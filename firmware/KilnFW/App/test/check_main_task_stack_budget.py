@@ -87,7 +87,7 @@ import check_all_task_stack_budgets as stack_budget_common  # noqa: E402
 # the budget is a fraction of the configured stack, not the whole thing.
 HEADROOM_FRACTION = 0.75
 
-FN_RE = re.compile(r"^[0-9a-f]{8} <(.+)>:")
+FN_RE = re.compile(r"^([0-9a-f]{8}) <(.+)>:")
 ENTRY_RE = re.compile(r"\bentry\ta1, (0x[0-9a-f]+|\d+)")
 # Deliberately requires the target to land EXACTLY on a symbol (no
 # "+0xNNNN") -- 2026-09-08 fix, see SECTION_MARKER_NAMES' comment below for
@@ -107,6 +107,62 @@ ENTRY_RE = re.compile(r"\bentry\ta1, (0x[0-9a-f]+|\d+)")
 # same direction as this file's other documented LIMITS), never hide a call
 # that previously wasn't there.
 CALL_RE = re.compile(r"\bcall(?:4|8|12)\t[0-9a-f]+ <([^>+]+)>")
+
+# Address of the instruction a disassembly line describes, e.g.
+# "42084dfe:\tb08765        \tcall8 ...". Needed to tell a line that is really
+# part of the current function from a line objdump merely PRINTED under that
+# function's caption -- see symbol_sizes() below. Same fix as
+# stack_budget_lib.py's (2026-09-19, 924eeea2); that pass fixed the NEW
+# address-keyed walker (stack_budget_lib.py, used by
+# check_all_task_stack_budgets.py) but left THIS module's own parse() --
+# which is the one check_executor_task_stack_budget.py,
+# check_httpd_task_stack_budget.py, check_system_uart_bridge_stack_budget.py
+# and check_uart_log_bridge_stack_budget.py all actually import and call as
+# `base.parse` -- untouched, on the stated basis that those four pre-existing
+# callers "do not have to be touched or re-verified". That left this exact
+# class of phantom edge live in the code four other checks actually run.
+# Confirmed 2026-09-20: `profile_executor_guard_zone_ramp_rate` (nm -S size
+# 0x42, a 3-line leaf float function) has no `.size`-covered call of its own,
+# but objdump keeps captioning the ~4 KB of literal-pool/padding bytes after
+# it (up to the next real symbol, `profile_executor_on_off_log_transition`)
+# under its name and decodes a `call8` into `lfs_rename` out of that data,
+# grafting the whole LittleFS rename/compact chain onto profile_executor's
+# graph and failing check_executor_task_stack_budget.py on a path the
+# firmware never executes.
+LINE_ADDR_RE = re.compile(r"^([0-9a-f]+):\t")
+
+
+def symbol_sizes(objdump, elf):
+    """{addr:int -> size_bytes:int} for every sized function symbol, read from
+    the ELF symbol table (`objdump -t`). See stack_budget_lib.py's
+    symbol_sizes() for the full rationale -- this is the same fix, applied
+    here because this module's parse()/deepest() are a separate, older
+    implementation that fix did not reach."""
+    try:
+        result = subprocess.run([objdump, "-t", elf], capture_output=True, text=True)
+    except OSError as exc:
+        raise ElfParseError(f"could not run {objdump} -t on {elf}: {exc}") from exc
+    if result.returncode != 0:
+        raise ElfParseError(
+            f"{objdump} -t {elf} exited {result.returncode} -- could not read the symbol table "
+            f"(needed to bound each function to its real extent). objdump stderr:\n"
+            f"{result.stderr.strip()}"
+        )
+    sizes = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or "F" not in parts[1:-3]:
+            continue
+        try:
+            addr = int(parts[0], 16)
+            size = int(parts[-2], 16)
+        except ValueError:
+            continue
+        if size <= 0:
+            continue
+        if size > sizes.get(addr, 0):
+            sizes[addr] = size
+    return sizes
 
 
 def find_objdump():
@@ -181,16 +237,33 @@ def parse(objdump, elf):
             f"stderr:\n{result.stderr.strip()}"
         )
     out = result.stdout
+    sizes = symbol_sizes(objdump, elf)
     frames, calls, seen_entry, cur = {}, {}, set(), None
+    cur_end = None  # first address PAST the current function per the ELF
+                    # symbol table; None means "size unknown, unbounded".
     for line in out.splitlines():
         m = FN_RE.match(line)
         if m:
-            cur = m.group(1)
+            addr = int(m.group(1), 16)
+            cur = m.group(2)
+            size = sizes.get(addr)
+            cur_end = (addr + size) if size else None
             frames.setdefault(cur, 0)
             calls.setdefault(cur, set())
             continue
         if cur is None:
             continue
+        if cur_end is not None:
+            la = LINE_ADDR_RE.match(line)
+            if la and int(la.group(1), 16) >= cur_end:
+                # Past this function's real end: objdump is captioning
+                # inter-function data (literal pool / jump table / padding /
+                # blob) with this function's name and decoding it as
+                # instructions. Those bytes belong to no function, so credit
+                # them to none -- see symbol_sizes()'s docstring.
+                cur = None
+                cur_end = None
+                continue
         if cur not in seen_entry:
             e = ENTRY_RE.search(line)
             if e:

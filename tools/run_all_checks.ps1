@@ -267,6 +267,33 @@ if (Test-Path $stopPathNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_stack_budget_symbol_bounds.py (firmware/KilnFW/App/test/) is a
+# regression test for the objdump-decodes-past-a-function's-real-end
+# phantom call-graph edge class: 924eeea2 fixed it for stack_budget_lib.py;
+# 2026-09-20 fixed the same bug in this same directory's
+# check_main_task_stack_budget.py, the older name-keyed parser
+# check_executor_task_stack_budget.py/check_httpd_task_stack_budget.py/
+# check_system_uart_bridge_stack_budget.py/check_uart_log_bridge_stack_
+# budget.py all actually import and call. Named test_*, not check_*, so
+# the glob above does not pick it up; wired explicitly here, same pattern
+# as the SaftyFW regsp negative tests below. Needs no ELF and no Xtensa
+# toolchain -- objdump is monkeypatched -- so it runs unconditionally.
+$stackBudgetSymbolBoundsTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_stack_budget_symbol_bounds.py"
+if (Test-Path $stackBudgetSymbolBoundsTest) {
+    $checks += Get-Item $stackBudgetSymbolBoundsTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected test $stackBudgetSymbolBoundsTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing regression test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected test $stackBudgetSymbolBoundsTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
 # test_check_ui_responsive_sweep.ps1 is a negative test, not a guard -- it
 # proves ui_responsive_sweep.mjs's isTransientHarnessError() classifier (used
 # by check_ui_responsive_sweep.ps1, itself glob-discovered above) can still
