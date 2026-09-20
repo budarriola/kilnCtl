@@ -31,9 +31,23 @@ def _case_sp06(ctx: dict) -> CaseResult:
     return J.judge_relay_energized(hp01.get("energized_samples", []))
 
 
+def _case_sp04(ctx: dict) -> CaseResult:
+    """SP-04 "uses OT-B01's S6a" (plan doc section 3.9): a pure observer of
+    OT-B01's already-collected trip/clear data, same shape as SP-03/SP-06 --
+    it never independently re-triggers or re-clears a trip."""
+    otb01 = ctx.get("_otb01")
+    if not otb01:
+        return CaseResult(Verdict.NOT_RUN, reason="OT-B01 did not run in this session")
+    return J.judge_dual_reset_trip(
+        otb01.get("link_up"), otb01.get("trip_reason"), otb01.get("trip_mask"),
+        otb01.get("clear_ok"), otb01.get("readiness_trip_ok"),
+    )
+
+
 _CASE_FUNCS = {
     "SP-03": _case_sp03,
     "SP-06": _case_sp06,
+    "SP-04": _case_sp04,
 }
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn

@@ -810,3 +810,161 @@ def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
             Verdict.FAIL, reason="POST /api/auth/session/extend did not return 200", observed=observed
         )
     return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_dual_reset_trip(
+    link_up: bool,
+    trip_reason: Optional[int],
+    trip_mask: Optional[int],
+    clear_ok: Optional[bool],
+    readiness_trip_ok: Optional[bool],
+) -> CaseResult:
+    """OT-B01: sw_reset_esp(confirm=True) resets both processors. Link must
+    come back up within the window with S6a (SAFETY_TRIP_MAIN_FAULT,
+    trip_reason == 6) latched and NOTHING else -- trip_mask == 1 <<
+    (trip_reason - 1) exactly, per link_frame_trip_mask_for_reason()
+    (firmware/SaftyFW/src/tasks/link_frame.c:237). For reason 6 that is bit
+    5, 0x0020 -- NOT 0x0040 (bit 6, reason 7 / SAFETY_TRIP_LINK_DEAD / S6b),
+    the wrong constant a stale docstring elsewhere in this tree still names
+    (CLAUDE.md correction). Any other bit or reason is FAIL. clear_ok and
+    the readiness trip item must then confirm cleared."""
+    observed = {
+        "link_up": link_up, "trip_reason": trip_reason, "trip_mask": trip_mask,
+        "clear_ok": clear_ok, "readiness_trip_ok": readiness_trip_ok,
+    }
+    if not link_up:
+        return CaseResult(Verdict.FAIL, reason="safety link did not come back up within the window", observed=observed)
+    if trip_reason != 6:
+        return CaseResult(
+            Verdict.FAIL, reason=f"trip_reason={trip_reason!r}, expected 6 (SAFETY_TRIP_MAIN_FAULT)",
+            observed=observed, expected={"trip_reason": 6},
+        )
+    expected_mask = 1 << (trip_reason - 1)
+    if trip_mask != expected_mask:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(f"trip_mask=0x{(trip_mask or 0):04x}, expected 0x{expected_mask:04x} "
+                    f"(1 << (trip_reason-1)) and nothing else"),
+            observed=observed, expected={"trip_mask": expected_mask},
+        )
+    if not clear_ok:
+        return CaseResult(Verdict.FAIL, reason="safety_clear_trip() did not confirm cleared once link+mask were verified", observed=observed)
+    if readiness_trip_ok is False:
+        return CaseResult(Verdict.FAIL, reason="/api/readiness trip item is not ok after clearing", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_push_applied(
+    phase: Optional[str],
+    running: Optional[str],
+    expected_running: str,
+    fw_build_matches_image: Optional[bool],
+    fingerprint_identical: Optional[bool],
+    boot_guard_recovery_mode: Optional[bool],
+) -> CaseResult:
+    """OT-E01: a good image pushed into app over Wi-Fi must reach phase ==
+    "done", come back up RUNNING the expected partition, report the exact
+    fw_build embedded in the pushed .bin's esp_app_desc_t, leave the
+    zones-config fingerprint identical, and clear boot_guard's
+    recovery_mode."""
+    observed = {
+        "phase": phase, "running": running, "expected_running": expected_running,
+        "fw_build_matches_image": fw_build_matches_image,
+        "fingerprint_identical": fingerprint_identical,
+        "boot_guard_recovery_mode": boot_guard_recovery_mode,
+    }
+    if phase != "done":
+        return CaseResult(Verdict.FAIL, reason=f"phase={phase!r}, expected 'done'", observed=observed)
+    if running != expected_running:
+        return CaseResult(
+            Verdict.FAIL, reason=f"running={running!r}, expected {expected_running!r}",
+            observed=observed, expected={"running": expected_running},
+        )
+    if fw_build_matches_image is not True:
+        return CaseResult(Verdict.FAIL, reason="board's fw_build does not match the .bin's embedded build time", observed=observed)
+    if fingerprint_identical is not True:
+        return CaseResult(Verdict.FAIL, reason="zones-config fingerprint changed across the update", observed=observed)
+    if boot_guard_recovery_mode is not False:
+        return CaseResult(Verdict.FAIL, reason=f"boot_guard recovery_mode={boot_guard_recovery_mode!r}, expected False", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_push_refused(
+    refused: Optional[bool],
+    running_before: Optional[str],
+    running_after: Optional[str],
+    fw_build_before: Optional[str],
+    fw_build_after: Optional[str],
+) -> CaseResult:
+    """OT-E03: a corrupt image must be refused (4xx, or phase:failed short
+    of a reboot) -- fw_build and RUNNING must be exactly unchanged. A
+    'refused' flag alone is not trusted: a refusal that nonetheless changed
+    RUNNING or fw_build is still FAIL, meaning the board rebooted into the
+    bad image before catching the problem."""
+    observed = {
+        "refused": refused, "running_before": running_before, "running_after": running_after,
+        "fw_build_before": fw_build_before, "fw_build_after": fw_build_after,
+    }
+    if not refused:
+        return CaseResult(Verdict.FAIL, reason="push was accepted; expected a refusal before reboot", observed=observed)
+    if running_after != running_before:
+        return CaseResult(
+            Verdict.FAIL, reason=f"RUNNING partition changed ({running_before!r} -> {running_after!r}) despite refusal",
+            observed=observed,
+        )
+    if fw_build_after != fw_build_before:
+        return CaseResult(
+            Verdict.FAIL, reason=f"fw_build changed ({fw_build_before!r} -> {fw_build_after!r}) despite refusal",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_rollback(
+    fw_build_matches_pre_update: Optional[bool],
+    pid_gains_before: "Optional[dict]",
+    pid_gains_after: "Optional[dict]",
+    zones_config_load_fault: Optional[bool],
+) -> CaseResult:
+    """OT-E02: the ZONES_CFG_VERSION rollback hazard -- rolling back past a
+    zones-config schema bump makes the older firmware refuse the
+    newer-than-it-knows blob and run on firmware-default PID gains,
+    silently. A load_fault reported by /api/status after the rollback is
+    FAIL by itself, and control_get_zones()'s PID gains must equal the
+    pre-rollback values exactly -- a rollback that merely looks done (right
+    fw_build, no load_fault) but changed gains is still FAIL."""
+    observed = {
+        "fw_build_matches_pre_update": fw_build_matches_pre_update,
+        "pid_gains_before": pid_gains_before, "pid_gains_after": pid_gains_after,
+        "zones_config_load_fault": zones_config_load_fault,
+    }
+    if zones_config_load_fault:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="zones_config_load_fault is true after rollback -- PID gains likely reset to firmware defaults (ZONES_CFG_VERSION hazard)",
+            observed=observed,
+        )
+    if fw_build_matches_pre_update is not True:
+        return CaseResult(Verdict.FAIL, reason="fw_build after rollback does not match the pre-update (pre-E01) value", observed=observed)
+    if pid_gains_before is None or pid_gains_after is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="PID gains were not readable before or after the rollback", observed=observed)
+    if pid_gains_before != pid_gains_after:
+        return CaseResult(
+            Verdict.FAIL, reason=f"PID gains changed by rollback: before={pid_gains_before} after={pid_gains_after}",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_partitions_state(running: Optional[str], expected_running: str) -> CaseResult:
+    """OT-E12: otadata/partition state recorded after every OT-E case. Only
+    FAILs the one condition the plan names: RUNNING reads back 'recovery'
+    when the case expected 'app'."""
+    observed = {"running": running, "expected_running": expected_running}
+    if expected_running == "app" and running == "recovery":
+        return CaseResult(
+            Verdict.FAIL,
+            reason="RUNNING partition is 'recovery' after a case that expected 'app' (otadata gap, CLAUDE.md flash section)",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)

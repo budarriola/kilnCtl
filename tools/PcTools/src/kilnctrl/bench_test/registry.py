@@ -243,7 +243,7 @@ for cid in _WEB_IDS:
     register(_c(cid, "WEB", cid))
 for cid in _LCD_IDS:
     register(_c(cid, "LCD", cid))
-_SP_DEPENDS_ON = {"SP-03": "HP-02", "SP-06": "HP-01"}
+_SP_DEPENDS_ON = {"SP-03": "HP-02", "SP-06": "HP-01", "SP-04": "OT-B01"}
 for cid, desc in _SP:
     register(_c(
         cid, "SP", desc, heat=(cid == "SP-09"), operator_only=cid in ("SP-08", "SP-09"),
@@ -358,7 +358,9 @@ _NIGHTLY_ORDER: List[str] = [
     "HP-04", "HP-05", "HP-06", "HP-08",
     "SK-02",
     "WEB-SEC-03",
-    "OT-B01",
+    # SP-04 is a pure observer of OT-B01's already-collected trip/clear data
+    # (cases_safety._case_sp04, depends_on="OT-B01"), so it follows it directly.
+    "OT-B01", "SP-04",
     "OT-E01", "OT-E02", "OT-E03", "OT-E12",
 ]
 assert len(_NIGHTLY_ORDER) == len(set(_NIGHTLY_ORDER)), "duplicate id in _NIGHTLY_ORDER"
