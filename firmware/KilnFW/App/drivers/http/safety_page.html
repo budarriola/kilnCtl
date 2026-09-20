@@ -101,7 +101,8 @@
   .card.ineffective { background: var(--warn); border-color: var(--warn); }
   .card.ineffective .row .label, .card.ineffective .row .value { color: #fff; }
   .card.ineffective .row { border-bottom-color: rgba(255,255,255,0.35); }
-  .breaker-banner { display: none; background: #000; color: #fff; border: 2px solid var(--warn);
+  .breaker-banner { display: none; background: #000; /* lint-color-ok: deliberately black regardless of theme -- S9 TRIP_INEFFECTIVE's "go to the breaker, right now" banner must never be mistaken for an ordinary themed card, same idiom as .card.ineffective's solid --warn fill above but pushed one step louder. */
+                     color: #fff; border: 2px solid var(--warn);
                      border-radius: var(--ui-radius); padding: 0.6em 0.9em; margin-bottom: 0.6em;
                      font-weight: bold; font-size: 1.05em; text-align: center; }
   .breaker-banner.show { display: block; }

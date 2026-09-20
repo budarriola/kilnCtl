@@ -206,7 +206,7 @@
   .danger-card input[type=checkbox] { width: 1.2em; height: 1.2em; flex: none; margin-top: 0.15em; }
   .danger-actions { display: flex; gap: 0.5em; margin: 0.6em 0 0.2em; flex-wrap: wrap; }
   .danger-actions button { font: inherit; padding: 0.6em 1em; min-height: 32px; box-sizing: border-box;
-                background: #fff; color: var(--warn); border: none;
+                background: var(--bg); color: var(--warn); border: none;
                 border-radius: var(--ui-radius); cursor: pointer; font-weight: bold; }
   .danger-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .danger-actions button.exit { background: transparent; color: #fff; border: 1px solid #fff; }
@@ -215,7 +215,7 @@
   .relay-grid button { font: inherit; padding: 0.6em 1em; min-height: 40px; min-width: 4.5em;
                 box-sizing: border-box; border: 1px solid #fff; border-radius: var(--ui-radius);
                 cursor: pointer; font-weight: bold; background: transparent; color: #fff; }
-  .relay-grid button.on { background: #fff; color: var(--warn); }
+  .relay-grid button.on { background: var(--bg); color: var(--warn); }
   /* --- Thermocouple faults (folded in from thermo_faults_page.html, owner
      request "Thermocouple Faults should also be combined into the
      diagnostic page") -- CSS carried over byte-for-byte from that page. */

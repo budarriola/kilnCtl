@@ -85,6 +85,88 @@ function glued_comment_ends(code, label, line0) {
   return out;
 }
 
+/* Off-theme white/black BACKGROUND literal on a button or card (owner audit,
+ * 2026-09-08/09): diagnostics_page.html's danger-zone buttons hardcoded
+ * `background: #fff`, which is invisible against the page's own background
+ * in light mode and reads as a jarring, unthemed white patch in dark mode --
+ * every other themed surface in these pages goes through a var(--bg)/
+ * var(--button-bg)/var(--card-bg)/etc token specifically so it flips with
+ * the theme instead of staying pinned to one literal colour.
+ *
+ * Scoped to `background`/`background-color` only, not `color`/`border` --
+ * this codebase has a separate, large, and deliberate existing convention of
+ * literal `color: #fff`/`border: 1px solid #fff` used as high-contrast text/
+ * outline ON TOP of a solid, already-themed fill (var(--warn), var(--ok),
+ * var(--ui-accent-5), the .danger-card/.card.ineffective treatment, every
+ * .kc-*-btn in theme.css, etc.) -- white text reads fine on both this
+ * palette's light-mode and dark-mode saturated accent colours, so that
+ * pattern is not the bug class the owner flagged and is intentionally left
+ * alone here; a rule broad enough to also catch it would fail on ~30
+ * pre-existing, correct declarations across nearly every page in this
+ * directory, which is exactly the kind of over-broad check CLAUDE.md warns
+ * against (flags the common correct case, not the specific defect).
+ *
+ * A custom-property TOKEN DEFINITION (e.g. `--bg: #fff;` inside a page's own
+ * :root block, or theme.css's --ui-* palette) is not a violation -- it is
+ * the one place a literal is supposed to live, and it's automatically
+ * excluded here because its property name starts with "--", not
+ * "background". Anything actually named `background`/`background-color` on
+ * a real rule is a hardcoded USE of a colour, not a definition of one.
+ *
+ * Two narrow, commented allowances:
+ *   - rgba(0,0,0,<alpha>) / rgba(255,255,255,<alpha>) -- a translucent
+ *     black/white overlay (modal backdrops: main_page.html's #pidPopupOverlay,
+ *     theme.css's .kc-menu-overlay) composites correctly over either theme's
+ *     background the same way --ui-shadow-1/2 already do (see theme.css's
+ *     own comment on why plain rgba(0,0,0,...) was chosen over
+ *     color-mix(var(--ui-bg))) -- it is not "a white/black background",
+ *     it's a dimming veil, and it is required to look the same in both
+ *     themes rather than switch with one.
+ *   - an inline `/* lint-color-ok: <reason> *\/` comment on the SAME line as
+ *     the declaration, for the rare case a literal really is required (the
+ *     wifi_provision_page.html QR canvas, which must render true white for a
+ *     phone camera to scan it regardless of theme, and safety_page.html's
+ *     .breaker-banner, deliberately pinned to black so the loudest safety
+ *     banner in the app can never be mistaken for an ordinary themed card).
+ *     Keep this allowlist minimal -- it is an escape hatch for a handful of
+ *     reviewed exceptions, not a way to silence the rule.
+ */
+function hardcoded_background_literals(code, label, line0) {
+  const out = [];
+  const lines = code.split('\n');
+  const declRe = /(^|[;{}])\s*([a-zA-Z-]+)\s*:\s*([^;{}]+);/g;
+  const targetProp = /^background(-color)?$/;
+  let m;
+  while ((m = declRe.exec(code))) {
+    const prop = m[2];
+    if (prop.startsWith('--')) continue; // token definition, not a use -- allowed
+    if (!targetProp.test(prop)) continue;
+    const value = m[3];
+    const hasHex = /#[0-9a-fA-F]{3,8}\b/.test(value);
+    const hasNamedLiteral = /\b(white|black)\b/i.test(value);
+    const rgbMatch = value.match(/\brgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
+    let isOverlayRgb = false;
+    if (rgbMatch) {
+      const [r, g, b] = [rgbMatch[1], rgbMatch[2], rgbMatch[3]].map(Number);
+      const isBlack = r === 0 && g === 0 && b === 0;
+      const isWhite = r === 255 && g === 255 && b === 255;
+      isOverlayRgb = isBlack || isWhite;
+    }
+    if (!hasHex && !hasNamedLiteral && !(rgbMatch && !isOverlayRgb)) continue;
+    const lineIdx = code.slice(0, m.index).split('\n').length - 1;
+    const line = line0 + lineIdx;
+    const lineText = lines[lineIdx] || '';
+    if (/lint-color-ok/.test(lineText)) continue;
+    out.push(`${label} (line ${line}): hardcoded colour literal in '${prop}: ${value.trim()};' -- ` +
+      `off-theme background (owner audit 2026-09-08/09: diagnostics_page.html's ` +
+      `"background: #fff" buttons). Use an existing theme token (var(--bg), ` +
+      `var(--button-bg), var(--card-bg), etc.) instead of a literal colour outside ` +
+      `a token definition, or add "/* lint-color-ok: <reason> */" on this same line ` +
+      `if a literal really is required.`);
+  }
+  return out;
+}
+
 for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) {
   const f = path.relative(dir, fullPath).split(path.sep).join('/');
   let src = fs.readFileSync(fullPath, 'utf8');
@@ -147,6 +229,10 @@ for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) 
     if (neg || depth !== 0) {
       bad++;
       console.log(`${f} (style at line ${b.line}): unbalanced braces (final depth ${depth}${neg ? ', went negative' : ''})`);
+    }
+    for (const msg of hardcoded_background_literals(b.code, `${f} style`, b.line)) {
+      bad++;
+      console.log(msg);
     }
   }
 }

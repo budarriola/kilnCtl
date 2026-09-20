@@ -133,7 +133,7 @@
      already vendors for the LCD side of this feature). */
   #apQrSection { margin-top: 1em; padding: 1em; border: 1px solid var(--border);
                  border-radius: var(--ui-radius); text-align: center; }
-  #apQrSection canvas { background: #fff; border-radius: 4px; max-width: 100%; height: auto; }
+  #apQrSection canvas { background: #fff; border-radius: 4px; max-width: 100%; height: auto; } /* lint-color-ok: QR modules need real black-on-white quiet-zone contrast to scan; must stay white regardless of theme, not var(--bg) (goes dark in dark mode). */
 </style>
 </head>
 <body>
