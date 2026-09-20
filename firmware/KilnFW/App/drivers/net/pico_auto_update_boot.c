@@ -144,14 +144,17 @@ static bool attempt_update_staged(const char *commit_for_log, uint32_t image_len
      * existing, armed image and the next boot re-evaluates with one less
      * attempt left.
      *
-     * FUTURE HOOK: if SaftyFW ever grows a "wrong slot" rejection code (not
-     * yet visible from this side as of this pass), the relay's completion
-     * handler is where a retry against the OTHER slot belongs, WITHOUT
-     * consuming another unit of pico_update_attempts' budget -- that rejection
-     * is proof the ESP's guess was structurally wrong, not that the image or
-     * the link is bad, so it should not cost the same as a real failure. No
-     * such completion path exists yet; ota_pico_relay.c's own header is the
-     * place that hook would be wired from. */
+     * FUTURE HOOK: SaftyFW's update_task.c (as of 2026-09-20) now DOES emit a
+     * "wrong slot" rejection, SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE
+     * (safety_link.h), recognized by ota_pico_relay.c's relay_wait_for_states()
+     * as a distinct terminal state instead of falling through to the generic
+     * 10 s UPDATE_END timeout. What is still missing is on THIS side: nothing
+     * here yet retries against the OTHER slot when that rejection comes back,
+     * and it still should not consume another unit of pico_update_attempts'
+     * budget when it does -- that rejection is proof the ESP's guess was
+     * structurally wrong, not that the image or the link is bad, so it should
+     * not cost the same as a real failure. ota_pico_relay.c's own header is
+     * the place that retry hook belongs; it is not wired up yet. */
     return true;
 }
 
