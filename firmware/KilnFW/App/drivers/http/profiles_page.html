@@ -123,14 +123,61 @@
      segmentTableHtml() -- so the only thing a saved row's header adds is
      the Export/Edit/Delete action group the shipped entries have no
      equivalent of.
-     Floated (the same idiom #restoreBtn already uses in an <h2> below)
-     rather than making <summary> a flex container: `display: flex` on a
-     <summary> drops its disclosure triangle in Chromium, and that triangle
-     is the whole folding affordance. inline-flex + nowrap is what stops
-     Export/Edit/Delete splitting across two lines -- the exact defect in the
-     phone screenshot that prompted this pass, where Delete had wrapped onto
-     a second row and left every card ragged and a third taller than needed. */
-  .pi-acts { float: right; display: inline-flex; flex-wrap: nowrap; gap: 0.3em; margin-left: 0.6em; }
+     Originally floated right (the same idiom #restoreBtn uses in an <h2>
+     below) rather than making <summary> a flex container, since `display:
+     flex` on a <summary> drops its disclosure triangle in Chromium and that
+     triangle is the whole folding affordance -- but the float itself had no
+     clearfix anywhere on the page and staircased across rows (2026-09-19,
+     see the .pi-row/.pi-acts CSS comments below for the fix: an inner flex
+     span carries the row layout instead, leaving <summary>'s own display
+     untouched so the triangle survives). inline-flex + nowrap on .pi-acts is
+     what stops Export/Edit/Delete splitting across two lines -- the exact
+     defect in the phone screenshot that prompted this pass, where Delete had
+     wrapped onto a second row and left every card ragged and a third taller
+     than needed. */
+  /* 2026-09-19: was `float: right`, with no clearfix anywhere on this page
+     (introduced 49683b45). A <details>/<summary> row's own box does not
+     grow to contain a floated child unless something clears it, so each
+     row's box stayed as short as its text line while the floated button
+     group hung off the bottom-right, overlapping the *next* row -- and each
+     subsequent row's own float then laid out beside whatever of the
+     previous row's leftover float area intruded into its line box,
+     shifting it further left row over row (a classic uncleared-float
+     stacking bug, not a nesting bug -- buildProfileItem()'s rows are
+     confirmed DOM siblings). Fixed by giving the summary's real content one
+     flex row (.pi-row) instead: the label takes the flexible share via
+     flex:1/min-width:0 (so it ellipsizes rather than wrapping under the
+     actions), and the actions group sits after it, so it lands flush at
+     the row's true right edge on every row with no float needed at all.
+     Left `display: inline-flex` on the group itself (used to lay out its
+     own icon buttons in a row) but dropped `float`; `flex: 0 0 auto` below
+     keeps it from being compressed by the row's own flex layout. */
+  .pi-acts { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 0.3em; margin-left: 0.6em; }
+  /* The one flex row holding a row's real summary content (checkbox, name,
+     badge, actions) -- see the .pi-acts comment above for why this replaced
+     float. Lives on a child <span>, not on <summary> itself: `display: flex`
+     directly on <summary> drops Chromium's disclosure triangle (existing
+     .pi-acts float comment above this, kept for that part), so the triangle
+     stays governed by summary's own untouched `display: list-item` and only
+     this inner span becomes the flex container. */
+  .pi-row { display: flex; align-items: center; width: 100%; gap: 0.4em; }
+  /* flex: 1 1 auto + min-width: 0 is what lets a long profile name ellipsize
+     instead of wrapping under the action icons (the "cpl_z1" three-line
+     wrap in the owner's screenshot) -- a flex item's default min-width is
+     `auto` (its content's natural width), which defeats overflow/ellipsis
+     entirely until this is set to 0. */
+  .pi-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; }
+  /* Per-card container query (WEB_UI_RESPONSIVE.md sec 6 idiom used by
+     .card elsewhere in this file -- reflow off the row's own rendered
+     width, not the viewport's) rather than a viewport @media breakpoint:
+     lets the actions drop below the name on a narrow phone without
+     depending on the whole page's width, which this row does not
+     necessarily track 1:1 with (page padding/margins). */
+  @container kc-pi (max-width: 420px) {
+    .pi-row { flex-wrap: wrap; }
+    .pi-label { flex-basis: 100%; white-space: normal; }
+  }
   /* Icon-only, but deliberately NOT shrunk to the glyph: 40px square, above
      both this page's own 32px .small floor and the responsive sweep's
      minimum, because this UI is driven from a phone and from a panel at the
@@ -201,7 +248,7 @@
   .ci.fz-too_fast th, .ci.fz-unreachable th,
   .ci.fz-too_fast td, .ci.fz-unreachable td { border-bottom-color: rgba(255,255,255,0.35); }
   .ci.fz-unreachable summary, .ci.fz-unreachable .badge { font-weight: bold; text-decoration: underline wavy; }
-  .ci { margin: 0.25em 0; }
+  .ci { margin: 0.25em 0; container-type: inline-size; container-name: kc-pi; }
   .ci > summary { cursor: pointer; font-size: 0.9em; }
   .ci table { width: 100%; border-collapse: collapse; font-size: 0.85em; margin: 0.4em 0; }
   .ci th, .ci td { border-bottom: 1px solid var(--border); padding: 0.2em 0.4em; text-align: right; }
@@ -1160,9 +1207,18 @@ function buildProfileItem(p, selectable) {
   fzMark(d, p.feasibility);
 
   var s = document.createElement('summary');
+  /* All real content lives in one flex row (.pi-row), a child of <summary>
+     rather than the summary itself -- see the .pi-row CSS comment (this
+     page's <style>) for why: `display: flex` directly on <summary> drops
+     Chromium's disclosure triangle, so the triangle stays governed by
+     summary's own default `display: list-item` and only this inner span
+     opts into flex. This replaced a `float: right` action group that had
+     no clearfix anywhere on the page and staircased across rows -- see the
+     .pi-acts CSS comment for the mechanism. */
+  var row = document.createElement('span');
+  row.className = 'pi-row';
   var cb = selectable ? selectionCheckbox(p) : null;
-  if (cb) s.appendChild(cb);
-  s.appendChild(profileActionsGroup(p));
+  if (cb) row.appendChild(cb);
 
   var label;
   if (p.builtin) {
@@ -1173,13 +1229,18 @@ function buildProfileItem(p, selectable) {
     label = p.name + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
       ', ' + p.segment_count + ' steps)';
   }
-  s.appendChild(document.createTextNode(label));
+  var lbl = document.createElement('span');
+  lbl.className = 'pi-label';
+  lbl.textContent = label;
+  row.appendChild(lbl);
   if (isMarked(p.feasibility)) {
     var b = document.createElement('span');
     b.className = 'badge';
     b.textContent = FZ_LABEL[p.feasibility] || p.feasibility;
-    s.appendChild(b);
+    row.appendChild(b);
   }
+  row.appendChild(profileActionsGroup(p));
+  s.appendChild(row);
   d.appendChild(s);
 
   var body = document.createElement('div');
