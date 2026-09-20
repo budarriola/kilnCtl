@@ -839,9 +839,8 @@ function renderKilnGraphicHtml(z, st) {
     } else if (measured === false) {
       s += kgBadge(bx, by, 'unknown', 'Heater load check is DORMANT -- not measured',
         'This zone’s normal current was never measured, so the heater-load check is DORMANT: it ' +
-        'is not passing, it cannot run. Measure it with the current sweep below. On this ~4 W bench ' +
-        'fixture every zone sits under the sweep’s noise floor, so it stays dormant here and only ' +
-        'becomes live on a kiln-scale load.');
+        'is not passing, it cannot run. Measure it with the current sweep below. A zone whose heater ' +
+        'draws less than the sweep can resolve stays dormant until measured on a real load.');
     } else if (measured === null) {
       s += kgBadge(bx, by, 'unknown', 'Heater load state not reported',
         'The response did not say whether this zone’s normal current was ever measured.');
@@ -1106,7 +1105,7 @@ var INFO_HTML = {
     'minute over the window below, or the zone trips as a detached thermocouple / dead element / ' +
     'open relay. Too HIGH false-trips a slow, well-insulated or lightly-loaded kiln that is ' +
     'genuinely heating; too LOW lets a genuinely dead element go unnoticed for longer. Range ' +
-    '0-20. This bench jig runs 0.2. It does not affect the runaway, drift or frozen-sensor ' +
+    '0-20. It does not affect the runaway, drift or frozen-sensor ' +
     'guards, which have their own thresholds.</p>',
   relayTiming: '<p class="hint"><b>Min on is a hardware-protection minimum, not a tuning knob.</b> ' +
     'Once the PID closes the relay for this zone it stays closed for at least <b>10000 ms ' +

@@ -403,7 +403,7 @@ the same measurement.</p>
      "this is a dangerous control" language, legible in both themes since
      --fault-color tracks --warn, which is itself already theme-aware. -->
 <button type="button" class="danger-btn" id="wdPanicToggleBtn">--</button>
-<p class="note">Disabling this stops a hung task from rebooting the board (dev/bench debugging only,
+<p class="note">Disabling this stops a hung task from rebooting the board (developer debugging only,
 e.g. sitting at a breakpoint) -- it does NOT stop the hang itself. A disabled panic is written to
 flash and survives a reboot; the setting is shown here and in the dashboard status so it is never
 silently on. Starting a firing while this is disabled requires an extra confirmation.</p>
@@ -489,7 +489,7 @@ report, not a single occurrence.</p>
 
 <h2>Danger Zone</h2>
 <div class="danger-card" id="dangerCard">
-  <p><strong>Manual relay/heater/thermocouple bench test.</strong> This section
+  <p><strong>Manual relay/heater/thermocouple hardware test.</strong> This section
   turns off this board's own gate on its four heater relays -- you can force
   any of them on or off directly, for testing a relay, a contactor, or a
   thermocouple by hand. The safety processor (SaftyFW) is <strong>not</strong>
@@ -804,7 +804,7 @@ here:</p>
       if (nextDisabled && !window.kcConfirm(
           'Disable the task-watchdog panic? If a task hangs, the board will NOT reboot -- it will ' +
           'sit hung with the relays in whatever state they were last commanded, instead of resetting. ' +
-          'This is for development/bench debugging only. Continue?')) {
+          'This is for developer debugging only. Continue?')) {
         return;
       }
       fetch('/api/watchdog_cfg', {
@@ -1370,7 +1370,7 @@ here:</p>
         html += '<div class="subrow">' +
                 (s.not_installed ? '<span class="bad">Declared not installed</span>' : '') +
                 (s.not_installed && s.injected ? '  &middot;  ' : '') +
-                (s.injected ? '<span class="bad">Reading is synthetic (bench injection)</span>' : '') +
+                (s.injected ? '<span class="bad">Reading is synthetic (test injection)</span>' : '') +
                 '</div>';
       }
     }

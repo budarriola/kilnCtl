@@ -990,7 +990,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         } else {
             snprintf(detail, sizeof(detail),
                      "never confirmed -- pole 1 (contactor coil) is wiring firmware can't see. Run the "
-                     "README.md bench procedure, no heat, then confirm via /safety");
+                     "E-stop verification procedure, no heat, then confirm via /safety");
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "estop_verified", "E-stop interlock verified", st, detail,

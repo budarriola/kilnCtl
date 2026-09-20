@@ -411,7 +411,7 @@ The four questions above already cover the fields most commissioning passes need
 <div id="fields"><p class="empty">Loading&hellip;</p></div>
 
 <button id="saveBtn" type="button">Stage &amp; commit changes</button>
-<button id="benchBtn" type="button">Apply bench preset (test values, dev only)</button>
+<button id="benchBtn" type="button">Apply test preset (test values, dev only)</button>
 <p id="msg"></p>
 </details>
 
@@ -629,8 +629,8 @@ var GROUPS = [
        * that could ever be a wire id. */
       { id: 900800, name: 'CT0 probe rating (A_fs)', type: 'ct_cal', chIndex: 0, unit: 'A', risk: 'nuisance',
         guards: ['S3', 'S4', 'S9'],
-        note: 'The number printed on the probe: amps at 1V full-scale output (1A bench probe, ' +
-          '10-100A on a real kiln -- any rating is accepted). Also asks the probe\'s own zero-current ' +
+        note: 'The number printed on the probe: amps at 1V full-scale output ' +
+          '(typically 10-100A on a real kiln -- any rating is accepted). Also asks the probe\'s own zero-current ' +
           'output (zero_mv, mV) -- both are converted here into k_ct_v_per_a and zero_counts below, ' +
           'which is what actually gets sent to the safety processor. A value you type here (source ' +
           '"manual") is never silently overwritten by the zone-current sweep\'s own calibration.' },
@@ -1586,7 +1586,7 @@ function renderCrcLine(data) {
   commissioned.textContent = data.commissioned
     ? 'Board reports commissioned (calibration_missing is clear).'
     : 'Board reports NOT COMMISSIONED (calibration_missing is set) -- at least one required ' +
-      'section-1 field above is unset, or only a bench preset has been applied.';
+      'section-1 field above is unset, or only a test preset has been applied.';
   commissioned.className = data.commissioned ? 'hint' : 'hint guard-disabled';
 
   // M1: unset_reporting_reliable is false when the peer is too old (or
@@ -1860,22 +1860,22 @@ document.getElementById('benchBtn').addEventListener('click', function () {
   // leaves calibration_missing set (the Pico's own behaviour, per that
   // section) rather than this page pretending the board is now commissioned.
   if (!window.kcConfirm(
-    'Apply the bench preset?\n\n' +
+    'Apply the test preset?\n\n' +
     'This loads test values for exercising the link and the commissioning ' +
-    'flow on a bench with no kiln attached. It is NOT a commissioning: the ' +
+    'flow with no kiln attached. It is NOT a commissioning: the ' +
     'board stays marked calibration_missing (not commissioned) afterward, ' +
     'and every real guard threshold above still needs to be set for an ' +
     'actual kiln before it is fired.')) {
     return;
   }
   var msg = document.getElementById('msg');
-  msg.textContent = 'Applying bench preset…';
+  msg.textContent = 'Applying test preset…';
   fetch('/api/safety/commissioning/bench_preset', { method: 'POST' }).then(function (r) {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
-    msg.textContent = 'Bench preset applied -- board remains NOT commissioned (test values only).';
+    msg.textContent = 'Test preset applied -- board remains NOT commissioned (test values only).';
     loadCurrent();
   }).catch(function (e) {
-    msg.textContent = 'Bench preset failed: ' + e.message;
+    msg.textContent = 'Test preset failed: ' + e.message;
   });
 });
 

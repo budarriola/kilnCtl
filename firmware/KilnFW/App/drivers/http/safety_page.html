@@ -646,7 +646,7 @@ if the Pico's diagnostics are too stale to trust.</p>
     // the override on the very next read) and a safety-processor reboot (the
     // state is RAM-only, never persisted). So the remedy must NOT promise a
     // "remove injection" control on the Commissioning page -- there isn't one.
-    if (state.injected) parts.push('reading is a bench-injected synthetic value, not the real part. ' +
+    if (state.injected) parts.push('reading is a test-injected synthetic value, not the real part. ' +
       'To clear: commission the safety thermocouple (safety_tc_installed) in the Advanced ' +
       'section of the Safety Commissioning page -- that drops the override on the next read. ' +
       'Rebooting the safety processor also clears it; there is no separate "remove injection" control');

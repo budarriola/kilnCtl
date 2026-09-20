@@ -2532,7 +2532,7 @@ function renderStep7() {
     var html = '<p class="hint">Commissions the RP2040 safety processor\'s own thermocouple type, ' +
       'calibration offset, absolute-maximum ceiling, and current-transformer (CT) setup -- stored on the ' +
       'Pico, outside both OTA slots, enforced there independent of everything else on this board. Embedded ' +
-      'here (not linked out) per owner decision, reusing <a href="/safety/commissioning">/safety/commissioning</a>\'s ' +
+      'here (not linked out) by design, reusing <a href="/safety/commissioning">/safety/commissioning</a>\'s ' +
       'own write path and its confirm_commit_landed() read-back verbatim.</p>';
     html += '<p class="hint">' + (commissioning.link_up ? 'Safety processor: LINK UP.' :
       'Safety processor: LINK DOWN -- values below are the ESP\'s last cached copy and may be stale.') +
@@ -2580,8 +2580,7 @@ function renderStep7() {
       '<select id="s7CtTopology"><option value="">-- choose --</option>' +
       '<option value="1">Summed (one shared CT, channel 3, reads every zone)</option>' +
       '<option value="0">Per-zone (one CT per zone)</option></select>' +
-      '<p class="hint">Required whenever CTs are fitted. This bench: one summed CT on RP2040 GPIO28 ' +
-      '(ct_installed=1, ct_topology=1).</p></div>';
+      '<p class="hint">Required whenever CTs are fitted.</p></div>';
 
     html += '<div id="step7Err"></div><div id="step7Ok"></div><p id="step7Msg" class="hint"></p>';
     html += '<div class="gnav"><button type="button" id="step7Save">Stage &amp; commit</button></div>';

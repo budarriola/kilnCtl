@@ -1662,7 +1662,7 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
     if (commit_err != ESP_OK) {
         ESP_LOGW(TAG, "bench_preset: commit failed: %s", esp_err_to_name(commit_err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                             "bench preset staged but the safety processor did not acknowledge the commit");
+                             "test preset staged but the safety processor did not acknowledge the commit");
         return ESP_OK;
     }
     if (rejected) {
@@ -1674,7 +1674,7 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
                  (unsigned)reject_reason);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"bench preset staged but the safety "
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"test preset staged but the safety "
                                         "processor rejected the commit\"}");
     }
     ESP_LOGI(TAG, "bench_preset: applied (%u fields) -- calibration_missing remains set, "
