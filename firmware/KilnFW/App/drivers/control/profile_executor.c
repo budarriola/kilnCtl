@@ -389,12 +389,35 @@ static void reload_live_profile_if_changed(void)
     live_profile_load_result_t load_result = live_profile_load_working_for_origin(profile_id, candidate);
     if (load_result != LIVE_PROFILE_LOAD_OK) {
         free(candidate);
-        profile_live_pickup_poll_outcome_kind_t load_kind = (load_result == LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN)
-                                                                  ? PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE
-                                                                  : PROFILE_LIVE_PICKUP_POLL_LOAD_TRANSIENT;
+        profile_live_pickup_poll_outcome_kind_t load_kind;
+        switch (load_result) {
+        case LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN:
+            load_kind = PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE;
+            break;
+        case LIVE_PROFILE_LOAD_PERMANENT:
+            load_kind = PROFILE_LIVE_PICKUP_POLL_LOAD_PERMANENT;
+            break;
+        case LIVE_PROFILE_LOAD_TRANSIENT:
+        default:
+            load_kind = PROFILE_LIVE_PICKUP_POLL_LOAD_TRANSIENT;
+            break;
+        }
         if (profile_live_pickup_should_advance_generation(load_kind, PROFILE_LIVE_PICKUP_OK)) {
             xSemaphoreTake(s_exec.lock, portMAX_DELAY);
             s_exec.live_edit_generation = gen;
+            if (load_kind == PROFILE_LIVE_PICKUP_POLL_LOAD_PERMANENT) {
+                /* Pass-3 review fix: live_profile.c already logged the
+                 * specific reason at ESP_LOGE when it made this call; record
+                 * a refusal here too so GET /api/profile/live's operator-
+                 * facing view (MEDIUM-3's mechanism) surfaces it, rather than
+                 * this generation silently vanishing the way the original
+                 * bug made every unloadable pending edit disappear. */
+                s_exec.live_edit_last_refusal.valid = true;
+                s_exec.live_edit_last_refusal.generation = gen;
+                s_exec.live_edit_last_refusal.result = PROFILE_LIVE_PICKUP_REFUSED_INVALID;
+                snprintf(s_exec.live_edit_last_refusal.err_msg, sizeof(s_exec.live_edit_last_refusal.err_msg),
+                         "pending live edit could not be loaded (see log) -- discarded");
+            }
             xSemaphoreGive(s_exec.lock);
         }
         /* LOAD_TRANSIENT: leave the generation unconsumed so the next tick
@@ -442,27 +465,32 @@ static void reload_live_profile_if_changed(void)
          * still the CURRENT schedule segment, so its own dwell is read fresh
          * out of s_exec.profile.segments[segment_index] by the ordinary
          * segment-stepping path once the swap below lands -- there is no
-         * separate stale copy of its dwell anywhere. */
-        uint8_t seg_n = s_exec.profile.segment_count;
-        if (seg_n > PROFILE_MAX_SEGMENTS) {
-            seg_n = PROFILE_MAX_SEGMENTS;
-        }
+         * separate stale copy of its dwell anywhere.
+         *
+         * Pass-3 review fix (2026-09-19): this loop reads BOTH
+         * s_exec.profile.segments[i] (the OLD profile, for elapsed_s) and
+         * candidate->segments[i] (the NEW one, for new_dwell_s), so it must
+         * be bounded by the SMALLER of the two segment_counts, not just the
+         * old one -- a live edit that shortens the profile (legal per
+         * live_edit_check_window(), segment_count may drop to
+         * segment_index + 1) could otherwise index candidate->segments[]
+         * past its own segment_count. An active IO segment at an index the
+         * new profile no longer has is left to the ordinary end-of-segment
+         * path once the swap lands, same as it already handles any segment
+         * beyond the new segment_count today. Bound and per-segment
+         * arithmetic are both pulled out to profile_executor_live_pickup.c
+         * so they are host-testable on their own (that pure module's own
+         * test executable can drive a shortened-profile case directly). */
+        uint8_t seg_n = profile_live_pickup_io_seg_rederive_count(s_exec.profile.segment_count,
+                                                                   candidate->segment_count, PROFILE_MAX_SEGMENTS);
         for (uint8_t i = 0; i < seg_n; i++) {
             io_seg_runtime_t *r = &s_exec.io_segs[i];
             if (!r->active || r->blocking) {
                 continue;
             }
-            float old_dwell_s = (float)(s_exec.profile.segments[i].dwell_min * 60u);
-            float elapsed_s = old_dwell_s - r->remaining_s;
-            if (elapsed_s < 0.0f) {
-                elapsed_s = 0.0f;
-            }
-            float new_dwell_s = (float)(candidate->segments[i].dwell_min * 60u);
-            float new_remaining_s = new_dwell_s - elapsed_s;
-            if (new_remaining_s < 0.0f) {
-                new_remaining_s = 0.0f;
-            }
-            r->remaining_s = new_remaining_s;
+            r->remaining_s = profile_live_pickup_rederive_remaining_s(s_exec.profile.segments[i].dwell_min,
+                                                                       r->remaining_s,
+                                                                       candidate->segments[i].dwell_min);
         }
 
         /* Swap CONTENT only -- segment_index/segment_elapsed_s/dwelling/

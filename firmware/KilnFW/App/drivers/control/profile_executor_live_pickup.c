@@ -26,5 +26,34 @@ bool profile_live_pickup_should_advance_generation(profile_live_pickup_poll_outc
                                                     profile_live_pickup_result_t result)
 {
     (void)result; /* every CHECKED result (OK or a REFUSED_*) advances alike -- see header comment */
-    return kind == PROFILE_LIVE_PICKUP_POLL_CHECKED || kind == PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE;
+    return kind == PROFILE_LIVE_PICKUP_POLL_CHECKED || kind == PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE ||
+           kind == PROFILE_LIVE_PICKUP_POLL_LOAD_PERMANENT;
+}
+
+uint8_t profile_live_pickup_io_seg_rederive_count(uint8_t old_segment_count, uint8_t new_segment_count,
+                                                   uint8_t max_segments)
+{
+    uint8_t n = old_segment_count;
+    if (new_segment_count < n) {
+        n = new_segment_count;
+    }
+    if (n > max_segments) {
+        n = max_segments;
+    }
+    return n;
+}
+
+float profile_live_pickup_rederive_remaining_s(uint32_t old_dwell_min, float old_remaining_s, uint32_t new_dwell_min)
+{
+    float old_dwell_s = (float)(old_dwell_min * 60u);
+    float elapsed_s = old_dwell_s - old_remaining_s;
+    if (elapsed_s < 0.0f) {
+        elapsed_s = 0.0f;
+    }
+    float new_dwell_s = (float)(new_dwell_min * 60u);
+    float new_remaining_s = new_dwell_s - elapsed_s;
+    if (new_remaining_s < 0.0f) {
+        new_remaining_s = 0.0f;
+    }
+    return new_remaining_s;
 }

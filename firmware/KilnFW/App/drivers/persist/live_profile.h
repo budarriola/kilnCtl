@@ -223,10 +223,23 @@ typedef enum {
      * safely consume the generation it observed and stop re-polling for
      * this same edit. */
     LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN,
-    /* A record IS pending for expect_origin_id, but the working blob itself
-     * failed to load (hal_kv open error, blob decode failure) -- this is not
-     * an answer about whether an edit exists, so the caller must NOT consume
-     * the generation and should retry on the next tick. */
+    /* Pass-3 review fix (2026-09-19): a record IS pending for expect_origin_id
+     * and the working blob's STORAGE was reached (hal_kv_open succeeded), but
+     * its CONTENT can never be adopted -- the blob is missing (HAL_NOT_FOUND),
+     * the wrong length (HAL_INVALID_SIZE), or fails profile_decode_blob().
+     * None of these will resolve themselves on a retry, so unlike
+     * LIVE_PROFILE_LOAD_TRANSIENT just below, this IS definitive and DOES
+     * consume the generation; the caller also logs once at ESP_LOGE and
+     * records a refusal so GET /api/profile/live can surface it to the
+     * operator, since silently dropping a pending-but-unloadable edit would
+     * otherwise look identical to nothing having happened. */
+    LIVE_PROFILE_LOAD_PERMANENT,
+    /* A record IS pending for expect_origin_id, and the failure to load it
+     * is one that MAY resolve on its own next tick: hal_kv_open failed (the
+     * partition/namespace itself could not be opened) or the heap allocation
+     * for the decode buffer failed. This is not an answer about whether an
+     * edit exists, so the caller must NOT consume the generation and should
+     * retry on the next tick. */
     LIVE_PROFILE_LOAD_TRANSIENT,
 } live_profile_load_result_t;
 

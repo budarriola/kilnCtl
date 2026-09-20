@@ -442,12 +442,34 @@ bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
     return true;
 }
 
-bool live_profile_load_working(profile_t *out)
+/* Pass-3 review fix (2026-09-19): internal tri-state core shared by
+ * live_profile_load_working() (which only ever needed OK/fail) and
+ * live_profile_load_working_for_origin() (which now needs to tell a
+ * TRANSIENT failure -- one that may resolve on retry -- apart from a
+ * PERMANENT one -- one that never will, so the caller can stop polling for
+ * it). Only hal_kv_open() failing (the partition/namespace itself could not
+ * be opened) or the decode-buffer malloc failing are TRANSIENT: neither says
+ * anything about the blob's own content, and either can plausibly clear on
+ * its own (a concurrent NVS commit, memory freed elsewhere) by the next
+ * tick. HAL_NOT_FOUND/HAL_INVALID_SIZE from hal_kv_get_blob(), and any
+ * profile_decode_blob() failure, are PERMANENT: the blob that exists right
+ * now is provably not a loadable working profile, and nothing about a
+ * retry with the same stored bytes will change that. `out_reason` receives
+ * a short static string for logging; pass NULL to ignore it. */
+typedef enum {
+    LOAD_WORKING_OK = 0,
+    LOAD_WORKING_PERMANENT,
+    LOAD_WORKING_TRANSIENT,
+} load_working_outcome_t;
+
+static load_working_outcome_t load_working_internal(profile_t *out, const char **out_reason)
 {
+    const char *reason = "";
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, LIVE_PROFILE_NVS_PARTITION);
     if (kv_err != HAL_OK) {
-        return false;
+        if (out_reason) *out_reason = "hal_kv_open failed";
+        return LOAD_WORKING_TRANSIENT;
     }
     /* Heap-allocated, not a stack local -- same reasoning as
      * profile_executor.c's reload_live_profile_if_changed() candidate blob:
@@ -463,19 +485,33 @@ bool live_profile_load_working(profile_t *out)
         ESP_LOGE(LIVE_PROFILE_TAG, "live_profile_load_working: malloc(%u) failed",
                  (unsigned)PROFILE_BLOB_MAX_SIZE);
         hal_kv_close(&h);
-        return false;
+        if (out_reason) *out_reason = "decode buffer malloc failed";
+        return LOAD_WORKING_TRANSIENT;
     }
     size_t len = PROFILE_BLOB_MAX_SIZE;
     kv_err = hal_kv_get_blob(&h, NVS_KEY_LIVE_PROFILE, buf, &len);
     hal_kv_close(&h);
     if (kv_err != HAL_OK) {
         free(buf);
-        return false;
+        if (kv_err == HAL_NOT_FOUND || kv_err == HAL_INVALID_SIZE) {
+            if (out_reason) *out_reason = (kv_err == HAL_NOT_FOUND) ? "working blob not found" : "working blob wrong length";
+            return LOAD_WORKING_PERMANENT;
+        }
+        if (out_reason) *out_reason = "hal_kv_get_blob transient error";
+        return LOAD_WORKING_TRANSIENT;
     }
-    const char *reason = "";
     profile_decode_result_t dres = profile_decode_blob(buf, len, out, &reason);
     free(buf);
-    return dres == PROFILE_DECODE_OK;
+    if (dres != PROFILE_DECODE_OK) {
+        if (out_reason) *out_reason = "working blob failed to decode";
+        return LOAD_WORKING_PERMANENT;
+    }
+    return LOAD_WORKING_OK;
+}
+
+bool live_profile_load_working(profile_t *out)
+{
+    return load_working_internal(out, NULL) == LOAD_WORKING_OK;
 }
 
 /* MEDIUM-1 (review): the pickup-side half of the origin_id guard -- fork()
@@ -504,7 +540,25 @@ live_profile_load_result_t live_profile_load_working_for_origin(uint8_t expect_o
     if (!live_profile_load_record(&rec) || !rec.pending || rec.origin_id != expect_origin_id) {
         return LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN;
     }
-    return live_profile_load_working(out) ? LIVE_PROFILE_LOAD_OK : LIVE_PROFILE_LOAD_TRANSIENT;
+    const char *reason = "";
+    load_working_outcome_t r = load_working_internal(out, &reason);
+    switch (r) {
+    case LOAD_WORKING_OK:
+        return LIVE_PROFILE_LOAD_OK;
+    case LOAD_WORKING_PERMANENT:
+        /* Pass-3 review fix: logged HERE, once, at the point the permanent
+         * fact is actually established -- the caller (profile_executor.c)
+         * additionally records this in s_exec.live_edit_last_refusal so an
+         * operator polling GET /api/profile/live sees it too, but the raw
+         * reason string is only ever available here. */
+        ESP_LOGE(LIVE_PROFILE_TAG,
+                 "pending live edit for origin %u can never be adopted, discarding this generation: %s",
+                 (unsigned)expect_origin_id, reason);
+        return LIVE_PROFILE_LOAD_PERMANENT;
+    case LOAD_WORKING_TRANSIENT:
+    default:
+        return LIVE_PROFILE_LOAD_TRANSIENT;
+    }
 }
 
 /* MEDIUM-2 (review): profile_executor_run.c seeds s_exec.live_edit_generation

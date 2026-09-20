@@ -623,6 +623,65 @@ static void test_load_working_for_origin_refuses_foreign_id(void)
     TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
 }
 
+static void test_load_working_for_origin_permanent_on_missing_blob(void)
+{
+    TEST_SECTION("live_profile_load_working_for_origin -- pass-3 review fix: a pending record whose working blob "
+                 "is MISSING (hal_kv_get_blob returns HAL_NOT_FOUND) is PERMANENT, not TRANSIENT -- otherwise this "
+                 "spins forever the same way the original HIGH bug did, just one layer deeper");
+    profile_t origin = make_test_profile();
+    profile_t working;
+    live_edit_record_t rec;
+    char err[128];
+    TEST_CHECK(live_profile_fork(11, false, "Run D", &origin, &working, &rec, err, sizeof(err)),
+               "fork (origin 11) succeeds, writing both the record and the working blob");
+
+    // Delete just the working blob out from under the still-pending record --
+    // the record alone is not enough to load.
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION) == HAL_OK,
+               "kv open for the erase succeeds");
+    TEST_CHECK(hal_kv_erase_key(&h, NVS_KEY_LIVE_PROFILE) == HAL_OK, "erasing the working blob key succeeds");
+    hal_kv_close(&h);
+
+    profile_t out;
+    live_profile_load_result_t r = live_profile_load_working_for_origin(11, &out);
+    TEST_CHECK(r == LIVE_PROFILE_LOAD_PERMANENT,
+               "a missing working blob for a still-pending record is a definitive, non-retryable outcome");
+
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
+static void test_load_working_for_origin_permanent_on_decode_failure(void)
+{
+    TEST_SECTION("live_profile_load_working_for_origin -- pass-3 review fix: a pending record whose working blob "
+                 "reads back fine but fails to DECODE (wrong length, per this file's profile_decode_blob() fake) "
+                 "is ALSO PERMANENT, not TRANSIENT -- the bytes that exist right now will never decode differently "
+                 "on a retry");
+    profile_t origin = make_test_profile();
+    profile_t working;
+    live_edit_record_t rec;
+    char err[128];
+    TEST_CHECK(live_profile_fork(13, false, "Run F", &origin, &working, &rec, err, sizeof(err)),
+               "fork (origin 13) succeeds");
+
+    // Overwrite the working blob with fewer bytes than sizeof(profile_t) --
+    // hal_kv_get_blob() succeeds (a shorter blob genuinely exists), but this
+    // file's profile_decode_blob() fake rejects any length != sizeof(profile_t).
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION) == HAL_OK,
+               "kv open for the corrupt-write succeeds");
+    uint8_t short_blob[4] = {0, 1, 2, 3};
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_LIVE_PROFILE, short_blob, sizeof(short_blob)) == HAL_OK,
+               "writing a too-short blob over the working slot succeeds");
+    hal_kv_close(&h);
+
+    profile_t out;
+    live_profile_load_result_t r = live_profile_load_working_for_origin(13, &out);
+    TEST_CHECK(r == LIVE_PROFILE_LOAD_PERMANENT, "a blob that reads back but fails to decode is definitive too");
+
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
 // ---------------------------------------------------------------------------
 // HIGH-1 (review): profile_live_pickup_should_advance_generation() -- the
 // pure decision this fix extracted so the real defect (the tick loop
@@ -694,6 +753,54 @@ static void test_should_advance_generation_true_when_checked_refused(void)
                "same for a HARD-validate refusal");
 }
 
+static void test_should_advance_generation_true_when_load_permanent(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- pass-3 review fix: LOAD_PERMANENT (a record IS "
+                 "pending but its blob can never be loaded) DOES consume the generation, unlike LOAD_TRANSIENT");
+    TEST_CHECK(profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_LOAD_PERMANENT,
+                                                              PROFILE_LIVE_PICKUP_OK),
+               "a permanently unloadable pending edit is a definitive fact -- nothing to re-check on the next tick");
+}
+
+// ---------------------------------------------------------------------------
+// Pass-3 review fix (2026-09-19): the adopt-time io_seg remaining_s
+// re-derivation, extracted to profile_executor_live_pickup.c specifically so
+// its bound (the original defect: indexed candidate->segments[] by the OLD
+// profile's segment_count) is host-testable.
+
+static void test_io_seg_rederive_count_bounds_by_smaller_count(void)
+{
+    TEST_SECTION("profile_live_pickup_io_seg_rederive_count -- pass-3 review fix: bounded by the SMALLER of the "
+                 "old and new segment_count, not just the old one");
+    TEST_CHECK(profile_live_pickup_io_seg_rederive_count(5, 5, 8) == 5, "equal counts: no clamp needed");
+    TEST_CHECK(profile_live_pickup_io_seg_rederive_count(5, 2, 8) == 2,
+               "a live edit that SHORTENS the profile (legal down to segment_index + 1) must bound by the NEW, "
+               "smaller count -- this is exactly the bug: bounding by 5 here would index candidate->segments[2..4], "
+               "past its own segment_count of 2");
+    TEST_CHECK(profile_live_pickup_io_seg_rederive_count(2, 5, 8) == 2,
+               "a live edit that LENGTHENS the profile must still bound by the OLD, smaller count -- there is no "
+               "old io_seg_runtime_t state for segments the run never reached yet");
+    TEST_CHECK(profile_live_pickup_io_seg_rederive_count(5, 5, 3) == 3, "max_segments still clamps as before");
+}
+
+static void test_io_seg_rederive_remaining_s_carries_elapsed_time(void)
+{
+    TEST_SECTION("profile_live_pickup_rederive_remaining_s -- pass-3 review fix: re-derives remaining_s from "
+                 "elapsed time under the OLD dwell, applied to the NEW dwell");
+    // Old dwell 10 min (600 s), 400 s elapsed (200 s remaining) -> new dwell
+    // 20 min (1200 s): 1200 - 400 = 800 s remaining.
+    TEST_CHECK(profile_live_pickup_rederive_remaining_s(10, 200.0f, 20) == 800.0f,
+               "elapsed time carries over onto the new, longer dwell");
+    // Old dwell 10 min, 400 s elapsed, new dwell SHORTER than elapsed (2 min
+    // = 120 s) -> floors at 0, does not go negative.
+    TEST_CHECK(profile_live_pickup_rederive_remaining_s(10, 200.0f, 2) == 0.0f,
+               "a new dwell shorter than the time already elapsed floors at 0, never negative "
+               "(this is exactly what a negative resulting dwell_remaining_s would otherwise look like)");
+    // Unchanged dwell: remaining_s should come back unchanged.
+    TEST_CHECK(profile_live_pickup_rederive_remaining_s(10, 350.0f, 10) == 350.0f,
+               "an unchanged dwell_min is a no-op");
+}
+
 int main(void)
 {
     // fake_kv.c (the host hal_kv backend) requires every partition to be
@@ -738,12 +845,17 @@ int main(void)
     test_save_working_bumps_generation();
     test_fork_refuses_pending_for_different_origin();
     test_load_working_for_origin_refuses_foreign_id();
+    test_load_working_for_origin_permanent_on_missing_blob();
+    test_load_working_for_origin_permanent_on_decode_failure();
     test_should_advance_generation_false_when_not_running();
     test_should_advance_generation_false_on_malloc_failure();
     test_should_advance_generation_true_when_not_applicable();
     test_should_advance_generation_false_when_load_transient();
     test_should_advance_generation_true_when_checked_ok();
     test_should_advance_generation_true_when_checked_refused();
+    test_should_advance_generation_true_when_load_permanent();
+    test_io_seg_rederive_count_bounds_by_smaller_count();
+    test_io_seg_rederive_remaining_s_carries_elapsed_time();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

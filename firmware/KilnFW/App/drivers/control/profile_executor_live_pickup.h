@@ -76,6 +76,16 @@ typedef enum {
      * "new" and re-spends a malloc + blocking NVS read on the control task
      * for an edit that will never exist to adopt. */
     PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE,
+    /* Pass-3 review fix (2026-09-19): live_profile_load_working_for_origin()
+     * returned LIVE_PROFILE_LOAD_PERMANENT -- a record IS pending for this
+     * run's origin_id and hal_kv_open() itself succeeded, but the blob's
+     * CONTENT can never be adopted (missing, wrong length, or a decode
+     * failure). Unlike LOAD_TRANSIENT just below, this will not change on
+     * retry, so it DOES consume the generation -- kept as its own kind
+     * (rather than folded into NOT_APPLICABLE) only so the caller can
+     * log/record a refusal distinctly from the ordinary "nothing pending"
+     * case. */
+    PROFILE_LIVE_PICKUP_POLL_LOAD_PERMANENT,
     /* HIGH (review, 2026-09-19): live_profile_load_working_for_origin()
      * returned LIVE_PROFILE_LOAD_TRANSIENT -- a record IS pending for this
      * run's origin_id, but the working blob itself failed to load (hal_kv
@@ -99,10 +109,12 @@ typedef enum {
  * caller is expected to have already recorded for the operator, MEDIUM-3) --
  * since either way the operator's specific edit was actually evaluated and
  * does not need re-evaluating on an unchanged generation.
- * PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE (HIGH, 2026-09-19) ALSO returns
- * true: it is the other definitive outcome -- nothing exists for this run's
- * origin_id to ever adopt for this generation, so there is nothing left to
- * re-check either.
+ * PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE (HIGH, 2026-09-19) and
+ * PROFILE_LIVE_PICKUP_POLL_LOAD_PERMANENT (pass-3 review fix, 2026-09-19)
+ * ALSO return true: both are definitive outcomes -- nothing exists for this
+ * run's origin_id to ever adopt for this generation (NOT_APPLICABLE), or
+ * something exists but can never be loaded (LOAD_PERMANENT) -- so there is
+ * nothing left to re-check either way.
  * NOT_RUNNING/MALLOC_FAILED/LOAD_TRANSIENT all return false: none of them
  * looked at (or could even find) the candidate, so none of them may consume
  * the generation -- doing so was the original HIGH-1 defect (an edit made
@@ -114,6 +126,32 @@ typedef enum {
  * branch's plumbing. */
 bool profile_live_pickup_should_advance_generation(profile_live_pickup_poll_outcome_kind_t kind,
                                                     profile_live_pickup_result_t result);
+
+/* Pass-3 review fix (2026-09-19): how many of s_exec.io_segs[] an adopt-time
+ * dwell re-derivation pass may safely touch. profile_executor.c's reload_
+ * live_profile_if_changed() reads BOTH the OLD profile's segments (for
+ * elapsed_s) and the NEW candidate's segments (for the new dwell), so it
+ * must be bounded by the SMALLER of the two segment_counts -- a live edit
+ * that legally shortens the profile (live_edit_check_window() allows
+ * segment_count down to segment_index + 1) could otherwise index the
+ * candidate's segments[] array past its own segment_count. Extracted as its
+ * own pure function (rather than left inline) specifically so this bound is
+ * host-testable on its own, since the original defect was exactly a wrong
+ * bound with no test to catch it. */
+uint8_t profile_live_pickup_io_seg_rederive_count(uint8_t old_segment_count, uint8_t new_segment_count,
+                                                   uint8_t max_segments);
+
+/* Pass-3 review fix (2026-09-19): the pure arithmetic behind that same
+ * adopt-time re-derivation, extracted so it is host-testable without
+ * executor plumbing. Given an active NON-BLOCKING IO/relay segment's OLD
+ * dwell_min and its current countdown (old_remaining_s), and the NEW
+ * candidate's dwell_min for that same segment index, returns the countdown
+ * that should replace old_remaining_s so the segment's elapsed time (under
+ * its OLD dwell) carries over against the NEW dwell. Clamped to
+ * [0, new_dwell_min*60] at both ends -- a stale/negative old_remaining_s
+ * (should not happen, but this is defensive) or a new dwell shorter than
+ * what has already elapsed both floor at 0. */
+float profile_live_pickup_rederive_remaining_s(uint32_t old_dwell_min, float old_remaining_s, uint32_t new_dwell_min);
 
 #ifdef __cplusplus
 }
