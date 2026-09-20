@@ -13,6 +13,8 @@
 #include <stdlib.h> /* free() -- blobs below are heap-allocated, see firing_stats_load() */
 #include <string.h>
 
+#include "freertos/portmacro.h" /* portMUX_TYPE -- last-run cache guard below */
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -25,6 +27,7 @@
 #include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
                                      section 5 item 7 */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- firing_stats_get_dualwrite_status() below */
+#include "profiles_builtin.h" /* g_builtin_profile_count/PROFILE_BUILTIN_ID_BASE -- last-run cache sizing/indexing */
 
 /* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
  *
@@ -176,6 +179,177 @@ void firing_stats_snapshot(const zone_runtime_t *z, float setpoint_span_c,
     if (out->duration_s > 0) {
         out->iae_normalized = out->iae_raw_c_s / ((float)out->duration_s * span);
     }
+}
+
+/* ---- last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW,
+ * "list perf") ---------------------------------------------------------
+ *
+ * profiles_catalog_http.c's GET /api/profiles calls profile_executor_
+ * last_run_started_unix_s() once per profile id -- up to PROFILES_MAX_COUNT +
+ * g_builtin_profile_count times per request (36 today; ~132 once
+ * PROFILES_MAX_COUNT reaches 100, docs/PROFILE_SLOTS_100_PLAN.md) -- and that
+ * function used to do a full firing_stats_load() (an NVS blob read, cfg-fs
+ * resolve, and a 1364 B heap_caps_malloc) on EVERY call, for EVERY request,
+ * on the httpd_worker task. This cache makes that O(1) NVS per request:
+ * first read after boot (or after this id's history last changed) is a real
+ * load and fills the cache; every other call for that id is one array read
+ * under a spinlock, no NVS/flash touched at all.
+ *
+ * This module is the single writer of "fs_<id>" (firing_stats_persist()) and
+ * its single eraser (firing_stats_erase()) -- see this file's own top
+ * comment -- so both update the cache directly rather than relying on the
+ * next reader to notice a change (CLAUDE.md's "reset one side of a pair" bug
+ * class: whoever writes/erases the NVS side must also update the cached
+ * side, in the SAME module, so the two can never drift). backup_import.c and
+ * every other profiles.* writer never touch "fs_<id>" directly (grepped
+ * 2026-09-19) -- profiles_http.c's slot-delete path is the only external
+ * caller, and it goes through firing_stats_erase() like everything else.
+ *
+ * Sized from PROFILES_MAX_COUNT + g_builtin_profile_count (never a literal)
+ * so it tracks both knobs automatically -- including the slots8->slots100
+ * bump landing in a sibling worktree. Allocated lazily, once, on first use
+ * (a board that never serves /api/profiles never pays for it) rather than at
+ * some fixed boot hook, matching history_buf_ensure_alloc()'s established
+ * convention (profile_executor_run.c) for this same reason. Kept off the
+ * calling task's stack and off .bss: heap_caps_malloc'd, from PSRAM once the
+ * array would exceed roughly 1 KB (which .bss growth toward 100 slots would
+ * do), internal DRAM below that threshold since MALLOC_CAP_SPIRAM churn
+ * isn't worth it for ~144 B today. A failed allocation degrades to "caching
+ * disabled" (every call falls back to firing_stats_load()) rather than
+ * aborting anything -- same non-fatal contract as every other lazy alloc in
+ * this split. */
+#define FS_LAST_RUN_CACHE_UNCACHED UINT32_MAX /* sentinel: "not yet looked up this boot" --
+                                                * distinct from the legitimate cached value 0
+                                                * ("looked up, genuinely never fired / fired
+                                                * before RTC/SNTP sync") */
+
+static uint32_t *volatile s_fs_last_run_cache = NULL;
+static size_t s_fs_last_run_cache_count = 0;
+static portMUX_TYPE s_fs_last_run_alloc_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_fs_last_run_alloc_claimed = false; /* true once some task has committed to
+                                                   * doing (or has finished/failed) the
+                                                   * one-time allocation below */
+static portMUX_TYPE s_fs_last_run_data_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Maps a profile id (a user slot 0..PROFILES_MAX_COUNT-1, or a builtin id
+ * PROFILE_BUILTIN_ID_BASE..+g_builtin_profile_count-1) to a cache slot.
+ * Returns false for anything else (a stale/invalid/out-of-range id) -- such
+ * an id is never cached and every lookup for it just falls back to a direct
+ * firing_stats_load(), which is already correct, if not O(1). */
+static bool fs_last_run_cache_index(uint8_t profile_id, size_t *out_idx)
+{
+    if (profile_id < PROFILES_MAX_COUNT) {
+        *out_idx = profile_id;
+        return true;
+    }
+    if (profile_id >= PROFILE_BUILTIN_ID_BASE) {
+        size_t bi = (size_t)profile_id - (size_t)PROFILE_BUILTIN_ID_BASE;
+        if (bi < g_builtin_profile_count) {
+            *out_idx = (size_t)PROFILES_MAX_COUNT + bi;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* One-time lazy allocation, safe under concurrent httpd_worker callers: the
+ * first task to see !s_fs_last_run_alloc_claimed wins the (very short,
+ * malloc-only, no NVS) allocation race under a spinlock that is released
+ * before the allocation itself runs, so heap_caps_malloc() never executes
+ * with interrupts disabled. Every other concurrent caller simply reports
+ * "not ready yet" (returns false) for that one call and falls back to an
+ * uncached direct load -- there is no blocking wait, since the allocation
+ * finishes in well under a tick and the next call from that same request
+ * loop (the very next profile id in the /api/profiles for-loop) will see it
+ * published. */
+static bool fs_last_run_cache_ensure_alloc(void)
+{
+    if (s_fs_last_run_cache != NULL) {
+        return true;
+    }
+    bool i_am_allocator = false;
+    portENTER_CRITICAL(&s_fs_last_run_alloc_mux);
+    if (!s_fs_last_run_alloc_claimed) {
+        s_fs_last_run_alloc_claimed = true;
+        i_am_allocator = true;
+    }
+    portEXIT_CRITICAL(&s_fs_last_run_alloc_mux);
+    if (!i_am_allocator) {
+        return s_fs_last_run_cache != NULL;
+    }
+
+    size_t count = (size_t)PROFILES_MAX_COUNT + g_builtin_profile_count;
+    size_t bytes = count * sizeof(uint32_t);
+    uint32_t *buf = NULL;
+    if (bytes > 1024) {
+        buf = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (buf == NULL) {
+            ESP_LOGW(PE_TAG, "firing_stats last-run cache: %u B PSRAM alloc failed, falling back to "
+                             "internal DRAM", (unsigned)bytes);
+        }
+    }
+    if (buf == NULL) {
+        buf = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (buf == NULL) {
+        ESP_LOGE(PE_TAG, "firing_stats last-run cache: alloc(%u) failed -- caching disabled, every "
+                         "GET /api/profiles will keep doing a full NVS read per profile",
+                 (unsigned)bytes);
+        return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        buf[i] = FS_LAST_RUN_CACHE_UNCACHED;
+    }
+    s_fs_last_run_cache_count = count;
+    s_fs_last_run_cache = buf; /* publish last */
+    return true;
+}
+
+/* Returns true and fills *out_started_unix_s from the cache on a hit; false
+ * (cache miss, id uncacheable, or cache unavailable) otherwise -- caller
+ * falls back to firing_stats_load() and should firing_stats_cache_store()
+ * the result. No NVS access here; the spinlock below only ever guards a
+ * plain array read. */
+bool firing_stats_cache_lookup(uint8_t profile_id, uint32_t *out_started_unix_s)
+{
+    size_t idx;
+    if (!fs_last_run_cache_index(profile_id, &idx)) {
+        return false;
+    }
+    if (!fs_last_run_cache_ensure_alloc() || idx >= s_fs_last_run_cache_count) {
+        return false;
+    }
+    uint32_t v;
+    portENTER_CRITICAL(&s_fs_last_run_data_mux);
+    v = s_fs_last_run_cache[idx];
+    portEXIT_CRITICAL(&s_fs_last_run_data_mux);
+    if (v == FS_LAST_RUN_CACHE_UNCACHED) {
+        return false;
+    }
+    *out_started_unix_s = v;
+    return true;
+}
+
+/* Fills (or corrects) this id's cache entry. Called from three places, all
+ * in this file: the lazy-miss path (profile_executor_status.c, after a real
+ * firing_stats_load()), firing_stats_persist() (a new run just became the
+ * newest one), and firing_stats_erase() (history for this id is gone, so the
+ * correct cached value is 0 -- the same value profile_executor_last_run_
+ * started_unix_s() already returns for "never fired"). A no-op (not an
+ * error) for an id fs_last_run_cache_index() does not recognize, or if the
+ * cache failed to allocate -- there is nothing to update in either case. */
+void firing_stats_cache_store(uint8_t profile_id, uint32_t started_unix_s)
+{
+    size_t idx;
+    if (!fs_last_run_cache_index(profile_id, &idx)) {
+        return;
+    }
+    if (!fs_last_run_cache_ensure_alloc() || idx >= s_fs_last_run_cache_count) {
+        return;
+    }
+    portENTER_CRITICAL(&s_fs_last_run_data_mux);
+    s_fs_last_run_cache[idx] = started_unix_s;
+    portEXIT_CRITICAL(&s_fs_last_run_data_mux);
 }
 
 /* Must be called with s_exec.lock held. Fills rec from the run currently (or
@@ -583,6 +757,12 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
              (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob->count,
              (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+    // The NVS blob commit above just succeeded (this point is unreachable on
+    // any earlier failure return), so this run is now genuinely the newest
+    // one on disk -- update the last-run cache to match before anything else
+    // can observe a stale value. See this file's "last-run-started RAM
+    // cache" section above.
+    firing_stats_cache_store(rec->profile_id, rec->run_started_unix_s);
     // Rev key write happens AFTER the blob's own NVS commit succeeds -- if
     // this fails, the next load's nvs_rev is stale-low, which just means a
     // FUTURE divergence check might slightly under-trust NVS; the blob
@@ -652,6 +832,14 @@ void firing_stats_erase(uint8_t profile_id)
         ESP_LOGW(PE_TAG, "firing_stats_erase(%u): cfg-fs delete failed: %s", (unsigned)profile_id,
                  esp_err_to_name(file_err));
     }
+
+    // This id's history is gone (or was already empty) on both sides above,
+    // best-effort or not -- 0 ("never fired") is the correct cached value
+    // either way, matching what a fresh firing_stats_load() would now report.
+    // Unconditional, not gated on the erase/delete results above, for the
+    // same "best-effort, never blocks the caller" reasoning as the rest of
+    // this function -- see this file's "last-run-started RAM cache" section.
+    firing_stats_cache_store(profile_id, 0);
 }
 
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from

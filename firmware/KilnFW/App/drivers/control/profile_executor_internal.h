@@ -1015,6 +1015,16 @@ void firing_stats_persist(const profile_firing_run_record_t *rec);
 bool firing_stats_maybe_finalize(profile_firing_run_record_t *out_rec);
 void capture_run_snapshot(run_snapshot_buf_t *b);
 
+/* Last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW, "list
+ * perf") -- see profile_executor_firing_stats.c's own section comment for
+ * the full design. firing_stats_persist()/firing_stats_erase() (this same
+ * file) are the only writers; profile_executor_status.c's
+ * profile_executor_last_run_started_unix_s() is the only reader, consulting
+ * the cache first and calling firing_stats_cache_store() itself on a miss
+ * after doing the real (uncached) firing_stats_load()-based lookup. */
+bool firing_stats_cache_lookup(uint8_t profile_id, uint32_t *out_started_unix_s);
+void firing_stats_cache_store(uint8_t profile_id, uint32_t started_unix_s);
+
 /* ---- relay/IO segment machinery + guard escalation
  * (profile_executor_relay_io.c) --------------------------------------------- */
 void apply_relay(uint8_t zi, bool want_on);

@@ -477,11 +477,24 @@ size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_ru
 
 uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
 {
-    profile_firing_run_record_t rec;
-    if (profile_executor_get_firing_history(profile_id, &rec, 1) == 0) {
-        return 0;
+    /* RAM cache first (profile_executor_firing_stats.c's "last-run-started
+     * RAM cache" section) -- GET /api/profiles calls this once per profile
+     * id (PROFILES_MAX_COUNT + g_builtin_profile_count times per request),
+     * and this used to mean a full firing_stats_load() NVS read every single
+     * time, for every id, on every request. A hit here touches no NVS at
+     * all; a miss falls through to the exact lookup this function always
+     * did, then fills the cache so the NEXT request for this id is a hit. */
+    uint32_t cached;
+    if (firing_stats_cache_lookup(profile_id, &cached)) {
+        return cached;
     }
-    return rec.run_started_unix_s;
+    profile_firing_run_record_t rec;
+    uint32_t started_unix_s = 0;
+    if (profile_executor_get_firing_history(profile_id, &rec, 1) != 0) {
+        started_unix_s = rec.run_started_unix_s;
+    }
+    firing_stats_cache_store(profile_id, started_unix_s);
+    return started_unix_s;
 }
 
 size_t profile_executor_get_history_count(void)

@@ -109,6 +109,14 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
     return ESP_OK;
 }
 
+// profile_executor_firing_stats.c's last-run cache (PROFILE_SLOTS_100_PLAN.md
+// review LOW, "list perf") now #includes profiles_builtin.h to size/index
+// itself; this executable does not link profiles_builtin.c (not needed for
+// anything the prestart guard reaches), so g_builtin_profile_count needs a
+// fake definition here -- same convention, and same value (0 -- "no builtin
+// ids exist in this test's world"), as test_profiles_http.c's own fake.
+const size_t g_builtin_profile_count = 0;
+
 // PID_EXPANSION_PLAN.md sec 7.2: profile_executor.c's tick loop now calls
 // ramp_assist_cfg_enabled() (ramp_assist_cfg.h) once per tick -- that
 // module's real implementation needs NVS, which this test executable does
@@ -7631,6 +7639,149 @@ static void test_firing_stats_load_discards_unknown_size_blob(void)
     fake_kv_reset_all();
 }
 
+// ---- last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW,
+// "list perf") -- profile_executor_last_run_started_unix_s()'s O(1)-per-
+// request fix. Each test below uses a profile id nothing else in this file
+// ever calls profile_executor_last_run_started_unix_s() for, and the three
+// tests each use their OWN id (4, 5, 6) -- the cache is process-lifetime
+// static state (fake_kv_reset_all() resets the fake NVS store, not this RAM
+// cache), so distinct ids keep these tests order-independent of each other
+// without needing a cache-reset seam that would only exist for tests.
+
+static void test_firing_stats_last_run_cache_hit_avoids_nvs_reads(void)
+{
+    TEST_SECTION("profile_executor_last_run_started_unix_s() -- firing_stats_persist() populates "
+                 "the cache directly, so every subsequent call for that id is a cache hit and "
+                 "touches no NVS at all (the O(1)-per-request fix this pass adds).");
+
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 4;
+    strncpy(rec.profile_name, "CacheHit", sizeof(rec.profile_name) - 1);
+    rec.run_started_unix_s = 1700000000;
+    rec.duration_s = 3600;
+    rec.zone_mask = 0x01;
+    firing_stats_persist(&rec);
+
+    unsigned base_calls = fake_kv_get_call_count();
+
+    for (int i = 0; i < 5; i++) {
+        uint32_t started = profile_executor_last_run_started_unix_s(4);
+        TEST_CHECK(started == 1700000000u, "cached value must exactly match the persisted "
+                                            "run_started_unix_s on every repeated call");
+    }
+
+    TEST_CHECK(fake_kv_get_call_count() == base_calls,
+               "5 repeated lookups for the same id after a persist must not touch NVS even once -- "
+               "firing_stats_persist() already filled the cache, so every one of these is a plain "
+               "array read under a spinlock");
+
+    fake_kv_reset_all();
+}
+
+static void test_firing_stats_last_run_cache_first_miss_then_hit(void)
+{
+    TEST_SECTION("profile_executor_last_run_started_unix_s() -- a fresh boot's first lookup for an "
+                 "id whose history was written before the cache ever saw it (simulated here by "
+                 "writing the NVS blob directly, bypassing firing_stats_persist()) is a real, "
+                 "correct load; every lookup after that is a cache hit.");
+
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+
+    profile_firing_history_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.count = 1;
+    blob.runs[0].profile_id = 5;
+    strncpy(blob.runs[0].profile_name, "ColdBoot", sizeof(blob.runs[0].profile_name) - 1);
+    blob.runs[0].run_started_unix_s = 1650000000;
+    blob.runs[0].zone_mask = 0x01;
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
+                                    FIRING_STATS_NVS_PARTITION);
+    TEST_CHECK(err == HAL_OK, "test setup: hal_kv_open for the write must succeed");
+    err = hal_kv_set_blob(&h, "fs_5", &blob, sizeof(blob));
+    TEST_CHECK(err == HAL_OK, "test setup: writing the blob directly (never through "
+                              "firing_stats_persist(), so the cache never saw this write) must succeed");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    unsigned base_calls = fake_kv_get_call_count();
+    uint32_t first = profile_executor_last_run_started_unix_s(5);
+    TEST_CHECK(first == 1650000000u, "the first (uncached) lookup must return the real on-disk value");
+    TEST_CHECK(fake_kv_get_call_count() > base_calls,
+               "the first lookup for an id the cache has never seen must actually reach NVS");
+
+    unsigned after_first_calls = fake_kv_get_call_count();
+    for (int i = 0; i < 5; i++) {
+        uint32_t started = profile_executor_last_run_started_unix_s(5);
+        TEST_CHECK(started == 1650000000u, "every call after the first miss must still return the "
+                                            "same value, now from the cache");
+    }
+    TEST_CHECK(fake_kv_get_call_count() == after_first_calls,
+               "no lookup after the first must touch NVS again -- the miss filled the cache");
+
+    fake_kv_reset_all();
+}
+
+static void test_firing_stats_last_run_cache_invalidated_on_persist_and_erase(void)
+{
+    TEST_SECTION("profile_executor_last_run_started_unix_s() -- firing_stats_persist() (a new run) "
+                 "and firing_stats_erase() (slot delete) both update the cache directly, so a "
+                 "later lookup never reads a stale value without needing to invalidate-and-reload "
+                 "(CLAUDE.md's 'reset one side of a pair' checklist: this module is the single "
+                 "writer/eraser of \"fs_<id>\", so it is also the one place that must keep the "
+                 "cache in step).");
+
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 6;
+    strncpy(rec.profile_name, "Invalidate", sizeof(rec.profile_name) - 1);
+    rec.run_started_unix_s = 1000;
+    rec.duration_s = 60;
+    rec.zone_mask = 0x01;
+    firing_stats_persist(&rec);
+
+    TEST_CHECK(profile_executor_last_run_started_unix_s(6) == 1000u,
+               "cache reflects the first persisted run");
+
+    // A second, later run for the SAME profile must immediately become the
+    // newest -- no explicit cache invalidation call, no reload, needed
+    // between the persist and the next lookup.
+    rec.run_started_unix_s = 2000;
+    rec.duration_s = 90;
+    firing_stats_persist(&rec);
+
+    unsigned calls_before_relookup = fake_kv_get_call_count();
+    TEST_CHECK(profile_executor_last_run_started_unix_s(6) == 2000u,
+               "a second persist for the same id must update the cached last-run value to the "
+               "NEW run, not keep serving the first one");
+    TEST_CHECK(fake_kv_get_call_count() == calls_before_relookup,
+               "the re-lookup after the second persist is still a cache hit -- persist() updates "
+               "the cache itself rather than merely invalidating it");
+
+    // Deleting the slot (firing_stats_erase(), profiles_http.c's
+    // nvs_erase_slot() call site) must make the cached value 0 ("never
+    // fired") immediately too.
+    firing_stats_erase(6);
+    unsigned calls_before_erase_relookup = fake_kv_get_call_count();
+    TEST_CHECK(profile_executor_last_run_started_unix_s(6) == 0u,
+               "after erasing this id's history, the cached last-run value must read back 0, "
+               "matching what a fresh (uncached) lookup would now report");
+    TEST_CHECK(fake_kv_get_call_count() == calls_before_erase_relookup,
+               "the post-erase lookup is still a cache hit -- firing_stats_erase() set the cache "
+               "to 0 directly rather than leaving a stale value for the next reader to correct");
+
+    fake_kv_reset_all();
+}
+
 static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("firing_stats_persist -- refuses (does not crash) when called with a PSRAM "
@@ -8681,6 +8832,9 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_persist_load_round_trip_and_ring_depth();
     test_firing_stats_load_migrates_known_old_size_blob();
     test_firing_stats_load_discards_unknown_size_blob();
+    test_firing_stats_last_run_cache_hit_avoids_nvs_reads();
+    test_firing_stats_last_run_cache_first_miss_then_hit();
+    test_firing_stats_last_run_cache_invalidated_on_persist_and_erase();
 
     // PID_EXPANSION_PLAN.md sec 7.1/7.2 -- ramp assist's sustained-lag
     // detection and auto-stretch instrumentation, order-independent.
