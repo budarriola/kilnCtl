@@ -2395,12 +2395,20 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         return false;
     }
 
+    /* PSRAM only, no internal-DRAM fallback: at PROFILES_MAX_COUNT == 100 this
+     * array is ~42.8 KB (profile_candidate_t, ~428 B each) -- a `malloc()`
+     * fallback landing in internal DRAM at that size is exactly the hazard
+     * PROFILE_SLOTS_100_PLAN.md section 7 task 7 calls out (sockets reset
+     * below ~11.9 KB of internal DRAM headroom on this board). Fail cleanly
+     * with a logged error and a clean 400 instead -- see the "out of memory"
+     * `err_msg` path just below, indistinguishable from any other pass-1
+     * validation refusal to the caller. */
     profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!candidates) {
-        candidates = malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT);
-    }
-    if (!candidates) {
+        ESP_LOGE(BACKUP_TAG, "backup import: PSRAM allocation for %u profile candidates failed "
+                              "(%u B) -- refusing rather than falling back to internal DRAM",
+                              (unsigned)PROFILES_MAX_COUNT, (unsigned)(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT));
         snprintf(err_msg, err_cap, "out of memory (profile candidates) -- kiln configs were already restored");
         *partial_write_out = true;
         return false;

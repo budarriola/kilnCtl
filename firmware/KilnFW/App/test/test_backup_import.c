@@ -99,6 +99,13 @@ static bool test_backup_import_apply(const char *body, char *err_msg, size_t err
 }
 #include "../drivers/http/backup_http.c"
 
+// LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) -- used by the
+// live-edit-slot-id-rejected test below (task 7,
+// PROFILE_SLOTS_100_PLAN.md section 7). Header-only, no persistence
+// functions linked in, so this pulls in nothing beyond profiles_types.h,
+// already a transitive dependency of every include above.
+#include "../drivers/persist/live_profile.h"
+
 #undef asm
 
 // The shared settings_source chain-walk (zones_http.h's
@@ -1822,6 +1829,118 @@ static void test_profile_name_at_limit_accepted(void)
     TEST_CHECK(ok, "a name exactly at the limit must be accepted, not rejected as \"too long\"");
     TEST_CHECK(g_profile_save_calls == 1, "the profile was committed");
     TEST_CHECK(strcmp(g_last_saved_profile.name, "ExactlyFifteenC") == 0, "the full, untruncated name was written");
+}
+
+// PROFILE_SLOTS_100_PLAN.md section 7 task 7: a backup carrying exactly
+// PROFILES_MAX_COUNT profiles must import in full, and one carrying
+// PROFILES_MAX_COUNT+1 must be refused BY NAME (the explicit
+// "backup has more than %u profiles" count check a few lines above, not an
+// overflow of the heap-allocated `candidates[]` array -- see
+// backup_import_apply()'s comment for why that array is heap, not stack,
+// allocated in the first place). Both counts are derived from the constant
+// so this test passes unchanged whether PROFILES_MAX_COUNT is today's 8 or
+// the 100 a sibling, concurrently-running worktree is raising it to.
+//
+// Builds a body with `count` profile entries, ids 0..count-1, each a
+// minimal-but-valid profile (one segment, zone_mask 1 -- valid for the
+// thermo_count=3 default reset_stub_state() below leaves in place).
+static char *build_many_profiles_body(unsigned count)
+{
+    // "{\"id\":N,\"name\":\"pN\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,"
+    //  "\"ramp_c_per_hr\":50,\"dwell_min\":30}]}," is comfortably under 128 B
+    // even at 3-digit ids; +256 for the envelope.
+    size_t cap = (size_t)count * 128 + 256;
+    char *body = malloc(cap);
+    TEST_CHECK(body != NULL, "test setup: malloc for many-profiles body must succeed");
+    size_t off = 0;
+    off += (size_t)snprintf(body + off, cap - off,
+                            "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[");
+    for (unsigned i = 0; i < count; i++) {
+        off += (size_t)snprintf(body + off, cap - off,
+                                "%s{\"id\":%u,\"name\":\"p%u\",\"zone_mask\":1,"
+                                "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}",
+                                i == 0 ? "" : ",", i, i);
+    }
+    snprintf(body + off, cap - off, "],\"zones\":[]}");
+    return body;
+}
+
+static void test_import_exactly_max_count_profiles_succeeds(void)
+{
+    TEST_SECTION("backup_import_apply -- exactly PROFILES_MAX_COUNT profiles all import");
+    reset_stub_state();
+
+    char *body = build_many_profiles_body(PROFILES_MAX_COUNT);
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    free(body);
+
+    TEST_CHECK(ok, "a backup with exactly PROFILES_MAX_COUNT profiles must be accepted");
+    TEST_CHECK(g_profile_save_calls == PROFILES_MAX_COUNT,
+              "every one of the PROFILES_MAX_COUNT profiles must be saved, none dropped");
+}
+
+static void test_import_over_max_count_profiles_refused(void)
+{
+    TEST_SECTION("backup_import_apply -- PROFILES_MAX_COUNT+1 profiles refused by name, nothing written");
+    reset_stub_state();
+
+    char *body = build_many_profiles_body(PROFILES_MAX_COUNT + 1);
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    free(body);
+
+    TEST_CHECK(!ok, "a backup with PROFILES_MAX_COUNT+1 profiles must be refused");
+    TEST_CHECK(strstr(err, "more than") != NULL,
+              "refused by the explicit count check (\"backup has more than N profiles\"), "
+              "not silently truncated or an overflow");
+    TEST_CHECK(g_profile_save_calls == 0, "nothing written -- refusal happens in validation, before any commit");
+    TEST_CHECK(g_total_write_calls == 0, "no other setter ran either");
+}
+
+// LIVE_EDIT_WORKING_SLOT_ID is defined as PROFILES_MAX_COUNT itself
+// (live_profile.h) -- the reserved slot sits exactly one past the last real
+// user id. An import naming that id, or any id further out, must be
+// rejected by the same "id out of range (0-PROFILES_MAX_COUNT-1)" check a
+// plain out-of-range id gets; it must never reach profiles_http_save().
+static void test_import_live_edit_slot_id_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- an id naming the live-edit slot is rejected, not written");
+    reset_stub_state();
+
+    char body[256];
+    snprintf(body, sizeof(body),
+            "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+            "\"profiles\":[{\"id\":%u,\"name\":\"live\",\"zone_mask\":1,"
+            "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+            "\"zones\":[]}",
+            (unsigned)LIVE_EDIT_WORKING_SLOT_ID);
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "id == LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) must be rejected");
+    TEST_CHECK(strstr(err, "id out of range") != NULL, "rejected by the id-range check, naming the problem");
+    TEST_CHECK(g_profile_save_calls == 0, "the live-edit slot is never written by a backup import");
+}
+
+static void test_import_id_past_max_count_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- an id well past PROFILES_MAX_COUNT is rejected, not written");
+    reset_stub_state();
+
+    char body[256];
+    snprintf(body, sizeof(body),
+            "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+            "\"profiles\":[{\"id\":%u,\"name\":\"far\",\"zone_mask\":1,"
+            "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+            "\"zones\":[]}",
+            (unsigned)PROFILES_MAX_COUNT + 5);
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "an id well past PROFILES_MAX_COUNT must be rejected");
+    TEST_CHECK(strstr(err, "id out of range") != NULL, "rejected by the id-range check, naming the problem");
+    TEST_CHECK(g_profile_save_calls == 0, "nothing written for an out-of-range id");
 }
 
 // RELEASE_HARDENING_PLAN.md item 7, "import of a deliberately hostile
@@ -3677,6 +3796,10 @@ void run_test_backup_import(void)
     test_v2_body_with_stale_sentinel_still_imports();
     test_overlong_profile_name_rejected();
     test_profile_name_at_limit_accepted();
+    test_import_exactly_max_count_profiles_succeeds();
+    test_import_over_max_count_profiles_refused();
+    test_import_live_edit_slot_id_rejected();
+    test_import_id_past_max_count_rejected();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
 
     test_v4_new_fields_round_trip_distinct_values();

@@ -395,6 +395,57 @@ Section 7 task 8 (web: name filter plus favorites/recent grouping) done.
   `check_ui_responsive_sweep.ps1`, `check_00_kilnfw_target_build.ps1`, full
   C host-test suite (`test_profiles_http.c`'s 337/337) all green.
 
+Section 7 task 7 (raise `BACKUP_BODY_MAX`, PSRAM the import buffer, 100/101-profile
+tests) done, minus the `BACKUP_BODY_MAX` raise itself, which had already landed as
+part of an earlier ("bkfinish") pass (`backup_http_internal.h:103`, already 131072,
+body already read into a `content_len`-sized `MALLOC_CAP_SPIRAM` buffer in
+`backup_import_post_handler()` -- confirmed unchanged here). `backup_export.c`'s
+export side was confirmed to already stream via `backup_stream_printf()`/a small
+`BACKUP_STREAM_BUF` chunk buffer, never buffering the whole document.
+
+- `backup_import.c`'s `candidates[PROFILES_MAX_COUNT]` (`profile_candidate_t`, ~428 B
+  each -- ~42.8 KB at the 100 slots a concurrent sibling worktree is raising
+  `PROFILES_MAX_COUNT` to) no longer falls back to `malloc()` (internal DRAM) when the
+  `MALLOC_CAP_SPIRAM` allocation fails. It now logs `ESP_LOGE` naming the byte count
+  and refuses cleanly with the same "out of memory (profile candidates)" 400 the
+  caller already handled -- no behavior change at today's 8 slots (PSRAM allocation
+  never fails on this board), only the failure path at high slot counts. The sibling
+  `zone_candidates`/`timing_profile_candidates` arrays are sized by
+  `MAX31856_CHANNEL_COUNT` (3-4 entries), not `PROFILES_MAX_COUNT`, so their existing
+  small `malloc()` fallback is not the hazard this task named and was left as-is.
+- No other per-slot array sized by `PROFILES_MAX_COUNT` was found on the httpd stack
+  or in `.bss` within the import/export path itself; the literal `profile_names[]`
+  table in `diagnostics_http.c` and the several `PROFILES_MAX_COUNT`-sized locals in
+  `profiles_http.c` are section 6/task 6's own scope (the constant raise), not
+  touched here.
+- New tests in `test_backup_import.c`: `test_import_exactly_max_count_profiles_succeeds`
+  (a backup with exactly `PROFILES_MAX_COUNT` profiles imports every one),
+  `test_import_over_max_count_profiles_refused` (`PROFILES_MAX_COUNT`+1 refused by the
+  existing "backup has more than N profiles" name, not an overflow, nothing written),
+  `test_import_live_edit_slot_id_rejected` (an id equal to `LIVE_EDIT_WORKING_SLOT_ID`,
+  which is defined as `PROFILES_MAX_COUNT` itself, is rejected by the existing id-range
+  check, never reaching `profiles_http_save()`), and
+  `test_import_id_past_max_count_rejected` (an id further out, `PROFILES_MAX_COUNT`+5,
+  same rejection). All four counts/ids are derived from `PROFILES_MAX_COUNT`/
+  `LIVE_EDIT_WORKING_SLOT_ID` rather than hardcoded, so they pass unchanged whether the
+  constant is today's 8 or the 100 the concurrent sibling worktree is landing.
+- Negative-tested: widened the pass-1 profile-count guard from
+  `candidate_count >= PROFILES_MAX_COUNT` to `candidate_count > PROFILES_MAX_COUNT`
+  (an off-by-one letting one profile past the array's true capacity write into
+  `candidates[PROFILES_MAX_COUNT]`, one element past the heap allocation), confirmed a
+  forced full rebuild failed (the `test_backup_import` host-test executable crashed
+  rather than reporting a clean assertion failure -- a heap buffer overflow, not a
+  benign logic miss), restored `backup_import.c` byte-exact via
+  `git cat-file blob HEAD:... > ...` (`git hash-object` match confirmed), reapplied
+  this task's own PSRAM-fallback fix by hand on top of the restored file, then forced
+  another full rebuild and confirmed 55/55 host test executables green again.
+- Verified (this task): full C host-test suite (55/55 executables, including the four
+  new `test_backup_import.c` cases), `check_00_kilnfw_target_build.ps1` (PASS, in
+  `C:\wt\checkbuild_cc4e4b468a`), `check_all_task_stack_budgets.py` (0 of 28 tasks over
+  budget), `check_httpd_task_stack_budget.ps1` (OK, ceiling unchanged at 4832 B,
+  `backup_import_post_handler` still the deepest handler path at 4544 B),
+  `check_uri_handler_cap.ps1` (150 of 151 -- unchanged, no new routes added).
+
 ## 8. Open owner questions
 
 1. **Consume the entire 1.81 MiB tail, or stop at 2 MiB and keep 320 KiB spare?** Section 1
