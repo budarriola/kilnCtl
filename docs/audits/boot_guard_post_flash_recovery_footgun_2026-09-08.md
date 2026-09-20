@@ -228,6 +228,22 @@ that made the call (the read-back could not confirm it that boot), but the persi
 does not stay "stuck," it becomes "accidentally reads as 0 later." Not a defect worth chasing
 further: it is strictly no worse than the stuck-at-stale-value case this whole audit is about.
 
+## Owner decision, 2026-09-19
+
+The `ap_password` gate above is no longer opt-in: the post-flash `boot_guard_reset` call is now
+DEFAULT ON whenever a credential is available at all. `flash_firmware()` resolves the password
+via (in order) an explicit `ap_password` argument, then the `KILNCTL_WEB_USERNAME`/
+`KILNCTL_WEB_PASSWORD` environment variables (the same pair `http_auth.py` reads for the admin
+session). All of section 4's gating is otherwise unchanged -- still only called once
+`_verify_flash_landed()` returns `""` (full, unambiguous success), never on a raise, a WARNING,
+or `verify=False`. A new `reset_boot_guard=False` parameter opts out unconditionally regardless
+of credential availability. A caller with no credential from either source gets the
+pre-`b09294fb` behavior, but the result now says explicitly that the reset was skipped for lack
+of credentials rather than staying silent about it. See `tools/PcTools/src/kilnctrl/
+mcp_server_flash.py`'s `_resolve_boot_guard_password()`/`_maybe_reset_boot_guard()` and
+`tests/test_flash_firmware_verify.py`'s `BootGuardResetWiringTest` for the env-fallback,
+opt-out, and no-credential-skip tests.
+
 ## Not done in this pass (original, 2026-09-08)
 
 - ~~No HTTP route wired up, and `flash_firmware()` itself was not changed -- see section 4.~~

@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, http_auth, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -567,8 +567,28 @@ def _verify_flash_landed(
     return ""
 
 
+def _resolve_boot_guard_password(ap_password: Optional[str]) -> Optional[str]:
+    """Owner decision 2026-09-19: the post-flash boot_guard counter reset is
+    DEFAULT ON whenever credentials are available, not opt-in per call. If
+    the caller passes `ap_password` explicitly, that value wins (unchanged
+    behavior). Otherwise, falls back to the KILNCTL_WEB_PASSWORD environment
+    variable (the same variable http_auth.py's PASSWORD_ENV reads for the
+    admin session itself) IF KILNCTL_WEB_USERNAME is also set -- mirroring
+    the pair-of-env-vars convention the rest of this codebase uses to decide
+    whether web-auth credentials are actually configured, even though this
+    particular call only ever needs the password. Returns None (never the
+    empty string) when neither source has a value, so callers can treat
+    "None" uniformly as "no credential available" regardless of which source
+    was tried. Never logs or echoes the resolved value."""
+    if ap_password:
+        return ap_password
+    if os.environ.get(http_auth.USERNAME_ENV) and os.environ.get(http_auth.PASSWORD_ENV):
+        return os.environ.get(http_auth.PASSWORD_ENV)
+    return None
+
+
 def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
-                             ap_password: Optional[str]) -> str:
+                             ap_password: Optional[str], reset_boot_guard: bool = True) -> str:
     """Called from flash_firmware()'s _post_flash() ONLY after
     _verify_flash_landed() returned "" -- i.e. full, unambiguous, verified
     success (running partition is 'factory' AND its build timestamp matches
@@ -579,9 +599,15 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     something broken, or whose landing was never actually confirmed, must
     still be free to walk into recovery mode on its own.
 
-    No-op (returns "") when `ap_password` is not given -- this is an
-    additive, opt-in behavior; a caller that omits it gets exactly the
-    pre-existing flash_firmware() behavior.
+    Owner decision 2026-09-19: this is now DEFAULT ON whenever a credential
+    is available, not opt-in. Resolution order: `ap_password` if the caller
+    passed one explicitly, else the KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD
+    environment variables via `_resolve_boot_guard_password()`. Pass
+    `reset_boot_guard=False` to opt out entirely regardless of credential
+    availability. If no credential is available from either source, this is
+    still a no-op -- but reports a one-line "skipped for lack of
+    credentials" note instead of returning "" silently, so a caller who
+    expected the reset to run can tell it didn't happen and why.
 
     Resolves the board address the SAME way _verify_flash_landed() just
     confirmed one was reachable at (via _preflash_board_address(), which
@@ -603,8 +629,13 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     verified-or-not after value -- RELEASE_HARDENING_PLAN.md blocker 6 calls
     for both, since a silent clear is not acceptable and a failed clear must
     be visible with enough context to judge it."""
-    if not ap_password:
+    if not reset_boot_guard:
         return ""
+    resolved_password = _resolve_boot_guard_password(ap_password)
+    if not resolved_password:
+        return ("boot_guard_reset: skipped -- no credential available (neither `ap_password` "
+                "nor KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD were set); the recovery-mode "
+                "counter was NOT cleared by this flash.")
     resolved = _preflash_board_address(host) or pre_flash_host
     if not resolved:
         return ("WARNING: boot_guard_reset skipped -- could not resolve a board address to call "
@@ -624,7 +655,7 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
                                    "only, does not block the reset call): %s", exc)
     before_str = "unknown" if before_count is None else str(before_count)
     try:
-        body = ota_http.boot_guard_reset_esp(resolved, ap_password)
+        body = ota_http.boot_guard_reset_esp(resolved, resolved_password)
     except ota_http.OtaHttpError as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
@@ -680,6 +711,7 @@ def flash_firmware(
     allow_sensitive_dirty: bool = False,
     kiln_fw_root: Optional[str] = None,
     ap_password: Optional[str] = None,
+    reset_boot_guard: bool = True,
     allow_partition_offset_mismatch: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
@@ -807,10 +839,13 @@ def flash_firmware(
     (`verify=True`) compares against THAT tree's `.bin`, unchanged
     otherwise.
 
-    `ap_password`: when given AND `verify=True`, and ONLY once post-flash
+    `ap_password` / `reset_boot_guard`: Owner decision 2026-09-19 -- the
+    post-flash boot_guard counter reset is DEFAULT ON whenever credentials
+    are available, not opt-in per call. When `verify=True` and
+    `reset_boot_guard=True` (the default), and ONLY once post-flash
     verification confirms full success (the board is running `factory` with
     the exact build just flashed -- `_verify_flash_landed()` returned "",
-    not a WARNING and not a raise), this also calls
+    not a WARNING and not a raise), this calls
     `POST /api/ota/esp/boot_guard_reset` (ota_http_client.boot_guard_reset_esp())
     to clear `boot_guard`'s recovery-mode counter directly -- the tool-driven
     fix for docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md:
@@ -818,19 +853,32 @@ def flash_firmware(
     snapshot that can be wrong for a boot or two right after a flash-induced
     reset, and a run of ordinary development reflashes can otherwise walk a
     perfectly healthy board into recovery mode for a reason that has nothing
-    to do with whether the firmware can boot. Deliberately gated on FULL
-    verified success, never on a failed, unverified, or merely-warned-about
-    flash (`verify=False`, an unreachable board, a wrong-partition/
-    wrong-build mismatch, or a soft bring-up WARNING) -- a board that was
-    just flashed with something broken, or whose landing was never actually
-    confirmed, must still be free to walk into recovery mode on its own; see
-    boot_guard_reset_counter()'s own header comment on why this must never
-    run except from a tool that KNOWS a deliberate, confirmed-good flash just
-    happened. A failure to reach or verify this call is reported as a
-    WARNING appended to the result, never raised -- the flash itself already
-    succeeded and landed by this point, and a caller who omits `ap_password`
-    (the default) gets the same behavior as before this parameter existed:
-    no attempt, no warning.
+    to do with whether the firmware can boot.
+
+    The credential used is resolved by `_resolve_boot_guard_password()`: an
+    explicit `ap_password` wins if given; otherwise it falls back to the
+    KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD environment variables (the same
+    pair http_auth.py reads for the admin session). If neither is available,
+    this is a no-op, but the result gets one line saying the reset was
+    skipped for lack of credentials rather than silently doing nothing.
+    Passing `reset_boot_guard=False` opts out unconditionally, regardless of
+    what credentials are available -- use this for a deliberate flash of
+    something you expect might NOT boot cleanly and want free to walk into
+    recovery mode on its own.
+
+    Deliberately gated on FULL verified success, never on a failed,
+    unverified, or merely-warned-about flash (`verify=False`, an unreachable
+    board, a wrong-partition/wrong-build mismatch, or a soft bring-up
+    WARNING) -- a board that was just flashed with something broken, or
+    whose landing was never actually confirmed, must still be free to walk
+    into recovery mode on its own; see boot_guard_reset_counter()'s own
+    header comment on why this must never run except from a tool that KNOWS
+    a deliberate, confirmed-good flash just happened. A failure to reach or
+    verify this call is reported as a WARNING appended to the result, never
+    raised -- the flash itself already succeeded and landed by this point.
+    The result always reports the counter's before and after values (or the
+    skip reason), never a silent clear. The password itself is never logged
+    or echoed.
 
     `allow_partition_offset_mismatch`: before touching OpenOCD, this tool
     parses `<kiln_fw_root>/partitions.csv` to find the partition named
@@ -1045,7 +1093,7 @@ def flash_firmware(
         # _maybe_reset_boot_guard()'s own doc comment for why this must
         # never run on a raise (handled above, already returned), a WARNING
         # (handled just above), or verify=False (already returned earlier).
-        boot_guard_note = _maybe_reset_boot_guard(host, pre_flash_host, ap_password)
+        boot_guard_note = _maybe_reset_boot_guard(host, pre_flash_host, ap_password, reset_boot_guard)
         suffix = f"\n{boot_guard_note}" if boot_guard_note else ""
         return (f"{base_msg}, and post-flash verification confirmed the board is running "
                 f"{app_target.name!r} with the matching build{suffix}")

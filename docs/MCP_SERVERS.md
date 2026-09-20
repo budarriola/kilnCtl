@@ -333,6 +333,21 @@ before calling OpenOCD at all, if that serial isn't currently enumerated
 identity check, since either picker returning the other board's port
 misdirects UART traffic just as badly as an unpinned JTAG flash.
 
+**Post-flash boot_guard counter reset is default-on (owner decision
+2026-09-19).** `flash_firmware()` calls `POST /api/ota/esp/boot_guard_reset`
+after post-flash verification confirms full, unambiguous success (never on a
+raise, a WARNING, or `verify=False`) -- see
+`docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`. This used
+to require an explicit `ap_password` argument; it is now attempted whenever a
+credential is available at all: an explicit `ap_password` still wins if
+passed, otherwise it falls back to the `KILNCTL_WEB_USERNAME`/
+`KILNCTL_WEB_PASSWORD` environment variables (the same pair `http_auth.py`
+reads for the admin session). If neither is set, the tool result reports the
+reset was skipped for lack of credentials rather than saying nothing. Pass
+`reset_boot_guard=False` to opt out unconditionally. The password is never
+logged or echoed, and the result always names the counter's before/after
+values (or the skip reason).
+
 ## Building from a clean worktree for `kiln_fw_root`
 
 `flash_firmware(kiln_fw_root=...)` exists for exactly the "build from a clean
