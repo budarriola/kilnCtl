@@ -180,7 +180,7 @@ static bool attempt_update_embedded(const pico_image_embedded_info_t *emb, int s
     pico_img_stage_ctx_t ctx;
     char fail_reason[96];
     fail_reason[0] = '\0';
-    if (!pico_img_stage_begin(&ctx, emb->slot_len[slot], fail_reason, sizeof(fail_reason))) {
+    if (!pico_img_stage_begin(&ctx, emb->slot_len[slot], fail_reason, sizeof(fail_reason), NULL)) {
         ESP_LOGE(TAG, "embedded slot %c could not be staged: %s", slot == 0 ? 'A' : 'B',
                  fail_reason);
         return false;
@@ -219,7 +219,24 @@ static void pico_auto_update_task(void *arg)
     int use_slot = 0;
     pico_image_source_info_t img;
     bool have_manifest = false;
-    bool use_embedded = emb.usable;
+    bool use_embedded = pico_image_embedded_should_use(&emb);
+
+    if (emb.usable && emb.dirty) {
+        /* Review finding D4: pico_auto_update_identity_matches()
+         * (pico_image_embedded.h) requires the Pico's OWN dirty flag to read
+         * 0 before it will call an already-running image a match for the
+         * embedded pair. A dirty embedded image can therefore never be
+         * confirmed as matching even after a fully successful push, which
+         * burns the 3-attempt budget every boot and latches
+         * pico_auto_update_state_set_blocking(true) -- silently blocking
+         * every future firing via readiness_gate. Mirror the "no image
+         * staged either" branch below: log it and go inert, same as
+         * ABANDONED_NO_IMAGE, rather than attempting an update that can
+         * never be confirmed. */
+        ESP_LOGW(TAG, "embedded SaftyFW image is marked dirty -- automatic Pico update is inert "
+                      "this boot (a dirty image can never be confirmed as matching, so attempting "
+                      "it would only burn the attempt budget and block readiness)");
+    }
 
     if (!use_embedded) {
         have_manifest = pico_image_source_describe(&img);

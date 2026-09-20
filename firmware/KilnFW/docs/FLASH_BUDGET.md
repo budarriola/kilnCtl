@@ -600,15 +600,22 @@ both SaftyFW two-slot bootloader binaries
 either is missing. Measured this pass, same worktree/toolchain/sdkconfig,
 `check_00_kilnfw_target_build.ps1`:
 
+Corrected 2026-09-20 (review finding D3): the partition figure below had been
+copied from the OLD three-way `factory`/`ota_0`/`ota_1` table pre-dating the
+single-slot OTA redesign (`docs/OTA_SINGLE_SLOT_PLAN.md`); the current
+`app` row in `firmware/KilnFW/partitions.csv` is `0x800000` = 8,388,608 B, not
+3,145,728 B. Figures below re-measured in a clean worktree via
+`check_00_saftyfw_target_build.ps1` then `check_00_kilnfw_target_build.ps1`:
+
 ```
-KilnCtrl.bin, with both embedded slots (this commit)   2,698,672 B
-  SaftyFW_slotA.bin                                       119,044 B
-  SaftyFW_slotB.bin                                       119,044 B
-  raw embedded payload                                    238,088 B
+KilnCtrl.bin, with both embedded slots (this commit)   2,699,744 B
+  SaftyFW_slotA.bin                                       119,308 B
+  SaftyFW_slotB.bin                                       119,308 B
+  raw embedded payload                                    238,616 B
 KilnCtrl.bin, without embedding (computed: measured total
-  minus the exact raw embedded payload above)          ~2,460,584 B
-app partition (ota_0 / ota_1 / factory, all equal)     3,145,728 B
-free with both slots embedded                            447,056 B  (14.2%)
+  minus the exact raw embedded payload above)          ~2,461,128 B
+app partition (ota_0, single-slot table)               8,388,608 B
+free with both slots embedded                          5,688,864 B  (67.8%)
 ```
 
 The "without embedding" figure is computed by subtracting the two slot
@@ -617,9 +624,10 @@ second twin build with `EMBED_FILES` removed — the two `.bin`s are raw,
 uncompressed payloads (`EMBED_FILES`, not `EMBED_TXTFILES`/gzip), so no
 compression ratio or other nonlinearity is in play, and the only material
 difference from an actual twin build is a few bytes of section-alignment
-padding. 14.2% headroom remains on the smallest app partition with both
-slots embedded — comfortable, but this is the single largest jump this
-document has recorded from one change (prior baselines moved by tens of KB
-across many commits; this one is +238,088 B in one step) and any second
+padding. 67.8% headroom remains on the `app` partition with both slots
+embedded, on the much larger single-slot table — comfortable, but this is
+still the single largest jump this document has recorded from one change
+(prior baselines moved by tens of KB
+across many commits; this one is +238,616 B in one step) and any second
 embedded artifact proposed later should be weighed against this section, not
 just against the raw partition size.

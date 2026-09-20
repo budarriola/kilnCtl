@@ -114,6 +114,20 @@ typedef struct {
  * the return value. NULL-safe: a NULL out returns false and does nothing. */
 bool pico_image_embedded_describe(pico_image_embedded_info_t *out);
 
+/* Review finding D4: whether the boot path should try to use *emb as its
+ * update source at all. `usable` alone is not enough -- a dirty embedded
+ * image can never be confirmed as matching by
+ * pico_auto_update_identity_matches() (pico_auto_update.h, which requires
+ * the Pico's OWN observed dirty flag to read 0), so attempting an update
+ * against one would burn the 3-attempt budget every boot and latch
+ * pico_auto_update_state_set_blocking(true), refusing every future firing.
+ * Pure and NULL-safe (NULL reads as not usable) so it is host-testable
+ * without pulling in the ESP-IDF task in pico_auto_update_boot.c. */
+static inline bool pico_image_embedded_should_use(const pico_image_embedded_info_t *emb)
+{
+    return emb != NULL && emb->usable && !emb->dirty;
+}
+
 /* The pure, freestanding-C11 core of pico_image_embedded_describe(): does the
  * actual identity scan/cross-check over two caller-supplied buffers, with no
  * dependency on the linker-generated EMBED_FILES symbols or on ESP-IDF.

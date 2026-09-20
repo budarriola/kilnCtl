@@ -565,6 +565,18 @@ TASKS = [
              ("execute_scope_job", "factory_reset.c"),
              ("safety_poll_pico_half_recapture_job", "safety_link_poll.c"),
          ]),
+    dict(name="pico_auto_update", root="pico_auto_update_task",
+         # Review finding (Pico-image-embed pass, 2026-09-20): this task's
+         # call into ota_http_check_interlocks() does SPI reads and zone
+         # snapshots normally run on the 8 KB httpd stack (see this file's
+         # own httpd_task_stack_budget-adjacent notes), but the boot task is
+         # only 4096 B (PICO_AUTO_UPDATE_TASK_STACK,
+         # drivers/net/pico_auto_update_boot.c) -- registered for stack-
+         # margin reporting per CLAUDE.md's "register every new task"
+         # standing instruction, not previously covered here.
+         stack=lambda: extract_local_macro("drivers/net/pico_auto_update_boot.c",
+             r'#define PICO_AUTO_UPDATE_TASK_STACK\s+(\d+)',
+             r'xTaskCreate\(pico_auto_update_task,\s*"pico_auto_update",\s*PICO_AUTO_UPDATE_TASK_STACK')),
     dict(name="info_uart_bridge", root="info_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_info.c",
              r'xTaskCreatePinnedToCoreWithCaps\(info_bridge_task,\s*"info_uart_bridge",\s*(\d+)')),
@@ -690,6 +702,15 @@ TASKS = [
 # is auditable as one block; retighten a value down if a fix legitimately
 # shrinks it, never raise one to paper over a regression.
 CEILING_BYTES = {
+    # Measured 2026-09-20 against a KilnCtrl.elf freshly built by
+    # check_00_kilnfw_target_build.ps1 in a clean worktree, immediately after
+    # registering this task (see TASKS["pico_auto_update"]'s own comment for
+    # why: ota_http_check_interlocks() does SPI reads/zone snapshots normally
+    # run on the 8 KB httpd stack, and this task's declared stack is 4096 B).
+    # 3104 of 4096 B used -- 992 B (24.2%) free on the declared stack. Not
+    # over budget; reported here per the standing instruction not to bump a
+    # stack size just because a checker was newly wired up.
+    "pico_auto_update": 3104,
     "boot_button": 1552,
     "gpio_probe": 3376,
     "link_watchdog": 160,

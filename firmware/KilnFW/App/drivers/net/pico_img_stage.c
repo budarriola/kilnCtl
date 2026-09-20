@@ -24,8 +24,11 @@ static void set_fail(char *buf, size_t len, const char *fmt, ...)
 }
 
 bool pico_img_stage_begin(pico_img_stage_ctx_t *ctx, size_t content_len, char *fail_reason,
-                          size_t fail_reason_len)
+                          size_t fail_reason_len, pico_img_stage_begin_result_t *out_result)
 {
+    if (out_result != NULL) {
+        *out_result = PICO_IMG_STAGE_BEGIN_OK;
+    }
     if (ctx == NULL) {
         return false;
     }
@@ -35,6 +38,9 @@ bool pico_img_stage_begin(pico_img_stage_ctx_t *ctx, size_t content_len, char *f
     if (part == NULL) {
         set_fail(fail_reason, fail_reason_len, "pico_img staging partition not found");
         ESP_LOGE(TAG, "pico_img staging partition not found");
+        if (out_result != NULL) {
+            *out_result = PICO_IMG_STAGE_BEGIN_NOT_FOUND;
+        }
         return false;
     }
     if (content_len > part->size) {
@@ -42,6 +48,9 @@ bool pico_img_stage_begin(pico_img_stage_ctx_t *ctx, size_t content_len, char *f
                  (unsigned)content_len, (unsigned)part->size);
         ESP_LOGE(TAG, "image (%u B) larger than pico_img (%u B)", (unsigned)content_len,
                  (unsigned)part->size);
+        if (out_result != NULL) {
+            *out_result = PICO_IMG_STAGE_BEGIN_TOO_LARGE;
+        }
         return false;
     }
 
@@ -51,6 +60,9 @@ bool pico_img_stage_begin(pico_img_stage_ctx_t *ctx, size_t content_len, char *f
     if (erc != ESP_OK) {
         set_fail(fail_reason, fail_reason_len, "pico_img erase failed: %s", esp_err_to_name(erc));
         ESP_LOGE(TAG, "pico_img erase failed: %s", esp_err_to_name(erc));
+        if (out_result != NULL) {
+            *out_result = PICO_IMG_STAGE_BEGIN_ERASE_FAILED;
+        }
         return false;
     }
 
@@ -66,6 +78,20 @@ bool pico_img_stage_write_chunk(pico_img_stage_ctx_t *ctx, const uint8_t *data, 
 {
     if (ctx == NULL || ctx->part == NULL || (data == NULL && len > 0)) {
         set_fail(fail_reason, fail_reason_len, "pico_img_stage_write_chunk: invalid argument");
+        return false;
+    }
+    /* Review finding D6: pico_img_stage_begin() erases only
+     * ceil(total_len / sector_size) sectors, not the whole partition -- a
+     * caller that writes past total_len (a Content-Length lie, an off-by-one
+     * in its own chunk bookkeeping, etc.) would land in un-erased flash and
+     * produce silently-corrupt bytes rather than a clean failure. Refuse the
+     * overrun instead of trusting every caller's own arithmetic. */
+    if (len > ctx->total_len || ctx->written > ctx->total_len - len) {
+        set_fail(fail_reason, fail_reason_len,
+                 "pico_img_stage_write_chunk: overrun -- %u + %u bytes exceeds staged total of %u",
+                 (unsigned)ctx->written, (unsigned)len, (unsigned)ctx->total_len);
+        ESP_LOGE(TAG, "pico_img_stage_write_chunk: overrun -- %u + %u bytes exceeds staged total of %u",
+                 (unsigned)ctx->written, (unsigned)len, (unsigned)ctx->total_len);
         return false;
     }
     esp_err_t werr = esp_partition_write(ctx->part, ctx->written, data, len);

@@ -122,16 +122,19 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
         goto cleanup;
     }
 
-    if (!pico_img_stage_begin(&stage, content_len, fail_reason, sizeof(fail_reason))) {
-        // pico_img_stage_begin() covers both "partition not found" and
-        // "image too large for the partition" -- same two failure shapes
-        // the inline version used to distinguish, folded into one message.
-        // Neither is really a client error, but a too-large image is closer
-        // to one than a missing partition is, so keep that one distinction
-        // rather than flattening both to 500.
-        bool too_large = (strstr(fail_reason, "large") != NULL);
+    pico_img_stage_begin_result_t stage_result = PICO_IMG_STAGE_BEGIN_OK;
+    if (!pico_img_stage_begin(&stage, content_len, fail_reason, sizeof(fail_reason), &stage_result)) {
+        // Review finding D5: pico_img_stage_begin() covers three distinct
+        // failure shapes (partition not found, image too large, erase
+        // failed) -- switch on its out-enum instead of substring-matching
+        // *fail_reason for "large", which silently breaks the moment either
+        // message's wording changes. Only TOO_LARGE is really a client
+        // error; the other two are this board's own fault.
+        httpd_err_code_t http_err = (stage_result == PICO_IMG_STAGE_BEGIN_TOO_LARGE)
+                                         ? HTTPD_400_BAD_REQUEST
+                                         : HTTPD_500_INTERNAL_SERVER_ERROR;
         ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
-        httpd_resp_send_err(req, too_large ? HTTPD_400_BAD_REQUEST : HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
+        httpd_resp_send_err(req, http_err, fail_reason);
         goto cleanup;
     }
 

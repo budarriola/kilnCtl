@@ -141,4 +141,41 @@ void run_test_pico_image_embedded(void)
     /* ---- NULL-safety ---- */
     TEST_CHECK(!pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), NULL),
                "a NULL out returns false and does nothing");
+
+    /* ---- review finding D4: pico_image_embedded_should_use() ---- */
+    /* usable + clean -> use it. */
+    memset(buf_a, 0xA5, sizeof(buf_a));
+    memset(buf_b, 0xA5, sizeof(buf_b));
+    memcpy(buf_a + 64, &rec, sizeof(rec));
+    memcpy(buf_b + 64, &rec, sizeof(rec));
+    memset(&out, 0, sizeof(out));
+    pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), &out);
+    TEST_CHECK(out.usable && !out.dirty, "sanity: this pair is usable and clean");
+    TEST_CHECK(pico_image_embedded_should_use(&out),
+               "usable, clean, agreeing pair -- should_use is true");
+
+    /* usable but dirty (both slots agree they are dirty) -> must NOT be used,
+     * even though `usable` alone is true. This is the exact defect: a dirty
+     * embedded image can never be confirmed as matching, so trying it burns
+     * the attempt budget and latches the readiness block every boot. */
+    saftyfw_image_identity_t rec_both_dirty = rec;
+    rec_both_dirty.dirty = 1u;
+    memset(buf_a, 0xA5, sizeof(buf_a));
+    memset(buf_b, 0xA5, sizeof(buf_b));
+    memcpy(buf_a + 64, &rec_both_dirty, sizeof(rec_both_dirty));
+    memcpy(buf_b + 64, &rec_both_dirty, sizeof(rec_both_dirty));
+    memset(&out, 0, sizeof(out));
+    pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), &out);
+    TEST_CHECK(out.usable && out.dirty, "sanity: this pair is usable but dirty");
+    TEST_CHECK(!pico_image_embedded_should_use(&out),
+               "usable but dirty -- should_use is false (inert, not NEEDED)");
+
+    /* not usable at all -> also never used. */
+    memset(&out, 0, sizeof(out));
+    out.usable = false;
+    out.dirty = false;
+    TEST_CHECK(!pico_image_embedded_should_use(&out), "not usable -- should_use is false");
+
+    /* NULL-safety. */
+    TEST_CHECK(!pico_image_embedded_should_use(NULL), "NULL -- should_use is false");
 }

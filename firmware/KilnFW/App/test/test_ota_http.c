@@ -423,8 +423,15 @@ esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t 
 esp_err_t kiln_io_read(kiln_io_t *io, kiln_io_state_t *out)
 { (void)io; if (out) memset(out, 0, sizeof(*out)); return ESP_FAIL; }
 
-// ota_pico_relay.h -- never called by any test here.
-const esp_partition_t *ota_pico_img_partition(void) { return NULL; }
+// ota_pico_relay.h -- never called by ota_http.c's own tests, but review
+// finding D6 adds a direct test of pico_img_stage.c (linked in for real,
+// see build_host_tests.ps1's cmd8) below, which needs a non-NULL partition
+// to stage into. Sized generously (1 MiB) so ordinary test payloads never
+// trip the "too large" path by accident.
+static esp_partition_t s_fake_pico_img_partition = {
+    .address = 0, .size = 0x100000u, .label = "pico_img", .type = 1, .subtype = 0, .encrypted = false,
+};
+const esp_partition_t *ota_pico_img_partition(void) { return &s_fake_pico_img_partition; }
 const char *ota_pico_relay_phase_str(ota_pico_relay_phase_t phase) { (void)phase; return "idle"; }
 bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t image_crc32,
                           const char *version16_or_null, const uint8_t image_sha256_or_null[32])
@@ -2365,6 +2372,89 @@ static void test_client_ip_finalize_terminates_with_undersized_buffer(void)
 }
 
 // ---------------------------------------------------------------------------
+// Review finding D6: pico_img_stage.c (linked in for real above) writes
+// offset/CRC bookkeeping that a caller's own chunk-length arithmetic must
+// not be able to break. pico_img_stage_begin() erases only
+// ceil(total_len / sector_size) sectors -- writing past total_len would
+// land in un-erased flash -- so pico_img_stage_write_chunk() must refuse an
+// overrun rather than trust every caller. s_fake_pico_img_partition above
+// backs these calls; esp_partition_write() above is faked to always
+// succeed, so this exercises pico_img_stage.c's own bookkeeping, not flash
+// I/O.
+
+static void test_pico_img_stage_offset_and_crc_bookkeeping(void)
+{
+    TEST_SECTION("pico_img_stage -- offset/CRC bookkeeping across chunks");
+    pico_img_stage_ctx_t ctx;
+    char fail_reason[96];
+    pico_img_stage_begin_result_t result = PICO_IMG_STAGE_BEGIN_ERASE_FAILED; // poisoned
+    const uint8_t chunk1[4] = { 0x01, 0x02, 0x03, 0x04 };
+    const uint8_t chunk2[3] = { 0x05, 0x06, 0x07 };
+    size_t total = sizeof(chunk1) + sizeof(chunk2);
+
+    TEST_CHECK(pico_img_stage_begin(&ctx, total, fail_reason, sizeof(fail_reason), &result),
+               "begin() succeeds against the fake partition");
+    TEST_CHECK(result == PICO_IMG_STAGE_BEGIN_OK, "out-result reports OK on success");
+    TEST_CHECK(ctx.written == 0 && ctx.total_len == total, "ctx starts at offset 0 with the given total");
+
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk1, sizeof(chunk1), fail_reason, sizeof(fail_reason)),
+               "first chunk writes clean");
+    TEST_CHECK(ctx.written == sizeof(chunk1), "written advances by exactly the first chunk's length");
+
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk2, sizeof(chunk2), fail_reason, sizeof(fail_reason)),
+               "second chunk (landing exactly at total_len) writes clean");
+    TEST_CHECK(ctx.written == total, "written now equals the full staged total, exactly, not more");
+
+    uint32_t crc_two_calls = ctx.crc;
+    pico_img_stage_ctx_t ctx_one_call;
+    result = PICO_IMG_STAGE_BEGIN_ERASE_FAILED;
+    TEST_CHECK(pico_img_stage_begin(&ctx_one_call, total, fail_reason, sizeof(fail_reason), &result),
+               "begin() again for the single-call comparison");
+    uint8_t whole[7];
+    memcpy(whole, chunk1, sizeof(chunk1));
+    memcpy(whole + sizeof(chunk1), chunk2, sizeof(chunk2));
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx_one_call, whole, sizeof(whole), fail_reason, sizeof(fail_reason)),
+               "the same bytes written in one call also write clean");
+    TEST_CHECK(ctx_one_call.crc == crc_two_calls,
+               "CRC is identical whether the bytes arrive in two chunks or one -- pure running fold, "
+               "no per-call reset");
+}
+
+static void test_pico_img_stage_write_chunk_refuses_overrun(void)
+{
+    TEST_SECTION("pico_img_stage -- write_chunk refuses writing past the staged total (D6)");
+    pico_img_stage_ctx_t ctx;
+    char fail_reason[96];
+    fail_reason[0] = '\0';
+    pico_img_stage_begin_result_t result;
+    const uint8_t chunk1[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+    const uint8_t overrun_chunk[4] = { 0x11, 0x22, 0x33, 0x44 }; // 4 + 4 = 8 > total_len of 6
+
+    TEST_CHECK(pico_img_stage_begin(&ctx, 6u, fail_reason, sizeof(fail_reason), &result),
+               "begin() stages a 6-byte total");
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk1, sizeof(chunk1), fail_reason, sizeof(fail_reason)),
+               "first 4 bytes, within budget, write clean");
+
+    size_t written_before = ctx.written;
+    uint32_t crc_before = ctx.crc;
+    fail_reason[0] = '\0';
+    bool ok = pico_img_stage_write_chunk(&ctx, overrun_chunk, sizeof(overrun_chunk), fail_reason,
+                                         sizeof(fail_reason));
+    TEST_CHECK(!ok, "a chunk that would push written past total_len is refused");
+    TEST_CHECK(fail_reason[0] != '\0', "a non-empty failure reason is reported for the overrun");
+    TEST_CHECK(ctx.written == written_before, "written is NOT advanced by the refused chunk");
+    TEST_CHECK(ctx.crc == crc_before, "the CRC is NOT folded with the refused chunk's bytes");
+
+    // A same-size chunk that lands EXACTLY on total_len must still succeed --
+    // this is the boundary the overrun check must not falsely reject.
+    const uint8_t exact_chunk[2] = { 0x55, 0x66 }; // 4 + 2 = 6 == total_len
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, exact_chunk, sizeof(exact_chunk), fail_reason,
+                                          sizeof(fail_reason)),
+               "a chunk landing exactly at total_len (not past it) still succeeds");
+    TEST_CHECK(ctx.written == 6u, "written now equals total_len exactly");
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -2449,6 +2539,9 @@ void run_test_ota_http(void)
     test_client_ip_finalize_writes_real_address_on_success();
     test_client_ip_finalize_defined_on_null_formatted_addr();
     test_client_ip_finalize_terminates_with_undersized_buffer();
+
+    test_pico_img_stage_offset_and_crc_bookkeeping();
+    test_pico_img_stage_write_chunk_refuses_overrun();
 }
 
 int main(void)

@@ -49,18 +49,38 @@ typedef struct {
     size_t   total_len;
 } pico_img_stage_ctx_t;
 
+/* Review finding D5: pico_img_stage_begin()'s distinct failure shapes, for a
+ * caller to switch on directly instead of substring-matching *fail_reason
+ * (ota_http_pico.c used to guess "too large" via
+ * strstr(fail_reason, "large"), which silently breaks the moment either
+ * message's wording changes). NOT_FOUND/ERASE_FAILED are the server's own
+ * fault (worth a 500); TOO_LARGE is the caller's fault (worth a 400). */
+typedef enum {
+    PICO_IMG_STAGE_BEGIN_OK = 0,
+    PICO_IMG_STAGE_BEGIN_NOT_FOUND,
+    PICO_IMG_STAGE_BEGIN_TOO_LARGE,
+    PICO_IMG_STAGE_BEGIN_ERASE_FAILED,
+} pico_img_stage_begin_result_t;
+
 /* Looks up the `pico_img` partition, refuses if content_len exceeds it, and
  * erases ceil(content_len / sector_size) sectors starting at offset 0.
  * Fills *fail_reason (may be NULL) with a short, static-format-free message
- * on failure. Returns false on any failure; *ctx is undefined in that case. */
+ * on failure. *out_result (may be NULL) is set on every call, including
+ * success (PICO_IMG_STAGE_BEGIN_OK), naming which of the three failure
+ * shapes occurred. Returns false on any failure; *ctx is undefined in that
+ * case. */
 bool pico_img_stage_begin(pico_img_stage_ctx_t *ctx, size_t content_len, char *fail_reason,
-                          size_t fail_reason_len);
+                          size_t fail_reason_len, pico_img_stage_begin_result_t *out_result);
 
 /* Writes `len` bytes at the current write offset (ctx->written) and folds
  * them into the running CRC. Chunks must be presented in order, as they were
  * to pico_img_stage_begin()'s content_len budget -- this function does not
  * reorder or buffer. Returns false (and leaves ctx->written at the last
- * successfully written offset) on a flash write failure. */
+ * successfully written offset) on a flash write failure OR on an attempted
+ * overrun past ctx->total_len (review finding D6: pico_img_stage_begin()
+ * erases only ceil(total_len / sector_size) sectors, so writing past
+ * total_len would land in un-erased flash -- this bound is what refuses
+ * that, rather than trusting every caller's own chunk-length bookkeeping). */
 bool pico_img_stage_write_chunk(pico_img_stage_ctx_t *ctx, const uint8_t *data, size_t len,
                                 char *fail_reason, size_t fail_reason_len);
 

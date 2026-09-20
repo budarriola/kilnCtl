@@ -266,6 +266,17 @@ bool pico_update_attempts_record_failure(uint32_t pair_hash)
     return write_verified(pair_hash, count, true, last_slot);
 }
 
+/* Reset-one-side bug class (CLAUDE.md): this ESP-persisted `last_slot` is a
+ * derived EXPECTATION of the Pico's actual `active_slot`, joined only by the
+ * implicit contract "the ESP alternated correctly last time" -- there is no
+ * wire field carrying the Pico's real active slot back, so nothing here can
+ * ever detect drift between the two. A Pico reflashed by other means (SWD,
+ * `debug_program(peer="pico")`) or a Pico that rejects a write for a reason
+ * unrelated to slot linkage silently leaves this side's `last_slot` stale;
+ * the next alternation guess is then simply wrong, discovered only via
+ * SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE (state 8) at the next
+ * attempt, not before. Do not add other state here that assumes this value
+ * tracks the Pico without a read-back to confirm it. */
 bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot)
 {
     pico_update_attempts_record_t rec;
