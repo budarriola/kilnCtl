@@ -203,6 +203,14 @@ class BenchTestRunner:
 
         run_id = report_mod.make_run_id(suite, tag)
         started = time.time()
+        # Made available to case judge functions via ctx["run_dir"] *before*
+        # any case runs (wave 1d, SK-01/02: a case that writes a fresh
+        # stack-margin baseline record needs a stable directory to write it
+        # into -- the run's own directory -- rather than inventing a scratch
+        # location. Deterministic from run_id/logs_root, so computing it here
+        # and again below in report_mod.run_dir_path() for `outcome.run_dir`
+        # always agrees.
+        self.ctx["run_dir"] = report_mod.run_dir_path(self.logs_root, run_id)
         self._log(f"# bench_test run {run_id} (suite={suite}, dry_run={dry_run})")
         self._log(f"requested cases: {', '.join(requested)}")
 

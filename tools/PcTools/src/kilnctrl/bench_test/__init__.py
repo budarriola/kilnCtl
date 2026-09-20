@@ -24,6 +24,7 @@ from . import cases_web as _cases_web  # noqa: F401 - import wires judge functio
 from . import cases_lcd as _cases_lcd  # noqa: F401 - import wires LCD-01/08/21 judge functions into REGISTRY
 from . import cases_heat as _cases_heat  # noqa: F401 - import wires judge functions into REGISTRY
 from . import cases_safety as _cases_safety  # noqa: F401 - import wires judge functions into REGISTRY
+from . import cases_fl as _cases_fl  # noqa: F401 - import wires judge functions into REGISTRY
 from .runner import BenchTestRunner, run_suite
 
 __all__ = [

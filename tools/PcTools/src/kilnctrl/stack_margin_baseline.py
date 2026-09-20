@@ -288,3 +288,183 @@ def render_markdown_table(records: Iterable[StackMarginBaselineRecord]) -> str:
             f"{', '.join(conditions_seen) if conditions_seen else '--'} |"
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Pico (SaftyFW) baseline records -- plan section 7 owner decision 4 ("Pico
+# stack threshold"): capture a real baseline in wave 1 while SK-03 keeps its
+# flat 25%-free interim rule meanwhile. A separate record type, not a reuse
+# of StackMarginBaselineRecord above: the Pico's own
+# GET /api/saftyfw_stack_margin report is WORDS, not bytes (see
+# safety_stack_margin_http.c's own "opposite convention" comment), is a
+# FLOOR since the Pico's last boot rather than a per-capture high-water mark
+# tied to one of the three ESP LOAD_CONDITIONS, and is keyed by SaftyFW's
+# own build identity (git commit + build date/time -- SaftyFW has no
+# HTTP-reported build timestamp the way the ESP's fw_build is), not an ESP
+# FirmwareVersion. Folding the two into one shape would either lose that
+# units distinction or force a lot of ESP-only fields (condition, load) to
+# be meaningless on every Pico record.
+#
+# Backwards compatibility: this is purely additive. load_records()'s glob
+# (stack_margin_*.json) still matches these files' names too, but
+# load_records() reads them through StackMarginEntry's ESP-shaped keys
+# (configured_stack_bytes, hwm_bytes, alive, level) -- a Pico record's
+# entries carry stack_total_words/high_water_words/measured instead, so the
+# KeyError that raises is caught by load_records()'s existing "one bad file
+# must not sink the report" except-continue, and a Pico record is silently
+# skipped by the ESP loader exactly the way a corrupted/partial file
+# already is. Use load_pico_records() to read these back correctly, and
+# every existing ESP-only record (no "load" field, no "processor" field)
+# still loads unchanged through load_records() -- nothing above this
+# comment changed shape.
+
+
+@dataclass(frozen=True)
+class PicoStackMarginEntry:
+    """One task's reading from GET /api/saftyfw_stack_margin (see
+    safety_stack_margin_http.c's safety_stack_margin_build_json() for the
+    wire shape this mirrors 1:1). measured False means the poller has not
+    yet obtained a reading for this task this boot
+    (KILNLINK_STACK_MARGIN_UNMEASURED) -- high_water_words/
+    stack_total_words are meaningless (not merely absent) in that case,
+    matching the JSON's own shape where those two keys are omitted
+    entirely when measured is false."""
+
+    task_id: int
+    name: str
+    measured: bool
+    high_water_words: Optional[int] = None
+    stack_total_words: Optional[int] = None
+
+    @property
+    def free_fraction(self) -> Optional[float]:
+        """high_water_words / stack_total_words -- the flat 25% rule SK-03
+        applies today (plan section 7 owner decision 4) compares against
+        this, not a byte figure; the units note in
+        safety_stack_margin_http.c applies here too. None when unmeasured
+        or when stack_total_words is 0 (never divide by an unconfigured
+        stack and call the result a real fraction)."""
+        if not self.measured or not self.stack_total_words:
+            return None
+        return self.high_water_words / self.stack_total_words
+
+    def to_json_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_json_dict(d: dict) -> "PicoStackMarginEntry":
+        return PicoStackMarginEntry(
+            task_id=int(d["task_id"]),
+            name=d["name"],
+            measured=bool(d["measured"]),
+            high_water_words=d.get("high_water_words"),
+            stack_total_words=d.get("stack_total_words"),
+        )
+
+
+@dataclass(frozen=True)
+class PicoStackMarginBaselineRecord:
+    """One capture of every SaftyFW task's stack-margin floor, tagged with
+    the SaftyFW build identity it was taken against (git commit + build
+    date/time -- the same identity elf_archive.archive_safty_elf() and
+    find_safty_crash_elf() key on, so a record and an archived ELF for the
+    same boot can always be cross-referenced by identity alone)."""
+
+    captured_at_utc: str
+    saftyfw_commit: str
+    saftyfw_build_date: str
+    saftyfw_build_time: str
+    rounds_completed: int
+    last_tick_ms: int
+    all_measured: bool
+    notes: str
+    entries: tuple[PicoStackMarginEntry, ...]
+    #: A marker field so a reader iterating a directory of mixed ESP/Pico
+    #: files can tell the two apart from the parsed dict alone, without
+    #: guessing from the filename -- ESP records have no such key at all
+    #: (StackMarginBaselineRecord.to_json_dict() sets no "processor" key),
+    #: so d.get("processor") == "pico" is a safe test either way.
+    processor: str = "pico"
+
+    def to_json_dict(self) -> dict:
+        d = asdict(self)
+        d["entries"] = [asdict(e) for e in self.entries]
+        return d
+
+
+def build_pico_record(
+    entries: Iterable[PicoStackMarginEntry],
+    saftyfw_commit: str,
+    saftyfw_build_date: str,
+    saftyfw_build_time: str,
+    rounds_completed: int,
+    last_tick_ms: int,
+    all_measured: bool,
+    notes: str = "",
+    *,
+    now: Optional[datetime] = None,
+) -> PicoStackMarginBaselineRecord:
+    """Pure, same contract as build_record(): takes only already-fetched
+    data (whatever GET /api/saftyfw_stack_margin returned, decoded), never
+    touches the link itself."""
+    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return PicoStackMarginBaselineRecord(
+        captured_at_utc=ts,
+        saftyfw_commit=saftyfw_commit,
+        saftyfw_build_date=saftyfw_build_date,
+        saftyfw_build_time=saftyfw_build_time,
+        rounds_completed=rounds_completed,
+        last_tick_ms=last_tick_ms,
+        all_measured=all_measured,
+        entries=tuple(entries),
+        notes=notes,
+    )
+
+
+def pico_record_filename(record: PicoStackMarginBaselineRecord) -> str:
+    """stack_margin_pico_<commit>_<timestamp>.json -- deliberately still
+    prefixed stack_margin_ (not a wholly distinct prefix) so a directory
+    listing groups ESP and Pico captures together by eye; the "pico" infix
+    plus the processor field above are what keeps a reader from conflating
+    them, not the filename alone."""
+    commit = record.saftyfw_commit or "unknown"
+    ts = record.captured_at_utc.replace(":", "").replace("-", "")
+    return f"stack_margin_pico_{commit}_{ts}.json"
+
+
+def write_pico_record(record: PicoStackMarginBaselineRecord, out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / pico_record_filename(record)
+    path.write_text(json.dumps(record.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def load_pico_records(out_dir: Path) -> list[PicoStackMarginBaselineRecord]:
+    """Reads every stack_margin_pico_*.json back -- a distinct glob from
+    load_records()'s (stack_margin_*.json) so this loader never even
+    attempts an ESP-shaped file; see this section's docstring for why the
+    reverse (load_records() attempting a Pico file) is already safe by
+    construction. Same "skip, don't sink the report" contract on a
+    corrupted/partial file."""
+    records: list[PicoStackMarginBaselineRecord] = []
+    for path in sorted(out_dir.glob("stack_margin_pico_*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            entries = tuple(PicoStackMarginEntry.from_json_dict(e) for e in raw["entries"])
+            records.append(
+                PicoStackMarginBaselineRecord(
+                    captured_at_utc=raw["captured_at_utc"],
+                    saftyfw_commit=raw["saftyfw_commit"],
+                    saftyfw_build_date=raw["saftyfw_build_date"],
+                    saftyfw_build_time=raw["saftyfw_build_time"],
+                    rounds_completed=int(raw["rounds_completed"]),
+                    last_tick_ms=int(raw["last_tick_ms"]),
+                    all_measured=bool(raw["all_measured"]),
+                    notes=raw.get("notes", ""),
+                    entries=entries,
+                    processor=raw.get("processor", "pico"),
+                )
+            )
+        except Exception:  # noqa: BLE001 -- one bad file must not sink the report
+            continue
+    return records

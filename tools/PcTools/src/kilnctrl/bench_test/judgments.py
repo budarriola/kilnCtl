@@ -143,6 +143,116 @@ def judge_stack_margin(report_text: str, min_free_bytes: Optional[int] = None) -
     return CaseResult(Verdict.PASS, observed={"report": report_text})
 
 
+def judge_stack_margin_against_baseline(entries, baseline_by_name: dict, min_free_bytes: Optional[int] = None) -> CaseResult:
+    """SK-01/SK-02 (wave 1d): compares a live ``StackMarginEntry`` reading
+    against the committed baseline's worst-case-across-conditions figure
+    per task name (``stack_margin_baseline.worst_case_across_conditions()``).
+
+    Per plan §3.3's note: a task with no baseline record at all is
+    INCONCLUSIVE for that task (not FAIL -- there is nothing to compare
+    against yet) rather than sinking the whole case; a task that regressed
+    below its own committed worst case is FAIL. ``min_free_bytes``, when
+    given (SK-02's absolute floor), FAILs any live task under that many
+    bytes free regardless of what the baseline says -- the httpd stack blob
+    class (project memory project_httpd_stack_blob_class) is exactly a task
+    that looked fine relative to its own history but was dangerously close
+    in absolute terms.
+
+    A dead (``alive=False``) task is never scored against a byte figure --
+    it FAILs outright, since a task that was never created or was deleted
+    is not "using less stack than expected", it is missing."""
+    if not entries:
+        return CaseResult(Verdict.FAIL, reason="device reported no instrumented tasks", observed={})
+
+    dead = [e.name for e in entries if not e.alive]
+    if dead:
+        return CaseResult(Verdict.FAIL, reason=f"task(s) not running: {', '.join(dead)}", observed={"dead": dead})
+
+    below_floor = []
+    if min_free_bytes is not None:
+        below_floor = [
+            {"task": e.name, "hwm_bytes": e.hwm_bytes}
+            for e in entries
+            if e.hwm_bytes < min_free_bytes
+        ]
+
+    regressed = []
+    inconclusive_tasks = []
+    for e in entries:
+        base = baseline_by_name.get(e.name)
+        if base is None:
+            inconclusive_tasks.append(e.name)
+            continue
+        if not base.alive:
+            continue
+        if e.hwm_bytes < base.hwm_bytes:
+            regressed.append({"task": e.name, "hwm_bytes": e.hwm_bytes, "baseline_hwm_bytes": base.hwm_bytes})
+
+    observed = {
+        "entries": [{"name": e.name, "hwm_bytes": e.hwm_bytes, "configured_stack_bytes": e.configured_stack_bytes} for e in entries],
+        "below_floor": below_floor,
+        "regressed": regressed,
+        "no_baseline": inconclusive_tasks,
+    }
+
+    if below_floor:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{len(below_floor)} task(s) below the {min_free_bytes} B absolute floor",
+            observed=observed,
+        )
+    if regressed:
+        names = ", ".join(r["task"] for r in regressed)
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{len(regressed)} task(s) below their committed baseline: {names}",
+            observed=observed,
+        )
+    if inconclusive_tasks:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"no committed baseline for: {', '.join(inconclusive_tasks)}",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_pico_archive_with_description(find_elf_text: str, description_exists) -> CaseResult:
+    """FL-09 (wave 1d override): ``find_safty_crash_elf()``'s text report,
+    downgraded from PASS to INCONCLUSIVE when the found ELF has no sibling
+    ``project_description.json`` -- SaftyFW's CMake/pico-sdk build never
+    produces one, and ``elf_archive/`` deliberately never bundles one even
+    for KilnFW (2026-09-19 revert; that file's absolute-path gdbinit
+    reference goes stale). ``read_esp_coredump`` needs that file to actually
+    symbolize, so its absence is an expected, permanent gap for this
+    processor's archive -- record-only, never FAIL, per the plan's "FL-09
+    record-only INCONCLUSIVE never FAIL" rule. A genuine no-match (no ELF
+    archived at all) keeps the ordinary FAIL behavior.
+
+    ``description_exists`` is injected (a ``str -> bool`` callable) so this
+    stays a pure function for unit testing -- no filesystem access here."""
+    if find_elf_text.startswith("error:"):
+        return CaseResult(Verdict.FAIL, reason=find_elf_text, observed={"report": find_elf_text})
+    m = _FL09_FOUND_RE.search(find_elf_text)
+    if not m:
+        return CaseResult(Verdict.PASS, observed={"report": find_elf_text})
+    elf_path = m.group(1)
+    if description_exists(elf_path):
+        return CaseResult(Verdict.PASS, observed={"report": find_elf_text, "elf_path": elf_path})
+    return CaseResult(
+        Verdict.INCONCLUSIVE,
+        reason=(
+            f"archived ELF {elf_path} has no sibling project_description.json -- "
+            "read_esp_coredump cannot symbolize without it; elf_archive/ deliberately "
+            "never bundles this file (record-only, plan FL-09 rule)"
+        ),
+        observed={"report": find_elf_text, "elf_path": elf_path},
+    )
+
+
+_FL09_FOUND_RE = re.compile(r"found (\S+\.elf)", re.IGNORECASE)
+
+
 def judge_pico_stack_margins(tasks: "list[dict]", min_fraction: float = 0.25) -> CaseResult:
     """SK-03: every task's free >= 25% of configured (memory
     project_saftyfw_minimal_stack_overflows -- the flat interim rule per

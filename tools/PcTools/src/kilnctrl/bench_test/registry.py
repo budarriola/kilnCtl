@@ -227,7 +227,12 @@ for cid, desc in _ST:
 for cid, desc in _FL:
     register(_c(cid, "FL", desc, operator_only=(cid in ("FL-10", "FL-11"))))
 for cid, desc in _SK:
-    register(_c(cid, "SK", desc))
+    # SK-02 ("exercised") needs httpd-heavy traffic actually happening, per
+    # the plan's web_ui_open load condition -- HP-01 (a single-zone firing)
+    # is the cheapest case in the suite that reliably drives that path, so
+    # SK-02 depends on it rather than fabricating load itself (single-
+    # dependency rule, plan §5.3 rule 1).
+    register(_c(cid, "SK", desc, depends_on="HP-01" if cid == "SK-02" else None))
 for cid, desc in _OT:
     register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08")))
 for cid, desc in _AT:
