@@ -233,6 +233,72 @@ def judge_estop_verify(flags: Optional[int], asserted_bit: int = 0x04) -> CaseRe
     return CaseResult(Verdict.PASS, observed={"flags": flags})
 
 
+def judge_web_render(html: Optional[str], landmark_id: Optional[str], expect_nav: bool,
+                      error: Optional[str] = None) -> CaseResult:
+    """WEB-*-01: page answers 200 (the fetch layer raises on non-2xx before
+    this is reached, so `error` carries that text), its known landmark
+    element id is present, and (except `/login`, which loads before the
+    shared chrome) `nav.js` is referenced."""
+    if error is not None:
+        return CaseResult(Verdict.FAIL, reason=error, observed={})
+    if not html:
+        return CaseResult(Verdict.FAIL, reason="empty response body", observed={})
+    if landmark_id and f'id="{landmark_id}"' not in html:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"landmark id={landmark_id!r} not found in page",
+            observed={"landmark": landmark_id, "body_len": len(html)},
+        )
+    if expect_nav and "nav.js" not in html:
+        return CaseResult(Verdict.FAIL, reason="nav.js script reference missing", observed={"body_len": len(html)})
+    return CaseResult(Verdict.PASS, observed={"landmark": landmark_id, "nav_js": expect_nav, "body_len": len(html)})
+
+
+def judge_nav_menu(nav_js_text: Optional[str], href_count: Optional[int], expected_count: int = 15,
+                    has_group_expand: Optional[bool] = None) -> CaseResult:
+    """WEB-X-01: the shared nav.js menu carries exactly the 15 links the
+    plan names, and supports an expanding sub-group (the Safety group,
+    `children`/`activeFor` per nav.js's 2026-08-27 rework) for the
+    "auto-expands the current group" half of the case."""
+    if nav_js_text is None:
+        return CaseResult(Verdict.FAIL, reason="GET /nav.js failed", observed={})
+    if href_count != expected_count:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"nav.js has {href_count} href entries, expected {expected_count}",
+            observed={"href_count": href_count},
+        )
+    if has_group_expand is False:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="nav.js has no expanding-group support (activeFor/children)",
+            observed={"href_count": href_count},
+        )
+    return CaseResult(Verdict.PASS, observed={"href_count": href_count, "has_group_expand": has_group_expand})
+
+
+def judge_route_tier_sweep(results: "list[dict]") -> CaseResult:
+    """WEB-X-03: every GET route actually exercised (OPEN/SAFETY_REDUCE
+    answering without a session, ADMIN answering 401/redirect-to-login
+    without one when the board currently has web auth enabled, and
+    answering normally when it does not -- see cases_web.py's docstring
+    for why an ADMIN route's 200 is not itself a failure on a bench with
+    auth off) must have behaved as classified. Non-GET rows are recorded
+    but never invoked in this read-only wave (see module docstring) and
+    never fail this case on their own."""
+    violations = [r for r in results if r.get("exercised") and not r.get("ok")]
+    if violations:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{len(violations)} route(s) did not match their declared tier",
+            observed={"violations": violations, "total_rows": len(results)},
+        )
+    exercised = sum(1 for r in results if r.get("exercised"))
+    if exercised == 0:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no GET routes were exercised", observed={"total_rows": len(results)})
+    return CaseResult(Verdict.PASS, observed={"total_rows": len(results), "exercised": exercised})
+
+
 def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResult:
     """SP-07: consistent read-back between the two sides; not written."""
     if safety_side.get("max_rate_c_per_min") is None or esp_side.get("max_rate_c_per_min") is None:

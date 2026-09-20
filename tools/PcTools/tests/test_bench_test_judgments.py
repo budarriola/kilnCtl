@@ -244,6 +244,82 @@ class EstopVerifyTest(unittest.TestCase):
         self.assertEqual(J.judge_estop_verify(None).verdict, Verdict.FAIL)
 
 
+class WebRenderTest(unittest.TestCase):
+    def test_landmark_and_nav_present_passes(self):
+        html = '<html><body><button id="runBtn"></button><script defer src="/nav.js"></script></body></html>'
+        r = J.judge_web_render(html, "runBtn", True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_missing_landmark_fails(self):
+        html = '<html><body><script defer src="/nav.js"></script></body></html>'
+        r = J.judge_web_render(html, "runBtn", True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("runBtn", r.reason)
+
+    def test_missing_nav_fails_when_expected(self):
+        html = '<html><body><button id="runBtn"></button></body></html>'
+        r = J.judge_web_render(html, "runBtn", True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_login_page_does_not_require_nav(self):
+        html = '<html><body><input id="username"></body></html>'
+        r = J.judge_web_render(html, "username", False)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_fetch_error_fails(self):
+        r = J.judge_web_render(None, "runBtn", True, error="GET / failed: connection refused")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("connection refused", r.reason)
+
+    def test_empty_body_fails(self):
+        r = J.judge_web_render("", "runBtn", True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
+class NavMenuTest(unittest.TestCase):
+    def test_15_links_with_group_expand_passes(self):
+        r = J.judge_nav_menu("text", 15, has_group_expand=True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_wrong_link_count_fails(self):
+        r = J.judge_nav_menu("text", 14, has_group_expand=True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("14", r.reason)
+
+    def test_no_group_expand_fails(self):
+        r = J.judge_nav_menu("text", 15, has_group_expand=False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_fetch_failure_fails(self):
+        r = J.judge_nav_menu(None, None)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
+class RouteTierSweepTest(unittest.TestCase):
+    def test_all_matching_passes(self):
+        results = [
+            {"uri": "/api/status", "exercised": True, "ok": True},
+            {"uri": "/diagnostics", "exercised": True, "ok": True},
+            {"uri": "/api/zones", "exercised": False, "ok": True},
+        ]
+        r = J.judge_route_tier_sweep(results)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_a_violation_fails(self):
+        results = [
+            {"uri": "/api/status", "exercised": True, "ok": True},
+            {"uri": "/diagnostics", "exercised": True, "ok": False},
+        ]
+        r = J.judge_route_tier_sweep(results)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("/diagnostics", str(r.observed))
+
+    def test_nothing_exercised_is_inconclusive(self):
+        results = [{"uri": "/api/foo", "exercised": False, "ok": True}]
+        r = J.judge_route_tier_sweep(results)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+
 class RateGuardConsistencyTest(unittest.TestCase):
     def test_matching_passes(self):
         r = J.judge_rate_guard_consistency({"max_rate_c_per_min": 10}, {"max_rate_c_per_min": 10})

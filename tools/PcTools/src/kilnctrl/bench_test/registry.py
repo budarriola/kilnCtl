@@ -267,11 +267,18 @@ def _fixed_order(ids) -> List[str]:
 #: NOT_RUN: not_implemented until later waves land judge functions for
 #: them) -- so `bench_test_run(suite="nightly")` is honest today rather
 #: than silently pretending to be the full nightly run from §5.1.
+#: The 18 "-01" WEB render cases (17 pages + WEB-X-01's nav.js shape check)
+#: plus WEB-X-03's generated tier sweep (plan §5.1's smoke membership) --
+#: implemented by cases_web.py (Wave 1a). Every other WEB id stays
+#: judge=None until a later wave.
+_WEB_SMOKE_IDS = [cid for cid in _WEB_IDS if cid.endswith("-01")] + ["WEB-X-03"]
+
 SUITES["smoke"] = [
     "ST-05",
     "FL-01", "FL-02", "FL-03", "FL-04", "FL-05", "FL-06", "FL-07", "FL-08", "FL-09",
     "SK-01", "SK-03", "SK-04",
     "SP-01", "SP-02", "SP-05", "SP-07",
+    *_WEB_SMOKE_IDS,
 ]
 SUITES["static"] = ["ST-01", "ST-02", "ST-03", "ST-04", "ST-05"]
 SUITES["flash"] = [c for c in REGISTRY if c.startswith("FL-")]

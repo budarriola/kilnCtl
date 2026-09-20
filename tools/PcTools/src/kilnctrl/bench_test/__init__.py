@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from .registry import Verdict, CaseResult, CaseSpec, REGISTRY, SUITES, get_case, suite_case_ids
 from . import cases_smoke as _cases_smoke  # noqa: F401 - import wires judge functions into REGISTRY
+from . import cases_web as _cases_web  # noqa: F401 - import wires judge functions into REGISTRY
 from .runner import BenchTestRunner, run_suite
 
 __all__ = [

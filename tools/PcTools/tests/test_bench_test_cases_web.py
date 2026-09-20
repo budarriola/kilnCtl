@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Unit tests for kilnctrl.bench_test.cases_web -- Wave 1a's WEB render
+cases and the generated route-tier sweep. Every board/HTTP call is mocked
+except the two tests that parse the real
+firmware/KilnFW/App/drivers/http/route_tier_table.h off disk (the whole
+point of generating WEB-X-03 from that file rather than hardcoding it).
+
+Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_web.py -q
+"""
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from kilnctrl.bench_test import cases_web as C  # noqa: E402
+from kilnctrl.bench_test.registry import REGISTRY, Verdict  # noqa: E402
+
+REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+ROUTE_TABLE_PATH = os.path.join(
+    REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "http", "route_tier_table.h"
+)
+
+
+class FakeWebClient:
+    def __init__(self, pages: dict, raise_for: "set[str]" = frozenset()):
+        self._pages = pages
+        self._raise_for = raise_for
+
+    def goto(self, path: str) -> str:
+        if path in self._raise_for:
+            from kilnctrl.web_ui_client import WebUiError
+
+            raise WebUiError(f"GET {path} failed: connection refused")
+        return self._pages.get(path, "")
+
+
+class RenderCaseTest(unittest.TestCase):
+    def test_dashboard_render_passes(self):
+        html = '<html><body><button id="runBtn"></button><script defer src="/nav.js"></script></body></html>'
+        ctx = {"web_client": FakeWebClient({"/": html})}
+        result = REGISTRY["WEB-DASH-01"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_login_render_does_not_require_nav(self):
+        html = '<html><body><input id="username"></body></html>'
+        ctx = {"web_client": FakeWebClient({"/login": html})}
+        result = REGISTRY["WEB-LOG-01"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_missing_landmark_fails(self):
+        html = '<html><body><script defer src="/nav.js"></script></body></html>'
+        ctx = {"web_client": FakeWebClient({"/": html})}
+        result = REGISTRY["WEB-DASH-01"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_connection_failure_fails_not_crashes(self):
+        """Negative test: a raised WebUiError must become a FAIL CaseResult,
+        never propagate out of the case function."""
+        ctx = {"web_client": FakeWebClient({}, raise_for={"/"})}
+        result = REGISTRY["WEB-DASH-01"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("connection refused", result.reason)
+
+    def test_every_page_case_has_a_distinct_path_and_is_wired(self):
+        for cid, path, landmark, expect_nav in C._PAGES:
+            self.assertIsNotNone(REGISTRY[cid].judge, f"{cid} has no judge wired")
+
+
+class NavX01Test(unittest.TestCase):
+    def test_15_links_passes(self):
+        text = "\n".join(f"{{ href: '/x{i}', label: 'x' }}," for i in range(15))
+        text += "\nactiveFor children"
+        with mock.patch.object(C, "_http_get_raw", return_value=(200, text)):
+            result = REGISTRY["WEB-X-01"].judge({"host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_wrong_link_count_fails(self):
+        text = "{ href: '/x', label: 'x' },\nactiveFor children"
+        with mock.patch.object(C, "_http_get_raw", return_value=(200, text)):
+            result = REGISTRY["WEB-X-01"].judge({"host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_no_host_fails(self):
+        result = REGISTRY["WEB-X-01"].judge({})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+
+class ParseRouteTierTableTest(unittest.TestCase):
+    def test_parses_synthetic_rows(self):
+        text = '''
+        ROUTE_TIER("/", HTTP_GET, ROUTE_TIER_OPEN),
+        ROUTE_TIER("/api/zones", HTTP_POST, ROUTE_TIER_ADMIN),
+        '''
+        rows = C.parse_route_tier_table(text)
+        self.assertEqual(rows, [
+            ("/", "HTTP_GET", "ROUTE_TIER_OPEN"),
+            ("/api/zones", "HTTP_POST", "ROUTE_TIER_ADMIN"),
+        ])
+
+    def test_no_rows_returns_empty_list(self):
+        self.assertEqual(C.parse_route_tier_table("no rows here"), [])
+
+    def test_against_the_real_header(self):
+        """The whole point of generating WEB-X-03 rather than hardcoding it:
+        this must track the real file. 150 rows as of the plan doc's
+        2026-09-19 recount (CLAUDE.md's kiln_help()/kicad_help() tool-count
+        style caveat applies equally here -- re-verify rather than trusting
+        a hardcoded number if this ever fails)."""
+        with open(ROUTE_TABLE_PATH, "r", encoding="utf-8") as f:
+            text = f.read()
+        rows = C.parse_route_tier_table(text)
+        self.assertEqual(len(rows), 150)
+        uris = {uri for uri, _method, _tier in rows}
+        self.assertIn("/", uris)
+        self.assertIn("/diagnostics", uris)
+        self.assertIn("/api/auth/login", uris)
+
+
+class WebX03Test(unittest.TestCase):
+    def _fake_get(self, responses):
+        def _get(host, path, timeout=5.0):
+            return responses.get(path, (404, None))
+
+        return _get
+
+    def test_open_route_reachable_passes(self):
+        text = 'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),'
+        ctx = {"host": "1.2.3.4", "route_tier_table_path": "unused"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/api/status": (200, "{}")}
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_open_route_refused_fails(self):
+        """Negative test: an OPEN-tier route that answers >=400 unauthenticated
+        is a real defect (auth is blocking a route that must never require
+        a credential) and must FAIL, not PASS."""
+        text = 'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/api/status": (401, None)}
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_admin_route_requires_401_when_auth_enabled(self):
+        text = 'ROUTE_TIER("/diagnostics", HTTP_GET, ROUTE_TIER_ADMIN),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":true}'), "/diagnostics": (200, "<html></html>")}
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_admin_route_ok_when_auth_disabled(self):
+        text = 'ROUTE_TIER("/diagnostics", HTTP_GET, ROUTE_TIER_ADMIN),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/diagnostics": (200, "<html></html>")}
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_post_routes_are_recorded_but_never_invoked(self):
+        text = 'ROUTE_TIER("/api/zones", HTTP_POST, ROUTE_TIER_ADMIN),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":true}')}
+        calls = []
+
+        def _get(host, path, timeout=5.0):
+            calls.append(path)
+            return responses.get(path, (404, None))
+
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=_get):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertNotIn("/api/zones", calls)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_unreadable_table_file_fails(self):
+        ctx = {"host": "1.2.3.4", "route_tier_table_path": os.path.join(REPO_ROOT, "does_not_exist.h")}
+        result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+
+if __name__ == "__main__":
+    unittest.main()
