@@ -1231,3 +1231,232 @@ def judge_ota_partitions_state(running: Optional[str], expected_running: str) ->
             observed=observed,
         )
     return CaseResult(Verdict.PASS, observed=observed)
+# ---------------------------------------------------------------------------
+# AT-* -- autotune on the 4W fixture (plan doc section 3.5, Wave 3 part A)
+# ---------------------------------------------------------------------------
+
+def judge_autotune_fit(
+    method: str,
+    model_valid: bool,
+    baseline_c: Optional[float],
+    ambient_ref: float,
+    k_gain_c_per_duty: Optional[float],
+    tau_s: Optional[float],
+    max_temp_c: Optional[float],
+    tripped: bool,
+    relay_valid: bool = True,
+    relay_amplitude_c: Optional[float] = None,
+    min_relay_amplitude_c: float = 2.0,
+    rest_band_c: float = 2.0,
+    k_expected_c_per_duty: float = 38.0,
+    k_tol_fraction: float = 0.15,
+    tau_expected_s: float = 265.0,
+    tau_tol_fraction: float = 0.25,
+    max_temp_limit_c: float = 70.0,
+) -> CaseResult:
+    """AT-01 (method='step') / AT-04 (method='relay'): the run reaches a
+    fitted result; ``baseline_c`` within ``rest_band_c`` of the rested
+    ambient reference; fitted ``K`` within +-15% of the last committed
+    bench value (~38 C/duty, memory project_bench_is_a_4w_test_fixture);
+    ``tau`` within +-25% of ~265s; no trip; max temperature stayed under
+    70 C. AT-04's relay method gets one extra, plan-mandated escape hatch:
+    if the relay result is invalid *because the fixture could not sustain
+    the oscillation amplitude*, that is INCONCLUSIVE (with the amplitude
+    recorded), never a FAIL -- a real, expected limit of a ~4W fixture, not
+    a defect. Any other invalid-relay-result cause is still a FAIL."""
+    observed = {
+        "baseline_c": baseline_c, "ambient_ref": ambient_ref, "k_gain_c_per_duty": k_gain_c_per_duty,
+        "tau_s": tau_s, "max_temp_c": max_temp_c, "tripped": tripped,
+    }
+    if tripped:
+        return CaseResult(Verdict.FAIL, reason="a safety trip occurred during the run", observed=observed)
+    if max_temp_c is not None and max_temp_c >= max_temp_limit_c:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"max temperature {max_temp_c:.1f}C reached/exceeded the {max_temp_limit_c:.0f}C limit",
+            observed=observed,
+        )
+    if method == "relay" and not relay_valid:
+        if relay_amplitude_c is not None and relay_amplitude_c < min_relay_amplitude_c:
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=(
+                    f"fixture could not sustain the oscillation amplitude "
+                    f"({relay_amplitude_c:.2f}C < {min_relay_amplitude_c:.2f}C)"
+                ),
+                observed={**observed, "relay_amplitude_c": relay_amplitude_c},
+            )
+        return CaseResult(
+            Verdict.FAIL, reason="relay result invalid for a reason other than insufficient amplitude",
+            observed={**observed, "relay_amplitude_c": relay_amplitude_c},
+        )
+    if not model_valid:
+        return CaseResult(Verdict.FAIL, reason="no fitted model was produced (model_valid is false)", observed=observed)
+    if baseline_c is None:
+        return CaseResult(Verdict.FAIL, reason="no valid baseline temperature reading", observed=observed)
+    if abs(baseline_c - ambient_ref) > rest_band_c:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"baseline {baseline_c:.1f}C is more than {rest_band_c:.1f}C from the rested reference {ambient_ref:.1f}C",
+            observed=observed,
+        )
+    if k_gain_c_per_duty is None or abs(k_gain_c_per_duty - k_expected_c_per_duty) > k_tol_fraction * k_expected_c_per_duty:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"fitted K={k_gain_c_per_duty!r} outside +-{k_tol_fraction*100:.0f}% of {k_expected_c_per_duty:.1f}C/duty",
+            observed=observed, expected={"k_expected_c_per_duty": k_expected_c_per_duty, "k_tol_fraction": k_tol_fraction},
+        )
+    if tau_s is None or abs(tau_s - tau_expected_s) > tau_tol_fraction * tau_expected_s:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"fitted tau={tau_s!r} outside +-{tau_tol_fraction*100:.0f}% of {tau_expected_s:.0f}s",
+            observed=observed, expected={"tau_expected_s": tau_expected_s, "tau_tol_fraction": tau_tol_fraction},
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_autotune_abort_immediate(
+    state_name: str, duties: "list[float]", relays_off: Optional[bool], elapsed_since_abort_s: float,
+    timeout_s: float = 5.0,
+) -> CaseResult:
+    """AT-02: status goes idle within 5s of ``autotune_abort()``, every zone
+    duty reads 0 within one control tick, and ``io_read()`` shows the
+    heater relays off. ``relays_off=None`` (the read failed / no host) is
+    reported INCONCLUSIVE for that half of the check rather than a silent
+    PASS, matching ``judge_relay_energized``'s discipline elsewhere in this
+    module."""
+    observed = {"state_name": state_name, "duties": duties, "relays_off": relays_off, "elapsed_since_abort_s": elapsed_since_abort_s}
+    if elapsed_since_abort_s > timeout_s:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"status did not go idle within {timeout_s:.0f}s of autotune_abort() (took {elapsed_since_abort_s:.1f}s)",
+            observed=observed,
+        )
+    if state_name != "idle":
+        return CaseResult(Verdict.FAIL, reason=f"state is {state_name!r}, expected 'idle' after abort", observed=observed)
+    nonzero = [d for d in duties if d]
+    if nonzero:
+        return CaseResult(Verdict.FAIL, reason=f"{len(nonzero)} zone(s) had nonzero duty after abort", observed=observed)
+    if relays_off is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE, reason="could not read io_read() to confirm heater relays are off", observed=observed
+        )
+    if not relays_off:
+        return CaseResult(Verdict.FAIL, reason="io_read() shows a heater relay still on after abort", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_autotune_accept_guarded(
+    accept_ok: bool, accept_reason: str, gains_before: tuple, gains_after: tuple,
+) -> CaseResult:
+    """AT-03: ``autotune_accept()`` (no ``ack_unsettled``) is refused on an
+    unsettled fit, and ``control_get_zones``' gains are unchanged either
+    way -- the guard must be all-or-nothing, never "refused but wrote
+    anyway"."""
+    observed = {"accept_ok": accept_ok, "accept_reason": accept_reason, "gains_before": gains_before, "gains_after": gains_after}
+    if accept_ok:
+        return CaseResult(
+            Verdict.FAIL, reason="autotune_accept() succeeded on an unsettled fit; expected a refusal", observed=observed
+        )
+    if gains_before != gains_after:
+        return CaseResult(
+            Verdict.FAIL, reason="zone PID gains changed despite the accept being refused", observed=observed
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_autotune_matrix(matrix: Any, zone_row: int = 0) -> CaseResult:
+    """AT-05: ``GET /api/autotune/matrix`` is a well-formed 3x3 with the
+    given zone's row populated (three finite numeric entries -- coupling
+    onto itself and both neighbors)."""
+    if not isinstance(matrix, list) or len(matrix) != 3 or any(not isinstance(row, list) or len(row) != 3 for row in matrix):
+        return CaseResult(Verdict.FAIL, reason="matrix is not well-formed 3x3", observed={"matrix": matrix})
+    row = matrix[zone_row]
+    bad = [v for v in row if isinstance(v, bool) or not isinstance(v, (int, float))]
+    if bad:
+        return CaseResult(
+            Verdict.FAIL, reason=f"zone {zone_row}'s row is not fully populated with numbers: {row!r}",
+            observed={"matrix": matrix},
+        )
+    return CaseResult(Verdict.PASS, observed={"matrix": matrix, "row": row})
+
+
+# ---------------------------------------------------------------------------
+# HP-03 / HP-07 -- on/off zone cycling and a provoked software fault
+# (plan doc section 3.6, Wave 3 part A)
+# ---------------------------------------------------------------------------
+
+def judge_on_off_zone_cycling(
+    relay_states: "list[bool]",
+    temps_c: "list[Optional[float]]",
+    target_c: float,
+    hyst_c: float,
+    min_transitions: int = 2,
+    margin_c: float = 3.0,
+) -> CaseResult:
+    """HP-03: an on/off-type zone's relay toggles at least ``min_transitions``
+    times over the run (proof it is actually cycling, not stuck on or off),
+    and every sampled temperature stays within ``hyst_c + margin_c`` of
+    ``target_c`` -- the margin is slack for real thermal lag/overshoot on a
+    hysteresis controller, not a second hysteresis band to tune against."""
+    observed = {"relay_states": relay_states, "temps_c": temps_c, "target_c": target_c, "hyst_c": hyst_c}
+    if len(relay_states) < 2:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="fewer than 2 relay samples collected", observed=observed)
+    transitions = sum(1 for a, b in zip(relay_states, relay_states[1:]) if a != b)
+    if transitions < min_transitions:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"relay only toggled {transitions} time(s), expected >= {min_transitions}",
+            observed={**observed, "transitions": transitions},
+        )
+    band = hyst_c + margin_c
+    out_of_band = [t for t in temps_c if t is not None and abs(t - target_c) > band]
+    if out_of_band:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{len(out_of_band)} sample(s) strayed more than {band:.1f}C from target {target_c:.1f}C",
+            observed={**observed, "out_of_band": out_of_band},
+        )
+    return CaseResult(Verdict.PASS, observed={**observed, "transitions": transitions})
+
+
+#: firmware/KilnFW/App/drivers/http/app.js's THERMAL_GUARD_WORDS -- 5 is
+#: "over absolute max temperature", the only guard HP-07 deliberately
+#: provokes (a software max_temp_c ceiling set just above ambient, never a
+#: Pico/hardware trip). Kept here as the one named constant rather than a
+#: magic number in the judge below.
+THERMAL_GUARD_OVER_MAX_TEMP = 5
+
+
+def judge_faulted_run(
+    state_name: str,
+    faulted: bool,
+    fault_guard: Optional[int],
+    ack_ok: bool,
+    post_ack_state: str,
+    expected_guard: int = THERMAL_GUARD_OVER_MAX_TEMP,
+) -> CaseResult:
+    """HP-07: a profile whose zone max_temp_c is set 3C above ambient
+    reaches FAULTED with fault_guard naming the over-max-temp guard (not a
+    Pico/safety trip), and the sticky bar's Acknowledge
+    (POST /api/profile_exec/stop) clears it back to a non-faulted state."""
+    observed = {
+        "state_name": state_name, "faulted": faulted, "fault_guard": fault_guard,
+        "ack_ok": ack_ok, "post_ack_state": post_ack_state,
+    }
+    if state_name != "faulted" or not faulted:
+        return CaseResult(
+            Verdict.FAIL, reason=f"expected state=faulted/faulted=True, got state={state_name!r} faulted={faulted}",
+            observed=observed,
+        )
+    if fault_guard != expected_guard:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"fault_guard={fault_guard!r}, expected {expected_guard} (over absolute max temperature)",
+            observed=observed,
+        )
+    if not ack_ok:
+        return CaseResult(Verdict.FAIL, reason="Acknowledge (profiles.stop) was refused on a faulted run", observed=observed)
+    if post_ack_state == "faulted":
+        return CaseResult(Verdict.FAIL, reason="state is still 'faulted' after Acknowledge", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)

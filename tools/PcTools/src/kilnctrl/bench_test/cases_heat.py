@@ -396,12 +396,168 @@ def _case_hp08(ctx: dict) -> CaseResult:
     return J.judge_firing_history(entries, expected_name_prefix=BENCH_PROFILE_NAME)
 
 
+def _case_hp03(ctx: dict) -> CaseResult:
+    """A zone reconfigured `zonetype`=on/off with hysteresis cycles its
+    relay at least twice and never strays far outside the hysteresis band
+    (plan doc section 3.6). Zones config is read/POSTed via
+    zones_http_client's whole-page GET-merge-POST pattern and restored in
+    `finally` regardless of outcome -- this case is the only one in the
+    package that touches persistent zone config, not just the hidden
+    profile slot, so the restore is not optional."""
+    from .. import zones_http_client
+
+    rested, rest_reason = _rest_gate(ctx)
+    if not rested:
+        return CaseResult(Verdict.SKIP, reason=f"rest gate: {rest_reason}")
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx")
+    target_zone = ctx.get("_hp03_zone_index", 2)
+    try:
+        snapshot = zones_http_client.get_zones(host)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"GET /api/zones failed: {type(exc).__name__}: {exc}")
+    try:
+        restore_body = zones_http_client.build_post_body(snapshot, {})
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"could not build a restore body from the snapshot: {exc}")
+    ambient = min(_zone_temps(ctx).values()) if _zone_temps(ctx) else None
+    if ambient is None:
+        return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as an ambient reference")
+    hyst_c = 2.0
+    target_c = ambient + 10.0
+    preset = {"zones": [{
+        "index": target_zone, "zone_type": 1, "failsafe_state": False,
+        "hyst_c": hyst_c, "min_on_s": 0, "min_off_s": 0,
+    }]}
+    try:
+        on_off_body = zones_http_client.build_post_body(snapshot, preset)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"could not build the on/off preset body: {exc}")
+    try:
+        post_result = zones_http_client.post_zones(host, on_off_body)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (on/off config) failed: {exc}")
+    if post_result != "ok":
+        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (on/off config) refused: {post_result}")
+    try:
+        ok, reason, _ambient = _start_bench_profile(
+            ctx, zone_mask=1 << target_zone, target_offset_c=10.0,
+        )
+        if not ok:
+            return CaseResult(Verdict.FAIL, reason=reason)
+        srv = _srv(ctx)
+        sleep = ctx.get("_sleep", time.sleep)
+        now = ctx.get("_now", time.monotonic)
+        deadline = now() + 360.0
+        relay_states: List[bool] = []
+        temps_c: List[Optional[float]] = []
+        state = "running"
+        while now() < deadline:
+            st = srv._profiles.get_exec_status()
+            state = st.state_name
+            if target_zone < len(st.zones):
+                relay_states.append(bool(st.zones[target_zone].relay_commanded_on))
+            zone_temps = _zone_temps(ctx)
+            temps_c.append(zone_temps.get(target_zone))
+            if state in ("done", "faulted"):
+                break
+            sleep(2)
+        return J.judge_on_off_zone_cycling(relay_states, temps_c, target_c=target_c, hyst_c=hyst_c)
+    finally:
+        _cleanup_bench_profile(ctx)
+        try:
+            zones_http_client.post_zones(host, restore_body)
+        except Exception:
+            pass
+
+
+def _case_hp07(ctx: dict) -> CaseResult:
+    """HP-01's profile, but with the target zone's `max_temp_c` limit set
+    3C above ambient so the software thermal guard trips it (a `dashboard`
+    zone-config field, never a Pico/safety trip) -- expects FAULTED with
+    fault_guard naming the over-max-temp guard, and confirms the sticky
+    bar's Acknowledge (`profiles.stop()`, mirroring the web UI's
+    POST /api/profile_exec/stop) clears it. Restores the zone's original
+    max_temp_c in `finally`."""
+    from .. import zones_http_client
+
+    rested, rest_reason = _rest_gate(ctx)
+    if not rested:
+        return CaseResult(Verdict.SKIP, reason=f"rest gate: {rest_reason}")
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx")
+    target_zone = ctx.get("_hp07_zone_index", 0)
+    zone_temps = _zone_temps(ctx)
+    if not zone_temps:
+        return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as an ambient reference")
+    ambient = min(zone_temps.values())
+    try:
+        snapshot = zones_http_client.get_zones(host)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"GET /api/zones failed: {type(exc).__name__}: {exc}")
+    try:
+        restore_body = zones_http_client.build_post_body(snapshot, {})
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"could not build a restore body from the snapshot: {exc}")
+    preset = {"zones": [{"index": target_zone, "max_temp_c": ambient + 3.0}]}
+    try:
+        limited_body = zones_http_client.build_post_body(snapshot, preset)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"could not build the lowered-limit preset body: {exc}")
+    try:
+        post_result = zones_http_client.post_zones(host, limited_body)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
+    if post_result != "ok":
+        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
+    try:
+        ok, reason, _ambient = _start_bench_profile(
+            ctx, zone_mask=1 << target_zone, target_offset_c=15.0,
+        )
+        if not ok:
+            return CaseResult(Verdict.FAIL, reason=reason)
+        srv = _srv(ctx)
+        sleep = ctx.get("_sleep", time.sleep)
+        now = ctx.get("_now", time.monotonic)
+        deadline = now() + 240.0
+        state = "running"
+        st = None
+        while now() < deadline:
+            st = srv._profiles.get_exec_status()
+            state = st.state_name
+            if state == "faulted":
+                break
+            sleep(2)
+        if st is None or state != "faulted":
+            return CaseResult(Verdict.FAIL, reason=f"never reached FAULTED within 240s (last state={state})")
+        zone_status = st.zones[target_zone] if target_zone < len(st.zones) else None
+        faulted = bool(getattr(zone_status, "faulted", False))
+        fault_guard = getattr(zone_status, "fault_guard", None)
+        ack_result = srv._profiles.stop()
+        sleep(2)
+        st_after = srv._profiles.get_exec_status()
+        return J.judge_faulted_run(
+            state_name=state, faulted=faulted, fault_guard=fault_guard,
+            ack_ok=bool(ack_result.ok), post_ack_state=st_after.state_name,
+        )
+    finally:
+        _cleanup_bench_profile(ctx)
+        try:
+            zones_http_client.post_zones(host, restore_body)
+        except Exception:
+            pass
+
+
 _CASE_FUNCS = {
     "HP-01": _case_hp01,
     "HP-02": _case_hp02,
+    "HP-03": _case_hp03,
     "HP-04": _case_hp04,
     "HP-05": _case_hp05,
     "HP-06": _case_hp06,
+    "HP-07": _case_hp07,
     "HP-08": _case_hp08,
 }
 for _cid, _fn in _CASE_FUNCS.items():

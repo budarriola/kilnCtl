@@ -286,3 +286,211 @@ class CleanupRegressionTest(unittest.TestCase):
         C._cleanup_bench_profile({"srv": _FakeSrv(profiles=profiles)})
         self.assertTrue(profiles.stop_called)
         self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
+
+
+class _ZoneExecStatusHP:
+    def __init__(self, duty=0.0, relay_commanded_on=False, faulted=False, fault_guard=0):
+        self.duty = duty
+        self.relay_commanded_on = relay_commanded_on
+        self.faulted = faulted
+        self.fault_guard = fault_guard
+
+
+class _FakeZonesHttpClient:
+    """Stand-in for kilnctrl.zones_http_client -- records what was POSTed and
+    replays a canned snapshot for GET, so HP-03/HP-07 can be exercised
+    without a board or real HTTP."""
+
+    def __init__(self, snapshot=None):
+        self.snapshot = snapshot or {
+            "thermo_count": 3, "relay_count": 3,
+            "zones": [
+                {"index": 0, "zone_type": 0, "max_temp_c": 300.0},
+                {"index": 1, "zone_type": 0, "max_temp_c": 300.0},
+                {"index": 2, "zone_type": 0, "max_temp_c": 300.0},
+            ],
+        }
+        self.posted_bodies = []
+        self.post_result = "ok"
+
+    def get_zones(self, host):
+        return self.snapshot
+
+    def build_post_body(self, current, preset):
+        # A lightweight stand-in that just records the merged zone view
+        # rather than reproducing the real urlencoded wire format -- these
+        # tests only need to prove the case function feeds the right
+        # (current, preset) shape through and reacts to what comes back.
+        merged = {z["index"]: dict(z) for z in current.get("zones", [])}
+        for z in preset.get("zones", []):
+            merged[z["index"]].update(z)
+        return {"current": current, "preset": preset, "merged": merged}
+
+    def post_zones(self, host, body):
+        self.posted_bodies.append(body)
+        return self.post_result
+
+
+class _FakeProfilesClientHP(_FakeProfilesClient):
+    def __init__(self, exec_statuses=None, **kw):
+        super().__init__(**kw)
+        self._exec_statuses = list(exec_statuses or [_ExecStatus("done", [])])
+
+    def get_exec_status(self):
+        if len(self._exec_statuses) > 1:
+            return self._exec_statuses.pop(0)
+        return self._exec_statuses[0]
+
+
+def _install_fake_zones_http_client(fake):
+    import kilnctrl.zones_http_client as real
+    saved = (real.get_zones, real.build_post_body, real.post_zones)
+    real.get_zones = fake.get_zones
+    real.build_post_body = fake.build_post_body
+    real.post_zones = fake.post_zones
+    return saved
+
+
+def _restore_zones_http_client(saved):
+    import kilnctrl.zones_http_client as real
+    real.get_zones, real.build_post_body, real.post_zones = saved
+
+
+class HP03Test(unittest.TestCase):
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+
+    def _ctx(self, profiles):
+        srv = _FakeSrv(
+            readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
+            profiles=profiles,
+        )
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+        }
+        _always_ok_preflight(ctx)
+        return ctx
+
+    def test_passes_on_cycling_within_band(self):
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=False)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        # Rest gate/ambient calc must see uniform 24C; the run-loop polls
+        # must see the target zone sitting ON the on/off target (ambient 24
+        # + offset 10 = 34C) so the band check passes -- a static fake
+        # thermo reading can't simulate real thermal lag, only the band
+        # math, so this switches reading sets after the Nth read() call
+        # (rest gate's one read + _start_bench_profile's ambient read).
+        calls = {"n": 0}
+        rested_readings = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)]
+        on_target_readings = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 34.0)]
+
+        def _read():
+            calls["n"] += 1
+            return rested_readings if calls["n"] <= 2 else on_target_readings
+
+        ctx["srv"]._thermo.read = _read
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        # zones were restored: the last POST body must be the unmodified restore
+        self.assertGreaterEqual(len(self.fake_zhc.posted_bodies), 2)
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+
+    def test_skips_when_not_rested(self):
+        srv = _FakeSrv(readings=[_Reading(0, 24.0), _Reading(1, 40.0), _Reading(2, 24.0)])
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s + 100.0),
+        }
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_fails_when_relay_never_toggles_and_still_restores(self):
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertGreaterEqual(len(self.fake_zhc.posted_bodies), 2)
+
+    def test_post_refusal_fails_without_starting_a_profile(self):
+        self.fake_zhc.post_result = "refused: bad field"
+        profiles = _FakeProfilesClientHP()
+        ctx = self._ctx(profiles)
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(profiles.started, [])
+
+
+class HP07Test(unittest.TestCase):
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+
+    def _ctx(self, profiles):
+        srv = _FakeSrv(
+            readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
+            profiles=profiles,
+        )
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+        }
+        _always_ok_preflight(ctx)
+        return ctx
+
+    def test_passes_on_a_clean_provoked_fault_and_clear(self):
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP()]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertTrue(profiles.stop_called)
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+
+    def test_fails_when_never_reaches_faulted(self):
+        statuses = [_ExecStatus("running", [_ZoneExecStatusHP()])]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        clock = {"t": 0.0}
+        ctx["_now"] = lambda: clock["t"]
+        ctx["_sleep"] = lambda s: clock.__setitem__("t", clock["t"] + s)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("FAULTED", result.reason)
+
+    def test_skips_when_not_rested(self):
+        srv = _FakeSrv(readings=[_Reading(0, 24.0), _Reading(1, 40.0), _Reading(2, 24.0)])
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s + 100.0),
+        }
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)

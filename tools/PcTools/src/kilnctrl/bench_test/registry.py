@@ -235,8 +235,18 @@ for cid, desc in _SK:
     register(_c(cid, "SK", desc, depends_on="HP-01" if cid == "SK-02" else None))
 for cid, desc in _OT:
     register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08")))
+#: AT-03 reads back the unsettled fit AT-02 (its short, self-aborted step
+#: run) leaves behind; AT-05 reads GET /api/autotune/matrix after AT-01's
+#: zone-0 fit populates it. Both are the one sanctioned dependency each
+#: (plan section 5.3 rule 1) rather than trying to literally share another
+#: case's live window (see cases_autotune.py's module docstring for why).
+_AT_DEPENDS_ON = {"AT-03": "AT-02", "AT-05": "AT-01"}
+_AT_DURATION_S = {"AT-01": 1200, "AT-02": 60, "AT-03": 5, "AT-04": 1200, "AT-05": 2}
 for cid, desc in _AT:
-    register(_c(cid, "AT", desc, heat=cid in ("AT-01", "AT-04"), est_duration_s=1200))
+    register(_c(
+        cid, "AT", desc, heat=cid in ("AT-01", "AT-02", "AT-04"), est_duration_s=_AT_DURATION_S[cid],
+        depends_on=_AT_DEPENDS_ON.get(cid),
+    ))
 for cid, desc in _HP:
     register(_c(cid, "HP", desc, heat=True, est_duration_s=360))
 for cid in _WEB_IDS:
