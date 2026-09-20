@@ -635,6 +635,14 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
  * headroom over a legitimate 12-segment submission, checked against
  * Content-Length before a single byte is read. */
 
+/* "prof" + up to 3 digits (max id 127, PROFILE_BUILTIN_ID_BASE's ceiling) +
+ * NUL = 8 bytes, well inside NVS's 15-character key limit -- asserted here
+ * rather than only trusted in a comment, per
+ * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6. */
+_Static_assert(sizeof("prof127") - 1 <= 15,
+               "profile_nvs_key()'s longest possible key must stay within "
+               "NVS's 15-character key limit");
+
 static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 {
     snprintf(out, out_cap, "prof%u", id);
@@ -654,6 +662,53 @@ esp_err_t nvs_save_slot(uint8_t id);
 static esp_err_t nvs_partition_init(const char *partition)
 {
     return hal_status_to_esp_err(hal_kv_init_partition(partition));
+}
+
+/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: NVS_KEY_USED used to be a
+ * single uint8_t (8 bits, exactly PROFILES_MAX_COUNT's old value). Raising
+ * PROFILES_MAX_COUNT to 100 needs all 4 words of profiles_slot_bitmap_t
+ * persisted, not just word[0]. These two helpers are the read/write seam:
+ * used_bitmap_load() accepts EITHER the new 16-byte blob OR a pre-existing
+ * board's old single-byte value (migration, read-only -- the old key is
+ * simply overwritten with the new 16-byte shape the next time anything
+ * saves), and used_bitmap_save() always writes the full new shape.
+ *
+ * The two-branch dispatch (type-mismatch vs size-mismatch) exists because
+ * the real ESP-IDF NVS backend enforces the on-flash type of a key (a
+ * blob-typed read against a key written as U8 fails with
+ * ESP_ERR_NVS_TYPE_MISMATCH, mapped to HAL_INVALID_ARG by
+ * hal_kv_esp.c) while the host-test fake backend (hwAbstraction/host/
+ * fake_kv.c) stores everything by raw size with no type tag, so the same
+ * old byte instead comes back as a successful blob read of length 1. Both
+ * are handled so the migration path is exercised the same way on host as
+ * it will behave on target. */
+static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+{
+    size_t len = 0;
+    hal_status_t err = hal_kv_get_blob(h, NVS_KEY_USED, NULL, &len);
+    if (err == HAL_NOT_FOUND) {
+        return HAL_NOT_FOUND;
+    }
+    if (err == HAL_OK && len == sizeof(*out)) {
+        size_t full_len = sizeof(*out);
+        return hal_kv_get_blob(h, NVS_KEY_USED, out, &full_len);
+    }
+    /* Either a real-backend type mismatch (err == HAL_INVALID_ARG, the key
+     * was written by a pre-task-6 hal_kv_set_u8()) or the host fake's
+     * size-based equivalent (err == HAL_OK, len == 1) -- both mean "old
+     * single-byte format", so fall back to reading it as one. */
+    uint8_t legacy = 0;
+    hal_status_t legacy_err = hal_kv_get_u8(h, NVS_KEY_USED, &legacy);
+    if (legacy_err != HAL_OK) {
+        return legacy_err;
+    }
+    profiles_slot_bitmap_from_u32(out, legacy);
+    return HAL_OK;
+}
+
+static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bitmap_t *bm)
+{
+    return hal_kv_set_blob(h, NVS_KEY_USED, bm, sizeof(*bm));
 }
 
 /* Loads NVS_NAMESPACE/NVS_KEY_USED + "profN" out of `partition` into *out,
@@ -680,15 +735,13 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         return hal_status_to_esp_err(kv_err);
     }
 
-    uint8_t bitmap = 0;
-    kv_err = hal_kv_get_u8(&h, NVS_KEY_USED, &bitmap);
+    kv_err = used_bitmap_load(&h, &out->used_bitmap);
     esp_err_t err = hal_status_to_esp_err(kv_err);
     if (kv_err != HAL_OK && kv_err != HAL_NOT_FOUND) {
         hal_kv_close(&h);
         return err;
     }
     if (kv_err == HAL_OK) {
-        profiles_slot_bitmap_from_u32(&out->used_bitmap, bitmap);
         if (out_any_found) {
             *out_any_found = true;
         }
@@ -848,7 +901,7 @@ esp_err_t nvs_save_slot(uint8_t id)
     persisted.crc32 = compute_profile_crc(&persisted);
     kv_err = hal_kv_set_blob(&h, key, &persisted, sizeof(persisted));
     if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, (uint8_t)profiles_slot_bitmap_to_u32(&s_profiles.used_bitmap));
+        kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
     }
     uint32_t rev_snapshot[PROFILES_MAX_COUNT];
     memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
@@ -914,7 +967,7 @@ esp_err_t nvs_erase_slot(uint8_t id)
         hal_kv_close(&h);
         return hal_status_to_esp_err(erase_err);
     }
-    kv_err = hal_kv_set_u8(&h, NVS_KEY_USED, (uint8_t)profiles_slot_bitmap_to_u32(&s_profiles.used_bitmap));
+    kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
     uint32_t rev_snapshot[PROFILES_MAX_COUNT];
     memcpy(rev_snapshot, s_profile_rev, sizeof(rev_snapshot));
     rev_snapshot[id] = new_rev;

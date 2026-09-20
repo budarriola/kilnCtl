@@ -77,7 +77,12 @@ static hal_status_t favorites_save(void)
     if (err != HAL_OK) {
         return err;
     }
-    err = hal_kv_set_u32(&h, NVS_KEY_FAV_USER, profiles_slot_bitmap_to_u32(&s_fav_user));
+    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: NVS_KEY_FAV_USER used
+     * to be a single uint32_t (word[0] only) -- now the full 4-word
+     * profiles_slot_bitmap_t, so an id up to 100 (still below the 128-id
+     * ceiling) can be favorited and actually persist. See
+     * favorites_load_user_mask() below for the migration-read side. */
+    err = hal_kv_set_blob(&h, NVS_KEY_FAV_USER, &s_fav_user, sizeof(s_fav_user));
     if (err == HAL_OK) {
         err = hal_kv_set_u32(&h, NVS_KEY_FAV_BUILTIN, s_fav_builtin);
     }
@@ -88,7 +93,39 @@ static hal_status_t favorites_save(void)
     return err;
 }
 
-/* Reads one mask key. A missing key is explicitly not an error -- it means
+/* Reads NVS_KEY_FAV_USER, accepting EITHER the new 16-byte
+ * profiles_slot_bitmap_t blob OR a pre-task-6 board's old single uint32_t
+ * (word[0] only). Same two-branch dispatch as profiles_http.c's
+ * used_bitmap_load() and for the same reason: the real ESP-IDF NVS backend
+ * enforces on-flash key type (a blob read against a U32-typed key fails
+ * with HAL_INVALID_ARG), while the host fake backend answers a size
+ * mismatch instead. A missing key entirely is explicitly not an error -- it
+ * means nothing has ever been favorited, the shipped default. */
+static hal_status_t favorites_load_user_mask(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+{
+    size_t len = 0;
+    hal_status_t err = hal_kv_get_blob(h, NVS_KEY_FAV_USER, NULL, &len);
+    if (err == HAL_NOT_FOUND) {
+        return HAL_OK;
+    }
+    if (err == HAL_OK && len == sizeof(*out)) {
+        size_t full_len = sizeof(*out);
+        return hal_kv_get_blob(h, NVS_KEY_FAV_USER, out, &full_len);
+    }
+    uint32_t legacy = 0;
+    hal_status_t legacy_err = hal_kv_get_u32(h, NVS_KEY_FAV_USER, &legacy);
+    if (legacy_err == HAL_NOT_FOUND) {
+        return HAL_OK;
+    }
+    if (legacy_err != HAL_OK) {
+        return legacy_err;
+    }
+    profiles_slot_bitmap_from_u32(out, legacy);
+    return HAL_OK;
+}
+
+/* Reads one plain uint32_t mask key (the builtin mask, unaffected by the
+ * user-slot count). A missing key is explicitly not an error -- it means
  * that namespace has nothing favorited, which is the shipped default. */
 static hal_status_t favorites_load_key(hal_kv_handle_t *h, const char *key, uint32_t *out)
 {
@@ -130,10 +167,8 @@ esp_err_t profiles_favorites_start(void)
         return hal_status_to_esp_err(err);
     }
 
-    uint32_t fav_user_word0 = 0;
-    err = favorites_load_key(&h, NVS_KEY_FAV_USER, &fav_user_word0);
+    err = favorites_load_user_mask(&h, &s_fav_user);
     if (err == HAL_OK) {
-        profiles_slot_bitmap_from_u32(&s_fav_user, fav_user_word0);
         err = favorites_load_key(&h, NVS_KEY_FAV_BUILTIN, &s_fav_builtin);
     }
     hal_kv_close(&h);

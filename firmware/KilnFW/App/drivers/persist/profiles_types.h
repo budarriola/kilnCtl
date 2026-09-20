@@ -16,20 +16,35 @@
 extern "C" {
 #endif
 
-#define PROFILES_MAX_COUNT 8
+/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: 100 user slots (ids
+ * 0..99), id 100 is the reserved live-edit slot (LIVE_EDIT_WORKING_SLOT_ID,
+ * live_profile.h, defined as PROFILES_MAX_COUNT so it tracks this value
+ * automatically), and id 101 is the hidden bench-harness slot
+ * (PROFILE_BENCH_SLOT_ID, profiles_bench_slot.h) added by the plan's
+ * 2026-09-19 owner decision. PROFILE_BUILTIN_ID_BASE (profiles_builtin.h) is
+ * 128 and is the HARD CEILING for this whole id space -- any later raise of
+ * PROFILES_MAX_COUNT (or addition of another reserved id) past 127 total is
+ * a protocol change (profiles_builtin.h's own ids, and PcTools'
+ * devices_profiles.py two disjoint ranges), not a constant bump. Today's
+ * ids leave 102..127 (26 ids) free. */
+#define PROFILES_MAX_COUNT 100
 #define PROFILE_NAME_MAX_LEN 15
 #define PROFILE_MAX_SEGMENTS 12
 
-/* profiles_slot_bitmap.h's profiles_slot_bitmap_to_u32()/_from_u32() are the
- * persistence seam that keeps the NVS "used-slots" key a single 32-bit
- * scalar (word[0] only) -- byte-identical to before slot ids widened past a
- * uint8_t/uint32_t scalar. Raising PROFILES_MAX_COUNT past 32 (task 6, not
- * yet done) makes ids live in words[1]+ and that seam silently stops
- * persisting them. This assert exists so that raise can't land without also
- * widening the persisted bitmap format. */
-_Static_assert(PROFILES_MAX_COUNT <= 32,
-               "PROFILES_MAX_COUNT > 32 needs profiles_slot_bitmap.h's u32 "
-               "persistence seam widened first (task 6) -- see comment above");
+/* profiles_slot_bitmap.h's profiles_slot_bitmap_to_u32()/_from_u32() are now
+ * ONLY the legacy single-word migration seam: they let profiles_http.c's
+ * nvs_load_all_from() and profiles_favorites.c's favorites load path accept
+ * a pre-task-6 board's old single-word "used slots"/favorites blob. The
+ * live persisted format as of task 6 is the full 4-word
+ * profiles_slot_bitmap_t. This assert protects that: PROFILES_MAX_COUNT
+ * plus the reserved live-edit and bench-harness ids above it must never
+ * exceed what four 32-bit words (ids 0..127) can address -- the same 128
+ * ceiling PROFILE_BUILTIN_ID_BASE enforces from the other direction. */
+_Static_assert(PROFILES_MAX_COUNT + 2 <= 128,
+               "PROFILES_MAX_COUNT (plus the reserved live-edit and "
+               "bench-harness ids) must stay within profiles_slot_bitmap.h's "
+               "4x32-bit id space (0..127), which is also "
+               "PROFILE_BUILTIN_ID_BASE's hard ceiling");
 
 /* Owner's request, verbatim (2026-08-27): "insted of the relays and rules
  * section i want them to be part of the profile. unused relays or io may be
