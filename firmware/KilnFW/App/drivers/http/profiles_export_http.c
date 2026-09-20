@@ -443,8 +443,16 @@ static esp_err_t import_post_handler(httpd_req_t *req)
     uint8_t warn_count = 0;
     char err_msg[128];
     if (!profiles_http_save(requested_id, &candidate, &out_id, &warn_count, err_msg, sizeof(err_msg))) {
-        char errjson[192];
-        int en = snprintf(errjson, sizeof(errjson), "{\"ok\":false,\"error\":\"%s\"}", err_msg);
+        /* err_msg can echo an operator-supplied profile name back verbatim
+         * (e.g. the dup-name refusal from live_edit_name_collides()), so it
+         * must be escaped before embedding -- a name containing '"' would
+         * otherwise produce invalid JSON and make the page's r.json() throw,
+         * masking the real refusal reason behind a generic "could not reach
+         * the board" error. */
+        char err_escaped[sizeof(err_msg) * 2 + 1];
+        json_escape(err_msg, err_escaped, sizeof(err_escaped));
+        char errjson[192 + sizeof(err_escaped)];
+        int en = snprintf(errjson, sizeof(errjson), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, errjson, en < 0 ? 0 : (size_t)en);

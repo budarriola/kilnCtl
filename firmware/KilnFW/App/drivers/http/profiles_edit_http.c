@@ -18,6 +18,39 @@
 #include "profiles_favorites.h"
 #include "zones_config_accessors.h"
 
+/* ---- shared JSON escaping, same convention as every other *_http.c ------
+ * (see e.g. profiles_export_http.c/backup_export.c's own copies, and
+ * backup_http_internal.h's comment on why these stay per-file `static`
+ * rather than widened -- dashboard_json.c already defines a non-static
+ * `json_escape()` of its own, so a second widened one anywhere would be an
+ * immediate link-time collision, not a latent one). Needed here because
+ * the dup-name refusal below echoes an operator-supplied profile name back
+ * into a JSON error body.
+ *
+ * Guarded by PROFILES_HTTP_JSON_ESCAPE_DEFINED -- see
+ * profiles_catalog_http.c's identical guard/comment: this file, profiles_http.c
+ * and profiles_catalog_http.c are three separate TUs in the real target
+ * build (each keeps its own copy, no collision), but test_profiles_http.c's
+ * host test #includes all three into ONE TU, where two identical `static
+ * json_escape` bodies would otherwise be a duplicate-symbol build error. */
+#ifndef PROFILES_HTTP_JSON_ESCAPE_DEFINED
+#define PROFILES_HTTP_JSON_ESCAPE_DEFINED
+static void json_escape(const char *src, char *out, size_t out_cap)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 2 < out_cap; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (o + 3 >= out_cap) {
+                break;
+            }
+            out[o++] = '\\';
+        }
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+}
+#endif
+
 
 /* ---- POST /api/profile ----------------------------------------------------
  * Validates into a scratch profile_t before touching s_profiles/NVS. Runs
@@ -565,11 +598,22 @@ esp_err_t profile_post_handler(httpd_req_t *req)
      * see that function's comment. exclude_id lets overwriting a slot with
      * its own unchanged name stay legal. */
     {
-        uint8_t exclude_id = profiles_slot_used(target_id) ? target_id : (uint8_t)0xFF;
+        /* target_id alone is enough: profile_post_name_at() already returns
+         * NULL for an unused slot, so an unused target_id is naturally
+         * skipped by live_edit_name_collides()'s own `if (!existing)
+         * continue;` -- the profiles_slot_used()-guarded 0xFF fallback here
+         * was redundant with that. */
         char name_err[128];
-        if (live_edit_name_collides(tmp.name, profile_post_name_at, NULL, exclude_id, name_err, sizeof(name_err))) {
-            char json[192];
-            int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name_err);
+        if (live_edit_name_collides(tmp.name, profile_post_name_at, NULL, target_id, name_err, sizeof(name_err))) {
+            /* name_err can echo the operator-supplied name back verbatim
+             * (see live_edit_name_collides()'s "%s" formats) -- escape
+             * before embedding, else a name containing '"' breaks the JSON
+             * and the page's r.json() throws instead of showing the real
+             * refusal reason. */
+            char name_err_escaped[sizeof(name_err) * 2 + 1];
+            json_escape(name_err, name_err_escaped, sizeof(name_err_escaped));
+            char json[192 + sizeof(name_err_escaped)];
+            int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name_err_escaped);
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
             esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);

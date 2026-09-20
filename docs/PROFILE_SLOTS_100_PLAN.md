@@ -542,16 +542,37 @@ so overwriting a slot with its own unchanged name stays legal. Every other save
 path (`backup_import.c`'s batch commit, `profiles_export_http.c`'s single-profile
 import, `profiles_live_http.c`'s SAVE_AS/OVERWRITE, the profile builder review
 page) already funnels through `profiles_http_save()` and is covered without
-further changes; a duplicate name inside a batch import rejects only that entry
-(existing per-candidate semantics, not all-or-nothing). `profiles_page.html`'s
-save and import flows already surfaced `result.data.error`/`res.data.error`, so
-no client change was needed. New tests in `test_profiles_http.c`: exact-duplicate
-rejected, case/whitespace variant rejected, same-slot self-overwrite allowed,
-builtin-name collision rejected. Negative-tested (short-circuited the new check
-with `false &&`, confirmed 6 failures, removed the sabotage, forced full rebuild,
-confirmed 830/830 clean). Full host-test suite (56/56 executables) and
+further changes. `profiles_page.html`'s save and import flows already surfaced
+`result.data.error`/`res.data.error`, so no client change was needed. New tests
+in `test_profiles_http.c`: exact-duplicate rejected, case/whitespace variant
+rejected, same-slot self-overwrite allowed, builtin-name collision rejected.
+Negative-tested (short-circuited the new check with `false &&`, confirmed 6
+failures, removed the sabotage, forced full rebuild, confirmed 830/830 clean).
+Full host-test suite (56/56 executables) and
 `run_all_checks.ps1 -Fast -Only "profile|lint|isolation|include" -AllowFewerChecks
 -AllowSkips` (9/9) both green.
+
+Opus review of that commit (5dd23944), fixed 2026-09-20: (A) the collision
+message embedded the operator-supplied name unescaped in a hand-built JSON
+body (`profile_post_handler()` and `profiles_export_http.c`'s single-profile
+import), so a name containing `"` produced invalid JSON and the page showed
+"could not reach the board" instead of the real refusal -- both now run it
+through `json_escape()` after truncation; `profiles_page.html`'s save-error
+path now also HTML-escapes the message before writing it into `innerHTML`.
+(B) the paragraph above was wrong: a duplicate name inside a batch import did
+NOT reject only that entry -- `backup_import.c`'s pass 2 committed profiles
+one at a time, so a same-named pair (or a name colliding with an existing,
+non-overwritten board slot) aborted the import half-applied, with entries
+`0..i-1` already written. Fixed with a new pass-1 pre-check that scans every
+named candidate for both an intra-batch duplicate and an existing-slot
+collision (excluding every id the import will itself write) via
+`live_edit_name_collides()`, refusing the WHOLE import before pass 2 writes
+anything -- now genuinely all-or-nothing. New tests in `test_profiles_http.c`
+(well-formed-JSON collision response, plain and quote-in-name) and
+`test_backup_import.c` (intra-batch duplicate, existing-slot collision,
+same-slot self-overwrite still allowed). Full host-test suite (56/56) and
+`check_test_c_files_wired`/`check_c_files_in_cmakelists`/`check_js_host_tests`/
+`check_lint_pages`/`check_host_embed_symbols_defined` all green.
 
 ## 8. Open owner questions
 

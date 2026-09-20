@@ -2153,7 +2153,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
     .then(function (result) {
       if (!result.ok || result.data.ok === false) {
-        msg.innerHTML = '<span class="err">' + (result.data.error || 'save failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(result.data.error || 'save failed') + '</span>';
         return;
       }
       var html = 'Saved.';

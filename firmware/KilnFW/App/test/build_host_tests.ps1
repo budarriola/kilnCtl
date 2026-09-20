@@ -252,6 +252,17 @@ try {
         # link needs; its psa/crypto.h host stub needs exactly one
         # g_stub_psa_import_key_result definition, added in test_backup_import.c.
         (Join-Path $driversDir "persist/web_auth_store.c"),
+        # Opus review of 5dd23944 finding B (2026-09-20): backup_import.c
+        # (#included via test_backup_import.c above) now calls
+        # live_edit_name_collides() directly, in its new pass-1 dup-name
+        # pre-check, so this executable needs live_profile.c linked in for
+        # REAL -- same "small, pure, already host-tested elsewhere" reasoning
+        # exe7's identical link documents. Its only other dependency,
+        # profiles_builtin_id_valid()/entry(), is faked directly in
+        # test_backup_import.c (same convention as test_profiles_http.c's own
+        # g_fake_builtin), since this executable has no other reason to link
+        # profiles_builtin.c's real read-only catalogue.
+        (Join-Path $driversDir "persist/live_profile.c"),
         # kiln_http_register() (http_auth_http.c) rewiring pass: backup_http.c
         # (#included via test_backup_import.c, joined into $sources per the
         # comment further down) now calls it instead of
@@ -344,7 +355,11 @@ try {
     )
     [System.IO.File]::WriteAllText($hostTestsRsp, ($hostTestsRspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
-    $cmd = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
+    # /experimental:c11atomics: live_profile.c (linked in below for
+    # test_backup_import.c's Opus-review pass-1 dup-name pre-check, 2026-09-20)
+    # uses <stdatomic.h> -- same MSVC requirement exe7/exeLp/exePlh already
+    # need for the same reason (see this file's comments on those).
+    $cmd = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
 
     # ---- build/run bookkeeping -------------------------------------------------
     #

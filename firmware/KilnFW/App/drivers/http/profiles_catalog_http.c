@@ -57,6 +57,17 @@ esp_err_t profiles_page_get_handler(httpd_req_t *req)
 
 /* ---- JSON ------------------------------------------------------------------ */
 
+/* PROFILES_HTTP_JSON_ESCAPE_DEFINED: profiles_edit_http.c (2026-09-20, Opus
+ * review of 5dd23944 finding A) needs this exact same helper and guards its
+ * own copy with this same macro -- real per-file builds never see both
+ * definitions in one TU, so each file keeps its own static copy as usual,
+ * but test_profiles_http.c's host test #includes profiles_http.c/
+ * profiles_catalog_http.c/profiles_edit_http.c into ONE translation unit
+ * (see that file's own header comment), where two identical `static
+ * json_escape` bodies would otherwise be a C2084 "already has a body" /
+ * duplicate-symbol error. Harmless in the real, per-file target build. */
+#ifndef PROFILES_HTTP_JSON_ESCAPE_DEFINED
+#define PROFILES_HTTP_JSON_ESCAPE_DEFINED
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
     size_t o = 0;
@@ -71,6 +82,7 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     }
     out[o] = '\0';
 }
+#endif
 
 /* ---- Builtin catalogue JSON ------------------------------------------------
  *

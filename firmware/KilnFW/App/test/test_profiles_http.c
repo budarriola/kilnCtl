@@ -264,6 +264,23 @@ void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 static char s_send_capture[16384];
 static size_t s_send_capture_len = 0;
 static bool s_send_capture_on = false;
+
+// ---- POST-body/response capture for profile_post_handler() -- Opus review
+// finding A (malformed-JSON-on-collision): these tests drive
+// profile_post_handler() through a real (fake) httpd_req_t rather than only
+// profiles_http_save()/live_edit_name_collides() directly, so they exercise
+// the ACTUAL bytes the handler sends, catching an unescaped '"' the same way
+// profiles_page.html's r.json() would (by trying to parse it). s_post_body/
+// s_post_body_left let httpd_req_recv() serve a caller-supplied body instead
+// of always reporting EOF; s_resp_capture/-_on mirror s_chunk_capture's
+// pattern above for httpd_resp_send() (not httpd_resp_send_chunk() -- the
+// non-chunked path profile_post_handler() actually uses for every response).
+static const char *s_post_body;
+static size_t s_post_body_left;
+static char s_resp_capture[2048];
+static size_t s_resp_capture_len;
+static bool s_resp_capture_on;
+
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
@@ -275,6 +292,15 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
         memcpy(s_send_capture, buf, (size_t)n);
         s_send_capture[n] = '\0';
         s_send_capture_len = (size_t)n;
+    }
+    if (s_resp_capture_on && buf && buf_len > 0) {
+        size_t n = (size_t)buf_len;
+        if (n >= sizeof(s_resp_capture)) {
+            n = sizeof(s_resp_capture) - 1;
+        }
+        memcpy(s_resp_capture, buf, n);
+        s_resp_capture[n] = '\0';
+        s_resp_capture_len = n;
     }
     return ESP_OK;
 }
@@ -312,8 +338,13 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
+    if (s_post_body && s_post_body_left > 0) {
+        size_t n = buf_len < s_post_body_left ? buf_len : s_post_body_left;
+        memcpy(buf, s_post_body, n);
+        s_post_body += n;
+        s_post_body_left -= n;
+        return (int)n;
+    }
     return 0;
 }
 // Controllable per test (default NULL, matching the always-ESP_FAIL behavior
@@ -2158,6 +2189,94 @@ static void test_profiles_http_save_rejects_builtin_name(void)
     g_fake_builtin_on = false;
 }
 
+// ---------------------------------------------------------------------------
+// Opus review finding A (landing pass): a collision refusal from
+// profile_post_handler() (POST /api/profile) used to interpolate the
+// offending name RAW into `{"ok":false,"error":"%s"}`, with no escaping.
+// A name containing '"' produced invalid JSON, which made
+// profiles_page.html's `r.json()` throw and fall into its network-failure
+// catch -- showing "could not reach the board" instead of the real refusal.
+// These two tests drive profile_post_handler() through the fake httpd_req_t
+// plumbing above (real body read, real response capture) rather than only
+// profiles_http_save()/live_edit_name_collides() directly, so they catch
+// exactly that class of bug: a helper-level test proving err_msg CONTAINS
+// the right substring says nothing about whether embedding it produced
+// well-formed JSON.
+// ---------------------------------------------------------------------------
+
+// Builds a minimal, always-valid POST /api/profile body (one zone-ramp
+// segment) with the given (already percent-encoded) name= value, into a
+// caller-owned buffer.
+static void build_minimal_post_body(char *out, size_t out_cap, const char *name_encoded)
+{
+    snprintf(out, out_cap,
+             "id=-1&name=%s&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5", name_encoded);
+}
+
+static esp_err_t run_profile_post(const char *body)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(body);
+    s_post_body = body;
+    s_post_body_left = strlen(body);
+    s_resp_capture_len = 0;
+    s_resp_capture[0] = '\0';
+    s_resp_capture_on = true;
+    esp_err_t err = profile_post_handler(&req);
+    s_resp_capture_on = false;
+    s_post_body = NULL;
+    s_post_body_left = 0;
+    return err;
+}
+
+static void test_profile_post_handler_collision_response_is_well_formed_json(void)
+{
+    TEST_SECTION("profile_post_handler() -- a plain (no-quote) dup-name collision response is well-formed "
+                 "JSON and names the offending profile");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    char body1[256];
+    build_minimal_post_body(body1, sizeof(body1), "Bisque%20Fast");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save must succeed");
+
+    char body2[256];
+    build_minimal_post_body(body2, sizeof(body2), "Bisque%20Fast");
+    TEST_CHECK(run_profile_post(body2) == ESP_OK, "handler must still return ESP_OK on a refusal "
+                                                  "(it replies with a 400 JSON body, not a transport error)");
+    TEST_CHECK(json_is_well_formed(s_resp_capture),
+              "a plain-name collision response must already be well-formed JSON");
+    TEST_CHECK(strstr(s_resp_capture, "Bisque Fast") != NULL,
+              "the response must name the offending profile");
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":false") != NULL, "the response must report ok:false");
+}
+
+static void test_profile_post_handler_collision_response_escapes_quote_in_name(void)
+{
+    TEST_SECTION("profile_post_handler() -- a dup-name collision response stays well-formed JSON even "
+                 "when the colliding name itself contains a '\"' (Opus review finding A -- this used to "
+                 "produce invalid JSON, which made profiles_page.html's r.json() throw)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    // %22 -- percent-encoded '"'. http_form_url_decode() (http_form.h) turns
+    // this back into a literal '"' before it ever reaches
+    // live_edit_name_collides(), the same way a real browser-submitted form
+    // body would.
+    char body1[256];
+    build_minimal_post_body(body1, sizeof(body1), "Bisque%20%2210%22");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save (name containing '\"') must succeed");
+
+    char body2[256];
+    build_minimal_post_body(body2, sizeof(body2), "Bisque%20%2210%22");
+    TEST_CHECK(run_profile_post(body2) == ESP_OK, "handler must still return ESP_OK on a refusal");
+    TEST_CHECK(json_is_well_formed(s_resp_capture),
+              "a collision response embedding a name with '\"' must still be well-formed JSON -- this is "
+              "the exact defect Opus review finding A reported (unescaped name broke the JSON, and the "
+              "page's r.json() threw instead of showing the refusal reason)");
+    TEST_CHECK(strstr(s_resp_capture, "Bisque \\\"10\\\"") != NULL,
+              "the escaped name must still be recoverable from the JSON (backslash-escaped quotes)");
+}
+
 static void test_profiles_list_marks_exceeds_ceiling(void)
 {
     TEST_SECTION("profiles_list_get_handler -- a saved over-ceiling profile is marked "
@@ -2716,6 +2835,8 @@ void run_test_profiles_http(void)
     test_profiles_http_save_rejects_case_and_whitespace_variant_name();
     test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name();
     test_profiles_http_save_rejects_builtin_name();
+    test_profile_post_handler_collision_response_is_well_formed_json();
+    test_profile_post_handler_collision_response_escapes_quote_in_name();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

@@ -1523,10 +1523,12 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
      * already used by the live-edit SAVE_AS path -- same case/whitespace
      * normalization and same read-only-builtin scan. exclude_id is the slot
      * this save is writing into: overwriting an existing slot's OWN unchanged
-     * name must stay legal, so that slot is excluded from the scan; a
-     * brand-new slot excludes nothing (0xFF, never a valid profile id). */
-    uint8_t exclude_id = profiles_slot_used(target_id) ? target_id : (uint8_t)0xFF;
-    if (live_edit_name_collides(candidate->name, profiles_http_name_at, NULL, exclude_id, err_msg, err_cap)) {
+     * name must stay legal, so that slot is excluded from the scan. Passing
+     * target_id directly (no profiles_slot_used() ternary) is enough: for a
+     * brand-new/unused slot, profiles_http_name_at() already returns NULL,
+     * which live_edit_name_collides()'s own `if (!existing) continue;`
+     * skips regardless of exclude_id's value. */
+    if (live_edit_name_collides(candidate->name, profiles_http_name_at, NULL, target_id, err_msg, err_cap)) {
         return false; /* live_edit_name_collides already filled err_msg */
     }
 

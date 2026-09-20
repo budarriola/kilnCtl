@@ -135,6 +135,65 @@ static bool test_backup_import_apply(const char *body, char *err_msg, size_t err
 #include "psa/crypto.h"
 psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
+#include "profiles_builtin.h"
+
+// ---- live_profile.c's wire-format dependency, faked -----------------------
+// live_profile.c (linked for real, see build_host_tests.ps1) calls
+// profile_encode_current_blob()/profile_decode_blob() from its own
+// save/load paths -- unreachable from this file's tests (only
+// live_edit_name_collides() is ever called), but still referenced inside
+// live_profile.c's object file, so the linker needs them to resolve.
+// Deliberately trivial fakes, NOT the real wire format -- same convention
+// and same guarded profile_decode_result_t shim as test_live_profile.c's
+// identical fakes (see that file's header comment); the real format's own
+// correctness is test_profiles_http.c's job.
+#ifndef PROFILE_DECODE_RESULT_SHIM_DECLARED
+#define PROFILE_DECODE_RESULT_SHIM_DECLARED
+typedef enum {
+    PROFILE_DECODE_OK,
+    PROFILE_DECODE_CORRUPT,
+    PROFILE_DECODE_NEWER,
+} profile_decode_result_t;
+#endif
+
+size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t cap)
+{
+    if (!profile || !out || cap < sizeof(profile_t)) {
+        return 0;
+    }
+    memcpy(out, profile, sizeof(profile_t));
+    return sizeof(profile_t);
+}
+
+profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profile_t *out, const char **err_reason)
+{
+    if (!blob || !out || len != sizeof(profile_t)) {
+        if (err_reason) *err_reason = "bad length";
+        return PROFILE_DECODE_CORRUPT;
+    }
+    memcpy(out, blob, sizeof(profile_t));
+    return PROFILE_DECODE_OK;
+}
+
+// ---- profiles_builtin.h stub bodies ---------------------------------------
+// live_profile.c (linked for real, see build_host_tests.ps1's comment on this
+// executable's $sources entry -- Opus review of 5dd23944 finding B) also
+// scans the read-only builtin catalogue inside live_edit_name_collides().
+// This executable has no other reason to link the real profiles_builtin.c
+// table, so a "no builtins exist" fake is enough -- same convention as
+// test_profiles_http.c's own g_fake_builtin, just permanently off since none
+// of this file's tests exercise a builtin-name collision.
+bool profiles_builtin_id_valid(uint8_t id)
+{
+    (void)id;
+    return false;
+}
+const builtin_profile_t *profiles_builtin_entry(uint8_t id)
+{
+    (void)id;
+    return NULL;
+}
+
 // ---- Embedded-page symbols backup_page_get_handler() references ----------
 // Never actually sent by these tests (that handler is never called), but
 // must exist for the linker.
@@ -1941,6 +2000,89 @@ static void test_import_id_past_max_count_rejected(void)
     TEST_CHECK(!ok, "an id well past PROFILES_MAX_COUNT must be rejected");
     TEST_CHECK(strstr(err, "id out of range") != NULL, "rejected by the id-range check, naming the problem");
     TEST_CHECK(g_profile_save_calls == 0, "nothing written for an out-of-range id");
+}
+
+// Opus review of 5dd23944 finding B: backup_import_apply()'s pass 2 used to
+// commit profiles one at a time, so a name collision discovered mid-batch
+// (profiles_http_save() now runs live_edit_name_collides() too, same as the
+// interactive POST /api/profile path) left entries 0..i-1 already written --
+// a board holding two same-named slots, exported then re-imported, aborted
+// half-applied instead of either fully applying or fully refusing. The three
+// tests below drive the new pass-1 pre-check (backup_import.c, the
+// "Pass 1a-dup" block) that refuses the WHOLE import up front instead.
+
+static void test_import_intra_batch_duplicate_name_refused_nothing_written(void)
+{
+    TEST_SECTION("backup_import_apply -- two candidates with the same name in one import refused, nothing written");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":["
+        "{\"name\":\"Bisque\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]},"
+        "{\"name\":\"bisque\",\"zone_mask\":1,\"segments\":[{\"target_c\":200,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}"
+        "],\"zones\":[]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "two candidates normalizing to the same name (case-insensitive) must refuse the whole import");
+    TEST_CHECK(strstr(err, "duplicate name within this import") != NULL,
+              "error names the actual problem (intra-batch duplicate), not a generic failure");
+    TEST_CHECK(g_profile_save_calls == 0, "neither candidate may be written -- refusal happens in pass 1, before pass 2 commits anything");
+    TEST_CHECK(g_total_write_calls == 0, "no other setter ran either");
+}
+
+static void test_import_name_collides_with_existing_non_overwritten_slot_refused(void)
+{
+    TEST_SECTION("backup_import_apply -- candidate name collides with an existing slot this import will NOT overwrite -- refused");
+    reset_stub_state();
+
+    // Slot 3 already holds "Bisque" on the board. The import brings in a
+    // new, unnumbered ("first free slot") candidate also named "Bisque" --
+    // it will land in whichever slot is first free (not 3), so this is a
+    // genuine collision with a slot the import leaves untouched, exactly
+    // profiles_http_save()'s own interactive-path rule.
+    profile_t existing;
+    memset(&existing, 0, sizeof(existing));
+    strncpy(existing.name, "Bisque", sizeof(existing.name) - 1);
+    test_stub_profiles_set(3, &existing);
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":["
+        "{\"name\":\"Bisque\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}"
+        "],\"zones\":[]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a candidate colliding with an existing, non-overwritten board slot must refuse the whole import");
+    TEST_CHECK(g_profile_save_calls == 0, "nothing written -- refused in pass 1, before pass 2 commits anything");
+}
+
+static void test_import_name_overwriting_the_slot_holding_that_name_allowed(void)
+{
+    TEST_SECTION("backup_import_apply -- candidate overwrites the very slot already holding that name -- allowed");
+    reset_stub_state();
+
+    // Slot 3 already holds "Bisque". This import explicitly targets id 3
+    // (has_id) with the SAME name -- exactly profiles_http_save()'s own
+    // exclude_id rule: a slot is never a collision with its own current
+    // contents.
+    profile_t existing;
+    memset(&existing, 0, sizeof(existing));
+    strncpy(existing.name, "Bisque", sizeof(existing.name) - 1);
+    test_stub_profiles_set(3, &existing);
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":["
+        "{\"id\":3,\"name\":\"Bisque\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}"
+        "],\"zones\":[]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "overwriting the same slot that already holds this exact name must be allowed, not refused");
+    TEST_CHECK(g_profile_save_calls == 1, "the one candidate must actually be written");
 }
 
 // RELEASE_HARDENING_PLAN.md item 7, "import of a deliberately hostile
@@ -3800,6 +3942,9 @@ void run_test_backup_import(void)
     test_import_over_max_count_profiles_refused();
     test_import_live_edit_slot_id_rejected();
     test_import_id_past_max_count_rejected();
+    test_import_intra_batch_duplicate_name_refused_nothing_written();
+    test_import_name_collides_with_existing_non_overwritten_slot_refused();
+    test_import_name_overwriting_the_slot_holding_that_name_allowed();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
 
     test_v4_new_fields_round_trip_distinct_values();

@@ -47,6 +47,8 @@
 
 #include "MAX31856.h"
 #include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up -- kiln_configs[] restore */
+#include "live_profile.h" /* live_edit_name_collides() -- Opus review finding B, the pass-1
+                            * dup-name pre-check below (before pass 2 writes anything) */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
 #include "profiles_http.h"
 #include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
@@ -88,6 +90,36 @@ typedef struct {
     uint8_t id;
     profile_t p;
 } profile_candidate_t;
+
+/* Pass-1 dup-name pre-check (Opus review finding B): name_at() adapters over
+ * live_edit_name_collides() for the two sources a candidate name must be
+ * checked against before ANY write happens -- the rest of this import batch,
+ * and existing board slots this import will not itself overwrite. */
+typedef struct {
+    profile_candidate_t *candidates;
+    size_t count;
+} import_batch_name_ctx_t;
+
+static const char *import_batch_name_at(void *ctx_v, uint8_t id)
+{
+    import_batch_name_ctx_t *ctx = (import_batch_name_ctx_t *)ctx_v;
+    if (id >= ctx->count) { return NULL; }
+    if (ctx->candidates[id].p.name[0] == '\0') { return NULL; }
+    return ctx->candidates[id].p.name;
+}
+
+typedef struct {
+    const bool *write_ids; /* PROFILES_MAX_COUNT entries; true = this import writes that slot */
+} import_board_name_ctx_t;
+
+static const char *import_board_name_at(void *ctx_v, uint8_t id)
+{
+    import_board_name_ctx_t *ctx = (import_board_name_ctx_t *)ctx_v;
+    if (id >= PROFILES_MAX_COUNT || ctx->write_ids[id]) { return NULL; }
+    static profile_t scratch; /* single-threaded import path; no reentrancy */
+    if (!profiles_http_get(id, &scratch)) { return NULL; }
+    return scratch.name;
+}
 
 typedef struct {
     uint8_t index;
@@ -864,6 +896,97 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         }
 
         candidate_count++;
+    }
+
+    /* ---- Pass 1a-dup: refuse a duplicate/colliding profile name BEFORE any
+     * profile in this import is written (Opus review finding B). Without
+     * this, pass 2 below only discovers a name collision (profiles_http_save()
+     * now runs live_edit_name_collides(), same as the interactive POST
+     * /api/profile path) one profile at a time, mid-commit -- entries
+     * 0..i-1 already landed on the board by the time entry i is refused, so
+     * a board holding two same-named slots that gets exported and
+     * re-imported now aborts half-applied instead of either fully applying
+     * or fully refusing.
+     *
+     * Two kinds of collision must both be caught here:
+     *   1. an intra-batch duplicate -- two candidates in THIS SAME import
+     *      normalizing to the same name (import_batch_name_at()/
+     *      batch_ctx below, scanned via live_edit_name_collides() itself so
+     *      this shares its exact case/whitespace normalization rather than
+     *      a second hand-rolled copy of it).
+     *   2. a candidate colliding with an EXISTING board slot that this
+     *      import will NOT itself overwrite (import_board_name_at()/
+     *      board_ctx below) -- exactly profiles_http_save()'s own rule,
+     *      except every id this import is about to write is excluded from
+     *      the existing-slot scan (write_ids[]), so a candidate that
+     *      overwrites the very slot already holding that name stays legal,
+     *      same as profiles_http_save()'s exclude_id.
+     *
+     * write_ids[] is computed by simulating profiles_http_save()'s own
+     * first-free-slot allocation for every !has_id candidate, in the same
+     * candidate order pass 2 below commits them in -- the set of slots
+     * pass 2 will actually touch is otherwise not knowable in advance for
+     * an import that mixes explicit ids with "first free". An unnamed
+     * candidate (backup_json_field_str() found no "name" key -- the import
+     * format allows this, unlike the interactive POST path) is exempt from
+     * both checks, matching the pre-existing behavior of every check above:
+     * nothing here newly rejects an import that was previously accepted. */
+    {
+        bool slot_used_sim[PROFILES_MAX_COUNT];
+        bool write_ids[PROFILES_MAX_COUNT];
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            profile_t tmp;
+            slot_used_sim[id] = profiles_http_get(id, &tmp);
+            write_ids[id] = false;
+        }
+        for (size_t i = 0; i < candidate_count; i++) {
+            if (candidates[i].has_id) {
+                write_ids[candidates[i].id] = true;
+                slot_used_sim[candidates[i].id] = true;
+            }
+        }
+        for (size_t i = 0; i < candidate_count; i++) {
+            if (candidates[i].has_id) {
+                continue;
+            }
+            int free_slot = -1;
+            for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+                if (!slot_used_sim[id]) {
+                    free_slot = id;
+                    break;
+                }
+            }
+            if (free_slot < 0) {
+                /* profiles_http_save() would refuse this exact way at
+                 * commit time ("profile storage full") -- catching it here
+                 * too means the whole import is refused up front rather
+                 * than partially committing the candidates before it. */
+                snprintf(err_msg, err_cap, "profile storage full");
+                return false;
+            }
+            write_ids[free_slot] = true;
+            slot_used_sim[free_slot] = true;
+        }
+
+        import_batch_name_ctx_t batch_ctx = { .candidates = candidates, .count = candidate_count };
+        import_board_name_ctx_t board_ctx = { .write_ids = write_ids };
+        for (size_t i = 0; i < candidate_count; i++) {
+            if (candidates[i].p.name[0] == '\0') {
+                continue; /* unnamed candidate -- see comment above */
+            }
+            char coll_err[128];
+            if (live_edit_name_collides(candidates[i].p.name, import_batch_name_at, &batch_ctx, (uint8_t)i,
+                                        coll_err, sizeof(coll_err))) {
+                snprintf(err_msg, err_cap, "profile entry %u: duplicate name within this import (%s)",
+                        (unsigned)i, coll_err);
+                return false;
+            }
+            if (live_edit_name_collides(candidates[i].p.name, import_board_name_at, &board_ctx, 0xFF, coll_err,
+                                        sizeof(coll_err))) {
+                snprintf(err_msg, err_cap, "profile entry %u: %s", (unsigned)i, coll_err);
+                return false;
+            }
+        }
     }
 
     /* ---- Pass 1b: zone tuning ---- */
