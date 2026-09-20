@@ -183,6 +183,7 @@
 
 
 #include "ui_page_home_internal.h"
+#include "ui_page_profile_picker.h" /* ui_page_profile_picker_set_pick_cb() -- UI_PLAN.md 6.1 */
 
 const char *UI_HOME_TAG = "ui_page_home";
 
@@ -1262,10 +1263,28 @@ _Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
      * ("profile_picker" -- see kiln_ui_register_page() in kiln_ui.c). */
     s_ui_home_profile_btn = ui_home_build_button(action_row, "--", UI_THEME_ACCENT_2, ui_home_profile_btn_cb, 36,
                                 &s_ui_home_profile_label);
-    lv_label_set_long_mode(s_ui_home_profile_label, LV_LABEL_LONG_DOT);
+    /* LONG_CLIP, not LONG_DOT: UI_PLAN.md 6.2 records that LONG_DOT's
+     * lv_obj_get_self_height() -> lv_label_set_long_mode() ->
+     * lv_obj_invalidate() -> lv_event_send() -> cleanup_event_list() ->
+     * lv_malloc_core() chain is reachable from ui_home_refresh_cb() through
+     * lv_obj_update_layout() and re-breaks the lvgl task's 4880 B stack
+     * ceiling -- and this label is re-texted from that very callback every
+     * tick, which is exactly the reachability that warning names. Nothing is
+     * lost: PROFILE_NAME_MAX_LEN is 15, and the button stays 264px wide even
+     * with Pause showing (about 33 montserrat_14 characters), so a stored
+     * name can never reach the clip boundary in the first place. */
+    lv_label_set_long_mode(s_ui_home_profile_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_ui_home_profile_label, lv_pct(100));
     lv_obj_set_style_text_align(s_ui_home_profile_label, LV_TEXT_ALIGN_CENTER, 0);
     ui_theme_apply_touch_area(s_ui_home_profile_btn, true);
+
+    /* UI_PLAN.md 6.1 -- wire the picker's PICK-mode callback (the "a later
+     * wave wires the caller" that ui_page_profile_picker.h's header comment
+     * refers to). Without this, s_pick_cb stays NULL and
+     * row_name_clicked_cb() does nothing at all in pick mode: the button
+     * would open a list that cannot be picked from. Set once here, matching
+     * this page's build-once lifetime. */
+    ui_page_profile_picker_set_pick_cb(ui_home_profile_picked_cb);
 
     s_ui_home_pause_btn = ui_home_build_button(action_row, "Pause", UI_THEME_ACCENT_1, ui_home_pause_resume_btn_cb, 36,
                                 &s_ui_home_pause_btn_label);

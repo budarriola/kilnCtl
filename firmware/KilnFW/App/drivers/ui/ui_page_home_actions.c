@@ -7,14 +7,39 @@
  * page's overall design history. */
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
+#include "ui_page_profile_picker.h" /* ui_page_profile_picker_pick_refresh() -- UI_PLAN.md 6.1 */
+#include "profiles_builtin.h" /* profiles_builtin_get(), PROFILE_BUILTIN_ID_BASE -- UI_PLAN.md 6.1 */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 
-static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
+/* UI_PLAN.md 6.1 -- the profile the operator picked on the LCD this boot.
+ * There is no persisted "selected profile" anywhere in this firmware: before
+ * 6.1 the Start button resolved what to run from the executor snapshot, else
+ * the run_state boot record, and an operator who wanted anything else had to
+ * use the web dashboard. The picker adds a third, highest-priority source
+ * for the IDLE case, deliberately RAM-only and boot-scoped -- writing it to
+ * NVS would mean inventing a new persisted key and a new schema, which 6.1
+ * does not ask for and which would collide with run_state's own record. */
+static bool    s_ui_home_picked_valid;
+static uint8_t s_ui_home_picked_id;
+
+/* Shared by the Start button and by the dashboard's profile-name label
+ * (ui_home_profile_label_refresh()), so the two can never disagree about
+ * which profile Start would actually run -- taking the caller's already-held
+ * snapshot rather than fetching a second one on the LVGL tick.
+ *
+ * Note the IDLE branch is not optional: profile_executor_get_status()
+ * memsets its output and fills profile_id ONLY when the state is not IDLE
+ * (profile_executor_status.c), so st->profile_id reads 0 for every idle
+ * board. Trusting it while idle would name user slot 0 no matter what is
+ * actually selected. */
+bool ui_home_resolve_profile_id(const profile_exec_status_t *st, uint8_t *out_id)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    if (st.state != PROFILE_EXEC_IDLE) {
-        *out_id = st.profile_id;
+    if (st->state != PROFILE_EXEC_IDLE) {
+        *out_id = st->profile_id;
+        return true;
+    }
+    if (s_ui_home_picked_valid) {
+        *out_id = s_ui_home_picked_id;
         return true;
     }
     run_state_record_t rec;
@@ -23,6 +48,31 @@ static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
         return true;
     }
     return false;
+}
+
+/* Out-of-line on purpose: profile_t is this firmware's largest UI-reachable
+ * value type (PROFILE_MAX_SEGMENTS segments), and the lvgl task's 4880 B
+ * ceiling has very little headroom, so it lives in its own frame rather than
+ * in ui_home_profile_label_refresh()'s alongside run_state_record_t. Neither
+ * getter locks or touches NVS on this path: profiles_builtin_get() reads a
+ * const table and profiles_http_get() copies from the resident RAM store. */
+bool ui_home_profile_name_for_id(uint8_t id, char *out, size_t out_cap)
+{
+    profile_t prof;
+    bool found = (id >= PROFILE_BUILTIN_ID_BASE) ? profiles_builtin_get(id, &prof)
+                                                  : profiles_http_get(id, &prof);
+    if (!found) {
+        return false;
+    }
+    snprintf(out, out_cap, "%s", prof.name);
+    return out[0] != '\0';
+}
+
+static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
+{
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    return ui_home_resolve_profile_id(&st, out_id);
 }
 
 static void ui_home_do_start(void)
@@ -258,11 +308,33 @@ void ui_home_menu_nav_cb(lv_event_t *e)
 /* UI_PLAN.md 6.1: tap the profile name left of Start to open the picker in
  * pick mode ("profile_picker" -- kiln_ui_register_page() in kiln_ui.c wires
  * that name to ui_page_profile_picker_build_pick(); "profiles" is the
- * separate unified manage list reached from the menu instead). */
+ * separate unified manage list reached from the menu instead).
+ *
+ * Refresh before showing, for the same reason ui_page_config.c's
+ * profiles_nav_cb() does: kiln_ui_show() caches the page after its first
+ * build, so without this the pick list would be frozen at whatever the
+ * profile set was the first time this button was pressed, surviving any
+ * later create/delete/import made from the builder or the web dashboard. */
 void ui_home_profile_btn_cb(lv_event_t *e)
 {
     (void)e;
+    ui_page_profile_picker_pick_refresh();
     kiln_ui_show("profile_picker");
+}
+
+/* UI_PLAN.md 6.1 -- the picker's PICK-mode selection callback, registered
+ * once from ui_page_home_build(). Records the choice for this boot and
+ * returns to the dashboard; it deliberately does NOT start anything, so the
+ * Start button (and its confirmation dialog, and its PIN gate) remains the
+ * only way to energise elements. The id is stored unresolved: a profile
+ * deleted between the pick and the Start is caught by
+ * ui_home_show_start_confirm()'s existing "have an id but the getter failed"
+ * branch, exactly as a stale boot record already is. */
+void ui_home_profile_picked_cb(uint8_t profile_id)
+{
+    s_ui_home_picked_id = profile_id;
+    s_ui_home_picked_valid = true;
+    kiln_ui_show("home");
 }
 
 /* out_label, if non-NULL, receives the button's label widget so a caller can

@@ -643,6 +643,53 @@ needed, action_row's 36px contribution is unchanged) and
 section above still needs a live bench capture -- not done from this
 worktree.
 
+**Review corrections, same day, before landing.** Four defects were found
+reviewing the first implementation and are fixed in the landed commit:
+
+1. **The label named the wrong profile on every idle board.**
+   `profile_executor_get_status()` `memset`s its output and fills
+   `profile_id` **only when the state is not IDLE**
+   (`profile_executor_status.c`), so `st->profile_id` reads 0 for an idle
+   board -- the label read user slot 0's name while Start would run
+   something else. The plan text above ("the `profile_exec_status_t`
+   profile id from the snapshot") is only true mid-run. Both surfaces now go
+   through one shared `ui_home_resolve_profile_id()`
+   (`ui_page_home_actions.c`), which is also what
+   `ui_home_resolve_start_profile_id()` is now defined in terms of, so the
+   label and the Start button cannot drift apart. Mid-run the name comes
+   from `profile_exec_status_t::profile_name`, which the snapshot already
+   carries -- no lookup at all.
+2. **The picker could be opened but not picked from.**
+   `ui_page_profile_picker.h` says PICK mode's row tap "invokes the callback
+   set by `ui_page_profile_picker_set_pick_cb()`... a later wave wires the
+   caller" -- 6.1 is that wave, and it did not. `s_pick_cb` stayed NULL, so
+   a row tap did nothing at all. `ui_page_home_build()` now registers
+   `ui_home_profile_picked_cb()`, which records the choice for this boot
+   (RAM-only; no persisted "selected profile" key is invented) and returns
+   home. It never starts anything: Start, its confirmation dialog and its
+   PIN gate stay the only path to energising elements.
+3. **The pick list was frozen at first open.** `kiln_ui_show()` caches a
+   page after its first build, which is why `ui_page_config.c`'s
+   `profiles_nav_cb()` calls the manage refresh before showing.
+   `ui_home_profile_btn_cb()` now calls `ui_page_profile_picker_pick_refresh()`
+   the same way -- previously that function had no callers at all.
+4. **`LV_LABEL_LONG_DOT` on a label re-texted from `ui_home_refresh_cb()`.**
+   6.2 below records that `LONG_DOT`'s `lv_obj_invalidate()` ->
+   `lv_malloc_core()` chain, reachable from that very callback through
+   `lv_obj_update_layout()`, re-breaks the lvgl task's 4880 B ceiling. Now
+   `LV_LABEL_LONG_CLIP`, with nothing lost: `PROFILE_NAME_MAX_LEN` is 15 and
+   the button is 264px wide even with Pause showing (about 33 montserrat_14
+   characters), so a stored name cannot reach the clip boundary.
+
+Owner decision 6.8 item 2 (grey and non-clickable whenever the snapshot is
+not IDLE) was also missing from the first implementation and is now
+implemented as written: `UI_THEME_COLOR_TEXT_SECONDARY` on the label and
+`LV_OBJ_FLAG_CLICKABLE` cleared. Re-measured after all of the above: host
+tests 55/55, `check_00_kilnfw_target_build.ps1` PASS, lvgl still 4848 B
+against the 4880 B ceiling and `bx_flash_worker` still 3792 B against its
+3792 B ceiling, `check_ui_budget_asserts.ps1` /
+`check_stack_margin_registration.ps1` / `check_lint_pages.ps1` pass.
+
 **Files.** `ui_page_home.c` (`ui_page_home_build()`, the `action_row` block
 at the end), `ui_page_home_internal.h` (declare the new
 `s_ui_home_profile_btn` / `s_ui_home_profile_label`),

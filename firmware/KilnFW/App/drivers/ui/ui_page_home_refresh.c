@@ -16,7 +16,6 @@
                                        * ota_rollback_esp() hazard, closed 2026-09-16 */
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
-#include "profiles_builtin.h" /* profiles_builtin_get(), PROFILE_BUILTIN_ID_BASE -- UI_PLAN.md 6.1 */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -875,17 +874,43 @@ lag_notice_done:;
 
 /* UI_PLAN.md 6.1 -- sets the profile-name label left of Start/Pause from the
  * SAME profile_executor_get_status() snapshot ui_home_refresh_cb() already
- * holds. No lock, no new producer call. id < PROFILE_BUILTIN_ID_BASE (128)
- * is a user slot (profiles_http_get()); >= that is a builtin
- * (profiles_builtin_get()). state == PROFILE_EXEC_IDLE still reports the
- * last-run/selected profile_id (profile_executor_state.h), which is exactly
- * the "selected profile" this label is meant to show before a run starts. */
+ * holds. No new producer call.
+ *
+ * While a run is up the snapshot already carries the name
+ * (profile_exec_status_t::profile_name), so nothing is looked up at all.
+ * While IDLE the snapshot carries NOTHING usable -- see
+ * ui_home_resolve_profile_id()'s comment: get_status() zeroes profile_id for
+ * an idle board, so reading it directly would label every idle dashboard
+ * with user slot 0's name while Start ran something else entirely. The idle
+ * branch therefore goes through that shared resolver, which is the same
+ * function ui_home_fire_btn_cb()'s confirmation dialog uses.
+ *
+ * Owner decision, UI_PLAN.md 6.8 item 2: whenever the snapshot is not IDLE
+ * the control is greyed (UI_THEME_COLOR_TEXT_SECONDARY) and its clickable
+ * flag is cleared -- changing the profile under a running firing is out of
+ * scope, so the affordance is removed rather than left to be tapped and
+ * silently ignored. */
 void ui_home_profile_label_refresh(const profile_exec_status_t *st)
 {
-    profile_t prof;
-    bool found = (st->profile_id >= PROFILE_BUILTIN_ID_BASE) ? profiles_builtin_get(st->profile_id, &prof)
-                                                               : profiles_http_get(st->profile_id, &prof);
-    lv_label_set_text(s_ui_home_profile_label, found ? prof.name : "--");
+    bool idle = (st->state == PROFILE_EXEC_IDLE);
+
+    if (idle) {
+        lv_obj_add_flag(s_ui_home_profile_btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_color(s_ui_home_profile_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+
+        uint8_t id = 0;
+        char name[PROFILE_NAME_MAX_LEN + 1];
+        if (ui_home_resolve_profile_id(st, &id) && ui_home_profile_name_for_id(id, name, sizeof(name))) {
+            lv_label_set_text(s_ui_home_profile_label, name);
+        } else {
+            lv_label_set_text(s_ui_home_profile_label, "--");
+        }
+        return;
+    }
+
+    lv_obj_remove_flag(s_ui_home_profile_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_text_color(s_ui_home_profile_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_ui_home_profile_label, st->profile_name[0] ? st->profile_name : "--");
 }
 
 /* UI_PLAN.md 6.5 -- fills the right-quarter rail. Called once per tick from

@@ -140,6 +140,13 @@ extern lv_obj_t *s_ui_home_rail_watts_label;
 /* UI_PLAN.md 6.1 -- see ui_page_home_refresh.c for the full doc comment. */
 void ui_home_profile_label_refresh(const profile_exec_status_t *st);
 
+/* UI_PLAN.md 6.1 -- both defined in ui_page_home_actions.c. The resolver is
+ * THE definition of "which profile would Start run"; the dashboard label and
+ * the Start button must both go through it or they drift apart. */
+bool ui_home_resolve_profile_id(const profile_exec_status_t *st, uint8_t *out_id);
+bool ui_home_profile_name_for_id(uint8_t id, char *out, size_t out_cap);
+void ui_home_profile_picked_cb(uint8_t profile_id);
+
 /* ---- helpers, defined in ui_page_home.c or ui_page_home_actions.c, used
  * from another file in the split -------------------------------------- */
 void ui_home_format_duration(uint32_t seconds, char *out, size_t out_cap);
