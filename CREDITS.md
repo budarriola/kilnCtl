@@ -109,9 +109,85 @@ design into the repo, add an entry here in the same pull request.
   and explicitly *not* recommended — see the plan's §2 — so they are cited there but not
   credited here as the source of any implemented technique.
 
+## Research and control literature (scenario-simulation and coupling-model passes)
+
+Sources actually consulted in `docs/research/` and `docs/SCENARIO_SIMULATION_PLAN.md`
+§3, beyond the PID-autotune papers already credited above. Full detail, quotations, and
+retrieval caveats (abstract-only, search-summary-only, paywalled) live in the two
+`docs/research/*.md` files themselves — this entry only records which findings actually
+reached a design or shipped code, per the owner's 2026-08-30 instruction to credit only
+what was used.
+
+**Used — informed an adopted design or shipped code:**
+
+- Watlow Electric Manufacturing Co., *"Sensor placement in a thermal system"*
+  (engineering knowledge-base article, no publication date given on the page),
+  <https://www.watlow.com/resources-and-support/engineering-tools/knowledge-base/sensor-placement-in-a-thermal-system>
+  — states the near-source-vs-near-load sensor-placement tradeoff (loop stability vs.
+  load fidelity) that `docs/SCENARIO_SIMULATION_PLAN.md` §2.1's three-node sensor model
+  (`sensor_bias_p`, exercised by `firmware/KilnFW/App/test/sim_plant.c`) is built around.
+  Per §3.1, the source supports the tradeoff qualitatively only — it gives no
+  conductance ratio; the plan's own 5:1 numeric interpretation is this project's
+  inference, not the source's.
+- RTP (rapid thermal processing) multi-zone gain-scheduling literature — Schaper, C.D.
+  and Edgar, T.F. & Breedijk, T. (1994), title/venue not independently verified this
+  session; found only via secondary summaries at
+  <https://www.researchgate.net/publication/234065612_Modeling_and_Control_of_Rapid_Thermal_Processing>
+  and <https://ir.lib.nycu.edu.tw/bitstream/11536/29999/1/000166627500015.pdf> (**gap:**
+  primary papers not read in full, so the exact title/journal of the 1994 works is not
+  confirmed from this repo's own research pass — see
+  `docs/research/multizone_thermal_modelling_literature_2026-09-11.md` §"3. Setpoint/
+  level-dependent gain scheduling"). The RTP literature's practice of scheduling a
+  multi-lamp-zone interaction-gain matrix by operating point/setpoint is the recommended
+  ("candidate 3", ranked #1) replacement for kilnCtl's refuted additive linear coupling
+  model, and informs the setpoint-dependent zone-interaction-matrix design in
+  `firmware/KilnFW/App/drivers/control/zone_coupling_solve.c`. Note the literature
+  supports scheduling coupling *magnitude* by level, not the coupling *sign reversal*
+  this project separately measured on its own bench data — that reversal is this
+  project's own finding, not the RTP source's.
+
+**Surveyed, not used** (kept here only so a reader can tell the difference from the list
+above; do not treat these as informing any shipped design):
+
+- Jin, Renjie, *"Research on Optimized Fuzzy PID Temperature Control Strategy Based on
+  Improved Particle Swarm Optimization"*, arXiv:2609.00001 (2026) —
+  <https://arxiv.org/abs/2609.00001> — abstract only; per
+  `docs/SCENARIO_SIMULATION_PLAN.md` §3.2, its reported effect sizes are for a
+  full-authority fuzzy design and do not transfer to this project's bounded ±50% nudge
+  (`pid_fuzzy.c`).
+- Comparative expert-adjustable-fuzzy-control study (injection-molding temperature
+  control), <https://pmc.ncbi.nlm.nih.gov/articles/PMC9252661/> — search-summary only,
+  same non-transferability conclusion, §3.2.
+- Visioli, A., *"Fuzzy logic based set-point weight tuning of PID controllers"*, IEEE
+  SMC, 1999, <https://ieeexplore.ieee.org/document/798062/>, and its Springer follow-up
+  (*"Fuzzy rule-based set point weighting for fuzzy PID controller"*,
+  <https://link.springer.com/article/10.1007/s42452-021-04626-0>) — motivated a
+  "consider tuning it, for overshoot, not ramp tracking" recommendation for the
+  already-present `PID_SETPOINT_WEIGHT_B` constant in
+  `docs/research/fuzzy_ramp_tracking_2026-09-13.md` §6. Not adopted: the constant is
+  still `1.0f` (`firmware/KilnFW/App/drivers/control/profile_executor_internal.h:253`,
+  as of this writing), i.e. unused/inert.
+- The remaining furnace/fuzzy-PID and setpoint-weighting sources listed in
+  `docs/research/fuzzy_ramp_tracking_2026-09-13.md`'s own "Sources" bibliography —
+  surveyed to answer whether the fuzzy layer could also serve ramp tracking; the
+  document's conclusion was "leave the rule table alone," so none of them changed
+  shipped code. See that file for the full list and per-source notes.
+- Sonta, Simmons, et al., *"Data-driven identification of a thermal network in
+  multi-zone building"*, arXiv:1810.07400 (2018), and Cen et al., *"Lumped Parameter
+  Thermal Network Modeling and Thermal Optimization Design of an Aerial Camera"*,
+  PMC/NCBI (2024), <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11207309/> — shared-node
+  RC-network coupling model ("candidate 1" in
+  `docs/research/multizone_thermal_modelling_literature_2026-09-11.md`), ranked below
+  the adopted candidate 3 and not implemented.
+- Bilinear (input × state) coupling-term literature (arXiv:1802.06165 and
+  ResearchGate 343151731) — "candidate 2" in the same document, not implemented.
+- Deep-learning multi-zone furnace prediction (graph attention + GRU), ScienceDirect,
+  <https://www.sciencedirect.com/science/article/abs/pii/S0735193325010504> — the
+  document's own "Does not apply, and why" section; not implemented.
+
 ---
 
-*Last updated: 2026-09-02. If you copy or vendor a new third-party file, library, or
+*Last updated: 2026-09-20. If you copy or vendor a new third-party file, library, or
 reference design into this repo, add an entry here in the same pull request. Plain
 package-manager dependencies (pip packages, ESP-IDF managed components, etc.) don't need
 an entry — only things actually copied into the tree.*
