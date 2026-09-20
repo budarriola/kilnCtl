@@ -612,9 +612,11 @@ static void test_load_working_for_origin_refuses_foreign_id(void)
     TEST_CHECK(live_profile_fork(9, false, "Run C", &origin, &working, &rec, err, sizeof(err)), "fork (origin 9) succeeds");
 
     profile_t out;
-    TEST_CHECK(live_profile_load_working_for_origin(9, &out), "the SAME origin_id (9) may load the pending working copy");
-    TEST_CHECK(!live_profile_load_working_for_origin(10, &out),
-               "a DIFFERENT origin_id (10) is refused even though a pending record exists");
+    TEST_CHECK(live_profile_load_working_for_origin(9, &out) == LIVE_PROFILE_LOAD_OK,
+               "the SAME origin_id (9) may load the pending working copy");
+    TEST_CHECK(live_profile_load_working_for_origin(10, &out) == LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN,
+               "a DIFFERENT origin_id (10) is refused even though a pending record exists -- and definitively so, "
+               "since this is a fact about the persisted record, not a transient hiccup (HIGH, 2026-09-19)");
     TEST_CHECK(live_profile_has_pending_for_origin(9), "has_pending_for_origin agrees for the real origin");
     TEST_CHECK(!live_profile_has_pending_for_origin(10), "has_pending_for_origin agrees for the foreign origin");
 
@@ -651,13 +653,25 @@ static void test_should_advance_generation_false_on_malloc_failure(void)
                "a transient failure must be retried next tick, not silently marked seen");
 }
 
-static void test_should_advance_generation_false_when_not_applicable(void)
+static void test_should_advance_generation_true_when_not_applicable(void)
 {
-    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH-1: NOT_APPLICABLE (nothing pending, or a "
-                 "foreign origin_id) never consumes the generation");
-    TEST_CHECK(!profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE,
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH (2026-09-19): NOT_APPLICABLE (no record at "
+                 "all, not pending, or a foreign origin_id) DOES consume the generation -- it is a definitive fact "
+                 "about the persisted state, not a transient hiccup. Without this, a live_profile_clear() that "
+                 "leaves no pending record behind would bump the generation once and this poll would re-observe it "
+                 "as \"new\" on every tick forever.");
+    TEST_CHECK(profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE,
+                                                              PROFILE_LIVE_PICKUP_OK),
+               "nothing exists for this run's origin_id to ever adopt for this generation");
+}
+
+static void test_should_advance_generation_false_when_load_transient(void)
+{
+    TEST_SECTION("profile_live_pickup_should_advance_generation -- HIGH (2026-09-19): LOAD_TRANSIENT (a record IS "
+                 "pending for this run but its blob failed to load) never consumes the generation");
+    TEST_CHECK(!profile_live_pickup_should_advance_generation(PROFILE_LIVE_PICKUP_POLL_LOAD_TRANSIENT,
                                                                PROFILE_LIVE_PICKUP_OK),
-               "neither answer is a definitive verdict on THIS run's own edit");
+               "unlike NOT_APPLICABLE, this is not a definitive answer -- the blob may load fine next tick");
 }
 
 static void test_should_advance_generation_true_when_checked_ok(void)
@@ -726,7 +740,8 @@ int main(void)
     test_load_working_for_origin_refuses_foreign_id();
     test_should_advance_generation_false_when_not_running();
     test_should_advance_generation_false_on_malloc_failure();
-    test_should_advance_generation_false_when_not_applicable();
+    test_should_advance_generation_true_when_not_applicable();
+    test_should_advance_generation_false_when_load_transient();
     test_should_advance_generation_true_when_checked_ok();
     test_should_advance_generation_true_when_checked_refused();
 

@@ -500,11 +500,11 @@ bool live_profile_load_working(profile_t *out)
 // live_profile_load_working()'s own comment (live_profile_generation() is
 // pinned at 0, so the "unchanged" early return always fires first), but the
 // symbols must still exist for the link to succeed.
-bool live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
+live_profile_load_result_t live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
 {
     (void)expect_origin_id;
     (void)out;
-    return false;
+    return LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN;
 }
 
 bool live_profile_has_pending_for_origin(uint8_t origin_id)

@@ -29,7 +29,13 @@
  * #includes this whole file directly (host-only translation unit). Declared
  * locally instead, matching that header's real signature exactly (types come
  * from profiles_types.h, already visible), so this stays a thin extern
- * reference rather than dragging the httpd tier into a control-tier file. */
+ * reference rather than dragging the httpd tier into a control-tier file.
+ * LOW (review, 2026-09-19): the two enums (this one and the real
+ * profile_validate_mode_t) cannot be the same C type across this TU
+ * boundary, so their VALUES are pinned instead by a _Static_assert in
+ * profiles_http_internal.h, the TU that owns the real enum -- if that
+ * assert ever fires, PROFILE_VALIDATE_HARD_LOCAL below must be updated to
+ * match. */
 typedef enum { PROFILE_VALIDATE_ADVISORY_LOCAL = 0, PROFILE_VALIDATE_HARD_LOCAL = 1 } profile_validate_mode_local_t;
 extern bool profiles_validate_candidate(const profile_t *candidate, int mode, char *warnings_json,
                                          size_t warnings_json_cap, char *err_msg, size_t err_cap);
@@ -371,10 +377,28 @@ static void reload_live_profile_if_changed(void)
 
     /* MEDIUM-1 (review): refuses a pending record left over from a
      * DIFFERENT run's undecided edit (foreign origin_id) as well as "no
-     * pending edit at all" -- neither is a definitive verdict on THIS run's
-     * own edit, so neither may consume the generation (HIGH-1). */
-    if (!live_profile_load_working_for_origin(profile_id, candidate)) {
+     * pending edit at all". HIGH (review, 2026-09-19): unlike a genuinely
+     * TRANSIENT load failure, NONE_FOR_ORIGIN IS a definitive verdict about
+     * the persisted state (there is nothing pending for this run's
+     * origin_id at all right now), so it DOES consume the generation --
+     * otherwise a live_profile_clear() (discard/save-as/overwrite) that
+     * leaves no pending record behind bumps live_profile_generation() once,
+     * and this poll re-observes that same bump as "still new" on every
+     * future tick forever, spending a malloc + blocking NVS read on the
+     * control task each time for an edit that will never exist to adopt. */
+    live_profile_load_result_t load_result = live_profile_load_working_for_origin(profile_id, candidate);
+    if (load_result != LIVE_PROFILE_LOAD_OK) {
         free(candidate);
+        profile_live_pickup_poll_outcome_kind_t load_kind = (load_result == LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN)
+                                                                  ? PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE
+                                                                  : PROFILE_LIVE_PICKUP_POLL_LOAD_TRANSIENT;
+        if (profile_live_pickup_should_advance_generation(load_kind, PROFILE_LIVE_PICKUP_OK)) {
+            xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+            s_exec.live_edit_generation = gen;
+            xSemaphoreGive(s_exec.lock);
+        }
+        /* LOAD_TRANSIENT: leave the generation unconsumed so the next tick
+         * retries the load. */
         return;
     }
 
@@ -400,6 +424,47 @@ static void reload_live_profile_if_changed(void)
     } else {
         kind = PROFILE_LIVE_PICKUP_POLL_CHECKED;
         result = PROFILE_LIVE_PICKUP_OK;
+
+        /* MEDIUM (review, 2026-09-19): io_seg_runtime_t.remaining_s is
+         * seeded ONCE from the OLD profile's dwell_min at io_seg_start() and
+         * only ever counted down from there (io_segs_tick()) -- swapping
+         * s_exec.profile's content below does nothing to it, so an adopted
+         * dwell_min change on a currently-active NON-BLOCKING relay/IO
+         * segment was logged as adopted but silently had no effect on that
+         * segment's own countdown. Re-derive it here, under this same lock,
+         * against the OLD profile still in s_exec.profile (about to be
+         * overwritten) so the amount of time already spent in the segment is
+         * computed from the dwell it was actually started with, then applied
+         * to the NEW dwell -- pure arithmetic, no I/O, no other io_seg_
+         * runtime_t field touched (segment_index/dwelling/every firing-stats
+         * accumulator keep the same continuity guarantee as the profile
+         * swap itself). A BLOCKING relay/IO segment doesn't need this: it is
+         * still the CURRENT schedule segment, so its own dwell is read fresh
+         * out of s_exec.profile.segments[segment_index] by the ordinary
+         * segment-stepping path once the swap below lands -- there is no
+         * separate stale copy of its dwell anywhere. */
+        uint8_t seg_n = s_exec.profile.segment_count;
+        if (seg_n > PROFILE_MAX_SEGMENTS) {
+            seg_n = PROFILE_MAX_SEGMENTS;
+        }
+        for (uint8_t i = 0; i < seg_n; i++) {
+            io_seg_runtime_t *r = &s_exec.io_segs[i];
+            if (!r->active || r->blocking) {
+                continue;
+            }
+            float old_dwell_s = (float)(s_exec.profile.segments[i].dwell_min * 60u);
+            float elapsed_s = old_dwell_s - r->remaining_s;
+            if (elapsed_s < 0.0f) {
+                elapsed_s = 0.0f;
+            }
+            float new_dwell_s = (float)(candidate->segments[i].dwell_min * 60u);
+            float new_remaining_s = new_dwell_s - elapsed_s;
+            if (new_remaining_s < 0.0f) {
+                new_remaining_s = 0.0f;
+            }
+            r->remaining_s = new_remaining_s;
+        }
+
         /* Swap CONTENT only -- segment_index/segment_elapsed_s/dwelling/
          * io_segs/every firing-stats accumulator are left exactly as they
          * were, which is the continuity guarantee plan section 1 asks for

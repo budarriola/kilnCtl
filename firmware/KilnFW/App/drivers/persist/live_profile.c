@@ -485,22 +485,26 @@ bool live_profile_load_working(profile_t *out)
  * it is currently running, in case a record ever reaches this state some
  * other way than fork() (a future decision-layer bug, a hand-edited NVS
  * blob during bring-up, etc.) -- "compare in fork and in the pickup
- * caller" per the review. Returns false (untouched *out) if there is no
- * pending record, the record isn't pending, or its origin_id does not
- * match expect_origin_id -- all three are "not for this run", indistinguishable
- * to the caller on purpose (see profile_executor.c's reload_live_profile_
- * if_changed(), which treats every one of them as a no-op, not a refusal
- * worth recording). */
-bool live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
+ * caller" per the review. Returns LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN
+ * (untouched *out) if there is no pending record, the record isn't pending,
+ * or its origin_id does not match expect_origin_id -- all three are "not for
+ * this run" and, per the HIGH fix above, all three are DEFINITIVE (the
+ * caller may consume the generation it observed), unlike
+ * LIVE_PROFILE_LOAD_TRANSIENT (a record IS pending for this run but its blob
+ * failed to load), which must not be. */
+live_profile_load_result_t live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
 {
     live_edit_record_t rec;
-    if (!live_profile_load_record(&rec) || !rec.pending) {
-        return false;
+    /* HIGH (review): "no record at all" is read through the exact same
+     * hal_kv_open()/hal_kv_get_blob() path as a genuine transient error, but
+     * per plan it is treated as the definitive, common case here (there is
+     * no live edit for ANY run yet) rather than as TRANSIENT -- matching
+     * live_profile_has_pending_for_origin()'s treatment of the same
+     * !live_profile_load_record() outcome just below. */
+    if (!live_profile_load_record(&rec) || !rec.pending || rec.origin_id != expect_origin_id) {
+        return LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN;
     }
-    if (rec.origin_id != expect_origin_id) {
-        return false;
-    }
-    return live_profile_load_working(out);
+    return live_profile_load_working(out) ? LIVE_PROFILE_LOAD_OK : LIVE_PROFILE_LOAD_TRANSIENT;
 }
 
 /* MEDIUM-2 (review): profile_executor_run.c seeds s_exec.live_edit_generation

@@ -171,9 +171,11 @@ bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(
  *     also beyond it, are unconstrained
  *   - on/off rules whose segment_index is <= the running segment_index must
  *     be byte-identical
- *   - candidate->segment_count may be <= segment_index (every future segment
- *     deleted -- legal, ends the firing cleanly at the end of the current
- *     segment) but never inserts/reorders anything at or before it
+ *   - candidate->segment_count may drop as low as segment_index + 1 (every
+ *     future segment deleted -- legal, ends the firing cleanly at the end of
+ *     the current segment) but never fewer than that: the implementation
+ *     refuses segment_index >= candidate->segment_count, since the running
+ *     segment itself can never be deleted out from under the run
  * Returns true (refused) with the offending segment/reason in `err` on the
  * first violation found. Pure -- no zone-config lookup, no FreeRTOS. */
 bool live_edit_check_window(const profile_t *running, const profile_t *candidate, uint8_t segment_index, char *err,
@@ -203,13 +205,38 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
 bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap);
 bool live_profile_load_working(profile_t *out);
 
+/* HIGH (review, 2026-09-19): tri-state so the caller (profile_executor.c's
+ * reload_live_profile_if_changed()) can tell a DEFINITIVE "nothing to adopt"
+ * answer apart from a TRANSIENT one that deserves a retry -- collapsing both
+ * into a single bool made every future tick re-poll forever once the
+ * definitive case was reached (e.g. live_profile_clear() bumps the
+ * generation on discard/save-as/overwrite while leaving no pending record
+ * behind: the old bool-false answer looked identical to a transient NVS
+ * hiccup, so the caller never dared consume the generation and re-did the
+ * malloc + blocking NVS read on the control task every single tick,
+ * forever). */
+typedef enum {
+    LIVE_PROFILE_LOAD_OK = 0,
+    /* No record at all, the record isn't pending, or its origin_id does not
+     * match expect_origin_id -- all three are definitive facts about the
+     * PERSISTED state, independent of anything transient, so the caller may
+     * safely consume the generation it observed and stop re-polling for
+     * this same edit. */
+    LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN,
+    /* A record IS pending for expect_origin_id, but the working blob itself
+     * failed to load (hal_kv open error, blob decode failure) -- this is not
+     * an answer about whether an edit exists, so the caller must NOT consume
+     * the generation and should retry on the next tick. */
+    LIVE_PROFILE_LOAD_TRANSIENT,
+} live_profile_load_result_t;
+
 /* MEDIUM-1 (review): same as live_profile_load_working() but also refuses
- * (returns false, *out untouched) unless the pending record's origin_id
- * equals expect_origin_id -- the pickup-side half of the stale-record guard
- * live_profile_fork() applies on the fork side. The RUNNING executor is the
- * only caller that knows which profile it is actually running, so it is the
- * only caller that can supply this. */
-bool live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out);
+ * (LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN, *out untouched) unless the pending
+ * record's origin_id equals expect_origin_id -- the pickup-side half of the
+ * stale-record guard live_profile_fork() applies on the fork side. The
+ * RUNNING executor is the only caller that knows which profile it is
+ * actually running, so it is the only caller that can supply this. */
+live_profile_load_result_t live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out);
 
 /* MEDIUM-2 (review): true iff a pending record exists whose origin_id is
  * origin_id. profile_executor_run() uses this to decide how to seed

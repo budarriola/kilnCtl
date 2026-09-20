@@ -26,5 +26,5 @@ bool profile_live_pickup_should_advance_generation(profile_live_pickup_poll_outc
                                                     profile_live_pickup_result_t result)
 {
     (void)result; /* every CHECKED result (OK or a REFUSED_*) advances alike -- see header comment */
-    return kind == PROFILE_LIVE_PICKUP_POLL_CHECKED;
+    return kind == PROFILE_LIVE_PICKUP_POLL_CHECKED || kind == PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE;
 }

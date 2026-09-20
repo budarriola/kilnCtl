@@ -192,6 +192,19 @@ typedef enum {
     PROFILE_VALIDATE_HARD = 1,     /* live-edit accept/pickup: over-ceiling refuses */
 } profile_validate_mode_t;
 
+/* LOW (review, 2026-09-19): profile_executor.c cannot #include this header
+ * (it pulls in esp_http_server.h, which is not host-test-safe, and
+ * test_profile_executor_prestart.c #includes profile_executor.c directly as
+ * a host-only translation unit) -- it declares its own host-safe
+ * profile_validate_mode_local_t/extern instead, matching this real
+ * enum/prototype by hand. That duplication cannot be reached by the
+ * compiler across the two TUs, so pin the one thing that actually has to
+ * stay in sync -- the numeric values -- with a static assert here, in the
+ * TU that owns the real enum. If this ever fails, profile_executor.c's
+ * PROFILE_VALIDATE_HARD_LOCAL must be updated to match. */
+_Static_assert(PROFILE_VALIDATE_ADVISORY == 0, "profile_executor.c's local profile_validate_mode_local_t duplicate is out of sync");
+_Static_assert(PROFILE_VALIDATE_HARD == 1, "profile_executor.c's local profile_validate_mode_local_t duplicate is out of sync");
+
 /* The one place a candidate profile_t is checked before it is written
  * anywhere. Called by profile_post_handler() (mode ADVISORY, unchanged
  * behavior), the live-edit POST handler (mode HARD, docs/LIVE_PROFILE_EDIT_PLAN.md

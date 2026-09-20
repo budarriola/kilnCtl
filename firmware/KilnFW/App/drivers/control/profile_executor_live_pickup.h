@@ -61,12 +61,28 @@ typedef enum {
     PROFILE_LIVE_PICKUP_POLL_NOT_RUNNING,
     /* heap_caps_malloc() failed -- transient, retry next tick. */
     PROFILE_LIVE_PICKUP_POLL_MALLOC_FAILED,
-    /* live_profile_load_working_for_origin() returned false: nothing
-     * pending, the pending record isn't for this run (MEDIUM-1), or the
-     * blob failed to decode. None of these is a definitive answer about
-     * THIS run's still-outstanding edit (there may be no such edit at all),
-     * so none of them may consume the generation either. */
+    /* HIGH (review, 2026-09-19): live_profile_load_working_for_origin()
+     * returned LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN -- no record at all, the
+     * record isn't pending, or it is pending for a DIFFERENT run's origin_id
+     * (MEDIUM-1). Unlike the old bool-returning API this collapsed with, all
+     * three are a DEFINITIVE fact about the persisted state (there is
+     * nothing for THIS run's origin_id to ever adopt right now), not a
+     * "try again" answer, so this DOES consume the generation -- see
+     * PROFILE_LIVE_PICKUP_POLL_LOAD_TRANSIENT just below for the one load
+     * outcome that must not. Collapsing these together with that one used to
+     * be the bug: a live_profile_clear() (discard/save-as/overwrite) bumps
+     * the generation while leaving no pending record behind, and if that is
+     * never consumed, every future tick forever re-observes the same bump as
+     * "new" and re-spends a malloc + blocking NVS read on the control task
+     * for an edit that will never exist to adopt. */
     PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE,
+    /* HIGH (review, 2026-09-19): live_profile_load_working_for_origin()
+     * returned LIVE_PROFILE_LOAD_TRANSIENT -- a record IS pending for this
+     * run's origin_id, but the working blob itself failed to load (hal_kv
+     * open error, blob decode failure). This is NOT a definitive answer
+     * about the edit (it may well load fine next tick), so -- unlike
+     * NOT_APPLICABLE just above -- it must NOT consume the generation. */
+    PROFILE_LIVE_PICKUP_POLL_LOAD_TRANSIENT,
     /* The window/HARD-validate check actually ran -- see .result for
      * PROFILE_LIVE_PICKUP_OK vs one of the two REFUSED_* reasons. Both a
      * REFUSED_* and OK are definitive: the operator's specific candidate
@@ -77,18 +93,25 @@ typedef enum {
 } profile_live_pickup_poll_outcome_kind_t;
 
 /* HIGH-1 (review): true iff s_exec.live_edit_generation may be advanced to
- * the newly-observed generation this tick. Only PROFILE_LIVE_PICKUP_POLL_
- * CHECKED ever returns true here -- and then unconditionally, whether the
- * candidate was adopted (result == OK) or definitively refused (a REFUSED_*
- * result, which the caller is expected to have already recorded for the
- * operator, MEDIUM-3) -- since either way the operator's specific edit was
- * actually evaluated and does not need re-evaluating on an unchanged
- * generation. NOT_RUNNING/MALLOC_FAILED/NOT_APPLICABLE all return false:
- * none of them looked at the candidate at all, so none of them may consume
- * the generation -- doing so was the HIGH-1 defect (an edit made while
- * PAUSED, or one that transiently failed to load, was silently marked
- * "seen" and never revisited). Pure and host-testable on its own, since the
- * real bug was in this decision's SHAPE, not in any one branch's plumbing. */
+ * the newly-observed generation this tick. PROFILE_LIVE_PICKUP_POLL_CHECKED
+ * returns true unconditionally, whether the candidate was adopted
+ * (result == OK) or definitively refused (a REFUSED_* result, which the
+ * caller is expected to have already recorded for the operator, MEDIUM-3) --
+ * since either way the operator's specific edit was actually evaluated and
+ * does not need re-evaluating on an unchanged generation.
+ * PROFILE_LIVE_PICKUP_POLL_NOT_APPLICABLE (HIGH, 2026-09-19) ALSO returns
+ * true: it is the other definitive outcome -- nothing exists for this run's
+ * origin_id to ever adopt for this generation, so there is nothing left to
+ * re-check either.
+ * NOT_RUNNING/MALLOC_FAILED/LOAD_TRANSIENT all return false: none of them
+ * looked at (or could even find) the candidate, so none of them may consume
+ * the generation -- doing so was the original HIGH-1 defect (an edit made
+ * while PAUSED, or one that transiently failed to load, was silently marked
+ * "seen" and never revisited), and collapsing LOAD_TRANSIENT together with
+ * NOT_APPLICABLE under the old bool-returning API was the same defect
+ * recurring one layer down (2026-09-19 fix). Pure and host-testable on its
+ * own, since the real bug was in this decision's SHAPE, not in any one
+ * branch's plumbing. */
 bool profile_live_pickup_should_advance_generation(profile_live_pickup_poll_outcome_kind_t kind,
                                                     profile_live_pickup_result_t result);
 
