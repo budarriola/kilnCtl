@@ -434,6 +434,81 @@ def test_decode_log_unknown_level_falls_back_to_hex():
     assert decoded["message"] == "hi"
 
 
+def _update_status_payload(state, last_error, bytes_received=0, total_chunks=0,
+                            received_chunks=0, gaps=()):
+    import struct as _struct
+    header = _struct.pack(
+        "<BBBIIIB", 0x14, state, last_error, bytes_received, total_chunks,
+        received_chunks, len(gaps),
+    )
+    return header + b"".join(_struct.pack("<H", g) for g in gaps)
+
+
+def test_decode_update_status_ordinary_states():
+    # states 0-7 decode by name and carry no special summary.
+    for state, name_expect in kc.UPDATE_STATE_NAMES.items():
+        if state == 8:
+            continue
+        payload = _update_status_payload(state, 0)
+        name, decoded, err = kc.decode_payload(7, 7, payload)
+        assert err is None, err
+        assert name == "UPDATE_STATUS"
+        assert decoded["state"] == state
+        assert decoded["state_name"] == name_expect
+        assert "summary" not in decoded
+
+
+def test_decode_update_status_gaps_and_error_bits():
+    payload = _update_status_payload(
+        3, 0b01000100, bytes_received=1000, total_chunks=10,
+        received_chunks=8, gaps=(2, 7),
+    )
+    name, decoded, err = kc.decode_payload(7, 7, payload)
+    assert err is None, err
+    assert decoded["state_name"] == "RECEIVING"
+    assert decoded["gaps"] == [2, 7]
+    assert set(decoded["error_names"]) == {"TOO_HOT", "CRC_MISMATCH"}
+
+
+def test_decode_update_status_state_8_rejected_slot_linkage_surfaces_real_reason():
+    # State 8 reuses CRC_MISMATCH's bit (no protocol bump, 2026-09-20) -- an
+    # operator must see the real reason, not a bare CRC-mismatch reading.
+    payload = _update_status_payload(8, 1 << 6)  # CRC_MISMATCH bit
+    name, decoded, err = kc.decode_payload(7, 7, payload)
+    assert err is None, err
+    assert decoded["state_name"] == "REJECTED_SLOT_LINKAGE"
+    assert decoded["error_names"] == ["CRC_MISMATCH"]
+    assert decoded.get("summary") == "rejected: image linked for the other slot"
+
+
+def test_decode_update_status_state_8_without_special_case_would_mislead():
+    # Negative test proving the state==8 branch in _decode_update_status is
+    # load-bearing: without it, all a caller has for state 8 is the reused
+    # CRC_MISMATCH bit -- indistinguishable from a genuine CRC mismatch on
+    # any other state. Confirm the raw fields alone are ambiguous, so the
+    # decoder's explicit "summary" key is the only thing disambiguating them.
+    genuine_crc_mismatch = _update_status_payload(4, 1 << 6)  # VERIFYING + CRC_MISMATCH
+    slot_rejected = _update_status_payload(8, 1 << 6)         # REJECTED_SLOT_LINKAGE
+    _, decoded_crc, _ = kc.decode_payload(7, 7, genuine_crc_mismatch)
+    _, decoded_slot, _ = kc.decode_payload(7, 7, slot_rejected)
+    assert decoded_crc["error_names"] == decoded_slot["error_names"] == ["CRC_MISMATCH"]
+    assert "summary" not in decoded_crc
+    assert decoded_slot["summary"] == "rejected: image linked for the other slot"
+
+
+def test_decode_update_status_short_payload_raises():
+    name, decoded, err = kc.decode_payload(7, 7, bytes([0x14, 3, 0]))
+    assert decoded is None
+    assert err is not None
+
+
+def test_update_cmd_names_present():
+    for cmd, expect in ((0x10, "UPDATE_BEGIN"), (0x11, "UPDATE_DATA"),
+                         (0x12, "UPDATE_END"), (0x13, "UPDATE_ABORT"),
+                         (0x14, "UPDATE_STATUS")):
+        assert kc.CMD_NAMES[cmd] == expect
+
+
 # ---------------------------------------------------------------------------
 # Drift guards against the C, which is authoritative for this wire format.
 #

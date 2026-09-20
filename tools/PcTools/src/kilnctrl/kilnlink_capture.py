@@ -104,15 +104,11 @@ class LinkDevice(enum.IntEnum):
 #: timeline. Not every id here has a structured decoder below; anything
 #: without one still gets a name and a raw hex payload dump.
 #
-# TODO (2026-09-20, docs/PICO_AUTO_UPDATE_PLAN.md): the ESP now embeds both
-# SaftyFW slot images and updates the Pico automatically at boot. That
-# firmware work is landing separately and is expected to add a new
-# update-failure status/enumerator for "image not linked for target slot" (or
-# similar -- name TBD by that change, not guessed here). When it lands, wire
-# its numeric value into this table (and into any bench case /
-# kilnlink_capture status-name lookup that enumerates ROLLBACK_RESULT- or
-# REBOOT_RESULT-style outcome codes) so the bench harness decodes it by name
-# instead of falling back to the UNKNOWN(0x..) path below.
+# 2026-09-20, docs/PICO_AUTO_UPDATE_PLAN.md: the ESP now embeds both SaftyFW
+# slot images and updates the Pico automatically at boot. The UPDATE_* wire
+# frames below (0x10-0x14) and UPDATE_STATE_NAMES/UPDATE_ERR_BITS further
+# down decode that relay -- including state 8, REJECTED_SLOT_LINKAGE, added
+# by that same change for "image linked for the other slot".
 CMD_NAMES: dict[int, str] = {
     0x01: "GET_STATUS / STATUS (Frame A)",
     0x02: "REQUEST_ENABLE",
@@ -149,7 +145,51 @@ CMD_NAMES: dict[int, str] = {
     0x2B: "GET_STACK_MARGIN",
     0x2C: "STACK_MARGIN",
     0x2D: "APPLY_CONFIG_VOLATILE",
+    # Pico firmware-update relay frames (firmware/SaftyFW/src/tasks/link_frame.h
+    # LINK_FRAME_UPDATE_*_CMD -- NOT firmware/CommonFW/include/kilnlink/, so
+    # these are outside the KILNLINK_*_CMD drift-guard test below).
+    0x10: "UPDATE_BEGIN",
+    0x11: "UPDATE_DATA",
+    0x12: "UPDATE_END",
+    0x13: "UPDATE_ABORT",
+    0x14: "UPDATE_STATUS",
 }
+
+#: update_task_wire_state_t (firmware/SaftyFW/src/tasks/update_task.c),
+#: mirrored -- same reasoning as CMD_NAMES/LogLevel above: a real board can
+#: report a state this table doesn't know yet, so lookups always fall back
+#: to a hex label rather than raising.
+#:
+#: State 8 (2026-09-20, docs/PICO_AUTO_UPDATE_PLAN.md): the Pico now rejects
+#: an UPDATE_BEGIN whose embedded image is linked for the WRONG target slot
+#: (position-dependent code -- see that plan's slot-selection hazard note).
+#: It reuses UPDATE_STATUS_ERR_CRC_MISMATCH's bit in `last_error` (no
+#: protocol/wire-layout bump), so decode_payload's UPDATE_STATUS decoder
+#: below special-cases state 8 so an operator sees "rejected: image linked
+#: for the other slot", not a generic CRC-mismatch report.
+UPDATE_STATE_NAMES: dict[int, str] = {
+    0: "IDLE",
+    1: "REFUSED",
+    2: "ERASING",
+    3: "RECEIVING",
+    4: "VERIFYING",
+    5: "COMPLETE",
+    6: "ABORTED",
+    7: "FAILED",
+    8: "REJECTED_SLOT_LINKAGE",
+}
+
+#: UPDATE_STATUS_ERR_* bitmask (same source file), name only.
+UPDATE_ERR_BITS: "list[tuple[int, str]]" = [
+    (1 << 0, "RELAY_CLOSED"),
+    (1 << 1, "TRIP_PENDING"),
+    (1 << 2, "TOO_HOT"),
+    (1 << 3, "HEADER_INVALID"),
+    (1 << 4, "VERSION_INCOMPATIBLE"),
+    (1 << 5, "RETRANSMIT_CAP"),
+    (1 << 6, "CRC_MISMATCH"),
+    (1 << 7, "INTERNAL"),
+]
 # Every KILNLINK_*_CMD id defined in firmware/CommonFW/include/kilnlink/ must
 # appear above; tests/test_kilnlink_capture.py parses those headers and fails
 # if one is missing, so a new firmware command cannot silently decode as
@@ -437,6 +477,46 @@ def _decode_bare(payload: bytes, name: str) -> dict:
     return {}
 
 
+def _decode_update_status(payload: bytes) -> dict:
+    """UPDATE_STATUS (0x14), firmware/SaftyFW/src/tasks/update_task.c.
+
+    Header is UPDATE_STATUS_HEADER_LEN=16 bytes total (including the leading
+    cmd byte): cmd, state(u8), last_error(u8 bitmask), bytes_received(u32 LE),
+    total_chunks(u32 LE), received_chunks(u32 LE), gap_count(u8), followed by
+    gap_count u16-LE gap chunk indices.
+    """
+    if len(payload) < 16:
+        raise ValueError(f"UPDATE_STATUS must be at least 16 bytes, got {len(payload)}")
+    state, last_error, bytes_received, total_chunks, received_chunks, gap_count = (
+        struct.unpack_from("<BBIIIB", payload, 1)
+    )
+    expected_len = 16 + 2 * gap_count
+    if len(payload) < expected_len:
+        raise ValueError(
+            f"UPDATE_STATUS gap_count={gap_count} needs {expected_len} bytes, got {len(payload)}"
+        )
+    gaps = list(struct.unpack_from(f"<{gap_count}H", payload, 16)) if gap_count else []
+    state_name = UPDATE_STATE_NAMES.get(state, f"0x{state:02X}")
+    error_names = [name for bit, name in UPDATE_ERR_BITS if last_error & bit]
+    result = {
+        "state": state,
+        "state_name": state_name,
+        "last_error": last_error,
+        "error_names": error_names,
+        "bytes_received": bytes_received,
+        "total_chunks": total_chunks,
+        "received_chunks": received_chunks,
+        "gap_count": gap_count,
+        "gaps": gaps,
+    }
+    if state == 8:
+        # REJECTED_SLOT_LINKAGE reuses CRC_MISMATCH's bit (no protocol bump,
+        # 2026-09-20) -- surface the real reason explicitly rather than
+        # leaving an operator to read a misleading bare "CRC_MISMATCH".
+        result["summary"] = "rejected: image linked for the other slot"
+    return result
+
+
 _CMD_DECODERS = {
     0x01: _decode_status_frame_a,
     0x02: _decode_request_enable,
@@ -462,6 +542,7 @@ _CMD_DECODERS = {
     0x28: _decode_ct_auto_zero_status,
     0x29: lambda p: _decode_bare(p, "REBOOT"),
     0x2A: lambda p: _decode_accepted_reason(p, "REBOOT_RESULT"),
+    0x14: _decode_update_status,
 }
 # 0x0B is special-cased below (the bare 1-byte GET_FW_VERSION request shares
 # its id with the much longer Frame C reply -- LINK_PROTOCOL.md's own
