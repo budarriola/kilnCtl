@@ -314,11 +314,15 @@ static void kiln_cfg_plan_add(kiln_cfg_plan_t *plan, const char *fmt, ...)
 {
     if (!plan || plan->count >= KILN_CFG_PLAN_MAX_LINES) {
         return; /* plan is informational for the confirm dialog -- silently
-                  * capping it is acceptable; KILN_CFG_PLAN_MAX_LINES (32) is
-                  * already well over 3x KILN_CFG_MAX_COUNT (10), the most
-                  * create+rename+delete lines a single restore can ever
-                  * produce (at most one line per board slot plus one per
-                  * file entry). */
+                  * capping it is acceptable; KILN_CFG_PLAN_MAX_LINES (32)
+                  * still exactly covers the worst case, refreshed for the
+                  * HIGH 2 "keep active" line (bkfinish review): at most one
+                  * line per board slot (a MIRROR "delete" or "keep active",
+                  * never both) plus at most TWO per file entry (its own
+                  * create/rename/no-op-active line, plus a separate
+                  * "was the active kiln config" informational line when
+                  * is_active is set) -- 3 * KILN_CFG_MAX_COUNT (10) = 30,
+                  * still <= 32. */
     }
     va_list ap;
     va_start(ap, fmt);
@@ -439,10 +443,24 @@ static void kiln_cfg_unique_name(const char *base, int32_t exclude_id, char clai
 // before applying" for any client, not just backup_page.html's own dry-run
 // round trip -- a MIRROR POST that omits or gets the count wrong is refused
 // before ANY write (rename/create/delete) happens this pass.
+//
+// `*wrote_out` (HIGH 1, bkfinish review): set to true the moment the FIRST
+// store mutation of this commit pass actually lands (a successful rename,
+// create, or mirror-delete), and left alone (not reset) on every later
+// return so a caller can tell "refused before touching the store" (false)
+// apart from "some earlier action in this same pass already landed before a
+// later one failed" (true) -- the same distinction backup_import_apply()
+// already makes between its own kiln_configs-pass and profiles/zones-pass.
+// Always false on entry to a commit=true call and never touched at all when
+// commit is false (pass-1 validation writes nothing). Callers that don't
+// care may pass NULL.
 static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t mode, bool commit,
-                                        int32_t ack_delete_count, kiln_cfg_plan_t *plan, char *err_msg,
-                                        size_t err_cap)
+                                        int32_t ack_delete_count, bool ack_no_safety_processor,
+                                        kiln_cfg_plan_t *plan, bool *wrote_out, char *err_msg, size_t err_cap)
 {
+    if (commit && wrote_out) {
+        *wrote_out = false;
+    }
     plan->count = 0;
     const char *arr = backup_json_obj_find(body, "kiln_configs");
     if (!arr) {
@@ -600,6 +618,18 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
     if (mode == KILN_CFG_RESTORE_MIRROR) {
         for (uint8_t b = 0; b < board_n; b++) {
             if (!board_matched[b]) {
+                /* HIGH 2 (bkfinish review): kiln_cfg_store_delete() refuses
+                 * the active slot unconditionally, so an unmatched ACTIVE
+                 * slot must never be queued for deletion here -- otherwise
+                 * dry-run shows a confirmable plan that the real commit pass
+                 * below then fails at, after any earlier renames/creates/
+                 * deletes in this same pass have already landed. Named in
+                 * the plan either way so the operator sees the slot survives
+                 * mirror mode. */
+                if (board[b].is_active) {
+                    kiln_cfg_plan_add(plan, "keep active \"%s\" (active slot is never deleted)", board[b].name);
+                    continue;
+                }
                 board_delete[b] = true;
                 kiln_cfg_plan_add(plan, "delete \"%s\"", board[b].name);
             }
@@ -643,6 +673,9 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
                          action_name[i]);
                 return false;
             }
+            if (wrote_out) {
+                *wrote_out = true;
+            }
         }
     }
     for (size_t i = 0; i < file_n; i++) {
@@ -655,22 +688,32 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
                          action_name[i], reason);
                 return false;
             }
+            if (wrote_out) {
+                *wrote_out = true;
+            }
         }
     }
     for (uint8_t b = 0; b < board_n; b++) {
         if (board_delete[b]) {
             char reason[128];
-            /* ack_no_safety_processor: derived above, not hardcoded -- true
-             * only once mirror_delete_ack confirmed the caller's
-             * X-Kiln-Config-Ack-Delete header actually echoed this exact
-             * deletion count (we would already have returned false above
-             * otherwise, so this is always true by the time we get here;
-             * kept explicit rather than a bare `true` so the next reader
-             * doesn't have to re-derive that from the guard above). */
-            if (!kiln_cfg_store_delete(board[b].id, mirror_delete_ack, reason, sizeof(reason))) {
+            /* ack_no_safety_processor: this is a SEPARATE acknowledgement
+             * from `mirror_delete_ack` above (MEDIUM, bkfinish review) --
+             * mirror_delete_ack only confirms the operator accepted how MANY
+             * slots this restore deletes (X-Kiln-Config-Ack-Delete); this
+             * argument is kiln_cfg_store_delete()'s own "the safety
+             * processor is absent/down and the operator has been warned"
+             * gate (ota_http_check_interlocks()'s ack_no_safety_processor,
+             * same X-Ota-Ack-No-Safety header backup_import_post_handler()
+             * already reads for the interlock check ahead of this function),
+             * threaded through as its own parameter rather than reusing the
+             * delete-count ack for an unrelated precondition. */
+            if (!kiln_cfg_store_delete(board[b].id, ack_no_safety_processor, reason, sizeof(reason))) {
                 snprintf(err_msg, err_cap, "kiln_configs: could not delete \"%.23s\" for mirror: %.60s", board[b].name,
                          reason);
                 return false;
+            }
+            if (wrote_out) {
+                *wrote_out = true;
             }
         }
     }
@@ -2314,8 +2357,8 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
  * what landed rather than a 400 implying nothing did. Always set on entry;
  * never left indeterminate on any return path. */
 static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
-                                 int32_t ack_delete_count, kiln_cfg_plan_t *plan, bool *partial_write_out,
-                                 char *err_msg, size_t err_cap)
+                                 int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
+                                 bool *partial_write_out, char *err_msg, size_t err_cap)
 {
     *partial_write_out = false;
 
@@ -2326,7 +2369,8 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     // commit surface is not profiles_http_save()/zones_config_set_*()). A
     // malformed kiln_configs entry refuses the WHOLE restore, including
     // profiles/zones, exactly like a malformed profile/zone entry does today.
-    if (!backup_import_kiln_configs(body, mode, false, ack_delete_count, plan, err_msg, err_cap)) {
+    if (!backup_import_kiln_configs(body, mode, false, ack_delete_count, ack_no_safety_processor, plan, NULL,
+                                    err_msg, err_cap)) {
         return false;
     }
     if (dry_run) {
@@ -2335,8 +2379,19 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
 
     // Pass 2 for kiln_configs[] now runs BEFORE profiles/zones (task 6):
     // create/rename/mirror-delete kiln config slots. If this fails, nothing
-    // else has been touched yet.
-    if (!backup_import_kiln_configs(body, mode, true, ack_delete_count, plan, err_msg, err_cap)) {
+    // else has been touched yet -- UNLESS `kiln_configs_wrote` comes back
+    // true (HIGH 1, bkfinish review): backup_import_kiln_configs()'s own
+    // commit pass can fail partway through its rename/create/delete loops
+    // (e.g. the Nth of several renames fails) after an earlier action in
+    // that SAME pass already landed on the store. Previously that case fell
+    // through to this function's default *partial_write_out = false and the
+    // handler replied 400 "nothing changed" while items 1..N-1 were already
+    // persisted -- propagate it here exactly like every other partial-write
+    // path in this function does.
+    bool kiln_configs_wrote = false;
+    if (!backup_import_kiln_configs(body, mode, true, ack_delete_count, ack_no_safety_processor, plan,
+                                    &kiln_configs_wrote, err_msg, err_cap)) {
+        *partial_write_out = kiln_configs_wrote;
         return false;
     }
 
@@ -2517,8 +2572,8 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
     bool partial_write = false;
-    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, plan, &partial_write, err_msg,
-                                  sizeof(err_msg));
+    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, ota_http_req_ack_no_safety(req), plan,
+                                  &partial_write, err_msg, sizeof(err_msg));
     free(body);
 
     if (!ok) {

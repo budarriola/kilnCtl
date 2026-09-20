@@ -142,6 +142,15 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
                      "reset to invalid or re-derive something else");
 
     fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
+    // LOW (bkfinish review): fake_kv_reset_all() deregisters EVERY partition,
+    // not just this test's own -- ADAPTIVE_TUNE_NVS_PARTITION is "kiln_nvs",
+    // the SAME partition name kiln_cfg_store.c uses, so leaving it
+    // deregistered here silently relied on test_backup_import.c:2622's own
+    // defensive re-init to paper over it for every test that runs after this
+    // one in the same combined binary. Re-init it here instead, symmetric
+    // with this test's own setup above, so that defensive re-init is no
+    // longer masking anything.
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 }
 
 // Q3: adaptive_tune_clear_ki_baseline() is the escape hatch a stale
@@ -207,6 +216,11 @@ static void test_clear_ki_baseline_lets_the_next_refine_relatch_fresh(void)
                "was just cleared");
 
     fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
+    // LOW (bkfinish review): see the matching comment above -- re-init the
+    // shared "kiln_nvs" partition this test's own setup brought up, rather
+    // than leaving it deregistered for test_backup_import.c's defensive
+    // re-init to quietly cover for.
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
 }
 
 // ---------------------------------------------------------------------

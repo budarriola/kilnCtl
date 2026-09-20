@@ -15,7 +15,7 @@ migration code untouched. This module never runs on the board and never
 changes firmware migration behaviour.
 
 SCOPE. The document this module converts is the BACKUP document -- the
-top-level "version" field is BACKUP_FORMAT_VERSION (currently 4, see
+top-level "version" field is BACKUP_FORMAT_VERSION (currently 5, see
 backup_http_internal.h), not ZONES_CFG_VERSION (the on-flash per-zone schema
 version, currently 26). The two are different numbers for a reason: most of
 the fields ZONES_CFG_VERSION bumps added to the on-flash struct were folded

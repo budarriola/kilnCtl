@@ -78,24 +78,24 @@ void test_stub_kiln_cfg_export_content_toggle_byte0(void);
 #include "../drivers/http/backup_export.c"
 #include "../drivers/http/backup_import.c"
 
-// backup_import_apply() gained mode/dry_run/ack_delete_count/plan/
-// partial_write parameters (kiln_configs[] restore, 2026-09-19) -- every
-// pre-existing call site in this file predates that and only cares about
-// the profiles/zones behaviour, always wants a real (non-dry-run) MERGE
-// apply with no pending mirror-deletes to acknowledge, and has no reason to
-// inspect the plan or the partial-write flag. Rather than hand-edit all of
-// them, this thin wrapper supplies KILN_CFG_RESTORE_MERGE/false/-1/scratch
-// plan+flag so every old call site unchanged in spirit still compiles and
-// behaves exactly as before; tests that specifically exercise
-// kiln_configs[]/mode/dry_run/ack-delete call backup_import_apply() directly
-// instead.
+// backup_import_apply() gained mode/dry_run/ack_delete_count/
+// ack_no_safety_processor/plan/partial_write parameters (kiln_configs[]
+// restore, 2026-09-19) -- every pre-existing call site in this file predates
+// that and only cares about the profiles/zones behaviour, always wants a
+// real (non-dry-run) MERGE apply with no pending mirror-deletes to
+// acknowledge, and has no reason to inspect the plan or the partial-write
+// flag. Rather than hand-edit all of them, this thin wrapper supplies
+// KILN_CFG_RESTORE_MERGE/false/-1/true/scratch plan+flag so every old call
+// site unchanged in spirit still compiles and behaves exactly as before;
+// tests that specifically exercise kiln_configs[]/mode/dry_run/ack-delete
+// call backup_import_apply() directly instead.
 static kiln_cfg_plan_t s_test_backup_plan;
 static bool test_backup_import_apply(const char *body, char *err_msg, size_t err_cap)
 {
     memset(&s_test_backup_plan, 0, sizeof(s_test_backup_plan));
     bool partial_write = false;
-    return backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, &s_test_backup_plan, &partial_write, err_msg,
-                               err_cap);
+    return backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan, &partial_write,
+                               err_msg, err_cap);
 }
 #include "../drivers/http/backup_http.c"
 
@@ -3361,6 +3361,310 @@ static void test_export_never_contains_credential_markers(void)
     }
 }
 
+// ---------------------------------------------------------------------------
+// bkfinish review, HIGH 2 / HIGH 3: MIRROR-mode kiln_configs[] delete-ack
+// gate coverage, plus the active-slot-survives-mirror fix. These call
+// backup_import_apply() DIRECTLY (not the test_backup_import_apply()
+// wrapper above) since they need real mode/ack_delete_count control.
+// kiln_cfg_store.c's state is cumulative across every test in this shared
+// binary (see the comment on test_kiln_configs_absent_key_is_a_no_op()), so
+// every count used below is derived from a live kiln_cfg_store_list() BEFORE
+// snapshot, never a hardcoded number, and MERGE/no-op sections that don't
+// need mirror deletion are left alone by tests running earlier in this file.
+// ---------------------------------------------------------------------------
+
+// kiln_cfg_store.c's KILN_CFG_MAX_COUNT (10) slots are shared, cumulative
+// state across every test in this combined binary (see the comment on
+// test_kiln_configs_absent_key_is_a_no_op()) -- by the time this file's own
+// later tests run, earlier ones (here and in sibling test_*.c files linked
+// into the same executable) can easily have already filled the store to
+// capacity, leaving no room for a new test's own setup saves. Trim back to
+// a small, known baseline (every non-active slot deleted -- the active one,
+// if any, is left alone since delete refuses it anyway) before any test
+// below that needs to CREATE new slots.
+static void mirror_test_trim_to_baseline(void)
+{
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    char reason[160] = {0};
+    for (uint8_t i = 0; i < n; i++) {
+        if (!rows[i].is_active) {
+            TEST_CHECK(kiln_cfg_store_delete(rows[i].id, true, reason, sizeof(reason)),
+                      "setup: trimmed a leftover non-active slot from an earlier test to make room");
+        }
+    }
+}
+
+// Common setup for the three ack-gate tests below: ensures at least one
+// ACTIVE slot and at least one NON-active slot exist, and returns the
+// current non-active count (the real MIRROR delete count against an empty
+// kiln_configs[] body) via `nonactive_count_out`.
+//
+// Names are made unique per call (a static counter) rather than reused
+// literal "Mirror Ack Marker A/B" strings: kiln_cfg_store_delete() refuses
+// the ACTIVE slot unconditionally, so mirror_test_trim_to_baseline() (which
+// only deletes non-active rows) cannot clean up a marker slot a PRIOR call
+// left behind active -- a fixed name would then collide with that leftover
+// on the next save_current() and fail setup itself, which is exactly the
+// intermittent "setup: marker slot ... saved" failure this replaced.
+static int s_mirror_ack_marker_seq = 0;
+static void mirror_ack_test_setup(int32_t *nonactive_count_out)
+{
+    mirror_test_trim_to_baseline();
+    char reason[160] = {0};
+    int32_t id_a = -1, id_b = -1;
+    int seq = ++s_mirror_ack_marker_seq;
+    char name_a[KILN_CFG_NAME_MAX_LEN + 1];
+    char name_b[KILN_CFG_NAME_MAX_LEN + 1];
+    snprintf(name_a, sizeof(name_a), "Mirror Ack Marker A %d", seq);
+    snprintf(name_b, sizeof(name_b), "Mirror Ack Marker B %d", seq);
+    // save_current() makes its OWN save active, so saving A then B leaves A
+    // non-active and B active -- guarantees at least one of each regardless
+    // of what earlier tests left behind.
+    TEST_CHECK(kiln_cfg_store_save_current(name_a, -1, &id_a, reason, sizeof(reason)),
+              "setup: non-active marker slot A saved");
+    TEST_CHECK(kiln_cfg_store_save_current(name_b, -1, &id_b, reason, sizeof(reason)),
+              "setup: marker slot B saved (becomes active)");
+
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int32_t nonactive = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        if (!rows[i].is_active) {
+            nonactive++;
+        }
+    }
+    *nonactive_count_out = nonactive;
+}
+
+static void test_mirror_delete_absent_ack_refuses_and_writes_nothing(void)
+{
+    TEST_SECTION("backup_import_apply -- MIRROR restore that would delete kiln config slots refuses "
+                 "with NO X-Kiln-Config-Ack-Delete header (ack_delete_count -1) and writes nothing");
+    reset_stub_state();
+    int32_t nonactive_count = 0;
+    mirror_ack_test_setup(&nonactive_count);
+    TEST_CHECK(nonactive_count > 0, "test assumption: at least one non-active slot exists to be deleted");
+
+    kiln_cfg_summary_t before[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(before, KILN_CFG_MAX_COUNT);
+
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],\"kiln_configs\":[]}";
+    kiln_cfg_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    bool partial_write = false;
+    char err[160] = {0};
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MIRROR, false, -1, true, &plan, &partial_write, err,
+                                  sizeof(err));
+
+    TEST_CHECK(!ok, "MIRROR with slots to delete and no ack header must refuse");
+    TEST_CHECK(!partial_write, "refused before any write -- not a partial write");
+    TEST_CHECK(strstr(err, "would delete") != NULL, "the refusal names that it would delete slots");
+
+    kiln_cfg_summary_t after[KILN_CFG_MAX_COUNT];
+    uint8_t n_after = kiln_cfg_store_list(after, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before, "nothing was deleted -- count unchanged by the refused restore");
+}
+
+static void test_mirror_delete_wrong_count_refuses_and_writes_nothing(void)
+{
+    TEST_SECTION("backup_import_apply -- MIRROR restore refuses when X-Kiln-Config-Ack-Delete does not "
+                 "exactly match the real delete count, and writes nothing");
+    reset_stub_state();
+    int32_t nonactive_count = 0;
+    mirror_ack_test_setup(&nonactive_count);
+    TEST_CHECK(nonactive_count > 0, "test assumption: at least one non-active slot exists to be deleted");
+
+    kiln_cfg_summary_t before[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(before, KILN_CFG_MAX_COUNT);
+
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],\"kiln_configs\":[]}";
+    kiln_cfg_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    bool partial_write = false;
+    char err[160] = {0};
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MIRROR, false, nonactive_count - 1, true, &plan,
+                                  &partial_write, err, sizeof(err));
+
+    TEST_CHECK(!ok, "MIRROR with a wrong (off-by-one) ack count must refuse");
+    TEST_CHECK(!partial_write, "refused before any write -- not a partial write");
+
+    kiln_cfg_summary_t after[KILN_CFG_MAX_COUNT];
+    uint8_t n_after = kiln_cfg_store_list(after, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before, "nothing was deleted -- count unchanged by the refused restore");
+}
+
+// Also covers HIGH 2: the active marker slot (B) must survive a MIRROR
+// restore even though it is unmatched by the (empty) kiln_configs[] body --
+// kiln_cfg_store_delete() refuses the active slot unconditionally, so the
+// plan must never have queued it, and the commit must succeed rather than
+// failing partway through on that refusal.
+static void test_mirror_delete_correct_count_proceeds_and_keeps_active_slot(void)
+{
+    TEST_SECTION("backup_import_apply -- MIRROR restore with the correct X-Kiln-Config-Ack-Delete count "
+                 "proceeds, deletes every unmatched NON-active slot, and (HIGH 2) never queues the "
+                 "active slot for deletion");
+    reset_stub_state();
+    int32_t nonactive_count = 0;
+    mirror_ack_test_setup(&nonactive_count);
+    TEST_CHECK(nonactive_count > 0, "test assumption: at least one non-active slot exists to be deleted");
+
+    int32_t active_id_before = kiln_cfg_store_get_active_id();
+    char active_name_before[KILN_CFG_NAME_MAX_LEN + 1] = {0};
+    kiln_cfg_summary_t before[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(before, KILN_CFG_MAX_COUNT);
+    for (uint8_t i = 0; i < n_before; i++) {
+        if (before[i].is_active) {
+            strncpy(active_name_before, before[i].name, KILN_CFG_NAME_MAX_LEN);
+        }
+    }
+
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],\"kiln_configs\":[]}";
+    kiln_cfg_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    bool partial_write = false;
+    char err[160] = {0};
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MIRROR, false, nonactive_count, true, &plan,
+                                  &partial_write, err, sizeof(err));
+
+    TEST_CHECK(ok, "MIRROR with the exactly-correct ack count must succeed");
+
+    bool saw_keep_active = false;
+    bool saw_delete_active = false;
+    for (size_t i = 0; i < plan.count; i++) {
+        if (strstr(plan.lines[i], "keep active") != NULL && strstr(plan.lines[i], active_name_before) != NULL) {
+            saw_keep_active = true;
+        }
+        // Matches the literal `delete "%s"` text kiln_cfg_plan_add() emits
+        // for an actual queued deletion (backup_import.c) -- NOT the
+        // "keep active ... (active slot is never deleted)" informational
+        // line above, which also contains the substring "delete" (from
+        // "never deleted") and would otherwise false-positive here.
+        if (strstr(plan.lines[i], "delete \"") != NULL && strstr(plan.lines[i], active_name_before) != NULL) {
+            saw_delete_active = true;
+        }
+    }
+    TEST_CHECK(saw_keep_active, "the plan names the active slot as kept, not queued for deletion");
+    TEST_CHECK(!saw_delete_active, "the active slot never appears in a \"delete\" plan line");
+
+    TEST_CHECK(kiln_cfg_store_get_active_id() == active_id_before,
+              "the active slot itself is untouched (still active, same id) after the mirror restore");
+
+    kiln_cfg_summary_t after[KILN_CFG_MAX_COUNT];
+    uint8_t n_after = kiln_cfg_store_list(after, KILN_CFG_MAX_COUNT);
+    int32_t nonactive_after = 0;
+    bool active_found_after = false;
+    for (uint8_t i = 0; i < n_after; i++) {
+        if (!after[i].is_active) {
+            nonactive_after++;
+        } else if (after[i].id == active_id_before) {
+            active_found_after = true;
+        }
+    }
+    TEST_CHECK(nonactive_after == 0, "every non-active slot was deleted by the mirror restore");
+    TEST_CHECK(active_found_after, "the active slot survives, present and still marked active");
+}
+
+// HIGH 1: backup_import_kiln_configs()'s own commit pass (pass 2) can fail
+// PARTWAY through its create loop -- e.g. the store fills up after an
+// earlier create in the SAME pass already landed. Before this fix,
+// backup_import_apply() only ever set *partial_write_out from ITS OWN two
+// passes (kiln_configs[] vs. profiles/zones), never from a mid-pass failure
+// inside backup_import_kiln_configs() itself, so this case replied 400
+// "nothing changed" while the first create had already committed.
+static void test_kiln_configs_partial_write_set_on_mid_pass_create_failure(void)
+{
+    TEST_SECTION("backup_import_apply -- HIGH 1: a kiln_configs[] restore that creates one slot then "
+                 "fails to create a second (store full) sets partial_write, not a clean refusal");
+    reset_stub_state();
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: kiln_nvs partition is up");
+    mirror_test_trim_to_baseline();
+
+    // Build one real, validly-hashed package from a distinct live state (the
+    // same toggle-byte0 technique test_kiln_configs_restore_create_leaves_
+    // autosave_targeting_the_prior_active_slot() above uses), then remove
+    // its source slot so the board holds no matching identity -- both
+    // create-entries below reuse this SAME package text (only its embedded
+    // name differs, which the create path already disambiguates via
+    // kiln_cfg_unique_name()), so only ONE distinct identity is needed.
+    test_stub_kiln_cfg_export_content_toggle_byte0();
+    int32_t id_src = -1;
+    char reason[160] = {0};
+    int32_t active_before_src = kiln_cfg_store_get_active_id();
+    TEST_CHECK(kiln_cfg_store_save_current("Temp Source For Create", -1, &id_src, reason, sizeof(reason)),
+              "setup: temporary source slot saved (becomes active)");
+    char *pkg_json = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+    TEST_CHECK(pkg_json != NULL, "test scratch alloc");
+    size_t pkg_len = 0;
+    TEST_CHECK(kiln_cfg_store_export_package_json(id_src, pkg_json, KILN_CFG_EXPORT_JSON_MAX_LEN, &pkg_len, reason,
+                                                  sizeof(reason)),
+              "setup: temporary source slot exports a real, validly-hashed package");
+    // Restore active_id so the temp source slot can be deleted (delete
+    // refuses the active slot), then remove it -- the board must hold NO
+    // slot with this identity, or the two create-entries below would match
+    // it instead of creating new slots.
+    TEST_CHECK(kiln_cfg_store_set_active_id_raw(active_before_src, reason, sizeof(reason)),
+              "setup: active_id restored so the temp source slot can be deleted");
+    TEST_CHECK(kiln_cfg_store_delete(id_src, true, reason, sizeof(reason)), "setup: temp source slot removed");
+    // Toggle byte0 back to its pre-toggle value: the filler slots below are
+    // saved via kiln_cfg_store_save_current(), which captures whatever the
+    // stub's "live" export content is AT THAT MOMENT -- if it were left at
+    // the toggled value used for pkg_json above, every filler would share
+    // pkg_json's exact identity (schema+hash), which would make the two
+    // create-entries below match an EXISTING filler by identity (a rename/
+    // no-op) instead of actually creating a new slot, silently defeating
+    // this test's whole "fill to exactly one free slot, then create two"
+    // setup (found by inspecting a DEBUG dump showing both creates as
+    // spurious no-op successes despite the store genuinely being full).
+    test_stub_kiln_cfg_export_content_toggle_byte0();
+
+    // Fill the board to exactly ONE free slot left.
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n_now = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    int free_slots = (int)KILN_CFG_MAX_COUNT - (int)n_now;
+    TEST_CHECK(free_slots >= 1, "test assumption: at least one free slot remains to fill down from");
+    int fillers_needed = free_slots - 1;
+    for (int i = 0; i < fillers_needed; i++) {
+        char name[KILN_CFG_NAME_MAX_LEN + 1];
+        snprintf(name, sizeof(name), "Filler %d", i);
+        int32_t filler_id = -1;
+        TEST_CHECK(kiln_cfg_store_save_current(name, -1, &filler_id, reason, sizeof(reason)),
+                  "setup: filler slot saved to bring the board to exactly one free slot");
+    }
+    uint8_t n_before_restore = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK((int)KILN_CFG_MAX_COUNT - (int)n_before_restore == 1,
+              "test assumption: exactly one free slot remains before the restore");
+
+    char *body = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN * 2 + 256);
+    TEST_CHECK(body != NULL, "test scratch alloc");
+    snprintf(body, KILN_CFG_EXPORT_JSON_MAX_LEN * 2 + 256,
+             "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],"
+             "\"kiln_configs\":[{\"package\":%s},{\"package\":%s}]}",
+             pkg_json, pkg_json);
+
+    kiln_cfg_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    bool partial_write = false;
+    char err[160] = {0};
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, true, &plan, &partial_write, err,
+                                  sizeof(err));
+
+    TEST_CHECK(!ok, "the second create fails once the store is full");
+    TEST_CHECK(partial_write,
+              "HIGH 1: the first create already landed before the second failed -- this must be reported "
+              "as a partial write, not a clean refusal");
+    TEST_CHECK(strstr(err, "kiln_configs[1]") != NULL, "the error names the SECOND entry (index 1) as the "
+                                                       "one that failed at commit");
+
+    uint8_t n_after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before_restore + 1,
+              "exactly one of the two creates landed (the board is now completely full) -- proving the "
+              "partial write actually happened, not merely that the flag was set");
+
+    free(pkg_json);
+    free(body);
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -3411,4 +3715,9 @@ void run_test_backup_import(void)
     test_safety_i_normal_a_absent_key_never_calls_write();
 
     test_export_never_contains_credential_markers();
+
+    test_mirror_delete_absent_ack_refuses_and_writes_nothing();
+    test_mirror_delete_wrong_count_refuses_and_writes_nothing();
+    test_mirror_delete_correct_count_proceeds_and_keeps_active_slot();
+    test_kiln_configs_partial_write_set_on_mid_pass_create_failure();
 }
