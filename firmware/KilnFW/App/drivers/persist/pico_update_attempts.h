@@ -86,21 +86,20 @@ bool pico_update_attempts_record_attempt(uint32_t pair_hash, int slot_tried, uin
  * nothing distinguishes the two slots' likelihood of being correct on a
  * board this ESP has never attempted before.
  *
- * HOOK FOR THE SAFTYFW-SIDE REJECTION (not implemented yet, tracked here
- * deliberately): a parallel SaftyFW change is adding a distinct, definitive
- * "wrong slot" rejection code to the update protocol, which SaftyFW's own
- * bootloader can only really know once it inspects the incoming image
- * against the slot it is about to write. Today, ANY relay failure --
- * wrong-slot or otherwise -- is treated identically (ota_pico_relay's
- * existing failure path, unchanged by this feature) and consumes one
- * attempt from the budget like any other failure. Once that rejection code
- * exists on the wire, the retry-on-wrong-slot behaviour belongs HERE: a
- * relay failure specifically identified as "wrong slot" should retry
- * immediately with pico_update_attempts_next_slot()'s other value WITHOUT
- * calling pico_update_attempts_record_attempt() again (i.e. without
- * consuming budget for a guess that was never given a fair chance to
- * succeed) -- see pico_auto_update_boot.c's attempt_update(), which names
- * this same hook at its ota_pico_relay_start() call site. */
+ * HOOK FOR THE SAFTYFW-SIDE REJECTION (N6, opus review 2026-09-20: this
+ * rejection code EXISTS on the wire already -- Pico update_task.c:244's
+ * state 8 sends it, and the ESP side already names it in safety_link.h:720
+ * -- what is NOT yet implemented is this module wiring into it). Today, ANY
+ * relay failure -- wrong-slot or otherwise -- is treated identically
+ * (ota_pico_relay's existing failure path, unchanged by this feature) and
+ * consumes one attempt from the budget like any other failure. Wiring the
+ * existing wrong-slot code in here would let a relay failure specifically
+ * identified as "wrong slot" retry immediately with
+ * pico_update_attempts_next_slot()'s other value WITHOUT calling
+ * pico_update_attempts_record_attempt() again (i.e. without consuming
+ * budget for a guess that was never given a fair chance to succeed) -- see
+ * pico_auto_update_boot.c's attempt_update(), which names this same hook at
+ * its ota_pico_relay_start() call site. */
 bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot);
 
 /* Marks `pair_hash`'s most recent attempt as a terminal (non-retryable)

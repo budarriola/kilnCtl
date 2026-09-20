@@ -1031,6 +1031,15 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # unconditionally, and KilnFW's own build cannot proceed at all without
     # these two files once they are missing, so a missing arm-none-eabi
     # toolchain here is a hard FAIL, not a soft SKIP.
+    #
+    # N4 (opus review, 2026-09-20): this used to also objcopy each slot ELF
+    # to .bin itself after the ninja build -- redundant with
+    # firmware\SaftyFW\CMakeLists.txt's own POST_BUILD step
+    # (saftyfw_add_slot_executable(), ~line 558), which already runs
+    # ${CMAKE_OBJCOPY} -O binary on every SaftyFW_slotA/SaftyFW_slotB build
+    # and writes the same .bin next to the .elf. That loop is gone; this
+    # check now only builds the ninja targets and verifies the resulting
+    # .bin files exist, same as it always verified for the .elf files.
     $SaftyfwWorktreeDir = Join-Path $WorktreePath "firmware\SaftyFW"
     $SaftyfwBuildDir = Join-Path $SaftyfwWorktreeDir "build"
     $slotABin = Join-Path $SaftyfwBuildDir "SaftyFW_slotA.bin"
@@ -1084,9 +1093,8 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
             if (-not (Test-Path -LiteralPath $pair.Elf)) {
                 Fail "ninja reported success but $($pair.Elf) does not exist -- refusing to report PASS without the real SaftyFW slot artifact."
             }
-            & arm-none-eabi-objcopy -O binary $pair.Elf $pair.Bin
-            if ($LASTEXITCODE -ne 0) {
-                Fail "arm-none-eabi-objcopy failed (exit $LASTEXITCODE) converting $($pair.Elf) to $($pair.Bin)."
+            if (-not (Test-Path -LiteralPath $pair.Bin)) {
+                Fail "ninja reported success but $($pair.Bin) does not exist -- firmware\SaftyFW\CMakeLists.txt's saftyfw_add_slot_executable() POST_BUILD objcopy step should have produced it alongside $($pair.Elf)."
             }
         }
         Write-Host "SaftyFW slot images built and staged: $slotABin, $slotBBin"

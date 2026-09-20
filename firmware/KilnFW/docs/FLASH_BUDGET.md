@@ -608,7 +608,14 @@ single-slot OTA redesign (`docs/OTA_SINGLE_SLOT_PLAN.md`); the current
 `check_00_saftyfw_target_build.ps1` then `check_00_kilnfw_target_build.ps1`:
 
 ```
-KilnCtrl.bin, with both embedded slots (this commit)   2,699,744 B
+KilnCtrl.bin, with both embedded slots (this commit)   ~2,699,744 B (approximate --
+                                                          2,700,336 B measured in
+                                                          worktree C:\wt\picofix_d5uzu7
+                                                          at this branch's HEAD; exact
+                                                          byte count drifts a few
+                                                          hundred bytes commit to
+                                                          commit and is not itself
+                                                          load-bearing)
   SaftyFW_slotA.bin                                       119,308 B
   SaftyFW_slotB.bin                                       119,308 B
   raw embedded payload                                    238,616 B

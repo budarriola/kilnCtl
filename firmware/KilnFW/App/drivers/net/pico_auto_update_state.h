@@ -45,6 +45,31 @@ const char *pico_auto_update_state_reason(void);
  * (required to be, in spirit, when `blocking` is false). */
 void pico_auto_update_state_set_blocking(bool blocking, const char *reason);
 
+/* Review finding F2, owner decision (option c), 2026-09-20: a SEPARATE,
+ * non-blocking verdict for PICO_AUTO_UPDATE_ABANDONED_BUDGET_SPENT. Unlike
+ * the blocking verdict above, this one never refuses a firing start --
+ * readiness_gate.h reads only pico_auto_update_state_is_blocking(), never
+ * this -- it exists purely so /readiness (readiness_http.c) can show the
+ * operator "the last few auto-update attempts failed and the budget is
+ * spent" as a WARNING rather than silently saying nothing, matching the
+ * "advisory, not gating" treatment several other readiness items already
+ * get. Same single-writer-per-boot convention as set_blocking(). */
+bool pico_auto_update_state_is_warning(void);
+
+/* The reason behind a true pico_auto_update_state_is_warning() -- naming the
+ * attempt count and the commit that could not be matched. Never NULL; an
+ * empty string when there is no warning. Points at static storage that only
+ * the boot evaluator writes. */
+const char *pico_auto_update_state_warning_reason(void);
+
+/* Publishes this boot's non-blocking warning verdict. `reason` may be NULL
+ * (or empty) to mean "no warning". Called by pico_auto_update_boot.c only
+ * for the ABANDONED_BUDGET_SPENT outcome; every other outcome leaves this at
+ * its zero-initialized default (no warning), which is correct since this
+ * state is not persisted across boots and each boot's task decides its own
+ * verdict exactly once. */
+void pico_auto_update_state_set_warning(const char *reason);
+
 #ifdef __cplusplus
 }
 #endif

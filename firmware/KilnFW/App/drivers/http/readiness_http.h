@@ -255,9 +255,23 @@ static inline readiness_status_t readiness_ceiling_match_status(bool link_up, bo
  * `blocked` is pico_auto_update_state_is_blocking()'s own live verdict --
  * deliberately not recomputed here (same "one shared predicate, not two
  * that can drift" reasoning as the ceiling-match item immediately above).
- * It reads true only for one of pico_auto_update.h's unrecoverable
- * ABANDONED_* outcomes after the attempt budget is exhausted; a retryable
- * mismatch that auto-update is still working through is NOT blocking. */
+ * It reads true only for one of pico_auto_update.h's remaining unrecoverable
+ * ABANDONED_* outcomes (NO_IMAGE, CHAIN_GAP, PRIOR_FAILED); a retryable
+ * mismatch that auto-update is still working through is NOT blocking, and
+ * (2026-09-20 owner decision, option c) neither is a spent attempt budget
+ * any more -- readiness_http.c's own pico_update rendering block calls this
+ * function directly (check_readiness_gate_display_agreement.py requires the
+ * literal call, not a wrapper around it) and then separately overlays
+ * READY_CANNOT_YET when pico_auto_update_state_is_warning() is true and
+ * `blocked` is false, so the page can show a spent budget without ever
+ * routing that overlay through this predicate. This function is also what
+ * readiness_gate.h consults, so it must never be changed to read the
+ * warning bit -- that would silently turn the warning back into a block.
+ * `warning` itself is pico_auto_update_state_is_warning()'s live verdict:
+ * true only for PICO_AUTO_UPDATE_ABANDONED_BUDGET_SPENT (2026-09-20 owner
+ * decision, option c) -- the budget for this version pair is spent and the
+ * Pico still does not match, but that alone must not brick firing on
+ * otherwise-good hardware. */
 static inline readiness_status_t readiness_pico_update_status(bool blocked)
 {
     return blocked ? READY_NOT_DONE : READY_OK;

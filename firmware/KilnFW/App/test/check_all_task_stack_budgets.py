@@ -707,8 +707,10 @@ CEILING_BYTES = {
     # registering this task (see TASKS["pico_auto_update"]'s own comment for
     # why: ota_http_check_interlocks() does SPI reads/zone snapshots normally
     # run on the 8 KB httpd stack, and this task's declared stack is 4096 B).
-    # 3104 of 4096 B used -- 992 B (24.2%) free on the declared stack. Not
-    # over budget; reported here per the standing instruction not to bump a
+    # Ceiling 3104 B; the tool's own lower bound (indeterminate walk) reads
+    # 692 B honest free (16.9% of 4096 B) on the declared stack -- not the
+    # 992 B / 24.2% an earlier draft of this comment claimed. Not over
+    # budget; reported here per the standing instruction not to bump a
     # stack size just because a checker was newly wired up.
     "pico_auto_update": 3104,
     "boot_button": 1552,

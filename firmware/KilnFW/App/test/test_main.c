@@ -55,6 +55,7 @@ void run_test_kiln_cfg_store(void);
 void run_test_safety_cfg_store(void);
 void run_test_boot_guard(void);
 void run_test_pico_auto_update_decision(void);
+void run_test_pico_auto_update_state(void);
 void run_test_pico_update_attempts(void);
 void run_test_pico_image_identity(void);
 void run_test_pico_image_embedded(void);
@@ -166,6 +167,7 @@ int main(void)
     run_test_safety_cfg_store();
     run_test_boot_guard();
     run_test_pico_auto_update_decision();
+    run_test_pico_auto_update_state();
     run_test_pico_update_attempts();
     run_test_pico_image_identity();
     run_test_pico_image_embedded();

@@ -119,10 +119,13 @@ bool pico_image_embedded_describe(pico_image_embedded_info_t *out);
  * image can never be confirmed as matching by
  * pico_auto_update_identity_matches() (pico_auto_update.h, which requires
  * the Pico's OWN observed dirty flag to read 0), so attempting an update
- * against one would burn the 3-attempt budget every boot and latch
- * pico_auto_update_state_set_blocking(true), refusing every future firing.
- * Pure and NULL-safe (NULL reads as not usable) so it is host-testable
- * without pulling in the ESP-IDF task in pico_auto_update_boot.c. */
+ * against one would burn the 3-attempt budget every boot for no possible
+ * gain (2026-09-20 owner decision, option c: a spent budget is now a
+ * non-blocking /readiness warning rather than a permanent firing refusal,
+ * but it is still a pointless, unwinnable retry loop worth avoiding here
+ * rather than merely tolerating). Pure and NULL-safe (NULL reads as not
+ * usable) so it is host-testable without pulling in the ESP-IDF task in
+ * pico_auto_update_boot.c. */
 static inline bool pico_image_embedded_should_use(const pico_image_embedded_info_t *emb)
 {
     return emb != NULL && emb->usable && !emb->dirty;

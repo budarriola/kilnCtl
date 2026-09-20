@@ -719,13 +719,31 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * PLAN.md's ABANDONED_* causes); an in-progress retry is not blocking. */
     {
         bool blocked = pico_auto_update_state_is_blocking();
+        bool warning = pico_auto_update_state_is_warning();
+        /* check_readiness_gate_display_agreement.py requires this item's
+         * rendered status to be computed by calling readiness_pico_update_
+         * status() directly, not merely by a header helper that wraps it --
+         * so the warning overlay is applied AFTER that call, never in place
+         * of it. readiness_pico_update_status(blocked) alone already gives
+         * READY_NOT_DONE iff blocked, matching the gate's own predicate
+         * exactly; the warning can only ever promote an otherwise-OK result
+         * to READY_CANNOT_YET, never touch a blocked result. */
         readiness_status_t st = readiness_pico_update_status(blocked);
+        if (!blocked && warning) {
+            st = READY_CANNOT_YET;
+        }
         char detail[READINESS_DETAIL_MAX];
-        if (!blocked) {
-            snprintf(detail, sizeof(detail), "%s", "the safety processor's firmware version matches");
-        } else {
+        if (blocked) {
             snprintf(detail, sizeof(detail), "%s",
                      "safety processor firmware VERSION MISMATCH could not be auto-updated");
+        } else if (warning) {
+            /* 2026-09-20 owner decision (option c): budget-spent is a
+             * WARNING, not a block -- see readiness_pico_update_display_
+             * status()'s own comment. pico_auto_update_state_warning_reason()
+             * already names the attempt count and commit. */
+            snprintf(detail, sizeof(detail), "%.190s", pico_auto_update_state_warning_reason());
+        } else {
+            snprintf(detail, sizeof(detail), "%s", "the safety processor's firmware version matches");
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "pico_update", "Safety processor firmware version", st,

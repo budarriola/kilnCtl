@@ -72,28 +72,19 @@ static bool wait_for_peer_identity(uint8_t *commit_buf, uint8_t *out_commit_len,
     return false;
 }
 
-/* One attempt, image already sitting in the pico_img partition (either the
- * manifest path's earlier HTTP upload, or this boot's own embedded-image
- * stage -- see attempt_update()/attempt_update_embedded() below). Claims the
- * SAME cross-processor update mutex the HTTP paths claim, counts the attempt
- * BEFORE handing off (an attempt that starts and then wedges must still
- * consume budget -- otherwise a board that hangs mid-relay retries forever,
- * which is exactly what the budget exists to prevent), and hands the mutex to
- * the relay task on success. Returns true if the relay took ownership.
- *
- * slot_tried: which embedded slot (0=A, 1=B) this attempt used, persisted
- * alongside the attempt count so the NEXT boot's pico_update_attempts_next_slot()
- * can alternate to the other one if this guess was wrong -- see that
- * function's header comment. The manifest (HTTP-staged) path is a single
- * image, not a two-slot pair, so it has no real slot to report; it passes 0
- * as a fixed placeholder and is never read by next_slot() for that pair since
- * a manifest-sourced pair_hash never round-trips through the embedded path. */
-static bool attempt_update_staged(const char *commit_for_log, uint32_t image_length,
-                                  uint32_t image_crc32, uint32_t pair_hash, int slot_tried)
+/* Acquire half of attempt_update_staged() (review finding F1): re-checks the
+ * interlock snapshot (seconds old by the time a caller reaches this point,
+ * and "no firing, no heat" is exactly the kind of fact that can change
+ * underneath a stale read) and claims the SAME cross-processor update mutex
+ * the HTTP paths claim. Split out so a caller that must stage bytes into
+ * pico_img BEFORE it has anything to hand to the relay -- the embedded path,
+ * whose staging write is itself only safe under this same mutex per
+ * pico_img_stage.h's "not reentrant and not locked internally" contract --
+ * can claim it first and release it on any subsequent failure, rather than
+ * staging unlocked and claiming only once staging has already finished.
+ * Returns false (nothing claimed) if the interlock or the mutex refuses. */
+static bool attempt_update_acquire(void)
 {
-    /* Re-check, immediately before claiming: the interlock snapshot taken at
-     * decision time is seconds old by now, and "no firing, no heat" is
-     * exactly the kind of fact that can change underneath a stale read. */
     char reason[OTA_INTERLOCK_REASON_MAX];
     ota_interlock_result_t gate = ota_http_check_interlocks(false, reason, sizeof(reason));
     if (gate != OTA_INTERLOCK_OK) {
@@ -105,7 +96,28 @@ static bool attempt_update_staged(const char *commit_for_log, uint32_t image_len
         ESP_LOGW(TAG, "update attempt stood down: an update is already in progress");
         return false;
     }
+    return true;
+}
 
+/* Post-acquire half of the old attempt_update_staged(): the mutex from
+ * attempt_update_acquire() is already held on entry. Counts the attempt
+ * BEFORE handing off (an attempt that starts and then wedges must still
+ * consume budget -- otherwise a board that hangs mid-relay retries forever,
+ * which is exactly what the budget exists to prevent), and hands the mutex to
+ * the relay task on success. Returns true if the relay took ownership.
+ * Releases the mutex itself (ota_http_update_end()) on EVERY failure return
+ * path -- the caller must not call it again.
+ *
+ * slot_tried: which embedded slot (0=A, 1=B) this attempt used, persisted
+ * alongside the attempt count so the NEXT boot's pico_update_attempts_next_slot()
+ * can alternate to the other one if this guess was wrong -- see that
+ * function's header comment. The manifest (HTTP-staged) path is a single
+ * image, not a two-slot pair, so it has no real slot to report; it passes 0
+ * as a fixed placeholder and is never read by next_slot() for that pair since
+ * a manifest-sourced pair_hash never round-trips through the embedded path. */
+static bool attempt_update_staged_locked(const char *commit_for_log, uint32_t image_length,
+                                         uint32_t image_crc32, uint32_t pair_hash, int slot_tried)
+{
     uint32_t new_count = 0;
     if (!pico_update_attempts_record_attempt(pair_hash, slot_tried, &new_count)) {
         /* The counter did NOT verify (pico_update_attempts.c already logged
@@ -161,10 +173,17 @@ static bool attempt_update_staged(const char *commit_for_log, uint32_t image_len
 /* Manifest (HTTP-staged) path: the image is already sitting in pico_img from
  * an earlier upload, described by pico_image_source_describe(). Not a
  * two-slot pair, so slot_tried is the fixed placeholder 0 -- see
- * attempt_update_staged()'s header comment. */
+ * attempt_update_staged_locked()'s header comment. Nothing is staged here (the
+ * bytes were staged earlier, by the HTTP upload handler, itself already under
+ * this same mutex per ota_http_pico.c), so acquire-then-stage ordering does
+ * not apply -- only the relay hand-off needs the mutex. */
 static bool attempt_update(const pico_image_source_info_t *img, uint32_t pair_hash)
 {
-    return attempt_update_staged(img->commit, img->image_length, img->image_crc32, pair_hash, 0);
+    if (!attempt_update_acquire()) {
+        return false;
+    }
+    return attempt_update_staged_locked(img->commit, img->image_length, img->image_crc32, pair_hash,
+                                        0);
 }
 
 /* Embedded path: stages the chosen slot's bytes (already resident in this
@@ -173,34 +192,53 @@ static bool attempt_update(const pico_image_source_info_t *img, uint32_t pair_ha
  * handler uses (pico_img_stage.h), then hands off exactly like the manifest
  * path. Written directly from the rodata pointer in one call -- no chunking
  * loop and no stack buffer, since the whole image is already addressable
- * memory (unlike the HTTP path, which streams off a socket and must chunk). */
+ * memory (unlike the HTTP path, which streams off a socket and must chunk).
+ *
+ * Review finding F1: pico_img_stage.h's own contract says it is "NOT
+ * reentrant and not locked internally: exactly one context may be staging
+ * into pico_img at a time," relying entirely on the cross-processor update
+ * mutex every OTHER writer already claims first. This function used to stage
+ * BEFORE claiming that mutex, so a concurrent HTTP upload to the Pico-OTA
+ * route could interleave its own erase/write into the same partition. The
+ * mutex is now claimed via attempt_update_acquire() before the first byte is
+ * staged, and released on every staging-failure return path below -- nothing
+ * between the acquire and the eventual attempt_update_staged_locked() call
+ * may return without either releasing it or handing it to the relay. */
 static bool attempt_update_embedded(const pico_image_embedded_info_t *emb, int slot,
                                     uint32_t pair_hash)
 {
+    if (!attempt_update_acquire()) {
+        return false;
+    }
+
     pico_img_stage_ctx_t ctx;
     char fail_reason[96];
     fail_reason[0] = '\0';
     if (!pico_img_stage_begin(&ctx, emb->slot_len[slot], fail_reason, sizeof(fail_reason), NULL)) {
         ESP_LOGE(TAG, "embedded slot %c could not be staged: %s", slot == 0 ? 'A' : 'B',
                  fail_reason);
+        ota_http_update_end();
         return false;
     }
     if (!pico_img_stage_write_chunk(&ctx, emb->slot_data[slot], emb->slot_len[slot], fail_reason,
                                     sizeof(fail_reason))) {
         ESP_LOGE(TAG, "embedded slot %c could not be staged: %s", slot == 0 ? 'A' : 'B',
                  fail_reason);
+        ota_http_update_end();
         return false;
     }
     uint32_t crc = 0;
     if (!pico_img_stage_finish(&ctx, &crc)) {
         /* Non-fatal per pico_img_stage.h's contract: the bytes ARE staged and
          * usable this boot, the manifest just won't survive to describe them
-         * to a later boot. Proceed. */
+         * to a later boot. Proceed -- the mutex stays held into the relay
+         * hand-off below, same as every other non-fatal path here. */
         ESP_LOGW(TAG, "embedded slot %c staged but its manifest could not be persisted -- usable "
                       "this boot only",
                  slot == 0 ? 'A' : 'B');
     }
-    return attempt_update_staged(emb->commit, (uint32_t)emb->slot_len[slot], crc, pair_hash, slot);
+    return attempt_update_staged_locked(emb->commit, (uint32_t)emb->slot_len[slot], crc, pair_hash,
+                                        slot);
 }
 
 static void pico_auto_update_task(void *arg)
@@ -352,7 +390,30 @@ static void pico_auto_update_task(void *arg)
         break;
     }
 
-    default: /* every ABANDONED_* */
+    case PICO_AUTO_UPDATE_ABANDONED_BUDGET_SPENT: {
+        /* Review finding F2, owner decision (option c), 2026-09-20: budget-
+         * spent must NOT block firing. Unlike ABANDONED_NO_IMAGE/CHAIN_GAP/
+         * PRIOR_FAILED, this cause can be produced entirely by uncooperative
+         * hardware around an otherwise-good image (a bad cable, a wedged
+         * Pico bootloader) -- latching a permanent, un-escapable firing
+         * refusal for that is worse than the status quo before this feature
+         * existed. Logged at WARN, not ERROR, and surfaced as a non-blocking
+         * /readiness warning (pico_auto_update_state_set_warning()) naming
+         * the attempt count and the embedded/expected commit, rather than
+         * pico_auto_update_state_set_blocking(true). The board keeps firing
+         * on whatever SaftyFW it already has. */
+        char warn_reason[PICO_AUTO_UPDATE_STATE_REASON_MAX];
+        snprintf(warn_reason, sizeof(warn_reason),
+                "Pico update budget spent (%lu/%u attempts) against %.24s",
+                (unsigned long)in.attempt_count, (unsigned)PICO_AUTO_UPDATE_ATTEMPT_BUDGET,
+                in.expected_commit != NULL ? in.expected_commit : "");
+        ESP_LOGW(TAG, "%s -- %s", why, warn_reason);
+        pico_auto_update_state_set_blocking(false, NULL);
+        pico_auto_update_state_set_warning(warn_reason);
+        break;
+    }
+
+    default: /* the remaining ABANDONED_* causes: NO_IMAGE, CHAIN_GAP, PRIOR_FAILED */
         ESP_LOGE(TAG, "automatic Pico update abandoned: %s%s%s", why,
                  (use_embedded ? emb.reason[0] : img.reason[0]) != '\0' ? " -- " : "",
                  use_embedded ? emb.reason : img.reason);

@@ -82,6 +82,11 @@ try {
         # test_boot_guard.c immediately above; no fake-body collision, so it
         # joins this combined executable rather than needing its own).
         (Join-Path $testDir "test_pico_auto_update_decision.c"),
+        # F2 (opus review, 2026-09-20): the shared blocking/warning state
+        # module pico_auto_update_boot.c's ABANDONED_BUDGET_SPENT case now
+        # writes into -- see that file's own doc comment for why the boot
+        # switch itself is not host-tested.
+        (Join-Path $testDir "test_pico_auto_update_state.c"),
         (Join-Path $testDir "test_pico_update_attempts.c"),
         # G2's shared scanner: the build-identity record a SaftyFW image
         # carries about itself. Pure, freestanding, and compiled into BOTH

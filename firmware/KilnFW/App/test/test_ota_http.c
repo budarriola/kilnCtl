@@ -2455,6 +2455,48 @@ static void test_pico_img_stage_write_chunk_refuses_overrun(void)
 }
 
 // ---------------------------------------------------------------------------
+// N5 (opus review, 2026-09-20): content_len over the fake pico_img
+// partition's 1 MiB size must be refused as TOO_LARGE at the
+// pico_img_stage_begin() level AND as HTTP 400 at the full
+// ota_pico_do_stage() level -- not just one or the other. s_fake_pico_img_partition
+// above is exactly 0x100000 (1 MiB); 0x100001 is one byte past it.
+
+static void test_pico_img_stage_begin_refuses_oversize(void)
+{
+    TEST_SECTION("pico_img_stage_begin -- content_len past the partition size is TOO_LARGE (N5)");
+    pico_img_stage_ctx_t ctx;
+    char fail_reason[96];
+    fail_reason[0] = '\0';
+    pico_img_stage_begin_result_t result = PICO_IMG_STAGE_BEGIN_OK; // poisoned
+    bool ok = pico_img_stage_begin(&ctx, 0x100001u, fail_reason, sizeof(fail_reason), &result);
+    TEST_CHECK(!ok, "begin() refuses a total_len larger than the staging partition");
+    TEST_CHECK(result == PICO_IMG_STAGE_BEGIN_TOO_LARGE, "out-result names TOO_LARGE specifically");
+    TEST_CHECK(fail_reason[0] != '\0', "a non-empty failure reason is reported");
+}
+
+static void test_ota_pico_do_stage_refuses_oversize_with_http_400(void)
+{
+    TEST_SECTION("ota_pico_do_stage -- an oversize Content-Length is refused with HTTP 400, not 500 (N5)");
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 0x100001u; // one byte past s_fake_pico_img_partition's 1 MiB
+
+    ota_pico_do_stage(&req, "10.0.0.1");
+
+    TEST_CHECK(s_last_err_code == 400,
+              "an oversize image is a CLIENT error (400), not a board-side failure (500) -- "
+              "review finding D5's TOO_LARGE-vs-everything-else distinction, exercised end to end "
+              "through the real handler rather than only at pico_img_stage_begin() in isolation");
+
+    ota_http_safety = NULL; // restore -- every other test in this file expects ota_http_safety == NULL
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -2542,6 +2584,8 @@ void run_test_ota_http(void)
 
     test_pico_img_stage_offset_and_crc_bookkeeping();
     test_pico_img_stage_write_chunk_refuses_overrun();
+    test_pico_img_stage_begin_refuses_oversize();
+    test_ota_pico_do_stage_refuses_oversize_with_http_400();
 }
 
 int main(void)
