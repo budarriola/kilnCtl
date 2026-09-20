@@ -41,11 +41,11 @@ Two independent input shapes are accepted -- see ``load_bytes()``:
 from __future__ import annotations
 
 import csv
-import dataclasses
+import enum
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 from . import kilnlink_codec
 from .protocol import (
@@ -55,6 +55,8 @@ from .protocol import (
     FRAME_ESC_XOR,
     HEADER_LEN,
     UART_PROTO_MAX_PAYLOAD,
+    UART_TASK_ID_LOG,
+    UART_TASK_ID_SAFETY,
     LogLevel,
     MsgType,
     crc16_ccitt_false,
@@ -85,7 +87,6 @@ __all__ = [
 # module defines its own, separate, three-member enum rather than extending
 # protocol.Device and risking that other module's deliberate omission.
 # ---------------------------------------------------------------------------
-import enum
 
 
 class LinkDevice(enum.IntEnum):
@@ -94,9 +95,10 @@ class LinkDevice(enum.IntEnum):
     SAFETY = 2
 
 
-#: uart_task_ids.h -- the only two task ids that matter on this link.
-UART_TASK_ID_LOG = 5
-UART_TASK_ID_SAFETY = 7
+# UART_TASK_ID_LOG / UART_TASK_ID_SAFETY are re-exported from
+# kilnctrl.protocol above rather than restated here: that module is the
+# maintained Python mirror of uart_task_ids.h, so a value bumped there can
+# never leave this decoder reading a stale copy.
 
 #: Frame ids (LINK_PROTOCOL.md secs 4/6), name only -- for the readable
 #: timeline. Not every id here has a structured decoder below; anything
@@ -117,16 +119,32 @@ CMD_NAMES: dict[int, str] = {
     0x17: "ROLLBACK",
     0x18: "ANNOUNCE_REBOOT",
     0x19: "SET_CT_CAL",
-    0x1A: "CT_CAL (Frame G)",
+    0x1A: "CT_CAL / GET_CT_CAL (Frame G)",
+    0x1B: "SET_LOG_LEVEL",
+    0x1C: "SET_PARAM",
+    0x1D: "COMMIT_CONFIG",
+    0x1E: "PARAM",
+    0x1F: "CONFIG_PAGE",
+    0x20: "COMMIT_CONFIG_REJECTED",
     0x21: "INJECT_TC",
     0x22: "GET_CT_CAL",
+    0x23: "GET_PARAM",
+    0x24: "GET_CONFIG_PAGE",
     0x25: "ROLLBACK_RESULT",
     0x26: "CT_AUTO_ZERO_BEGIN",
     0x27: "GET_CT_AUTO_ZERO",
     0x28: "CT_AUTO_ZERO_STATUS (Frame H)",
     0x29: "REBOOT",
     0x2A: "REBOOT_RESULT",
+    0x2B: "GET_STACK_MARGIN",
+    0x2C: "STACK_MARGIN",
+    0x2D: "APPLY_CONFIG_VOLATILE",
 }
+# Every KILNLINK_*_CMD id defined in firmware/CommonFW/include/kilnlink/ must
+# appear above; tests/test_kilnlink_capture.py parses those headers and fails
+# if one is missing, so a new firmware command cannot silently decode as
+# UNKNOWN(0x..) here. Ids without a structured decoder below still get their
+# name plus a raw hex payload dump, which is the deliberate fallback.
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +406,10 @@ def _decode_ct_auto_zero_status(payload: bytes) -> dict:
 def _decode_inject_tc(payload: bytes) -> dict:
     if len(payload) != 11:
         raise ValueError(f"INJECT_TC must be 11 bytes, got {len(payload)}")
-    valid, tc_c, cj_c, fault_bits = struct.unpack_from("<Bffb", payload, 1)
+    # fault_bits is uint8_t in kilnlink_inject_tc.h (SAFETY_THERMO_FAULT_*
+    # bits) -- unpack unsigned, or a mask with bit 7 set reads as a negative
+    # number in the timeline.
+    valid, tc_c, cj_c, fault_bits = struct.unpack_from("<BffB", payload, 1)
     return {"valid": bool(valid), "tc_c": tc_c, "cj_c": cj_c, "fault_bits": fault_bits}
 
 
@@ -474,6 +495,11 @@ def decode_payload(src_task: int, dst_task: int, payload: bytes) -> "tuple[Optio
 
     if cmd == 0x0B and len(payload) == 1:
         return "GET_FW_VERSION (request)", {}, None
+    # KILNLINK_GET_CT_CAL_CMD == KILNLINK_CT_CAL_CMD == 0x1A (uart_task_ids.h
+    # line 1025): the 1-byte request and the 28-byte reply share one id, same
+    # as 0x0B above.
+    if cmd == 0x1A and len(payload) == 1:
+        return "GET_CT_CAL (request)", {}, None
 
     decoder = _CMD_DECODERS.get(cmd)
     if decoder is None:
@@ -630,8 +656,13 @@ def _iter_spans(data: bytes):
     """Yield ``(start_offset, end_offset, body, kind)`` for every span this
     stream implies, where ``kind`` is one of:
 
-    * ``"garbage"`` -- bytes seen before the first delimiter, or after the
-      last one with no closing delimiter (an incomplete tail).
+    * ``"garbage"`` -- bytes seen before the first delimiter (the capture
+      started mid-frame, or the analyzer picked up line noise).
+    * ``"tail"`` -- bytes after the last delimiter with no closing delimiter:
+      a frame that was still arriving when the capture stopped. Reported as
+      TRUNCATED specifically, never merged into "garbage" -- "the capture
+      ended mid-frame" and "these bytes were never part of a frame" are
+      different diagnoses.
     * ``"empty"`` -- a zero-length span between two adjacent delimiters
       (back-to-back DELIMs are just noise, per kilnlink_frame.c / the
       firmware's own FrameDecoder -- not reported as an error).
@@ -655,7 +686,7 @@ def _iter_spans(data: bytes):
 
     last = delims[-1]
     if last + 1 < len(data):
-        yield (last + 1, len(data), data[last + 1 :], "garbage")
+        yield (last + 1, len(data), data[last + 1 :], "tail")
 
 
 def decode_capture(data: bytes) -> list[CapturedFrame]:
@@ -671,15 +702,19 @@ def decode_capture(data: bytes) -> list[CapturedFrame]:
     for start, end, body, kind in _iter_spans(data):
         if kind == "empty":
             continue
-        if kind == "garbage":
-            records.append(
-                CapturedFrame(
-                    offset=start,
-                    end_offset=end,
-                    ok=False,
-                    error=f"{end - start} byte(s) of non-frame data (no enclosing delimiter)",
-                    raw_stuffed=body,
+        if kind in ("garbage", "tail"):
+            if kind == "tail":
+                why = (
+                    f"TRUNCATED: capture ends mid-frame -- {end - start} byte(s) "
+                    f"follow the last delimiter with no closing delimiter"
                 )
+            else:
+                why = (
+                    f"{end - start} byte(s) of non-frame data before the first "
+                    f"delimiter (no enclosing delimiter)"
+                )
+            records.append(
+                CapturedFrame(offset=start, end_offset=end, ok=False, error=why, raw_stuffed=body)
             )
             continue
         try:

@@ -12,6 +12,7 @@ recover and keep decoding the frames after it.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 
@@ -152,10 +153,12 @@ def test_truncated_tail_fixture_reports_partial_frame_not_silence():
     assert records[0].ok
     assert not records[1].ok
     assert records[1].offset > records[0].offset
-    # Whatever the specific reason (too-short header, truncated payload, or
-    # an unterminated escape from the mid-stream cut), it must be reported,
-    # not empty.
-    assert records[1].error
+    # A capture that stopped mid-frame must be reported as TRUNCATED
+    # specifically -- not as the same "non-frame data" record that bytes
+    # before the FIRST delimiter get. They are different diagnoses.
+    assert "TRUNCATED" in records[1].error
+    assert "capture ends mid-frame" in records[1].error
+    assert records[1].end_offset == len(data)
 
 
 def test_garbage_before_first_delimiter_is_reported():
@@ -412,12 +415,14 @@ def test_decode_rollback_and_reboot_result():
 
 
 def test_decode_inject_tc():
-    payload = __import__("struct").pack("<BBffb", 0x21, 1, 123.4, 25.0, -2)
+    # fault_bits is uint8_t in kilnlink_inject_tc.h -- a mask with bit 7 set
+    # must read as 0xFE, never as -2 (it is a SAFETY_THERMO_FAULT_* bitfield).
+    payload = __import__("struct").pack("<BBffB", 0x21, 1, 123.4, 25.0, 0xFE)
     name, decoded, err = kc.decode_payload(7, 7, payload)
     assert err is None
     assert decoded["valid"] is True
     assert decoded["tc_c"] == pytest.approx(123.4)
-    assert decoded["fault_bits"] == -2
+    assert decoded["fault_bits"] == 0xFE
 
 
 def test_decode_log_unknown_level_falls_back_to_hex():
@@ -427,3 +432,133 @@ def test_decode_log_unknown_level_falls_back_to_hex():
     assert name == "LOG"
     assert decoded["level_name"] == "0xEE"
     assert decoded["message"] == "hi"
+
+
+# ---------------------------------------------------------------------------
+# Drift guards against the C, which is authoritative for this wire format.
+#
+# This module is the FOURTH consumer of the kilnlink wire format (the two
+# firmwares, kilnctrl.protocol, and this decoder). The three tests below
+# read the firmware headers themselves rather than a prose doc, and fail
+# hard -- never skip -- if a header is missing, so they cannot go quietly
+# vacuous the way a `if not path.is_file(): skipTest(...)` guard would.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+KILNLINK_INCLUDE = REPO_ROOT / "firmware" / "CommonFW" / "include" / "kilnlink"
+UART_PROTOCOL_H = (
+    REPO_ROOT / "firmware" / "hwAbstraction" / "esp" / "uart" / "uart_protocol.h"
+)
+
+
+def test_cmd_names_covers_every_kilnlink_cmd_id_defined_in_firmware():
+    assert KILNLINK_INCLUDE.is_dir(), f"missing firmware headers at {KILNLINK_INCLUDE}"
+    pattern = re.compile(r"#define\s+(KILNLINK_[A-Z0-9_]*CMD[A-Z0-9_]*)\s+0x([0-9A-Fa-f]+)u?")
+    defined: dict[int, set] = {}
+    for header in sorted(KILNLINK_INCLUDE.glob("*.h")):
+        for name, hexval in pattern.findall(header.read_text(encoding="utf-8", errors="replace")):
+            defined.setdefault(int(hexval, 16), set()).add(name)
+    assert defined, "parsed no KILNLINK_*_CMD defines -- the regex or the headers moved"
+    missing = {f"0x{cid:02X}": sorted(names) for cid, names in defined.items()
+               if cid not in kc.CMD_NAMES}
+    assert not missing, (
+        "kilnlink_capture.CMD_NAMES is missing firmware command id(s); they would "
+        f"decode as UNKNOWN(0x..) in a capture timeline: {missing}"
+    )
+
+
+def test_link_device_enum_matches_uart_proto_device_t():
+    assert UART_PROTOCOL_H.is_file(), f"missing firmware header at {UART_PROTOCOL_H}"
+    text = UART_PROTOCOL_H.read_text(encoding="utf-8", errors="replace")
+    found = dict(
+        (name, int(value))
+        for name, value in re.findall(r"UART_PROTO_DEVICE_([A-Z]+)\s*=\s*(\d+)", text)
+    )
+    assert found, "parsed no UART_PROTO_DEVICE_* values from uart_protocol.h"
+    assert found == {d.name: int(d) for d in kc.LinkDevice}, (
+        f"LinkDevice {[(d.name, int(d)) for d in kc.LinkDevice]} has drifted from "
+        f"uart_proto_device_t {found}"
+    )
+    # The reason this enum is local at all: protocol.Device deliberately omits
+    # SAFETY, and test_link_hub_routing.py pins that omission. If that ever
+    # changes, this local enum should be retired rather than left to drift.
+    from kilnctrl.protocol import Device
+
+    assert "SAFETY" not in Device.__members__
+
+
+def test_task_ids_are_the_protocol_modules_own_not_a_local_copy():
+    from kilnctrl import protocol
+
+    assert kc.UART_TASK_ID_LOG is protocol.UART_TASK_ID_LOG
+    assert kc.UART_TASK_ID_SAFETY is protocol.UART_TASK_ID_SAFETY
+
+
+# ---------------------------------------------------------------------------
+# Decode the SHARED CommonFW vectors -- the same JSON the C host tests and
+# kilnlink_codec.py are checked against. This is what makes "the decoders are
+# the exact inverse of the C encoders" a measured claim rather than an
+# inference from the Python encoders alone (those could be wrong in the same
+# direction as the decoder and the round-trip would still close).
+# ---------------------------------------------------------------------------
+
+VECTORS_DIR = REPO_ROOT / "firmware" / "CommonFW" / "test" / "vectors"
+
+#: vector file -> (field container key or None for flat, bytes key)
+_VECTOR_FILES = {
+    "status_vectors.json": (None, "payload_hex"),
+    "context_vectors.json": (None, "payload_hex"),
+    "fw_version_vectors.json": (None, "payload_hex"),
+    "diag_vectors.json": ("fields", "bytes_hex"),
+    "trip_vectors.json": ("fields", "bytes_hex"),
+    "ceiling_vectors.json": ("fields", "bytes_hex"),
+    "clear_trip_vectors.json": ("fields", "bytes_hex"),
+    "set_clock_vectors.json": ("fields", "bytes_hex"),
+    "set_config_vectors.json": ("fields", "bytes_hex"),
+    "get_fw_version_vectors.json": ("fields", "bytes_hex"),
+}
+
+#: Fields whose vector spelling is not the decoder's (enum names vs numbers,
+#: a different key, or a value this decoder deliberately does not surface).
+_VECTOR_SKIP_FIELDS = {"name", "note", "_comment", "boot_reason", "state", "flags",
+                       "zones", "zone_count", "current_a", "dirty"}
+
+
+@pytest.mark.parametrize("filename", sorted(_VECTOR_FILES))
+def test_decoders_match_commonfw_vectors(filename):
+    import json
+
+    path = VECTORS_DIR / filename
+    assert path.is_file(), f"missing shared CommonFW vector file {path}"
+    container_key, bytes_key = _VECTOR_FILES[filename]
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    vectors = doc["vectors"]
+    assert vectors, f"{filename} has no vectors"
+
+    for vec in vectors:
+        payload = bytes.fromhex(vec[bytes_key])
+        name, decoded, err = kc.decode_payload(
+            kc.UART_TASK_ID_SAFETY, kc.UART_TASK_ID_SAFETY, payload
+        )
+        assert err is None, f"{filename}:{vec.get('name')} failed to decode: {err}"
+        assert decoded is not None
+        fields = vec[container_key] if container_key else vec
+        compared = 0
+        for key, expected in fields.items():
+            if key in _VECTOR_SKIP_FIELDS or key == bytes_key or key not in decoded:
+                continue
+            actual = decoded[key]
+            if isinstance(expected, str) and expected in ("NaN", "Infinity", "-Infinity"):
+                expected = float(expected.replace("Infinity", "inf"))
+            if isinstance(expected, float):
+                assert actual == pytest.approx(expected, nan_ok=True), (
+                    f"{filename}:{vec.get('name')}: {key} {actual} != {expected}"
+                )
+            else:
+                assert actual == expected, (
+                    f"{filename}:{vec.get('name')}: {key} {actual!r} != {expected!r}"
+                )
+            compared += 1
+        # Non-vacuity: a vector that compared nothing would pass silently.
+        if len(payload) > 1:
+            assert compared > 0, f"{filename}:{vec.get('name')} compared no fields"
