@@ -4,28 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-bool ui_page_home_kiln_suffix_visible(uint8_t config_count)
-{
-    return config_count >= 2;
-}
-
-void ui_page_home_append_kiln_suffix(char *status_buf, size_t status_buf_cap, uint8_t config_count,
-                                      bool has_active_name, const char *active_name)
-{
-    if (!ui_page_home_kiln_suffix_visible(config_count)) {
-        return;
-    }
-    size_t used = strlen(status_buf);
-    if (used >= status_buf_cap) {
-        return;
-    }
-    if (has_active_name && active_name != NULL) {
-        snprintf(status_buf + used, status_buf_cap - used, "  Kiln: %s", active_name);
-    } else {
-        snprintf(status_buf + used, status_buf_cap - used, "  Kiln: (none)");
-    }
-}
-
 int ui_page_home_rail_duty_pct(float duty_fraction)
 {
     if (isnan(duty_fraction)) {

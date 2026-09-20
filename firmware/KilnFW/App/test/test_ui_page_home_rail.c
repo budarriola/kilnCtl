@@ -18,31 +18,6 @@ void run_test_ui_page_home_rail(void)
         TEST_CHECK(ui_page_home_kiln_suffix_visible(10) == true, "10 configs: visible");
     }
 
-    TEST_SECTION("ui_page_home_rail: append_kiln_suffix");
-    {
-        char buf[64];
-
-        // 0 configs -- suffix omitted entirely, base text untouched.
-        strcpy(buf, "WiFi: OK");
-        ui_page_home_append_kiln_suffix(buf, sizeof(buf), 0, true, "Bisque");
-        TEST_CHECK(strcmp(buf, "WiFi: OK") == 0, "0 configs: base text unchanged");
-
-        // 1 config -- still omitted, even with an active name available.
-        strcpy(buf, "WiFi: OK");
-        ui_page_home_append_kiln_suffix(buf, sizeof(buf), 1, true, "Bisque");
-        TEST_CHECK(strcmp(buf, "WiFi: OK") == 0, "1 config: base text unchanged");
-
-        // 2 configs, active name resolved -- must name it (not "(none)").
-        strcpy(buf, "WiFi: OK");
-        ui_page_home_append_kiln_suffix(buf, sizeof(buf), 2, true, "Bisque");
-        TEST_CHECK(strcmp(buf, "WiFi: OK  Kiln: Bisque") == 0, "2 configs, active: names it");
-
-        // 2 configs, nothing currently active -- falls back to "(none)".
-        strcpy(buf, "WiFi: OK");
-        ui_page_home_append_kiln_suffix(buf, sizeof(buf), 2, false, NULL);
-        TEST_CHECK(strcmp(buf, "WiFi: OK  Kiln: (none)") == 0, "2 configs, no active: (none)");
-    }
-
     TEST_SECTION("ui_page_home_rail: duty_pct");
     {
         TEST_CHECK(ui_page_home_rail_duty_pct(0.0f) == 0, "0.0 -> 0");

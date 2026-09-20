@@ -25,26 +25,26 @@ extern "C" {
 #endif
 
 /* True only when the "  Kiln: ..." suffix should be appended to the home
- * page's status line at all -- config_count is whatever
- * kiln_cfg_store_list() returned (a plain count, 0..KILN_CFG_MAX_COUNT).
+ * page's status line at all -- config_count is what kiln_cfg_store_count()
+ * returned (a plain count, 0..KILN_CFG_MAX_COUNT).
  * With 0 or 1 configs saved, the suffix is entirely redundant (there is
  * either nothing to name or exactly one board-wide default), so it is
- * dropped rather than shown as "(none)" or the lone name. */
-bool ui_page_home_kiln_suffix_visible(uint8_t config_count);
-
-/* Appends the "  Kiln: <name>" (or "  Kiln: (none)" if config_count >= 2
- * but nothing is currently active) suffix onto `status_buf` in place, IFF
- * ui_page_home_kiln_suffix_visible(config_count) is true. `status_buf` must
- * already hold the base status text and be NUL-terminated; `status_buf_cap`
- * is its full buffer capacity. `has_active_name` is true when the caller
- * successfully resolved the active id to a name (kiln_cfg_store_get_name()
- * succeeded); `active_name` is only read when `has_active_name` is true.
- * When config_count < 2, `status_buf` is left completely unmodified --
- * this is the only function in this file that mutates a caller buffer,
- * matching ui_page_home_graph.c's precedent of keeping all other helpers
- * pure computations with no side effects. */
-void ui_page_home_append_kiln_suffix(char *status_buf, size_t status_buf_cap, uint8_t config_count,
-                                      bool has_active_name, const char *active_name);
+ * dropped rather than shown as "(none)" or the lone name.
+ *
+ * The caller formats and appends the suffix text itself rather than
+ * calling a helper for it: ui_home_refresh_cb() is the LVGL task's
+ * deepest known dispatch target, and one extra call frame on that path
+ * measured +80 B in check_all_task_stack_budgets.ps1 against a 4880 B
+ * ceiling with no headroom left -- so only the DECISION lives here, and
+ * it is `static inline` (not an out-of-line call into ui_page_home_rail.c)
+ * for the same reason: this build has no LTO, so a cross-TU call to a
+ * three-token predicate would cost ui_home_refresh_cb() another frame's
+ * worth of spill on that same ceiling. The host test includes this header,
+ * so the threshold is still covered by exactly one tested definition. */
+static inline bool ui_page_home_kiln_suffix_visible(uint8_t config_count)
+{
+    return config_count >= 2;
+}
 
 /* Clamps a duty fraction (0.0..1.0, but may arrive out of range from a
  * stale/degenerate snapshot) to an integer percent in [0, 100]. NaN maps to
