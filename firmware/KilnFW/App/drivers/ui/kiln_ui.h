@@ -79,9 +79,18 @@ const char *kiln_ui_current_page(void);
  * Prev/Next press silently changes every tap target on the screen and the
  * last dump on record becomes wrong, which is worse than no dump at all.
  *
- * Safe to call any time; does nothing if no screen is loaded yet. Intended
- * for bench/diagnostic use, not for anything on a hot path -- see the volume
- * note on kiln_ui_show()'s own dump. */
+ * NOT safe to call from any task: this recurses the live LVGL tree and
+ * calls ESP_LOGI at every node, which only fits on lvgl_port_task's 8192 B
+ * stack (bench-reproduced IllegalInstruction panic, exc_task='touch_uart_
+ * brid', 2026-09-19, when a caller on a smaller stack called this
+ * directly). Callers on any other task must request the dump instead,
+ * via lvgl_port_request_tap_dump(), which flags lvgl_port_task to run this
+ * function on its own next loop tick. This function itself is only ever
+ * meant to be called from lvgl_port_task (or another caller already known
+ * to be running on that task's stack with sole LVGL ownership). Does
+ * nothing if no screen is loaded yet. Intended for bench/diagnostic use,
+ * not for anything on a hot path -- see the volume note on
+ * kiln_ui_show()'s own dump. */
 void kiln_ui_log_tap_targets(void);
 
 /* Turns the AUTOMATIC tap-target dump inside kiln_ui_show() on/off -- off by
@@ -120,9 +129,17 @@ typedef struct {
  * written. If the walk finds more than `max` targets, `*truncated` (may be
  * NULL) is set true and the rest are dropped -- callers sizing `out` for a
  * wire reply should check it rather than assume `out` saw everything.
- * Read-only tree walk, so -- like kiln_ui_log_tap_targets() it wraps -- it is
- * called directly from the UART bridge task (uart_bridge.c), not marshalled
- * onto lvgl_port_task. */
+ * Called directly from UART_TASK_ID_UI_TEST's own task
+ * (ui_test_uart_bridge, uart_bridge_ui_test.c, 8192 B stack), NOT marshalled
+ * onto lvgl_port_task the way kiln_ui_log_tap_targets() now is (see that
+ * function's declaration comment and lvgl_port_request_tap_dump()) -- this
+ * function still reads live LVGL objects from a task other than LVGL's
+ * sole owner. That pre-existing thread-safety gap was fixed for the
+ * TOUCH_CMD_LOG_TAP_TARGETS path in 3f86e899 but NOT here: this task's
+ * generous 8192 B stack (sized for kiln_ui_click_by_name()'s own locals,
+ * see that task's creation comment) means it isn't at risk of the stack
+ * overflow that motivated that fix, but the underlying race with
+ * lvgl_port_task mutating the same tree concurrently is unresolved. */
 size_t kiln_ui_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated);
 
 typedef enum {

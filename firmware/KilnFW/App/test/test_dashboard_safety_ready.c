@@ -169,6 +169,29 @@ static char *strip_c_comments(const char *src)
     return out;
 }
 
+// Strips ALL whitespace (not just comments) so the strstr needles below
+// can't be defeated by reformatting alone -- e.g. clang-format changing
+// `out->safety_relay_known = true;` to `out->safety_relay_known=true;` or
+// spreading it across a line wrap. C identifiers and operators (=, ;, (, ))
+// are never whitespace themselves, so collapsing whitespace to nothing
+// cannot accidentally merge two distinct tokens into a needle that wasn't
+// really there.
+static char *strip_all_ws(const char *src)
+{
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r') {
+            continue;
+        }
+        out[o++] = src[i];
+    }
+    out[o] = '\0';
+    return out;
+}
+
 static const char *DASHBOARD_HTTP_C_CANDIDATES[] = {
     "../drivers/http/dashboard_http.c",
     "App/drivers/http/dashboard_http.c",
@@ -216,10 +239,22 @@ static void test_safety_relay_known_gated_on_link_up_in_source(void)
         return;
     }
 
+    // Whitespace-stripped copy: the needles below only contain identifiers
+    // and operators, none of which is itself whitespace, so stripping all
+    // whitespace first makes the match immune to spacing/line-wrap choices
+    // (e.g. `= true;` vs `=true;` vs a wrapped `=\n    true;`) that a
+    // reformat could otherwise introduce to dodge a literal, spacing-exact
+    // needle -- see strip_all_ws()'s own comment.
+    char *dense = strip_all_ws(fn);
+    free(fn);
+    TEST_CHECK(dense != NULL, "malloc for the whitespace-stripped function body succeeded");
+    if (!dense) {
+        return;
+    }
+
     // The old, buggy line was a bare `out->safety_relay_known = true;` with
     // nothing else on the statement -- reject that shape outright...
-    TEST_CHECK(strstr(fn, "safety_relay_known = true ;") == NULL &&
-                   strstr(fn, "safety_relay_known=true;") == NULL,
+    TEST_CHECK(strstr(dense, "safety_relay_known=true;") == NULL,
                "safety_relay_known must NOT be unconditionally assigned true -- this is "
                "the exact regression this test exists to catch (a Pico that never "
                "answered, or answered once and went silent, must not read as a known "
@@ -230,17 +265,17 @@ static void test_safety_relay_known_gated_on_link_up_in_source(void)
     // sl.link_up a few lines above) via the same dashboard_safety_ready()
     // predicate safety_ready itself uses, so the two fields can never
     // silently diverge again.
-    TEST_CHECK(strstr(fn, "safety_relay_known = dashboard_safety_ready(") != NULL,
+    TEST_CHECK(strstr(dense, "safety_relay_known=dashboard_safety_ready(") != NULL,
                "safety_relay_known must be computed via dashboard_safety_ready(), the same "
                "predicate safety_ready uses, so the two can never drift apart -- if this "
                "fails, the assignment was changed to some other (possibly still-buggy) "
                "expression");
-    TEST_CHECK(strstr(fn, "safety_link_up") != NULL,
+    TEST_CHECK(strstr(dense, "safety_link_up") != NULL,
                "dashboard_get_status() must read safety_link_up (sl.link_up) somewhere in "
                "its body -- if this fails, the link_up bit this whole fix depends on was "
                "removed from this function entirely");
 
-    free(fn);
+    free(dense);
 }
 
 void run_test_dashboard_safety_ready(void)

@@ -90,6 +90,32 @@
 # silent exit 0 -- a check that could not compile anything and still says
 # PASS is the exact defect class this file exists to close.
 
+# KNOWN MAIN REPO ROOT (constant, not derived).
+# --------------------------------------------
+# The one shared tree on this machine whose invocations get the pre-warmed
+# "C:\wt\checkbuild" build worktree instead of their own hash-tagged one
+# (see the identity-check comment further down, where this constant is
+# compared against), and whose firmware\KilnFW\sdkconfig is the fallback
+# board-tuned config for a tree that has none of its own.
+#
+# Deliberately a fixed string, not derived from git: `git rev-parse
+# --git-common-dir` was considered and rejected. From a LINKED worktree of
+# the main tree it does resolve to the main tree's .git and would work here
+# -- but the whole reason this constant exists is the OTHER case: "an
+# unrelated private clone that happens to consider itself main by its own
+# git's reckoning" (see below), i.e. a totally separate `git clone`, not a
+# linked worktree of this repo at all. That clone's own .git IS its
+# git-common-dir -- there is no shared ancestry to walk to reach the real
+# machine-wide shared tree, because none exists in its git object graph.
+# Only a value fixed outside git (this constant) can name "the one specific
+# directory on THIS machine", independent of how any given invoking tree
+# relates to it in git's own worktree/clone bookkeeping.
+#
+# Override with the environment variable KILNCTL_MAIN_REPO_ROOT if this
+# checkout ever moves, or on a different machine where the shared tree
+# lives somewhere else.
+$KnownMainRepoRoot = if ($env:KILNCTL_MAIN_REPO_ROOT) { $env:KILNCTL_MAIN_REPO_ROOT } else { "C:\Users\budar\OneDrive\Desktop\kilnCtl" }
+
 $ErrorActionPreference = "Stop"
 
 # Native git/idf.py output on stderr (informational lines, e.g. "From
@@ -195,8 +221,8 @@ if (-not $headCommit) {
 # agent worktree under C:\wt\, or an unrelated private clone that happens to
 # consider itself "main" by its own git's reckoning -- always gets its own
 # hash-tagged directory below, so distinct source trees never share a mirror.
+# ($KnownMainRepoRoot itself is defined once, near the top of this file.)
 $repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
-$KnownMainRepoRoot = "C:\Users\budar\OneDrive\Desktop\kilnCtl"
 
 if ([string]::Equals($repoRootFull, $KnownMainRepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     $WorktreePath = "C:\wt\checkbuild"
