@@ -282,13 +282,24 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
             snprintf(cj_buf2, sizeof(cj_buf2), "%.2f", (double)sl.cj_temp_c);
         }
 
+        /* tc_is_separate_sensor: the same shared predicate zones_http_get.c's
+         * safety_wiring block and dashboard_http.c's safety_tc_is_separate_sensor
+         * field already compute (safety_tc_is_separate_physical_sensor(),
+         * safety_link.h) -- fail-to-shown, only false when the Pico has
+         * CONFIRMED (V3 status frame, BORROWED bit) it is reusing a main
+         * zone's probe rather than its own separate MAX31856. window.
+         * kcSafetyTcIsSeparate() in app.js is the client-side twin; adding it
+         * here lets this card apply the same hide-when-borrowed rule the
+         * other two pages already apply, instead of always showing. */
         APPEND(",\"safety\":{\"state\":\"%s\",\"link_up\":true,\"link_age_ms\":%u,"
               "\"tc_c\":%s,\"cj_c\":%s,\"fault_status\":%u,"
               "\"not_installed\":%s,\"injected\":%s,"
-              "\"cj_valid_known\":%s,\"cj_valid\":%s}",
+              "\"cj_valid_known\":%s,\"cj_valid\":%s,"
+              "\"tc_is_separate_sensor\":%s}",
               state, (unsigned)sl.age_ms, tc_buf, cj_buf2, (unsigned)sl.tc_fault,
               not_installed ? "true" : "false", injected ? "true" : "false",
-              sl.cj_valid_known ? "true" : "false", sl.cj_valid ? "true" : "false");
+              sl.cj_valid_known ? "true" : "false", sl.cj_valid ? "true" : "false",
+              safety_tc_is_separate_physical_sensor(&sl) ? "true" : "false");
     }
     APPEND("}");
 

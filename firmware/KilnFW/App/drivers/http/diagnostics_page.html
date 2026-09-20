@@ -1414,6 +1414,18 @@ here:</p>
   // rather than guessing which one it is.
   function renderSafetyTcCard(s) {
     if (!s) return '';
+    // 2026-09-08 owner request (this time): show this card next to the other
+    // TC fault cards ONLY when the safety processor has its own SEPARATE
+    // thermocouple -- hide it when the Pico borrows a zone TC
+    // (BORROWED_ZONE / BOTH wiring), same rule main_page.html (694) and
+    // zones_page.html (2311) already apply via the single shared predicate,
+    // window.kcSafetyTcIsSeparate() (app.js), mirroring
+    // safety_tc_is_separate_physical_sensor() (safety_link.h). Link-down
+    // behavior is unchanged: still shown as "LINK DOWN" below, since a dead
+    // link says nothing about which sensor is wired.
+    if (s.state !== 'no_link' && !window.kcSafetyTcIsSeparate({ link_up: true, tc_is_separate_sensor: s.tc_is_separate_sensor })) {
+      return '';
+    }
     var cardClass = 'chan kc-live-value';
     var faultsClass = 'faults';
     var summary;

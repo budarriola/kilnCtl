@@ -27,6 +27,28 @@ const PAGE_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'diagnostics_p
 const SRC = fs.readFileSync(PAGE_PATH, 'utf8');
 const LINES = SRC.split('\n');
 
+// Real kcSafetyTcIsSeparate() from app.js -- extracted, not reimplemented,
+// same principle as FAULT_BITS_SRC/CARD_SRC below, so this test tracks the
+// actual shared predicate (main_page.html/zones_page.html use the same one)
+// rather than a hand-copied stand-in that could silently drift from it.
+const APP_JS_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'app.js');
+const APP_JS_SRC = fs.readFileSync(APP_JS_PATH, 'utf8');
+const APP_JS_LINES = APP_JS_SRC.split('\n');
+
+function extractAppJsRange(startMarker, endMarker) {
+  const raw = (l) => l.replace(/\r$/, '');
+  const startIdx = APP_JS_LINES.findIndex((l) => raw(l) === startMarker);
+  if (startIdx === -1) throw new Error('start marker not found in app.js: ' + JSON.stringify(startMarker));
+  const endIdx = APP_JS_LINES.findIndex((l, i) => i >= startIdx && raw(l) === endMarker);
+  if (endIdx === -1) throw new Error('end marker not found in app.js after start: ' + JSON.stringify(endMarker));
+  return APP_JS_LINES.slice(startIdx, endIdx + 1).join('\n');
+}
+
+const KC_SAFETY_TC_IS_SEPARATE_SRC = extractAppJsRange(
+  '  window.kcSafetyTcIsSeparate = function (st) {',
+  '  };'
+);
+
 function extractRange(startMarker, endMarker) {
   const raw = (l) => l.replace(/\r$/, '');
   const startIdx = LINES.findIndex((l) => raw(l) === startMarker);
@@ -66,6 +88,7 @@ function makeContext() {
     console: console,
   };
   vm.createContext(ctx);
+  vm.runInContext(KC_SAFETY_TC_IS_SEPARATE_SRC, ctx);
   vm.runInContext(FAULT_BITS_SRC, ctx);
   vm.runInContext(CARD_SRC, ctx);
   return ctx;
@@ -156,6 +179,54 @@ assert(render(null) === '', 'null safety block: renders nothing');
     fault_status: 0, not_installed: false, injected: true,
   });
   assert(html.indexOf('synthetic') !== -1, 'injected: flagged as a synthetic bench reading');
+}
+
+// ---------------------------------------------------------------------------
+// Group 7: owner request 2026-09-08 (this pass) -- the card must be hidden
+// entirely once the Pico has CONFIRMED it is borrowing a zone TC
+// (tc_is_separate_sensor: false), same shared predicate main_page.html and
+// zones_page.html already apply. An older/unset payload (field omitted --
+// e.g. a firmware build predating diagnostics_http.c's addition of this
+// field) must fail-to-SHOWN, matching every other group above that omits it.
+// Link-down is unaffected either way -- nothing about wiring is knowable
+// while the link itself is down, so the LINK DOWN card still renders.
+// ---------------------------------------------------------------------------
+{
+  const html = render({
+    state: 'ok', link_up: true, link_age_ms: 400, tc_c: 20.0, cj_c: 20.1,
+    fault_status: 0, not_installed: false, injected: false, tc_is_separate_sensor: false,
+  });
+  assert(html === '', 'confirmed borrowed (tc_is_separate_sensor:false): card renders nothing');
+}
+{
+  const html = render({
+    state: 'faulted', link_up: true, link_age_ms: 400, tc_c: null, cj_c: 24.0,
+    fault_status: 0x01, not_installed: false, injected: false, tc_is_separate_sensor: false,
+  });
+  assert(html === '', 'confirmed borrowed, even with a real fault bit set: card still renders nothing');
+}
+{
+  const html = render({
+    state: 'ok', link_up: true, link_age_ms: 400, tc_c: 20.0, cj_c: 20.1,
+    fault_status: 0, not_installed: false, injected: false, tc_is_separate_sensor: true,
+  });
+  assert(html.indexOf('Safety processor TC') !== -1, 'confirmed separate (tc_is_separate_sensor:true): card renders');
+}
+{
+  // Field omitted entirely (older firmware build) -- must fail-to-shown, not
+  // fail-to-hidden, exactly like window.kcSafetyTcIsSeparate()'s own
+  // documented contract.
+  const html = render({
+    state: 'ok', link_up: true, link_age_ms: 400, tc_c: 20.0, cj_c: 20.1,
+    fault_status: 0, not_installed: false, injected: false,
+  });
+  assert(html.indexOf('Safety processor TC') !== -1, 'tc_is_separate_sensor omitted: fails open, card still shown');
+}
+{
+  // Link down: unaffected by tc_is_separate_sensor even if it happens to be
+  // false in a stale/last-known payload -- still shows LINK DOWN.
+  const html = render({ state: 'no_link', link_up: false, tc_is_separate_sensor: false });
+  assert(html.indexOf('LINK DOWN') !== -1, 'no_link with tc_is_separate_sensor:false: still shows LINK DOWN');
 }
 
 console.log('');
