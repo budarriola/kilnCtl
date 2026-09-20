@@ -314,3 +314,90 @@ def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResul
             observed={"safety_side": safety_side, "esp_side": esp_side},
         )
     return CaseResult(Verdict.PASS, observed={"safety_side": safety_side, "esp_side": esp_side})
+
+
+# ---------------------------------------------------------------------------
+# LCD suite judgments (plan §8 Wave 1c). "targets" throughout is the dict
+# list_tap_targets() returns: [{"name","cx","cy","hidden"}, ...].
+# ---------------------------------------------------------------------------
+
+def _find_target(targets: "list[dict]", name: str) -> "Optional[dict]":
+    for t in targets:
+        if t.get("name") == name:
+            return t
+    return None
+
+
+def judge_lcd_home_idle(page: str, targets: "list[dict]",
+                         start_matches_accent4: Optional[bool],
+                         pause_is_hidden: Optional[bool]) -> CaseResult:
+    """LCD-01: home page, idle. Start button present and tappable, Pause
+    hidden, and (when a capture was available) Start reads the ACCENT_4
+    color. A missing camera capture degrades the color half to
+    INCONCLUSIVE rather than failing the whole case on a busy webcam
+    (CLAUDE.md: ffmpeg exit -5 means busy, never treated as a board defect).
+    """
+    observed = {"page": page, "targets": targets}
+    if page != "home":
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'home'", observed=observed)
+    start = _find_target(targets, "start")
+    if start is None or start.get("hidden"):
+        return CaseResult(Verdict.FAIL, reason="Start target missing or hidden on home/idle", observed=observed)
+    pause = _find_target(targets, "pause")
+    if pause is not None and not pause.get("hidden") and pause_is_hidden is not False:
+        # pause_is_hidden (from a camera sample) can override a firmware
+        # 'hidden' flag disagreement; absent camera data, trust the flag.
+        return CaseResult(Verdict.FAIL, reason="Pause target is not hidden on home/idle", observed=observed)
+    if start_matches_accent4 is False:
+        return CaseResult(Verdict.FAIL, reason="Start button region does not read as ACCENT_4", observed=observed)
+    if start_matches_accent4 is None or pause_is_hidden is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no camera capture available (webcam busy or unreachable) -- widget state checked, color not",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_config_hub(page: str, targets: "list[dict]",
+                          expected_tiles: "tuple[str, ...]" = (
+                              "Profiles", "Temperature", "Network", "Diagnostics",
+                          )) -> CaseResult:
+    """LCD-08: config hub reached by tapping Menu. `expected_tiles` omits
+    Touch Calibration by default since the plan marks it 'if present' --
+    callers that know the board has it should pass the 5-tuple."""
+    observed = {"page": page, "targets": targets}
+    if page != "config":
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'config'", observed=observed)
+    names = {t.get("name") for t in targets if not t.get("hidden")}
+    missing = [t for t in expected_tiles if t not in names]
+    if missing:
+        return CaseResult(Verdict.FAIL, reason=f"missing config tile(s): {', '.join(missing)}", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_no_scroll_budget(pages_targets: "dict[str, dict]") -> CaseResult:
+    """LCD-21: no tap target on any visited page reports cy > 320 with
+    truncated False (memory feedback_lcd_no_scrolling -- a truncated list
+    is a reporting limit, not evidence of an actual off-screen target, so
+    it is excluded from the offending set rather than counted as a pass).
+    `pages_targets` is {page_name: list_tap_targets() dict}."""
+    if not pages_targets:
+        return CaseResult(Verdict.NOT_RUN, reason="no pages were visited to check", observed={})
+    offenders: "dict[str, list]" = {}
+    for page, result in pages_targets.items():
+        targets = result.get("targets", [])
+        truncated = result.get("truncated", False)
+        if truncated:
+            continue
+        bad = [t for t in targets if t.get("cy", 0) > 320]
+        if bad:
+            offenders[page] = bad
+    observed = {"pages": list(pages_targets.keys()), "offenders": offenders}
+    if offenders:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"target(s) below the 320px no-scroll budget on: {', '.join(offenders)}",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)

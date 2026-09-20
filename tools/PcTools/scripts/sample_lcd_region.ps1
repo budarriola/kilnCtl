@@ -29,8 +29,17 @@
   Off-screen reference region (default 100,100 on a -Full 1280x720 frame --
   adjust if the camera framing changes). Sampled at the same W/H.
 
+.PARAMETER Json
+  Emit machine-readable JSON instead of the default text lines, for callers
+  like the bench-test harness's lcd_sampler.py. Backwards compatible: the
+  plain-text output is unchanged when this switch is omitted.
+  Shape: {"region":{"X":,"Y":,"W":,"H":,"R":,"G":,"B":},
+          "bezel":{"X":,"Y":,"W":,"H":,"R":,"G":,"B":} | null}
+
 .EXAMPLE
   .\sample_lcd_region.ps1 -Image full.jpg -X 500 -Y 650 -W 8 -H 8
+.EXAMPLE
+  .\sample_lcd_region.ps1 -Image full.jpg -X 500 -Y 650 -W 8 -H 8 -Json
 #>
 [CmdletBinding()]
 param(
@@ -41,7 +50,8 @@ param(
     [int]$H = 6,
     [int]$BezelX = 100,
     [int]$BezelY = 100,
-    [switch]$SkipBezel
+    [switch]$SkipBezel,
+    [switch]$Json
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,9 +84,23 @@ function Sample-Region([string]$path, [int]$cx, [int]$cy, [int]$cw, [int]$ch) {
 }
 
 $region = Sample-Region -path $Image -cx $X -cy $Y -cw $W -ch $H
-Write-Output ("region  ({0},{1},{2}x{3}): RGB({4},{5},{6})" -f $X, $Y, $W, $H, $region.R, $region.G, $region.B)
-
+$bezel = $null
 if (-not $SkipBezel) {
     $bezel = Sample-Region -path $Image -cx $BezelX -cy $BezelY -cw $W -ch $H
-    Write-Output ("bezel   ({0},{1},{2}x{3}): RGB({4},{5},{6})" -f $BezelX, $BezelY, $W, $H, $bezel.R, $bezel.G, $bezel.B)
+}
+
+if ($Json) {
+    $out = [ordered]@{
+        region = [ordered]@{ X = $X; Y = $Y; W = $W; H = $H; R = $region.R; G = $region.G; B = $region.B }
+        bezel  = $null
+    }
+    if ($null -ne $bezel) {
+        $out.bezel = [ordered]@{ X = $BezelX; Y = $BezelY; W = $W; H = $H; R = $bezel.R; G = $bezel.G; B = $bezel.B }
+    }
+    Write-Output ($out | ConvertTo-Json -Compress)
+} else {
+    Write-Output ("region  ({0},{1},{2}x{3}): RGB({4},{5},{6})" -f $X, $Y, $W, $H, $region.R, $region.G, $region.B)
+    if ($null -ne $bezel) {
+        Write-Output ("bezel   ({0},{1},{2}x{3}): RGB({4},{5},{6})" -f $BezelX, $BezelY, $W, $H, $bezel.R, $bezel.G, $bezel.B)
+    }
 }
