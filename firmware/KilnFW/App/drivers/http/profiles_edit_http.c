@@ -252,6 +252,23 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         long temp_cmp = len > 0 ? strtol(val, &fend, 10) : 0;
         r->temp_cmp = (fend == val) ? 0 : (uint8_t)(temp_cmp & 0xFF);
 
+        /* rule%u_temp_source was missing from this wire encoding until now --
+         * profile_resolve_on_off_rule() (profile_executor.c) only honors
+         * temp_cmp when temp_source == 1 ("measured, this zone's own TC"),
+         * so without this field a rule%u_temp_cmp posted from the editor was
+         * silently ignored at run time (temp_source stayed 0 = none, the
+         * memset()'d default above). Only 0 (none)/1 (this zone's TC) are
+         * wired by the executor as of ON_OFF_ZONE_PLAN.md plan step 5 --
+         * 2 (named zone)/3 (executor setpoint) are reserved encoding space,
+         * so the client only ever needs to send 0 or 1 today; a value out of
+         * 0-3 collapses to 0 here (validate_on_off_rules() re-checks the
+         * range server-side regardless). */
+        snprintf(key, sizeof(key), "rule%u_temp_source", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
+        long temp_source = len > 0 ? strtol(val, &fend, 10) : 0;
+        r->temp_source = (fend == val || temp_source < 0 || temp_source > 3) ? 0 : (uint8_t)temp_source;
+
         snprintf(key, sizeof(key), "rule%u_temp_c", i);
         len = http_form_find_field(body, key, val, sizeof(val));
         fend = NULL;

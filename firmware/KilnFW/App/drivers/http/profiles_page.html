@@ -286,6 +286,21 @@
                      box-sizing: border-box; }
   #segPreviewWrap canvas { display: block; width: 100%; height: 120px; box-sizing: border-box; }
   #segPreviewWrap .hint { margin: 0.3em 0 0; }
+  /* On/off rule editor (owner request 2026-09-14/15) -- same row shape as
+     .seg above (a dashed-bottom block with a wrapping field strip) so the
+     new section reads as a sibling of the segment editor, not a bolted-on
+     extra. Checkboxes for phase/direction are kept at the sitewide 40px
+     touch floor via .oo-check, same reasoning as .sel-cb-wrap above. */
+  .oorule { border-bottom: 1px dashed var(--border); padding-bottom: 0.6em; margin-top: 0.7em; }
+  .oorule .oo-row2 { display: flex; flex-wrap: wrap; gap: 0.5em; margin-top: 0.4em; }
+  .oorule .oo-row2 > div { flex: 1 1 130px; min-width: 130px; }
+  .oorule label { font-size: 0.75em; margin-top: 0; }
+  .oo-checks { display: flex; flex-wrap: wrap; gap: 0.6em; margin-top: 0.2em; }
+  .oo-check { display: inline-flex; align-items: center; gap: 0.3em; min-height: 40px; font-size: 0.85em; }
+  .oo-check input[type=checkbox] { width: 20px; height: 20px; }
+  .oo-inline { display: flex; align-items: center; gap: 0.4em; font-weight: normal; }
+  .oo-inline input[type=checkbox] { width: auto; }
+  .oo-summary { font-size: 0.8em; color: var(--muted); margin: 0.3em 0 0; }
 </style>
 </head>
 <body>
@@ -369,6 +384,13 @@ selected zone has caught up)</label>
 <div id="segments"></div>
 <button id="addSegBtn" type="button" class="small">+ Add segment</button>
 
+<h2 id="ooHeading">On/off devices <span id="ooInfoSlot"></span></h2>
+<p class="hint" id="ooNoZonesMsg" style="display:none">No zones are configured as On/off devices yet --
+set a zone's type to "On/off device" on the
+<a href="/settings/zones">Thermocouples &amp; Zones</a> page first, then come back here to add a rule for it.</p>
+<div id="oorules"></div>
+<button id="addOoBtn" type="button" class="small">+ Add on/off rule</button>
+
 <div style="margin-top:1em">
   <button id="saveBtn" type="button">Save profile</button>
   <button id="newBtn" type="button">New</button>
@@ -407,16 +429,32 @@ var relayOwnedMask = 0;
 var relayCount = 4;
 var IO_DIGITAL_COUNT = 7; // KILN_IO_DIGITAL_COUNT (kiln_io.h); no live count in /api/zones today
 
+// docs/ON_OFF_ZONE_PLAN.md plan step 5's editor pass: zone_type comes back
+// on every zone in /api/zones (zones_http_get.c, ZONES_CFG_VERSION 22's
+// zone_type/failsafe_state/hyst_c/min_on_s/min_off_s block, "always
+// emitted" -- see that file's own comment) -- the same array the zone
+// checkboxes above already read, just one more field per entry. onOffZones
+// is the subset an on/off rule may ever target; validate_on_off_rules()
+// (profiles_http.c) refuses anything else server-side, this is only the
+// client-side "don't even offer it" half, same precedent as
+// ioTargetOptionsHtml()'s relay-ownership filter above.
+var onOffZones = []; // [{index, name}]
+
 function loadZones() {
   return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
     zones = [];
     zoneCeilings = [];
+    onOffZones = [];
     relayNames = data.relay_names || [];
     relayOwnedMask = data.relay_zone_owned_mask || 0;
     relayCount = data.relay_count || 4;
     for (var i = 0; i < data.thermo_count; i++) {
-      zones.push(data.zones[i].name || ('Zone ' + i));
+      var zname = data.zones[i].name || ('Zone ' + i);
+      zones.push(zname);
       zoneCeilings.push(data.zones[i].max_ramp_c_per_hr || 0);
+      if (data.zones[i].zone_type === 1) {
+        onOffZones.push({ index: i, name: zname });
+      }
     }
     var container = document.getElementById('pzone');
     container.innerHTML = '';
@@ -449,6 +487,7 @@ function loadZones() {
       container.innerHTML = '<span class="empty">No zones configured</span>';
     }
     updateZoneCeiling();
+    refreshOoUi();
   }).catch(function () {
     // Resolve rather than reject on failure: callers chain refreshAll() off
     // this promise (see the page-boot call below), and a network hiccup
@@ -836,7 +875,7 @@ function segmentRow(seg) {
       '<button type="button" class="small remove">&times;</button>' +
     '</div>' +
     '<div class="fields"></div>';
-  div.querySelector('.remove').addEventListener('click', function () { div.remove(); renderSegPreview(); });
+  div.querySelector('.remove').addEventListener('click', function () { div.remove(); renderSegPreview(); refreshOoUi(); });
   var fields = div.querySelector('.fields');
   renderSegFields(fields, kind, seg);
   div.querySelector('.seg-kind').addEventListener('change', function (ev) {
@@ -865,8 +904,323 @@ function segmentRow(seg) {
 document.getElementById('addSegBtn').addEventListener('click', function () {
   var container = document.getElementById('segments');
   if (container.children.length >= MAX_SEGMENTS) return;
-  loadZones().then(function () { container.appendChild(segmentRow({})); renderSegPreview(); });
+  loadZones().then(function () { container.appendChild(segmentRow({})); renderSegPreview(); refreshOoUi(); });
 });
+
+// ---- On/off device rules (docs/ON_OFF_ZONE_PLAN.md plan step 5) ----------
+// The backend (profile_on_off_rule_t/validate_on_off_rules()/
+// profile_resolve_on_off_rule()) has carried this since plan step 5; this
+// editor is the piece that was still missing. One rule = one (segment,
+// on/off zone) pair, matching the sparse storage array 1:1. Wire encoding
+// on save is "ruleN_field=value" (profiles_edit_http.c's rule%u_* parser),
+// same indexed-field convention segments already use above; JSON load
+// (GET /api/profile's "on_off_rules") uses the long-form keys
+// (profiles_catalog_http.c) -- see ooRuleFromJson()/rulesToParams() below
+// for the two-way mapping.
+var MAX_OO_RULES = 8; // PROFILE_MAX_ON_OFF_RULES
+
+var OO_INFO_HTML = '<p>A rule commands one On/off device (a vent, damper or fan -- never a heater; ' +
+  'guards 1/2/3/4/9 are already disabled for that zone) ON or OFF for the duration of one segment, ' +
+  'whenever ALL of its configured conditions hold at once. Phase/direction with nothing checked means ' +
+  '"any" for that axis. "Invert" flips the result: the device is OFF while the conditions hold and ON ' +
+  'otherwise, instead of the usual ON-while-true. At most one rule may target a given (segment, zone) ' +
+  'pair -- profile_resolve_on_off_rule() only ever looks at the first match.</p>';
+
+function ooInfoOpenKey() { return 'profileOoInfoOpen'; }
+function isOoInfoOpen() {
+  try { return window.localStorage.getItem(ooInfoOpenKey()) === '1'; } catch (e) { return false; }
+}
+function setOoInfoOpen(open) {
+  try { window.localStorage.setItem(ooInfoOpenKey(), open ? '1' : '0'); } catch (e) { /* ignore */ }
+}
+document.getElementById('ooInfoSlot').innerHTML =
+  '<details class="info"' + (isOoInfoOpen() ? ' open' : '') + '><summary aria-label="About on/off devices">i</summary>' +
+  OO_INFO_HTML + '</details>';
+document.getElementById('ooInfoSlot').querySelector('details').addEventListener('toggle', function (e) {
+  setOoInfoOpen(e.target.open);
+});
+
+function ooZoneOptionsHtml(selected) {
+  if (onOffZones.length === 0) return '<option value="">(none)</option>';
+  var html = '';
+  onOffZones.forEach(function (z) {
+    html += '<option value="' + z.index + '"' + (z.index === selected ? ' selected' : '') + '>' +
+            window.kcEscapeHtml(z.name) + '</option>';
+  });
+  return html;
+}
+
+// Segment options are labelled by 1-based position ("Step N"), same
+// numbering segmentTableHtml()'s preview table and this page's saved-list
+// preview use -- a rule's stored segment_index is 0-based, the label is not.
+function ooSegmentOptionsHtml(selected) {
+  var count = document.getElementById('segments').children.length;
+  if (count === 0) return '<option value="0">(no segments yet)</option>';
+  var html = '';
+  for (var i = 0; i < count; i++) {
+    html += '<option value="' + i + '"' + (i === selected ? ' selected' : '') + '>Step ' + (i + 1) + '</option>';
+  }
+  return html;
+}
+
+// Re-renders every existing rule row's segment <select> in place (options
+// change count when segments are added/removed) -- preserves the row's
+// current segment choice when it is still valid, clamps to the last segment
+// otherwise, exactly like a stale relay/IO choice would be refused at save
+// time rather than silently kept.
+function refreshOoUi() {
+  var maxSeg = Math.max(0, document.getElementById('segments').children.length - 1);
+  document.querySelectorAll('#oorules .oorule').forEach(function (row) {
+    var sel = row.querySelector('.oo-segment');
+    var cur = parseInt(sel.value, 10);
+    if (isNaN(cur) || cur > maxSeg) cur = maxSeg;
+    sel.innerHTML = ooSegmentOptionsHtml(cur);
+    var zsel = row.querySelector('.oo-zone');
+    var curZone = parseInt(zsel.value, 10);
+    zsel.innerHTML = ooZoneOptionsHtml(isNaN(curZone) ? -1 : curZone);
+  });
+  document.getElementById('ooNoZonesMsg').style.display = onOffZones.length === 0 ? '' : 'none';
+  document.getElementById('addOoBtn').style.display = onOffZones.length === 0 ? 'none' : '';
+  if (onOffZones.length === 0) {
+    document.getElementById('oorules').innerHTML = '';
+  }
+  document.querySelectorAll('#oorules .oorule').forEach(ooUpdateSummary);
+}
+
+function ooPhaseChecksHtml(mask) {
+  return '<label class="oo-check"><input type="checkbox" class="oo-phase" value="1"' +
+         ((mask & 1) ? ' checked' : '') + '> Ramp</label>' +
+         '<label class="oo-check"><input type="checkbox" class="oo-phase" value="2"' +
+         ((mask & 2) ? ' checked' : '') + '> Dwell</label>';
+}
+
+function ooDirChecksHtml(mask) {
+  return '<label class="oo-check"><input type="checkbox" class="oo-dir" value="1"' +
+         ((mask & 1) ? ' checked' : '') + '> Heating</label>' +
+         '<label class="oo-check"><input type="checkbox" class="oo-dir" value="2"' +
+         ((mask & 2) ? ' checked' : '') + '> Cooling</label>' +
+         '<label class="oo-check"><input type="checkbox" class="oo-dir" value="4"' +
+         ((mask & 4) ? ' checked' : '') + '> Flat</label>';
+}
+
+// rule fields from profile_on_off_rule_t (profiles_types.h), defaults match
+// profile_executor.c's on_off_trigger_rule_t zero-value ("no rule").
+function ooRuleFieldsHtml(r) {
+  r = r || {};
+  var zone = (r.zone != null) ? r.zone : (onOffZones[0] ? onOffZones[0].index : 0);
+  var segment = r.segment || 0;
+  var enable = (r.enable == null) ? 1 : r.enable;
+  var phase = r.phase_mask || 0;
+  var dir = r.direction_mask || 0;
+  var tempSource = r.temp_source || 0;
+  var tempCmp = (tempSource === 1) ? (r.temp_cmp || 0) : 0;
+  var tempC = (r.temp_c != null) ? r.temp_c : 0;
+  var startS = r.time_start_s || 0;
+  var stopS = r.time_stop_s || 0;
+  var invert = r.invert || 0;
+  return (
+    '<div class="oo-row2">' +
+      '<div><label>Device (on/off zone) ' + infoIconHtml('ooZone', 'the target zone') + '</label>' +
+      '<select class="oo-zone">' + ooZoneOptionsHtml(zone) + '</select></div>' +
+      '<div><label>Segment</label><select class="oo-segment">' + ooSegmentOptionsHtml(segment) + '</select></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div><label>Phase ' + infoIconHtml('ooPhase', 'phase') + '</label><div class="oo-checks">' +
+      ooPhaseChecksHtml(phase) + '</div></div>' +
+      '<div><label>Direction ' + infoIconHtml('ooDir', 'direction') + '</label><div class="oo-checks">' +
+      ooDirChecksHtml(dir) + '</div></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div><label>Temperature condition ' + infoIconHtml('ooTemp', 'the temperature condition') + '</label>' +
+      '<select class="oo-tempcmp">' +
+        '<option value="0"' + (tempCmp === 0 ? ' selected' : '') + '>(none)</option>' +
+        '<option value="1"' + (tempCmp === 1 ? ' selected' : '') + '>This zone\'s measured T is ABOVE</option>' +
+        '<option value="2"' + (tempCmp === 2 ? ' selected' : '') + '>This zone\'s measured T is BELOW</option>' +
+      '</select></div>' +
+      '<div><label>Threshold &deg;C</label>' +
+      /* Deliberately NOT run through kcUnit, matching rampFieldsHtml's own
+         "Target °C" input above (that field's comment: this editor's numeric
+         inputs are Celsius-only; only READ-ONLY previews (segmentTableHtml())
+         convert for display) -- one convention for every editable degree
+         field on this page, not two. */
+      '<input type="number" step="1" class="oo-tempval" value="' + tempC +
+      '"' + (tempCmp === 0 ? ' disabled' : '') + '></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div><label>Time window start (s into segment)</label>' +
+      '<input type="number" step="1" min="0" class="oo-start" value="' + startS + '"></div>' +
+      '<div><label>Time window stop (s, 0 = end of segment) ' + infoIconHtml('ooTime', 'the time window') + '</label>' +
+      '<input type="number" step="1" min="0" class="oo-stop" value="' + stopS + '"></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div class="oo-inline"><label><input type="checkbox" class="oo-enable"' + (enable ? ' checked' : '') +
+      '> Enabled</label></div>' +
+      '<div class="oo-inline"><label><input type="checkbox" class="oo-invert"' + (invert ? ' checked' : '') +
+      '> Invert ' + infoIconHtml('ooInvert', 'invert') + '</label></div>' +
+    '</div>' +
+    '<p class="hint oo-summary"></p>'
+  );
+}
+
+var OO_INFO = {
+  ooZone: 'Only zones set to "On/off device" on the Thermocouples &amp; Zones page can be picked here -- ' +
+    'validate_on_off_rules() refuses anything else server-side, most importantly a heater.',
+  ooPhase: 'Which part of the step this rule may fire in. Leave both unchecked to allow either.',
+  ooDir: 'Whether the shared ramp/dwell target is rising, falling, or unchanged tick-to-tick. Leave all ' +
+    'unchecked to allow any direction.',
+  ooTemp: 'Compares this device\'s OWN zone\'s measured temperature against a threshold. "(none)" drops ' +
+    'this axis out of the condition entirely (always true).',
+  ooTime: 'An offset window measured from the start of the segment, not a clock time. 0/0 means the whole segment.',
+  ooInvert: 'Without Invert, the device is ON while every checked condition holds. With Invert, that flips: ' +
+    'ON whenever they do NOT all hold, OFF while they do.'
+};
+function ooInfoOpenKeyFor(key) { return 'profileOoInfoOpen:' + key; }
+function isOoInfoOpenFor(key) {
+  try { return window.localStorage.getItem(ooInfoOpenKeyFor(key)) === '1'; } catch (e) { return false; }
+}
+function infoIconHtml(key, aboutLabel) {
+  var open = isOoInfoOpenFor(key) ? ' open' : '';
+  return '<details class="info" data-ooinfokey="' + key + '"' + open + '><summary aria-label="About ' +
+    aboutLabel + '">i</summary><p>' + OO_INFO[key] + '</p></details>';
+}
+document.getElementById('oorules').addEventListener('toggle', function (e) {
+  if (!e.target.classList || !e.target.classList.contains('info')) return;
+  var key = e.target.dataset.ooinfokey;
+  if (!key) return;
+  try { window.localStorage.setItem(ooInfoOpenKeyFor(key), e.target.open ? '1' : '0'); } catch (err) { /* ignore */ }
+}, true);
+
+var OO_PHASE_LABEL = { 1: 'ramp', 2: 'dwell', 3: 'ramp or dwell', 0: 'any phase' };
+var OO_DIR_NAMES = { 1: 'heating', 2: 'cooling', 4: 'flat' };
+
+// Plain-language summary line (brief item: "compact per-rule summary"),
+// recomputed from the row's OWN current inputs so it never drifts from what
+// Save will actually serialize -- no separate state to keep in sync.
+function ooUpdateSummary(row) {
+  var zoneIdx = parseInt(row.querySelector('.oo-zone').value, 10);
+  var zoneName = 'Zone ' + zoneIdx;
+  onOffZones.forEach(function (z) { if (z.index === zoneIdx) zoneName = z.name; });
+  var segIdx = parseInt(row.querySelector('.oo-segment').value, 10);
+  var phase = 0;
+  row.querySelectorAll('.oo-phase:checked').forEach(function (cb) { phase |= parseInt(cb.value, 10); });
+  var dir = 0;
+  var dirNames = [];
+  row.querySelectorAll('.oo-dir:checked').forEach(function (cb) {
+    var v = parseInt(cb.value, 10);
+    dir |= v;
+    dirNames.push(OO_DIR_NAMES[v]);
+  });
+  var tempCmp = parseInt(row.querySelector('.oo-tempcmp').value, 10);
+  var tempVal = row.querySelector('.oo-tempval').value;
+  var startS = parseInt(row.querySelector('.oo-start').value, 10) || 0;
+  var stopS = parseInt(row.querySelector('.oo-stop').value, 10) || 0;
+  var invert = row.querySelector('.oo-invert').checked;
+  var enabled = row.querySelector('.oo-enable').checked;
+
+  var cond = 'during ' + (OO_PHASE_LABEL[phase] || 'any phase');
+  cond += ' while ' + (dirNames.length ? dirNames.join(' or ') : 'any direction');
+  if (tempCmp === 1) cond += ', T ≥ ' + tempVal + '°C';
+  else if (tempCmp === 2) cond += ', T ≤ ' + tempVal + '°C';
+  if (startS > 0 || stopS > 0) {
+    cond += ', ' + startS + '-' + (stopS > 0 ? stopS : 'end') + 's into the step';
+  }
+  var verb = invert ? 'OFF' : 'ON';
+  var text = zoneName + ' (step ' + (segIdx + 1) + '): ' + verb + ' ' + cond +
+    (invert ? ' (ON otherwise)' : '');
+  if (!enabled) text = '[disabled] ' + text;
+  row.querySelector('.oo-summary').textContent = text;
+}
+
+function ooRuleRow(r) {
+  var div = document.createElement('div');
+  div.className = 'oorule';
+  div.innerHTML = ooRuleFieldsHtml(r) +
+    '<button type="button" class="small remove">Remove rule</button>';
+  div.querySelector('.remove').addEventListener('click', function () { div.remove(); });
+  div.querySelector('.oo-tempcmp').addEventListener('change', function (ev) {
+    div.querySelector('.oo-tempval').disabled = (ev.target.value === '0');
+    ooUpdateSummary(div);
+  });
+  div.addEventListener('input', function () { ooUpdateSummary(div); });
+  div.addEventListener('change', function () { ooUpdateSummary(div); });
+  ooUpdateSummary(div);
+  return div;
+}
+
+document.getElementById('addOoBtn').addEventListener('click', function () {
+  var container = document.getElementById('oorules');
+  if (container.children.length >= MAX_OO_RULES || onOffZones.length === 0) return;
+  container.appendChild(ooRuleRow({}));
+});
+
+// Populates the editor from GET /api/profile's "on_off_rules" (long-form
+// JSON keys -- profiles_catalog_http.c) -- used by editProfile()/
+// loadIntoEditor() below. copyBuiltin() never calls this: the shipped
+// catalogue has no on/off concept (builtin_profile_t carries no such field).
+function loadOoRulesIntoEditor(rules) {
+  var container = document.getElementById('oorules');
+  container.innerHTML = '';
+  (rules || []).forEach(function (jr) {
+    container.appendChild(ooRuleRow({
+      zone: jr.zone, segment: jr.segment, enable: jr.enable, phase_mask: jr.phase_mask,
+      direction_mask: jr.direction_mask, temp_source: jr.temp_source, temp_cmp: jr.temp_cmp,
+      temp_c: jr.temp_c, time_start_s: jr.time_start_s, time_stop_s: jr.time_stop_s, invert: jr.invert
+    }));
+  });
+}
+
+// Serializes every current rule row into the "ruleN_*" params
+// profiles_edit_http.c's parser expects, in the same array-push style the
+// segment loop above uses. temp_source is derived, not a field the operator
+// sets directly -- (none) means "no temperature axis" (temp_source 0), any
+// real comparison means "this zone's own measured TC" (temp_source 1), the
+// only source the executor honors today (profile_resolve_on_off_rule()'s
+// comment).
+function ooRulesToParams() {
+  var params = [];
+  var rows = document.getElementById('oorules').querySelectorAll('.oorule');
+  rows.forEach(function (row, i) {
+    var tempCmp = parseInt(row.querySelector('.oo-tempcmp').value, 10) || 0;
+    var tempSource = tempCmp === 0 ? 0 : 1;
+    var tempC = parseFloat(row.querySelector('.oo-tempval').value) || 0; // Celsius-only input, see ooRuleFieldsHtml()
+    var phase = 0;
+    row.querySelectorAll('.oo-phase:checked').forEach(function (cb) { phase |= parseInt(cb.value, 10); });
+    var dir = 0;
+    row.querySelectorAll('.oo-dir:checked').forEach(function (cb) { dir |= parseInt(cb.value, 10); });
+    params.push('rule' + i + '_zone=' + row.querySelector('.oo-zone').value);
+    params.push('rule' + i + '_segment=' + row.querySelector('.oo-segment').value);
+    params.push('rule' + i + '_enable=' + (row.querySelector('.oo-enable').checked ? 1 : 0));
+    params.push('rule' + i + '_phase=' + phase);
+    params.push('rule' + i + '_direction=' + dir);
+    params.push('rule' + i + '_temp_source=' + tempSource);
+    params.push('rule' + i + '_temp_cmp=' + tempCmp);
+    params.push('rule' + i + '_temp_c=' + tempC);
+    params.push('rule' + i + '_time_start_s=' + (parseInt(row.querySelector('.oo-start').value, 10) || 0));
+    params.push('rule' + i + '_time_stop_s=' + (parseInt(row.querySelector('.oo-stop').value, 10) || 0));
+    params.push('rule' + i + '_invert=' + (row.querySelector('.oo-invert').checked ? 1 : 0));
+  });
+  return params;
+}
+
+/* Compact read-only summary for wherever a profile is displayed/previewed
+ * (the saved-profile list's expanded row -- see buildProfileItem() below).
+ * Reuses ooUpdateSummary()'s exact wording by building one throwaway
+ * detached row per rule rather than a second copy of the phrasing -- two
+ * independently-maintained summary strings is exactly the kind of drift
+ * this codebase's "reset one side of a pair" class warns about, so there is
+ * only ever one summary formatter. */
+function onOffRulesSummaryHtml(rules) {
+  if (!rules || rules.length === 0) return '';
+  var lines = rules.map(function (jr) {
+    var row = ooRuleRow({
+      zone: jr.zone, segment: jr.segment, enable: jr.enable, phase_mask: jr.phase_mask,
+      direction_mask: jr.direction_mask, temp_source: jr.temp_source, temp_cmp: jr.temp_cmp,
+      temp_c: jr.temp_c, time_start_s: jr.time_start_s, time_stop_s: jr.time_stop_s, invert: jr.invert
+    });
+    return window.kcEscapeHtml(row.querySelector('.oo-summary').textContent);
+  });
+  return '<p class="hint"><strong>On/off devices:</strong><br>' + lines.join('<br>') + '</p>';
+}
 
 function resetEditor() {
   editingId = null;
@@ -876,6 +1230,7 @@ function resetEditor() {
   updateZoneCeiling();
   document.getElementById('segments').innerHTML = '';
   document.getElementById('addSegBtn').click();
+  document.getElementById('oorules').innerHTML = '';
   document.getElementById('msg').innerHTML = '';
 }
 
@@ -1355,7 +1710,7 @@ function buildProfileItem(p, selectable) {
       if (!d.open || loaded) return;
       loaded = true;
       fetch('/api/profile?id=' + p.id).then(function (r) { return r.json(); }).then(function (full) {
-        body.innerHTML = segmentTableHtml(full.segments);
+        body.innerHTML = segmentTableHtml(full.segments) + onOffRulesSummaryHtml(full.on_off_rules);
       }).catch(function () {
         loaded = false; // let a retry happen on the next expand
         body.innerHTML = '<p class="empty">Could not load steps.</p>';
@@ -1518,6 +1873,10 @@ function loadIntoEditor(p) {
   loadZones().then(function () {
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
     renderSegPreview();
+    // Builtin catalogue entries never carry on/off rules of their own --
+    // clear the editor's rule list rather than leaving a previous edit's
+    // rules attached to this unrelated copy.
+    loadOoRulesIntoEditor([]);
   });
   window.scrollTo(0, document.body.scrollHeight);
 }
@@ -1554,6 +1913,7 @@ function editProfile(id) {
     container.innerHTML = '';
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
     renderSegPreview();
+    loadOoRulesIntoEditor(p.on_off_rules || []);
     document.getElementById('msg').innerHTML = '';
     window.scrollTo(0, document.body.scrollHeight);
   }).catch(function () {
@@ -1733,6 +2093,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       params.push('seg' + i + '_dwell=' + row.querySelector('.s-dwell').value);
     }
   });
+  params = params.concat(ooRulesToParams());
   msg.textContent = 'Saving…';
   fetch('/api/profile', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),

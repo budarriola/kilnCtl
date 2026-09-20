@@ -115,12 +115,20 @@ static esp_err_t export_get_handler(httpd_req_t *req)
                s->io_leave_on_at_end);
     }
     APPEND("],\"on_off_rules\":[");
+    /* "temp_source" added alongside the profiles_page.html on/off editor --
+     * see profiles_catalog_http.c's identical addition for why this must
+     * round-trip (profile_resolve_on_off_rule() only honors temp_cmp when
+     * temp_source == 1). import_post_handler() below defaults a missing key
+     * to 0, so an OLD export (no "temp_source" key) still imports cleanly,
+     * exactly like every other optional field in this object. */
     for (uint8_t i = 0; i < p.on_off_rule_count; i++) {
         const profile_on_off_rule_t *r = &p.on_off_rules[i];
         APPEND("%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,\"direction_mask\":%u,"
-               "\"temp_cmp\":%u,\"temp_c\":%.2f,\"time_start_s\":%u,\"time_stop_s\":%u,\"invert\":%u}",
+               "\"temp_source\":%u,\"temp_cmp\":%u,\"temp_c\":%.2f,\"time_start_s\":%u,\"time_stop_s\":%u,"
+               "\"invert\":%u}",
                i == 0 ? "" : ",", r->zone_index, r->segment_index, r->enable, r->phase_mask, r->direction_mask,
-               r->temp_cmp, (double)r->temp_threshold_c, r->time_start_s, r->time_stop_s, r->invert);
+               r->temp_source, r->temp_cmp, (double)r->temp_threshold_c, r->time_start_s, r->time_stop_s,
+               r->invert);
     }
     APPEND("]}");
 #undef APPEND
@@ -356,6 +364,12 @@ static esp_err_t import_post_handler(httpd_req_t *req)
                                        rule_i) &&
             has_v) {
             r->direction_mask = (uint8_t)dv;
+        }
+        r->temp_source = 0;
+        has_v = false;
+        if (backup_json_field_opt_num(re, "temp_source", 0, 3, &dv, &has_v, "temp_source", NULL, 0, rule_i) &&
+            has_v) {
+            r->temp_source = (uint8_t)dv;
         }
         r->temp_cmp = 0;
         has_v = false;

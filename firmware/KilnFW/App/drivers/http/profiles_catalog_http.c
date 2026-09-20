@@ -499,13 +499,21 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     APPEND("],\"on_off_rules\":[");
     /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- echoes exactly the
      * fields profiles_edit_http.c's rule%u_* parser accepts, same round-trip
-     * discipline the segment loop above already follows. */
+     * discipline the segment loop above already follows. "temp_source"
+     * added alongside the profiles_page.html editor pass: without it, a
+     * rule loaded back into the editor could not tell whether its
+     * (already-saved) temp_cmp was actually live -- profile_resolve_on_off_
+     * rule() (profile_executor.c) only honors temp_cmp when temp_source == 1,
+     * so this field must round-trip or the editor's own preview would lie
+     * about which rules are actually armed. */
     for (uint8_t i = 0; i < p->on_off_rule_count; i++) {
         const profile_on_off_rule_t *r = &p->on_off_rules[i];
         APPEND("%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,\"direction_mask\":%u,"
-               "\"temp_cmp\":%u,\"temp_c\":%.2f,\"time_start_s\":%u,\"time_stop_s\":%u,\"invert\":%u}",
+               "\"temp_source\":%u,\"temp_cmp\":%u,\"temp_c\":%.2f,\"time_start_s\":%u,\"time_stop_s\":%u,"
+               "\"invert\":%u}",
                i == 0 ? "" : ",", r->zone_index, r->segment_index, r->enable, r->phase_mask, r->direction_mask,
-               r->temp_cmp, (double)r->temp_threshold_c, r->time_start_s, r->time_stop_s, r->invert);
+               r->temp_source, r->temp_cmp, (double)r->temp_threshold_c, r->time_start_s, r->time_stop_s,
+               r->invert);
     }
     APPEND("]}");
 
