@@ -576,9 +576,18 @@ def judge_firing_history(entries: "list[dict]", expected_name_prefix: str = "BEN
 
 def judge_link_stats_delta(before: "dict[str, Any]", after: "dict[str, Any]") -> CaseResult:
     """SP-03: crc_errors/timeouts/broadcast_dropped deltas are 0 across a
-    firing. GET_STATUS timeouts are a separate, by-design-noisy counter
-    (memory project_get_status_has_no_reply) and are not part of this
-    comparison."""
+    firing.
+
+    `timeouts` IS compared here, deliberately. It is no longer the old
+    per-exchange "GET_STATUS got no reply" counter that read a bimodal
+    ~0%/~100% by design (memory project_get_status_has_no_reply, and the
+    docstring this one previously carried, which claimed the field was
+    excluded while the code below compared it anyway). It was redefined
+    2026-09-10 (docs/audits/safety_link_get_status_timeout_counter_2026-09-10.md,
+    and see SafetyLinkStats.timeouts' own comment in devices_safety.py) to
+    count ~500 ms poll iterations during which NO new STATUS frame was
+    applied at all -- near zero on a healthy link, so a nonzero delta over a
+    firing is real partial loss and belongs in this verdict."""
     deltas: "dict[str, Optional[int]]" = {}
     for key in ("crc_errors", "timeouts", "broadcast_dropped"):
         b, a = before.get(key), after.get(key)

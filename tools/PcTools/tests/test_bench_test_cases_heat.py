@@ -230,3 +230,59 @@ class CleanupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanupRegressionTest(unittest.TestCase):
+    """Two defects found reviewing wave 1b, each fixed with its own test
+    here; both were paths on which the fixture could be left heating or the
+    hidden slot left behind."""
+
+    def test_start_refusal_still_deletes_the_saved_bench_slot(self):
+        profiles = _FakeProfilesClient(start_result=_OkReason(ok=False, error="busy"))
+        srv = _FakeSrv(profiles=profiles)
+        ctx = {"srv": srv}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertFalse(ok)
+        self.assertIn("busy", reason)
+        # the save DID land in the hidden slot, so the teardown must have run
+        self.assertEqual(profiles.saved[0][0], C.BENCH_PROFILE_SLOT_ID)
+        self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
+        self.assertTrue(profiles.stop_called)
+
+    def test_start_raising_still_deletes_the_saved_bench_slot(self):
+        class _Raising(_FakeProfilesClient):
+            def start(self, profile_id):
+                raise RuntimeError("link down")
+
+        profiles = _Raising()
+        srv = _FakeSrv(profiles=profiles)
+        ctx = {"srv": srv}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertFalse(ok)
+        self.assertIn("RuntimeError", reason)
+        self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
+
+    def test_cleanup_stops_even_when_exec_status_raises(self):
+        """A failed get_exec_status() must not skip the stop -- stopping the
+        host does not stop a firing."""
+        class _BlindStatus(_FakeProfilesClient):
+            def get_exec_status(self):
+                raise RuntimeError("no reply")
+
+        profiles = _BlindStatus()
+        C._cleanup_bench_profile({"srv": _FakeSrv(profiles=profiles)})
+        self.assertTrue(profiles.stop_called)
+        self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
+
+    def test_cleanup_stops_even_when_stop_raises_then_still_deletes(self):
+        class _StopRaises(_FakeProfilesClient):
+            def stop(self):
+                self.stop_called = True
+                raise RuntimeError("no reply")
+
+        profiles = _StopRaises()
+        C._cleanup_bench_profile({"srv": _FakeSrv(profiles=profiles)})
+        self.assertTrue(profiles.stop_called)
+        self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])

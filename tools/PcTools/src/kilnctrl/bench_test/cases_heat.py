@@ -155,11 +155,18 @@ def _start_bench_profile(
         return False, f"profiles.save raised {type(exc).__name__}: {exc}", ambient
     if not save_result.ok:
         return False, f"profiles.save refused: {save_result.error}", ambient
+    # From here on the hidden slot HAS been written, so every failure path
+    # below must tear it down itself: the callers only enter their own
+    # `finally: _cleanup_bench_profile(ctx)` once this function has returned
+    # ok, so a start that refuses or raises would otherwise leave BENCH_HP
+    # sitting in a user-visible slot forever.
     try:
         start_result = srv._profiles.start(BENCH_PROFILE_SLOT_ID)
     except Exception as exc:
+        _cleanup_bench_profile(ctx)
         return False, f"profiles.start raised {type(exc).__name__}: {exc}", ambient
     if not start_result.ok:
+        _cleanup_bench_profile(ctx)
         return False, f"profiles.start refused: {start_result.error}", ambient
     return True, "", ambient
 
@@ -171,10 +178,15 @@ def _cleanup_bench_profile(ctx: dict) -> None:
     the next case's own preflight/rest-gate will catch a board left in a
     bad state."""
     srv = _srv(ctx)
+    # Stop UNCONDITIONALLY, in its own try: "stopping the host does not stop
+    # a firing" (memory project_stopping_host_does_not_stop_firing), so the
+    # stop must not be conditional on a get_exec_status() that may itself
+    # raise -- reading the state and stopping used to share one try, which
+    # meant a failed status read silently skipped the stop and left the
+    # fixture heating. profiles_stop() on an already-idle executor is a
+    # harmless no-op, so there is nothing to gain from asking first.
     try:
-        st = srv._profiles.get_exec_status()
-        if st.state_name in ("running", "paused"):
-            srv._profiles.stop()
+        srv._profiles.stop()
     except Exception:
         pass
     try:
