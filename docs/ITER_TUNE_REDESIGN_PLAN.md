@@ -109,7 +109,12 @@
 >   on 5 of 6** (−2.1 to −4.8 °C against ±1.5, one hold-out z0 pass at −1.412),
 >   dwell-entry-peak is mixed pass/fail per segment, and the noise-floor
 >   spread check fails 4 of 6 keys (simulated spread pessimistic vs. 2×
->   `noise_floor.json`). **The gate's overall verdict is still `GATE FAILS`**
+>   `noise_floor.json`). (These ramp-MAE and dwell-offset numbers predate the
+>   `69118a66` sim_plant dead-time cap fix — see the 2026-09-21 addendum atop
+>   `docs/audits/credibility_gate_dwell_offset_2026-09-14.md` and
+>   `docs/audits/credibility_gate_scalar_adoption_2026-09-14.md` for current
+>   numbers; the gate's conclusion is unchanged.) **The gate's overall verdict
+>   is still `GATE FAILS`**
 >   — three of its four bars are open, most acutely dwell-entry peak, which
 >   the audit doc's own sec 6 says is not yet demonstrated by any variant
 >   tried. Per plan sec 6.5 this means: simulation results are materially

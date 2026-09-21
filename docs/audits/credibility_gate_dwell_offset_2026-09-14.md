@@ -1,5 +1,17 @@
 # Credibility gate: the dwell-offset bar, re-investigated, 2026-09-14
 
+**Addendum, 2026-09-21:** the per-zone tables below were computed before
+commit `69118a66` ("sim_plant: fix DT_S trap"), which raised
+`SIM_PLANT_DELAY_MAX_STEPS` from 64 to 128 and made truncation refuse loudly
+instead of silently clamping. The gate's kiln-scaled dead time is ~76.9 s, so
+the 09-14 numbers below used a silently-truncated 64 s delay. Current numbers
+at `a8f1e524` (calibration `noise_floor_p7_run1`, hold-out
+`noise_floor_p7d_run1`): ramp MAE 3 pass / 3 fail (was 5/1), dwell offset 2
+pass / 4 fail (was 1/5), dwell-entry peak 10 pass / 2 fail / 6 unevaluable
+(unchanged), noise-floor spread 2 pass / 4 fail (unchanged). Conclusion
+unchanged: genuine forward-gain deficit, do not tune to pass, gate left
+failing.
+
 Roadmap survey flagged `sim_credibility_gate`'s current verdict — GATE FAILS,
 ramp MAE 5/6, dwell offset 5/6 miss at −2.1 to −4.8 °C against ±1.5 °C — as
 blocking `iter_tune` steps 6-9. This pass re-derives what the gate compares,
