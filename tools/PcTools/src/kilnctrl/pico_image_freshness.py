@@ -143,25 +143,6 @@ def find_one_identity(buf: bytes) -> ImageIdentity:
     return found[0]
 
 
-def git_short_head(repo_root: Path) -> Optional[str]:
-    """Plain `git rev-parse --short HEAD` of the whole repo. Kept for
-    callers that genuinely want repo HEAD; NOT what gen_build_info.cmake
-    stamps into SAFTYFW_GIT_COMMIT any more -- use
-    git_saftyfw_scoped_head() to mirror that. Returns None if git is
-    unavailable or the call fails, so callers can SKIP rather than crash."""
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    commit = out.stdout.strip()
-    return commit or None
-
-
 # The exact set of repo-relative paths gen_build_info.cmake scopes both its
 # `git log -1` (SAFTYFW_GIT_COMMIT) and its `git status --porcelain`
 # (SAFTYFW_GIT_DIRTY) to -- the three hwAbstraction subdirectories the

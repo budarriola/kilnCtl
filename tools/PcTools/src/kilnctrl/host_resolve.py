@@ -28,7 +28,8 @@ knows better (an explicit ``host=`` argument, or ``flash_firmware()``'s own
 ordered candidate list) is untouched by this module and always wins.
 
 RECORDING IS OPT-IN, DEFAULT OFF. :func:`record_host_seen` is a no-op
-until :func:`enable_recording` has been called once in this process.
+until :func:`enable_recording` has been called once in this process
+(``enable_recording(False)`` turns it back off, e.g. for test teardown).
 Real entry points (the MCP server's own startup, the GUI's startup) call
 it; nothing else should. This is what keeps a test that mocks
 ``urllib.request.urlopen`` and calls a client with a fixture host (e.g.
@@ -64,21 +65,21 @@ FALLBACK_HOST = "192.168.4.1"
 _recording_enabled = False
 
 
-def enable_recording() -> None:
-    """Turn on :func:`record_host_seen`'s writes for the rest of this
-    process. Call exactly once, from a real entry point (the MCP server's
+def enable_recording(enabled: bool = True) -> None:
+    """Turn :func:`record_host_seen`'s writes on (the default) or, passing
+    ``enabled=False``, back off for the rest of this process. Call with no
+    argument exactly once, from a real entry point (the MCP server's
     startup, the GUI's startup) -- never from library code, and never from
     a test unless that test is specifically exercising this wiring (in
     which case it should also patch ``host_resolve.settings.SETTINGS_PATH``
-    or pass an explicit ``path=`` to avoid touching the real file)."""
-    global _recording_enabled
-    _recording_enabled = True
+    or pass an explicit ``path=`` to avoid touching the real file).
 
-
-def disable_recording() -> None:
-    """Test/teardown helper: the inverse of :func:`enable_recording`."""
+    ``enabled=False`` is a test/teardown helper: it used to be a separate
+    ``disable_recording()`` function, folded into this one so the toggle
+    has a single production entry point instead of two public names where
+    only one is ever reached outside tests."""
     global _recording_enabled
-    _recording_enabled = False
+    _recording_enabled = enabled
 
 
 def resolve_default_host(path: Optional[Path] = None) -> str:

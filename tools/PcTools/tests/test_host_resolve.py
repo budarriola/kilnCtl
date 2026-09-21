@@ -58,7 +58,7 @@ class HostResolveTest(unittest.TestCase):
         # and always turn it back off so no OTHER test file's calls
         # through http_auth.urlopen accidentally start writing.
         host_resolve.enable_recording()
-        self.addCleanup(host_resolve.disable_recording)
+        self.addCleanup(host_resolve.enable_recording, False)
 
     # --- resolution order --------------------------------------------------
     def test_falls_back_to_ap_address_with_nothing_set(self):
@@ -106,14 +106,14 @@ class HostResolveTest(unittest.TestCase):
         ``*_AP_DEFAULT_HOST`` constant computed at import time in a LATER
         pytest process (this really happened -- see the commit message).
         Recording must default OFF regardless of ``path=`` given."""
-        host_resolve.disable_recording()  # undo setUp's enable, for this one test
+        host_resolve.enable_recording(False)  # undo setUp's enable, for this one test
         with unittest.mock.patch.object(host_resolve.settings, "set_last_host") as mock_set:
             host_resolve.record_host_seen("kiln.local", self.path)
         mock_set.assert_not_called()
         self.assertEqual(host_resolve.resolve_default_host(self.path), host_resolve.FALLBACK_HOST)
 
     def test_enable_recording_turns_writes_back_on(self):
-        host_resolve.disable_recording()
+        host_resolve.enable_recording(False)
         host_resolve.record_host_seen("192.168.1.156", self.path)
         self.assertEqual(host_resolve.resolve_default_host(self.path), host_resolve.FALLBACK_HOST)
         host_resolve.enable_recording()
@@ -136,7 +136,7 @@ class HostResolveTest(unittest.TestCase):
                 self.assertEqual(host_resolve.resolve_default_host(self.path), "192.168.1.156")
 
     def test_a_successful_request_does_not_update_the_cache_when_recording_disabled(self):
-        host_resolve.disable_recording()
+        host_resolve.enable_recording(False)
         http_auth.clear_sessions()
         self.addCleanup(http_auth.clear_sessions)
         recorder_response = _response(b'{"ok":true}')
