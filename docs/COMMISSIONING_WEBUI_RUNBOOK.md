@@ -14,17 +14,51 @@ duplicated here. Source snapshot: `origin/main` at 51effca5.
 (`route_tier_table.h` has 155 route rows -- counted directly with
 `grep -c '^\s*ROUTE_TIER("' firmware/KilnFW/App/drivers/http/route_tier_table.h`,
 which excludes the file's own header-comment prose and its `#define`; a
-naive `grep -c 'ROUTE_TIER('` overcounts by 2 by matching those). Pages:
+naive `grep -c 'ROUTE_TIER('` overcounts by 2 by matching those).
 
-`main_page.html`, `profiles_page.html`, `live_profile_page.html`,
-`zones_page.html`, `safety_config_page.html`, `safety_page.html`,
-`safety_commissioning_page.html`, `diagnostics_page.html`,
-`settings_page.html`, `settings_display_page.html`, `kiln_configs_page.html`,
-`backup_page.html`, `readiness_page.html`, `setup_wizard_page.html`,
-`login_page.html`, and (under `drivers/net/`) `ota_page.html`,
-`security_page.html`, `wifi_provision_page.html`. Static shared assets
-(`theme.css`, `nav.js`, `app.js`, `commissioning_shared.js`) are served but
-have no controls of their own.
+**Drive the board by ROUTE, not by source filename** -- the filenames below
+never appear in a URL; a driver following an earlier draft of this section by
+requesting e.g. `/login_page.html` gets a 302 redirect to `/` and never
+reaches the login form (`kiln_http_prehandler` / `wifi_provision_http.c`'s
+`index_get_handler` sends any unrecognized path there). Route first, source
+filename second, tier from `route_tier_table.h`:
+
+| Route (GET) | Source file | Tier |
+|---|---|---|
+| `/` | `main_page.html` (Wi-Fi connected) or `wifi_provision_page.html` (not yet provisioned/AP mode) | OPEN |
+| `/login` | `login_page.html` | OPEN |
+| `/wifi` | `wifi_provision_page.html` | OPEN |
+| `/profiles` | `profiles_page.html` | ADMIN |
+| `/live_profile` | `live_profile_page.html` | ADMIN |
+| `/settings` | `settings_page.html` | ADMIN |
+| `/settings/zones` | `zones_page.html` | ADMIN |
+| `/settings/safety` | `safety_config_page.html` | ADMIN |
+| `/settings/security` | `security_page.html` | ADMIN |
+| `/settings/display` | `settings_display_page.html` | ADMIN |
+| `/settings/kiln_configs` | `kiln_configs_page.html` | ADMIN |
+| `/settings/backup` | `backup_page.html` | ADMIN |
+| `/safety` | `safety_page.html` | ADMIN |
+| `/safety/commissioning` | `safety_commissioning_page.html` | ADMIN |
+| `/diagnostics` | `diagnostics_page.html` | ADMIN |
+| `/readiness` | `readiness_page.html` | ADMIN |
+| `/setup` | `setup_wizard_page.html` | ADMIN |
+| `/ota` | `ota_page.html` | ADMIN |
+
+All but `/`, `/login` and `/wifi` are `ROUTE_TIER_ADMIN` even for this GET --
+each needs an authenticated administrator session before it will render the
+real page rather than redirecting to `/login` (or, pre-bootstrap, to the
+bootstrap flow). Static shared assets (`theme.css`, `nav.js`, `app.js`,
+`commissioning_shared.js`) are served but have no controls of their own.
+
+**Static pages/assets vs. API requests and `Accept-Encoding`:** every page
+shell and static asset above is stored gzip-only and answers `406 Not
+Acceptable` to a request whose `Accept-Encoding` header is present but
+excludes gzip (`web_encoding.c`'s `WEB_ENCODING_406_BODY` path) -- so a driver
+or test harness must NOT send `Accept-Encoding: identity` against any of
+these routes (omit the header entirely, or send one that includes `gzip`).
+`/api/*` requests are ordinary uncompressed JSON and are unaffected either
+way, so sending `Accept-Encoding: identity` there (to rule out an unwanted
+transfer-encoding on API responses) is fine and does not trip this path.
 
 Per the matrix's own count: ~120 distinct controls (161 raw `<button>`
 matches across 18 pages before dedup), 155 total HTTP routes, of which
