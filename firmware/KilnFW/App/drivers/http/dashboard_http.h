@@ -340,6 +340,7 @@ typedef struct {
     uint32_t diag_context_frames_ok;
     uint32_t diag_context_frames_bad;
     uint32_t diag_tx_frames_dropped;
+    uint32_t diag_log_frames_dropped;
     /* 2026-09-16: thermo_task.c's MAX31856 tc_type reconfigure retry
      * (SaftyFW) has exhausted its bound with the type still unverified --
      * SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP, safety_link.h. Meaningless

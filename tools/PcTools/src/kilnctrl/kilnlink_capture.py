@@ -287,8 +287,8 @@ def _decode_context(payload: bytes) -> dict:
 
 def _decode_diag(payload: bytes) -> dict:
     """LINK_PROTOCOL.md sec 6 Frame B -- mirrors kilnlink_codec.encode_diag."""
-    if len(payload) != 26:
-        raise ValueError(f"DIAG (Frame B) must be 26 bytes, got {len(payload)}")
+    if len(payload) != 30:
+        raise ValueError(f"DIAG (Frame B) must be 30 bytes, got {len(payload)}")
     (
         trip_reason,
         warn_mask,
@@ -301,7 +301,8 @@ def _decode_diag(payload: bytes) -> dict:
         tx_frames_dropped,
         state,
         flags,
-    ) = struct.unpack_from("<BHHIBBIIIBB", payload, 1)
+        log_frames_dropped,
+    ) = struct.unpack_from("<BHHIBBIIIBBI", payload, 1)
     return {
         "trip_reason": trip_reason,
         "warn_mask": warn_mask,
@@ -314,6 +315,7 @@ def _decode_diag(payload: bytes) -> dict:
         "tx_frames_dropped": tx_frames_dropped,
         "state": state,
         "flags": flags,
+        "log_frames_dropped": log_frames_dropped,
     }
 
 

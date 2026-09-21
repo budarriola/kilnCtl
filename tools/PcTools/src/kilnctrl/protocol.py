@@ -148,7 +148,12 @@ DEFAULT_BAUD_RATE = 921600
 #: ESP<->Pico link (KILNLINK_PROTOCOL_VERSION 14->15) and has no PC<->ESP
 #: wire change. Bumped anyway per uart_task_ids.h's Version 12 note, so this
 #: mirror must match it too or selfcheck.py's cross-language pin fails.
-UART_PROTOCOL_VERSION = 12
+#:
+#: 12 -> 13 (2026-09-20): GET_DIAG (SAFETY_CMD_GET_DIAG) reply grows 27 -> 31
+#: bytes -- a new trailing diag_log_frames_dropped (u32 LE), mirroring the
+#: Pico's log_task.c drop counter. See uart_task_ids.h's Version 13 note and
+#: TODO.md's "Dropped-log-frame counter surfaced from the diagnostic frame".
+UART_PROTOCOL_VERSION = 13
 
 
 class Device(enum.IntEnum):

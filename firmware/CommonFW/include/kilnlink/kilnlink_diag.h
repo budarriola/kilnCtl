@@ -19,7 +19,17 @@ extern "C" {
  * via kilnlink_bytes.h, fixed-size frame (no variable-length fields). */
 
 #define KILNLINK_DIAG_CMD 0x08u
-#define KILNLINK_DIAG_LEN 26u
+/* 26 -> 30, KILNLINK_PROTOCOL_VERSION 15 -> 16 (kilnlink_version.h),
+ * TODO.md's "Dropped-log-frame counter surfaced from the diagnostic frame":
+ * appends log_frames_dropped (u32 LE, offset 26..29) -- log_task.c's own
+ * s_dropped/log_task_get_dropped(), which existed on this side already
+ * (log emission has always been best-effort/non-blocking, see log_task.h's
+ * own comment) but was never surfaced past this boot's own RAM. A real
+ * layout break of an EXISTING fixed-size frame, same class as the 13->14
+ * stack-margin growth (kilnlink_version.h) -- kilnlink_diag_decode()
+ * rejects any len != KILNLINK_DIAG_LEN before reading a single field, so a
+ * skewed pair fails closed with ERR_LENGTH_MISMATCH, never a misparse. */
+#define KILNLINK_DIAG_LEN 30u
 
 /* boot_reason byte (offset 10). Bits 3-5 added 2026-09-09 (RP2040
  * fatal-fault diagnosability pass): SaftyFW's watchdog_hw->scratch[5] latch
@@ -120,11 +130,17 @@ typedef struct {
     uint32_t tx_frames_dropped;   /* TX ring full */
     uint8_t  state;               /* kilnlink_diag_state_t */
     uint8_t  flags;               /* kilnlink_diag_flag_t bits */
+    uint32_t log_frames_dropped;  /* log_task.c's own count -- LOG frames the
+                                    * Pico never even attempted to enqueue/send
+                                    * (queue full, or level-filtered doesn't
+                                    * count -- see log_task_log()'s own doc
+                                    * comment). Added KILNLINK_PROTOCOL_VERSION
+                                    * 15 -> 16. */
 } kilnlink_diag_t;
 
 /* Serializes `dg` (SAFETY_CMD_DIAG payload, byte 0 = 0x08 included) into
- * `out`. Always exactly KILNLINK_DIAG_LEN (26) bytes -- this frame has no
- * variable-length fields. Returns 26, or 0 on
+ * `out`. Always exactly KILNLINK_DIAG_LEN (30) bytes -- this frame has no
+ * variable-length fields. Returns 30, or 0 on
  * KILNLINK_DIAG_ERR_BUFFER_TOO_SMALL. */
 size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_cap,
                             kilnlink_diag_status_t *status);

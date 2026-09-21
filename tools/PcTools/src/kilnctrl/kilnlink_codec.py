@@ -154,7 +154,8 @@ def encode_announce(f: dict) -> bytes:
 # -- SAFETY_CMD_DIAG = 0x08 (Pico -> ESP, Frame B) ---------------------------
 # kilnlink_diag.c: cmd(1) trip_reason(1) warn_mask(u16) trip_mask(u16)
 # uptime_ms(u32) boot_reason(1) context_age_100ms(1) context_frames_ok(u32)
-# context_frames_bad(u32) tx_frames_dropped(u32) state(1) flags(1) = 26 bytes.
+# context_frames_bad(u32) tx_frames_dropped(u32) state(1) flags(1)
+# log_frames_dropped(u32) = 30 bytes. (KILNLINK_PROTOCOL_VERSION 15 -> 16)
 
 _DIAG_BOOT = {
     "KILNLINK_DIAG_BOOT_POWERON": 0x01,
@@ -177,7 +178,7 @@ _DIAG_FLAG = {
 
 def encode_diag(f: dict) -> bytes:
     return struct.pack(
-        "<BBHHIBBIIIBB",
+        "<BBHHIBBIIIBBI",
         0x08,
         f["trip_reason"],
         f["warn_mask"],
@@ -190,6 +191,7 @@ def encode_diag(f: dict) -> bytes:
         f["tx_frames_dropped"],
         _resolve_enum(f["state"], _DIAG_STATE),
         _resolve_enum(f["flags"], _DIAG_FLAG),
+        f["log_frames_dropped"],
     )
 
 

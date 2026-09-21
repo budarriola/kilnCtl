@@ -1073,6 +1073,7 @@ Everything the 23-byte frame has no room for. A `KilnFW` that has never heard of
 | 20..23 | u32 LE | `tx_frames_dropped` (ring full) |
 | 24 | u8 | `state` (0 init, 1 grace, 2 armed, 3 warn, 4 **tripped**) |
 | 25 | u8 | flags: bit0 `sim_context_seen`, bit1 `calibration_missing`, bit2 `estop_unwired_suspect` |
+| 26..29 | u32 LE | `log_frames_dropped` — `log_task.c`'s own drop counter (queue full), added `KILNLINK_PROTOCOL_VERSION` 15 -> 16 |
 
 `boot_reason` bit 1 is the one to watch on a bench: a safety processor that is
 silently watchdog-resetting in a loop presents as a working system with an

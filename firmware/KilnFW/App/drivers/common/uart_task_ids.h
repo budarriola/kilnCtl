@@ -187,8 +187,20 @@
  * SAFETY_CMD_CLEAR_TRIP/SAFETY_CMD_PUSH_CONTEXT the same way) -- moving
  * only KILNLINK_PROTOCOL_VERSION would leave the "uart" fingerprint
  * drifted with no version bump to explain it, exactly the failure class
- * that check exists to catch. */
-#define UART_PROTOCOL_VERSION ((uint16_t)12)
+ * that check exists to catch.
+ *
+ * Version 13 (2026-09-20): GET_DIAG (SAFETY_CMD_GET_DIAG, 0x0C) reply grows
+ * from 27 to 31 bytes -- a new trailing bytes27..30 diag_log_frames_dropped
+ * (u32 LE), mirroring the Pico's own log_task.c drop counter
+ * (log_task_get_dropped()) onto the PC-facing cache, same as
+ * diag_tx_frames_dropped's existing precedent. TODO.md's "Dropped-log-frame
+ * counter surfaced from the diagnostic frame". A REAL layout break of an
+ * EXISTING fixed-size reply, same class as Version 11 above -- the exact
+ * length check on this reply (SAFETY_LINK_DIAG_PAYLOAD_LEN) already fails
+ * closed on any mismatch rather than misparsing. KILNLINK_PROTOCOL_VERSION
+ * also bumped 15 -> 16 alongside this, since the underlying wire frame
+ * (SAFETY_CMD_DIAG, Frame B) grew too -- see kilnlink_version.h. */
+#define UART_PROTOCOL_VERSION ((uint16_t)13)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */
@@ -885,6 +897,7 @@
  *   bytes21..24= diag_tx_frames_dropped, u32 LE
  *   byte25     = diag_state (SAFETY_LINK_DIAG_STATE_*)
  *   byte26     = diag_flags (SAFETY_LINK_DIAG_FLAG_* bits)
+ *   bytes27..30= diag_log_frames_dropped, u32 LE -- UART_PROTOCOL_VERSION 12 -> 13
  *
  * GET_TRIP_EVENT response payload (mirrors safety_link_status_t's trip_*
  * fields, safety_link.h):

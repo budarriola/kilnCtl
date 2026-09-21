@@ -274,7 +274,7 @@ extern "C" {
  * from kilnlink_diag.h. Pushed unsolicited on the same 500 ms cadence as the
  * status frame -- see safety_apply_diag() in safety_link.c for the field
  * layout. */
-#define SAFETY_LINK_DIAG_FRAME_LEN 26u
+#define SAFETY_LINK_DIAG_FRAME_LEN 30u
 
 /* DIAG flags byte (offset 25), kilnlink_diag.h's kilnlink_diag_flag_t
  * mirrored here for the same reason SAFETY_CMD_POWER/DIAG are hand-parsed
@@ -399,7 +399,7 @@ extern "C" {
 
 /* Length of the PC-facing GET_DIAG / GET_TRIP_EVENT payloads
  * (uart_task_ids.h). */
-#define SAFETY_LINK_DIAG_PAYLOAD_LEN       27u
+#define SAFETY_LINK_DIAG_PAYLOAD_LEN       31u
 #define SAFETY_LINK_TRIP_EVENT_PAYLOAD_LEN 34u
 
 /* Reserved age meaning "no status has ever been received". Distinct from a
@@ -869,6 +869,10 @@ typedef struct {
     uint32_t diag_tx_frames_dropped;   /* Pico's TX ring full */
     uint8_t  diag_state;               /* SAFETY_LINK_DIAG_STATE_* */
     uint8_t  diag_flags;               /* SAFETY_LINK_DIAG_FLAG_* bits */
+    uint32_t diag_log_frames_dropped;  /* Pico's log_task.c s_dropped -- LOG
+                                         * frames never enqueued/sent (queue
+                                         * full). Added KILNLINK_PROTOCOL_VERSION
+                                         * 15 -> 16 / UART_PROTOCOL_VERSION 12 -> 13. */
 
     /* SAFETY_CMD_TRIP_EVENT (Frame D) -- the most recent trip event the Pico
      * has pushed, cached until a newer one replaces it. Deliberately never

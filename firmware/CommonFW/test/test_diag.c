@@ -43,12 +43,13 @@ static void test_round_trip(void)
     dg.tx_frames_dropped = 1;
     dg.state = KILNLINK_DIAG_STATE_TRIPPED;
     dg.flags = KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN | KILNLINK_DIAG_FLAG_CALIBRATION_MISSING;
+    dg.log_frames_dropped = 42;
 
     uint8_t buf[KILNLINK_DIAG_LEN];
     kilnlink_diag_status_t status;
     size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
     CHECK(status == KILNLINK_DIAG_OK, "encode() reports OK");
-    CHECK(n == KILNLINK_DIAG_LEN, "encode() always writes exactly 26 bytes");
+    CHECK(n == KILNLINK_DIAG_LEN, "encode() always writes exactly 30 bytes");
 
     kilnlink_diag_t decoded;
     kilnlink_diag_status_t dstatus = kilnlink_diag_decode(buf, n, &decoded);
@@ -64,6 +65,7 @@ static void test_round_trip(void)
     CHECK(decoded.tx_frames_dropped == dg.tx_frames_dropped, "decoded tx_frames_dropped matches");
     CHECK(decoded.state == dg.state, "decoded state matches");
     CHECK(decoded.flags == dg.flags, "decoded flags matches");
+    CHECK(decoded.log_frames_dropped == dg.log_frames_dropped, "decoded log_frames_dropped matches");
 }
 
 static void test_round_trip_never_received_context(void)
@@ -92,7 +94,7 @@ static void test_vector_healthy_armed(void)
     static const uint8_t expected[] = {
         0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0xe2, 0x01, 0x00, 0x01, 0xff,
         0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x02, 0x02,
+        0x02, 0x02, 0x00, 0x00, 0x00, 0x00,
     };
     kilnlink_diag_t dg = {0};
     dg.trip_reason = 0;
@@ -106,6 +108,7 @@ static void test_vector_healthy_armed(void)
     dg.tx_frames_dropped = 0;
     dg.state = KILNLINK_DIAG_STATE_ARMED;
     dg.flags = KILNLINK_DIAG_FLAG_CALIBRATION_MISSING;
+    dg.log_frames_dropped = 0;
 
     uint8_t buf[KILNLINK_DIAG_LEN];
     kilnlink_diag_status_t status;
@@ -125,7 +128,7 @@ static void test_vector_tripped_with_history(void)
     static const uint8_t expected[] = {
         0x08, 0x03, 0x01, 0x00, 0x04, 0x00, 0x3f, 0x42, 0x0f, 0x00, 0x02, 0x0c,
         0xf4, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-        0x04, 0x03,
+        0x04, 0x03, 0x07, 0x00, 0x00, 0x00,
     };
     kilnlink_diag_t dg = {0};
     dg.trip_reason = 3;
@@ -139,6 +142,7 @@ static void test_vector_tripped_with_history(void)
     dg.tx_frames_dropped = 1;
     dg.state = KILNLINK_DIAG_STATE_TRIPPED;
     dg.flags = KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN | KILNLINK_DIAG_FLAG_CALIBRATION_MISSING;
+    dg.log_frames_dropped = 7;
 
     uint8_t buf[KILNLINK_DIAG_LEN];
     kilnlink_diag_status_t status;
@@ -161,7 +165,7 @@ static void test_decode_too_short(void)
     buf[0] = KILNLINK_DIAG_CMD;
     kilnlink_diag_t out;
     CHECK(kilnlink_diag_decode(buf, sizeof(buf), &out) == KILNLINK_DIAG_ERR_LENGTH_MISMATCH,
-          "decode() of a 25-byte (one short) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 29-byte (one short) payload -> ERR_LENGTH_MISMATCH");
 }
 
 static void test_decode_too_long(void)
@@ -170,7 +174,7 @@ static void test_decode_too_long(void)
     buf[0] = KILNLINK_DIAG_CMD;
     kilnlink_diag_t out;
     CHECK(kilnlink_diag_decode(buf, sizeof(buf), &out) == KILNLINK_DIAG_ERR_LENGTH_MISMATCH,
-          "decode() of a 27-byte (one too many) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 31-byte (one too many) payload -> ERR_LENGTH_MISMATCH");
 }
 
 static void test_decode_wrong_cmd(void)
@@ -185,7 +189,7 @@ static void test_decode_wrong_cmd(void)
 static void test_encode_buffer_too_small(void)
 {
     kilnlink_diag_t dg = {0};
-    uint8_t buf[10]; /* needs 26 */
+    uint8_t buf[10]; /* needs 30 */
     kilnlink_diag_status_t status;
     size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
     CHECK(n == 0, "encode() with an undersized output buffer writes nothing");
@@ -211,7 +215,7 @@ static void test_round_trip_fatal_boot_reason_bits(void)
     kilnlink_diag_status_t status;
     size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
     CHECK(status == KILNLINK_DIAG_OK, "encode() reports OK with fatal boot_reason bits set");
-    CHECK(n == KILNLINK_DIAG_LEN, "encode() still writes exactly 26 bytes -- fatal bits reuse "
+    CHECK(n == KILNLINK_DIAG_LEN, "encode() still writes exactly 30 bytes -- fatal bits reuse "
                                    "spare bits in the EXISTING boot_reason byte, they do not "
                                    "grow the frame");
 

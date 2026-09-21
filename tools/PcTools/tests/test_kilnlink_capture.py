@@ -293,6 +293,7 @@ def test_decode_diag_frame_b_matches_encoder_fields():
         "tx_frames_dropped": 0,
         "state": "KILNLINK_DIAG_STATE_TRIPPED",
         "flags": "KILNLINK_DIAG_FLAG_CALIBRATION_MISSING",
+        "log_frames_dropped": 9,
     }
     payload = codec.encode_diag(fields)
     decoded = kc.decode_payload(7, 7, payload)[1]
@@ -300,6 +301,7 @@ def test_decode_diag_frame_b_matches_encoder_fields():
     assert decoded["trip_mask"] == 0x0020
     assert decoded["state"] == 4  # KILNLINK_DIAG_STATE_TRIPPED
     assert decoded["flags"] == 0x02
+    assert decoded["log_frames_dropped"] == 9
 
 
 def test_decode_trip_frame_d_matches_encoder_fields():

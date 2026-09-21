@@ -15,6 +15,7 @@
  *   20..23   u32 tx_frames_dropped
  *   24       u8  state
  *   25       u8  flags
+ *   26..29   u32 log_frames_dropped -- KILNLINK_PROTOCOL_VERSION 15 -> 16
  */
 #define OFF_TRIP_REASON 1u
 #define OFF_WARN_MASK 2u
@@ -27,6 +28,7 @@
 #define OFF_TX_DROPPED 20u
 #define OFF_STATE 24u
 #define OFF_FLAGS 25u
+#define OFF_LOG_DROPPED 26u
 
 size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_cap,
                             kilnlink_diag_status_t *status)
@@ -54,6 +56,7 @@ size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_
     kilnlink_put_u32le(out, OFF_TX_DROPPED, dg->tx_frames_dropped);
     out[OFF_STATE] = dg->state;
     out[OFF_FLAGS] = dg->flags;
+    kilnlink_put_u32le(out, OFF_LOG_DROPPED, dg->log_frames_dropped);
 
     return KILNLINK_DIAG_LEN;
 }
@@ -79,6 +82,7 @@ kilnlink_diag_status_t kilnlink_diag_decode(const uint8_t *payload, size_t len,
     out->tx_frames_dropped = kilnlink_get_u32le(payload, OFF_TX_DROPPED);
     out->state = payload[OFF_STATE];
     out->flags = payload[OFF_FLAGS];
+    out->log_frames_dropped = kilnlink_get_u32le(payload, OFF_LOG_DROPPED);
 
     return KILNLINK_DIAG_OK;
 }

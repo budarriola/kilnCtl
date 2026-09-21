@@ -1125,6 +1125,7 @@ static void link_task_send_diag(void)
         .tx_frames_dropped = uart_owner_get_tx_dropped(),
         .state = diag_state,
         .flags = diag_flags,
+        .log_frames_dropped = log_task_get_dropped(),
     };
     uint8_t payload[KILNLINK_DIAG_LEN];
     kilnlink_diag_status_t status;

@@ -225,14 +225,14 @@ traffic.
       is detected by USB VID:PID (`serial_link.DEBUG_PROBE_VID_PID`,
       `list_debug_probe_ports()`), not by description text, since Windows
       exposes composite interface strings there and pyserial strips `MI_xx`.
-- [ ] Dropped-log-frame counter surfaced from the diagnostic frame —
-      **deliberately deferred, 2026-09-20**: LOG-frame relay now exists
-      (above), but attributing a drop specifically to a LOG frame needs a
-      wire protocol version bump plus new codec/field infrastructure on the
-      diagnostic frame — judged disproportionate to the scope of this pass;
-      left for a dedicated follow-up
-- [ ] Pico log emission best-effort and droppable — never blocking, per
-      no-hang rule 3 — **firmware side pending**
+- [x] Dropped-log-frame counter surfaced from the diagnostic frame —
+      `log_task.c`'s existing `log_task_get_dropped()` now rides the DIAG
+      frame (`kilnlink_diag_t.log_frames_dropped`, `KILNLINK_PROTOCOL_VERSION`
+      15 -> 16) and GET_DIAG's PC mirror (`UART_PROTOCOL_VERSION` 12 -> 13);
+      `SafetyDiag.log_frames_dropped` on the PC side
+- [x] Pico log emission best-effort and droppable — never blocking, per
+      no-hang rule 3 — already implemented (`log_task.c`'s non-blocking
+      enqueue/drop-and-count paths)
 
 ## Firmware updates from here
 
@@ -334,7 +334,7 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 - [x] Per-peer level filter — landed 2026-09-20 (see "Logging and consoles" above)
 - [x] Runtime log-level control for the safety processor over the link, default warnings+errors — already implemented pre-existing (`log_task`)
 - [x] Transport availability shown honestly
-- [ ] Dropped-log-frame counter surfaced from the diagnostic frame — deliberately deferred 2026-09-20, needs a wire protocol version bump
+- [x] Dropped-log-frame counter surfaced from the diagnostic frame — landed 2026-09-20, `KILNLINK_PROTOCOL_VERSION` 15 -> 16 / `UART_PROTOCOL_VERSION` 12 -> 13
 - [x] Pico log emission best-effort and droppable — never blocking — already implemented pre-existing (non-blocking `xQueueSend`/enqueue in `log_task`)
 
 **Firmware updates**

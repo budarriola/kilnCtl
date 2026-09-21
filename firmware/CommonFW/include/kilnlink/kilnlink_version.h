@@ -310,8 +310,32 @@
  * (0x1D). Purely additive: a whole new frame neither side is required to
  * send or understand to keep every existing frame working, same shape as
  * the 8 -> 9 and 11 -> 12 steps above, so KILNLINK_MIN_COMPATIBLE is NOT
- * raised alongside it (see that constant's own comment). */
-#define KILNLINK_PROTOCOL_VERSION 15
+ * raised alongside it (see that constant's own comment).
+ *
+ * 15 -> 16 (2026-09-20): SAFETY_CMD_DIAG (0x08, Frame B)'s payload grows a
+ * `log_frames_dropped` (u32 LE) field -- KILNLINK_DIAG_LEN 26 -> 30 --
+ * TODO.md's "Dropped-log-frame counter surfaced from the diagnostic frame".
+ * log_task.c's own drop counter (log_task_get_dropped()) existed already --
+ * log emission on this side has always been best-effort/non-blocking, never
+ * able to stall a safety task -- but was never carried past this boot's own
+ * RAM onto the wire, so a Pico silently dropping log lines under load (its
+ * 16-deep queue, log_task.c) looked, from the ESP/PC side, identical to one
+ * that simply had nothing to say.
+ *
+ * This is a REAL layout break of an EXISTING frame, same class as the
+ * 13 -> 14 stack-margin growth: an old 26-byte-shaped decoder reading a new
+ * 30-byte frame, or a new decoder reading an old 26-byte frame, would
+ * misalign nothing (the field is strictly appended) but would MISS the new
+ * counter entirely without a length check -- kilnlink_diag_decode() rejects
+ * any len != KILNLINK_DIAG_LEN before reading a single field, so a skewed
+ * pair fails closed with ERR_LENGTH_MISMATCH rather than silently reading a
+ * stale/zero value. Bumped for the same visibility reason as 12->13/13->14:
+ * a version-visible signal beats relying on a length-mismatch log line to
+ * notice a dual-reflash skew. KILNLINK_MIN_COMPATIBLE is NOT raised: the
+ * length check alone is sufficient, and an old (15) Pico paired with a new
+ * (16) ESP, or vice versa, degrades to a clean ERR_LENGTH_MISMATCH on this
+ * one frame while every other frame on the link is unaffected. */
+#define KILNLINK_PROTOCOL_VERSION 16
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6

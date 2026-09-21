@@ -36,7 +36,7 @@
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_LEN=(1u + KILNLINK_CT_CAL_NUM_CHANNELS * KILNLINK_CT_CAL_CHANNEL_LEN)",
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_NUM_CHANNELS=3u",
       "kilnlink_diag.h:KILNLINK_DIAG_CMD=0x08u",
-      "kilnlink_diag.h:KILNLINK_DIAG_LEN=26u",
+      "kilnlink_diag.h:KILNLINK_DIAG_LEN=30u",
       "kilnlink_frame.h:KILNLINK_FRAME_CRC_LEN=2u",
       "kilnlink_frame.h:KILNLINK_FRAME_HEADER_LEN=8u",
       "kilnlink_frame_a_offsets.h:KILNLINK_FRAME_A_CMD=0x01u",
@@ -133,8 +133,8 @@
       "link_frame.h:LINK_FRAME_UPDATE_END_CMD=0x12u",
       "link_frame.h:LINK_FRAME_UPDATE_STATUS_CMD=0x14u"
     ],
-    "fingerprint": "59807c1cf51f7b58",
-    "version": 15
+    "fingerprint": "85b22a317e20c15e",
+    "version": 16
   },
   "uart": {
     "defs": [
@@ -272,6 +272,6 @@
       "uart_task_ids.h:WIFI_CMD_SET_MODE=0x04u"
     ],
     "fingerprint": "1def8545026afc9f",
-    "version": 12
+    "version": 13
   }
 }

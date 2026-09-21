@@ -596,6 +596,7 @@ class SafetyDiag:
     tx_frames_dropped: int
     state: int
     flags: int
+    log_frames_dropped: int
 
     @property
     def context_never_received(self) -> bool:
@@ -658,7 +659,8 @@ class SafetyDiag:
             f"warn_mask 0x{self.warn_mask:04x} | "
             f"trip_mask {mask_desc} | uptime {self.uptime_ms} ms | "
             f"context age {context_age} | context frames ok {self.context_frames_ok}, "
-            f"bad {self.context_frames_bad} | tx frames dropped {self.tx_frames_dropped}"
+            f"bad {self.context_frames_bad} | tx frames dropped {self.tx_frames_dropped} | "
+            f"log frames dropped {self.log_frames_dropped}"
             + (f" | flags [{', '.join(flag_bits)}]" if flag_bits else "")
         )
 
@@ -811,7 +813,8 @@ def parse_safety_response(
                          uptime_ms u32 LE, boot_reason u8,
                          context_age_100ms u8, context_frames_ok u32 LE,
                          context_frames_bad u32 LE, tx_frames_dropped u32 LE,
-                         state u8, diag_flags u8                    (27 bytes)
+                         state u8, diag_flags u8, log_frames_dropped u32 LE
+                                                                     (31 bytes)
         GET_TRIP_EVENT:  byte0=0x15, flags u8 (bit0 ever_received),
                          last_seq u8, trip_reason u8, uptime_ms u32 LE,
                          safety_tc_c f32 LE, deciding_threshold f32 LE,
@@ -980,9 +983,9 @@ def parse_safety_response(
         )
 
     if subcommand == SAFETY_CMD_GET_DIAG:
-        if len(payload) != 27:
+        if len(payload) != 31:
             raise SafetyResponseError(
-                f"GET_DIAG response must be 27 bytes, got {len(payload)}"
+                f"GET_DIAG response must be 31 bytes, got {len(payload)}"
             )
         (
             flags,
@@ -997,7 +1000,8 @@ def parse_safety_response(
             tx_frames_dropped,
             state,
             diag_flags,
-        ) = struct.unpack_from("<BBHHIBBIIIBB", payload, 1)
+            log_frames_dropped,
+        ) = struct.unpack_from("<BBHHIBBIIIBBI", payload, 1)
         return subcommand, SafetyDiag(
             ever_received=bool(flags & 0x01),
             trip_reason=trip_reason,
@@ -1011,6 +1015,7 @@ def parse_safety_response(
             tx_frames_dropped=tx_frames_dropped,
             state=state,
             flags=diag_flags,
+            log_frames_dropped=log_frames_dropped,
         )
 
     if subcommand == SAFETY_CMD_GET_TRIP_EVENT:

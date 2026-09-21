@@ -341,6 +341,7 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
             APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds->diag_context_frames_ok);
             APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds->diag_context_frames_bad);
             APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds->diag_tx_frames_dropped);
+            APPEND(",\"diag_log_frames_dropped\":%lu", (unsigned long)ds->diag_log_frames_dropped);
             APPEND(",\"safety_tc_reconfig_gave_up\":%s",
                    ds->safety_tc_reconfig_gave_up ? "true" : "false");
         }

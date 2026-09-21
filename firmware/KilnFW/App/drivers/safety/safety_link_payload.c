@@ -186,6 +186,7 @@ size_t safety_link_build_diag_payload(SafetyLinkClass *link, uint8_t *out)
     safety_put_u32_le(&out[21], status.diag_tx_frames_dropped);
     out[25] = status.diag_state;
     out[26] = status.diag_flags;
+    safety_put_u32_le(&out[27], status.diag_log_frames_dropped);
     return SAFETY_LINK_DIAG_PAYLOAD_LEN;
 }
 

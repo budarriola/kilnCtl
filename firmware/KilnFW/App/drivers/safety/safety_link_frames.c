@@ -813,7 +813,7 @@ bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
  * cached diagnostic snapshot with it. Same discard-rather-than-partially-
  * apply contract as safety_apply_status()/safety_apply_power(): a malformed
  * frame is dropped and counted as a frame error rather than half-applied.
- * Byte layout (26 bytes total, LINK_PROTOCOL.md sec 6):
+ * Byte layout (30 bytes total, LINK_PROTOCOL.md sec 6):
  *   byte0        cmd (0x08)
  *   byte1        trip_reason
  *   bytes2..3    warn_mask, u16 LE
@@ -826,6 +826,7 @@ bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
  *   bytes20..23  tx_frames_dropped, u32 LE
  *   byte24       state
  *   byte25       flags
+ *   bytes26..29  log_frames_dropped, u32 LE -- KILNLINK_PROTOCOL_VERSION 15 -> 16
  * Mirrors kilnlink_diag_decode() in firmware/CommonFW/src/kilnlink_diag.c
  * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_DIAG comment for why this
  * driver hand-parses rather than linking that codec. */
@@ -904,6 +905,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
     link->cached.diag_state = p[24];
     link->cached.diag_flags = p[25];
+    link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
     link->cached.diag_ever_received = true;
     link->stats.diag_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     bool want_boot_clear = false;

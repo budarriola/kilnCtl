@@ -3,7 +3,7 @@
 backs the new safety_get_diag MCP tool (mcp_server_safety.py), added to close
 the gap that an unexpected Pico reboot had no PC-side readout of *why*
 (watchdog vs. power-on vs. brownout). The wire already carries this
-(kilnlink_diag.h's boot_reason byte, GET_DIAG 0x0C, 27 bytes) -- this only
+(kilnlink_diag.h's boot_reason byte, GET_DIAG 0x0C, 31 bytes) -- this only
 adds the human-facing describe() and proves the decode is byte-exact,
 matching devices_safety.py's parse_safety_response() GET_DIAG branch.
 
@@ -38,13 +38,14 @@ def _build_vector(
     tx_frames_dropped=0,
     state=2,  # armed
     flags=0,
+    log_frames_dropped=0,
 ):
     """Byte-exact mirror of the GET_DIAG (0x0C) reply layout -- see
     devices_safety.py's parse_safety_response() doc comment."""
     out = bytearray()
     out.append(SAFETY_CMD_GET_DIAG)
     out += struct.pack(
-        "<BBHHIBBIIIBB",
+        "<BBHHIBBIIIBBI",
         1 if ever_received else 0,
         trip_reason,
         warn_mask,
@@ -57,6 +58,7 @@ def _build_vector(
         tx_frames_dropped,
         state,
         flags,
+        log_frames_dropped,
     )
     return bytes(out)
 
@@ -83,6 +85,11 @@ class SafetyDiagParseTests(unittest.TestCase):
         vector = _build_vector()[:-1]
         with self.assertRaises(devices.SafetyResponseError):
             devices.parse_safety_response(vector)
+
+    def test_log_frames_dropped_decoded(self):
+        vector = _build_vector(ever_received=True, log_frames_dropped=42)
+        _subcommand, value = devices.parse_safety_response(vector)
+        self.assertEqual(value.log_frames_dropped, 42)
 
 
 class SafetyDiagDescribeTests(unittest.TestCase):

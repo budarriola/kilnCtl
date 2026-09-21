@@ -340,6 +340,7 @@ void dashboard_get_status(dashboard_status_t *out)
             out->diag_context_frames_ok = sl.diag_context_frames_ok;
             out->diag_context_frames_bad = sl.diag_context_frames_bad;
             out->diag_tx_frames_dropped = sl.diag_tx_frames_dropped;
+            out->diag_log_frames_dropped = sl.diag_log_frames_dropped;
             /* 2026-09-16: surfaces thermo_task.c's MAX31856 tc_type
              * reconfigure-retry give-up (SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_
              * GAVE_UP, safety_link.h) past SWD. See that flag's own doc
