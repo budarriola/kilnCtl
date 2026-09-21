@@ -81,7 +81,10 @@ legend.
 **2026-09-21 Class B continuation (M18 step 3, completion pass):** ran the 9
 previously-not-run Class B rows. Result: 1 PASS (B30, profile save/delete +
 favorite round trip, both verified by read-back), 3 BLOCKED (B6 -- zones POST
-timing-profile field shape not confirmed against source in time available; B9
+timing-profile field shape not confirmed against source in time available --
+**since UNBLOCKED and PASSED, 2026-09-21, see `docs/BENCH_TEST_LOG.md`'s M18
+B6 section and `docs/COMMISSIONING_BACKEND_RUNBOOK.md`'s B4 row for the
+established form shape**; B9
 and B17 -- `sw_reset_esp` requires the AP Wi-Fi password with no env-var
 fallback in this tool, and typing it into a visible tool call would violate
 the never-print-credentials rule), and one FAIL finding spanning 5 rows
@@ -154,7 +157,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | PASS 2026-09-21 (A8/A11; web /settings/zones page load) |
-| Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | BLOCKED 2026-09-21 (B4/B6: form body is a ~2561-byte multi-field shape, distinct from GET's JSON; reconstructing safely without risking zone config corruption judged out of scope this session; no data changed) |
+| Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | PASS 2026-09-21 (B4/B6: form shape established from source and exercised on hardware -- GET-merge-POST via `zones_http_client.py`, exact shape recorded in `docs/COMMISSIONING_BACKEND_RUNBOOK.md`'s B4 row; round-trip test changed only `zones[0].name`, confirmed byte-identical elsewhere including after restore, `zones_config_valid`/`load_fault` unchanged, no reboot -- see `docs/BENCH_TEST_LOG.md`'s dated M18 B6 section) |
 | PID save | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | PASS 2026-09-21 (B3, flagged anomaly: writing identical gains still invalidated `tuning_valid`, see log; B10 same-value round trip confirmed by read-back) |
 | Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | |
 | Abort sweep (`sweepAbortBtn`) | `POST /api/zones/current_sweep/abort` | SAFETY_REDUCE | `zone_current_sweep_abort` | -- | Testable (abort path itself, even if the sweep's numbers are meaningless on bench) | |
