@@ -207,8 +207,11 @@ persisted dual-write/migration state its GET sibling above reads — an
 earlier draft omitted it from every table here).
 
 (`POST /api/kiln_configs/quarantine_clear`, referenced in
-`kiln_cfg_store.c`'s comments, is not yet an actually-registered route and
-needs no tier entry until it is; it is not part of the 137.)
+`kiln_cfg_store.c`'s comments, is still not an actually-registered route
+(confirmed 2026-09-21 — only `kiln_cfg_store_quarantine_clear()` exists, no
+`httpd_uri_t` wires it up) and needs no tier entry until it is; deferred by
+the URI handler cap, which sits at 155/160 with essentially no headroom left
+(see CLAUDE.md's "URI handler cap" note). It is not part of the 137.)
 
 *Network writes:* `POST /provision`, `/forget`, `/ip_config`.
 
@@ -227,21 +230,22 @@ administrator record's salt and iteration count, none of which is usable
 without the administrator password itself. Gating it would break the flow it
 exists to serve. The nine routes it serves are ADMIN like any other.
 
-**`GET /api/ota/esp/status` (OPEN) — flagged, not fixed, by this refresh.**
-Its handler (`ota_esp_status_get_handler()`, `ota_http_esp.c`) returns more
-than a progress percentage: `commit` (the exact firmware git commit hash),
-`dirty` (whether that build had local modifications), `build_date`,
+**`GET /api/ota/esp/status` — FIXED in `9c2b1c1b`.** The payload was trimmed
+to remove the commit-and-dirty-flag fingerprint and the other identity/
+recovery-state fields flagged below; the route deliberately stays OPEN tier,
+since a dashboard progress read is the intended, non-sensitive use. The
+original finding is kept here for the record: the handler
+(`ota_esp_status_get_handler()`, `ota_http_esp.c`) used to return more than a
+progress percentage — `commit` (the exact firmware git commit hash), `dirty`
+(whether that build had local modifications), `build_date`,
 `active_slot`/`inactive_slot` with `inactive_version`, `recovery_mode`
-(whether the board is boot-looping into recovery), and, once one update has
-happened, the last update's `image_sha256_hex`. A dashboard progress read is
-defensible as OPEN; an exact commit-and-dirty-flag fingerprint and the
-recovery-mode boot state are not the same class of information as "what an
-onlooker at the kiln can already see" (section 1's OPEN test) — the fingerprint
-lets a remote, unauthenticated attacker target a known defect in that exact
-build, and `recovery_mode` signals a window where the board's own safety
-gating (boot_guard) is in a degraded state. This is pre-existing behavior, not
-introduced by this plan, and is out of this plan's scope to fix — recorded
-here so it is not mistaken for something this refresh already checked.
+(whether the board is boot-looping into recovery), and, once one update had
+happened, the last update's `image_sha256_hex`. That fingerprint would have
+let a remote, unauthenticated attacker target a known defect in that exact
+build, and `recovery_mode` signaled a window where the board's own safety
+gating (boot_guard) was in a degraded state — not the same class of
+information as "what an onlooker at the kiln can already see" (section 1's
+OPEN test).
 
 ### Ambiguous routes, with a recommendation
 

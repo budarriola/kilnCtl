@@ -62,15 +62,12 @@
 > bar list; renamed to `"A8 A2-half bar: ..."` to match the convention used
 > by every other bar and fix the summary.)
 >
-> **The A1-half of A8 is unchanged and still an open, genuine, non-blocking
-> FAIL** (45/660, 6.82%, vs a 38.4-count ceiling) -- this pass did not touch
-> it and makes no claim about it. **Steps 7, 8, 9 are STILL NOT started**
-> and should not be until A8's A1-half is either resolved (the plan's
-> algorithm/scoring changed to close the gap) or the owner accepts the gap
-> and revises sec 7's bar deliberately, the same way A1's was revised, with
-> the tradeoff named. "A design that passes A1-A6 but fails A7 or A8 has not
-> been redesigned, only re-tuned" (sec 7's own words) -- A8's A1-half keeps
-> that exactly true; only the A2-half of A8 is now closed.
+> **Closed by owner decision: the A1-half of A8's cross-profile miss (45/660,
+> 6.82%, vs a 38.4-count ceiling) is accepted as a known gap, not made
+> green.** Do not re-dispatch work to close it. Both halves of A8 are now
+> settled: the A2-half closed on its own merits above, and the A1-half
+> closed by explicit owner acceptance of the gap rather than an algorithm
+> change.
 >
 > **Status update, 2026-09-10 (later pass):** steps 1, 2, 3, 4, 5 and the
 > write-surface part of 7 are now IMPLEMENTED. The status paragraph that used

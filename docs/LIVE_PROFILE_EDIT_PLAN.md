@@ -370,9 +370,10 @@ array and that route can only 404 on it.
 - **Bench verification.** Nothing here has run on hardware. Everything in
   section 11's "cannot be tested without a real firing" list is still
   unverified, and so is the page itself against a live firing.
-- **The pending record is NVS-only** — see the "Owner decision needed"
-  section at the end of this document (whether it should dual-write to
-  `cfg_fs` like zones config does).
+
+**Closed 2026-09-21:** owner default now in force — NVS-only persistence for
+the live-edit slot (slot 100) and auto-fork on first edit. See the "Owner
+decision needed" section at the end of this document.
 
 All five routes are ADMIN. Each needs a row in
 `firmware/KilnFW/App/drivers/http/route_tier_table.h` **in the same change**,
@@ -537,33 +538,11 @@ undisturbed.
 
 ---
 
-## Owner decision needed (added during 2026-09-19 review-fix pass)
+## Owner decision: closed 2026-09-21
 
-**The `live_edit_v1` pending-decision record (section 4) is NVS-only and does
-not dual-write to the `cfg` LittleFS partition, unlike the working-copy
-profile it points at (which IS an ordinary profile through
-`profiles_http_save()`/`profiles_cfg_fs.c`, ordinary dual-write, unaffected).**
-Reviewer flagged this as a second, private storage path forking away from the
-rest of the config system's dual-write discipline (`docs/CONFIG_FILESYSTEM.md`).
-
-This pass did NOT change the storage design -- `live_edit_v1` stays an NVS-only
-record. Two options for the owner to pick between, neither implemented here:
-
-1. **Leave it NVS-only.** The record is small, disposable (a lost record only
-   means the operator is asked to redo the end-of-firing naming/overwrite
-   decision, not a lost working copy -- the working copy profile itself
-   already survives via the ordinary dual-write path), and adding it to the
-   `cfg_fs` dual-write list means one more file competing for the same 512K
-   partition margin decision 1 above already found tight at today's 8-slot
-   count. Simplicity over completeness.
-2. **Fold it into `cfg_fs`**, giving it the same NVS-primary/LittleFS-mirror
-   treatment as zones/profiles/preferences, for consistency with
-   `CONFIG_FILESYSTEM.md`'s stated goal and so a `cfg`-partition restore some
-   day also restores an in-flight pending decision, not just the working
-   profile it points at.
-
-No recommendation is made here; this needs an explicit owner call before
-either option is implemented.
+**Decided:** the `live_edit_v1` pending-decision record (section 4) stays
+NVS-only (option 1 below applied as the default), and the live-edit slot
+(slot 100) auto-forks on first edit. No `cfg_fs` dual-write for this record.
 
 ---
 
