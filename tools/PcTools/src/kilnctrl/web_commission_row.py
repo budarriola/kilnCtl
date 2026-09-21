@@ -647,9 +647,14 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     touches any other slot -- the active one or a builtin -- since it only
     ever selects the id it just read back for its own generated name."""
     # Short and clearly a test artifact, but well under _KILN_CFG_NAME_MAX_LEN
-    # (root cause of the 2026-09-21 W42 FAIL: the old 38-char name overflowed
-    # the firmware's 23-char limit and was correctly rejected 400).
-    unique_name = f"kc_test_{int(time.time()) % 100000}"
+    # (root cause of the 2026-09-21 W42 FAIL: the old 37-char name overflowed
+    # the firmware's 23-char limit and was correctly rejected 400). The FULL
+    # epoch seconds are kept (18 chars, still well inside the limit) rather
+    # than a modulo: truncating to 5 digits wraps every ~27.8 h, so a
+    # leftover slot from a previous day could collide, and firmware refuses
+    # a duplicate name ("a saved kiln config already has that name",
+    # kiln_cfg_store.c:1151) -- a needless FAIL.
+    unique_name = f"kc_test_{int(time.time())}"
     assert len(unique_name) <= _KILN_CFG_NAME_MAX_LEN, (
         f"generated kiln_config test name {unique_name!r} ({len(unique_name)} chars) "
         f"exceeds _KILN_CFG_NAME_MAX_LEN ({_KILN_CFG_NAME_MAX_LEN})")
@@ -664,13 +669,14 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     if proc.returncode != 0:
         return False, f"{row.row_id} FAIL: CDP driver (create) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
     create_post = _cdp_post_status(proc)
-    if create_post is not None and create_post.get("status") not in (200, None):
+    if create_post is not None and (create_post.get("failed")
+                                    or create_post.get("status") not in (200, None)):
         # A clean 4xx/5xx here means the save POST completed but was
         # rejected -- report that instead of letting the read-back below
         # produce the generic, cause-blind "write did not land".
         return False, (f"{row.row_id} FAIL: create POST {create_post.get('url')} -> "
                         f"{create_post.get('status')} (failed={create_post.get('failed')}) -- "
-                        f"save was rejected, see board's error response for detail")
+                        f"save did not succeed, see board's error response for detail")
 
     mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
     if mid_status != 200 or not isinstance(mid_body, dict):

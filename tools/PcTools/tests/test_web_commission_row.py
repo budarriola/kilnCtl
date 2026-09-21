@@ -521,15 +521,43 @@ def test_kiln_config_create_delete_fails_if_create_never_landed(monkeypatch):
     assert "write did not land" in msg
 
 
-def test_kiln_config_create_delete_generated_name_fits_firmware_limit():
+def _generated_kiln_config_name(mod, monkeypatch):
+    """Captures the name _run_kiln_config_create_delete() actually puts into
+    #kcSaveNewName, by intercepting its _run_cdp() call -- rather than
+    restating the format string here, which would pass even if the
+    generator changed."""
+    seen = {}
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "stopped"
+
+    def _capture(row, host, shot_dir, cookie, **kw):
+        seen["fills"] = kw.get("fills")
+        return _Proc()
+
+    monkeypatch.setattr(mod, "_get_json_with_cookie", lambda *a, **k: (200, {"configs": []}))
+    monkeypatch.setattr(mod.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "_run_cdp", _capture)
+    mod._run_kiln_config_create_delete(mod.ROWS["W42"], "h", "d", "c")
+    assert seen["fills"] and seen["fills"][0][0] == "#kcSaveNewName"
+    return seen["fills"][0][1]
+
+
+def test_kiln_config_create_delete_generated_name_fits_firmware_limit(monkeypatch):
     # Root cause of the 2026-09-21 W42 live FAIL (docs/audits/
     # w42_kiln_config_create_2026-09-21.md): the old 38-char generated name
     # overflowed KILN_CFG_NAME_MAX_LEN (23, kiln_cfg_store.h) and the
     # board's save handler correctly rejected it 400. Pin the generated
     # name's length under the mirrored constant so this can't regress.
+    # Drives the real generator (via a monkeypatched clock) rather than
+    # restating its formula, so a change to the format is caught here.
     for t in (0, 1_790_032_582, 9_999_999_999):
-        name = f"kc_test_{t % 100000}"
-        assert len(name) <= wcr._KILN_CFG_NAME_MAX_LEN
+        monkeypatch.setattr(wcr.time, "time", lambda t=t: t)
+        name = _generated_kiln_config_name(wcr, monkeypatch)
+        assert name.startswith("kc_test_")
+        assert len(name) <= wcr._KILN_CFG_NAME_MAX_LEN, name
 
 
 def test_kiln_config_create_delete_reports_real_status_on_rejected_create(monkeypatch):
@@ -560,6 +588,63 @@ def test_kiln_config_create_delete_reports_real_status_on_rejected_create(monkey
     assert not ok
     assert "400" in msg
     assert "/api/kiln_configs/save" in msg
+
+
+def test_kiln_config_create_delete_reports_network_failed_create(monkeypatch):
+    # _web_commission_cdp.mjs records {status: null, failed: true} for a POST
+    # that never got a response (Network.loadingFailed, line 201-205): status
+    # alone cannot distinguish that from "not recorded", so `failed` must be
+    # inspected too, or this falls through to "write did not land" again.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([(200, {"configs": []})]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _FailedCreateProc:
+        returncode = 0
+        stdout = json.dumps({
+            "ok": True, "route": "/settings/kiln_configs", "selector": "kcSaveNewBtn",
+            "fills": [], "dialogs": [],
+            "post": {"method": "POST", "url": "http://x/api/kiln_configs/save",
+                      "status": None, "failed": True},
+        })
+        stderr = ""
+
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailedCreateProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/x", "c")
+    assert not ok
+    assert "failed=True" in msg
+    assert "write did not land" not in msg
+
+
+def test_cdp_post_status_ignores_driver_preamble_line():
+    # The driver prints a plain-text line before its JSON when the CDP port
+    # it was given was busy (_web_commission_cdp.mjs:359), so only the LAST
+    # stdout line is JSON.
+    class _Proc:
+        stdout = ("_web_commission_cdp: CDP port 9333 was busy, using 9334 instead\n"
+                  + json.dumps({"ok": True, "post": {"method": "POST", "url": "u",
+                                                      "status": 200, "failed": False}}) + "\n")
+    assert wcr._cdp_post_status(_Proc()) == {"method": "POST", "url": "u",
+                                              "status": 200, "failed": False}
+
+
+def test_cdp_post_status_none_on_empty_or_nonjson_stdout():
+    class _Empty:
+        stdout = ""
+
+    class _NonJson:
+        stdout = "node: command failed\n"
+
+    class _NoPost:
+        stdout = json.dumps({"ok": True, "post": None})
+
+    assert wcr._cdp_post_status(_Empty()) is None
+    assert wcr._cdp_post_status(_NonJson()) is None
+    assert wcr._cdp_post_status(_NoPost()) is None
 
 
 def test_run_row_live_dispatches_to_fill_and_restore_for_w22(monkeypatch):
