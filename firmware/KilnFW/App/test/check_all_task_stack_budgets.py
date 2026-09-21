@@ -569,11 +569,13 @@ TASKS = [
          # Review finding (Pico-image-embed pass, 2026-09-20): this task's
          # call into ota_http_check_interlocks() does SPI reads and zone
          # snapshots normally run on the 8 KB httpd stack (see this file's
-         # own httpd_task_stack_budget-adjacent notes), but the boot task is
-         # only 4096 B (PICO_AUTO_UPDATE_TASK_STACK,
-         # drivers/net/pico_auto_update_boot.c) -- registered for stack-
-         # margin reporting per CLAUDE.md's "register every new task"
-         # standing instruction, not previously covered here.
+         # own httpd_task_stack_budget-adjacent notes). Raised 4096 -> 8192
+         # (PICO_AUTO_UPDATE_TASK_STACK, drivers/net/pico_auto_update_boot.c)
+         # 2026-09-21, owner-authorized, after a real hardware stack overflow
+         # in this task -- the earlier static ceiling excluded flash/NVS
+         # internals the embedded-staging path calls into. Registered for
+         # stack-margin reporting per CLAUDE.md's "register every new task"
+         # standing instruction.
          stack=lambda: extract_local_macro("drivers/net/pico_auto_update_boot.c",
              r'#define PICO_AUTO_UPDATE_TASK_STACK\s+(\d+)',
              r'xTaskCreate\(pico_auto_update_task,\s*"pico_auto_update",\s*PICO_AUTO_UPDATE_TASK_STACK')),

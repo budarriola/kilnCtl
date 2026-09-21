@@ -22,12 +22,15 @@
 
 static const char *TAG = "pico_auto_update";
 
-/* 4096 is the same size ota_pico_rollback (ota_http_pico.c) runs in, and this
- * task does strictly less: no httpd request, one static-buffered flash scan
- * (the scan buffer lives in pico_image_source.c precisely so it is NOT on
- * this stack), and one decision. Must match the stack_margin_register()
- * literal below. */
-#define PICO_AUTO_UPDATE_TASK_STACK 4096
+/* Raised 4096 -> 8192, 2026-09-21 (owner-authorized): this task overflowed
+ * on real hardware (coredump: "A stack overflow in task pico_auto_updat").
+ * The recorded static ceiling of 3104 B was measured from the call graph
+ * alone and excludes flash/NVS internals the embedded-staging path calls
+ * into, which is what actually blew the stack. This task allocates from the
+ * default (internal DRAM) heap, not PSRAM -- it writes flash/NVS update
+ * metadata, and a PSRAM-stacked task must never do that. Must match the
+ * stack_margin_register() literal below. */
+#define PICO_AUTO_UPDATE_TASK_STACK 8192
 /* Below every control/safety task. Nothing waits on this task's answer, and
  * it must never delay safety_poll or the link. */
 #define PICO_AUTO_UPDATE_TASK_PRIORITY 3
@@ -532,7 +535,7 @@ esp_err_t pico_auto_update_boot_start(SafetyLinkClass *link)
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
-    /* 4096 must match the PICO_AUTO_UPDATE_TASK_STACK literal above. Only
+    /* 8192 must match the PICO_AUTO_UPDATE_TASK_STACK literal above. Only
      * reached with a real handle -- the failure branch already returned. */
     stack_margin_register("pico_auto_update", &s_task, PICO_AUTO_UPDATE_TASK_STACK);
     return ESP_OK;

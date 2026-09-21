@@ -13,8 +13,9 @@
 >   kill switch, `PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT`, **defaults to
 >   0** — auto-update does not run in the default build. This makes the
 >   4096 B `pico_auto_updat` task-stack overflow (the M18 blocker below)
->   unreachable in a default build, but does **not fix** the stack itself;
->   see the owner-decisions block below. Third-review pass (`987050f6`) also
+>   unreachable in a default build. The stack itself was separately raised to
+>   8192 B, 2026-09-21, owner-authorized — see the owner-decisions block
+>   below. Third-review pass (`987050f6`) also
 >   added a mirror-drift test tying `safety_link.h`'s wire states to
 >   SaftyFW's own `update_task.c` enum.
 > - **SaftyFW: refuse to erase/program flash overlapping the running image**
@@ -60,10 +61,11 @@
 >   into `docs/COMMISSIONING_TEST_MATRIX.md`; full detail in
 >   `docs/BENCH_TEST_LOG.md`'s two 2026-09-21 sections (uncommitted in the
 >   shared tree as of this sweep). See M18 below for what remains.
-> - **Owner decisions still open, listed once under M18** rather than
->   repeated here: pico_auto_update task-stack size vs. keeping the kill
->   switch off; readiness status wording for the gate-off state;
->   `KILNCTL_AP_PASSWORD` unset; scope of an NVS reset at commission time.
+> - **Owner decisions, listed once under M18** rather than repeated here:
+>   pico_auto_update task-stack raised to 8192 B and readiness wording for
+>   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
+>   in progress (not yet done); scope of an NVS reset at commission time
+>   still open.
 >
 > **Previously reviewed:** 2026-09-20 night, five landings on
 > `origin/main` (twenty-second sweep) — open items below.
@@ -2720,10 +2722,11 @@ Owner instruction, 2026-09-21.
   handling, a readiness text fix, and (compile-time, default **off**)
   `PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT`. With the kill switch at its
   default of 0, auto-update does not run at all in a normal build, so the
-  4096 B `pico_auto_updat` task-stack overflow that started this is
-  currently unreachable — but it is **not fixed**, only inert; see the
-  owner-decisions block below. None of this has been re-verified on
-  hardware yet (no reflash since these landed).
+  4096 B `pico_auto_updat` task-stack overflow that started this was
+  unreachable with the kill switch off. The stack itself is now raised to
+  8192 B, 2026-09-21, owner-authorized (see the owner-decisions block
+  below). None of this has been re-verified on hardware yet (no reflash
+  since these landed).
 - **M18 read-only sweeps done, 2026-09-21** (see the top-of-file entry
   above and `docs/COMMISSIONING_TEST_MATRIX.md`): 48/48 backend Class A
   rows PASS, 19/19 web-UI read-only rows PASS, against the still-running
@@ -2743,17 +2746,22 @@ Owner instruction, 2026-09-21.
 
 **Owner decisions open, 2026-09-21:**
 
-1. `pico_auto_updat` task stack: raise it (4096→8192 B, against a measured
-   ~3104 B ceiling excluding flash/NVS internals — standing rule is never
-   bump a stack ceiling without review) or keep
-   `PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT` at 0 indefinitely.
-2. Readiness status for the auto-update gate while it is compiled off:
-   report `ok` (nothing to do) or `not_done` (feature exists but disabled).
+1. **Decided 2026-09-21:** `pico_auto_updat` task stack raised 4096→8192 B
+   (this commit) — the measured ~3104 B static ceiling excluded flash/NVS
+   internals the embedded-staging path calls into, which is what actually
+   overflowed on hardware. Owner: "Raise the stack and dont ask for
+   permission in the future."
+2. **Decided 2026-09-21:** readiness status for the auto-update gate while
+   it is compiled off stays `ok` with the existing "deliberately_off" text
+   — owner kept it as is.
 3. Set `KILNCTL_AP_PASSWORD` so `flash_firmware()` can clear `boot_guard`
-   (count sits at 2; skipped every reflash without it).
+   (count sits at 2; skipped every reflash without it). Owner directed a
+   dedicated bench AP test password be created and set in User scope; that
+   is being done in parallel and is **not yet done** as of this entry.
 4. Whether the next commission reflash should reset NVS more broadly than
    just the `web_auth`-recovery erase already done 2026-09-21, given the
-   `zones_cfg`/config-schema rollback hazards documented in CLAUDE.md.
+   `zones_cfg`/config-schema rollback hazards documented in CLAUDE.md. Still
+   open.
 
 ---
 
