@@ -159,5 +159,105 @@ class StaleCheckWorktreeRootTest(unittest.TestCase):
         )
 
 
+class StaleCheckKilnfwHwAbstractionScopingTest(unittest.TestCase):
+    """Regression test for check_kilnfw_stale()'s project_dirs missing the
+    hwAbstraction subdirectories the KilnFW build actually compiles
+    (firmware/hwAbstraction/esp, /common, /interface -- see
+    firmware/KilnFW/CMakeLists.txt's EXTRA_COMPONENT_DIRS and
+    firmware/hwAbstraction/idf/hwabstraction_esp/CMakeLists.txt's
+    idf_component_register). Before this fix, a commit touching only those
+    paths changed the KilnFW image but check_kilnfw_stale() reported
+    stale=False."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="stale_check_hwabs_test_")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+
+    def _make_override_tree(self):
+        tree_root = os.path.join(self.root, "override_tree")
+        _init_repo(tree_root)
+        _commit(tree_root, "base.txt", "base\n", "base commit")
+        recorded_commit = _commit(tree_root, "other.txt", "content\n", "advance HEAD")
+
+        kiln_fw_root = os.path.join(tree_root, "firmware", "KilnFW")
+        header_dir = os.path.join(kiln_fw_root, "build", "esp-idf", "drivers")
+        os.makedirs(header_dir, exist_ok=True)
+        with open(os.path.join(header_dir, "build_info.h"), "w", encoding="utf-8") as f:
+            f.write(f'#define FW_GIT_COMMIT "{recorded_commit}"\n')
+            f.write('#define FW_GIT_DIRTY 0\n')
+
+        build_dir = os.path.join(kiln_fw_root, "build")
+        with open(os.path.join(build_dir, "KilnCtrl.bin"), "wb") as f:
+            f.write(b"fake-binary")
+
+        return tree_root, kiln_fw_root, recorded_commit
+
+    def test_hwabstraction_esp_change_after_recorded_commit_is_stale(self):
+        tree_root, kiln_fw_root, recorded_commit = self._make_override_tree()
+        _commit(
+            tree_root,
+            os.path.join("firmware", "hwAbstraction", "esp", "spi", "esp_spi_owner.c"),
+            "// changed\n",
+            "hwAbstraction/esp change after the recorded build",
+        )
+
+        result = stale_check.check_kilnfw_stale(kiln_fw_root)
+
+        self.assertTrue(
+            result.stale,
+            "a change under firmware/hwAbstraction/esp (compiled into "
+            "KilnFW via the hwabstraction_esp component) after the recorded "
+            f"build commit must be flagged stale: {result.reason}",
+        )
+
+    def test_hwabstraction_common_change_after_recorded_commit_is_stale(self):
+        tree_root, kiln_fw_root, recorded_commit = self._make_override_tree()
+        _commit(
+            tree_root,
+            os.path.join("firmware", "hwAbstraction", "common", "hal_status.c"),
+            "// changed\n",
+            "hwAbstraction/common change after the recorded build",
+        )
+
+        result = stale_check.check_kilnfw_stale(kiln_fw_root)
+
+        self.assertTrue(result.stale, f"expected stale: {result.reason}")
+
+    def test_hwabstraction_interface_change_after_recorded_commit_is_stale(self):
+        tree_root, kiln_fw_root, recorded_commit = self._make_override_tree()
+        _commit(
+            tree_root,
+            os.path.join("firmware", "hwAbstraction", "interface", "hal_barrier.h"),
+            "// changed\n",
+            "hwAbstraction/interface change after the recorded build",
+        )
+
+        result = stale_check.check_kilnfw_stale(kiln_fw_root)
+
+        self.assertTrue(result.stale, f"expected stale: {result.reason}")
+
+    def test_hwabstraction_pico_change_after_recorded_commit_is_not_stale(self):
+        """Sanity check the scoping is exact, not the whole hwAbstraction
+        tree: firmware/hwAbstraction/pico never reaches the KilnFW image
+        (it is SaftyFW-only), so a change there must NOT make KilnFW
+        stale."""
+        tree_root, kiln_fw_root, recorded_commit = self._make_override_tree()
+        _commit(
+            tree_root,
+            os.path.join("firmware", "hwAbstraction", "pico", "some_pico_only.c"),
+            "// changed\n",
+            "hwAbstraction/pico change after the recorded build",
+        )
+
+        result = stale_check.check_kilnfw_stale(kiln_fw_root)
+
+        self.assertFalse(
+            result.stale,
+            f"a change under firmware/hwAbstraction/pico (never compiled "
+            f"into KilnFW) must not be flagged stale: {result.reason}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

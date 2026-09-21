@@ -286,11 +286,30 @@ def _tree_root_for_project(project_root: str) -> str:
 
 def check_kilnfw_stale(kiln_fw_root: str) -> StaleResult:
     tree_root = _tree_root_for_project(kiln_fw_root)
+    # project_dirs must mirror what the KilnFW build actually compiles.
+    # firmware/KilnFW/CMakeLists.txt:19 adds
+    # ../hwAbstraction/idf/hwabstraction_esp as an EXTRA_COMPONENT_DIR, and
+    # that thin wrapper's own CMakeLists.txt (idf_component_register) pulls
+    # its real sources from firmware/hwAbstraction/esp/**, plus exactly one
+    # file from firmware/hwAbstraction/common/ (hal_status.c), plus headers
+    # from firmware/hwAbstraction/interface/ (INCLUDE_DIRS) -- NOT
+    # firmware/hwAbstraction as a whole, which also holds pico/, host/,
+    # idf/, test/ and README.md that never reach the KilnFW image. Same
+    # class of bug just fixed for check_saftyfw_stale() below (987050f6): a
+    # commit touching only these subdirectories changes the KilnFW binary
+    # but was previously invisible to this check.
+    project_dirs = [
+        kiln_fw_root,
+        os.path.join(tree_root, "firmware", "CommonFW"),
+        os.path.join(tree_root, "firmware", "hwAbstraction", "esp"),
+        os.path.join(tree_root, "firmware", "hwAbstraction", "common"),
+        os.path.join(tree_root, "firmware", "hwAbstraction", "interface"),
+    ]
     return check_stale(
         header_path=os.path.join(kiln_fw_root, "build", "esp-idf", "drivers", "build_info.h"),
         commit_macro="FW_GIT_COMMIT",
         binary_path=os.path.join(kiln_fw_root, "build", "KilnCtrl.bin"),
-        project_dirs=[kiln_fw_root, os.path.join(tree_root, "firmware", "CommonFW")],
+        project_dirs=project_dirs,
         repo_root=tree_root,
     )
 
