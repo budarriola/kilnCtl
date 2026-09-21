@@ -2558,6 +2558,42 @@ captured board JSON.
 
 ---
 
+## M18 — Full commissioning of the dev board · *opened 2026-09-21*
+
+Owner instruction, 2026-09-21.
+
+- Fully commission the bench board (both processors at HEAD, diverged
+  config/filesystem items reset) and test every web function possible with
+  the current dev hardware.
+- Enumerate all web functions/buttons/options (every page, every control)
+  into `docs/COMMISSIONING_TEST_MATRIX.md` (being written in parallel; link
+  it) and mark each: testable on dev HW / hardware-gated.
+- Test order, owner preference: (1) backend first via HTTP API and MCP
+  facade, (2) then through the web interface (headless Chrome), (3) then LCD
+  functions (touch injection + camera numeric sampling).
+- Record results per function in the matrix; a failure becomes its own
+  ROADMAP row.
+
+**2026-09-21 bench findings, blocked/owner-gated:**
+
+1. Web auth record rewrite: board already has an admin record; only paths
+   are old password (unknown) or physical reset gesture (E-stop asserted
+   then four LCD corner taps, `docs/WEB_AUTH_PLAN.md`). Owner-gated, needs
+   hands at bench.
+2. E-stop false verification record: committing `0x0212` refused while Pico
+   ARMED; needs `debug_reset(peer="pico")` then commit inside the 60 s
+   GRACE window (S6a trip expected, clear after). Awaiting owner
+   authorization for the Pico reset.
+3. Live-edit bench exercise: `/api/profile/live`, `/fork`, `/decide` have no
+   kilnctrl MCP tool; tools being added (in progress). Zero-heat exec run
+   start/stop/delete slot 0 verified clean, no reboot.
+4. LCD blue profile button: numeric check inconclusive, specular glare on
+   that region (Start button reads green fine); needs light or camera
+   repositioned. Code confirmed `UI_THEME_ACCENT_BLUE`.
+5. Zero-caller sweep deletion: in progress.
+
+---
+
 ## Future work — KilnFW PC-link command acknowledgement
 
 **CLOSED**, moved out of this file 2026-08-24, closed in the owning doc
