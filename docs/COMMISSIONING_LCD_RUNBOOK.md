@@ -586,6 +586,46 @@ forbidden per the original document's own gate (panic fix not confirmed
 flashed on the running image) and was not called or considered for this
 pass.
 
+## Bench confirmation, 2026-09-21 (M18 LCD class)
+
+The panic fix (`3f86e899`) is confirmed flashed on this image (ESP
+`1045e542`), so this pass's coordinator explicitly authorized exactly one
+live `touch_log_tap_targets()` call, on the `home` page, to check the
+derivation above against the board's own dump. Before this, the panel was
+found **screen-blanked** (`touch_get_state()`: idle ~1.94e6 ms) — a plain
+wake tap was required before any capture showed page content; this is
+ordinary screen-idle behavior, not a defect (see `screen_idle.c`).
+
+**Topbar confirmed, within noise.** The dump's `home`-page Gear icon tap
+target was `(436,8)-(471,33)` centre **(453,20)** against this document's
+derived **(454,21)** — 1px on each axis, consistent with the exact-arithmetic
+derivation and not a real disagreement.
+
+**Home action row (Table 3) needed a correction.** The dump was taken while
+the board was idle (no firing), and in that state the Pause/Resume button
+is absent from the layout — Table 3 assumed it always present. The actual
+tap targets were:
+
+| Widget | Table 3 (derived, assumed 3 buttons) | Bench dump (idle, no Pause/Resume) |
+|---|---|---|
+| Profile picker button | (140,294), 264x36 | **(189,289)**, region `(8,272)-(371,307)`, 363x35 |
+| Start/Stop button | (424,294), 96x36 | **(423,289)**, region `(376,272)-(471,307)`, 95x35 |
+
+Start's x is close (1px) but the profile button's centre is off by 49px on
+x and 5px on y — with Pause/Resume absent, the profile-name widget grows to
+fill the freed width instead of staying pinned at its 3-button-layout
+position, and the whole row sits 5px higher (y=289 vs 294) than derived.
+**Table 3 should be read as the layout while a firing is active** (Pause
+button present, three elements); the idle-state, two-element layout above
+is the one to use for hitting the profile-picker button or Start from
+`home` while idle, which covers ordinary bench verification. Whether the
+row shifts again once Start is pressed (three elements, still idle-adjacent
+during the transition) was not tested this pass.
+
+No other page's tap targets were re-confirmed this pass, in keeping with
+this document's "one live call" allowance — the topbar and config-hub
+derivations for every other page stand as before, un-re-verified.
+
 ## Restore / re-run notes
 
 Every read-only row ends by navigating back toward `home` via topbar Back/

@@ -441,24 +441,24 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 verified with `capture_lcd.ps1` + `sample_lcd_region.ps1` numeric sampling
 (never by eye, per CLAUDE.md and `project_st7796_rgb565_byte_order`).
 
-| LCD page name | Source | Purpose | Web equivalent | Bench class |
-|---|---|---|---|---|
-| `home` | `ui_page_home.c` (+`_actions`, `_chart`, `_graph`, `_rail`, `_refresh`) | Live status, start/stop, graph | `/` | Testable |
-| `config` | `ui_page_config.c` | Device config menu | `/settings` (partial) | Testable |
-| `temperature` | `ui_page_temperature.c` (+`_safety`) | Per-zone temperature + safety status | `/safety`, `/api/status` | Testable |
-| `network` | `ui_page_network.c` | Wi-Fi status | `/status`, `/wifi` | Testable |
-| `network_manage` | `ui_page_network_manage.c` | Wi-Fi scan/connect/forget | `/scan`, `/provision`, `/forget` | Testable |
-| `diagnostics` | `ui_page_diagnostics.c` | On-device diagnostics | `/diagnostics` (subset) | Testable |
-| `touch_cal` | `ui_page_touch_cal.c` | Touch calibration | none (LCD-only; `KILNCTL_TOUCH_CAP_*` knobs, not the inert `KILNCTL_TOUCH_CAL_SWAP_XY`) | Testable |
-| `touch_test` | `ui_page_touch_test.c` | Raw touch test/tap-target dump | none | Testable via `touch_log_tap_targets`/`touch_inject` |
-| `profiles` | `ui_page_profiles.c` | Profile library | `/profiles` | Testable |
-| `profile_picker` | `ui_page_profile_picker.c` (+`_format`) | Choose profile to fire | `/profiles` | Testable |
-| `profiles_builtin_list` | `ui_page_profiles_builtin_list.c` | Built-in profile list | `/profiles` builtin section | Testable |
-| `profile_detail` | `ui_page_profile_detail.c` | View one profile | `/api/profile` | Testable |
-| `profile_segments` | `ui_page_profile_segments.c` | Segment list | `/profiles` segment editor | Testable |
-| `profile_builder_zones` | `ui_page_profile_builder_zones.c` | New profile: zone selection | `/profiles` new-profile flow | Testable |
-| `profile_builder_segment` | `ui_page_profile_builder_segment.c` | New profile: segment entry | same | Testable |
-| `profile_builder_review` | `ui_page_profile_builder_review.c` | New profile: review/save | same, `POST /api/profile` | Testable |
+| LCD page name | Source | Purpose | Web equivalent | Bench class | Result |
+|---|---|---|---|---|---|
+| `home` | `ui_page_home.c` (+`_actions`, `_chart`, `_graph`, `_rail`, `_refresh`) | Live status, start/stop, graph | `/` | Testable | PASS 2026-09-21 (M18 LCD class; zone temps 27.2-27.4C matched `safety_get_status`; gear icon bright vs bezel numeric sample) |
+| `config` | `ui_page_config.c` | Device config menu | `/settings` (partial) | Testable | PASS 2026-09-21 (M18 LCD class; 5-cell hub grid confirmed: Profiles/Temperature/Network/Diagnostics/Units) |
+| `temperature` | `ui_page_temperature.c` (+`_safety`) | Per-zone temperature + safety status | `/safety`, `/api/status` | Testable | PASS 2026-09-21 (M18 LCD class; zone temps 27.2-27.3C, "zone relays are view-only", Relay 2/K4 state shown, no write made) |
+| `network` | `ui_page_network.c` | Wi-Fi status | `/status`, `/wifi` | Testable | PASS 2026-09-21 (M18 LCD class, page-load only; displayed `192.168.1.156 (kilnctl.local)` matched `wifi_get_status()`'s `sta_ip`, signal -35dBm vs API -37dBm) |
+| `network_manage` | `ui_page_network_manage.c` | Wi-Fi scan/connect/forget | `/scan`, `/provision`, `/forget` | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- page-load-only was in scope but the "Manage networks" button's y is data-dependent (`status_card` above it is `LV_SIZE_CONTENT`) and unresolved from source; not brute-forced. Connect/forget actions remain owner-gated, not attempted |
+| `diagnostics` | `ui_page_diagnostics.c` | On-device diagnostics | `/diagnostics` (subset) | Testable | PASS 2026-09-21 (M18 LCD class; page 1/8 shown, reset_reason "Software (esp_restart)" matched `get_heap_status`, no crash banner, matches no-unacked-crash state) |
+| `touch_cal` | `ui_page_touch_cal.c` | Touch calibration | none (LCD-only; `KILNCTL_TOUCH_CAP_*` knobs, not the inert `KILNCTL_TOUCH_CAL_SWAP_XY`) | Testable | N/A -- unreachable on this bench's self-calibrating FT6336U (cell hidden), per `docs/COMMISSIONING_LCD_RUNBOOK.md` |
+| `touch_test` | `ui_page_touch_test.c` | Raw touch test/tap-target dump | none | Testable via `touch_log_tap_targets`/`touch_inject` | N/A -- unreachable (touch_cal cell hidden, no nav path); the underlying `touch_log_tap_targets()` was exercised once directly (not through this page) to confirm home-page geometry, see M18 LCD class notes |
+| `profiles` | `ui_page_profiles.c` | Profile library | `/profiles` | Testable | PASS 2026-09-21 (M18 LCD class; "1/8" pages, 4 rows/page x 8 = matches `profiles_list()`'s 29 total (1 custom + 28 builtin); Delete button visible but not tapped) |
+| `profile_picker` | `ui_page_profile_picker.c` (+`_format`) | Choose profile to fire | `/profiles` | Testable | PASS 2026-09-21 (M18 LCD class, page-load only; "Profile 1/8" heading, no row tapped) |
+| `profiles_builtin_list` | `ui_page_profiles_builtin_list.c` | Built-in profile list | `/profiles` builtin section | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- entry point from `profiles`' builtin section has no source-derived pixel geometry; not brute-forced |
+| `profile_detail` | `ui_page_profile_detail.c` | View one profile | `/api/profile` | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- reached only via a data-dependent list-row tap (unresolved geometry); not brute-forced |
+| `profile_segments` | `ui_page_profile_segments.c` | Segment list | `/profiles` segment editor | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- same reachability gap as `profile_detail` |
+| `profile_builder_zones` | `ui_page_profile_builder_zones.c` | New profile: zone selection | `/profiles` new-profile flow | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- entry (picker's New button) has no source-derived geometry; not brute-forced, and the chain terminates in an owner-gated Save |
+| `profile_builder_segment` | `ui_page_profile_builder_segment.c` | New profile: segment entry | same | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- unreachable without the prior unresolved-geometry step |
+| `profile_builder_review` | `ui_page_profile_builder_review.c` | New profile: review/save | same, `POST /api/profile` | Testable | NOT RUN 2026-09-21 (M18 LCD class) -- unreachable without the prior unresolved-geometry steps; its own Save action is owner-gated WRITE regardless |
 
 Note: no LCD page exists for live-profile editing, credentials/security,
 backup/restore, OTA, kiln_configs presets, or the safety-commissioning

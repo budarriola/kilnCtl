@@ -181,6 +181,30 @@
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
 >   in progress (not yet done); scope of an NVS reset at commission time
 >   still open.
+> - **M18 LCD class, 2026-09-21**: ran the read-only LCD sweep against ESP
+>   `1045e542` / Pico `05f1ab1f` (touch_log_tap_targets fix `3f86e899`
+>   confirmed in this image). Woke the panel from screen-idle blank first
+>   (idle 32+ min) via one wake tap. 7 of 16 registered pages exercised and
+>   PASSed by numeric capture + backend cross-check: `home`, `config`,
+>   `temperature`, `network` (page-load only), `diagnostics`, `profiles`,
+>   `profile_picker` (page-load only, no row tap). One authorized
+>   `touch_log_tap_targets()` call (home page) confirmed the runbook's
+>   source-derived topbar geometry within 1px, but found the derived home
+>   action-row table (`docs/COMMISSIONING_LCD_RUNBOOK.md` Table 3) wrong
+>   when idle/not-firing: with no Pause/Resume button present, the profile
+>   button spans the full remaining width and its actual center is
+>   `(189,289)`, not the derived `(140,294)` (Start stays close, `(423,289)`
+>   observed vs `(424,294)` derived). Runbook corrected in the same pass.
+>   7 remaining testable rows (`network_manage` page-load,
+>   `profiles_builtin_list`, `profile_detail`, `profile_segments`, and the
+>   3 profile-builder page-load rows) NOT RUN: their tap geometry is
+>   data-dependent/unresolved from source and the one live-dump call was
+>   already spent on the higher-value topbar/config-hub confirmation, so no
+>   further taps were brute-forced. `touch_cal`/`touch_test` stay N/A on
+>   this bench's self-calibrating FT6336U. No reboot/trip/firing throughout
+>   (uptime 1905s -> 2220s+, `state=0` idle before and after). Full detail:
+>   `docs/BENCH_TEST_LOG.md`'s "M18 LCD class" section; matrix LCD rows
+>   annotated in `docs/COMMISSIONING_TEST_MATRIX.md`.
 >
 > **Previously reviewed:** 2026-09-20 night, five landings on
 > `origin/main` (twenty-second sweep) — open items below.
