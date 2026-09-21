@@ -493,8 +493,9 @@ parallel surface:
   operation disables the cache and makes PSRAM unreachable for its
   duration -- see that handler's own comment).
 - `full_board_backup.py`: `/api/cfgfs` added to `GET_ENDPOINTS` (optional --
-  an unmounted/unformatted `cfg` partition is today's expected state, not a
-  failure); `_capture_cfgfs_files()` then fetches every listed file's bytes
+  an unmounted/unformatted `cfg` partition was the expected state on this
+  bench when written; superseded 2026-09-21, `cfg` is now mounted and
+  populated per `GET /api/cfgfs`); `_capture_cfgfs_files()` then fetches every listed file's bytes
   and base64-encodes them into the archive's new `cfgfs_files` section;
   `restore_cfgfs_files()` (also new) decodes and validates every entry
   BEFORE writing any of them back (`--restore-cfgfs-from <archive.json>`),
@@ -543,7 +544,10 @@ re-run this proof against the real firmware endpoints before relying on it.
 condition ("one proven backup/restore round trip against the file path")
 is **NOT YET evaluable**, for the same reason: it requires a live board with
 `cfg` mounted and file-backed zones config to export/erase/re-import
-against, and the bench board's `cfg` partition is unformatted today. This
+against, and the bench board's `cfg` partition is unformatted today.
+Superseded 2026-09-21: the bench board now has `cfg` mounted and populated
+(per `GET /api/cfgfs`), so this closing criterion can now be pursued on
+hardware. This
 pass makes the round trip MECHANICALLY POSSIBLE for the first time (the
 filesystem-file capture/restore machinery now exists end-to-end and is
 proven at the script-logic level) but does not itself satisfy the

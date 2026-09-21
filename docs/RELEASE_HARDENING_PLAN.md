@@ -1395,6 +1395,11 @@ check for this class stands.
 ## 10. Desirable, not blocking — the `cfg` partition is inert and should
 ## either be finished or explicitly parked
 
+**Superseded 2026-09-21:** the bench board (`8ab3b81a`) now has `cfg`
+mounted and populated with 7 files, confirmed via `GET /api/cfgfs` on
+hardware; NVS remains authoritative. The section below describes the
+prior, now-stale state.
+
 Zones config, profiles and several preferences dual-write to the `cfg`
 LittleFS partition, but that partition is unformatted on the bench board and
 not mounted at boot, so the whole path is inert today. NVS remains

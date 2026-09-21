@@ -431,7 +431,9 @@ below for both.
   and the bench board's `cfg` partition IS flashed (`c4b4e65d`) — it is
   merely unformatted (all-0xFF), same as step 1's "no `cfg` partition on any
   board today" note, which is stale for the same reason (see that note's own
-  correction above).
+  correction above). **Superseded 2026-09-21:** the bench board now has
+  `cfg` mounted and populated with 7 files, confirmed via `GET /api/cfgfs`
+  on hardware.
 
 **Step 3/5 close-out: relay names (item 3) + TZ (item 14), 2026-09-07 —
 done, host-proven, board-absent by construction.** Both items' original

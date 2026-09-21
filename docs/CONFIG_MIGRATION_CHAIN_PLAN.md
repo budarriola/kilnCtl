@@ -238,7 +238,10 @@ old-version bytes, a later release sees a blob two versions behind on whichever
 side lost, and D1 makes that unreadable. **Requirement: a migration write-back
 (§1.6) must update both copies, or deliberately invalidate the stale one.**
 This is inert on boards with no `cfg` partition, which is all of them today,
-and must be settled before `cfg` goes live rather than after.
+and must be settled before `cfg` goes live rather than after. **Superseded
+2026-09-21:** the bench board now has `cfg` mounted and populated (per
+`GET /api/cfgfs`), so this requirement is now live there, not purely
+theoretical.
 
 ### 1.6 Migration must persist — the blocking defect (CLOSED 2026-09-17)
 

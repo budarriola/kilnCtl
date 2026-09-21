@@ -1467,8 +1467,9 @@ by hand, confirm GREEN, and force a full rebuild.
 `WEB_AUTH_STORE_VERSION`, separate from every config version precisely so that
 a config-schema bump and a credential-schema bump can never force each other.
 **`ZONES_CFG_VERSION` stays at 26.** Credentials are NVS-only and not
-dual-written to `cfg` (item 2), so the inert, unformatted `cfg` partition is
-irrelevant to all five cases above.
+dual-written to `cfg` (item 2), so the `cfg` partition (superseded
+2026-09-21: now mounted and populated on the bench, per `GET /api/cfgfs`,
+rather than inert/unformatted) is irrelevant to all five cases above.
 
 *Acceptance:* a host test asserts an export's JSON contains none of the three
 credential key names and none of a set password's bytes; asserts an import of
