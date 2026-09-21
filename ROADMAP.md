@@ -1,6 +1,34 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-20/21, bench commissioning
+> **Status:** planning · **Last reviewed:** 2026-09-20, bench harness fixes +
+> ESP reflash (twenty-first sweep) — open items below.
+> - **Bench test harness fixes landed:** `e1a4a379` + `13f9ee5f` — SP-05 is now
+>   read-only (no more false `estop_verified` writes), gzip `Accept-Encoding`
+>   handling fixed, WEB-X-03 tiers corrected, nav-item count fixed to 16.
+>   Smoke suite remaining failures: `FL-04` (`boot_count`); `FL-08`/`SP-02`/
+>   `SK-01` (serial hub held by stale pytest PID 42424); `SK-04` (DRAM);
+>   INCONCLUSIVE `FL-07`/`SP-05`/`SP-07`; NOT_RUN `FL-09`.
+> - **LCD dashboard profile-selection button now uses a real blue accent
+>   token** (`UI_THEME_ACCENT_BLUE 0x2f6fe4`), not teal: `1ae1fc69`. Binary
+>   confirmed to contain the new constant, not the old purple one; webcam
+>   numeric verification UNCERTAIN — a fixed warm specular reflection
+>   saturates the profile-button region (right edge reads RGB 204,87,41;
+>   the neighbouring Start button samples clean green nearby). Needs the
+>   bench light moved for a numeric confirmation.
+> - **`s_routes` HTTP route-dispatch table moved to PSRAM** `.bss`:
+>   `bde51605` + `cd6073e5` (review nits). `.dram0.bss` 114408 → 95272 B
+>   against the 101000 B ceiling.
+> - **ESP flashed to `cd6073e5` on 2026-09-20** (`fw_build` "Sep 20 2026
+>   18:45:56", running partition `app`, `boot_count 1`, no new crash).
+>   Internal heap total 283627 → 302827 B (+19200), free 14067 → 25487,
+>   largest block 7936 → 8192 (still below the 8704 alarm / SK-04's 11900
+>   floor, so SK-04 stays red). Pico unchanged at `5f58ba09` (SaftyFW source
+>   unchanged).
+> - **Still owner-gated:** end stale pytest PID 42424 (serial hub); set
+>   `KILNCTL_AP_PASSWORD` (boot_guard_reset skipped without it); clear
+>   SP-05's false E-stop-verification record; fuzzy/live-edit defaults.
+>
+> **Previously reviewed:** 2026-09-20/21, bench commissioning
 > pass (twentieth sweep) — both processors reflashed to HEAD; open items below.
 > - **Bench board reflashed to `da37ffa2` on both processors, 2026-09-20
 >   evening to 2026-09-21 ~01:00 UTC.** Pico (SaftyFW) via
