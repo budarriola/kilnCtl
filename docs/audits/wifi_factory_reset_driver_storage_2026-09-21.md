@@ -35,10 +35,15 @@ the one reported is confirmed.
 
 - `CONFIG_ESP_WIFI_NVS_ENABLED=y` -- `firmware/KilnFW/sdkconfig:2185`.
 - Default storage is flash: "The default value is WIFI_STORAGE_FLASH",
-  `esp_wifi.h:1088` in the pinned IDF (`C:\esp\v6.0.2\esp-idf`).
-- Nothing under `firmware/KilnFW/App/` calls `esp_wifi_set_storage()`
-  (repo-wide grep over `firmware/**/*.c,*.h`: zero hits outside the IDF).
-  The bench agent's premise on this point is correct.
+  `components/esp_wifi/include/esp_wifi.h:1088` in the pinned IDF
+  (`C:\esp\v6.0.2\esp-idf`). Cited IDF-relative on purpose: a bare
+  `esp_wifi.h:NNNN` resolves, in `check_doc_citations.ps1`'s repo-wide
+  basename index, to this repo's own 213-line host stub
+  (`firmware/KilnFW/App/test/stubs/esp_wifi.h`) and fails the check.
+- At the time of this audit, nothing under `firmware/KilnFW/App/` called
+  `esp_wifi_set_storage()` (repo-wide grep over `firmware/**/*.c,*.h`: zero
+  hits outside the IDF). The bench agent's premise on this point is correct.
+  The fix below is what introduced the first callers.
 - The namespace is `nvs.net80211`, confirmed by a literal-string scan of
   `components/esp_wifi/lib/esp32s3/libnet80211.a` (the only `nvs.*` literal in
   that archive). It lives in the default `nvs` partition.
@@ -177,7 +182,8 @@ Side effects, checked:
 
 ### B. Clear what is already there
 
-`esp_wifi_restore()` (`esp_wifi.h:437-449`) restores "Wi-Fi stack persistent
+`esp_wifi_restore()` (`components/esp_wifi/include/esp_wifi.h:437-449` in the
+pinned IDF -- same IDF-relative form as section 1, for the same reason) restores "Wi-Fi stack persistent
 settings to default values", explicitly including "esp_wifi_set_config
 related". Call it in `execute_scope_job()` (`factory_reset.c:157`) for any
 scope whose partition list contains `WIFI_NVS_PARTITION` -- i.e. `wifi` and

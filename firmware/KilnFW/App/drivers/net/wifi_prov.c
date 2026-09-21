@@ -287,6 +287,25 @@ esp_err_t wifi_prov_start(void)
         return err;
     }
 
+    /* docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md: this app is
+     * the sole owner of Wi-Fi credential persistence (wifi_nvs,
+     * wifi_prov_nvs.c) -- every boot re-applies STA/AP config from wifi_nvs,
+     * and nothing here ever reads the driver's own store. ESP-IDF's driver
+     * defaults to WIFI_STORAGE_FLASH and would otherwise keep its OWN copy of
+     * the STA/AP config (SSID + PSK, AP password) in the default `nvs`
+     * partition's nvs.net80211 namespace -- a partition no factory_reset scope
+     * may erase wholesale (kiln_auth shares it, WEB_AUTH_PLAN 12b), so that
+     * copy survived every factory_reset scope including "all" until this fix.
+     * Switching to RAM storage here, before the first esp_wifi_set_config()
+     * call further down this function, stops any NEW copy from ever reaching
+     * flash; factory_reset.c's execute_scope_job() separately clears what
+     * older firmware already wrote. */
+    esp_err_t store_err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (store_err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_wifi_set_storage(RAM) failed: %s -- driver will keep its own "
+                 "credential copy in the default NVS partition", esp_err_to_name(store_err));
+    }
+
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL, NULL);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event, NULL, NULL);
 

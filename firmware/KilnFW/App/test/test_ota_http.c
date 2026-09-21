@@ -203,6 +203,16 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 const esp_app_desc_t *g_stub_esp_app_desc = NULL;
 
 // ---------------------------------------------------------------------------
+// esp_wifi.h -- declared extern there (stubs/esp_wifi.h, added 2026-09-21 for
+// factory_reset.c's new esp_wifi_set_storage()/esp_wifi_restore() calls --
+// docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md), defined once
+// here since factory_reset.c is compiled directly into this file.
+// ---------------------------------------------------------------------------
+int g_stub_wifi_set_storage_calls = 0;
+wifi_storage_t g_stub_wifi_last_storage = WIFI_STORAGE_FLASH;
+int g_stub_wifi_restore_calls = 0;
+
+// ---------------------------------------------------------------------------
 // lwip/sockets.h -- declared extern there for wifi_prov.c's host tests;
 // referenced by that header's static inline getsockname()/inet_ntop(), which
 // MSVC still needs a body for even though neither is ever actually called by
@@ -232,8 +242,14 @@ void hal_wdt_reboot(void) {}
 
 // ---------------------------------------------------------------------------
 // profiles_builtin.h -- factory_reset.c's execute_scope() calls this for
-// "profiles"/"all" scopes; the tests in this file never reach a scope that
-// executes (the interlock check always refuses first), but must resolve.
+// "profiles"/"all" scopes. Corrected 2026-09-21 (audit
+// wifi_factory_reset_driver_storage_2026-09-21.md section 4): this symbol
+// must resolve unconditionally because factory_reset.c is compiled directly
+// into this file, but it is NOT true that no test here reaches a scope that
+// executes -- the four test_credential_survives_factory_reset_*_scope()
+// cases below call factory_reset_execute() directly (bypassing the HTTP
+// handler and its interlock check) and do run execute_scope_job(), including
+// the "profiles"/"all" scopes that hit this stub.
 // ---------------------------------------------------------------------------
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
 // ---------------------------------------------------------------------------
@@ -1503,6 +1519,74 @@ static void test_credential_survives_factory_reset_all_scope(void)
         "the administrator password must still verify after an ALL-scope (factory-default) reset");
 }
 
+// --- esp_wifi_restore() is called for wifi/all scopes only, never kiln/profiles ---
+//
+// docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md section 5 step
+// 2: the IDF Wi-Fi driver keeps its own persisted copy of the STA/AP config
+// in the default nvs partition (nvs.net80211), independent of wifi_nvs.
+// execute_scope_job()'s new loop must clear it (esp_wifi_restore()) whenever
+// the scope's partition list includes wifi_nvs, and must never touch it for
+// scopes that don't -- kiln/profiles reset kiln or profile data only, and
+// must not perturb Wi-Fi state at all.
+static void reset_wifi_restore_stub_counters(void)
+{
+    g_stub_wifi_set_storage_calls = 0;
+    g_stub_wifi_last_storage = WIFI_STORAGE_FLASH;
+    g_stub_wifi_restore_calls = 0;
+}
+
+static void test_factory_reset_wifi_scope_calls_esp_wifi_restore(void)
+{
+    TEST_SECTION("factory_reset_execute(WIFI) must call esp_wifi_restore() exactly once");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
+    reset_wifi_restore_stub_counters();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
+              "factory_reset_execute(WIFI) must succeed");
+    TEST_CHECK(g_stub_wifi_restore_calls == 1,
+              "esp_wifi_restore() called exactly once for the WIFI scope");
+    TEST_CHECK(g_stub_wifi_last_storage == WIFI_STORAGE_RAM,
+              "storage left in RAM mode after the restore's FLASH/RAM bracket");
+}
+
+static void test_factory_reset_all_scope_calls_esp_wifi_restore(void)
+{
+    TEST_SECTION("factory_reset_execute(ALL) must call esp_wifi_restore() exactly once");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    reset_wifi_restore_stub_counters();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK,
+              "factory_reset_execute(ALL) must succeed");
+    TEST_CHECK(g_stub_wifi_restore_calls == 1,
+              "esp_wifi_restore() called exactly once for the ALL scope");
+}
+
+static void test_factory_reset_kiln_scope_never_calls_esp_wifi_restore(void)
+{
+    TEST_SECTION("factory_reset_execute(KILN) must never call esp_wifi_restore()");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
+    reset_wifi_restore_stub_counters();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK,
+              "factory_reset_execute(KILN) must succeed");
+    TEST_CHECK(g_stub_wifi_restore_calls == 0,
+              "esp_wifi_restore() must not be called for a scope that never touches wifi_nvs");
+}
+
+static void test_factory_reset_profiles_scope_never_calls_esp_wifi_restore(void)
+{
+    TEST_SECTION("factory_reset_execute(PROFILES) must never call esp_wifi_restore()");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    reset_wifi_restore_stub_counters();
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
+              "factory_reset_execute(PROFILES) must succeed");
+    TEST_CHECK(g_stub_wifi_restore_calls == 0,
+              "esp_wifi_restore() must not be called for a scope that never touches wifi_nvs");
+}
+
 // --- ESP-side sequencing for the Pico half (SAFETY_CMD_REBOOT, 0x29) -------
 //
 // sw_reset_post_handler() commands the Pico on the REQUEST task and reports
@@ -2575,6 +2659,10 @@ void run_test_ota_http(void)
     test_credential_survives_factory_reset_kiln_scope();
     test_credential_survives_factory_reset_profiles_scope();
     test_credential_survives_factory_reset_all_scope();
+    test_factory_reset_wifi_scope_calls_esp_wifi_restore();
+    test_factory_reset_all_scope_calls_esp_wifi_restore();
+    test_factory_reset_kiln_scope_never_calls_esp_wifi_restore();
+    test_factory_reset_profiles_scope_never_calls_esp_wifi_restore();
     test_extract_session_token_skips_malformed_occurrence();
     test_extract_session_token_large_cookie_header();
 

@@ -66,6 +66,33 @@ typedef struct {
         0 \
     }
 
+/* Added for factory_reset.c's host tests --
+ * docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md section 5 step
+ * 1: esp_wifi_set_storage()/esp_wifi_restore() are the two calls
+ * wifi_prov.c/factory_reset.c now make to stop and clear the IDF driver's own
+ * persisted STA/AP config copy. */
+typedef enum {
+    WIFI_STORAGE_FLASH = 0,
+    WIFI_STORAGE_RAM,
+} wifi_storage_t;
+
+extern int g_stub_wifi_set_storage_calls;
+extern wifi_storage_t g_stub_wifi_last_storage;
+extern int g_stub_wifi_restore_calls;
+
+static inline esp_err_t esp_wifi_set_storage(wifi_storage_t storage)
+{
+    g_stub_wifi_set_storage_calls++;
+    g_stub_wifi_last_storage = storage;
+    return ESP_OK;
+}
+
+static inline esp_err_t esp_wifi_restore(void)
+{
+    g_stub_wifi_restore_calls++;
+    return ESP_OK;
+}
+
 typedef struct {
     uint8_t ssid[33];
     int8_t rssi;

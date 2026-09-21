@@ -47,6 +47,14 @@
 // (extern-declared in the stub headers themselves; defined once here.)
 wifi_mode_t g_stub_wifi_mode = WIFI_MODE_NULL;
 int g_stub_wifi_set_mode_calls = 0;
+// esp_wifi_set_storage()/esp_wifi_restore() counters (added 2026-09-21,
+// docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md) -- wifi_prov.c
+// now calls esp_wifi_set_storage(RAM) once during wifi_prov_start(); this
+// file doesn't assert on it today, but the symbol must resolve since
+// wifi_prov.c is compiled directly into this executable.
+int g_stub_wifi_set_storage_calls = 0;
+wifi_storage_t g_stub_wifi_last_storage = WIFI_STORAGE_FLASH;
+int g_stub_wifi_restore_calls = 0;
 esp_err_t g_stub_ap_info_result = ESP_OK;
 int8_t g_stub_ap_info_rssi = -50;
 int g_stub_getsockname_result = 0;

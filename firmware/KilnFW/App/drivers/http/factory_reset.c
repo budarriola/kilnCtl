@@ -5,6 +5,9 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_wifi.h" /* esp_wifi_restore()/esp_wifi_set_storage() -- see the wifi/all scope loop
+                        * in execute_scope_job() below,
+                        * docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md */
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -191,6 +194,61 @@ static void execute_scope_job(void *arg)
         } else {
             ESP_LOGW(TAG, "erased NVS partition '%s'", part);
         }
+    }
+
+    /* docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md section 3
+     * part B: clear the SEPARATE copy of the STA/AP config ESP-IDF's Wi-Fi
+     * driver keeps in the default `nvs` partition's nvs.net80211 namespace --
+     * a partition no scope's erase loop above may touch wholesale, because
+     * kiln_auth (the web admin credential, WEB_AUTH_PLAN 12b) shares it. Only
+     * for scopes whose partition list includes wifi_nvs (today: "wifi" and
+     * "all") -- "kiln"/"profiles" never touch Wi-Fi state and must not call
+     * this. esp_wifi_restore() resets "esp_wifi_set_config related" settings
+     * to default, which is the STA/AP SSID+password the app wrote via
+     * wifi_prov_link.c.
+     *
+     * Ordering caveat (audit section 3, unresolved from source/header review
+     * alone -- esp_wifi_restore()'s own doc comment does not say whether it
+     * still erases the flash-backed blob once storage mode is RAM, which
+     * wifi_prov.c's own fix now sets at boot): bracket the call with an
+     * explicit FLASH/RAM round-trip so the restore always runs against
+     * flash-backed storage regardless of whatever mode esp_wifi_init() left
+     * it in, then put it back to RAM so no later esp_wifi_set_config() call
+     * this boot (there are none between here and the reboot, but this is
+     * cheap insurance) starts writing flash again. Confirmed on hardware only
+     * via a bench nvs.net80211 dump per the audit's test plan step 6, not by
+     * this change alone.
+     *
+     * Second thing the bench must check (code review 2026-09-21): this runs
+     * inside execute_scope(), which reset_post_handler() calls BEFORE it
+     * sends its "ok, rebooting" reply. esp_wifi_restore() also resets mode
+     * (esp_wifi.h's own list: bandwidth, protocol, set_config-related, mode),
+     * so if the driver tears the STA link down synchronously here, the
+     * operator's browser gets a dropped connection instead of that reply --
+     * the board still erases and still reboots, so this is a UX regression,
+     * not a safety one. It is NOT fixable by moving this into reboot_task():
+     * that task runs on a PSRAM stack and esp_wifi_restore() writes NVS.
+     * Confirm over the WEB route (not UART) that the reply still arrives. */
+    for (size_t i = 0; scope->partitions[i] != NULL; i++) {
+        if (strcmp(scope->partitions[i], WIFI_NVS_PARTITION) != 0) {
+            continue;
+        }
+        esp_err_t store_flash_err = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+        if (store_flash_err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_set_storage(FLASH) before restore failed: %s", esp_err_to_name(store_flash_err));
+        }
+        esp_err_t restore_err = esp_wifi_restore();
+        if (restore_err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_restore() failed: %s -- the Wi-Fi driver's own persisted "
+                     "config may survive this reset", esp_err_to_name(restore_err));
+        } else {
+            ESP_LOGW(TAG, "cleared the Wi-Fi driver's own persisted config (nvs.net80211)");
+        }
+        esp_err_t store_ram_err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+        if (store_ram_err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_set_storage(RAM) after restore failed: %s", esp_err_to_name(store_ram_err));
+        }
+        break;
     }
 
     /* "fs_<id>" firing-history blobs live in PROFILES_NVS_PARTITION, and the

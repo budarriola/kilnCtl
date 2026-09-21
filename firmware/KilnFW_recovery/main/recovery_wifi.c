@@ -139,6 +139,17 @@ void recovery_wifi_start(void)
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
+    /* docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md section 3
+     * part A note: recovery also owns no read path for the driver's own
+     * flash-persisted config (it reads ssid/pass out of wifi_nvs itself,
+     * above) and would otherwise repopulate the default `nvs` partition's
+     * nvs.net80211 namespace the main app's own fix (wifi_prov.c) stops
+     * touching. Same fix, same reasoning. */
+    esp_err_t store_err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (store_err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_storage(RAM) failed: %s -- driver will keep its own credential "
+                 "copy in the default NVS partition", esp_err_to_name(store_err));
+    }
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, NULL));
 
