@@ -1093,9 +1093,17 @@ after an early out-of-memory bug, see `docs/BRINGUP_HAZARDS.md`).
       PID gains/fitted model (gain scheduling is unbuilt, 6A.4), and most
       guard thresholds beyond `sanity_rate_c_per_min` (partially closed by
       the "Advanced guard thresholds" disclosure, 6A.3).
-- [~] **Per-relay `window_ms`/`min_on_ms`/`min_off_ms` is page-configurable
-      per *zone*, not per individual relay** — the control path has no
-      per-relay timing concept to expose.
+- [x] **Per-relay `window_ms`/`min_on_ms`/`min_off_ms`** — CLOSED
+      2026-09-20, deliberately kept per-zone, not implemented per-relay.
+      `zones_config_json.h`'s `zone_cfg_t::heater_window_ms` comment (added
+      alongside this field) already gives the reason: a zone's relay group
+      is switched as one unit by a single `heater_output_cfg_t` decision in
+      `profile_executor.c`/`autotune_engine.c` — there is no
+      per-individual-relay timing concept anywhere in the control path to
+      hang independent values off of. Building one would mean decomposing
+      a multi-relay zone's single duty-cycle decision into independently
+      timed sub-relay control, a control-path redesign, not a config/UI
+      addition — out of scope for this line item.
 - [ ] The 2s dashboard polling is probably fine for all of this; revisit
       push (WebSocket/SSE) only if watching a real firing proves otherwise
       (same open item as section 2).
