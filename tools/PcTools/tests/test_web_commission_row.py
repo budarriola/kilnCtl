@@ -9,6 +9,7 @@ bench_test/cases_web_rw.py rather than inventing a new one).
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import sys
 
@@ -470,7 +471,7 @@ def test_kiln_config_create_delete_full_flow_passes(monkeypatch):
         _sequential_get_json([
             (200, {"configs": [{"id": "1", "name": "existing"}]}),
             (200, {"configs": [{"id": "1", "name": "existing"},
-                                {"id": "7", "name": "__kc_web_commission_test_123__"}]}),
+                                {"id": "7", "name": "kc_test_123"}]}),
             (200, {"configs": [{"id": "1", "name": "existing"}]}),
         ]),
     )
@@ -490,8 +491,8 @@ def test_kiln_config_create_delete_fails_if_left_on_board(monkeypatch):
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
             (200, {"configs": []}),
-            (200, {"configs": [{"id": "7", "name": "__kc_web_commission_test_123__"}]}),
-            (200, {"configs": [{"id": "7", "name": "__kc_web_commission_test_123__"}]}),
+            (200, {"configs": [{"id": "7", "name": "kc_test_123"}]}),
+            (200, {"configs": [{"id": "7", "name": "kc_test_123"}]}),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -518,6 +519,47 @@ def test_kiln_config_create_delete_fails_if_create_never_landed(monkeypatch):
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
     assert "write did not land" in msg
+
+
+def test_kiln_config_create_delete_generated_name_fits_firmware_limit():
+    # Root cause of the 2026-09-21 W42 live FAIL (docs/audits/
+    # w42_kiln_config_create_2026-09-21.md): the old 38-char generated name
+    # overflowed KILN_CFG_NAME_MAX_LEN (23, kiln_cfg_store.h) and the
+    # board's save handler correctly rejected it 400. Pin the generated
+    # name's length under the mirrored constant so this can't regress.
+    for t in (0, 1_790_032_582, 9_999_999_999):
+        name = f"kc_test_{t % 100000}"
+        assert len(name) <= wcr._KILN_CFG_NAME_MAX_LEN
+
+
+def test_kiln_config_create_delete_reports_real_status_on_rejected_create(monkeypatch):
+    # A clean 400 from the save POST (the exact shape the 2026-09-21 audit
+    # found) must be reported as a real status, not the generic
+    # cause-blind "write did not land" the pre-fix runner produced.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"configs": []}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _RejectedCreateProc:
+        returncode = 0
+        stdout = json.dumps({
+            "ok": True, "route": "/settings/kiln_configs",
+            "post": {"method": "POST", "url": "http://x/api/kiln_configs/save",
+                      "status": 400, "failed": False},
+        })
+        stderr = ""
+
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _RejectedCreateProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "400" in msg
+    assert "/api/kiln_configs/save" in msg
 
 
 def test_run_row_live_dispatches_to_fill_and_restore_for_w22(monkeypatch):
