@@ -30,8 +30,23 @@ set(commit "unknown")
 set(dirty "1")
 
 if(GIT_EXECUTABLE)
+    # Path-scoped to firmware/SaftyFW (THIS_PROJECT_DIR) and firmware/CommonFW
+    # (the only other tree this build actually compiles -- see CMakeLists.txt's
+    # `add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW kilnlink)`), NOT
+    # `rev-parse --short HEAD` of the whole monorepo. A plain repo-wide HEAD
+    # changes on every commit anywhere in the tree -- including KilnFW-only
+    # commits that touch nothing SaftyFW reads -- so the boot-time identity
+    # comparison in pico_auto_update.h (firmware/KilnFW/.../pico_auto_update.h)
+    # saw a "mismatch" on every KilnFW flash and tried to reflash the Pico with
+    # a byte-identical image every time. `git log -1` over exactly the paths
+    # this build depends on only changes when one of them actually does.
+    # pico_image_freshness.py's check_slot_bins_fresh() and
+    # tools/PcTools/src/kilnctrl/stale_check.py's ancestor+scoped-diff check
+    # were updated to compare against this same scoped commit rather than
+    # plain HEAD -- see those files' own comments.
+    set(_commonfw_dir "${PROJECT_ROOT}/firmware/CommonFW")
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        COMMAND ${GIT_EXECUTABLE} log -1 --format=%h -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}"
         WORKING_DIRECTORY ${PROJECT_ROOT}
         OUTPUT_VARIABLE commit_out
         OUTPUT_STRIP_TRAILING_WHITESPACE

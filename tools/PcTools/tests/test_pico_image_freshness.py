@@ -195,36 +195,38 @@ def test_dirty_flag_warns_not_fails(tmp_path):
 def test_skip_when_git_unavailable(tmp_path, monkeypatch):
     a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
-    monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: None)
+    monkeypatch.setattr(fresh, "git_saftyfw_scoped_head", lambda repo_root: None)
     result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "SKIP"
 
 
 def test_stale_record_fails(tmp_path, monkeypatch):
-    """Negative test: a record whose commit does NOT match HEAD must FAIL,
-    not silently pass. Without this, a stale-but-present record (the exact
-    hazard this check exists to catch -- SaftyFW slot bins built from an
-    older commit than the current tree) would read as healthy."""
+    """Negative test: a record whose commit does NOT match the scoped
+    SaftyFW/CommonFW commit must FAIL, not silently pass. Without this, a
+    stale-but-present record (the exact hazard this check exists to catch --
+    SaftyFW slot bins built from an older commit than the current tree)
+    would read as healthy."""
     a = _write_slot(tmp_path, "a.bin", "stale01", extra=b"\xaa" * 64)
     b = _write_slot(tmp_path, "b.bin", "stale01", extra=b"\xbb" * 64)
-    monkeypatch.setattr(fresh, "git_short_head", lambda repo_root: "fresh99")
+    monkeypatch.setattr(fresh, "git_saftyfw_scoped_head", lambda repo_root: "fresh99")
     result = fresh.check_slot_bins_fresh(a, b, tmp_path)
     assert result.status == "FAIL"
     assert "stale01" in result.message
     assert "fresh99" in result.message
 
 
-def test_git_short_head_real_repo_matches_git_cli():
-    """Sanity check against the real repo (not a fixture): git_short_head()
-    must return exactly what a plain `git rev-parse --short HEAD` returns,
-    since that is the exact invocation gen_build_info.cmake uses to stamp
-    SAFTYFW_GIT_COMMIT -- any difference (e.g. a --short=N length override)
-    would make every real board read as stale."""
+def test_git_saftyfw_scoped_head_real_repo_matches_git_cli():
+    """Sanity check against the real repo (not a fixture):
+    git_saftyfw_scoped_head() must return exactly what `git log -1
+    --format=%h -- firmware/SaftyFW firmware/CommonFW` returns, since that
+    is the exact invocation gen_build_info.cmake uses to stamp
+    SAFTYFW_GIT_COMMIT (docs/PICO_AUTO_UPDATE_PLAN.md sec 12) -- any
+    difference would make every real board read as stale."""
     import subprocess
     expected = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
+        ["git", "log", "-1", "--format=%h", "--", "firmware/SaftyFW", "firmware/CommonFW"],
         cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=10,
     ).stdout.strip()
     if not expected:
         pytest.skip("git not available in this environment")
-    assert fresh.git_short_head(_REPO_ROOT) == expected
+    assert fresh.git_saftyfw_scoped_head(_REPO_ROOT) == expected

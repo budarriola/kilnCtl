@@ -144,14 +144,38 @@ def find_one_identity(buf: bytes) -> ImageIdentity:
 
 
 def git_short_head(repo_root: Path) -> Optional[str]:
-    """Mirrors gen_build_info.cmake's exact invocation: `git rev-parse
-    --short HEAD` run with WORKING_DIRECTORY = the repo root (SaftyFW is
-    NOT a submodule -- it shares this main repo -- so this is the same repo
-    the check itself runs from). Returns None if git is unavailable or the
-    call fails, so callers can SKIP rather than crash."""
+    """Plain `git rev-parse --short HEAD` of the whole repo. Kept for
+    callers that genuinely want repo HEAD; NOT what gen_build_info.cmake
+    stamps into SAFTYFW_GIT_COMMIT any more -- use
+    git_saftyfw_scoped_head() to mirror that. Returns None if git is
+    unavailable or the call fails, so callers can SKIP rather than crash."""
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    commit = out.stdout.strip()
+    return commit or None
+
+
+def git_saftyfw_scoped_head(repo_root: Path) -> Optional[str]:
+    """Mirrors gen_build_info.cmake's exact invocation as of the
+    KilnFW-only-commit fix (docs/PICO_AUTO_UPDATE_PLAN.md sec 12): `git log
+    -1 --format=%h -- firmware/SaftyFW firmware/CommonFW`, run with
+    WORKING_DIRECTORY = the repo root (SaftyFW is NOT a submodule -- it
+    shares this main repo). This is the commit SAFTYFW_GIT_COMMIT (and
+    therefore the embedded saftyfw_image_identity_t.commit) actually holds
+    -- a plain `rev-parse --short HEAD` no longer matches it whenever a
+    commit outside these two paths landed since. Returns None if git is
+    unavailable or the call fails, so callers can SKIP rather than crash."""
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%h", "--",
+             "firmware/SaftyFW", "firmware/CommonFW"],
             cwd=str(repo_root), capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
@@ -232,15 +256,18 @@ def check_slot_bins_fresh(slot_a: Path, slot_b: Path, repo_root: Path) -> Freshn
             "-- WARNING only, not a failure, per the dirty-flag carve-out.",
         )
 
-    head = git_short_head(repo_root)
+    head = git_saftyfw_scoped_head(repo_root)
     if head is None:
-        return FreshnessResult("SKIP", "could not resolve `git rev-parse --short HEAD`")
+        return FreshnessResult(
+            "SKIP", "could not resolve `git log -1 --format=%h -- firmware/SaftyFW firmware/CommonFW`"
+        )
 
     if ident_a.commit != head:
         return FreshnessResult(
             "FAIL",
             f"embedded SaftyFW identity commit ({ident_a.commit}) does not "
-            f"match the repo's current HEAD ({head}) -- rebuild SaftyFW "
+            f"match the last commit to touch firmware/SaftyFW or "
+            f"firmware/CommonFW ({head}) -- rebuild SaftyFW "
             "(check_00_saftyfw_target_build.ps1) before the KilnFW build "
             "embeds it.",
         )
@@ -249,5 +276,5 @@ def check_slot_bins_fresh(slot_a: Path, slot_b: Path, repo_root: Path) -> Freshn
         "PASS",
         f"SaftyFW slot images agree on commit {ident_a.commit} "
         f"(dirty={ident_a.dirty}, config_format_version={ident_a.config_format_version}), "
-        "matching repo HEAD.",
+        "matching the last commit to touch firmware/SaftyFW or firmware/CommonFW.",
     )
