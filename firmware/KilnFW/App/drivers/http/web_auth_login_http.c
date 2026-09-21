@@ -274,13 +274,6 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
     return s;
 }
 
-// Scope-aware entry point -- decides LOCAL (per-IP table slot, above) vs
-// REMOTE (the one shared s_remote_login_slot) before handing off to
-// login_lockout_slot_for(). The unresolvable-address sentinel ("unknown",
-// ip_known == false) deliberately bypasses classification altogether and
-// goes through the ordinary per-string table path unchanged -- it stays
-// fail-closed and separate from both the LOCAL and REMOTE buckets, per this
-// file's header comment.
 // Claims/refreshes the shared remote slot -- factored out since both the
 // REMOTE and UNKNOWN cases below (finding 3) route here.
 static login_lockout_slot_t *claim_remote_slot(uint32_t now)
@@ -293,6 +286,13 @@ static login_lockout_slot_t *claim_remote_slot(uint32_t now)
     return &s_remote_login_slot;
 }
 
+// Scope-aware entry point -- decides LOCAL (per-IP table slot, above) vs
+// REMOTE (the one shared s_remote_login_slot) before handing off to
+// login_lockout_slot_for(). The unresolvable-address sentinel ("unknown",
+// ip_known == false) deliberately bypasses classification altogether and
+// goes through the ordinary per-string table path unchanged -- it stays
+// fail-closed and separate from both the LOCAL and REMOTE buckets, per this
+// file's header comment.
 static login_lockout_slot_t *login_backoff_slot_for(const char *ip, bool ip_known, uint32_t now)
 {
     if (ip_known) {

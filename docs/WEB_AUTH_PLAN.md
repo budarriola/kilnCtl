@@ -388,17 +388,22 @@ while a LAN user has no such freedom — their address is a fact about the
 network, not a choice they can make to dodge a lockout. `login_ip_scope.c`
 (new, pure, host-testable like `ota_auth.c`) classifies a client IP as
 **LOCAL** when it is on the fixed AP fallback subnet (192.168.4.0/24) or on
-the STA interface's *currently active* subnet (fetched live via the new
-`wifi_prov_get_sta_ip_netmask()`, not the configured static settings, since
-those read back nothing useful in DHCP mode), and **REMOTE** otherwise (a
+the STA interface's *currently active* subnet (read from the cached
+`wifi_prov_get_cached_sta_ip_netmask()`, a non-blocking spinlocked read kept
+fresh by `do_ev_got_ip()`/`do_get_sta_ip()` on `owner_task()` rather than a
+per-call round trip, not the configured static settings, since those read
+back nothing useful in DHCP mode), and **REMOTE** otherwise (a
 syntactically valid IPv4 address that matches neither). Every REMOTE-scope
 client shares **one** reserved backoff slot (`s_remote_login_slot`), kept
 entirely outside the 16-slot `s_login_lockouts[]` array so ordinary
 per-address table saturation can never evict it and it can never itself be
-evicted to make room for a LOCAL address. LOCAL clients keep the existing
-per-address slots unchanged. The pre-existing unresolvable-IP ("unknown")
-sentinel bypasses scope classification entirely and stays fail-closed and
-separate from both buckets, exactly as before this change.
+evicted to make room for a LOCAL address. Because the slot is pooled, a
+successful login from any one REMOTE-scope address clears the shared
+ladder for every off-subnet client, not just the one that logged in —
+inherent to pooling, not a per-address guarantee. LOCAL clients keep the
+existing per-address slots unchanged. The pre-existing unresolvable-IP
+("unknown") sentinel bypasses scope classification entirely and stays
+fail-closed and separate from both buckets, exactly as before this change.
 
 **Where the record lives — corrected, and this is load-bearing.** An earlier
 draft of this plan put the credentials in namespace `kiln_cfg` on

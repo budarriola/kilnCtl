@@ -8,7 +8,7 @@
 // Parses a dotted-quad IPv4 string into a host-order uint32_t. Returns false
 // (leaving *out untouched) on anything that is not exactly four
 // 0-255 octets separated by '.', including empty strings and trailing
-// garbage -- sscanf's "%3[0-9]" fields plus an explicit length check on the
+// garbage -- sscanf's "%3u" fields plus an explicit length check on the
 // consumed count catch both "not four numbers" and "extra characters after
 // the fourth octet".
 static bool parse_ipv4(const char *s, uint32_t *out)

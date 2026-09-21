@@ -893,11 +893,10 @@ static void test_refused_login_makes_no_extra_sta_ip_netmask_calls(void)
     // refused. Each refusal may still need to classify scope to find its
     // slot (that's an existing, allowed read of the non-blocking cache),
     // but it must NEVER be the blocking wifi_prov_get_sta_ip_netmask() --
-    // this test doesn't stub that path at all, so if login_backoff_slot_for()
-    // ever regressed to calling it, this executable would fail to link
-    // (undefined at compile time it's still defined above, so instead we
-    // assert the cache-read count grows by exactly one bounded increment per
-    // attempt, never balloons or blocks).
+    // that stub is still defined above (kept for safety/other callers) so a
+    // regression back to it would not fail to link, which is exactly why
+    // this test instead asserts the cache-read count grows by exactly one
+    // bounded increment per attempt, never balloons or blocks.
     int before = s_cached_sta_ip_netmask_call_count;
     s_last_status_line = 0;
     do_login("admin", "correct-horse-battery-staple");
