@@ -66,12 +66,13 @@ import check_main_task_stack_budget as base  # noqa: E402  (REPO_ROOT, DEFAULT_E
 REPO_ROOT = base.REPO_ROOT
 DEFAULT_ELF = base.DEFAULT_ELF
 
-# 2026-09-20: measured 114408 B after the s_profiles_fallback fix (116024 B on
-# the previous flashed build, 73c1da94, before the 100-slot change). 120000
-# leaves ~5.5 kB for ordinary growth while still refusing anything on the
-# order of the 40.8 kB jump this check was written for. See module docstring
-# before raising.
-CEILING_BYTES = 120000
+# 2026-09-21: measured 95272 B after also moving s_routes (http_auth_http.c)
+# to EXT_RAM_BSS_ATTR (114408 B before that move, after the 2026-09-20
+# s_profiles_fallback fix; 116024 B on the previous flashed build, 73c1da94,
+# before the 100-slot change). 101000 leaves ~5.7 kB for ordinary growth
+# while still refusing anything on the order of the jumps this check was
+# written for. See module docstring before raising.
+CEILING_BYTES = 101000
 
 GRADED_SECTION = ".dram0.bss"
 CONTEXT_SECTIONS = (".dram0.data", ".ext_ram.bss")

@@ -119,12 +119,16 @@ Negative tests run before landing:
 
 ## Follow-up 2026-09-21
 
-Moved `s_routes` (`firmware/KilnFW/App/drivers/http/http_auth_http.c:45`, the
+Moved `s_routes` (`firmware/KilnFW/App/drivers/http/http_auth_http.c:57`, the
 HTTP route-dispatch metadata table, `kiln_http_route_ctx_t[KILN_HTTP_MAX_ROUTES]`,
 192 * 100 B) to `EXT_RAM_BSS_ATTR` (PSRAM), same fix shape as
-`s_profiles_fallback` above. It was ~67% of the regression since the
-2026-09-05 baseline (idle largest free internal-DRAM block 7936 B vs the
-8704 B alarm).
+`s_profiles_fallback` above. An `nm --size-sort` diff between
+`elf_archive/KilnCtrl-1204ef14664b.elf` (`d459d124`, 2026-09-16) and
+`da37ffa2` showed +28769 B of internal `.bss` growth over that span, of
+which `s_routes` accounted for 19200 B. Moving it to PSRAM raises total
+internal DRAM free by that ~19 kB deterministically; the effect on the idle
+largest-free-block figure is a runtime property of `get_heap_status` and
+must be read back after flashing, not assumed from this static measurement.
 
 Safety review before moving it: confirmed every access is from
 `kiln_http_register()` (HTTP server bringup, called from application code
@@ -140,9 +144,11 @@ bytes of residual variance from other build-generated symbols).
 `tools/run_all_checks.ps1 -AllowFewerChecks` in an isolated worktree: 124
 passed, 0 skipped, 0 failed, including
 `check_kilnfw_dram_bss_budget.ps1` and the three full target builds.
+`check_kilnfw_dram_bss_budget.py`'s ceiling was lowered from 120000 B to
+101000 B to reflect the new, lower baseline.
 
 Left for a later pass, both still in internal `.dram0.bss` and both smaller
 than `s_routes` was:
 
-- `s_bulk_pairs` (`firmware/KilnFW/App/drivers/safety_cfg_write.c:683`, 1846 B)
-- `s_scan_buf` (`firmware/KilnFW/App/drivers/pico_image_source.c:30`, 1080 B)
+- `s_bulk_pairs` (`firmware/KilnFW/App/drivers/safety/safety_cfg_write.c:683`, 1846 B)
+- `s_scan_buf` (`firmware/KilnFW/App/drivers/net/pico_image_source.c:30`, 1080 B)

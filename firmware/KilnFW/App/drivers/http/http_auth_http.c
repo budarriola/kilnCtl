@@ -25,18 +25,23 @@ void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
 static const char *AUTH_HTTP_TAG = "http_auth";
 
 // Fixed-size wrapper table -- no heap allocation, matching this feature's
-// RAM-cost discipline (plan section 4). 192 leaves headroom over the 138
-// rows route_tier_table.h currently carries; if this ever fills,
-// registration fails loudly (see kiln_http_register()) rather than
-// silently overflowing.
+// RAM-cost discipline (plan section 4). 192 leaves headroom over the 155
+// rows route_tier_table.h carried as of 2026-09-19 (see CLAUDE.md); if this
+// ever fills, registration fails loudly (see kiln_http_register()) rather
+// than silently overflowing.
 //
 // EXT_RAM_BSS_ATTR (PSRAM, not internal .dram0.bss): measured 2026-09-21 at
-// 19200 B (192 * 100 B) of internal DRAM, ~67% of the regression that took
-// the board's idle largest-free-block down to 7936 B against the 8704 B
-// alarm (docs/audits/dram_bss_profiles_fallback_2026-09-20.md). Every access
-// is from kiln_http_register() (HTTP server bringup, after app_main, so
-// PSRAM is already mapped) and kiln_http_prehandler() (an ordinary httpd
-// task callback on request dispatch) -- never an ISR, never DMA, never a
+// 19200 B (192 * 100 B) of internal DRAM. An `nm --size-sort` diff between
+// elf_archive/KilnCtrl-1204ef14664b.elf (d459d124, 2026-09-16) and da37ffa2
+// showed +28769 B of internal .bss growth over that span, of which this
+// table was 19200 B (docs/audits/dram_bss_profiles_fallback_2026-09-20.md,
+// "Follow-up 2026-09-21"). Moving it to PSRAM raises total internal DRAM
+// free by that ~19 kB deterministically; the effect on the idle
+// largest-free-block figure reported by get_heap_status must be read back
+// after flashing, not assumed. Every access to this table is from
+// kiln_http_register() (HTTP server bringup, after app_main, so PSRAM is
+// already mapped) and kiln_http_prehandler() (an ordinary httpd task
+// callback on request dispatch) -- never an ISR, never DMA, never a
 // flash-cache-disabled section, and no pointer into this table is ever
 // handed to a flash write. Same fix shape as s_profiles_fallback in
 // profiles_http.c.
