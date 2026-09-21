@@ -2,8 +2,8 @@
 
 > **Status:** planning · **Last reviewed:** 2026-09-20 night, five landings on
 > `origin/main` (twenty-second sweep) — open items below.
-> - **Login fast-logon + escalating backoff landed** (worktree
->   `C:\wt\loginbackoff_ioby37`, not yet on `origin/main`): `WEB_AUTH_ITERATIONS`
+> - **Login fast-logon + escalating backoff landed** (`a3b59e9c`, review
+>   fixes `8ab3b81a`): `WEB_AUTH_ITERATIONS`
 >   20000 → 2000 (~416 ms/attempt, existing records unaffected until next
 >   set); `POST /api/auth/login` now uses its own 5s/10s/30s/60s/300s
 >   escalating backoff ladder in place of the shared 3-failures OTA lockout
@@ -2630,8 +2630,9 @@ Owner instruction, 2026-09-21.
 - Login backoff ladder (owner decision 2026-09-21: fast first login, then
   5/10/30/60/300 s per IP, off-subnet clients pooled) — Done, landed and
   review-fixed (`8ab3b81a`).
-- Done: `docs/COMMISSIONING_WEBUI_RUNBOOK.md` (`58914003`) and
-  `docs/COMMISSIONING_BACKEND_RUNBOOK.md` (`f2432e0c`).
+- Done: `docs/COMMISSIONING_WEBUI_RUNBOOK.md` (`bb95e3ed`, review fix
+  `58914003`) and `docs/COMMISSIONING_BACKEND_RUNBOOK.md` (`2c3d9787`,
+  review fix `f2432e0c`).
 - In progress: reflash both boards to HEAD, NVS erase, `web_auth_setup`
   bootstrap, and the M18 test-order phases (backend, then web UI, then
   LCD) — flash is running now.
