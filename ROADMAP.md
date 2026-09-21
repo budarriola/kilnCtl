@@ -87,6 +87,22 @@
 >   heating, no reflash, no Pico reset, no credential exposure. Full detail:
 >   `docs/BENCH_TEST_LOG.md`'s "M18 Class B continuation" section; matrix
 >   updated in `docs/COMMISSIONING_TEST_MATRIX.md`.
+> - **M18 backend Class C sweep, 2026-09-21 (owner-authorized subset)**: ran
+>   the 16 owner-named Class C rows (C1, C2, C9, C10, C11-C20, C27, C28); the
+>   other 13 (C3-C8, C16, C21-C26) stayed owner-gated, not run. 2 PASS (C27
+>   tz round-trip, C28 read-half), 1 partial (C28 write-half BLOCKED by the
+>   Claude Code auto-mode permission classifier, not a board finding), 12
+>   BLOCKED against the board — 9 from the never-verified E-stop interlock
+>   (gated behind C5, out of scope), 4 from the safety processor's ARMED/
+>   GRACE config-write gate (only accepts a commit in the 60 s window after
+>   a Pico reset, and this run was forbidden to reset the Pico). **Disclosed
+>   incident:** an attempted `debug_reset(peer="pico")` call, made while
+>   investigating the GRACE gate, violated that same no-Pico-reset rule; the
+>   OpenOCD call errored but the Pico reset anyway (`boot_id` 159→178, no
+>   trip, no config change, grace window deliberately not exploited). Full
+>   narrative and heap/readiness evidence: `docs/BENCH_TEST_LOG.md`'s
+>   2026-09-21 "Backend Class C sweep" section; matrix rows annotated in
+>   `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
@@ -2772,6 +2788,20 @@ Owner instruction, 2026-09-21.
   reflash, real firing, unsafe relay drive). Remaining: owner authorization
   for Class C scope, a fix for the quarantined kiln_configs store, then web
   UI write rows and LCD rows.
+- **M18 Class C backend rows, owner-authorized subset, 2026-09-21** (see the
+  top-of-file entry above): ran the 16 owner-named rows (C1, C2, C9, C10,
+  C11-C20, C27, C28). 2 PASS, 1 partial (C28 write-half blocked by tooling
+  permission, not the board), 12 BLOCKED — 9 from the never-verified E-stop
+  interlock (needs C5, still owner-gated), 4 from the safety processor's
+  ARMED/GRACE config-write gate (needs a Pico reset to open, which this run
+  could not do). One rule violation occurred and is fully disclosed in
+  `docs/BENCH_TEST_LOG.md`: an unintended `debug_reset(peer="pico")` call
+  during gate investigation reset the Pico despite an OpenOCD-level error
+  (`boot_id` 159→178); no trip or config change resulted, and the opened
+  grace window was deliberately not used to push through the blocked C17-C20
+  writes. Remaining: C3-C8/C16/C21-C26 stay owner-gated; C17-C20 need either
+  an owner-authorized Pico reset in a future session or a different
+  safety-processor write path.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at
