@@ -22,9 +22,16 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (175 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-20, when `profile_live_get`/
-`profile_live_fork`/`profile_live_edit`/`profile_live_decide` were added --
+the rest behind a search facade (176 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `web_auth_setup` was
+added -- an MCP tool that bootstraps the board's administrator web credential
+and turns web auth on (POST /api/auth/bootstrap_password or
+POST /api/auth/security's `set_web_password`/`set_policy`, matched against
+security_backend_web_auth.c/security_http.c), reading
+`KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` from the environment, refusing
+every write unless `confirm=True`, and verifying by read-back afterward. The
+one before it was the profile_live_* quartet, 2026-09-20 -- `profile_live_get`/
+`profile_live_fork`/`profile_live_edit`/`profile_live_decide`,
 MCP tools wrapping the five-route live profile edit HTTP surface
 (`firmware/KilnFW/App/drivers/http/profiles_live_http.c`,
 `docs/LIVE_PROFILE_EDIT_PLAN.md` section 10): fork the running profile into a
