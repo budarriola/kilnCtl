@@ -2625,14 +2625,16 @@ Owner instruction, 2026-09-21.
   (`050baac7`).
 - Web auth credential recovery, owner decision: erase the `nvs` partition
   via `flash_firmware(erase_partitions=...)` (`050baac7`) during the
-  commission reflash, then bootstrap `web_auth_setup` from env vars — that
-  bootstrap tool is still in review, not yet on main.
+  commission reflash, then bootstrap `web_auth_setup` from env vars.
+  Done: `web_auth_setup` MCP tool landed and review-fixed (`2b46b1a8`).
 - Login backoff ladder (owner decision 2026-09-21: fast first login, then
-  5/10/30/60/300 s per IP, off-subnet clients pooled) — in review, not yet
-  on main.
-- M18 board reflash to HEAD is blocked on the login-backoff and
-  `web_auth_setup` commits landing; the commissioning backend runbook doc
-  is in progress.
+  5/10/30/60/300 s per IP, off-subnet clients pooled) — Done, landed and
+  review-fixed (`8ab3b81a`).
+- Done: `docs/COMMISSIONING_WEBUI_RUNBOOK.md` (`58914003`) and
+  `docs/COMMISSIONING_BACKEND_RUNBOOK.md` (`f2432e0c`).
+- In progress: reflash both boards to HEAD, NVS erase, `web_auth_setup`
+  bootstrap, and the M18 test-order phases (backend, then web UI, then
+  LCD) — flash is running now.
 
 ---
 
