@@ -86,14 +86,17 @@ DECORATOR_WIRING_MARKERS = ("_tool(", ".tool(", ".route(", "app.get(", "app.post
 # both tools/PcTools/src/kilnctrl/bench_test/registry.py and
 # tools/PcTools/src/mcpkit/registry.py) are never silently conflated.
 ZERO_CALLER_ALLOWLIST = {
-    # binary_provenance.assert_binary_fresh: the public raise-on-stale entry
-    # point (docs/audits/review_sim_fuzzy_commits_2026-09-13.md) meant for
-    # ad hoc/interactive measurement callers to invoke by hand before
-    # reading a number out of a host-test .exe -- check_binary_fresh (its
-    # non-raising sibling) is the one wired into
-    # check_host_test_binary_freshness.py today; no PcTools measurement
-    # script currently reads a host-test binary directly, so this has no
-    # in-repo caller yet, only test coverage (test_binary_provenance.py).
+    # binary_provenance.check_binary_fresh / assert_binary_fresh: the
+    # call-site guard from docs/audits/review_sim_fuzzy_commits_2026-09-13.md,
+    # meant to be invoked by hand immediately before reading a number out of
+    # a host-test .exe. No PcTools script reads a prebuilt host-test binary
+    # today (both build_host_tests.ps1 runners always rebuild and re-run),
+    # so there is no in-repo caller yet, only test coverage
+    # (tools/PcTools/tests/test_binary_provenance.py). Deliberately NOT
+    # wired into a standing check_*.ps1 -- see the module docstring for why
+    # a repo-wide sweep of the shared build directories measured 66/66
+    # false positives.
+    ("tools/PcTools/src/kilnctrl/binary_provenance.py", "check_binary_fresh"),
     ("tools/PcTools/src/kilnctrl/binary_provenance.py", "assert_binary_fresh"),
     ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "find_best_strength_per_load"),
     ("tools/PcTools/src/kilnctrl/http_capture_log.py", "starting_temps_c"),

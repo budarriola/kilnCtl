@@ -20,6 +20,31 @@ already known at each call site (a handful of .c/.h files a given harness
 links), and a wall-clock comparison is cheap, dependency-free, and exactly
 matches the failure mode above (a source file edited/restored later than the
 exe was produced).
+
+Deliberately a CALL-SITE guard, not a standing `check_*.ps1`. A repo-wide
+sweep of every .exe sitting in `firmware/KilnFW/App/test/build/` and
+`firmware/SaftyFW/test/build/` was written and then withdrawn on
+2026-09-21: run against the shared working tree it reported 66 of 66
+binaries stale, because a stale host-test .exe on disk is the NORMAL
+resting state of this repo. Nobody rebuilds all 62 KilnFW harnesses after
+every edit, and each harness compiles only a handful of the files under
+`App/drivers/`, so one ordinary commit touching one unrelated driver
+(`ui_page_profile_builder_segment.c`, fbd603c1) made every harness "stale"
+at once. On a tree where those build directories do not exist at all (any
+fresh clone or worktree) the same check SKIPped, and run_all_checks.ps1
+fails a skipped check by default -- so every branch of the standing check
+was red on a healthy tree. The defect the audit describes is not "a stale
+binary exists"; it is "a number was read out of one". That is only
+answerable where the read happens, which is what the two functions below
+are for. Both are mtime comparisons against the specific source list the
+caller knows it linked -- never a whole subtree.
+
+Note on mtime semantics: a fresh `git checkout`/clone writes every source
+file at checkout time, so every source is newer than any preserved .exe and
+these functions will call that .exe stale. That is conservative in the safe
+direction (it forces a rebuild rather than trusting an artifact whose
+provenance genuinely cannot be established from the filesystem) and is the
+intended behaviour, not a false positive to be tuned away.
 """
 
 from __future__ import annotations
