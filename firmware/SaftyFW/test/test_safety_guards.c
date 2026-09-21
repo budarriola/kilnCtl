@@ -1680,6 +1680,46 @@ static void test_sim_plant_disable(void)
         TEST_CHECK(!s.s4_warn, "sim_plant_disable_active==true: S4's WARN is also reset, not just its trip");
     }
 
+    /* Re-enable resumes cleanly (CLAUDE.md's "reset one side of a pair"
+     * class). While the flag is on, S2's accumulator is held at zero every
+     * tick, so when the flag DROPS the guard restarts a fresh window rather
+     * than tripping instantly on progress made while it was disabled -- and
+     * it still trips normally once a full overshoot_time_s of excess has
+     * accumulated AFTER the drop. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = true;
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 990.0f;
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 11 && !tripped; i++) { /* 110s of excess, disabled */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "re-enable: nothing trips while the flag is on");
+        TEST_CHECK(s.s2_over_elapsed_s == 0.0f,
+                   "re-enable: S2's accumulator is held at zero while disabled, not merely unread");
+
+        in.sim_plant_disable_active = false;
+        for (int i = 0; i < 11 && !tripped; i++) { /* 110s more, now enabled */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped,
+                   "re-enable: S2 starts a FRESH window on the drop -- 110s after re-enable does not trip");
+        for (int i = 0; i < 3 && !tripped; i++) { /* past 120s since the drop */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "re-enable: S2 trips normally once a full window accumulates after the drop");
+        TEST_CHECK(s.reason == SAFETY_TRIP_OVER_SETPOINT, "re-enable: reason is SAFETY_TRIP_OVER_SETPOINT");
+    }
+
     /* sim_plant_disable_active must be scoped to S2/S3/S4 only -- S1 (an
      * unrelated, context-independent guard) must still trip normally while
      * the flag is on, proving this is not a global "ignore everything"

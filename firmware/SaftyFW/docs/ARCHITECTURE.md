@@ -749,8 +749,12 @@ Phase 2 for the itemised done/not-done breakdown this summarizes.
       hardware" (its own header comment); 37 test source files exist under
       `firmware/SaftyFW/test/`.
 - [ ] `sim_plant.c` reused for thermal traces — **still not done, verified
-      2026-09-04**: no reference to `sim_plant` anywhere under
-      `firmware/SaftyFW` (`grep -rl sim_plant firmware/SaftyFW` is empty).
+      2026-09-04**: no `sim_plant.c` thermal-trace source is used anywhere
+      under `firmware/SaftyFW`. (The `sim_plant_disable_active` guard
+      input added 2026-09-20 is unrelated -- it is the ESP's
+      `CONTEXT_FLAG_SIM_PLANT` context bit, not a thermal model, so the
+      original "`grep -rl sim_plant` is empty" evidence for this item no
+      longer holds even though the item itself is still undone.)
       Per `project_simfw_and_kilnsim_removed`, `SimFW`/`kilnsim` were removed
       2026-08-28 and are not coming back as a dependency, so this item may
       be moot rather than merely undone — flagged for the owner to either

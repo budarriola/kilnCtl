@@ -362,11 +362,14 @@ endif()
 # processor's own guards by itself. With this OFF (default, every
 # production/target build), the disable path in safety_guards.c is gated on
 # a compile-time-false expression and can never fire regardless of what the
-# ESP claims. Visible in this build's own identity reporting: gen_build_
-# info.cmake bakes the resolved value into saftyfw_build_info.h as
-# SAFTYFW_BUILD_SIM_PLANT_HONORED, the same generated header that already
-# carries git commit/dirty/build time, so a sim-gated image can be
-# identified from that header and never mistaken for a production one.
+# ESP claims. gen_build_info.cmake bakes the resolved value into
+# saftyfw_build_info.h as SAFTYFW_BUILD_SIM_PLANT_HONORED, the same
+# generated header that already carries git commit/dirty/build time, so the
+# build that produced an image can be graded without trusting CMakeCache.
+# txt. Note the limit: unlike commit/dirty, this macro is NOT yet carried in
+# the image itself (saftyfw_image_identity_record.c) nor reported over the
+# link, so it cannot be read back off a running board -- putting it there is
+# a record-format change, left as a follow-up.
 # check_no_sim_plant_guard_disable.ps1 fails a target build whose generated
 # header reports this as 1.
 option(SAFTYFW_HONOR_SIM_PLANT "Let a Pico built this way disable S2/S3/S4 when the ESP's context reports SIM_PLANT (BENCH-ONLY: disables three safety detectors)" OFF)

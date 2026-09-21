@@ -1192,7 +1192,17 @@ on a later tick). 378/378 host checks pass.
 - [ ] GRACE state evaluates and reports but never energizes K4
 - [ ] Context-consuming guards go **inactive** on stale context, never pessimistic
 - [ ] `boot_id` change resets every correlation window
-- [ ] `SIM_PLANT` flag disables S2/S3/S4 and warns persistently
+- [ ] `SIM_PLANT` flag disables S2/S3/S4 and warns persistently -- the
+      persistent warning is unconditional (`KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN`,
+      latched from the ESP's bit alone). The DISABLE half is deliberately
+      double-gated: it also requires this Pico to have been built with the
+      `SAFTYFW_HONOR_SIM_PLANT` CMake option (default **OFF**, enforced by
+      `test/check_no_sim_plant_guard_disable.ps1` against
+      `SAFTYFW_BUILD_SIM_PLANT_HONORED` in the generated `saftyfw_build_info.h`),
+      so an ESP asserting the bit can never switch off a production safety
+      processor's guards by itself. When it is honoured, S2/S3/S4 go *inactive*
+      with their accumulators held at zero -- the same treatment stale context
+      gets -- and S1 and S5-S15 are untouched.
 - [ ] Guards with no defensible default ship **disabled**, and say so in telemetry
 - [ ] `tc_placement_mode` and `tc_source` required at commissioning, no defaults
 
