@@ -379,6 +379,213 @@ verified safe) is what would resolve all of these at once, per that tool's
 own docstring — this was explicitly out of scope for this read-only,
 camera-only pass.
 
+## Tap geometry derived from source (2026-09-21)
+
+**Everything below is source-derived, not bench-verified.** No board, no MCP
+`kilnctrl` tool, and no webcam were touched to produce it — another session
+held the bench. All coordinates are in native LVGL screen-pixel space,
+0,0 top-left, 480x320 landscape (confirmed: `firmware/KilnFW/App/drivers/hw/settings.h`'s
+`CONFIG_KILNCTL_DISPLAY_WIDTH`-derived `DISPLAY_WIDTH`/`DISPLAY_HEIGHT` feed
+`UI_THEME_PAGE_CONTENT_BUDGET_PX`'s own derivation comment in `ui_theme.h:238-244`,
+which states the panel is landscape 480x320 with the unrotated short edge
+(320) becoming the rotated height — the same space `touch_inject(x,y)` takes
+per its docstring, already noted above).
+
+### Method and the fix to the "flex/grid means unknowable" premise
+
+The original pass in this document concluded pixel geometry was unrecoverable
+because pages use `lv_obj_align`/flex instead of fixed `lv_obj_set_pos`. That
+is true of the *page's own internal arithmetic*, but every page here shares
+two fully-deterministic containers whose geometry a static read resolves
+completely:
+
+1. **The topbar icon row** (`ui_topbar.c`). Icons are built into a
+   `LV_FLEX_FLOW_ROW` container with `LV_FLEX_ALIGN_END` (packed to the right,
+   no distributed slack), `UI_TOPBAR_ICON_GAP_PX` (4px) gap
+   (`ui_topbar.h:80-82`), each icon a fixed `UI_TOPBAR_ICON_W_PX x
+   UI_TOPBAR_ICON_H_PX` = 36x26px. The container itself is `FLOATING` and
+   `lv_obj_align`ed `LV_ALIGN_TOP_RIGHT` with a `0,0` offset onto the page
+   root (`ui_topbar.c:151-163`) — and **every page's root sets
+   `lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0)`** (8px, confirmed
+   by grep across all fourteen `ui_page_*.c` files below), which
+   `lv_obj_align` honors as an inset. So the icon row's real right/top edge is
+   `(480-8, 0+8)` = `(472, 8)`, not `(480, 0)` as a naive read of the align
+   call alone would suggest — **this 8px inset is the correction that makes
+   the derivation match live measurement (below)**; missing it is exactly
+   the kind of "approximate, absolute origin not traced" gap the original
+   pass flagged and stopped short of closing.
+   Icon height 26px, top-aligned within the row (cross-axis `START`) → every
+   topbar icon's vertical center is **y=21** (8 + 26/2 = 21), full stop,
+   independent of which page or how many icons.
+   Horizontal: container left edge = `472 - icons_w`, where
+   `icons_w = n*36 + (n-1)*4`. Icons are packed left-to-right in build order
+   (Back, Home, Prev, Next, Warning, Add, Gear — `ui_topbar.c:170-201`), and
+   because the row is right-flush, **the rightmost icon's center is always
+   x=454**, and each icon one slot to its left is exactly **40px less**
+   (36 + 4 gap). This is why the table below is just "454 minus 40 times
+   position-from-the-right" for every page.
+
+2. **The Configuration hub's grid** (`ui_page_config.c`). Fixed cell height
+   `UI_THEME_MIN_TOUCH_TARGET_PX` (72px), `lv_pct(48)` width, `ROW_WRAP`,
+   `UI_THEME_PADDING_PX/2` (4px) gap both axes (`ui_page_config.c:139-238`).
+   The grid is the content area's first (and only occupied-height) child, so
+   its top edge is the page's fixed content-area origin
+   (`UI_THEME_STATUS_BAR_HEIGHT_PX` + 2 gaps + top pad = 32+4+8 = 44,
+   matching `UI_THEME_PAGE_CONTENT_BUDGET_PX`'s own 268px derivation,
+   `ui_theme.h:238-244`). Grid width = scr's inner width (480-16=464);
+   `lv_pct(48)` of 464 = 222px per cell (LVGL integer truncation), leaving a
+   16px unused strip on the right that the ROW_WRAP's default
+   `START`/`START` alignment does not redistribute.
+
+### Calibration check against the two prior live measurements
+
+`reference_lcd_tap_geometry.md` (2026-09-19) recorded two live numbers. Both
+are checked against this derivation:
+
+| Prior live measurement | This derivation | Agreement |
+|---|---|---|
+| Config page "Diagnostics" cell at (345,156) | Diagnostics cell, hub grid col1/row1 → **(345,156)** exactly (see table below) | **Exact match, 0px.** This also settles the coordinate-space doubt the original pass raised (Section "Row template" / row 6 above): the memory value is native LVGL screen-pixel space, not capture-crop space — a 1.78x/1.81x crop-scale mismatch would have shown up as a large, non-constant error, not an exact hit. |
+| Diagnostics page topbar Back/Home/Prev/Next at (333,20)/(373,20)/(413,20)/(453,20) | Diagnostics topbar (4 icons: Back,Home,Prev,Next) → **(334,21)/(374,21)/(414,21)/(454,21)** | **Within 1px on every value** — consistent with the live reading being eyeballed/rounded off a webcam photo (per the runbook's own camera-crop caveats) rather than a real disagreement. Trusted: this derivation, since it is exact arithmetic against source constants, not a second photo measurement; the 1px gap is noise, not a conflict. |
+
+Both prior "trust which one" flags in the original document (rows 2 and 6
+above) are now resolved: **trust this derivation**, and it is consistent
+with, not contradicting, the two live data points on record.
+
+One structural finding this closes: the nav-graph's "home --[Menu button,
+`ui_home_menu_nav_cb`]--> config" arrow (line 109) and row 2's "Menu button
+position: UNKNOWN, home page's own button layout not traced" (line 168) are
+the SAME icon — `ui_home_menu_nav_cb` is wired as the topbar `gear_cb`
+(`ui_page_home.c:590`), not a separate home-page widget. Its position is
+therefore covered by the topbar derivation, not unknown.
+
+### Table 1 — Topbar icons, every page (y=21 for every icon, universal)
+
+Rightmost icon is always x=454; each position further left is exactly 40px
+less. `n` = icon count that page's `ui_topbar_cfg_t` builds.
+
+| Page | Icons (build order, left→right) | n | Centers (x,21) | Source |
+|---|---|---|---|---|
+| `home` | Warning(indicator, hidden unless triggered), Gear | 2 | Warning (414,21), **Gear (454,21)** | `ui_page_home.c:588-592` |
+| `config` | Back | 1 | Back (454,21) | `ui_page_config.c:214-218` |
+| `temperature` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_temperature.c:550-554` |
+| `network` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_network.c:757-761` |
+| `network_manage` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_network_manage.c:557-561` |
+| `diagnostics` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_diagnostics.c:1572-1578` |
+| `profiles` (picker, manage mode) | Back, Home, Prev, Next, Add | 5 | Back (294,21), Home (334,21), Prev (374,21), Next (414,21), Add (454,21) | `ui_page_profile_picker.c:469-479` |
+| `profile_picker` (non-manage) | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profile_picker.c:469-476` |
+| `profiles_builtin_list` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profiles_builtin_list.c:213-225` |
+| `profile_detail` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_profile_detail.c:563-567` |
+| `profile_segments` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profile_segments.c:167-173` |
+| `profile_builder_zones` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_profile_builder_zones.c:183-187` |
+| `profile_builder_segment` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profile_builder_segment.c:358-364` |
+| `profile_builder_review` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_profile_builder_review.c:323-327` |
+| `touch_test` | Home only (back_page NULL) | 1 | Home (454,21) | `ui_page_touch_test.c:154-158` |
+| `touch_cal` | Hand-built "Back" label, NOT via `ui_topbar.c` | — | **UNRESOLVED** — this page predates the topbar module; N/A on this bench anyway (unreachable, see "Panel and camera facts" above) | `ui_page_touch_cal.c:319` |
+
+All icon boxes are 36x26px (`UI_TOPBAR_ICON_W_PX`/`UI_TOPBAR_ICON_H_PX`,
+`ui_topbar.h:80-81`), regardless of page.
+
+### Table 2 — `config` page, hub grid (5 cells on this bench; Touch Calibration hidden)
+
+Grid origin (472... wait, left-aligned, not right): col0 x=[8,230] center **119**;
+col1 x=[234,456] center **345**. Row0 y=[44,116] center **80**; row1
+y=[120,192] center **156**; row2 y=[196,268] center **232**. Cell size
+222x72px each.
+
+| Cell (build order) | Grid slot | Center (x,y) | Action |
+|---|---|---|---|
+| Profiles | row0/col0 | (119,80) | `kiln_ui_show("profiles")` |
+| Temperature | row0/col1 | (345,80) | `kiln_ui_show("temperature")` |
+| Network / Wi-Fi | row1/col0 | (119,156) | `kiln_ui_show("network")` |
+| Diagnostics | row1/col1 | **(345,156)** | `kiln_ui_show("diagnostics")` — matches the 2026-09-19 live measurement exactly, see calibration check above |
+| Units toggle | row2/col0 | (119,232) | in-place `unit_pref_set()` toggle, no navigation |
+
+Source: `ui_page_config.c:139-238,247-263` (`build_nav_item`/`build_unit_toggle_item`,
+`UI_CONFIG_HUB_GRID_HEIGHT_PX`). Touch Calibration cell would occupy
+row2/col1 (232,232) if offered — hidden on this bench build
+(`touch_cal_support_is_offerable()` false for the FT6336U).
+
+### Table 3 — `home` page action row (bottom-pinned, fixed heights)
+
+Row y=[276,312], all buttons height 36, center y=**294**. Widths: profile
+button flex-grows to fill the leftover space, Pause/Start are fixed 96px.
+Content inner width 464px (8..472); fixed total = 96+96+2*4(gaps)=200; profile
+button gets 464-200=264px.
+
+| Widget | Center (x,y) | Size (w x h) | Action | Source |
+|---|---|---|---|---|
+| Profile picker button | (140,294) | 264x36 | `ui_home_profile_btn_cb` → `profile_picker` | `ui_page_home.c:1271-1286` |
+| Pause/Resume button | (324,294) | 96x36 | `ui_home_pause_resume_btn_cb` | `ui_page_home.c:1296-1300` |
+| Start/Stop button | (424,294) | 96x36 | `ui_home_fire_btn_cb` | `ui_page_home.c:1302-1304` |
+| Gear (Menu, topbar) | (454,21) | 36x26 | `ui_home_menu_nav_cb` → `config` (see Table 1) | `ui_page_home.c:588-592` |
+| Warning indicator (topbar, relay-life) | (414,21) | 36x26, non-clickable, hidden unless triggered | none — display only | `ui_page_home.c:588-592`, `ui_topbar.c:74-91` |
+
+This resolves row 1's (`home`) two prior UNKNOWNs: the topbar Home icon
+question doesn't apply (home has no Home icon, it IS home), and the
+"Menu button" reached by the nav graph is the Gear above, not a separate
+undiscovered widget.
+
+### Table 4 — list-page row geometry (fixed row height, page-relative; absolute row identity is data-dependent)
+
+These pages page a live list into fixed-height rows; the *row slot*
+geometry is exact, but *which* item lands in which slot depends on runtime
+data (profile count/order), so only the slot geometry is source-derived —
+matching a specific profile name to a specific y needs a live read of that
+list's content.
+
+| Page | Rows/page | Row height | Row centers (x=240, content spans x=[8,472]) | Source |
+|---|---|---|---|---|
+| `profiles` (picker, manage) / `profile_picker` | 4 | 64px, 4px gap | y: 76, 144, 212, 280 (zero slack — 4*64+3*4=268=`UI_THEME_PAGE_CONTENT_BUDGET_PX` exactly) | `ui_page_profile_picker.h:37-38` |
+| `profile_segments` | `ROWS_PER_PAGE` (see file) | 48px (`ROW_HEIGHT_PX`) | Not derived further this pass — list top position after the paging indicator label was not traced | `ui_page_profile_segments.c:30-31,61,181` |
+| `profiles_builtin_list` | — | **UNRESOLVED** — no fixed row-height `#define` found in this page's header/source; appears to use `LV_SIZE_CONTENT` rows | — | `ui_page_profiles_builtin_list.c` |
+
+### Unresolved — could not be derived from source this pass
+
+- **`touch_cal` / `touch_test` internal widgets** — N/A regardless (unreachable
+  on this bench's FT6336U hardware, per "Panel and camera facts" above);
+  `touch_cal`'s topbar is hand-built, not via `ui_topbar.c`, so even its Back
+  icon position was not derived.
+- **`temperature` page's per-zone rows and relay toggle buttons** — zone rows
+  are `LV_SIZE_CONTENT` height (`ui_page_temperature.c:435-436`), so their
+  count (`MAX31856_CHANNEL_COUNT`, runtime-visible but not re-confirmed this
+  pass) times an unmeasured per-row rendered height determines where the
+  fixed-height (40px) relay row starts — not resolved to a pixel.
+- **`network` page's "Manage networks" button and mode-toggle buttons'
+  vertical position** — `status_card` above them is `LV_SIZE_CONTENT`
+  height (wraps live Wi-Fi status text of variable length,
+  `ui_page_network.c:772-786`), so `mode_row`/`s_manage_btn`'s y is
+  data-dependent; their x-span (full content width, 8..472) and heights
+  (44px, 36px respectively) are known, y is not (`ui_page_network.c:820-895`).
+- **`network_manage` internal scan/saved-network list** — not inspected this
+  pass (out of scope: this row's own MCP action is page-load-only, per the
+  runbook's write-gating above).
+- **`profile_detail`'s Segments/Edit/Start action row** — `s_info_card` above
+  it is `LV_SIZE_CONTENT` (profile name/segment-count text, variable length),
+  so the action row's y is data-dependent; not resolved
+  (`ui_page_profile_detail.c:570-664`).
+- **`profile_builder_zones`/`_segment`/`_review` internal controls** — not
+  inspected below the topbar this pass; each page's own zone-selector/
+  segment-editor/review-summary widget geometry is unresolved.
+- **`profiles_builtin_list` row geometry** — see Table 4; no fixed-height
+  `#define` was found for this page's rows in the time available this pass.
+
+### What remains true from the original pass
+
+The two structural facts the original document cited as reasons pixel
+geometry "cannot be derived from source alone" (line 367-380) were correct
+in general — flex/grid content areas genuinely do vary per-page and
+per-data-state — but **understated how much of each page's total tap
+surface is actually fixed**: the topbar (every page) and the Configuration
+hub grid (the single highest-traffic navigation hub) turn out to be fully
+static. The remaining UNRESOLVED items above are the genuinely
+data-dependent ones (`LV_SIZE_CONTENT` cards whose height depends on live
+text), not a blanket "everything is unknowable" — that blanket claim is now
+retracted for the topbar and the config hub specifically, while standing for
+the items listed as unresolved above. `touch_log_tap_targets()` remains
+forbidden per the original document's own gate (panic fix not confirmed
+flashed on the running image) and was not called or considered for this
+pass.
+
 ## Restore / re-run notes
 
 Every read-only row ends by navigating back toward `home` via topbar Back/
