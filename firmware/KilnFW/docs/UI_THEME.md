@@ -28,6 +28,7 @@ and update both this table and `ui_theme.h` together if it needs correcting.
 | `UI_THEME_ACCENT_3` | `#3ec6c6` | Accent 3 -- teal/cyan. Also the web UI's dominant/primary-action accent since WEB_UI_RESPONSIVE.md sec 7 (2026-09-03) -- `theme.css`'s `button:focus-visible` ring. Same value, web-only usage change; if `kiln_ui.c`'s placeholder screen grows real button chrome, its primary/confirm buttons should reach for this accent too for parity. |
 | `UI_THEME_ACCENT_4` | `#5cc06e` | Accent 4 -- green. Matches the reference's nav-icon underline color. |
 | `UI_THEME_ACCENT_5` | `#d6555f` | Accent 5 -- red/amber. Held back for "attention" use (fault/alarm/stop) rather than a fifth ordinary zone color; the one accent here inferred rather than directly seen in the reference screenshots, so double-check it hardest once real hardware is available. |
+| `UI_THEME_ACCENT_BLUE` | `#2f6fe4` | Accent blue -- the LCD dashboard's profile-selection button. Added 2026-09-21; none of ACCENT_1..5 above is blue. Keep this table, `ui_theme.h` and `theme.css` in step if it ever changes. |
 | `UI_THEME_COLOR_NEUTRAL` | `#9aa0ae` | **Dual-role token**, added Phase 7 (TODO.md 1223-1225). Alias for `UI_THEME_COLOR_TEXT_SECONDARY` -- same value, added so a "neutral status" call site can say that intent by name. Mirrors the web dashboard's `--neutral` (`main_page.html`, `readiness_page.html`, WEB_UI_RESPONSIVE.md sec 5.1 item 2, 2026-09-03), which is itself defined as `var(--ui-text-secondary)` in dark mode -- both front ends already treat "neutral status" and "secondary text" as the same color, this just gives the LCD side a name for that too. |
 
 ## Spacing / sizing
@@ -106,6 +107,7 @@ values into a shared CSS custom-properties block, e.g.:
   --accent-3: #3ec6c6;
   --accent-4: #5cc06e;
   --accent-5: #d6555f;
+  --accent-blue: #2f6fe4;
 }
 ```
 

@@ -1260,8 +1260,15 @@ _Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
      * width right after construction rather than adding a second growth
      * mode to that shared helper for its one remaining caller pair. Tap
      * opens the already-landed 6.2 picker page in pick mode
-     * ("profile_picker" -- see kiln_ui_register_page() in kiln_ui.c). */
-    s_ui_home_profile_btn = ui_home_build_button(action_row, "--", UI_THEME_ACCENT_2, ui_home_profile_btn_cb, 36,
+     * ("profile_picker" -- see kiln_ui_register_page() in kiln_ui.c).
+     *
+     * 2026-09-21 owner request: profile-selection button uses
+     * UI_THEME_ACCENT_BLUE (see ui_theme.h for why that token exists).
+     * ACCENT_2 is freed up; nothing else on this page uses it. Text stays
+     * UI_THEME_COLOR_TEXT_PRIMARY via ui_home_build_button(), same as every
+     * other button on this row. Keep this call site, ui_theme.h and
+     * theme.css in step if the token ever changes. */
+    s_ui_home_profile_btn = ui_home_build_button(action_row, "--", UI_THEME_ACCENT_BLUE, ui_home_profile_btn_cb, 36,
                                 &s_ui_home_profile_label);
     /* LONG_CLIP, not LONG_DOT: UI_PLAN.md 6.2 records that LONG_DOT's
      * lv_obj_get_self_height() -> lv_label_set_long_mode() ->

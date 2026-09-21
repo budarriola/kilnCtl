@@ -122,6 +122,13 @@
 #define UI_THEME_ACCENT_5_HEX   0xd6555f
 #define UI_THEME_ACCENT_5       lv_color_hex(UI_THEME_ACCENT_5_HEX)
 
+/* Accent blue: saturated mid blue for the LCD dashboard's profile-selection
+ * button (ui_page_home.c). None of ACCENT_1..5 above is actually blue.
+ * Mirrored in theme.css (--ui-accent-blue) and firmware/KilnFW/docs/UI_THEME.md
+ * -- keep all three in step if this value ever changes. */
+#define UI_THEME_ACCENT_BLUE_HEX   0x2f6fe4
+#define UI_THEME_ACCENT_BLUE       lv_color_hex(UI_THEME_ACCENT_BLUE_HEX)
+
 /* ---- Spacing / sizing ----------------------------------------------------
  * Budgeted against the 480x320 landscape panel (DISPLAY_WIDTH/HEIGHT,
  * App/drivers/hw/settings.h) -- these are round numbers chosen to fit a small

@@ -22,6 +22,11 @@
   --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
   --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
   --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+  /* --ui-accent-blue mirrors ui_theme.h's UI_THEME_ACCENT_BLUE (#2f6fe4):
+     the LCD dashboard's profile-selection button. Keep in step with
+     ui_theme.h and UI_THEME.md if it ever changes. No web page consumes
+     this yet. */
+  --ui-accent-blue: #2f6fe4;
   --ui-radius: 10px; --ui-padding: var(--ui-space-2); --ui-touch: 72px; --ui-status-bar: 32px;
   /* WEB_UI_RESPONSIVE.md sec 7.2 item 2, adopted 2026-09-03: a spacing
      scale, additive alongside the existing --ui-padding (now an alias for
