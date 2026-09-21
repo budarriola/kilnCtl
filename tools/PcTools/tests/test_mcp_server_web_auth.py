@@ -322,6 +322,65 @@ class OffBranchTest(_Base):
         self.assertNotIn("ok:", result)
 
 
+class TimeoutSubstitutionTest(_Base):
+    """project_..._: after an NVS erase, web_auth_backend_get_config()
+    reports -1 for both timeouts because no policy record exists yet --
+    the same sentinel that means "never expire". web_auth_setup() must not
+    echo that -1 straight back into set_policy."""
+
+    _NO_RECORD = dict(_OFF_NO_ADMIN, web_timeout_min=-1, lcd_timeout_min=-1)
+
+    def test_minus_one_readback_is_substituted_with_defaults(self):
+        with unittest.mock.patch.object(
+                wac, "get_auth_config",
+                side_effect=[self._NO_RECORD, _OFF_WITH_ADMIN, _ON_WITH_ADMIN]), \
+             unittest.mock.patch.object(wac, "post_security", return_value={"ok": True}) as post_mock:
+            result = msw.web_auth_setup(confirm=True, enable_web_auth=True)
+        second_call = post_mock.call_args_list[1]
+        self.assertEqual(second_call.args[1]["cmd"], "set_policy")
+        self.assertEqual(second_call.args[1]["web_timeout_min"], "30")
+        self.assertEqual(second_call.args[1]["lcd_timeout_min"], "10")
+        self.assertIn("substituted default", result)
+        self.assertIn("ok:", result)
+
+    def test_explicit_minus_one_is_honored_with_warning(self):
+        with unittest.mock.patch.object(
+                wac, "get_auth_config",
+                side_effect=[self._NO_RECORD, _OFF_WITH_ADMIN, _ON_WITH_ADMIN]), \
+             unittest.mock.patch.object(wac, "post_security", return_value={"ok": True}) as post_mock:
+            result = msw.web_auth_setup(confirm=True, enable_web_auth=True,
+                                         web_timeout_min=-1, lcd_timeout_min=-1)
+        second_call = post_mock.call_args_list[1]
+        self.assertEqual(second_call.args[1]["web_timeout_min"], "-1")
+        self.assertEqual(second_call.args[1]["lcd_timeout_min"], "-1")
+        self.assertIn("requested explicitly", result)
+        self.assertIn("NEVER expire", result)
+
+    def test_out_of_range_override_refused_before_any_http_call(self):
+        with unittest.mock.patch.object(wac, "get_auth_config") as get_mock:
+            result = msw.web_auth_setup(confirm=True, web_timeout_min=0)
+        self.assertIn("refused", result)
+        self.assertIn("web_timeout_min=0", result)
+        get_mock.assert_not_called()
+
+    def test_out_of_range_lcd_override_refused_before_any_http_call(self):
+        with unittest.mock.patch.object(wac, "get_auth_config") as get_mock:
+            result = msw.web_auth_setup(confirm=True, lcd_timeout_min=61)
+        self.assertIn("refused", result)
+        self.assertIn("lcd_timeout_min=61", result)
+        get_mock.assert_not_called()
+
+    def test_valid_override_is_used_verbatim_no_note(self):
+        with unittest.mock.patch.object(
+                wac, "get_auth_config",
+                side_effect=[_OFF_NO_ADMIN, _OFF_WITH_ADMIN, _ON_WITH_ADMIN]), \
+             unittest.mock.patch.object(wac, "post_security", return_value={"ok": True}) as post_mock:
+            result = msw.web_auth_setup(confirm=True, enable_web_auth=True, web_timeout_min=45)
+        second_call = post_mock.call_args_list[1]
+        self.assertEqual(second_call.args[1]["web_timeout_min"], "45")
+        self.assertNotIn("substituted default", result)
+
+
 class ReadBackRefusalTest(_Base):
     """Review fix 3: set_web_password reports ok:true but the read-back
     before set_policy still shows admin_password_set false -- must refuse

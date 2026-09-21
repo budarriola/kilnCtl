@@ -728,8 +728,9 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
         return ("WARNING: boot_guard_reset skipped -- could not resolve a board address to call "
                 "POST /api/ota/esp/boot_guard_reset at, even though post-flash verification just "
                 "succeeded against one; the recovery-mode counter was NOT cleared by this flash.")
-    # Best-effort "before" read via the unauthenticated GET /api/boot_guard
-    # diagnostics route, purely for the reported message -- never gates or
+    # Best-effort "before" read via the admin-authenticated GET /api/boot_guard
+    # diagnostics route (goes through http_auth.urlopen()'s ADMIN-session
+    # seam; 401s once web auth is on), purely for the reported message -- never gates or
     # fails the reset call below. A board that answers this GET but then
     # fails the POST (a transient network blip between the two calls) still
     # gets a useful before/after report instead of losing the before value

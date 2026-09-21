@@ -551,8 +551,10 @@ def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_
 
 
 def get_boot_guard_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
-    """GET /api/boot_guard -- unauthenticated diagnostics for boot_guard's
-    recovery-mode counter (App/drivers/http/ota_http_recovery.c's
+    """GET /api/boot_guard -- admin-authenticated diagnostics for boot_guard's
+    recovery-mode counter (the read goes through http_auth.urlopen(), the
+    same ADMIN-session seam every other admin-tier tool uses, and the route
+    401s once web auth is on) (App/drivers/http/ota_http_recovery.c's
     ota_boot_guard_status_get_handler()), added alongside the reset route
     above so this class of fix is verifiable without a JTAG memory read of
     s_bg (docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md

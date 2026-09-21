@@ -26,9 +26,54 @@ def _describe_login_error(exc: wac.WebAuthSetupHttpError) -> str:
     return str(exc)
 
 
+# security_timeout_minutes_is_valid() (security_http_core.c): -1 means
+# "never expire", 1-60 is minutes, anything else is rejected by set_policy
+# as a 400. These are the substitutes used when the pre-fetch reads -1 for
+# a reason other than a deliberate "never expire" choice -- see
+# _resolve_timeout()'s docstring.
+_DEFAULT_WEB_TIMEOUT_MIN = 30
+_DEFAULT_LCD_TIMEOUT_MIN = 10
+
+
+def _timeout_out_of_range(value: Optional[int]) -> bool:
+    return value is not None and value != -1 and not (1 <= value <= 60)
+
+
+def _resolve_timeout(label: str, default: int, raw, override: Optional[int]):
+    """Pick the value to send to set_policy for one timeout field, and a
+    human-readable note when that value was not simply echoed from the
+    pre-fetch.
+
+    ``web_auth_backend_get_config()`` (security_backend_web_auth.c:293-294)
+    collapses "no policy record yet" (the state right after an NVS erase)
+    onto the same -1 sentinel that ``security_timeout_minutes_is_valid()``
+    (security_http_core.c:26-31) treats as a deliberate, valid "never
+    expire". Blindly echoing a pre-fetched -1 back into set_policy silently
+    persists never-expire on a board that never actually asked for it.
+
+    ``override`` (an explicit caller-supplied value) always wins, including
+    an explicit -1 -- that is a deliberate choice and is honored, just
+    flagged loudly. Otherwise, a raw pre-fetch value of -1 is treated as the
+    ambiguous "no record" case and replaced with ``default``.
+    """
+    if override is not None:
+        if override == -1:
+            return override, (f"{label}=-1 requested explicitly -- sessions will NEVER expire")
+        return override, None
+    if raw == -1:
+        return default, (f"{label} read -1 from the board (this after an NVS erase means 'no "
+                          f"policy record yet', not a deliberate 'never expire' choice -- "
+                          f"security_backend_web_auth.c's ABSENT case collapses onto the same "
+                          f"sentinel security_http_core.c treats as valid) -- substituted "
+                          f"default {default}")
+    return raw, None
+
+
 @_srv._tool()
 def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
-                    enable_web_auth: bool = True) -> str:
+                    enable_web_auth: bool = True,
+                    web_timeout_min: Optional[int] = None,
+                    lcd_timeout_min: Optional[int] = None) -> str:
     """Bootstrap the board's administrator web credential from the
     environment (``KILNCTL_WEB_USERNAME``/``KILNCTL_WEB_PASSWORD`` -- never
     a parameter, never logged; this report only ever says whether each is
@@ -48,11 +93,13 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
        erase): sets the admin password via POST /api/auth/security
        (``cmd=set_web_password&role=admin``), then -- only if
        ``enable_web_auth`` is true -- POSTs ``cmd=set_policy`` to turn
-       ``web_enabled`` on, preserving the board's current ``lcd_enabled``/
-       ``lcd_timeout_min`` exactly as read back in step 1 (the page's own
-       ``save()`` always echoes all four policy fields together;
-       set_policy's parser requires web_timeout_min/lcd_timeout_min on
-       every call). Per http_auth_check() (http_auth_enforce.c),
+       ``web_enabled`` on, preserving the board's current ``lcd_enabled``
+       exactly as read back in step 1, and its ``web_timeout_min``/
+       ``lcd_timeout_min`` UNLESS the pre-fetch read -1 for one -- see the
+       "Timeouts" paragraph below (the page's own ``save()`` always echoes
+       all four policy fields together; set_policy's parser requires
+       web_timeout_min/lcd_timeout_min on every call). Per
+       http_auth_check() (http_auth_enforce.c),
        ROUTE_TIER_ADMIN collapses to unconditional ALLOW while
        ``web_enabled`` is false, so setting the password here needs no
        session at all -- confirmed against the firmware source, not
@@ -87,6 +134,26 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     a login is not a write). Also refuses outright, before any HTTP call,
     if either environment variable is absent.
 
+    Timeouts: ``web_auth_backend_get_config()``
+    (security_backend_web_auth.c:293-294) reports -1 for both
+    ``web_timeout_min``/``lcd_timeout_min`` when no policy record exists yet
+    (e.g. right after an NVS erase) -- the exact same sentinel
+    ``security_timeout_minutes_is_valid()`` (security_http_core.c:26-31)
+    treats as a deliberate, valid "never expire". Echoing that -1 straight
+    back into ``set_policy`` (case 2's own enable step) would silently
+    persist never-expire on a board that never asked for it. So when the
+    pre-fetch reads -1 for either field and the caller did not pass an
+    explicit override below, this tool substitutes a default (30 for
+    ``web_timeout_min``, 10 for ``lcd_timeout_min``) instead of echoing -1,
+    and names the substitution in the result. Pass ``web_timeout_min``/
+    ``lcd_timeout_min`` explicitly to override either default outright;
+    each is validated against the firmware's own rule (-1, or 1-60) and
+    refused before any HTTP call if out of range. An explicit -1 is honored
+    (this tool never overrides a deliberate choice) but reported with a
+    loud warning that sessions will never expire. Only reachable in case 2
+    (case 1's bootstrap_password route never calls set_policy, and case 3
+    writes nothing), so these two parameters are ignored otherwise.
+
     After any write, re-reads GET /api/auth/config and fails loud (does not
     report success) if the result disagrees with what was requested --
     ``admin_password_set`` still false after setting it, or ``web_enabled``
@@ -108,6 +175,12 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     if not have_username or not have_password:
         return (f"refused: missing credential in the environment ({presence}). Set both "
                 f"{USERNAME_ENV} and {PASSWORD_ENV} in the shell that launches this MCP server.")
+
+    for _label, _val in (("web_timeout_min", web_timeout_min), ("lcd_timeout_min", lcd_timeout_min)):
+        if _timeout_out_of_range(_val):
+            return (f"refused: {_label}={_val} is out of range -- the firmware accepts -1 "
+                     f"(never expire) or 1-60 minutes only "
+                     f"(security_timeout_minutes_is_valid(), security_http_core.c:26-31)")
 
     resolved = _ota_resolve_host(host)
 
@@ -137,12 +210,18 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     web_enabled = bool(before.get("web_enabled")) if config_readable else True
     admin_configured = bool(before.get("admin_password_set")) if config_readable else False
     lcd_enabled = bool(before.get("lcd_enabled"))
-    lcd_timeout_min = before.get("lcd_timeout_min", -1)
-    web_timeout_min = before.get("web_timeout_min", -1)
+    # Raw values exactly as the board reported them (or -1 default if the
+    # field/whole read is missing) -- kept separate from the *effective*
+    # values computed below (which may substitute a default for a raw -1,
+    # or honor an explicit caller override) so the "before" report always
+    # reflects what the board actually said, not what this tool decided to
+    # send back to it.
+    raw_lcd_timeout_min = before.get("lcd_timeout_min", -1)
+    raw_web_timeout_min = before.get("web_timeout_min", -1)
     if config_readable:
         state_line = (f"before: web_enabled={web_enabled} admin_password_set={admin_configured} "
-                      f"lcd_enabled={lcd_enabled} web_timeout_min={web_timeout_min} "
-                      f"lcd_timeout_min={lcd_timeout_min} ({presence}, host={resolved})")
+                      f"lcd_enabled={lcd_enabled} web_timeout_min={raw_web_timeout_min} "
+                      f"lcd_timeout_min={raw_lcd_timeout_min} ({presence}, host={resolved})")
     else:
         state_line = (f"before: GET /api/auth/config was refused -- treating this as web auth ON "
                       f"with no admin record yet (the only state that denies this ADMIN-tier read "
@@ -246,13 +325,20 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
                 return (f"FAILED verification: set_web_password reported ok:true but "
                         f"admin_password_set still reads false -- refusing to enable web auth "
                         f"over an unconfirmed credential\n{state_line}")
+            eff_web_timeout_min, web_timeout_note = _resolve_timeout(
+                "web_timeout_min", _DEFAULT_WEB_TIMEOUT_MIN, raw_web_timeout_min, web_timeout_min)
+            eff_lcd_timeout_min, lcd_timeout_note = _resolve_timeout(
+                "lcd_timeout_min", _DEFAULT_LCD_TIMEOUT_MIN, raw_lcd_timeout_min, lcd_timeout_min)
+            timeout_notes = [n for n in (web_timeout_note, lcd_timeout_note) if n]
+            if timeout_notes:
+                state_line += "\n" + "\n".join(f"NOTE: {n}" for n in timeout_notes)
             try:
                 policy_result = wac.post_security(resolved, {
                     "cmd": "set_policy",
                     "web_enabled": "1",
                     "lcd_enabled": "1" if lcd_enabled else "0",
-                    "web_timeout_min": str(web_timeout_min),
-                    "lcd_timeout_min": str(lcd_timeout_min),
+                    "web_timeout_min": str(eff_web_timeout_min),
+                    "lcd_timeout_min": str(eff_lcd_timeout_min),
                 })
             except wac.WebAuthSetupHttpError as exc:
                 return (f"password set, but enabling web auth failed: POST /api/auth/security "
