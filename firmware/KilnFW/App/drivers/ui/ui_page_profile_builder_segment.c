@@ -63,6 +63,16 @@ static profile_t *draft(void)
 
 static void refresh(void)
 {
+    if (!s_target_val_label) {
+        return; /* not built yet -- build() calls this itself once it is.
+                 * prepare() runs BEFORE kiln_ui_show() has built this page
+                 * the first time (screens are lazily built and cached, see
+                 * kiln_ui.c's kiln_ui_page_t::screen), so every widget
+                 * pointer below is still NULL on the first Next tap from
+                 * profile_builder_zones -- same guard idiom as
+                 * ui_page_profile_builder_review_prepare() and
+                 * ui_page_profile_segments.c's render_page(). */
+    }
     profile_t *d = draft();
     if (d->segment_count == 0) {
         return; /* prepare() always seeds at least one -- defensive only */
