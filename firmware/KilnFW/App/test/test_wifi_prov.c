@@ -49,9 +49,8 @@ wifi_mode_t g_stub_wifi_mode = WIFI_MODE_NULL;
 int g_stub_wifi_set_mode_calls = 0;
 // esp_wifi_set_storage()/esp_wifi_restore() counters (added 2026-09-21,
 // docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md) -- wifi_prov.c
-// now calls esp_wifi_set_storage(RAM) once during wifi_prov_start(); this
-// file doesn't assert on it today, but the symbol must resolve since
-// wifi_prov.c is compiled directly into this executable.
+// now calls esp_wifi_set_storage(RAM) once during wifi_prov_start();
+// test_wifi_prov_start_sets_ram_storage() below asserts on both counters.
 int g_stub_wifi_set_storage_calls = 0;
 wifi_storage_t g_stub_wifi_last_storage = WIFI_STORAGE_FLASH;
 int g_stub_wifi_restore_calls = 0;
@@ -102,7 +101,8 @@ static void reset_state(void)
     s_wifi.sta_rssi = -127;
     // post_event()/wifi_prov_post_and_wait() both refuse (silently, by design -- see
     // wifi_prov.c's owner-task comment) when s_wifi_cmd_queue is NULL, which it is
-    // until wifi_prov_start() runs (never called by these tests). Point it
+    // until wifi_prov_start() runs (called only by
+    // test_wifi_prov_start_sets_ram_storage()). Point it
     // at any non-NULL value so post_event() actually reaches xQueueSend(),
     // which is what g_stub_queue_send_calls counts -- the queue is never
     // really drained (xQueueSend always "fails" in the stub, see
