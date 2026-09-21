@@ -1751,7 +1751,6 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       the board granted heating enable while still reporting
       `commissioned: false`, i.e. with S1's absolute temperature ceiling
       disabled for want of `abs_max_temp_c`
-- [ ] ~~The SAFETY processor's MAX31856 is not populated~~ — superseded by the
       line above. Kept for one revision so anyone mid-task on the old wording
       sees why it changed.
       **Read the word "safety" carefully** — this item is about the RP2040's
