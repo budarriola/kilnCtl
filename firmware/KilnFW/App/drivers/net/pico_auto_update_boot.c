@@ -258,9 +258,41 @@ static bool attempt_update_embedded(const pico_image_embedded_info_t *emb, int s
                                         slot);
 }
 
+/* Bug found 2026-09-21 (bench triage): docs/PICO_AUTO_UPDATE_PLAN.md sec 11's
+ * source-only review found this board's SaftyFW has no confirmed two-slot
+ * bootloader today (a flat image at 0x10000000, no seeded metadata sector) --
+ * the P1-closed claim earlier in that plan does not hold for this board.
+ * Neither kilnlink_fw_version_t nor any other wire message the Pico sends
+ * today carries "I have an update-capable bootloader installed" as a fact;
+ * the only way the ESP finds out is by trying a relay and watching it fail
+ * (an erase-phase watchdog reset, per that section), which is exactly the
+ * failure mode this gate exists to avoid provoking automatically at every
+ * boot. Until a wire-level signal exists (a follow-up, not built here),
+ * automatic Pico updates are gated off by this build-time default -- set
+ * to 1 only once a board's bootloader install is confirmed and section 11's
+ * three NO-GO items are resolved. This does not touch pico_auto_update.h's
+ * decide() shape or its host tests: the gate short-circuits before decide()
+ * is ever called, the same way the "no image at all" inert path already
+ * does below. */
+#ifndef PICO_AUTO_UPDATE_BOOTLOADER_PRESENT
+#define PICO_AUTO_UPDATE_BOOTLOADER_PRESENT 0
+#endif
+
 static void pico_auto_update_task(void *arg)
 {
     (void)arg;
+
+#if !PICO_AUTO_UPDATE_BOOTLOADER_PRESENT
+    ESP_LOGW(TAG, "automatic Pico update is compiled OFF: no wire-level signal exists yet to "
+                  "confirm this board's SaftyFW has an update-capable two-slot bootloader "
+                  "installed (docs/PICO_AUTO_UPDATE_PLAN.md sec 11, NO-GO as of 2026-09-21) -- "
+                  "set -DPICO_AUTO_UPDATE_BOOTLOADER_PRESENT=1 once that is confirmed");
+    pico_auto_update_state_set_blocking(false, NULL);
+    pico_auto_update_state_set_warning(NULL);
+    pico_auto_update_state_set_last_decision(
+        "deliberately_off: safety processor has no confirmed update-capable bootloader", false);
+    goto done;
+#endif
 
     /* Owner decision 2026-09-20: the embedded pair (baked into THIS build, see
      * pico_image_embedded.h) is the primary image source -- unlike the
@@ -307,6 +339,8 @@ static void pico_auto_update_task(void *arg)
             ESP_LOGW(TAG, "no usable SaftyFW image (embedded: %s; no manifest staged either) -- "
                           "automatic Pico update is inert this boot",
                      emb.reason[0] != '\0' ? emb.reason : "none embedded");
+            pico_auto_update_state_set_last_decision(
+                "no usable SaftyFW image is available to compare against -- nothing decided", false);
             goto done;
         }
     }
@@ -384,18 +418,21 @@ static void pico_auto_update_task(void *arg)
         }
         pico_auto_update_state_set_blocking(false, NULL);
         pico_auto_update_state_set_warning(NULL);
+        pico_auto_update_state_set_last_decision(why, true);
         break;
 
     case PICO_AUTO_UPDATE_LINK_DOWN:
         ESP_LOGW(TAG, "%s", why);
         pico_auto_update_state_set_blocking(false, NULL);
         pico_auto_update_state_set_warning(NULL);
+        pico_auto_update_state_set_last_decision(why, false);
         break;
 
     case PICO_AUTO_UPDATE_DEFER_FIRING:
         ESP_LOGW(TAG, "%s (%s)", why, gate_reason[0] != '\0' ? gate_reason : "interlock");
         pico_auto_update_state_set_blocking(false, NULL);
         pico_auto_update_state_set_warning(NULL);
+        pico_auto_update_state_set_last_decision(why, false);
         break;
 
     case PICO_AUTO_UPDATE_NEEDED: {
@@ -407,6 +444,11 @@ static void pico_auto_update_task(void *arg)
              * the attempt actually began, and the next boot re-evaluates. */
             pico_auto_update_state_set_blocking(false, NULL);
             pico_auto_update_state_set_warning(NULL);
+            pico_auto_update_state_set_last_decision(
+                "an update attempt stood down before it could start (see log) -- not a match", false);
+        } else {
+            pico_auto_update_state_set_last_decision(
+                "a Pico update is in progress this boot -- not yet confirmed matching", false);
         }
         break;
     }
@@ -431,6 +473,7 @@ static void pico_auto_update_task(void *arg)
         ESP_LOGW(TAG, "%s -- %s", why, warn_reason);
         pico_auto_update_state_set_blocking(false, NULL);
         pico_auto_update_state_set_warning(warn_reason);
+        pico_auto_update_state_set_last_decision(why, false);
         break;
     }
 
@@ -457,6 +500,7 @@ static void pico_auto_update_task(void *arg)
         ESP_LOGW(TAG, "%s -- %s", why, warn_reason);
         pico_auto_update_state_set_blocking(false, NULL);
         pico_auto_update_state_set_warning(warn_reason);
+        pico_auto_update_state_set_last_decision(why, false);
         break;
     }
 
@@ -465,6 +509,7 @@ static void pico_auto_update_task(void *arg)
                  (use_embedded ? emb.reason[0] : img.reason[0]) != '\0' ? " -- " : "",
                  use_embedded ? emb.reason : img.reason);
         pico_auto_update_state_set_blocking(true, why);
+        pico_auto_update_state_set_last_decision(why, false);
         break;
     }
 

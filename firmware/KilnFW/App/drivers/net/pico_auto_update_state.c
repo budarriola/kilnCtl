@@ -15,6 +15,12 @@ static char s_reason[PICO_AUTO_UPDATE_STATE_REASON_MAX];
 static volatile bool s_warning;
 static char s_warning_reason[PICO_AUTO_UPDATE_STATE_REASON_MAX];
 
+/* Bug found 2026-09-21: see the header comment on
+ * pico_auto_update_state_set_last_decision() for why this exists -- the
+ * readiness page must not claim a match by default. */
+static volatile bool s_decision_is_match;
+static char s_last_decision[PICO_AUTO_UPDATE_STATE_REASON_MAX];
+
 bool pico_auto_update_state_is_blocking(void)
 {
     return s_blocking;
@@ -61,4 +67,25 @@ void pico_auto_update_state_set_warning(const char *reason)
         s_warning = false;
         s_warning_reason[0] = '\0';
     }
+}
+
+void pico_auto_update_state_set_last_decision(const char *reason, bool is_match)
+{
+    if (reason != NULL) {
+        (void)strncpy(s_last_decision, reason, sizeof(s_last_decision) - 1u);
+        s_last_decision[sizeof(s_last_decision) - 1u] = '\0';
+    } else {
+        s_last_decision[0] = '\0';
+    }
+    s_decision_is_match = is_match;
+}
+
+const char *pico_auto_update_state_last_decision(void)
+{
+    return s_last_decision;
+}
+
+bool pico_auto_update_state_decision_is_match(void)
+{
+    return s_decision_is_match;
 }

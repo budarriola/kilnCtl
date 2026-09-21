@@ -70,6 +70,35 @@ const char *pico_auto_update_state_warning_reason(void);
  * verdict exactly once. */
 void pico_auto_update_state_set_warning(const char *reason);
 
+/* Bug found 2026-09-21 (bench triage): readiness_http.c's "pico_update" item
+ * used to render the hardcoded sentence "the safety processor's firmware
+ * version matches" for EVERY non-blocking, non-warning outcome -- which
+ * includes LINK_DOWN (no FW_VERSION arrived yet), DEFER_FIRING (a firing is
+ * in the way), a NEEDED attempt that stood down locally, and the boot task
+ * never running at all this boot -- none of which ran a comparison that
+ * matched anything. Only a genuine PICO_AUTO_UPDATE_MATCH earns that
+ * sentence.
+ *
+ * pico_auto_update_state_set_last_decision() records the human-readable
+ * `why` string pico_auto_update_decide() already produces (or a boot-task
+ * -specific "inert" reason for the no-image-and-no-manifest case, which
+ * never reaches decide() at all), and pico_auto_update_state_decision_is_
+ * match() says whether that decision was actually MATCH. readiness_http.c
+ * uses these instead of assuming a match by default. Same single-writer-
+ * per-boot convention as the blocking/warning flags above; the default
+ * (boot task has not run yet, or this boot never reached a decision) is an
+ * empty string / false, which readiness_http.c renders as "not yet
+ * evaluated this boot" rather than a false "matches". */
+void pico_auto_update_state_set_last_decision(const char *reason, bool is_match);
+
+/* The most recent decision string set above. Never NULL; empty when nothing
+ * has been decided yet this boot. */
+const char *pico_auto_update_state_last_decision(void);
+
+/* True only when the most recent decision recorded via
+ * pico_auto_update_state_set_last_decision() was a genuine identity match. */
+bool pico_auto_update_state_decision_is_match(void);
+
 #ifdef __cplusplus
 }
 #endif

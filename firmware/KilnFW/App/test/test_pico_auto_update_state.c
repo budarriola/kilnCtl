@@ -107,6 +107,70 @@ static void test_set_blocking_false_clears_reason(void)
     TEST_CHECK(strcmp(pico_auto_update_state_reason(), "") == 0, "cleared: reason reset to empty");
 }
 
+// Bug found 2026-09-21 (bench triage, readiness_http.c): the readiness page
+// used to render a hardcoded "matches" sentence for every non-blocking,
+// non-warning outcome, whether or not a comparison actually ran and
+// matched. These tests prove the state module's side of the fix: the
+// decision string/flag are independent of blocking/warning, default to
+// "nothing decided" (empty/false), and are set verbatim by the boot task's
+// switch (pico_auto_update_boot.c, not part of this host-test build --
+// same "HTTP handlers are target-build only" class -- so this file proves
+// the CONTRACT that switch relies on, same pattern as the rest of this
+// file).
+static void test_default_decision_is_not_a_match(void)
+{
+    // Nothing has called set_last_decision() yet this test process (module
+    // statics are zero-initialized): readiness_http.c must NOT default to
+    // "matches" here -- this is exactly the bug. Empty string + false is
+    // "not yet evaluated", which the HTTP handler renders as its own
+    // distinct "not yet evaluated this boot" sentence, never "matches".
+    TEST_CHECK(!pico_auto_update_state_decision_is_match(), "default: not a match");
+    TEST_CHECK(strcmp(pico_auto_update_state_last_decision(), "") == 0, "default: empty decision string");
+}
+
+static void test_set_last_decision_match_reads_back(void)
+{
+    pico_auto_update_state_set_last_decision("identity confirmed against abc123", true);
+    TEST_CHECK(pico_auto_update_state_decision_is_match(), "MATCH: decision_is_match() true");
+    TEST_CHECK(strcmp(pico_auto_update_state_last_decision(), "identity confirmed against abc123") == 0,
+              "MATCH: reason recorded verbatim");
+}
+
+static void test_set_last_decision_non_match_reads_back_false(void)
+{
+    // A DEFER_FIRING/LINK_DOWN/etc outcome: a reason is still recorded (for
+    // display), but is_match must read false -- this is the exact
+    // distinction readiness_http.c's fix depends on to avoid claiming a
+    // match it never confirmed.
+    pico_auto_update_state_set_last_decision("link down -- no FW_VERSION observed yet", false);
+    TEST_CHECK(!pico_auto_update_state_decision_is_match(), "non-MATCH: decision_is_match() false");
+    TEST_CHECK(strcmp(pico_auto_update_state_last_decision(), "link down -- no FW_VERSION observed yet") == 0,
+              "non-MATCH: reason still recorded for display");
+}
+
+static void test_set_last_decision_overwrites_previous(void)
+{
+    // Same single-writer-per-boot convention as set_blocking/set_warning:
+    // a later call fully replaces the earlier one, including flipping
+    // is_match back from true to false (a MATCH outcome must not "stick"
+    // if somehow re-evaluated within one process's lifetime -- host-test
+    // only concern, but proves no latching bug crept in).
+    pico_auto_update_state_set_last_decision("identity confirmed against def456", true);
+    TEST_CHECK(pico_auto_update_state_decision_is_match(), "first call: match true");
+    pico_auto_update_state_set_last_decision("budget spent (3/3) against def456", false);
+    TEST_CHECK(!pico_auto_update_state_decision_is_match(), "second call: match flips to false");
+    TEST_CHECK(strcmp(pico_auto_update_state_last_decision(), "budget spent (3/3) against def456") == 0,
+              "second call: reason fully replaced, not appended");
+}
+
+static void test_set_last_decision_null_reason_clears_string(void)
+{
+    pico_auto_update_state_set_last_decision("something", true);
+    pico_auto_update_state_set_last_decision(NULL, false);
+    TEST_CHECK(strcmp(pico_auto_update_state_last_decision(), "") == 0, "NULL reason clears the string");
+    TEST_CHECK(!pico_auto_update_state_decision_is_match(), "NULL reason: is_match reads false");
+}
+
 void run_test_pico_auto_update_state(void)
 {
     test_default_state_is_neither_blocking_nor_warning();
@@ -114,4 +178,13 @@ void run_test_pico_auto_update_state(void)
     test_other_unrecoverable_causes_still_block();
     test_prior_failed_sets_warning_without_blocking();
     test_set_blocking_false_clears_reason();
+    // Restore the decision-tracking statics to their zero-init default
+    // BEFORE test_default_decision_is_not_a_match() runs -- it must run
+    // first among the decision tests to actually observe the default, so
+    // it is listed immediately here, ahead of the calls that mutate it.
+    test_default_decision_is_not_a_match();
+    test_set_last_decision_match_reads_back();
+    test_set_last_decision_non_match_reads_back_false();
+    test_set_last_decision_overwrites_previous();
+    test_set_last_decision_null_reason_clears_string();
 }

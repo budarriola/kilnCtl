@@ -742,8 +742,21 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
              * status()'s own comment. pico_auto_update_state_warning_reason()
              * already names the attempt count and commit. */
             snprintf(detail, sizeof(detail), "%.190s", pico_auto_update_state_warning_reason());
-        } else {
+        } else if (pico_auto_update_state_decision_is_match()) {
+            /* Bug found 2026-09-21 (bench triage): this branch used to be an
+             * unconditional else claiming "matches" for every non-blocking,
+             * non-warning outcome -- including LINK_DOWN, DEFER_FIRING, an
+             * in-progress attempt, and the boot task never having decided
+             * anything at all this boot. Only a genuine identity match earns
+             * this sentence; every other case below reports the real
+             * decision string instead. See pico_auto_update_state.h's
+             * comment on pico_auto_update_state_set_last_decision(). */
             snprintf(detail, sizeof(detail), "%s", "the safety processor's firmware version matches");
+        } else if (pico_auto_update_state_last_decision()[0] != '\0') {
+            snprintf(detail, sizeof(detail), "%.190s", pico_auto_update_state_last_decision());
+        } else {
+            snprintf(detail, sizeof(detail), "%s",
+                     "the safety processor's firmware version has not been evaluated yet this boot");
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "pico_update", "Safety processor firmware version", st,
