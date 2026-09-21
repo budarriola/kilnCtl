@@ -159,6 +159,23 @@
 >   `docs/BENCH_TEST_LOG.md`'s "M18 backend Class C carve-out: OTA rows"
 >   section; matrix/runbook rows annotated in
 >   `docs/COMMISSIONING_TEST_MATRIX.md` / `docs/COMMISSIONING_BACKEND_RUNBOOK.md`.
+> - **M18 backend Class C, C26 redo + C6, 2026-09-21**: against ESP `1045e542`
+>   (the `bx_flash_worker` stack fix, `2d6347b0`) / Pico `05f1ab1f`. C26
+>   (`cfgfs_format` + same-value zone-PID resave, the exact `7098b2ee`
+>   reproducer) now PASSes clean — no reboot, `zones.json` reappeared,
+>   supersedes the earlier panic run. C6 (`factory_reset scope=wifi`,
+>   owner-authorized by name for this run only) PASSed: `wifi_nvs` erased
+>   over UART, board re-provisioned from `KILNCTL_STA_SSID`/
+>   `KILNCTL_STA_PASSWORD`, reconnected at `192.168.1.156`, web auth
+>   confirmed still ON. One new finding, not yet filed: ESP-IDF's own
+>   `WIFI_STORAGE_FLASH`-persisted STA config briefly auto-reconnects the
+>   board on its OLD credentials right after the erase, before the app's
+>   no-saved-networks logic drops it again — net outcome matched spec, but
+>   the transient gap is real. Class C backend tally: 22 of 28 rows now run
+>   (16 owner-authorized subset + 4 OTA carve-out + C26/C6 this run); the
+>   `kiln`/`profiles`/`all` factory_reset scopes and remaining unrun rows
+>   stay deferred — recount from the matrix before quoting this number again. Full detail: `docs/BENCH_TEST_LOG.md`'s "2026-09-21 C26 redo +
+>   C6" section; matrix rows annotated in `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up

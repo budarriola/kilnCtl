@@ -170,6 +170,13 @@ re-attempted here (out of this run's assigned scope). Full detail in
 `docs/BENCH_TEST_LOG.md`'s "M18 backend Class C carve-out: OTA rows"
 section.
 
+**Superseded by the 2026-09-21 C26 redo / C6 run below the page-by-page
+inventory's own C26/C6 rows** (`bx_flash_worker` stack fix `2d6347b0`
+landed, C26 now PASSes clean and C6 was run and PASSed with one new
+finding; see `docs/BENCH_TEST_LOG.md`'s "2026-09-21 C26 redo + C6" section).
+Kept below for the panic's own root-cause record, which the fix history
+still relies on.
+
 **2026-09-21 C26/C6 attempt -- run halted after a board panic, C6 not
 attempted:** C26 (`cfgfs_format`) run dry then confirmed: before 9 files,
 after 0, `GET /api/cfgfs` verified mounted/0 files. A follow-up zone-PID
@@ -324,11 +331,11 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Reboot both processors, no config change (`swResetBtn`) | `POST /api/sw_reset` | ADMIN | `sw_reset_esp` | -- | Testable (watch for the expected S6a trip during a dual reflash, per CLAUDE.md) | PASS 2026-09-21 (B9/B17: env-fallback password, no S6a trip this time -- Pico link never dropped, benign deviation, see log) |
-| Reset Wi-Fi only (`data-scope="wifi"`) | `POST /api/factory_reset` (scope param) | ADMIN | none direct (`factory_default_then_load_preset`/`wifi_forget` are the nearest facade equivalents) | -- | Testable | NOT ATTEMPTED 2026-09-21 (this run's pre-checks for C6 were never reached -- halted before C6 after an unrelated board panic surfaced during C26; earlier run's DECLINE for LAN-reachability reasons is unaddressed context, not superseded) |
-| Reset kiln config only (`data-scope="kiln"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset` | -- | Testable | NOT ATTEMPTED 2026-09-21 (C6 scope `wifi` declined for reachability risk; `kiln`/`profiles`/`all` scopes not attempted, out of this session's scope) |
+| Reset Wi-Fi only (`data-scope="wifi"`) | `POST /api/factory_reset` (scope param) | ADMIN | none direct (`factory_default_then_load_preset`/`wifi_forget` are the nearest facade equivalents) | -- | Testable | PASS 2026-09-21 (C26-redo run, owner-authorized by name for this run only: driven via raw UART `SYSTEM_CMD_FACTORY_RESET(scope=wifi)`, not the HTTP route, per this run's re-provisioning-path choice -- see `docs/BENCH_TEST_LOG.md`. `wifi_nvs` erase confirmed, board re-provisioned from `KILNCTL_STA_SSID`/`KILNCTL_STA_PASSWORD` over UART, reconnected at `192.168.1.156`, web auth confirmed still ON via one authenticated GET. Real finding: ESP-IDF's own `WIFI_STORAGE_FLASH`-persisted STA config (set by `esp_wifi_set_config()` in `wifi_prov_link.c`, independent of the app's `wifi_nvs` partition) causes a brief post-reboot auto-reconnect on the OLD credentials before the app's no-saved-networks logic drops it again -- net outcome matched spec, but the transient gap is a real defect worth a source fix, not yet filed as a ticket) |
+| Reset kiln config only (`data-scope="kiln"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset` | -- | Testable | NOT ATTEMPTED 2026-09-21 (`kiln`/`profiles`/`all` scopes not attempted, out of this session's scope -- only `wifi` was owner-authorized) |
 | Reset fire profiles only (`data-scope="profiles"`) | `POST /api/factory_reset` | ADMIN | none direct | -- | Testable | |
 | Factory default -- erase everything (`data-scope="all"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset`(scope=all) | -- | Testable, but destructive -- re-provision Wi-Fi/credentials afterward | |
-| Format cfg partition (`cfgFsFormatConfirmBtn`) | `GET /api/cfgfs/format_pending`, `POST /api/cfgfs/format_confirm` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is mounted and populated with 7 files on this bench, per `GET /api/cfgfs` -- this is now a real destructive format, not a no-op) | BLOCKED 2026-09-21 (C26: `ota_http_client.py::derive_mac()` is missing a `"factory-reset"` context allow-list entry the firmware actually uses for this route; no code edit authorized this session, see log) |
+| Format cfg partition (`cfgFsFormatConfirmBtn`) | `GET /api/cfgfs/format_pending`, `POST /api/cfgfs/format_confirm` | ADMIN | `cfgfs_format` | -- | Testable (superseded 2026-09-21: `cfg` is mounted and populated with 7-8 files on this bench, per `GET /api/cfgfs` -- this is now a real destructive format, not a no-op) | PASS 2026-09-21 (C26-redo, ESP `1045e542` with the `bx_flash_worker` stack fix, `2d6347b0`: dry run then confirmed format to 0 files, then a same-value `control_set_zone_pid(zone=0)` resave -- no reboot, no crash banner, `zones.json` reappeared at 900 B. Supersedes both the earlier `derive_mac()` allow-list BLOCKED note and the 2026-09-21 panic run below) |
 | Timezone save | `POST /api/settings/tz` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (C27: posted current value "UTC0" (read via /api/status's time_tz, no dedicated GET route exists) back unchanged, confirmed by read-back) |
 
 ### `/settings/display` -- display settings (`settings_display_page.html`)
