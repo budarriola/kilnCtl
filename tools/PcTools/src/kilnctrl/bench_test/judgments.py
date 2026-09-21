@@ -261,8 +261,17 @@ def judge_pico_stack_margins(tasks: "list[dict]", min_fraction: float = 0.25) ->
         return CaseResult(Verdict.FAIL, reason="no task entries reported", observed={"tasks": tasks})
     failing = []
     for t in tasks:
-        configured = t.get("configured") or t.get("size")
+        # GET /api/saftyfw_stack_margin reports `stack_total_words` and
+        # `high_water_words` (FreeRTOS uxTaskGetStackHighWaterMark(): the
+        # minimum FREE stack ever observed, i.e. the margin floor). The
+        # `configured`/`free` spelling is kept for callers that pre-shape it.
+        configured = t.get("configured") or t.get("size") or t.get("stack_total_words")
         free = t.get("free")
+        if free is None:
+            free = t.get("high_water_words")
+        if t.get("measured") is False:
+            failing.append({"task": t.get("name"), "reason": "not measured"})
+            continue
         if not configured or free is None:
             failing.append({"task": t.get("name"), "reason": "missing configured/free"})
             continue
@@ -303,6 +312,15 @@ def judge_commissioning_readback(commissioning: dict, esp_max_temp_c: Optional[f
     if commissioning.get("stale", True):
         return CaseResult(Verdict.FAIL, reason="stale=True", observed=commissioning)
     pico_max = commissioning.get("abs_max_temp_c")
+    if pico_max is None:
+        # GET /api/safety/commissioning carries the record as
+        # params:[{name,set,value?}] -- `value` is omitted for an unset param
+        # (safety_cfg_http_client.get_commissioning), so an unset ceiling
+        # stays None here and fails below rather than reading as 0.
+        for param in commissioning.get("params") or []:
+            if isinstance(param, dict) and param.get("name") == "abs_max_temp_c":
+                pico_max = param.get("value") if param.get("set", True) else None
+                break
     if not pico_max or pico_max <= 0:
         return CaseResult(Verdict.FAIL, reason=f"abs_max_temp_c={pico_max!r}, expected > 0", observed=commissioning)
     if esp_max_temp_c is not None and abs(esp_max_temp_c - pico_max) > 1e-6:
@@ -353,18 +371,38 @@ def judge_status_diag_consistency(link_up: bool, state: Optional[str], boot_reas
     return CaseResult(Verdict.PASS, observed={"link_up": link_up, "state": state, "boot_reason": boot_reason, "trip_reason": trip_reason, "trip_mask": trip_mask})
 
 
-def judge_estop_verify(flags: Optional[int], asserted_bit: int = 0x04) -> CaseResult:
-    """SP-05: jumper fitted / not asserted -- flags bit 0x04 clear
-    (memory project_estop_jumper_is_fitted)."""
-    if flags is None:
-        return CaseResult(Verdict.FAIL, reason="no flags reported", observed={"flags": flags})
-    if flags & asserted_bit:
+def judge_estop_verify(status_text: str) -> CaseResult:
+    """SP-05: jumper fitted / not asserted (memory
+    project_estop_jumper_is_fitted) -- read-only, off the cached GET_STATUS
+    flags text (srv.safety_get_status(), same source SP-02 parses). This
+    case must NEVER call POST /api/estop/verify: that route is an admin
+    write recording an operator's physical verification of the interlock
+    (diagnostics_http.c, estop_verification.h), not a state read, so it has
+    no business inside a read-only smoke suite.
+
+    ``status_text`` is SafetyStatus.describe()'s rendering: flag labels
+    joined with '; ', or "error: ..." when the query itself failed
+    (SafetyQueryError, e.g. serial_link.py's "no serial port open - connect
+    first" or link_hub.py's "hub did not respond ..."). SAFETY_FLAG_LABELS
+    maps SafetyFlag.ESTOP to the literal label "E-stop asserted"
+    (devices_safety.py), so that substring is what appears when the bit is
+    set. A down serial hub/link is INCONCLUSIVE, not FAIL -- it says nothing
+    about the board's actual E-stop state, and is a known current condition
+    (another process holding the hub), not a board defect."""
+    if status_text is None:
+        return CaseResult(Verdict.FAIL, reason="no status text reported", observed={"status_text": status_text})
+    lowered = status_text.lower()
+    if lowered.startswith("error:"):
+        if "no serial port" in lowered or "hub did not respond" in lowered:
+            return CaseResult(Verdict.INCONCLUSIVE, reason=status_text, observed={"status_text": status_text})
+        return CaseResult(Verdict.FAIL, reason=status_text, observed={"status_text": status_text})
+    if "e-stop asserted" in lowered:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"E-stop bit {asserted_bit:#x} set in flags {flags:#x} (asserted)",
-            observed={"flags": flags},
+            reason="E-stop asserted (per safety_get_status())",
+            observed={"status_text": status_text},
         )
-    return CaseResult(Verdict.PASS, observed={"flags": flags})
+    return CaseResult(Verdict.PASS, observed={"status_text": status_text})
 
 
 def judge_web_render(html: Optional[str], landmark_id: Optional[str], expect_nav: bool,
@@ -388,12 +426,21 @@ def judge_web_render(html: Optional[str], landmark_id: Optional[str], expect_nav
     return CaseResult(Verdict.PASS, observed={"landmark": landmark_id, "nav_js": expect_nav, "body_len": len(html)})
 
 
-def judge_nav_menu(nav_js_text: Optional[str], href_count: Optional[int], expected_count: int = 15,
+def judge_nav_menu(nav_js_text: Optional[str], href_count: Optional[int], expected_count: int = 16,
                     has_group_expand: Optional[bool] = None) -> CaseResult:
-    """WEB-X-01: the shared nav.js menu carries exactly the 15 links the
-    plan names, and supports an expanding sub-group (the Safety group,
+    """WEB-X-01: the shared nav.js menu carries exactly the links the plan
+    names, and supports an expanding sub-group (the Safety group,
     `children`/`activeFor` per nav.js's 2026-08-27 rework) for the
-    "auto-expands the current group" half of the case."""
+    "auto-expands the current group" half of the case.
+
+    ``expected_count`` bumped 15 -> 16 2026-09-21: `e3de6122`
+    (LIVE_PROFILE_EDIT_PLAN.md) added `/live_profile` ("Edit running
+    firing") to nav.js's menu after this case's 15 was set, which turned it
+    red against a healthy, correctly-updated board -- same "count went
+    stale the moment new content landed" class WEB-X-03's own docstring
+    already names for the route-tier table (that one is now derived at run
+    time rather than hardcoded; this simpler case still hardcodes the
+    count, so it needs the same bump by hand whenever the menu grows)."""
     if nav_js_text is None:
         return CaseResult(Verdict.FAIL, reason="GET /nav.js failed", observed={})
     if href_count != expected_count:

@@ -224,7 +224,7 @@ WEB-DASH-01 render (`profileSelect`, `runBtn`, zone cards) · WEB-DASH-02 profil
 | SP-02 | Status and diag consistency | `safety_get_status()`, `safety_get_diag()`, `GET /api/status` safety fields | link up, state `armed`/`idle` as appropriate, boot reason not `watchdog`, `trip_reason 0` | 5 s | no |
 | SP-03 | Link stats over a firing | `safety_get_link_stats()` before/after HP-02 | `crc_errors`, `timeouts`, `broadcast_dropped` deltas are 0; GET_STATUS timeouts excluded by design (memory `project_get_status_has_no_reply`) | 5 s | uses HP-02 |
 | SP-04 | Trip / clear | OT-B01's S6a | `trip_mask == 1 << (trip_reason-1)` exactly, `trip_reason == 6`; `safety_clear_trip()` refused while link is still down, accepted once up | 1 min | no |
-| SP-05 | E-stop verify | `POST /api/estop/verify` current state | reports jumper fitted / not asserted (flags bit `0x04` clear, memory `project_estop_jumper_is_fitted`) | 5 s | no |
+| SP-05 | E-stop verify | `safety_get_status()` cached flags (read-only; `POST /api/estop/verify` is an admin write recording operator verification and must never be called from this suite) | reports jumper fitted / not asserted ("E-stop asserted" label absent, memory `project_estop_jumper_is_fitted`) | 5 s | no |
 | SP-06 | Heat enable path | during HP-01 | `dashboard_status_t.safety_relay_energized` true only while RUNNING; false within one tick of HP-05's stop | in-line | uses HP |
 | SP-07 | Rate guard read-back | `safety_get_rate_guard()`, `GET /api/safety/rate_guard/auto` | consistent; not written | 5 s | no |
 | SP-08 | E-stop press | **operator**: press/release | trip S7 latches and clears per `GUARD_TEST_MATRIX.md`; `SKIP: needs_operator` unattended | 2 min | no |

@@ -7,6 +7,7 @@ Run with: python -m pytest tools/PcTools/tests/test_web_ui_client.py -q
 """
 from __future__ import annotations
 
+import gzip
 import io
 import os
 import sys
@@ -57,6 +58,38 @@ class GotoTest(unittest.TestCase):
                                          side_effect=urllib.error.URLError("no route")):
             with self.assertRaises(wc.WebUiError):
                 client.goto("/")
+
+    def test_sends_accept_encoding_gzip(self):
+        """urllib's default Accept-Encoding: identity makes the firmware
+        answer 406 for its gzip-only embedded pages (2026-09-21) -- goto()
+        must advertise gzip like a real browser does."""
+        client = wc.WebUiClient("http://kiln.local")
+        captured = {}
+
+        def _fake_urlopen(req, timeout=None):
+            captured["req"] = req
+            return _fake_response(_SAMPLE_HTML.encode())
+
+        with unittest.mock.patch.object(wc.urllib.request, "urlopen", side_effect=_fake_urlopen):
+            client.goto("/")
+        self.assertEqual(captured["req"].get_header("Accept-encoding"), "gzip")
+
+    def test_decodes_gzip_body(self):
+        payload = gzip.compress(_SAMPLE_HTML.encode())
+        resp = io.BytesIO(payload)
+        resp.headers = {"Content-Encoding": "gzip"}
+
+        class _Ctx:
+            def __enter__(self_inner):
+                return resp
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        client = wc.WebUiClient("http://kiln.local")
+        with unittest.mock.patch.object(wc.urllib.request, "urlopen", return_value=_Ctx()):
+            html = client.goto("/")
+        self.assertIn("runBtn", html)
 
 
 class FindElementTest(unittest.TestCase):

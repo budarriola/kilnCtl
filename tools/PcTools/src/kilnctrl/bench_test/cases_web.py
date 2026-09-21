@@ -26,6 +26,7 @@ to non-GET rows under a real session.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -49,7 +50,7 @@ def _web_client(ctx: dict):
     client = ctx.get("web_client")
     if client is not None:
         return client
-    from .web_ui_client import WebUiClient
+    from ..web_ui_client import WebUiClient
     from .. import mcp_server_ota  # local import: avoids importing kilnctrl.mcp_server at module load
 
     host = ctx.get("host") or mcp_server_ota._ota_resolve_host(None)
@@ -61,10 +62,19 @@ def _http_get_raw(host: str, path: str, timeout: float = 5.0) -> "tuple[Optional
     the response an unauthenticated client actually gets, not one built
     through http_auth's credential-injecting urlopen()."""
     url = f"http://{host}{path}"
-    req = urllib.request.Request(url, method="GET")
+    # urllib sends "Accept-Encoding: identity" by default, which the firmware
+    # (web_client_accepts_gzip()) correctly reads as an explicit exclusion of
+    # gzip and answers 406 for its gzip-only embedded assets (/nav.js,
+    # /app.js, /theme.css, the pages). 2026-09-21 that turned every page-render
+    # case and WEB-X-01 red against a healthy board. Advertise gzip like a
+    # browser does and decode what comes back.
+    req = urllib.request.Request(url, method="GET", headers={"Accept-Encoding": "gzip"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+            raw = resp.read()
+            if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            return resp.getcode(), raw.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, None
     except (urllib.error.URLError, OSError) as exc:
@@ -220,7 +230,15 @@ def _case_web_x03(ctx: dict) -> CaseResult:
         row["exercised"] = True
         row["status"] = status
         if tier in _ALWAYS_OPEN_TIERS:
-            row["ok"] = status is not None and status < 400
+            # This check's job is confirming the route isn't gated behind
+            # auth it shouldn't be (401/403), never that a bare GET with no
+            # query string succeeds -- /api/profile_plan and
+            # /api/firing_history are ROUTE_TIER_OPEN but legitimately
+            # answer 400 for a required id/profile_id query param missing
+            # (dashboard_exec_http.c's profile_plan_get_handler()/
+            # firing_history_get_handler()), which is not an auth-tier
+            # violation. A >=500 is still worth flagging (server error).
+            row["ok"] = status is not None and status not in (401, 403) and status < 500
         elif tier in _ADMIN_TIERS:
             if web_enabled:
                 row["ok"] = status in (401, 403) or (status is not None and 300 <= status < 400)

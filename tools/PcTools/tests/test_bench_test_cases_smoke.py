@@ -128,20 +128,76 @@ class Sk03Test(unittest.TestCase):
             result = C._case_sk03({"host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.FAIL)
 
+    def test_real_route_shape_passes(self):
+        """GET /api/saftyfw_stack_margin's real field names
+        (stack_total_words/high_water_words/measured), sample shape from
+        logs/bench_test/20260921T004457Z_smoke/pico_stack_margin/*.json --
+        a healthy board."""
+        body = {
+            "tasks": [
+                {"name": "relay_owner", "task_id": 0, "measured": True, "stack_total_words": 256, "high_water_words": 214},
+                {"name": "link_task", "task_id": 5, "measured": True, "stack_total_words": 2560, "high_water_words": 1478},
+                {"name": "watchdog_task", "task_id": 8, "measured": True, "stack_total_words": 256, "high_water_words": 208},
+            ]
+        }
+        with mock.patch.object(C, "_http_get_json", return_value=(200, body)):
+            result = C._case_sk03({"host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+
+class Sp01Test(unittest.TestCase):
+    def test_params_list_commissioning_passes(self):
+        """Sample shape from logs/bench_test/20260921T004457Z_smoke's SP-01
+        observed payload: abs_max_temp_c lives in params:[{name,set,value}],
+        not as a top-level field."""
+        commissioning = {
+            "commissioned": True,
+            "stale": False,
+            "link_up": True,
+            "params": [
+                {"id": 259, "name": "tc_placement_mode", "set": True, "type": "u8", "value": 0},
+                {"id": 260, "name": "abs_max_temp_c", "set": True, "type": "f32", "value": 80},
+            ],
+        }
+        with mock.patch("kilnctrl.safety_cfg_http_client.get_commissioning", return_value=commissioning):
+            with mock.patch("kilnctrl.zones_http_client.get_zones", return_value={}):
+                result = C._case_sp01({"host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_query_failure_fails(self):
+        with mock.patch("kilnctrl.safety_cfg_http_client.get_commissioning", side_effect=OSError("unreachable")):
+            result = C._case_sp01({"host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
 
 class Sp05Test(unittest.TestCase):
+    """SP-05 must be read-only: srv.safety_get_status()'s cached text, never
+    a POST to /api/estop/verify (that route is an admin write). The
+    negative test below asserts the read-only contract directly."""
+
     def test_not_asserted_passes(self):
-        resp = mock.MagicMock()
-        resp.read.return_value = b'{"flags": 0}'
-        resp.__enter__.return_value = resp
-        with mock.patch("urllib.request.urlopen", return_value=resp):
-            result = C._case_sp05({"host": "1.2.3.4"})
+        srv = FakeSrv(safety_get_status=lambda: "no flags set | 22.50 C (CJ 23.10 C) | currents 0.00 A | 1 s old")
+        result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.PASS)
 
-    def test_request_failure_fails(self):
-        with mock.patch("urllib.request.urlopen", side_effect=OSError("timed out")):
-            result = C._case_sp05({"host": "1.2.3.4"})
+    def test_asserted_fails(self):
+        srv = FakeSrv(safety_get_status=lambda: "E-stop asserted | 22.50 C (CJ 23.10 C) | currents 0.00 A | 1 s old")
+        result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_serial_hub_unavailable_is_inconclusive(self):
+        srv = FakeSrv(safety_get_status=lambda: "error: no serial port open - connect first")
+        result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_never_calls_urllib_post(self):
+        """Negative test: SP-05 is a read-only case and must never issue an
+        HTTP POST (to /api/estop/verify or anywhere else)."""
+        srv = FakeSrv(safety_get_status=lambda: "no flags set | ...")
+        with mock.patch("urllib.request.urlopen") as urlopen_mock:
+            result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
+        urlopen_mock.assert_not_called()
+        self.assertEqual(result.verdict, Verdict.PASS)
 
 
 class Sp07Test(unittest.TestCase):

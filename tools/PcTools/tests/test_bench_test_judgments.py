@@ -178,6 +178,25 @@ class PicoStackMarginsTest(unittest.TestCase):
         tasks = [{"name": "main"}]
         self.assertEqual(J.judge_pico_stack_margins(tasks).verdict, Verdict.FAIL)
 
+    def test_real_route_field_names_pass(self):
+        """GET /api/saftyfw_stack_margin actually reports
+        stack_total_words/high_water_words, not configured/free -- sample
+        shape from logs/bench_test/20260921T004457Z_smoke/pico_stack_margin/
+        stack_margin_pico_unknown_20260921T004615Z.json, a healthy board."""
+        tasks = [
+            {"name": "relay_owner", "task_id": 0, "measured": True, "stack_total_words": 256, "high_water_words": 214},
+            {"name": "safety_core", "task_id": 1, "measured": True, "stack_total_words": 1536, "high_water_words": 1114},
+            {"name": "link_task", "task_id": 5, "measured": True, "stack_total_words": 2560, "high_water_words": 1478},
+        ]
+        result = J.judge_pico_stack_margins(tasks)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_not_measured_fails(self):
+        tasks = [{"name": "relay_owner", "measured": False, "stack_total_words": 256, "high_water_words": 214}]
+        result = J.judge_pico_stack_margins(tasks)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("not measured", result.observed["failing"][0]["reason"])
+
 
 class HeapDramFloorTest(unittest.TestCase):
     def test_healthy_passes(self):
@@ -208,6 +227,33 @@ class CommissioningReadbackTest(unittest.TestCase):
 
     def test_mismatched_max_temp_fails(self):
         r = J.judge_commissioning_readback({"commissioned": True, "stale": False, "abs_max_temp_c": 1300.0}, 1250.0)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_params_list_shape_passes(self):
+        """GET /api/safety/commissioning carries abs_max_temp_c inside
+        params:[{name,set,value}], not as a top-level field -- sample shape
+        from the 20260921T004457Z_smoke run's SP-01 observed payload
+        (safety_cfg_http_client.get_commissioning)."""
+        commissioning = {
+            "commissioned": True,
+            "stale": False,
+            "params": [
+                {"id": 259, "name": "tc_placement_mode", "set": True, "type": "u8", "value": 0},
+                {"id": 260, "name": "abs_max_temp_c", "set": True, "type": "f32", "value": 80},
+            ],
+        }
+        r = J.judge_commissioning_readback(commissioning, 80.0)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+
+    def test_params_list_unset_ceiling_fails_not_zero(self):
+        """An unset param carries no `value` key at all -- this must FAIL
+        as "no ceiling", never silently read as abs_max_temp_c=0."""
+        commissioning = {
+            "commissioned": True,
+            "stale": False,
+            "params": [{"id": 260, "name": "abs_max_temp_c", "set": False, "type": "f32"}],
+        }
+        r = J.judge_commissioning_readback(commissioning, None)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 
@@ -299,13 +345,31 @@ class ParseTripFieldsTest(unittest.TestCase):
 
 class EstopVerifyTest(unittest.TestCase):
     def test_not_asserted_passes(self):
-        self.assertEqual(J.judge_estop_verify(0x00).verdict, Verdict.PASS)
+        text = "no flags set | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | 120 ms old | tx_dropped 0"
+        self.assertEqual(J.judge_estop_verify(text).verdict, Verdict.PASS)
 
     def test_asserted_fails(self):
-        self.assertEqual(J.judge_estop_verify(0x04).verdict, Verdict.FAIL)
+        text = "E-stop asserted | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | 120 ms old | tx_dropped 0"
+        self.assertEqual(J.judge_estop_verify(text).verdict, Verdict.FAIL)
 
     def test_none_fails(self):
         self.assertEqual(J.judge_estop_verify(None).verdict, Verdict.FAIL)
+
+    def test_serial_hub_unavailable_is_inconclusive_not_fail(self):
+        """The serial hub is currently held by another process on this
+        bench -- a smoke run against that state must not read as a board
+        defect."""
+        self.assertEqual(
+            J.judge_estop_verify("error: no serial port open - connect first").verdict,
+            Verdict.INCONCLUSIVE,
+        )
+        self.assertEqual(
+            J.judge_estop_verify("error: hub did not respond to 'connect' within 10.0s").verdict,
+            Verdict.INCONCLUSIVE,
+        )
+
+    def test_other_query_error_fails(self):
+        self.assertEqual(J.judge_estop_verify("error: something unrelated broke").verdict, Verdict.FAIL)
 
 
 class WebRenderTest(unittest.TestCase):
@@ -341,8 +405,8 @@ class WebRenderTest(unittest.TestCase):
 
 
 class NavMenuTest(unittest.TestCase):
-    def test_15_links_with_group_expand_passes(self):
-        r = J.judge_nav_menu("text", 15, has_group_expand=True)
+    def test_16_links_with_group_expand_passes(self):
+        r = J.judge_nav_menu("text", 16, has_group_expand=True)
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_wrong_link_count_fails(self):
@@ -351,7 +415,7 @@ class NavMenuTest(unittest.TestCase):
         self.assertIn("14", r.reason)
 
     def test_no_group_expand_fails(self):
-        r = J.judge_nav_menu("text", 15, has_group_expand=False)
+        r = J.judge_nav_menu("text", 16, has_group_expand=False)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_fetch_failure_fails(self):

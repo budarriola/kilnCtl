@@ -9,6 +9,7 @@ Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_web.py -q
 """
 from __future__ import annotations
 
+import gzip
 import os
 import sys
 import unittest
@@ -70,9 +71,44 @@ class RenderCaseTest(unittest.TestCase):
             self.assertIsNotNone(REGISTRY[cid].judge, f"{cid} has no judge wired")
 
 
+class HttpGetRawTest(unittest.TestCase):
+    def test_sends_accept_encoding_gzip(self):
+        """urllib's default Accept-Encoding: identity makes the firmware
+        (web_client_accepts_gzip()) answer 406 for its gzip-only embedded
+        assets -- this must advertise gzip like a real browser does."""
+        resp = mock.MagicMock()
+        resp.getcode.return_value = 200
+        resp.read.return_value = b"plain body"
+        resp.headers.get.return_value = None
+        resp.__enter__.return_value = resp
+        captured = {}
+
+        def _fake_urlopen(req, timeout=5.0):
+            captured["req"] = req
+            return resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            status, body = C._http_get_raw("1.2.3.4", "/nav.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, "plain body")
+        self.assertEqual(captured["req"].get_header("Accept-encoding"), "gzip")
+
+    def test_decodes_gzip_body(self):
+        payload = gzip.compress(b'{"ok": true}')
+        resp = mock.MagicMock()
+        resp.getcode.return_value = 200
+        resp.read.return_value = payload
+        resp.headers.get.side_effect = lambda name, default=None: "gzip" if name == "Content-Encoding" else default
+        resp.__enter__.return_value = resp
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            status, body = C._http_get_raw("1.2.3.4", "/theme.css")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, '{"ok": true}')
+
+
 class NavX01Test(unittest.TestCase):
-    def test_15_links_passes(self):
-        text = "\n".join(f"{{ href: '/x{i}', label: 'x' }}," for i in range(15))
+    def test_16_links_passes(self):
+        text = "\n".join(f"{{ href: '/x{i}', label: 'x' }}," for i in range(16))
         text += "\nactiveFor children"
         with mock.patch.object(C, "_http_get_raw", return_value=(200, text)):
             result = REGISTRY["WEB-X-01"].judge({"host": "1.2.3.4"})
@@ -152,6 +188,35 @@ class WebX03Test(unittest.TestCase):
         text = 'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),'
         ctx = {"host": "1.2.3.4"}
         responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/api/status": (401, None)}
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_open_route_missing_required_param_passes(self):
+        """/api/profile_plan and /api/firing_history are ROUTE_TIER_OPEN but
+        legitimately answer 400 for a missing id/profile_id query param
+        (dashboard_exec_http.c) -- that's not an auth-tier violation and
+        must not fail this check (2026-09-21 false-positive fix)."""
+        text = "\n".join([
+            'ROUTE_TIER("/api/profile_plan", HTTP_GET, ROUTE_TIER_OPEN),',
+            'ROUTE_TIER("/api/firing_history", HTTP_GET, ROUTE_TIER_OPEN),',
+        ])
+        ctx = {"host": "1.2.3.4"}
+        responses = {
+            "/api/auth/config": (200, '{"web_enabled":false}'),
+            "/api/profile_plan": (400, "id missing"),
+            "/api/firing_history": (400, "profile_id missing"),
+        }
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_open_route_server_error_still_fails(self):
+        text = 'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/api/status": (500, None)}
         with mock.patch("builtins.open", mock.mock_open(read_data=text)):
             with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
                 result = REGISTRY["WEB-X-03"].judge(ctx)

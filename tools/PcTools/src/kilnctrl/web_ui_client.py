@@ -13,6 +13,7 @@ than guessed.
 
 from __future__ import annotations
 
+import gzip
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,11 +94,24 @@ class WebUiClient:
         self.current_path: str = ""
 
     def goto(self, path: str) -> str:
-        """GET ``path`` off ``base_url``, store and return the response HTML."""
+        """GET ``path`` off ``base_url``, store and return the response HTML.
+
+        Sends ``Accept-Encoding: gzip`` and decodes a gzip body -- urllib's
+        default of "identity" makes the firmware (web_client_accepts_gzip())
+        correctly read that as an explicit exclusion of gzip and answer 406
+        for its gzip-only embedded pages, which turned every WEB-*-01
+        page-render case red against a healthy board (2026-09-21). Same fix
+        as bench_test/cases_web.py's ``_http_get_raw``.
+        """
         url = self.base_url + path
+        req = urllib.request.Request(url, headers={"Accept-Encoding": "gzip"})
         try:
-            with http_auth.urlopen(url, timeout=self.timeout) as resp:
+            with http_auth.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read()
+                headers = getattr(resp, "headers", None)
+                encoding = headers.get("Content-Encoding") if headers is not None else None
+                if (encoding or "").lower() == "gzip":
+                    body = gzip.decompress(body)
         except (urllib.error.URLError, OSError) as exc:
             raise WebUiError(f"GET {url} failed: {exc}") from exc
         self.current_html = body.decode("utf-8", errors="replace")

@@ -42,8 +42,10 @@ def _srv(ctx: dict):
 def _http_get_json(host: str, path: str, timeout: float = 5.0) -> "tuple[Optional[int], Any]":
     """Minimal raw GET for routes with no existing typed client yet
     (plan §2.2's 'raw GET/POST ... through the existing helpers' escape
-    hatch, for the handful of routes -- /api/coredump/info,
-    /api/estop/verify -- that predate one)."""
+    hatch, for the handful of routes -- /api/coredump/info -- that predate
+    one). SP-05 no longer belongs in this category: it was rewritten to be
+    read-only via srv.safety_get_status() rather than a raw POST to
+    /api/estop/verify, an admin write."""
     url = f"http://{host}{path}"
     req = urllib.request.Request(url, method="GET")
     try:
@@ -280,16 +282,19 @@ def _case_sp02(ctx: dict) -> CaseResult:
 
 
 def _case_sp05(ctx: dict) -> CaseResult:
-    host = ctx["host"]
-    url = f"http://{host}/api/estop/verify"
-    req = urllib.request.Request(url, data=b"", method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/estop/verify failed: {exc}", observed={})
-    flags = body.get("flags")
-    return J.judge_estop_verify(flags)
+    """SP-05: E-stop interlock is not asserted.
+
+    Read-only, via the cached GET_STATUS flags (srv.safety_get_status(),
+    same source as SP-02) -- NEVER POST /api/estop/verify. That route
+    (diagnostics_http.c ~line 532, estop_verification.h) is an ADMIN WRITE:
+    it records that an operator has physically verified the E-stop
+    interlock, the same effect as the diagnostics page's own button. A
+    read-only smoke case must not perform that write; whether the interlock
+    currently reads asserted is fully answerable from the cached status
+    text already fetched for SP-02."""
+    srv = _srv(ctx)
+    status_text = srv.safety_get_status()
+    return J.judge_estop_verify(status_text)
 
 
 def _case_sp07(ctx: dict) -> CaseResult:
