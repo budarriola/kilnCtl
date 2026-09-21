@@ -22,9 +22,22 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (177 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `kiln_configs_quarantine_clear`
-was added -- an MCP tool wrapping the new `POST /api/kiln_configs/quarantine_clear`
+the rest behind a search facade (178 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `cfgfs_format` was
+added -- an MCP tool wrapping the new `POST /api/cfgfs/format_confirm` route
+(`cfg_fs_format_http.c`, ROUTE_TIER_ADMIN) that lets an operator confirm
+erasing and reformatting the `cfg` LittleFS partition once `cfg_fs_mount.c`'s
+auto-format gate defers to that confirmation rather than silently discarding
+data. It signs its request with `OTA_HTTP_CONTEXT_FACTORY_RESET`'s
+`"factory-reset"` context string -- deliberately reused from
+`POST /api/factory_reset`, not a bug -- which this same change also added to
+`ota_http_client.py`'s `derive_mac()` allow-list; that allow-list had omitted
+it even though firmware already used it for both routes, a tooling gap found
+on the bench. It reads `GET /api/cfgfs` before and after, refuses to POST
+unless `confirm=True`, and reports before/after file counts rather than
+trusting the POST's own plain-text response alone. The one before it was
+`kiln_configs_quarantine_clear`, same day -- an MCP tool wrapping the new
+`POST /api/kiln_configs/quarantine_clear`
 route (`kiln_cfg_http.c`, ROUTE_TIER_ADMIN) that discards a wrong-size-blob
 quarantined kiln_configs store and starts a fresh, empty one -- the only
 alternative today to a full `factory_reset(scope=KILN)`. It reads

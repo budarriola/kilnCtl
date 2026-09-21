@@ -137,18 +137,25 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     the HMAC KEY and the context string as the message -- this derivation is
     what keeps the literal Wi-Fi/AP password out of the value that's ever
     compared or sent). `context` must be exactly "esp", "pico",
-    "esp-rollback", "recovery", "boot-guard-reset", or "sw-reset" (each is its
-    own context, not a reuse of "esp" -- see ota_http.h's doc comment on
-    OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a plain-update MAC must not double
-    as a rollback authorization, and ota_state.h's doc comment on
-    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for the same reasoning applied there;
-    "sw-reset" is OTA_HTTP_CONTEXT_SW_RESET, POST /api/sw_reset -- see
-    sw_reset() below).
+    "esp-rollback", "recovery", "boot-guard-reset", "sw-reset", or
+    "factory-reset" (each is its own context, not a reuse of "esp" -- see
+    ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a
+    plain-update MAC must not double as a rollback authorization, and
+    ota_state.h's doc comment on OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for the
+    same reasoning applied there; "sw-reset" is OTA_HTTP_CONTEXT_SW_RESET,
+    POST /api/sw_reset -- see sw_reset() below. "factory-reset" is
+    OTA_HTTP_CONTEXT_FACTORY_RESET (ota_state.h/ota_http.c's context table),
+    used by BOTH POST /api/factory_reset (factory_reset.c) and POST
+    /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
+    handler() deliberately reuses this context rather than minting its own
+    -- see that file's own header comment: "a MAC signed for 'factory-reset'
+    already applies here just as directly").
     """
-    if context not in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset", "sw-reset"):
+    if context not in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset", "sw-reset",
+                        "factory-reset"):
         raise ValueError(
             f"context must be 'esp', 'pico', 'esp-rollback', 'recovery', 'boot-guard-reset', "
-            f"or 'sw-reset', got {context!r}")
+            f"'sw-reset', or 'factory-reset', got {context!r}")
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -657,6 +664,70 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
         raise OtaHttpError(f"/api/sw_reset unreachable: {detail}") from exc
 
     log.info("sw_reset accepted: host=%s status=%d body=%r", host, status_code, body_text)
+    return {"ok": True, "status_code": status_code, "detail": body_text}
+
+
+def format_cfgfs(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/cfgfs/format_confirm -- the operator confirmation that lets
+    cfg_fs_mount.c actually erase and reformat the `cfg` LittleFS partition
+    after it detected (at boot) that auto-formatting would silently discard
+    data and instead set its deferred format-confirmation-pending gate
+    (cfg_fs_mount.c's s_format_confirmation_pending; see
+    App/drivers/persist/cfg_fs_format_gate.h and GET
+    /api/cfgfs/format_pending for the read side of that gate -- not wrapped
+    here, since it needs no auth and dashboard_http_client.get_cfgfs_status()
+    already surfaces the same partition state).
+
+    Same challenge/MAC dance as sw_reset()/rollback_esp(), but signed over
+    the "factory-reset" context (OTA_HTTP_CONTEXT_FACTORY_RESET,
+    ota_state.h/ota_http.c) -- cfg_fs_format_http.c's format_confirm_post_
+    handler() deliberately reuses this context rather than minting its own
+    (see that file's own header comment), so a MAC already valid for POST
+    /api/factory_reset is also valid here, and vice versa; this is NOT a
+    reuse bug, it is the documented design.
+
+    DESTRUCTIVE: on success this erases every file cfg_fs holds and remounts
+    an empty filesystem. The response body is plain text (not JSON, same
+    departure from the rest of this module as sw_reset() above) -- reported
+    back as ``{"ok": True, "status_code": ..., "detail": "<body text>"}`` on
+    any 2xx. A non-2xx (e.g. the board's own 500 "format failed: ...") raises
+    OtaHttpError with that text in ``.detail``, same as every other write
+    call in this module.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE by this module's own test suite
+    -- request construction/HMAC/response-parsing are unit-tested with
+    mocked HTTP only; see test_ota_http_client.py.
+    """
+    nonce = get_challenge(host, timeout)
+    mac_hex = derive_mac(ap_password, nonce, "factory-reset").hex()
+
+    req = urllib.request.Request(
+        _url(host, "/api/cfgfs/format_confirm"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            "X-Ota-Mac": mac_hex,
+        },
+    )
+    log.info("cfgfs format_confirm requested: host=%s", host)
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            status_code = resp.status
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("cfgfs format_confirm refused: host=%s status=%s detail=%s",
+                    host, status_code, detail)
+        raise OtaHttpError(f"/api/cfgfs/format_confirm refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        log.warning("cfgfs format_confirm failed (unreachable): host=%s detail=%s", host, detail)
+        raise OtaHttpError(f"/api/cfgfs/format_confirm unreachable: {detail}") from exc
+
+    log.info("cfgfs format_confirm accepted: host=%s status=%d body=%r", host, status_code, body_text)
     return {"ok": True, "status_code": status_code, "detail": body_text}
 
 

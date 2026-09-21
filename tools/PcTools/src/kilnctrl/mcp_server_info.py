@@ -577,6 +577,86 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Optional[str] = None) -> str:
+    """Confirm-and-format the `cfg` LittleFS partition -- POST
+    /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
+    handler(), ROUTE_TIER_ADMIN). This is the operator confirmation
+    cfg_fs_mount.c's auto-format gate waits for once it decides, at boot,
+    that formatting the `cfg` partition would silently discard data it
+    cannot otherwise recover (s_format_confirmation_pending -- see
+    cfg_fs_mount.h/.c and App/main_boot_early.c's boot-time log line
+    pointing an operator at this exact endpoint).
+
+    DESTRUCTIVE: on success this ERASES EVERY FILE cfg_fs holds (zones,
+    prefs, profiles, ramp_assist, tz, relay_cycles, adaptive_tune,
+    firing_stats -- whatever get_cfgfs_status() currently lists) and remounts
+    an empty filesystem. NVS stays authoritative and unaffected by this call
+    on its own (see CLAUDE.md's cfg-partition dual-write section) -- this is
+    strictly a `cfg`-partition-only action, not a factory_reset(scope=KILN).
+
+    Always reads GET /api/cfgfs FIRST and reports the current file count
+    (never guesses). REFUSES UNLESS ``confirm=True`` -- without it, this is a
+    dry run: it reports the current file count and that it would format, but
+    sends no POST at all. Same rule crash_report_ack()/kiln_configs_
+    quarantine_clear()/safety_set_rate_guard() already use.
+
+    With ``confirm=True``, POSTs through the sanctioned ota_http_client/
+    http_auth seam (same "esp"-family challenge/HMAC dance every other
+    admin-tier write tool here uses), signed over the "factory-reset"
+    context -- cfg_fs_format_http.c deliberately reuses
+    OTA_HTTP_CONTEXT_FACTORY_RESET rather than minting its own context, so a
+    credential valid for POST /api/factory_reset is also valid here (see
+    ota_http_client.derive_mac()'s doc comment). `password` falls back to the
+    KILNCTL_AP_PASSWORD environment variable when omitted, and this refuses
+    with an error naming that variable if neither is set -- NEVER printed,
+    logged, or echoed either way.
+
+    After the POST, re-reads GET /api/cfgfs and reports the after-state file
+    count (should read 0, an empty freshly-formatted filesystem) so a caller
+    never has to trust the POST's own plain-text response alone.
+
+    Host is auto-resolved the same way get_cfgfs_status()/crash_report_ack()
+    do; pass `host` explicitly for kilnctl.local or a board reachable only
+    from a different network than this link's serial port.
+    """
+    from . import ota_http_client as ota_http
+    from .mcp_server_ota import _ota_resolve_host, _require_ap_password  # local imports: avoid circular imports, same convention as kiln_configs_quarantine_clear()
+
+    resolved = _ota_resolve_host(host)
+    try:
+        before = dashboard_http_client.get_cfgfs_status(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return f"error: could not read GET /api/cfgfs (host={resolved}): {exc}"
+    before_count = before.get("file_count")
+
+    if not confirm:
+        return (f"DRY RUN (pass confirm=True to actually format) -- cfg partition currently holds "
+                f"{before_count} file(s) (host={resolved}); formatting would erase all of them")
+
+    try:
+        resolved_password = _require_ap_password(password)
+    except ValueError as exc:
+        return f"error: {exc}"
+
+    try:
+        result = ota_http.format_cfgfs(resolved, resolved_password)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved}, before file_count={before_count})"
+
+    try:
+        after = dashboard_http_client.get_cfgfs_status(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return (f"ok - POST /api/cfgfs/format_confirm returned {result!r}, but the confirming "
+                f"re-read failed (host={resolved}): {exc} -- after-state UNKNOWN, re-check "
+                f"before trusting this")
+    after_count = after.get("file_count")
+
+    return (f"ok - cfg partition formatted (host={resolved}): before file_count={before_count}, "
+            f"after file_count={after_count}; board detail: {result.get('detail')!r}")
+
+
+@_srv._tool()
 def get_fw_version() -> str:
     """Report the running firmware's git commit, dirty flag, build time, and
     whether its UART protocol version matches this copy of pc_tools.

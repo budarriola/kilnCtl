@@ -847,6 +847,126 @@ class DeriveMacSwResetContextTest(unittest.TestCase):
         want = hmac.new(key, nonce + b"sw-reset", hashlib.sha256).digest()
         self.assertEqual(got, want)
 
+
+class DeriveMacFactoryResetContextTest(unittest.TestCase):
+    """Tooling-gap fix: firmware defines OTA_HTTP_CONTEXT_FACTORY_RESET
+    ("factory-reset", ota_http.c/ota_state.h) and uses it for BOTH
+    POST /api/factory_reset (factory_reset.c) and POST
+    /api/cfgfs/format_confirm (cfg_fs_format_http.c, which deliberately
+    reuses this context rather than minting its own -- see that file's own
+    header comment) -- but derive_mac()'s allow-list omitted it until this
+    change. Before the fix, `ota.derive_mac("pw", nonce, "factory-reset")`
+    raised ValueError, which is exactly the regression this class pins."""
+
+    def test_matches_manual_double_hmac(self):
+        nonce = bytes(range(16))
+        got = ota.derive_mac("hunter2", nonce, "factory-reset")
+        key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
+        want = hmac.new(key, nonce + b"factory-reset", hashlib.sha256).digest()
+        self.assertEqual(got, want)
+
+    def test_diverges_from_every_other_context(self):
+        nonce = bytes(range(16))
+        mac_factory_reset = ota.derive_mac("pw", nonce, "factory-reset")
+        for other in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset", "sw-reset"):
+            self.assertNotEqual(mac_factory_reset, ota.derive_mac("pw", nonce, other),
+                                 f"factory-reset MAC must not equal the {other!r} MAC")
+
+    def test_now_accepted_by_the_allow_list(self):
+        # Regression pin for the exact bug this change fixes: this call used
+        # to raise ValueError("context must be 'esp', 'pico', ... 'sw-reset'")
+        # because "factory-reset" was missing from derive_mac()'s allow-list,
+        # even though ota_http.c has authenticated requests against it since
+        # OTA_HTTP_CONTEXT_FACTORY_RESET was added.
+        try:
+            ota.derive_mac("pw", bytes(16), "factory-reset")
+        except ValueError:
+            self.fail("derive_mac() must accept the 'factory-reset' context "
+                      "(OTA_HTTP_CONTEXT_FACTORY_RESET) -- see ota_http.c/cfg_fs_format_http.c")
+
+
+class FormatCfgfsTest(unittest.TestCase):
+    """Unit tests for ota_http_client.format_cfgfs() -- POST
+    /api/cfgfs/format_confirm, signed over the "factory-reset" context."""
+
+    def test_sends_factory_reset_context_mac_and_empty_body(self):
+        ok_text = b"ok -- cfg partition formatted and mounted"
+        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
+
+        calls = {"n": 0}
+        captured_req = {}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            captured_req["req"] = req
+            return _fake_response(ok_text)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.format_cfgfs("kiln.local", "hunter2")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["detail"], ok_text.decode())
+        req = captured_req["req"]
+        self.assertEqual(req.full_url, "http://kiln.local/api/cfgfs/format_confirm")
+        self.assertEqual(req.data, b"")
+        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
+        self.assertIsNotNone(mac_header)
+        self.assertEqual(len(mac_header), 64)
+        expected = ota.derive_mac("hunter2", bytes.fromhex("44" * 16), "factory-reset").hex()
+        self.assertEqual(mac_header, expected)
+        # Must NOT be signed over "sw-reset" or any of the other contexts --
+        # only "esp"'s sibling context "factory-reset" is valid here.
+        not_sw_reset = ota.derive_mac("hunter2", bytes.fromhex("44" * 16), "sw-reset").hex()
+        self.assertNotEqual(mac_header, not_sw_reset)
+        # This call is posted exactly once (plus the one challenge fetch) --
+        # never retried on its own behalf.
+        self.assertEqual(calls["n"], 2)
+
+    def test_surfaces_500_format_failed(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/cfgfs/format_confirm", 500, "Internal Server Error", hdrs=None,
+            fp=io.BytesIO(b"format failed: ESP_ERR_INVALID_STATE"))
+        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            raise err
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.format_cfgfs("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertIn("format failed", ctx.exception.detail)
+
+    def test_surfaces_403_wrong_password(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/cfgfs/format_confirm", 403, "Forbidden", hdrs=None,
+            fp=io.BytesIO(b"wrong password"))
+        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            raise err
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.format_cfgfs("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.format_cfgfs("192.0.2.1", "hunter2")
+
     def test_diverges_from_every_other_context(self):
         nonce = bytes(range(16))
         sw_reset_mac = ota.derive_mac("hunter2", nonce, "sw-reset")
