@@ -55,7 +55,7 @@ MIN_REPEATS_FOR_FLOOR = 2
 #: repo-root-relative string ("tools/PcTools/config_presets/noise_floor.json"),
 #: which only resolved when the process's CWD happened to BE the repo root.
 #: Run from anywhere else (e.g. `pytest` from tools/PcTools, or this tool
-#: invoked from a different directory) it silently missed -- load_artifact()
+#: invoked from a different directory) it silently missed -- load_artifact_diagnostic()
 #: deliberately swallows FileNotFoundError, so the miss produced no error,
 #: just a quietly downgraded "NOISE FLOOR: UNKNOWN" instead of "measured".
 #: Anchoring on __file__ makes the default correct regardless of CWD.
@@ -65,8 +65,8 @@ DEFAULT_ARTIFACT_PATH = str(_REPO_ROOT / "tools" / "PcTools" / "config_presets" 
 #: schema_version 2 adds ``start_conditions`` (per-run starting temperature,
 #: read from each capture's first row -- see ``extract_start_conditions``)
 #: alongside the unchanged ``entries`` block from schema_version 1. Any
-#: reader that only looks at ``entries``/``floor_lookup`` (i.e.
-#: ``pid_ab_compare.py`` today) keeps working unmodified against a
+#: reader that only looks at ``entries`` (i.e. ``pid_ab_compare.py`` today,
+#: via its own inline ``entries`` lookup) keeps working unmodified against a
 #: schema_version-2 artifact; the new block is purely additive.
 
 #: WHY THIS EXISTS (see module docstring for the campaign-level framing).
@@ -557,9 +557,9 @@ def load_artifact_diagnostic(path: str = DEFAULT_ARTIFACT_PATH) -> Tuple[Optiona
       * "unreadable" -- a file exists at ``path`` but couldn't be parsed as
         the expected JSON (permission error, truncated/corrupt write).
 
-    Never raises -- same "unknown is a valid state, not a crash" contract as
-    ``load_artifact`` below, just with the reason preserved instead of
-    discarded."""
+    Never raises -- "unknown is a valid state, not a crash": callers
+    (``pid_ab_compare.py``) must treat ``(None, reason)`` as "floor not
+    measured", not an error."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f), None
@@ -567,27 +567,6 @@ def load_artifact_diagnostic(path: str = DEFAULT_ARTIFACT_PATH) -> Tuple[Optiona
         return None, f"missing -- no artifact file at {path}"
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"unreadable -- {path} exists but failed to load ({exc})"
-
-
-def load_artifact(path: str = DEFAULT_ARTIFACT_PATH) -> Optional[dict]:
-    """Load the checked-in noise-floor artifact, or ``None`` if it doesn't
-    exist yet -- callers (``pid_ab_compare.py``) must treat that as "unknown"
-    exactly like before this module existed, never as a crash. See
-    ``load_artifact_diagnostic`` for a variant that also reports *why*."""
-    artifact, _reason = load_artifact_diagnostic(path)
-    return artifact
-
-
-def floor_lookup(artifact: Optional[dict], zone: int, metric: str, segment: Optional[int]) -> Optional[float]:
-    """Return the measured noise floor (°C, or seconds for the two time
-    metrics) for one comparison key, or ``None`` if the artifact is absent or
-    has no entry for that key."""
-    if not artifact:
-        return None
-    entry = artifact.get("entries", {}).get(_key_str(zone, metric, segment))
-    if entry is None:
-        return None
-    return entry.get("noise_floor_c")
 
 
 # ---------------------------------------------------------------------------

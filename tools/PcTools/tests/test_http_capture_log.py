@@ -186,7 +186,7 @@ def test_write_split_runs_missing_file_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# ct_from_line / HttpPollRow.ct / write_no_heat_diagnostic_tsv --
+# ct_from_line / HttpPollRow.ct --
 # docs/audits/cplval75_aborted_executor_panic_2026-09-09.md's fix: a capture
 # that logs setpoint/temperature/duty but not raw CT current cannot tell
 # "no mains" apart from an ordinary control stall. See run_queue.py's
@@ -248,32 +248,3 @@ def test_parse_http_capture_jsonl_ct_none_for_old_format_line(tmp_path):
     assert len(rows) == 1
     assert rows[0].ct is None
 
-
-def test_write_no_heat_diagnostic_tsv_distinguishes_no_data_from_zero(tmp_path):
-    # Row 1: real board reading (16/17/80, channel 2 the only fitted one).
-    # Row 2: firmware never reported a POWER frame -- counts must be BLANK,
-    # never rendered as 0, or a genuinely-dead heat path would be
-    # indistinguishable from "no data yet" in the derived file.
-    p = tmp_path / "cap.jsonl"
-    p.write_text(
-        json.dumps({"t": 1.0, "exec": _exec_body([31.0, 31.5]),
-                    "status": {}, "ct": {"counts": [16, 17, 80], "topology": "summed",
-                                         "fitted": [False, False, True], "current_a": None}}) + "\n"
-        + json.dumps({"t": 6.0, "exec": _exec_body([31.0, 31.5]), "status": {}}) + "\n"
-    )
-    rows = hc.parse_http_capture_jsonl(str(p))
-    out = tmp_path / "diag.tsv"
-    n = hc.write_no_heat_diagnostic_tsv(rows, str(out))
-    assert n == 4  # 2 polls x 2 zones
-    lines = out.read_text().splitlines()
-    assert lines[0].split("\t") == list(hc._NO_HEAT_TSV_HEADER)
-    data_rows = [dict(zip(lines[0].split("\t"), line.split("\t"))) for line in lines[1:]]
-    row1 = [r for r in data_rows if r["wall_time"] == rows[0].poll.wall_time and r["zone"] == "0"][0]
-    assert row1["ct_ch0"] == "16"
-    assert row1["ct_ch1"] == "17"
-    assert row1["ct_ch2"] == "80"
-    assert row1["ct_topology"] == "summed"
-    row2 = [r for r in data_rows if r["wall_time"] == rows[1].poll.wall_time and r["zone"] == "0"][0]
-    assert row2["ct_ch0"] == ""
-    assert row2["ct_ch1"] == ""
-    assert row2["ct_ch2"] == ""

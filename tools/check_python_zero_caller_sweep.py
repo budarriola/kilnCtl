@@ -144,6 +144,79 @@ ZERO_CALLER_ALLOWLIST = {
     ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_clear_trip"),
     ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_get_fw_version"),
     ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_set_clock"),
+    # Below: owner review 2026-09-21 of the 23-entry PENDING_OWNER_REVIEW
+    # batch (docs/RELEASE_HARDENING_PLAN.md item 1) -- these 11 were kept,
+    # each for the reason given. The other 12 were deleted in the same pass
+    # (see git history / commit message for the full keep/delete table).
+    #
+    # cone_table's own mirror-of-firmware shape (cone_table_cone_for_temp_c
+    # in the C code) is exactly the kind of near-future-need reference
+    # implementation this repo keeps around even unwired -- see
+    # band_bottom_c/heat_work_weight, its actively-used siblings.
+    ("tools/PcTools/src/kilnctrl/cone_table.py", "cone_for_temp_c"),
+    # A genuine "should probably be wired up" gap, not dead code: the GUI
+    # hardcodes f"IO {io}" instead of calling this more descriptive label
+    # function. Kept as a documented near-future wiring opportunity rather
+    # than deleted or actually wired (wiring it in is out of scope for a
+    # keep/delete pass).
+    ("tools/PcTools/src/kilnctrl/devices_io.py", "digital_io_label"),
+    # Documented feature in tools/PcTools/TODO.md; only test-exercised today
+    # because the UART-capture input path it parses has no production
+    # caller yet, not because it is superseded or dead.
+    ("tools/PcTools/src/kilnctrl/log_analysis.py", "parse_profile_exec_uart_capture"),
+    # Deliberately not wired as an MCP tool (no registration decorator) --
+    # a documented test-support fixture-flash helper for
+    # test_flash_board_pinning.py, not a leftover.
+    ("tools/PcTools/src/kilnctrl/mcp_server_flash.py", "fixture_flash"),
+    # Real production caller the sweep cannot see: invoked from a Python
+    # heredoc embedded inside check_embedded_pico_image_fresh.ps1 (a
+    # newly-documented blind spot -- Python code embedded in a .ps1 file is
+    # invisible to this check's .py-file-glob-based corpus, distinct from
+    # the getattr/dispatch-by-string blind spot already documented above).
+    ("tools/PcTools/src/kilnctrl/pico_image_freshness.py", "check_slot_bins_fresh"),
+    # Both are documented analysis recipes for plant_sim.py's own test
+    # suite (per-zone gain holdout / actuator weight sensitivity), an
+    # obvious near-future need once real gain-tuning data exists; kept
+    # rather than deleted since their sibling report-formatting functions
+    # already have production callers.
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "actuator_weight_sensitivity_sweep"),
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "per_zone_gain_holdout_report"),
+    # Both are documented A/B comparison recipes referenced by
+    # ramp_assist.py's own test suite; kept as near-future analysis tools
+    # in the same family as the sweep functions above.
+    ("tools/PcTools/src/kilnctrl/ramp_assist.py", "compare_heat_work"),
+    ("tools/PcTools/src/kilnctrl/ramp_assist.py", "dwell_credit_parity"),
+    # Documented recipe used by capture_stack_margin_baseline.py's own
+    # workflow (test_bench_test_wave1d.py exercises the same path); kept as
+    # a real recipe, not a leftover.
+    ("tools/PcTools/src/kilnctrl/stack_margin_baseline.py", "load_pico_records"),
+    # NOT actually dead: collapse_table() IS called in production from
+    # tools/mykicadMcp/kicad_mcp_server.py, a separate git submodule this
+    # check deliberately excludes from both function discovery and the
+    # caller search (EXCLUDED_DIR_NAMES). Genuinely zero-caller only within
+    # this check's in-repo scan scope, not in the full picture -- kept
+    # (not deleted) for that reason. If mykicadMcp is ever folded back into
+    # this check's scan scope, re-verify this note still holds.
+    ("tools/PcTools/src/mcpkit/registry.py", "collapse_table"),
+    # Collateral zero-callers created BY this same 2026-09-21 pass, not part
+    # of the original 23 -- deleting check_chip_partition_table() (a
+    # confirmed dead top-level wrapper) removed its only in-repo production
+    # caller of these two. Both are explicitly retained per this module's
+    # own docstring ("read_chip_partition_table_bytes() below is KEPT...
+    # deprecated as a chip-read mechanism") -- unit-tested against synthetic
+    # blobs, not superseded logic, just no longer reachable from a
+    # production entry point until/unless a real JTAG-based mechanism is
+    # ever revived.
+    ("tools/PcTools/src/kilnctrl/partition_table.py", "parse_partition_table_binary"),
+    ("tools/PcTools/src/kilnctrl/partition_table.py", "read_chip_partition_table_bytes"),
+    # Same collateral shape: deleting estimate_from_capture_path() (a
+    # confirmed dead convenience wrapper) removed its only in-repo caller of
+    # this whole-board multi-zone estimator. Kept rather than also deleted --
+    # it is a genuine, actively-tested (3 call sites in
+    # test_load_estimator.py) general-purpose helper, not itself superseded;
+    # a future caller wiring up whole-board (rather than per-source) load
+    # estimation would reach for exactly this function.
+    ("tools/PcTools/src/kilnctrl/load_estimator.py", "estimate_all_zones"),
 }
 
 # Found genuinely zero-caller by this check's first full-coverage run
@@ -153,110 +226,15 @@ ZERO_CALLER_ALLOWLIST = {
 # wire them up or delete them. Listed separately from the benign allowlist
 # above (rather than silently merged into it) so this distinction survives:
 # a future reader of this file should not assume every entry below is fine.
-# See docs/RELEASE_HARDENING_PLAN.md item 1 status, 2026-09-20, for the full
-# writeup of each.
-PENDING_OWNER_REVIEW = {
-    # CONTROL-task binary wire-command encoders for the 2026-08-21 shared
-    # unit-preference feature; the feature that actually shipped reads/writes
-    # unit preference over HTTP (POST /api/unit_pref), so this CONTROL-task
-    # pair (0x04 GET_UNIT_PREF / 0x05 SET_UNIT_PREF) was apparently built as
-    # an alternate transport and never wired to any caller.
-    ("tools/PcTools/src/kilnctrl/devices_control.py", "control_get_unit_pref"),
-    ("tools/PcTools/src/kilnctrl/devices_control.py", "control_set_unit_pref"),
-    # params_by_name's own docstring explains id-based lookup was deliberately
-    # rejected in favor of name-based ("a renumbered id cannot silently
-    # retarget a value at a different field") -- params_by_id looks like the
-    # leftover of that decision, never removed.
-    ("tools/PcTools/src/kilnctrl/safety_cfg_http_client.py", "params_by_id"),
-    # entry_from_dict (its deserializing counterpart, run_queue.py:1596) IS
-    # called (run_queue.py:2600); entry_to_dict, the serializing half of the
-    # same pair, has no caller anywhere -- an asymmetric pair, the
-    # "reset-one-side" bug-class shape CLAUDE.md calls out, though here the
-    # unused side is dead code rather than stale state.
-    ("tools/PcTools/src/kilnctrl/run_queue.py", "entry_to_dict"),
-    # No caller anywhere in the repo, including tools/PcTools/scripts and
-    # ui_scripts (outside this check's own scan roots, but inside its
-    # caller-search universe). Reads a JSON preset file into a dict; nothing
-    # calls it today.
-    ("tools/PcTools/src/kilnctrl/run_queue.py", "load_preset_json"),
-    # Thin `path.read_bytes()` + find_one_identity(...) wrapper; find_one_
-    # identity itself is used elsewhere (check_slot_bins_fresh), this
-    # convenience wrapper around it is not.
-    ("tools/PcTools/src/kilnctrl/pico_image_freshness.py", "read_file_identity"),
-    # cone_table's sibling functions (band_bottom_c, heat_work_weight) are
-    # both actively used by ramp_assist.py; cone_for_temp_c -- a direct
-    # mirror of firmware's cone_table_cone_for_temp_c -- has no caller
-    # anywhere in tools/PcTools outside its own test.
-    ("tools/PcTools/src/kilnctrl/cone_table.py", "cone_for_temp_c"),
-    # log_analysis.py is itself a CLI tool (has __main__/main()) built around
-    # three input-source parsers (poll-capture JSONL, UART capture, and CSV);
-    # parse_trace_csv (its /api/autotune/trace.csv sibling) is used by
-    # render_autotune_report, but parse_history_csv (/api/history.csv) is
-    # never called by any of this module's own report/main functions --
-    # the CSV history-file input path looks implemented but never wired in.
-    ("tools/PcTools/src/kilnctrl/log_analysis.py", "parse_history_csv"),
-    # Below: surfaced by this pass's methodology fix (2026-09-20b) -- moving
-    # the caller search from a plain `\bname\b` text match to a token/AST-
-    # based one (only NAME tokens outside strings/comments count; a mention
-    # in a comment, a docstring, an `__all__` string-list entry, or the
-    # function's own recursive self-call no longer counts as a caller).
-    # Each was individually confirmed by hand to have no real caller
-    # (production or test-only aside), not just a text-match artifact.
-    #
-    # devices.__all__ lists it (a STRING token, correctly no longer counted);
-    # no production code calls it.
-    ("tools/PcTools/src/kilnctrl/devices_io.py", "digital_io_label"),
-    # Only ever called from its own test file; no production caller.
-    ("tools/PcTools/src/kilnctrl/http_capture_log.py", "write_no_heat_diagnostic_tsv"),
-    ("tools/PcTools/src/kilnctrl/load_estimator.py", "estimate_from_capture_path"),
-    ("tools/PcTools/src/kilnctrl/noise_floor.py", "floor_lookup"),
-    # load_artifact's own sibling floor_lookup (above) reads the same
-    # artifact structure it returns; noise_floor.py's own `main()` builds/
-    # reports the artifact but never reads it back through this loader --
-    # only the test suite exercises it.
-    ("tools/PcTools/src/kilnctrl/noise_floor.py", "load_artifact"),
-    # Previously mentioned only in its own docstring and telemetry_capture.py
-    # comments (both non-NAME-token references that no longer count); no
-    # production module actually calls it, only test_log_analysis.py.
-    ("tools/PcTools/src/kilnctrl/log_analysis.py", "parse_profile_exec_uart_capture"),
-    # No `@_srv._tool()` (or any other) registration decorator above it --
-    # unlike its sibling `flash_firmware()`, it is not wired up as an MCP
-    # tool at all, and nothing else in production code calls it directly.
-    # Only test_flash_board_pinning.py exercises it.
-    ("tools/PcTools/src/kilnctrl/mcp_server_flash.py", "fixture_flash"),
-    # partition_table.py's own docstring calls this "now-deprecated";
-    # tools/PcTools/scripts/check_chip_partition_table.py -- the CLI script
-    # named after it -- actually calls the newer
-    # `check_chip_partition_table_via_http()` instead. Only
-    # test_partition_table.py still calls the deprecated one.
-    ("tools/PcTools/src/kilnctrl/partition_table.py", "check_chip_partition_table"),
-    # Only test_pico_image_freshness.py calls it; no script or MCP tool
-    # wires it up (the check_embedded_pico_image_fresh.ps1 standing check is
-    # a separate PowerShell/pytest path that does not import this module).
-    ("tools/PcTools/src/kilnctrl/pico_image_freshness.py", "check_slot_bins_fresh"),
-    # Only test_plant_sim.py calls it; no CLI/report path in plant_sim.py's
-    # own `main()` reaches it.
-    ("tools/PcTools/src/kilnctrl/plant_sim.py", "actuator_weight_sensitivity_sweep"),
-    ("tools/PcTools/src/kilnctrl/plant_sim.py", "per_zone_gain_holdout_report"),
-    # Only test_ramp_assist.py / test_ramp_assist_cone_scale.py call these;
-    # ramp_assist.py has no `__main__`/CLI entry point of its own that would
-    # reach either.
-    ("tools/PcTools/src/kilnctrl/ramp_assist.py", "compare_heat_work"),
-    ("tools/PcTools/src/kilnctrl/ramp_assist.py", "dwell_credit_parity"),
-    # Only test_bench_test_wave1d.py calls it.
-    ("tools/PcTools/src/kilnctrl/stack_margin_baseline.py", "load_pico_records"),
-    # `collapse_table()` IS called in production -- but only from
-    # tools/mykicadMcp/kicad_mcp_server.py, a separate git submodule this
-    # check deliberately excludes from both function discovery and the
-    # caller search (EXCLUDED_DIR_NAMES; that submodule is never edited from
-    # this repo). Within tools/PcTools's own scan universe, kilnctrl's own
-    # mcp_server.py calls the sibling `collapse()`, never `collapse_table()`.
-    # Not dead in the full picture, but genuinely zero-caller within this
-    # check's in-repo scope -- left for owner review rather than silently
-    # allowlisted, since a real in-repo caller appearing later should be
-    # investigated, not assumed benign.
-    ("tools/PcTools/src/mcpkit/registry.py", "collapse_table"),
-}
+#
+# 2026-09-21: owner reviewed the batch of 23 that had accumulated here
+# (docs/RELEASE_HARDENING_PLAN.md item 1). 11 were kept (moved into
+# ZERO_CALLER_ALLOWLIST above, each with its own reason comment); the other
+# 12 -- confirmed genuinely dead, not just a blind-spot false positive --
+# were deleted from source along with their tests and doc mentions in the
+# same commit. This set is empty as of that pass; a future zero-caller
+# finding starts a new PENDING_OWNER_REVIEW batch.
+PENDING_OWNER_REVIEW = set()
 
 
 def _is_excluded_dir(path: Path) -> bool:

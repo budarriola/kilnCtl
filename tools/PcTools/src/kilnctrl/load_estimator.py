@@ -334,29 +334,13 @@ def load_capture_rows(path: str) -> list:
     return hcl.poll_rows(path)
 
 
-def estimate_from_capture_path(path: str, run_index: int = 0, ambient: float = 20.0,
-                                min_drive_c: float = 5.0, min_elapsed_s: float = 0.0,
-                                L_pair=None) -> list:
-    """Convenience wrapper: parse a real capture (either on-disk envelope,
-    see ``load_capture_rows``), split multi-run files, take ``run_index``,
-    drop the first ``min_elapsed_s`` (dead-time/startup transient), and
-    estimate every zone's mass multiplier off the rest. ``L_pair`` defaults
-    to ``plant_sim.L_PAIR`` (per-path dead time, 2026-09-03) -- pass the old
-    single-delay-per-zone matrix explicitly for a side-by-side comparison."""
-    rows_all = load_capture_rows(path)
-    runs = la.split_runs(rows_all)
-    rows = runs[run_index]
-    t, temps, duty = arrays_from_capture(rows)
-    keep = t >= (t[0] + min_elapsed_s)
-    return estimate_all_zones(t[keep], temps[keep], duty[keep], ambient=ambient,
-                               min_drive_c=min_drive_c, L_pair=L_pair)
-
-
 def estimate_per_source_from_capture_path(
     path: str, run_index: int = 0, ambient: float = 20.0, min_drive_c: float = 5.0,
     min_elapsed_s: float = 0.0, offdiag_candidates_s: Optional[Sequence[float]] = None,
 ) -> list:
-    """Same convenience wrapper as ``estimate_from_capture_path``, but for
+    """Convenience wrapper: parse a real capture (either on-disk envelope,
+    see ``load_capture_rows``), split multi-run files, take ``run_index``,
+    drop the first ``min_elapsed_s`` (dead-time/startup transient), and run
     ``estimate_zone_mass_mult_per_source`` -- one ``PerSourceLoadEstimate``
     per zone whose regression found at least 3 usable samples at some
     candidate combination (zones that never clear that bar are omitted, same

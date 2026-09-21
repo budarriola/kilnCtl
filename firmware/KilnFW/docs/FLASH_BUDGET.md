@@ -557,11 +557,13 @@ history and are not hypothetical — each has already caused a problem here once
    endpoint's JSON (`partition_http_client.py`,
    `read_chip_partition_table_from_http()`,
    `check_chip_partition_table_via_http()`). The old JTAG-based
-   `read_chip_partition_table_bytes()`/`check_chip_partition_table()` are
-   KEPT in the module (their logic is sound and still unit-tested) but are
-   explicitly marked deprecated in their own docstrings — nothing calls
-   them by default any more, and nobody should expect a real chip read from
-   them to succeed. Exposed two ways:
+   `read_chip_partition_table_bytes()` is KEPT in the module (its logic is
+   sound and still unit-tested) but is explicitly marked deprecated in its
+   own docstring — nothing calls it by default any more, and nobody should
+   expect a real chip read from it to succeed. Its former top-level
+   wrapper, `check_chip_partition_table()`, was deleted 2026-09-21 as a
+   zero-caller; `check_chip_partition_table_via_http()` above was already
+   its only caller's replacement. Exposed two ways:
    - MCP tool: `kiln_call(name="debug_check_partition_table")` (optional
      `host`, `csv_path` args — same host-resolution order as every
      `ota_*`/`adaptive_tune_*` tool).

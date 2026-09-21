@@ -15,11 +15,14 @@ OpenOCD's ``read_memory`` reaches the CPU's address space, which cannot
 reach raw flash content at an arbitrary offset. This module's own tests
 never caught it because they inject a fake ``read_memory_fn`` that stands
 in for the OpenOCD call and never exercises a real board.
-``read_chip_partition_table_bytes()``/``check_chip_partition_table()``
-below are KEPT (their parse logic is correct and remains unit-tested
-against synthetic blobs) but are DEPRECATED as a chip-read mechanism -- see
-each function's own docstring. Nobody should call them expecting a real
-chip read to succeed.
+``read_chip_partition_table_bytes()`` below is KEPT (its parse logic is
+correct and remains unit-tested against synthetic blobs) but is DEPRECATED
+as a chip-read mechanism -- see its own docstring. Nobody should call it
+expecting a real chip read to succeed. (The top-level convenience wrapper
+that used to sit on top of it, ``check_chip_partition_table()``, was
+deleted 2026-09-21 as a zero-caller -- its replacement,
+``check_chip_partition_table_via_http()``, already existed and was the
+only thing anything called.)
 
 The current mechanism is ``check_chip_partition_table_via_http()`` /
 ``read_chip_partition_table_from_http()`` below, which ask the RUNNING
@@ -393,34 +396,6 @@ def read_chip_partition_table_bytes(
     return _bytes_from_memrd_output(output, size)
 
 
-# --- Top-level convenience: read + parse both sides + diff --------------------
-
-
-def check_chip_partition_table(
-    peer: str = "esp",
-    csv_path: Optional[str] = None,
-    address: int = DEFAULT_TABLE_ADDRESS,
-    size: int = DEFAULT_TABLE_SIZE,
-    read_memory_fn=None,
-) -> "tuple[PartitionDiff, list[PartitionEntry], list[PartitionEntry]]":
-    """DEPRECATED as a real chip-read mechanism -- see this module's
-    docstring and ``read_chip_partition_table_bytes()``'s own deprecation
-    notice. Use ``check_chip_partition_table_via_http()`` instead; that is
-    what the MCP tool (``debug_check_partition_table``) and the CLI script
-    (``check_chip_partition_table.py``) call now.
-
-    Reads the on-chip partition table, parses ``csv_path`` (defaults to
-    ``firmware/KilnFW/partitions.csv`` in this repo), and returns
-    ``(diff, chip_entries, csv_entries)``.
-    """
-    if csv_path is None:
-        csv_path = _default_csv_path()
-
-    chip_bytes = read_chip_partition_table_bytes(peer, address, size, read_memory_fn=read_memory_fn)
-    chip_entries = parse_partition_table_binary(chip_bytes, base_address=address)
-    csv_entries = parse_partitions_csv(csv_path)
-    diff = diff_partition_tables(chip_entries, csv_entries)
-    return diff, chip_entries, csv_entries
 
 
 # --- HTTP read (current mechanism) -- GET /api/partitions from the running app ---

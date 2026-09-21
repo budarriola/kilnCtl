@@ -143,10 +143,6 @@ def find_one_identity(buf: bytes) -> ImageIdentity:
     return found[0]
 
 
-def read_file_identity(path: Path) -> ImageIdentity:
-    return find_one_identity(path.read_bytes())
-
-
 def git_short_head(repo_root: Path) -> Optional[str]:
     """Mirrors gen_build_info.cmake's exact invocation: `git rev-parse
     --short HEAD` run with WORKING_DIRECTORY = the repo root (SaftyFW is

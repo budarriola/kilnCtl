@@ -197,7 +197,7 @@ class CooldownSidecarRejectionTests(NoiseFloorTestCase):
 
 
 # ---------------------------------------------------------------------------
-# build_artifact / load_artifact / floor_lookup
+# build_artifact / load_artifact_diagnostic
 # ---------------------------------------------------------------------------
 
 class ArtifactTests(NoiseFloorTestCase):
@@ -223,8 +223,8 @@ class ArtifactTests(NoiseFloorTestCase):
     def test_build_artifact_carries_start_conditions_additively(self):
         # schema_version bump: the artifact grows a new "start_conditions"
         # key but "entries" (schema_version 1's whole payload) is untouched
-        # -- an old reader that only ever looked at "entries"/floor_lookup
-        # still works unmodified.
+        # -- an old reader that only ever looked at "entries" still works
+        # unmodified.
         artifact = nf.build_artifact(self.repeat_paths())
         self.assertEqual(nf.SCHEMA_VERSION, 2)
         self.assertIn("start_conditions", artifact)
@@ -232,33 +232,31 @@ class ArtifactTests(NoiseFloorTestCase):
         key = nf._key_str(0, "iae_normalized_whole_c", None)
         self.assertIn(key, artifact["entries"])  # schema_version-1 shape intact
 
-    def test_floor_lookup_returns_none_for_missing_artifact(self):
-        self.assertIsNone(nf.floor_lookup(None, 0, "iae_normalized_whole_c", None))
-
-    def test_floor_lookup_returns_none_for_unknown_key(self):
-        artifact = nf.build_artifact(self.repeat_paths())
-        self.assertIsNone(nf.floor_lookup(artifact, 99, "no_such_metric", None))
-
-    def test_floor_lookup_round_trips_through_json(self):
+    def test_artifact_round_trips_through_json(self):
         artifact = nf.build_artifact(self.repeat_paths())
         out_path = os.path.join(self._tmp, "noise_floor.json")
         with open(out_path, "w") as fh:
             json.dump(artifact, fh)
-        loaded = nf.load_artifact(out_path)
+        loaded, reason = nf.load_artifact_diagnostic(out_path)
+        self.assertIsNone(reason)
         key0 = nf._key_str(0, "iae_normalized_whole_c", None)
         self.assertAlmostEqual(
-            nf.floor_lookup(loaded, 0, "iae_normalized_whole_c", None),
+            loaded["entries"][key0]["noise_floor_c"],
             artifact["entries"][key0]["noise_floor_c"],
         )
 
-    def test_load_artifact_missing_file_returns_none(self):
-        self.assertIsNone(nf.load_artifact("does/not/exist/noise_floor.json"))
+    def test_load_artifact_diagnostic_missing_file_returns_none(self):
+        artifact, reason = nf.load_artifact_diagnostic("does/not/exist/noise_floor.json")
+        self.assertIsNone(artifact)
+        self.assertIn("missing", reason)
 
-    def test_load_artifact_malformed_json_returns_none(self):
+    def test_load_artifact_diagnostic_malformed_json_returns_none(self):
         p = os.path.join(self._tmp, "bad.json")
         with open(p, "w") as fh:
             fh.write("{not json")
-        self.assertIsNone(nf.load_artifact(p))
+        artifact, reason = nf.load_artifact_diagnostic(p)
+        self.assertIsNone(artifact)
+        self.assertIn("unreadable", reason)
 
 
 class DefaultArtifactPathCwdIndependenceTests(unittest.TestCase):
@@ -267,10 +265,10 @@ class DefaultArtifactPathCwdIndependenceTests(unittest.TestCase):
     "tools/PcTools/config_presets/noise_floor.json", which only resolved
     when the process's CWD happened to be the repo root. Run pytest from
     tools/PcTools (as this project's own test runner does) and it silently
-    missed -- load_artifact()'s deliberate FileNotFoundError-swallowing
-    turned that into a quiet "NOISE FLOOR: UNKNOWN" instead of an error.
-    DEFAULT_ARTIFACT_PATH is now anchored on __file__, so it must resolve
-    the checked-in artifact regardless of CWD."""
+    missed -- load_artifact_diagnostic()'s deliberate FileNotFoundError-
+    swallowing turned that into a quiet "NOISE FLOOR: UNKNOWN" instead of an
+    error. DEFAULT_ARTIFACT_PATH is now anchored on __file__, so it must
+    resolve the checked-in artifact regardless of CWD."""
 
     def setUp(self):
         self._orig_cwd = os.getcwd()
@@ -281,22 +279,22 @@ class DefaultArtifactPathCwdIndependenceTests(unittest.TestCase):
 
     def test_loads_from_repo_root(self):
         os.chdir(nf._REPO_ROOT)
-        artifact = nf.load_artifact()
-        self.assertIsNotNone(artifact)
+        artifact, reason = nf.load_artifact_diagnostic()
+        self.assertIsNone(reason)
         self.assertGreater(len(artifact.get("entries", {})), 0)
 
     def test_loads_from_tools_pctools(self):
         # This is where this project's own test suite actually runs from --
         # the exact CWD that exposed the bug.
         os.chdir(os.path.join(nf._REPO_ROOT, "tools", "PcTools"))
-        artifact = nf.load_artifact()
-        self.assertIsNotNone(artifact)
+        artifact, reason = nf.load_artifact_diagnostic()
+        self.assertIsNone(reason)
         self.assertGreater(len(artifact.get("entries", {})), 0)
 
     def test_loads_from_an_unrelated_directory(self):
         os.chdir(tempfile.gettempdir())
-        artifact = nf.load_artifact()
-        self.assertIsNotNone(artifact)
+        artifact, reason = nf.load_artifact_diagnostic()
+        self.assertIsNone(reason)
         self.assertGreater(len(artifact.get("entries", {})), 0)
 
     def test_the_48_entry_real_artifact_has_expected_measured_floors(self):
@@ -305,22 +303,22 @@ class DefaultArtifactPathCwdIndependenceTests(unittest.TestCase):
         # regression that loads the WRONG file (right shape, wrong content)
         # would still be caught.
         os.chdir(os.path.join(nf._REPO_ROOT, "tools", "PcTools"))
-        artifact = nf.load_artifact()
+        artifact, reason = nf.load_artifact_diagnostic()
+        self.assertIsNone(reason)
         self.assertEqual(artifact["schema_version"], 2)
         self.assertEqual(len(artifact["entries"]), 48)
         expected = {0: 0.11565, 1: 0.07709, 2: 0.14730}
         for zone, floor_c in expected.items():
-            got = nf.floor_lookup(artifact, zone, "iae_normalized_whole_c", None)
+            key = nf._key_str(zone, "iae_normalized_whole_c", None)
+            got = artifact["entries"][key]["noise_floor_c"]
             self.assertAlmostEqual(got, floor_c, places=5)
 
 
 class LoadArtifactDiagnosticTests(NoiseFloorTestCase):
-    """load_artifact() collapses every failure to None -- correct for
-    callers that only need "unknown", but it destroys the difference
-    between a MISSING artifact (never generated / wrong path) and an
-    UNREADABLE one (exists, but corrupt/truncated/unparseable). The
-    diagnostic variant preserves that distinction so a caller can surface
-    it loudly instead of silently."""
+    """load_artifact_diagnostic() distinguishes a MISSING artifact (never
+    generated / wrong path) from an UNREADABLE one (exists, but corrupt/
+    truncated/unparseable), so a caller can surface that difference loudly
+    instead of collapsing every failure to a single "unknown" state."""
 
     def test_missing_file_reason_says_missing(self):
         artifact, reason = nf.load_artifact_diagnostic(
@@ -348,12 +346,6 @@ class LoadArtifactDiagnosticTests(NoiseFloorTestCase):
         loaded, reason = nf.load_artifact_diagnostic(p)
         self.assertIsNotNone(loaded)
         self.assertIsNone(reason)
-
-    def test_load_artifact_still_collapses_reason_to_none_for_back_compat(self):
-        # load_artifact() (no reason) is still the public contract every
-        # existing caller (pid_ab_compare.py's compare_runs plumbing, other
-        # tests) relies on -- it must keep behaving exactly like before.
-        self.assertIsNone(nf.load_artifact(os.path.join(self._tmp, "nope.json")))
 
 
 # ---------------------------------------------------------------------------

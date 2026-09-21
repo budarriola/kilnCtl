@@ -144,10 +144,6 @@ def params_by_name(current: dict) -> "dict[str, dict]":
     return {p["name"]: p for p in current.get("params", []) if "name" in p}
 
 
-def params_by_id(current: dict) -> "dict[int, dict]":
-    return {int(p["id"]): p for p in current.get("params", []) if "id" in p}
-
-
 def format_value(name: str, wire_type: str, value: Any) -> str:
     """One parameter's value, rendered the way safety_cfg_http.c's
     parse_value_for_type() parses it back:

@@ -3,10 +3,12 @@
 item 3 ("confirm what table is actually on the chip").
 
 All tests operate on synthetic partition-table blobs and a temp CSV file --
-no OpenOCD, no board. ``read_chip_partition_table_bytes``/
-``check_chip_partition_table`` are exercised with an injected
-``read_memory_fn`` standing in for ``debug_probe.read_memory``, proving the
-read -> parse -> diff pipeline end to end without hardware.
+no OpenOCD, no board. ``read_chip_partition_table_bytes`` is exercised with
+an injected ``read_memory_fn`` standing in for ``debug_probe.read_memory``.
+(The end-to-end ``check_chip_partition_table()`` wrapper this file used to
+also test was deleted 2026-09-21 as a zero-caller -- its replacement,
+``check_chip_partition_table_via_http()``, is covered below by
+ReadChipPartitionTableFromHttpTests.)
 
 Run with: python -m unittest discover -s tools/PcTools/tests
 """
@@ -248,72 +250,6 @@ class ReadChipPartitionTableBytesTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             pt.read_chip_partition_table_bytes(read_memory_fn=fake_read_memory)
-
-
-class CheckChipPartitionTableEndToEndTests(unittest.TestCase):
-    """Exercises the full read -> parse(chip) -> parse(csv) -> diff pipeline
-    with an injected read_memory_fn, including the negative case: a mutated
-    on-chip blob must be reported as exactly the entry that differs."""
-
-    def _fake_read_memory_for(self, blob: bytes):
-        def fake_read_memory(peer, address, count=1, width=32, **kw):
-            return True, _memrd_output_for(blob, address)
-        return fake_read_memory
-
-    def test_matching_table_reports_ok(self):
-        blob = _table_blob(_SAMPLE_ENTRIES)
-        csv_path = _write_csv(_SAMPLE_CSV_TEXT)
-        try:
-            diff, chip_entries, csv_entries = pt.check_chip_partition_table(
-                peer="esp", csv_path=csv_path, address=0x8000, size=0x1000,
-                read_memory_fn=self._fake_read_memory_for(blob),
-            )
-        finally:
-            os.remove(csv_path)
-        self.assertTrue(diff.ok)
-        self.assertEqual(len(chip_entries), 3)
-        self.assertEqual(len(csv_entries), 3)
-
-    def test_mutated_chip_entry_is_caught_and_named_exactly(self):
-        # Mutate ONE entry's offset on the "chip" side (simulating pico_img
-        # never actually having been relocated in a real reflash) -- proves
-        # the diff catches a real mismatch, not just a contrived object diff.
-        mutated_entries = list(_SAMPLE_ENTRIES)
-        mutated_entries[2] = ("factory", 0x00, 0x00, 0xB10000, 0x100000)  # stale offset
-        blob = _table_blob(mutated_entries)
-        csv_path = _write_csv(_SAMPLE_CSV_TEXT)
-        try:
-            diff, _, _ = pt.check_chip_partition_table(
-                peer="esp", csv_path=csv_path, address=0x8000, size=0x1000,
-                read_memory_fn=self._fake_read_memory_for(blob),
-            )
-        finally:
-            os.remove(csv_path)
-        self.assertFalse(diff.ok)
-        self.assertEqual(len(diff.mismatched), 1)
-        name, field_mismatches = diff.mismatched[0]
-        self.assertEqual(name, "factory")
-        self.assertTrue(any("offset" in m for m in field_mismatches))
-        # Everything else must come back clean -- only "factory" mismatched.
-        self.assertEqual(diff.only_on_chip, [])
-        self.assertEqual(diff.only_in_csv, [])
-        report = diff.report()
-        self.assertIn("factory", report)
-        self.assertIn("0xb10000", report.lower())
-        self.assertIn("0x10000", report.lower())
-
-    def test_defaults_to_real_repo_csv(self):
-        # No csv_path given -- should resolve to firmware/KilnFW/partitions.csv
-        # and parse it without error (matching test_real_repo_csv_parses above).
-        blob = _table_blob(_SAMPLE_ENTRIES)  # chip content is irrelevant here
-        diff, chip_entries, csv_entries = pt.check_chip_partition_table(
-            peer="esp", address=0x8000, size=0x1000,
-            read_memory_fn=self._fake_read_memory_for(blob),
-        )
-        self.assertGreater(len(csv_entries), 3)  # real CSV has far more than 3 rows
-        # This synthetic chip blob deliberately doesn't match the real CSV --
-        # not asserting ok/not-ok here, just that both sides parsed.
-        self.assertEqual(len(chip_entries), 3)
 
 
 class ReadChipPartitionTableFromHttpTests(unittest.TestCase):

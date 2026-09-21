@@ -92,24 +92,6 @@ def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: fl
     )
 
 
-def control_get_unit_pref() -> bytes:
-    """0x04 GET_UNIT_PREF request (query): no args.
-
-    2026-08-21 (ROADMAP.md shared unit preference) -- additive subcommand on
-    the existing CONTROL task, DISPLAY-ONLY: does not affect the units of any
-    other CONTROL/PROFILES field (App/drivers/persist/unit_pref.h)."""
-    return struct.pack("<B", CONTROL_CMD_GET_UNIT_PREF)
-
-
-def control_set_unit_pref(unit_pref: int) -> bytes:
-    """0x05 SET_UNIT_PREF: unit_pref byte (0=Celsius, 1=Fahrenheit). Replies ok/fail."""
-    return struct.pack(
-        "<BB",
-        CONTROL_CMD_SET_UNIT_PREF,
-        _check_u8(unit_pref, "unit_pref"),
-    )
-
-
 def parse_control_response(
     payload: bytes,
 ) -> "tuple[int, tuple[int, int, list[ZoneConfig]] | OkReason | int]":

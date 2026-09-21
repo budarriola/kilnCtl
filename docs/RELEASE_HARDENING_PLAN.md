@@ -764,6 +764,39 @@ blob. Full foreground `run_all_checks.ps1 -Fast -AllowFewerChecks`:
 `check_00_saftyfw_target_build.ps1` run first -- unrelated to this change,
 a shared-tree build artifact left stale by another session).
 
+**Closed, 2026-09-21: owner review of the 23-function `PENDING_OWNER_REVIEW`
+batch.** Per-function keep/delete review (worktree `zerocall`): 11 kept
+(moved to `ZERO_CALLER_ALLOWLIST` with individual reason comments --
+`cone_table.cone_for_temp_c`, `devices_io.digital_io_label`,
+`log_analysis.parse_profile_exec_uart_capture`,
+`mcp_server_flash.fixture_flash`, `pico_image_freshness.
+check_slot_bins_fresh` (a genuinely new sweep blind spot found this pass:
+its only real caller is Python embedded as a heredoc inside
+`check_embedded_pico_image_fresh.ps1`, invisible to the sweep's
+`.py`-file-glob corpus), `plant_sim.actuator_weight_sensitivity_sweep`,
+`plant_sim.per_zone_gain_holdout_report`, `ramp_assist.compare_heat_work`,
+`ramp_assist.dwell_credit_parity`, `stack_margin_baseline.
+load_pico_records`, and `mcpkit.registry.collapse_table`); 12 deleted from
+source along with their tests and doc mentions in the same commit --
+`devices_control.control_get_unit_pref`/`control_set_unit_pref`,
+`safety_cfg_http_client.params_by_id`, `run_queue.entry_to_dict`,
+`run_queue.load_preset_json`, `pico_image_freshness.read_file_identity`,
+`log_analysis.parse_history_csv`, `http_capture_log.
+write_no_heat_diagnostic_tsv`, `load_estimator.estimate_from_capture_path`,
+`noise_floor.floor_lookup`, `noise_floor.load_artifact`, and
+`partition_table.check_chip_partition_table`. Deleting
+`check_chip_partition_table` and `estimate_from_capture_path` orphaned
+their own remaining in-repo callees (`partition_table.
+parse_partition_table_binary`/`read_chip_partition_table_bytes`,
+`load_estimator.estimate_all_zones`) as collateral new zero-callers; all
+three were reviewed the same way and allowlisted (kept, not deleted --
+each is genuine retained/deprecated or actively-tested logic, not itself
+superseded). `PENDING_OWNER_REVIEW` is now empty. **Corrected totals:**
+**40** in `ZERO_CALLER_ALLOWLIST` (26 prior + 11 kept + 3 collateral), **0**
+in `PENDING_OWNER_REVIEW`. Full keep/delete table with one-line reasons: see
+the commit message and `tools/check_python_zero_caller_sweep.py`'s own
+`ZERO_CALLER_ALLOWLIST` comments.
+
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
 build `origin/main`'s actual content in a clean worktree rather than the local

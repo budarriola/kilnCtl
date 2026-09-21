@@ -788,11 +788,6 @@ class RunQueueConfig:
     now: Callable[[], float] = time.time
 
 
-def load_preset_json(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
 def wait_until_rested(cfg: RunQueueConfig, deadline_s: Optional[float] = None) -> None:
     """Block (polling ``GET /api/status``) until :func:`is_rested` is True,
     or raise :class:`RunQueueError` after ``rested_timeout_s`` (or
@@ -1586,11 +1581,6 @@ def _atomic_write_json(path: str, obj: dict) -> None:
         except OSError:
             pass
         raise RunQueueError(f"could not durably write campaign state to {path!r}: {exc}") from exc
-
-
-def entry_to_dict(entry: QueueEntry) -> dict:
-    return {"preset_name": entry.preset_name, "profile_id": entry.profile_id,
-            "log_path": entry.log_path, "label": entry.label, "stabilize": entry.stabilize}
 
 
 def entry_from_dict(d: dict) -> QueueEntry:

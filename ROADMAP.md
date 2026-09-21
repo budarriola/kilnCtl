@@ -12,8 +12,11 @@
 > - **Python zero-caller sweep made a standing check** (`76e6ca55`,
 >   `326936c7`, `ab2c766e`): `tools/check_python_zero_caller_sweep.py`,
 >   token-based caller matching. 909 functions checked, 26 allowlisted, 23
->   still PENDING_OWNER_REVIEW (delete-vs-keep undecided). `RELEASE_HARDENING_PLAN.md`
->   already updated by the commit.
+>   were PENDING_OWNER_REVIEW. **Resolved 2026-09-21**: all 23 reviewed by
+>   hand, 11 kept (allowlisted) and 12 deleted with their tests and doc
+>   mentions; PENDING_OWNER_REVIEW is now empty (897 functions, 40
+>   allowlisted). See `RELEASE_HARDENING_PLAN.md` item 1 for the full
+>   keep/delete table.
 > - **Standing subagent rule set added** (`3e2382ea`): `docs/agent_rules/`
 >   (`COMMON.md` plus per-role `IMPLEMENTER.md`/`REVIEWER.md`/`RESEARCHER.md`/
 >   `BENCH.md`) replaces per-prompt boilerplate — dispatchers point subagents

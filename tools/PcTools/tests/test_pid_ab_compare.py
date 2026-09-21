@@ -736,7 +736,8 @@ def test_real_artifact_n_is_consistent_within_each_metric_but_mixed_overall():
     synthetic fixture -- if the artifact is regenerated with a uniform n,
     this test should be revisited, not silently left green on stale
     reasoning."""
-    artifact = nf.load_artifact()
+    artifact, reason = nf.load_artifact_diagnostic()
+    assert reason is None
     assert artifact is not None
     ns = {entry["n"] for entry in artifact["entries"].values()}
     assert ns == {3, 6}, (
