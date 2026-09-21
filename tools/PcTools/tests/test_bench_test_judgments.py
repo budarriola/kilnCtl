@@ -345,15 +345,24 @@ class ParseTripFieldsTest(unittest.TestCase):
 
 class EstopVerifyTest(unittest.TestCase):
     def test_not_asserted_passes(self):
-        text = "no flags set | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | 120 ms old | tx_dropped 0"
+        text = "link up | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | 120 ms old | tx_dropped 0"
         self.assertEqual(J.judge_estop_verify(text).verdict, Verdict.PASS)
 
     def test_asserted_fails(self):
-        text = "E-stop asserted | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | 120 ms old | tx_dropped 0"
+        text = "link up; E-stop asserted | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | 120 ms old | tx_dropped 0"
         self.assertEqual(J.judge_estop_verify(text).verdict, Verdict.FAIL)
 
     def test_none_fails(self):
         self.assertEqual(J.judge_estop_verify(None).verdict, Verdict.FAIL)
+
+    def test_link_down_is_inconclusive_not_pass(self):
+        """Opus review finding (HIGH): with the link down, describe() renders
+        "no flags set" (the "E-stop asserted" bit is simply absent, same as
+        every other flag -- not known-clear) and "never received" for the
+        context age. Judging that as a PASS would be a false PASS with zero
+        real data behind it."""
+        text = "no flags set | 22.50 C (CJ 23.10 C) | currents 0.00 A, 0.00 A, 0.00 A | never received | tx_dropped unknown"
+        self.assertEqual(J.judge_estop_verify(text).verdict, Verdict.INCONCLUSIVE)
 
     def test_serial_hub_unavailable_is_inconclusive_not_fail(self):
         """The serial hub is currently held by another process on this

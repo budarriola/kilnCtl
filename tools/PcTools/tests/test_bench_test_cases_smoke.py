@@ -176,12 +176,12 @@ class Sp05Test(unittest.TestCase):
     negative test below asserts the read-only contract directly."""
 
     def test_not_asserted_passes(self):
-        srv = FakeSrv(safety_get_status=lambda: "no flags set | 22.50 C (CJ 23.10 C) | currents 0.00 A | 1 s old")
+        srv = FakeSrv(safety_get_status=lambda: "link up | 22.50 C (CJ 23.10 C) | currents 0.00 A | 1 s old")
         result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.PASS)
 
     def test_asserted_fails(self):
-        srv = FakeSrv(safety_get_status=lambda: "E-stop asserted | 22.50 C (CJ 23.10 C) | currents 0.00 A | 1 s old")
+        srv = FakeSrv(safety_get_status=lambda: "link up; E-stop asserted | 22.50 C (CJ 23.10 C) | currents 0.00 A | 1 s old")
         result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.FAIL)
 
@@ -190,10 +190,27 @@ class Sp05Test(unittest.TestCase):
         result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
+    def test_link_down_is_inconclusive(self):
+        srv = FakeSrv(safety_get_status=lambda: "no flags set | ... | never received | tx_dropped unknown")
+        result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_timeout_error_is_inconclusive_not_a_bare_fail(self):
+        """Opus review finding (LOW): safety_get_status() can raise a bare
+        TimeoutError (link_hub.py:573) rather than returning an "error: ..."
+        string, when the hub/link is unavailable -- must be caught and
+        turned into INCONCLUSIVE, not left to propagate into a bare
+        FAIL/exception with no safety-relevant information."""
+        def _raise():
+            raise TimeoutError("hub request timed out")
+        srv = FakeSrv(safety_get_status=_raise)
+        result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
     def test_never_calls_urllib_post(self):
         """Negative test: SP-05 is a read-only case and must never issue an
         HTTP POST (to /api/estop/verify or anywhere else)."""
-        srv = FakeSrv(safety_get_status=lambda: "no flags set | ...")
+        srv = FakeSrv(safety_get_status=lambda: "link up | ...")
         with mock.patch("urllib.request.urlopen") as urlopen_mock:
             result = C._case_sp05({"srv": srv, "host": "1.2.3.4"})
         urlopen_mock.assert_not_called()

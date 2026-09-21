@@ -291,9 +291,23 @@ def _case_sp05(ctx: dict) -> CaseResult:
     interlock, the same effect as the diagnostics page's own button. A
     read-only smoke case must not perform that write; whether the interlock
     currently reads asserted is fully answerable from the cached status
-    text already fetched for SP-02."""
+    text already fetched for SP-02.
+
+    safety_get_status() itself can raise a bare TimeoutError (link_hub.py's
+    hub-request path, link_hub.py:573) rather than returning an "error: ..."
+    string, when the hub/link is unavailable -- caught here and treated as
+    INCONCLUSIVE, same as the "error: ..." case judge_estop_verify already
+    handles, rather than letting it propagate and have the runner record a
+    bare FAIL with no safety-relevant information."""
     srv = _srv(ctx)
-    status_text = srv.safety_get_status()
+    try:
+        status_text = srv.safety_get_status()
+    except TimeoutError as exc:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"safety_get_status() timed out (hub/link unavailable): {exc}",
+            observed={},
+        )
     return J.judge_estop_verify(status_text)
 
 

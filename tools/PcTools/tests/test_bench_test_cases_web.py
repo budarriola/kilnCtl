@@ -213,6 +213,19 @@ class WebX03Test(unittest.TestCase):
                 result = REGISTRY["WEB-X-03"].judge(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_open_route_not_found_fails(self):
+        """A 404 on an OPEN route is the URI-handler-cap failure mode (the
+        route silently never got registered, e.g. wifi_provision_http.c's
+        160-slot httpd_uri_t cap being hit) -- must still fail, unlike the
+        missing-query-param 400 case above (Opus review, MEDIUM)."""
+        text = 'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {"/api/auth/config": (200, '{"web_enabled":false}'), "/api/status": (404, None)}
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                result = REGISTRY["WEB-X-03"].judge(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
     def test_open_route_server_error_still_fails(self):
         text = 'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),'
         ctx = {"host": "1.2.3.4"}

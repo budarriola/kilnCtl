@@ -388,7 +388,15 @@ def judge_estop_verify(status_text: str) -> CaseResult:
     (devices_safety.py), so that substring is what appears when the bit is
     set. A down serial hub/link is INCONCLUSIVE, not FAIL -- it says nothing
     about the board's actual E-stop state, and is a known current condition
-    (another process holding the hub), not a board defect."""
+    (another process holding the hub), not a board defect. This also covers
+    the case where the status query itself succeeds but the safety link to
+    the Pico is down: describe() then renders "no flags set" (every flag,
+    including SAFETY_FLAG_LABELS' "E-stop asserted", is simply absent, not
+    known-clear) and "never received" for the context age -- with no data
+    at all, treating that absence as a PASS would be a false PASS. Require
+    SAFETY_FLAG_LABELS[SafetyFlag.LINK_UP] ("link up") present and reject
+    "never received", the same link_up check SP-02 makes off this same
+    text (cases_smoke.py's _case_sp02)."""
     if status_text is None:
         return CaseResult(Verdict.FAIL, reason="no status text reported", observed={"status_text": status_text})
     lowered = status_text.lower()
@@ -396,6 +404,12 @@ def judge_estop_verify(status_text: str) -> CaseResult:
         if "no serial port" in lowered or "hub did not respond" in lowered:
             return CaseResult(Verdict.INCONCLUSIVE, reason=status_text, observed={"status_text": status_text})
         return CaseResult(Verdict.FAIL, reason=status_text, observed={"status_text": status_text})
+    if "link up" not in lowered or "never received" in lowered:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="safety link is not up -- E-stop state cannot be judged from absent flags",
+            observed={"status_text": status_text},
+        )
     if "e-stop asserted" in lowered:
         return CaseResult(
             Verdict.FAIL,

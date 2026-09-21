@@ -237,8 +237,13 @@ def _case_web_x03(ctx: dict) -> CaseResult:
             # answer 400 for a required id/profile_id query param missing
             # (dashboard_exec_http.c's profile_plan_get_handler()/
             # firing_history_get_handler()), which is not an auth-tier
-            # violation. A >=500 is still worth flagging (server error).
-            row["ok"] = status is not None and status not in (401, 403) and status < 500
+            # violation. 404 is still a violation here too -- an OPEN route
+            # answering "not found" is the URI-handler-cap failure mode (the
+            # route silently never got registered, e.g. the 160-slot cap in
+            # wifi_provision_http.c being hit), which is exactly the kind of
+            # defect this sweep exists to catch. >=500 (server error) also
+            # still fails.
+            row["ok"] = status is not None and status not in (401, 403, 404) and status < 500
         elif tier in _ADMIN_TIERS:
             if web_enabled:
                 row["ok"] = status in (401, 403) or (status is not None and 300 <= status < 400)
