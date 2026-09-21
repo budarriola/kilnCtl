@@ -1440,13 +1440,36 @@ def parse_fw_version_boot_id(fw_version_text: str) -> "int | None":
     return int(m.group(1)) if m else None
 
 
+#: SafetyDiag.describe() (devices_safety.py) prints the field as
+#: "boot reason: power-on | state armed | ..." -- a SPACE, a hyphenated
+#: value, and "+"-joined bits when more than one reason bit is set (e.g.
+#: "watchdog+brownout"). The first version of this parser looked for
+#: "boot_reason" with an underscore and `\w+`, which matches NOTHING the
+#: real device module ever emits and would have silently returned None on
+#: hardware -- making every watchdog check below vacuous while the mocked
+#: tests, which fed an invented "boot_reason: power_on", stayed green.
+#: Both spellings are accepted now, and the whole "+"-joined run is
+#: returned so callers test membership, never equality.
 def parse_diag_boot_reason(diag_text: str) -> "str | None":
-    """SP/OT-P shared: whatever token SafetyDiag.describe() prints for its
-    boot reason field. None if the diag text carries no such field at all
-    (older firmware / field not populated) -- distinct from finding one
-    that happens to read "watchdog"."""
-    m = re.search(r"boot_reason\s*[:=]?\s*(\w+)", diag_text)
+    """The boot-reason token SafetyDiag.describe() prints. None if the diag
+    text carries no such field at all (never received / older firmware) --
+    distinct from finding one that happens to name "watchdog"."""
+    m = re.search(r"boot[_ ]reason\s*[:=]?\s*([\w+.-]+)", diag_text)
     return m.group(1) if m else None
+
+
+#: ota_pico_relay.c's refusal text for SAFETY_LINK_UPDATE_STATE_REFUSED_
+#: RUNNING_IMAGE_OVERLAP (state 9, SaftyFW update_task.c:943): the bench
+#: Pico runs a FLAT image with no two-slot bootloader, so any relayed
+#: write overlaps the running image and firmware refuses it by design.
+#: That refusal is the correct, safe behaviour -- it is NOT an OTA defect,
+#: so every OT-P judge grades it INCONCLUSIVE (the case's own precondition,
+#: a bootloader-equipped Pico, was not met), never FAIL.
+PICO_RUNNING_IMAGE_OVERLAP_SIGNATURE = "would overwrite its running flat image"
+
+
+def pico_overlap_refusal(last_error: "Optional[str]") -> bool:
+    return bool(last_error) and PICO_RUNNING_IMAGE_OVERLAP_SIGNATURE in str(last_error)
 
 
 def judge_ota_pico_push_applied(
@@ -1455,6 +1478,7 @@ def judge_ota_pico_push_applied(
     expected_commit: "Optional[str]",
     boot_reason: "Optional[str]",
     commissioning_identical: Optional[bool],
+    last_error: "Optional[str]" = None,
 ) -> CaseResult:
     """OT-P01: a Pico image relayed into the inactive slot must reach
     ``phase == "done"``, come back up reporting the pushed image's commit
@@ -1465,13 +1489,22 @@ def judge_ota_pico_push_applied(
     observed = {
         "phase": phase, "commit_after": commit_after, "expected_commit": expected_commit,
         "boot_reason": boot_reason, "commissioning_identical": commissioning_identical,
+        "last_error": last_error,
     }
+    if pico_overlap_refusal(last_error):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=("Pico refused the relay because it would overlap its running flat image "
+                    "(no two-slot bootloader on this unit) -- the correct firmware behaviour, "
+                    "not an OTA failure; this case needs a bootloader-equipped Pico"),
+            observed=observed,
+        )
     if phase != "done":
         return CaseResult(Verdict.FAIL, reason=f"phase={phase!r}, expected 'done'", observed=observed)
-    if boot_reason == "watchdog":
+    if boot_reason and "watchdog" in boot_reason:
         return CaseResult(
             Verdict.FAIL,
-            reason="Pico boot_reason is 'watchdog' after the relay (2026-09-18 erase-time watchdog defect's signature)",
+            reason=f"Pico boot reason is {boot_reason!r} after the relay (2026-09-18 erase-time watchdog defect's signature)",
             observed=observed,
         )
     if expected_commit and commit_after != expected_commit:
@@ -1527,6 +1560,7 @@ def judge_ota_pico_bad_image_fallback(
     commit_before: "Optional[str]",
     commit_after: "Optional[str]",
     boot_reason: "Optional[str]",
+    last_error: "Optional[str]" = None,
 ) -> CaseResult:
     """OT-P03: a CRC-corrupted Pico image must be refused by the relay
     (push_pico_image() raises/refuses) or fail the staged CRC check
@@ -1537,11 +1571,19 @@ def judge_ota_pico_bad_image_fallback(
     observed = {
         "push_refused_or_failed": push_refused_or_failed,
         "commit_before": commit_before, "commit_after": commit_after, "boot_reason": boot_reason,
+        "last_error": last_error,
     }
+    if pico_overlap_refusal(last_error):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=("the relay stopped at the running-image-overlap refusal, so the staged CRC "
+                    "check this case exists to exercise was never reached"),
+            observed=observed,
+        )
     if not push_refused_or_failed:
         return CaseResult(Verdict.FAIL, reason="corrupt Pico image was accepted; expected a refusal/failed relay", observed=observed)
-    if boot_reason == "watchdog":
-        return CaseResult(Verdict.FAIL, reason="Pico boot_reason is 'watchdog' after a corrupt-image attempt", observed=observed)
+    if boot_reason and "watchdog" in boot_reason:
+        return CaseResult(Verdict.FAIL, reason=f"Pico boot reason is {boot_reason!r} after a corrupt-image attempt", observed=observed)
     if commit_before is not None and commit_after != commit_before:
         return CaseResult(
             Verdict.FAIL,
@@ -1563,8 +1605,15 @@ def judge_ota_pico_no_watchdog_signature(
     general judge, so a regression of this SPECIFIC defect is legible even
     if OT-P01 as a whole still happens to read PASS for some other reason."""
     observed = {"boot_reason": boot_reason, "last_error": last_error}
-    if boot_reason == "watchdog":
-        return CaseResult(Verdict.FAIL, reason="Pico boot_reason is 'watchdog' (2026-09-18 erase-time watchdog defect)", observed=observed)
+    if pico_overlap_refusal(last_error):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=("OT-P01's relay stopped at the running-image-overlap refusal -- no erase ever "
+                    "ran, so this observer has nothing to judge"),
+            observed=observed,
+        )
+    if boot_reason and "watchdog" in boot_reason:
+        return CaseResult(Verdict.FAIL, reason=f"Pico boot reason is {boot_reason!r} (2026-09-18 erase-time watchdog defect)", observed=observed)
     if last_error and "did not confirm RECEIVING" in last_error:
         return CaseResult(
             Verdict.FAIL,

@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl.bench_test import cases_ota as C  # noqa: E402
 from kilnctrl.bench_test import cases_safety as CS  # noqa: E402
+from kilnctrl.bench_test import judgments as J  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict, get_case  # noqa: E402
 
 
@@ -861,10 +862,21 @@ class _FakePicoOtaClient(_FakeOtaClient):
 
 _FW_TEXT_A = "Pico build: aaa1111 built 2026-09-20T00:00:00Z, boot_id=4"
 _FW_TEXT_B = "Pico build: bbb2222 built 2026-09-21T00:00:00Z, boot_id=5"
-_DIAG_OK = "boot_reason: power_on"
-_DIAG_WATCHDOG = "boot_reason: watchdog"
-_DIAG_TRIP = "trip_reason: 6, trip_mask: 0x0020, boot_reason: power_on"
-_DIAG_NO_TRIP = "trip_reason: 0, trip_mask: 0x0000, boot_reason: power_on"
+# These are the REAL SafetyDiag.describe() vocabulary (devices_safety.py):
+# "boot reason: power-on | state armed | trip_reason 6 [...] | warn_mask
+# 0x0000 | trip_mask 0x0020 | uptime ... ms". The first version of this
+# file invented "boot_reason: power_on" instead, which let a parser that
+# matches nothing the device module ever emits pass all of its tests.
+def _diag(boot="power-on", trip_reason=0, trip_mask=0x0000):
+    return (f"boot reason: {boot} | state armed | trip_reason {trip_reason} [reason] | "
+            f"warn_mask 0x0000 | trip_mask 0x{trip_mask:04x} | uptime 1234 ms")
+
+
+_DIAG_WATCHDOG = _diag(boot="watchdog")
+_DIAG_TRIP = _diag(trip_reason=6, trip_mask=0x0020)
+_DIAG_TRIP_NOT_S6A = _diag(trip_reason=2, trip_mask=0x0002)
+_DIAG_NO_TRIP = _diag()
+_OVERLAP_ERROR = "Pico refused: update would overwrite its running flat image; reflash via SWD"
 
 
 class Otp01Test(unittest.TestCase):
@@ -930,7 +942,45 @@ class Otp01Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
+    def test_running_image_overlap_refusal_is_inconclusive_not_fail(self):
+        """The bench Pico runs a flat image with no two-slot bootloader, so
+        firmware refuses any overlapping write (state 9). That is correct
+        behaviour, not an OTA failure -- it must never read FAIL."""
+        client = _FakePicoOtaClient(phases=["failed"], last_error=_OVERLAP_ERROR)
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_otp01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+
+    def test_other_failed_phase_still_fails(self):
+        client = _FakePicoOtaClient(phases=["failed"], last_error="Pico reported FAILED after UPDATE_END: crc")
+        result = C._case_otp01(self._ctx(ota_http_client=client))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_real_describe_text_watchdog_is_detected(self):
+        """Negative test for the boot-reason parser against the REAL
+        describe() spelling ("boot reason: watchdog"), not an invented one."""
+        self.assertEqual(J.parse_diag_boot_reason(_DIAG_WATCHDOG), "watchdog")
+        self.assertEqual(J.parse_diag_boot_reason(_DIAG_NO_TRIP), "power-on")
+        self.assertIsNone(J.parse_diag_boot_reason("no such field here"))
+
+    def test_multi_bit_boot_reason_still_detects_watchdog(self):
+        ctx = self._ctx(ota_http_client=_FakePicoOtaClient(phases=["done"]))
+        ctx["srv"] = _FakeSafetySrv(fw_text=_FW_TEXT_B, diag_text=_diag(boot="watchdog+brownout"))
+        self.assertEqual(C._case_otp01(ctx).verdict, Verdict.FAIL)
+
+
 class Otp02Test(unittest.TestCase):
+    def test_inconclusive_when_otp01_relay_did_not_apply(self):
+        ctx = {
+            "srv": _FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_NO_TRIP),
+            "host": "10.0.0.5", "ap_password": "secret",
+            "ota_http_client": _FakePicoOtaClient(),
+            "_otp01": {"commit_before": "aaa1111", "phase": "failed"},
+        }
+        result = C._case_otp02(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertFalse(ctx["ota_http_client"].rollback_called)
+
     def test_not_run_without_otp01(self):
         result = C._case_otp02({})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
@@ -941,7 +991,7 @@ class Otp02Test(unittest.TestCase):
             "srv": _FakeSafetySrv(fw_text=_FW_TEXT_B, diag_text=_DIAG_NO_TRIP),
             "host": "10.0.0.5", "ap_password": "secret",
             "ota_http_client": client,
-            "_otp01": {"commit_before": "bbb2222", "commit_after": "aaa1111"},
+            "_otp01": {"commit_before": "bbb2222", "commit_after": "aaa1111", "phase": "done"},
             "_now": lambda: 0.0, "_sleep": lambda s: None,
             "_commissioning_fn": lambda: {"same": True},
         }
@@ -955,7 +1005,7 @@ class Otp02Test(unittest.TestCase):
             "srv": _FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_NO_TRIP),
             "host": "10.0.0.5", "ap_password": "secret",
             "ota_http_client": client,
-            "_otp01": {"commit_before": "bbb2222", "commit_after": "aaa1111"},
+            "_otp01": {"commit_before": "bbb2222", "commit_after": "aaa1111", "phase": "done"},
             "_now": lambda: 0.0, "_sleep": lambda s: None,
             "_commissioning_fn": lambda: {"same": True},
         }
@@ -963,7 +1013,7 @@ class Otp02Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_skips_without_ap_password(self):
-        ctx = {"_otp01": {"commit_before": "x"}, "ap_password": None}
+        ctx = {"_otp01": {"commit_before": "x", "phase": "done"}, "ap_password": None}
         result = C._case_otp02(ctx)
         self.assertEqual(result.verdict, Verdict.SKIP)
 
@@ -1013,6 +1063,12 @@ class Otp03Test(unittest.TestCase):
         result = C._case_otp03(self._ctx(ota_pico_corrupt_image_path=None))
         self.assertEqual(result.verdict, Verdict.SKIP)
 
+    def test_overlap_refusal_is_inconclusive(self):
+        client = _FakePicoOtaClient(push_result=_OtaPushResult(True, 200), phases=["failed"],
+                                     last_error=_OVERLAP_ERROR)
+        result = C._case_otp03(self._ctx(ota_http_client=client))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+
 
 class Otp04Test(unittest.TestCase):
     def test_not_run_without_otp01(self):
@@ -1020,7 +1076,7 @@ class Otp04Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
 
     def test_clean_relay_passes(self):
-        ctx = {"_otp01": {"boot_reason": "power_on", "last_error": None}}
+        ctx = {"_otp01": {"boot_reason": "power-on", "last_error": None}}
         result = C._case_otp04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
@@ -1030,9 +1086,14 @@ class Otp04Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_last_error_signature_fails(self):
-        ctx = {"_otp01": {"boot_reason": "power_on", "last_error": "peer did not confirm RECEIVING in time"}}
+        ctx = {"_otp01": {"boot_reason": "power-on", "last_error": "peer did not confirm RECEIVING in time"}}
         result = C._case_otp04(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_overlap_refusal_is_inconclusive(self):
+        ctx = {"_otp01": {"boot_reason": "power-on", "last_error": _OVERLAP_ERROR}}
+        result = C._case_otp04(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
 
 
 class Otp05Test(unittest.TestCase):
@@ -1064,6 +1125,33 @@ class Otp05Test(unittest.TestCase):
         ctx = self._ctx(ota_http_client=client)
         result = C._case_otp05(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_skips_when_not_idle_and_never_pushes(self):
+        client = _FakePicoOtaClient(push_result=_OtaPushResult(False, 409))
+        ctx = self._ctx(ota_http_client=client,
+                        srv=_FakeSafetySrv(state_name="running", fw_text=_FW_TEXT_A, diag_text=_DIAG_TRIP))
+        result = C._case_otp05(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(client.pushed, [])
+
+    def test_skips_when_interlock_not_ok_and_never_pushes(self):
+        client = _FakePicoOtaClient(push_result=_OtaPushResult(False, 409), interlock_ok=False,
+                                     interlock_reason="a trip is pending")
+        ctx = self._ctx(ota_http_client=client)
+        result = C._case_otp05(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(client.pushed, [])
+
+    def test_non_s6a_trip_is_never_cleared(self):
+        """Plan section 6 rule 5: only a confirmed S6a (trip_reason 6,
+        trip_mask 0x0020) may be cleared -- any other latched trip stops
+        the run for a human."""
+        cleared = {"v": False}
+        ctx = self._ctx(srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_TRIP_NOT_S6A),
+                        _clear_trip_fn=lambda: cleared.__setitem__("v", True))
+        result = C._case_otp05(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertFalse(cleared["v"])
 
     def test_skips_without_image_path(self):
         result = C._case_otp05(self._ctx(ota_pico_image_path=None))

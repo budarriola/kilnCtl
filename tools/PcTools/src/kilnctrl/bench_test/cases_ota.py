@@ -909,16 +909,32 @@ def _pico_boot_id(ctx: dict) -> Optional[int]:
     return J.parse_fw_version_boot_id(fw_text)
 
 
-def _pico_trip_pending(ctx: dict) -> Optional[bool]:
+def _pico_trip_reason_mask(ctx: dict) -> "tuple[Optional[int], Optional[int]]":
     srv = _srv(ctx)
     try:
         diag_text = srv.safety_get_diag()
     except Exception:
-        return None
-    reason = J.parse_trip_reason(diag_text)
+        return None, None
+    return J.parse_trip_reason(diag_text), J.parse_trip_mask(diag_text)
+
+
+def _pico_trip_pending(ctx: dict) -> Optional[bool]:
+    reason, _mask = _pico_trip_reason_mask(ctx)
     if reason is None:
         return None
     return reason != 0
+
+
+def _trip_is_the_clearable_s6a(ctx: dict) -> bool:
+    """Plan section 6 rule 5: a trip may only be cleared once it is
+    confirmed to be S6a and nothing else -- `trip_reason == 6` with
+    `trip_mask == 1 << (trip_reason - 1)` (0x0020) and no other bit. Any
+    other latched trip stops the run for a human; the harness leaves it
+    alone. Anything unreadable is treated as "do not clear"."""
+    reason, mask = _pico_trip_reason_mask(ctx)
+    if reason != 6 or mask is None:
+        return False
+    return mask == J.safety_trip_mask_for_reason(reason)
 
 
 def _commissioning(ctx: dict, host: str):
@@ -1006,7 +1022,10 @@ def _case_otp01(ctx: dict) -> CaseResult:
         "phase": phase, "last_error": last_error, "boot_reason": boot_reason,
         "boot_id_after": boot_id_after,
     }
-    return J.judge_ota_pico_push_applied(phase, commit_after, expected_commit, boot_reason, commissioning_identical)
+    return J.judge_ota_pico_push_applied(
+        phase, commit_after, expected_commit, boot_reason, commissioning_identical,
+        last_error=last_error,
+    )
 
 
 def _case_otp02(ctx: dict) -> CaseResult:
@@ -1017,6 +1036,16 @@ def _case_otp02(ctx: dict) -> CaseResult:
     pre = ctx.get("_otp01")
     if not pre:
         return CaseResult(Verdict.NOT_RUN, reason="OT-P01 did not run in this session")
+    # Never ask a Pico to roll back a slot it was never updated into: on a
+    # flat, bootloader-less bench unit OT-P01's relay ends at the
+    # running-image-overlap refusal (state 9) and there is no previous slot
+    # to revert to. Belt-and-braces with the runner's own depends_on gate,
+    # which only runs this case when OT-P01 read PASS.
+    if pre.get("phase") != "done":
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"OT-P01's relay ended at phase={pre.get('phase')!r}, so there is no new slot to roll back from",
+        )
 
     idle, reason = _is_idle(ctx)
     if not idle:
@@ -1090,18 +1119,21 @@ def _case_otp03(ctx: dict) -> CaseResult:
 
     ota = _ota_client(ctx)
     refused_or_failed = None
+    last_error = None
     try:
         push = ota.push_pico_image(host, image_path, ap_password)
         if not push.ok:
             refused_or_failed = True
         else:
-            phase, _last_error = _poll_pico_phase(ctx, host)
+            phase, last_error = _poll_pico_phase(ctx, host)
             refused_or_failed = phase == "failed"
     except Exception:
         refused_or_failed = True  # a raised transport/HMAC/CRC error is also a refusal
 
     commit_after, boot_reason = _pico_commit_and_boot_reason(ctx)
-    return J.judge_ota_pico_bad_image_fallback(refused_or_failed, commit_before, commit_after, boot_reason)
+    return J.judge_ota_pico_bad_image_fallback(
+        refused_or_failed, commit_before, commit_after, boot_reason, last_error=last_error,
+    )
 
 
 def _case_otp04(ctx: dict) -> CaseResult:
@@ -1119,14 +1151,26 @@ def _case_otp05(ctx: dict) -> CaseResult:
     refused, with the running commit left exactly unchanged. Requires a
     trip already pending (e.g. FL-11's S6a, before it is cleared) --
     INCONCLUSIVE if none is, per judgments.judge_ota_pico_refused_with_
-    trip_pending. The harness clears the trip afterward regardless of
-    outcome (plan section 6), via the same clear-trip path SP-08/SP-09
-    use, injectable as ctx['_clear_trip_fn'] for testing."""
+    trip_pending. The harness clears the trip afterward ONLY when it is
+    confirmed to be S6a and nothing else (plan section 6 rule 5), via the
+    same clear-trip path SP-08/SP-09 use, injectable as
+    ctx['_clear_trip_fn'] for testing."""
     host = ctx.get("host")
     ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_pico_image_path")
     if not ap_password or not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_pico_image_path/ap_password not provided for OT-P05")
+
+    # Plan section 6 rule 1 applies here exactly as to every other OTA
+    # action in this module: executor idle and GET /api/ota/interlock ok,
+    # checked immediately before the push, never assumed from the fact a
+    # trip is latched.
+    idle, ireason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=ireason)
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
     trip_pending = _pico_trip_pending(ctx)
     commit_before, _ = _pico_commit_and_boot_reason(ctx)
@@ -1143,7 +1187,7 @@ def _case_otp05(ctx: dict) -> CaseResult:
     commit_after, _ = _pico_commit_and_boot_reason(ctx)
     result = J.judge_ota_pico_refused_with_trip_pending(trip_pending, push_refused, commit_before, commit_after)
 
-    if trip_pending:
+    if trip_pending and _trip_is_the_clearable_s6a(ctx):
         clear_fn = ctx.get("_clear_trip_fn") or (lambda: _default_clear_trip_fn(ctx))
         try:
             clear_fn()
