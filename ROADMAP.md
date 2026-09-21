@@ -3000,6 +3000,13 @@ Owner instruction, 2026-09-21.
   whole-form Save posts alongside the edited one, snapshotted before the
   first Save and re-checked after the restore, since `restore_from_field`
   only ever puts the edited field back (95 tests).
+  **Live run 2026-09-21 at 33124aa8 (fa8b449b):** W22 PASS, W38 PASS, W42
+  FAIL. Root cause (docs/audits/w42_kiln_config_create_2026-09-21.md): the
+  runner generated a 38-character throwaway config name against firmware's
+  23-character `KILN_CFG_NAME_MAX_LEN`, so the create POST was correctly
+  refused 400 and the runner only saw the generic "write did not land";
+  page and firmware behave correctly. Runner-side fix (shorter name, real
+  POST status reported) in flight; W42 stays FAIL until re-run live.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at
