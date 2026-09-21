@@ -331,6 +331,83 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = None) -> str:
+    """Clear a quarantined kiln_configs store (POST
+    /api/kiln_configs/quarantine_clear, kiln_cfg_http.c's quarantine_clear_
+    post_handler(), ROUTE_TIER_ADMIN) -- the one way out short of a full
+    ``factory_reset(scope=KILN)`` erasing the whole kiln_nvs partition. The
+    store quarantines itself on boot (kiln_cfg_store.c's set_quarantine())
+    if the persisted blob is the wrong size for any known schema version;
+    every save/clone/rename/delete on saved kiln configs is refused until
+    this runs. The board's LIVE zones config is unaffected either way --
+    only the saved-slots store is quarantined.
+
+    Always checks status FIRST: fetches GET /api/kiln_configs (a sanity
+    read -- confirms the board answers at all) and then the quarantine
+    status itself via a non-mutating probe (kiln_configs_quarantine_http_
+    client.get_quarantine_status(), which POSTs with no confirm field --
+    the route's own ordering answers that without changing anything). If
+    the store is not quarantined, this returns that and does nothing else.
+
+    REFUSES UNLESS ``confirm=True`` -- without it, this is a dry run: it
+    reports whether the store is quarantined and what it WOULD clear, but
+    sends no confirming POST. Same rule crash_report_ack()/safety_set_rate_
+    guard() already use.
+
+    With ``confirm=True``, POSTs confirm=1 (discarding whatever kiln config
+    bytes could not be read and starting a fresh, empty store), then
+    re-probes quarantine status and FAILS LOUDLY (does not report success)
+    if the store still reads quarantined afterward -- same "do not trust an
+    ok:true POST reply alone" rule this codebase's other write tools use
+    (see CLAUDE.md's boot_guard write-lies section).
+
+    Host is auto-resolved the same way get_heap_status()/crash_report_ack()
+    do; pass `host` explicitly for kilnctl.local or a board reachable only
+    from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as crash_report_ack()
+    from . import kiln_configs_quarantine_http_client as qc
+
+    resolved = _ota_resolve_host(host)
+    try:
+        listing = qc.get_kiln_configs_list(resolved)
+    except qc.KilnConfigsQuarantineHttpError as exc:
+        return f"error: could not read GET /api/kiln_configs (host={resolved}): {exc}"
+    count = len(listing.get("configs", [])) if isinstance(listing, dict) else 0
+
+    try:
+        quarantined, detail = qc.get_quarantine_status(resolved)
+    except qc.KilnConfigsQuarantineHttpError as exc:
+        return f"error: could not read quarantine status (host={resolved}): {exc}"
+
+    if not quarantined:
+        return (f"not quarantined, nothing to do -- {count} saved config(s) visible "
+                f"(host={resolved}): {detail}")
+
+    if not confirm:
+        return (f"DRY RUN (pass confirm=True to actually clear) -- store IS quarantined: "
+                f"{detail} ({count} saved config(s) currently visible, host={resolved})")
+
+    try:
+        result = qc.post_quarantine_clear(resolved)
+    except qc.KilnConfigsQuarantineHttpError as exc:
+        return f"error clearing quarantine over HTTP (host={resolved}): {exc}"
+
+    try:
+        after_quarantined, after_detail = qc.get_quarantine_status(resolved)
+    except qc.KilnConfigsQuarantineHttpError as exc:
+        return (f"error: POST /api/kiln_configs/quarantine_clear returned {result!r}, but the "
+                f"confirming re-probe failed (host={resolved}): {exc} -- quarantine state "
+                f"UNKNOWN, re-check before trusting this")
+
+    if not after_quarantined:
+        return f"ok - quarantine cleared and confirmed by read-back: {result!r} (host={resolved})"
+    return (f"FAILED: POST /api/kiln_configs/quarantine_clear returned {result!r}, but the "
+            f"re-probed store still reads quarantined ({after_detail}) -- host={resolved}. Do "
+            f"not trust this as cleared.")
+
+
+@_srv._tool()
 def get_readiness(host: Optional[str] = None) -> str:
     """READ-ONLY: fetch and render the commissioning checklist from GET
     /api/readiness (readiness_http.c's api_readiness_get_handler(), the

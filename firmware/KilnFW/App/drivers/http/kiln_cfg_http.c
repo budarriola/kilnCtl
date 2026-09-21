@@ -624,6 +624,60 @@ static esp_err_t import_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
 }
 
+/* ---- POST /api/kiln_configs/quarantine_clear -- confirm=1 -----------------
+ *
+ * The one way out of a quarantined store (kiln_cfg_store.c's
+ * set_quarantine()/kiln_cfg_store_is_quarantined()): every save/clone/
+ * rename/delete is refused until this runs. Discards whatever bytes could
+ * not be read and starts a fresh, empty store -- kiln_cfg_store_quarantine_
+ * clear()'s own doc comment. Requires an explicit confirm=1 form field (400
+ * without it, mirroring every other confirm-gated write in this codebase);
+ * a store that is not actually quarantined is a 409, not a silent no-op,
+ * since a caller expecting to clear something should know nothing needed
+ * clearing. The quarantine check runs BEFORE the confirm gate, deliberately
+ * -- a POST with no/blank confirm still distinguishes "409, not quarantined,
+ * nothing to clear" from "400, quarantined, confirm=1 required", so a
+ * caller (a PC-side status probe, in particular) can learn the store's
+ * quarantine state with a non-mutating request instead of having to guess
+ * or duplicate kiln_cfg_store_is_quarantined()'s own logic client-side. */
+static esp_err_t quarantine_clear_post_handler(httpd_req_t *req)
+{
+    char body[KILN_CFG_BODY_MAX];
+    if (!read_small_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
+        return ESP_OK;
+    }
+
+    char quarantine_reason[128];
+    quarantine_reason[0] = '\0';
+    if (!kiln_cfg_store_is_quarantined(quarantine_reason, sizeof(quarantine_reason))) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "kiln config store is not quarantined -- nothing to clear");
+    }
+
+    char confirm_val[4];
+    int confirm_len = http_form_find_field(body, "confirm", confirm_val, sizeof(confirm_val));
+    if (confirm_len <= 0 || confirm_val[0] != '1') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "confirm=1 required to discard the quarantined store");
+        return ESP_OK;
+    }
+
+    char reason[128];
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_quarantine_clear(true, reason, sizeof(reason));
+    if (!ok) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason[0] ? reason : "quarantine clear failed");
+        return ESP_OK;
+    }
+
+    char resp[256];
+    char reason_escaped[224];
+    json_escape(quarantine_reason, reason_escaped, sizeof(reason_escaped));
+    int len = snprintf(resp, sizeof(resp), "{\"ok\":true,\"discarded_reason\":\"%s\"}", reason_escaped);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
 esp_err_t kiln_cfg_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -662,9 +716,13 @@ esp_err_t kiln_cfg_http_start(void)
     static const httpd_uri_t import_uri = {
         .uri = "/api/kiln_configs/import", .method = HTTP_POST, .handler = import_post_handler,
     };
+    static const httpd_uri_t quarantine_clear_uri = {
+        .uri = "/api/kiln_configs/quarantine_clear", .method = HTTP_POST, .handler = quarantine_clear_post_handler,
+    };
 
     const httpd_uri_t *uris[] = { &page_uri,   &list_uri,   &save_uri,   &clone_uri,  &apply_uri,
-                                 &apply_status_uri, &delete_uri, &rename_uri, &export_uri, &import_uri };
+                                 &apply_status_uri, &delete_uri, &rename_uri, &export_uri, &import_uri,
+                                 &quarantine_clear_uri };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t err = kiln_http_register(server, uris[i]);
         if (err != ESP_OK) {

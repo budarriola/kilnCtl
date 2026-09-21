@@ -22,9 +22,16 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (176 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `web_auth_setup` was
-added -- an MCP tool that bootstraps the board's administrator web credential
+the rest behind a search facade (177 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `kiln_configs_quarantine_clear`
+was added -- an MCP tool wrapping the new `POST /api/kiln_configs/quarantine_clear`
+route (`kiln_cfg_http.c`, ROUTE_TIER_ADMIN) that discards a wrong-size-blob
+quarantined kiln_configs store and starts a fresh, empty one -- the only
+alternative today to a full `factory_reset(scope=KILN)`. It reads
+`GET /api/kiln_configs` and a non-mutating status probe on the same route
+first, refuses to POST unless `confirm=True`, and re-probes afterward,
+failing loud if the store still reads quarantined. The one before it was
+`web_auth_setup`, same day -- an MCP tool that bootstraps the board's administrator web credential
 and turns web auth on (POST /api/auth/bootstrap_password or
 POST /api/auth/security's `set_web_password`/`set_policy`, matched against
 security_backend_web_auth.c/security_http.c), reading

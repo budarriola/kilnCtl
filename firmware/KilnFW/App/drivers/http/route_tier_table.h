@@ -233,6 +233,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/kiln_configs/import", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/kiln_configs/rename", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/kiln_configs/save", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* The one way out of a quarantined store (kiln_cfg_store.c's
+     * set_quarantine()) -- discards whatever could not be read and starts a
+     * fresh, empty store. Same tier as the other mutating kiln_configs
+     * routes above. */
+    ROUTE_TIER("/api/kiln_configs/quarantine_clear", HTTP_POST, ROUTE_TIER_ADMIN),
 
     /* Safety and calibration */
     ROUTE_TIER("/api/safety/clear_trip", HTTP_POST, ROUTE_TIER_ADMIN),
