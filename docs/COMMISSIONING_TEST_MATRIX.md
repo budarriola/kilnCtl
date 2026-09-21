@@ -152,6 +152,24 @@ stands; the DECLINE was this run's own narrower reading of a separate
 next run must be told these six rows are the carve-out** the "Authorize
 all" instruction meant to exempt from that clause.
 
+**2026-09-21 M18 backend Class C carve-out, OTA rows (C7/C8/C23/C24):** the
+next run promised above -- explicitly told these four rows are the
+carve-out, with the "no reflashing/OTA" and "never reset the Pico unbidden"
+rules overridden by name for this run only. Built KilnCtrl.bin from a clean
+worktree at origin/main (80239cd5) and ran all four: C7 (`ota_update_esp`)
+FAILED with `ESP_ERR_OTA_PARTITION_CONFLICT` -- a genuine property of the
+single-slot partition table (only one `ota_x` slot, board runs it, ESP-IDF
+refuses self-overwrite), not a setup error; C8 (`ota_update_pico`) REFUSED
+exactly as predicted, state 9 `REFUSED_RUNNING_IMAGE_OVERLAP`; C23
+(`ota_rollback_esp`) FAILED 409 "no previous valid image" since C7 never
+wrote one, `control_get_zones` confirmed gains stayed tuned; C24
+(`ota_rollback_pico`) confirmed refused by unchanged `boot_id` (fire-and-
+forget call). No board state changed by any of the four; no flash/restore
+pass was needed. C21/C22/C26 remain the earlier run's carve-out, not
+re-attempted here (out of this run's assigned scope). Full detail in
+`docs/BENCH_TEST_LOG.md`'s "M18 backend Class C carve-out: OTA rows"
+section.
+
 ---
 
 ## Page-by-page inventory
@@ -333,13 +351,13 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load / interlock status | `GET /api/ota/interlock`, `GET /api/ota/esp/status`, `GET /api/ota/pico/status` | ADMIN / OPEN(esp status) / ADMIN(pico status) | `ota_status` | -- (no LCD OTA UI) | Testable | PASS 2026-09-21 (A35; web /ota page load) |
-| Update ESP (`espUpdateBtn`) | `GET /api/ota/challenge` then `POST /api/ota/esp` | OPEN then ADMIN | `ota_get_challenge`, `ota_update_esp` | -- | Testable, but CLAUDE.md's sanctioned path for a real flash is `flash_firmware()` (JTAG/OpenOCD) -- this route is the Wi-Fi OTA path, a different mechanism, both worth exercising | |
-| Roll back ESP (`espRollbackBtn`) | `POST /api/ota/esp/rollback` | ADMIN | `ota_rollback_esp` | -- | Testable; mind the `zones_cfg` schema-bump rollback hazard in CLAUDE.md | |
+| Update ESP (`espUpdateBtn`) | `GET /api/ota/challenge` then `POST /api/ota/esp` | OPEN then ADMIN | `ota_get_challenge`, `ota_update_esp` | -- | Testable, but CLAUDE.md's sanctioned path for a real flash is `flash_firmware()` (JTAG/OpenOCD) -- this route is the Wi-Fi OTA path, a different mechanism, both worth exercising | FAIL 2026-09-21 (C7, M18 carve-out: `esp_ota_begin failed: ESP_ERR_OTA_PARTITION_CONFLICT`, HTTP 500 -- the single-slot partition table has only one `ota_x` slot (`app`), and the board is running it, so `esp_ota_get_next_update_partition()` returns the running partition itself and ESP-IDF refuses to begin; every Wi-Fi OTA will hit this while running `app`. No reboot, `fw_build` unchanged) |
+| Roll back ESP (`espRollbackBtn`) | `POST /api/ota/esp/rollback` | ADMIN | `ota_rollback_esp` | -- | Testable; mind the `zones_cfg` schema-bump rollback hazard in CLAUDE.md | FAIL 2026-09-21 (C23, M18 carve-out: HTTP 409 "no previous valid image to roll back to", expected since C7 never wrote an image; `control_get_zones` read back unchanged/tuned) |
 | Exit recovery mode & reboot now (`recoveryExitBtn`) | `POST /api/ota/esp/recovery_exit` | ADMIN | `ota_recovery_exit_esp` | -- | Testable only while actually in recovery mode | |
 | boot_guard_reset (fired automatically by `flash_firmware()`, no dedicated button) | `POST /api/ota/esp/boot_guard_reset` | ADMIN | wired into `flash_firmware()`'s `reset_boot_guard` path, no standalone MCP tool | -- | Testable | BLOCKED 2026-09-21 (B32: only reachable via `flash_firmware()`'s post-verify path; no reflash authorized this session) |
 | boot_guard status | `GET /api/boot_guard` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A36) |
-| Update Pico (`picoUpdateBtn`) | `POST /api/ota/pico` | ADMIN | `ota_update_pico` | -- | Testable; watch for the erase-watchdog-reset class, fixed per `project_pico_ota_erase_watchdog_resets_safety_processor` | |
-| Roll back Pico (`picoRollbackBtn`) | `POST /api/ota/pico/rollback` | ADMIN | `ota_rollback_pico` | -- | Testable | |
+| Update Pico (`picoUpdateBtn`) | `POST /api/ota/pico` | ADMIN | `ota_update_pico` | -- | Testable; watch for the erase-watchdog-reset class, fixed per `project_pico_ota_erase_watchdog_resets_safety_processor` | REFUSED (expected) 2026-09-21 (C8, M18 carve-out: staged/relayed 119428 B ok, then `ota_status` reported `SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP` (state 9) -- bench Pico is a flat image, no bootloader slots; no trip, no reboot) |
+| Roll back Pico (`picoRollbackBtn`) | `POST /api/ota/pico/rollback` | ADMIN | `ota_rollback_pico` | -- | Testable | REFUSED (expected) 2026-09-21 (C24, M18 carve-out: fire-and-forget call, confirmed refused by absence of effect -- `boot_id` unchanged before/after, link stayed up, no trip; consistent with SaftyFW's own `KILNLINK_ROLLBACK_RESULT_REASON_NO_METADATA` refusal on a flat/no-bootloader image) |
 | Pico rollback status | `GET /api/ota/pico/rollback/status` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A38) |
 | Partition table read (support for above, no button) | `GET /api/partitions` | ADMIN | `debug_check_partition_table` | -- | Testable | PASS 2026-09-21 (A37) |
 

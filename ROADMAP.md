@@ -142,6 +142,23 @@
 >   detail: `docs/BENCH_TEST_LOG.md`'s "Backend reruns after reflash to
 >   7098b2ee (M18)" section; matrix rows annotated in
 >   `docs/COMMISSIONING_TEST_MATRIX.md`.
+> - **M18 backend Class C carve-out, OTA rows, 2026-09-21**: the promised
+>   carve-out run for C7/C8/C23/C24, against ESP `7098b2ee` / Pico stamp
+>   `987050f6`. Built KilnCtrl.bin + SaftyFW slot bins from a clean worktree
+>   at origin/main (`80239cd5`). C7 (`ota_update_esp`) FAILED
+>   `ESP_ERR_OTA_PARTITION_CONFLICT` — the single-slot partition table has
+>   only one `ota_x` slot (`app`), the board runs it, and ESP-IDF refuses
+>   self-overwrite; a structural property of this OTA design, not a one-off.
+>   C8 (`ota_update_pico`) REFUSED exactly as predicted, state 9
+>   `REFUSED_RUNNING_IMAGE_OVERLAP` (flat Pico image, no bootloader slot).
+>   C23 (`ota_rollback_esp`) FAILED 409 "no previous valid image" (expected,
+>   C7 wrote nothing); `control_get_zones` confirmed gains stayed tuned. C24
+>   (`ota_rollback_pico`) confirmed refused by unchanged `boot_id`
+>   (fire-and-forget call). No board state changed by any of the four rows;
+>   no restore/reflash pass needed. Full detail:
+>   `docs/BENCH_TEST_LOG.md`'s "M18 backend Class C carve-out: OTA rows"
+>   section; matrix/runbook rows annotated in
+>   `docs/COMMISSIONING_TEST_MATRIX.md` / `docs/COMMISSIONING_BACKEND_RUNBOOK.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
