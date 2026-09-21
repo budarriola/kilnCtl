@@ -137,25 +137,30 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     the HMAC KEY and the context string as the message -- this derivation is
     what keeps the literal Wi-Fi/AP password out of the value that's ever
     compared or sent). `context` must be exactly "esp", "pico",
-    "esp-rollback", "recovery", "boot-guard-reset", "sw-reset", or
-    "factory-reset" (each is its own context, not a reuse of "esp" -- see
-    ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a
-    plain-update MAC must not double as a rollback authorization, and
-    ota_state.h's doc comment on OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for the
-    same reasoning applied there; "sw-reset" is OTA_HTTP_CONTEXT_SW_RESET,
+    "esp-rollback", "pico-rollback", "recovery", "boot-guard-reset",
+    "sw-reset", or "factory-reset" (each is its own context, not a reuse of
+    "esp" -- see ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK
+    for why a plain-update MAC must not double as a rollback authorization,
+    and ota_state.h's doc comment on OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for
+    the same reasoning applied there; "sw-reset" is OTA_HTTP_CONTEXT_SW_RESET,
     POST /api/sw_reset -- see sw_reset() below. "factory-reset" is
     OTA_HTTP_CONTEXT_FACTORY_RESET (ota_state.h/ota_http.c's context table),
     used by BOTH POST /api/factory_reset (factory_reset.c) and POST
     /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
     handler() deliberately reuses this context rather than minting its own
     -- see that file's own header comment: "a MAC signed for 'factory-reset'
-    already applies here just as directly").
+    already applies here just as directly"). "pico-rollback" is
+    OTA_HTTP_CONTEXT_PICO_ROLLBACK, POST /api/ota/pico/rollback
+    (ota_http.h's doc comment: NOT a reuse of "pico" or "esp-rollback" --
+    the same allow-list-omission tooling gap CLAUDE.md documents for
+    OTA_HTTP_CONTEXT_FACTORY_RESET, found here while wiring up
+    rollback_pico() below rather than on the bench).
     """
-    if context not in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset", "sw-reset",
-                        "factory-reset"):
+    if context not in ("esp", "pico", "esp-rollback", "pico-rollback", "recovery",
+                        "boot-guard-reset", "sw-reset", "factory-reset"):
         raise ValueError(
-            f"context must be 'esp', 'pico', 'esp-rollback', 'recovery', 'boot-guard-reset', "
-            f"'sw-reset', or 'factory-reset', got {context!r}")
+            f"context must be 'esp', 'pico', 'esp-rollback', 'pico-rollback', "
+            f"'recovery', 'boot-guard-reset', 'sw-reset', or 'factory-reset', got {context!r}")
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -321,6 +326,89 @@ def get_pico_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
         return json.loads(body_text)
     except Exception as exc:
         raise OtaHttpError(f"pico status response was not valid JSON: {body_text!r}") from exc
+
+
+def rollback_pico(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/ota/pico/rollback -- explicit "revert the safety
+    processor's bootloader to its previous slot right now"
+    (App/drivers/http/ota_http_pico.c's ota_pico_rollback_post_handler()).
+    Like push_pico_image(), this is fire-and-forget at Wi-Fi speed: the
+    handler starts a background task (ota_pico_rollback_task()) that does
+    the actual isolated-link work and returns 202 Accepted,
+    {"ok":true,"status":"rollback_started"} as soon as that task is
+    launched -- it does NOT wait for the relay to the RP2040 to finish.
+    Poll get_pico_rollback_status() afterward for the real outcome.
+
+    Refused the same way a Pico push is: wrong/missing auth (403), an
+    unmet interlock (409 -- not idle, a trip pending, a concurrent
+    update/rollback already holding the mutex), all raised as OtaHttpError
+    with the board's plain-text reason in `.detail`.
+
+    `ap_password`: same AP-password-derived HMAC scheme as rollback_esp()/
+    push_pico_image() -- see derive_mac()'s doc comment. Uses the
+    "pico-rollback" context, a distinct signature from both the plain
+    "pico" push MAC and the ESP's own "esp-rollback" MAC (ota_http.h's
+    OTA_HTTP_CONTEXT_PICO_ROLLBACK doc comment: reverting one processor
+    must not double as authorization to revert the other).
+    """
+    nonce = get_challenge(host, timeout)
+    mac_hex = derive_mac(ap_password, nonce, "pico-rollback").hex()
+
+    req = urllib.request.Request(
+        _url(host, "/api/ota/pico/rollback"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            "X-Ota-Mac": mac_hex,
+        },
+    )
+    log.info("Pico OTA rollback requested: host=%s", host)
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("Pico OTA rollback refused: host=%s status=%s detail=%s", host, status_code, detail)
+        raise OtaHttpError(f"/api/ota/pico/rollback refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        log.warning("Pico OTA rollback failed (unreachable): host=%s detail=%s", host, detail)
+        raise OtaHttpError(f"/api/ota/pico/rollback unreachable: {detail}") from exc
+
+    try:
+        body = json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/ota/pico/rollback response was not valid JSON: {body_text!r}") from exc
+    log.info("Pico OTA rollback accepted: host=%s body=%s", host, body)
+    return body
+
+
+def get_pico_rollback_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/ota/pico/rollback/status -- unauthenticated poll-back for
+    the background rollback task (ota_pico_rollback_task(),
+    ota_pico_rollback_status_get_handler()). Returns
+    {"ok": bool, "status": "idle"|"pending"|"rebooting"|"link_down"|
+    "send_failed"|"refused"|"unknown", "detail": "..."} straight from the
+    board (ota_http_pico_rollback_format_body()) -- "rebooting" is the only
+    success outcome and is reported only once BOTH the peer's boot_id and
+    its build identity were observed to change, i.e. a real reboot into a
+    different image was actually seen on the wire; "refused" also carries
+    a numeric "reason_code" mirroring KILNLINK_ROLLBACK_RESULT_REASON_*
+    (kilnlink_rollback_result.h)."""
+    req = urllib.request.Request(_url(host, "/api/ota/pico/rollback/status"), method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"pico rollback status request failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"pico rollback status response was not valid JSON: {body_text!r}") from exc
 
 
 def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:

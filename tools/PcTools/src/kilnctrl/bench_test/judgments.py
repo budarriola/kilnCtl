@@ -1411,6 +1411,200 @@ def judge_ota_partitions_state(running: Optional[str], expected_running: str) ->
             observed=observed,
         )
     return CaseResult(Verdict.PASS, observed=observed)
+
+
+# ---------------------------------------------------------------------------
+# OT-P* -- Pico OTA (plan doc section 3.4, Wave 4). Unlike the ESP (OT-E*),
+# the Pico has no partition/fw_build HTTP surface (TODO.md 9.6: "most of it
+# does NOT exist over this link") -- identity comes from the ESP's cached
+# GET_FW_VERSION reply (safety_get_fw_version()'s describe() text: commit,
+# boot_id) and boot-reason-not-watchdog comes from safety_get_diag()'s text,
+# the same "parse the .describe()/.text report" convention SP-08/SP-09
+# (cases_safety.py) already use for trip_reason/trip_mask.
+# ---------------------------------------------------------------------------
+
+def parse_fw_version_commit(fw_version_text: str) -> "str | None":
+    """Pulls the commit hash out of SafetyFwVersion.describe()'s
+    "Pico build: <commit>[ (dirty)] built <time>, boot_id=..." line. None
+    for the "unknown (Pico has not reported a build identity)" case --
+    never an empty string standing in for "no answer", matching
+    SafetyFwVersion's own "empty commit is unknown" convention."""
+    if "unknown (Pico has not reported" in fw_version_text:
+        return None
+    m = re.search(r"Pico build:\s*(\S+?)(?:\s*\(dirty\))?\s+built\b", fw_version_text)
+    return m.group(1) if m else None
+
+
+def parse_fw_version_boot_id(fw_version_text: str) -> "int | None":
+    m = re.search(r"boot_id\s*=\s*(\d+)", fw_version_text)
+    return int(m.group(1)) if m else None
+
+
+def parse_diag_boot_reason(diag_text: str) -> "str | None":
+    """SP/OT-P shared: whatever token SafetyDiag.describe() prints for its
+    boot reason field. None if the diag text carries no such field at all
+    (older firmware / field not populated) -- distinct from finding one
+    that happens to read "watchdog"."""
+    m = re.search(r"boot_reason\s*[:=]?\s*(\w+)", diag_text)
+    return m.group(1) if m else None
+
+
+def judge_ota_pico_push_applied(
+    phase: Optional[str],
+    commit_after: "Optional[str]",
+    expected_commit: "Optional[str]",
+    boot_reason: "Optional[str]",
+    commissioning_identical: Optional[bool],
+) -> CaseResult:
+    """OT-P01: a Pico image relayed into the inactive slot must reach
+    ``phase == "done"``, come back up reporting the pushed image's commit
+    via GET_FW_VERSION, never report a watchdog boot reason (the
+    2026-09-18 erase-time watchdog defect's signature -- see OT-P04's own
+    judge for the sharper, defect-specific version of this same check),
+    and leave the commissioning config byte-identical."""
+    observed = {
+        "phase": phase, "commit_after": commit_after, "expected_commit": expected_commit,
+        "boot_reason": boot_reason, "commissioning_identical": commissioning_identical,
+    }
+    if phase != "done":
+        return CaseResult(Verdict.FAIL, reason=f"phase={phase!r}, expected 'done'", observed=observed)
+    if boot_reason == "watchdog":
+        return CaseResult(
+            Verdict.FAIL,
+            reason="Pico boot_reason is 'watchdog' after the relay (2026-09-18 erase-time watchdog defect's signature)",
+            observed=observed,
+        )
+    if expected_commit and commit_after != expected_commit:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"Pico commit after relay is {commit_after!r}, expected {expected_commit!r}",
+            observed=observed,
+        )
+    if commissioning_identical is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="commissioning config was not readable before or after the relay", observed=observed)
+    if commissioning_identical is not True:
+        return CaseResult(Verdict.FAIL, reason="commissioning config changed across the Pico relay", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_pico_rollback(
+    rollback_status: Optional[str],
+    commit_after: "Optional[str]",
+    expected_previous_commit: "Optional[str]",
+    commissioning_identical: Optional[bool],
+) -> CaseResult:
+    """OT-P02: after OT-P01 boots the new slot, a rollback must report
+    ``status == "rebooting"`` (the only success outcome
+    ota_http_pico_rollback_format_body() defines -- every other status,
+    including "unknown", is not a confirmed rollback) and come back
+    running the pre-P01 commit, with commissioning config unchanged."""
+    observed = {
+        "rollback_status": rollback_status, "commit_after": commit_after,
+        "expected_previous_commit": expected_previous_commit,
+        "commissioning_identical": commissioning_identical,
+    }
+    if rollback_status != "rebooting":
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"rollback status={rollback_status!r}, expected 'rebooting' (a confirmed reboot into a different image)",
+            observed=observed,
+        )
+    if expected_previous_commit and commit_after != expected_previous_commit:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"commit after rollback is {commit_after!r}, expected the pre-update commit {expected_previous_commit!r}",
+            observed=observed,
+        )
+    if commissioning_identical is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="commissioning config was not readable before or after the rollback", observed=observed)
+    if commissioning_identical is not True:
+        return CaseResult(Verdict.FAIL, reason="commissioning config changed across the Pico rollback", observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_pico_bad_image_fallback(
+    push_refused_or_failed: Optional[bool],
+    commit_before: "Optional[str]",
+    commit_after: "Optional[str]",
+    boot_reason: "Optional[str]",
+) -> CaseResult:
+    """OT-P03: a CRC-corrupted Pico image must be refused by the relay
+    (push_pico_image() raises/refuses) or fail the staged CRC check
+    (phase: failed) before the bootloader ever switches slots -- the
+    running commit must be exactly unchanged, and boot_reason must never
+    read 'watchdog' (a corrupt-image attempt must not itself trip the
+    2026-09-18 erase-time defect)."""
+    observed = {
+        "push_refused_or_failed": push_refused_or_failed,
+        "commit_before": commit_before, "commit_after": commit_after, "boot_reason": boot_reason,
+    }
+    if not push_refused_or_failed:
+        return CaseResult(Verdict.FAIL, reason="corrupt Pico image was accepted; expected a refusal/failed relay", observed=observed)
+    if boot_reason == "watchdog":
+        return CaseResult(Verdict.FAIL, reason="Pico boot_reason is 'watchdog' after a corrupt-image attempt", observed=observed)
+    if commit_before is not None and commit_after != commit_before:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"Pico commit changed ({commit_before!r} -> {commit_after!r}) despite the corrupt image being refused",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_pico_no_watchdog_signature(
+    boot_reason: "Optional[str]",
+    last_error: "Optional[str]",
+) -> CaseResult:
+    """OT-P04: judges OT-P01's own relay specifically for the 2026-09-18
+    erase-time watchdog defect's two documented symptoms -- boot_reason
+    must never be 'watchdog', and get_pico_status()'s last_error must
+    never contain the defect's exact signature string, "did not confirm
+    RECEIVING". Deliberately narrower and more literal than OT-P01's own
+    general judge, so a regression of this SPECIFIC defect is legible even
+    if OT-P01 as a whole still happens to read PASS for some other reason."""
+    observed = {"boot_reason": boot_reason, "last_error": last_error}
+    if boot_reason == "watchdog":
+        return CaseResult(Verdict.FAIL, reason="Pico boot_reason is 'watchdog' (2026-09-18 erase-time watchdog defect)", observed=observed)
+    if last_error and "did not confirm RECEIVING" in last_error:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"last_error carries the 2026-09-18 defect's exact signature: {last_error!r}",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_ota_pico_refused_with_trip_pending(
+    trip_pending: Optional[bool],
+    push_refused: Optional[bool],
+    commit_before: "Optional[str]",
+    commit_after: "Optional[str]",
+) -> CaseResult:
+    """OT-P05: a Pico update attempted while a real trip is latched must be
+    refused (UPDATE_PROTOCOL.md's hardware exercise) with the running
+    commit left exactly unchanged -- same "refused means truly untouched"
+    discipline as judge_ota_push_refused (OT-E03)."""
+    observed = {
+        "trip_pending": trip_pending, "push_refused": push_refused,
+        "commit_before": commit_before, "commit_after": commit_after,
+    }
+    if trip_pending is not True:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no trip was actually pending at push time -- the case's own precondition was not met",
+            observed=observed,
+        )
+    if not push_refused:
+        return CaseResult(Verdict.FAIL, reason="Pico update was accepted while a trip was pending, expected a refusal", observed=observed)
+    if commit_before is not None and commit_after != commit_before:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"Pico commit changed ({commit_before!r} -> {commit_after!r}) despite the refused push",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
 # ---------------------------------------------------------------------------
 # AT-* -- autotune on the 4W fixture (plan doc section 3.5, Wave 3 part A)
 # ---------------------------------------------------------------------------

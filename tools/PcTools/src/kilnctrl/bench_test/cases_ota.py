@@ -1,13 +1,26 @@
-"""OT-B01 + SP-04, and OT-E01/E02/E03/E12 (plan doc section 3.4/3.9, Wave 2)
--- ESP OTA-over-Wi-Fi update/rollback/corrupt-image handling and the dual
-safety-processor reset trip, using `ota_http_client` directly (never the
+"""OT-B01 + SP-04, OT-E01/E02/E03/E12, and (Wave 4) OT-P01..05 -- ESP
+OTA-over-Wi-Fi update/rollback/corrupt-image handling, the dual
+safety-processor reset trip, and Pico OTA relayed over the isolated link
+(plan doc section 3.4/3.9), using `ota_http_client` directly (never the
 MCP-tool text wrapper, per the task's own instruction) so results stay
 structured dicts a pure judge function can compare.
 
 Every case here is gated on the executor being idle before touching OTA or
 issuing a dual reset -- CLAUDE.md's "never flash/OTA during a firing" -- and
-every case is thin: fetch/act, then delegate to judgments.py. Pico OTA
-(`OT-P*`) is Wave 4 and out of scope for this module.
+every case is thin: fetch/act, then delegate to judgments.py.
+
+OT-P* (Wave 4) was blocked until the two Pico OTA defects closed (erase-time
+watchdog reset, `e59b0328`; CRC-variant mismatch, `ota_image_crc.c`) -- both
+are fixed and confirmed flashed as of `73c1da94` (ROADMAP.md row L,
+2026-09-21), so this wave implements the case bodies; it has still only ever
+been unit-tested against mocked clients, never against a real Pico relay
+(constraint: an attempt on defective firmware watchdog-resets the safety
+processor, and no hardware access is in scope for the change that added
+these cases). The Pico has no partition/fw_build HTTP surface the way the
+ESP does (TODO.md 9.6) -- identity comes from the ESP's cached
+GET_FW_VERSION reply (`safety_get_fw_version()`'s text) and boot-reason
+comes from `safety_get_diag()`'s text, parsed by the `parse_fw_version_*`/
+`parse_diag_boot_reason` helpers in judgments.py.
 """
 from __future__ import annotations
 
@@ -861,6 +874,284 @@ def _case_ote12(ctx: dict) -> CaseResult:
     return J.judge_ota_partitions_state(running, "app")
 
 
+# ---------------------------------------------------------------------------
+# OT-P* -- Pico OTA relayed over the isolated link (Wave 4). See this
+# module's docstring for the blocked->unblocked history and why identity is
+# read from safety_get_fw_version()/safety_get_diag() text rather than an
+# HTTP status surface the Pico doesn't have.
+# ---------------------------------------------------------------------------
+
+def _pico_commit_and_boot_reason(ctx: dict) -> "tuple[Optional[str], Optional[str]]":
+    srv = _srv(ctx)
+    try:
+        fw_text = srv.safety_get_fw_version()
+    except Exception:
+        fw_text = ""
+    try:
+        diag_text = srv.safety_get_diag()
+    except Exception:
+        diag_text = ""
+    return J.parse_fw_version_commit(fw_text), J.parse_diag_boot_reason(diag_text)
+
+
+def _pico_boot_id(ctx: dict) -> Optional[int]:
+    """Read `boot_id` out of the same GET_FW_VERSION cache
+    `_pico_commit_and_boot_reason` uses. Stashed alongside commit/boot
+    reason by OT-P01/OT-P02 so a later reviewer (or a future OT-P case)
+    can check a Pico reboot actually happened via boot_id changing, the
+    same "a real reboot was observed on the wire" signal
+    get_pico_rollback_status()'s own "rebooting" status is defined by."""
+    srv = _srv(ctx)
+    try:
+        fw_text = srv.safety_get_fw_version()
+    except Exception:
+        return None
+    return J.parse_fw_version_boot_id(fw_text)
+
+
+def _pico_trip_pending(ctx: dict) -> Optional[bool]:
+    srv = _srv(ctx)
+    try:
+        diag_text = srv.safety_get_diag()
+    except Exception:
+        return None
+    reason = J.parse_trip_reason(diag_text)
+    if reason is None:
+        return None
+    return reason != 0
+
+
+def _commissioning(ctx: dict, host: str):
+    from .. import safety_cfg_http_client
+    fn = ctx.get("_commissioning_fn") or (lambda: safety_cfg_http_client.get_commissioning(host))
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _poll_pico_phase(ctx: dict, host: str, deadline_s: float = 180.0) -> "tuple[Optional[str], Optional[str]]":
+    """Polls GET /api/ota/pico/status to a terminal phase (done/failed),
+    same shape as OT-E01's ESP polling loop. Returns (phase, last_error)."""
+    ota = _ota_client(ctx)
+    now = ctx.get("_now")
+    sleep = ctx.get("_sleep")
+    import time as _time
+    now = now or _time.monotonic
+    sleep = sleep or _time.sleep
+
+    phase = None
+    last_error = None
+    deadline = now() + deadline_s
+    while now() < deadline:
+        try:
+            status = ota.get_pico_status(host)
+            phase = status.get("phase")
+            last_error = status.get("last_error")
+        except Exception:
+            phase = None
+        if phase in ("done", "failed"):
+            break
+        sleep(2.0)
+    return phase, last_error
+
+
+def _case_otp01(ctx: dict) -> CaseResult:
+    """OT-P01: relay a good Pico image into the inactive slot over the
+    isolated link, poll to a terminal phase, then confirm identity/boot
+    reason/commissioning via the ESP's safety-link cache (see module
+    docstring for why there is no Pico-side HTTP status surface)."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get("ota_pico_image_path")
+    expected_commit = ctx.get("ota_pico_image_commit")
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_pico_image_path/ap_password not provided for OT-P01")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    trip_pending = _pico_trip_pending(ctx)
+    if trip_pending:
+        return CaseResult(Verdict.SKIP, reason="a trip is currently pending, refusing to start OT-P01")
+
+    commit_before, _ = _pico_commit_and_boot_reason(ctx)
+    commissioning_before = _commissioning(ctx, host)
+
+    ota = _ota_client(ctx)
+    try:
+        push = ota.push_pico_image(host, image_path, ap_password)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"push_pico_image raised {type(exc).__name__}: {exc}")
+    if not push.ok:
+        return CaseResult(Verdict.FAIL, reason=f"push_pico_image refused: status={push.status_code} body={push.body!r}")
+
+    phase, last_error = _poll_pico_phase(ctx, host)
+    commit_after, boot_reason = _pico_commit_and_boot_reason(ctx)
+    boot_id_after = _pico_boot_id(ctx)
+    commissioning_after = _commissioning(ctx, host)
+    commissioning_identical = (
+        (commissioning_before == commissioning_after)
+        if commissioning_before is not None and commissioning_after is not None
+        else None
+    )
+
+    ctx["_otp01"] = {
+        "commit_before": commit_before, "commit_after": commit_after,
+        "phase": phase, "last_error": last_error, "boot_reason": boot_reason,
+        "boot_id_after": boot_id_after,
+    }
+    return J.judge_ota_pico_push_applied(phase, commit_after, expected_commit, boot_reason, commissioning_identical)
+
+
+def _case_otp02(ctx: dict) -> CaseResult:
+    """OT-P02: roll the safety processor's bootloader back to the slot
+    OT-P01 relayed away from, and confirm the pre-P01 commit is running
+    again. Requires OT-P01 to have run this session (a slot to roll back
+    from, and the pre-update commit to compare against)."""
+    pre = ctx.get("_otp01")
+    if not pre:
+        return CaseResult(Verdict.NOT_RUN, reason="OT-P01 did not run in this session")
+
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    if not ap_password:
+        return CaseResult(Verdict.SKIP, reason="no ap_password credential available for rollback_pico")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to roll back: {ireason}")
+
+    commissioning_before = _commissioning(ctx, host)
+    ota = _ota_client(ctx)
+    try:
+        ota.rollback_pico(host, ap_password)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"rollback_pico raised {type(exc).__name__}: {exc}")
+
+    now = ctx.get("_now")
+    sleep = ctx.get("_sleep")
+    import time as _time
+    now = now or _time.monotonic
+    sleep = sleep or _time.sleep
+
+    rollback_status = None
+    deadline = now() + 60.0
+    while now() < deadline:
+        try:
+            rollback_status = ota.get_pico_rollback_status(host).get("status")
+        except Exception:
+            rollback_status = None
+        if rollback_status not in (None, "idle", "pending"):
+            break
+        sleep(2.0)
+
+    commit_after, _ = _pico_commit_and_boot_reason(ctx)
+    commissioning_after = _commissioning(ctx, host)
+    commissioning_identical = (
+        (commissioning_before == commissioning_after)
+        if commissioning_before is not None and commissioning_after is not None
+        else None
+    )
+    return J.judge_ota_pico_rollback(
+        rollback_status, commit_after, pre.get("commit_before"), commissioning_identical,
+    )
+
+
+def _case_otp03(ctx: dict) -> CaseResult:
+    """OT-P03: a CRC-corrupted Pico image must be refused/fail the staged
+    check before the bootloader ever switches slots -- same 'refused
+    means truly untouched' contract as OT-E03, but for the Pico's commit
+    and boot reason rather than the ESP's RUNNING/fw_build."""
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get("ota_pico_corrupt_image_path")
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_pico_corrupt_image_path/ap_password not provided for OT-P03")
+
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
+
+    commit_before, _ = _pico_commit_and_boot_reason(ctx)
+
+    ota = _ota_client(ctx)
+    refused_or_failed = None
+    try:
+        push = ota.push_pico_image(host, image_path, ap_password)
+        if not push.ok:
+            refused_or_failed = True
+        else:
+            phase, _last_error = _poll_pico_phase(ctx, host)
+            refused_or_failed = phase == "failed"
+    except Exception:
+        refused_or_failed = True  # a raised transport/HMAC/CRC error is also a refusal
+
+    commit_after, boot_reason = _pico_commit_and_boot_reason(ctx)
+    return J.judge_ota_pico_bad_image_fallback(refused_or_failed, commit_before, commit_after, boot_reason)
+
+
+def _case_otp04(ctx: dict) -> CaseResult:
+    """OT-P04: judges OT-P01's own captured relay specifically for the
+    2026-09-18 erase-time watchdog defect's two documented symptoms.
+    Observer only -- NOT_RUN if OT-P01 did not run this session."""
+    pre = ctx.get("_otp01")
+    if not pre:
+        return CaseResult(Verdict.NOT_RUN, reason="OT-P01 did not run in this session")
+    return J.judge_ota_pico_no_watchdog_signature(pre.get("boot_reason"), pre.get("last_error"))
+
+
+def _case_otp05(ctx: dict) -> CaseResult:
+    """OT-P05: a Pico update attempted while a real trip is latched must be
+    refused, with the running commit left exactly unchanged. Requires a
+    trip already pending (e.g. FL-11's S6a, before it is cleared) --
+    INCONCLUSIVE if none is, per judgments.judge_ota_pico_refused_with_
+    trip_pending. The harness clears the trip afterward regardless of
+    outcome (plan section 6), via the same clear-trip path SP-08/SP-09
+    use, injectable as ctx['_clear_trip_fn'] for testing."""
+    host = ctx.get("host")
+    ap_password = ctx.get("ap_password")
+    image_path = ctx.get("ota_pico_image_path")
+    if not ap_password or not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_pico_image_path/ap_password not provided for OT-P05")
+
+    trip_pending = _pico_trip_pending(ctx)
+    commit_before, _ = _pico_commit_and_boot_reason(ctx)
+
+    push_refused = None
+    if trip_pending:
+        ota = _ota_client(ctx)
+        try:
+            push = ota.push_pico_image(host, image_path, ap_password)
+            push_refused = not push.ok
+        except Exception:
+            push_refused = True
+
+    commit_after, _ = _pico_commit_and_boot_reason(ctx)
+    result = J.judge_ota_pico_refused_with_trip_pending(trip_pending, push_refused, commit_before, commit_after)
+
+    if trip_pending:
+        clear_fn = ctx.get("_clear_trip_fn") or (lambda: _default_clear_trip_fn(ctx))
+        try:
+            clear_fn()
+        except Exception:
+            pass
+    return result
+
+
 _CASE_FUNCS = {
     "OT-B01": _case_otb01,
     "OT-E01": _case_ote01,
@@ -874,6 +1165,11 @@ _CASE_FUNCS = {
     "OT-E09": _case_ote09,
     "OT-E10": _case_ote10,
     "OT-E12": _case_ote12,
+    "OT-P01": _case_otp01,
+    "OT-P02": _case_otp02,
+    "OT-P03": _case_otp03,
+    "OT-P04": _case_otp04,
+    "OT-P05": _case_otp05,
 }
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn

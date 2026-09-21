@@ -235,6 +235,16 @@ for cid, desc in _SK:
     register(_c(cid, "SK", desc, depends_on="HP-01" if cid == "SK-02" else None))
 for cid, desc in _OT:
     register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08")))
+#: OT-P02 boots the slot OT-P01 relayed into and rolls it back, OT-P03 needs
+#: OT-P01's captured commit_before to prove an untouched running image, and
+#: OT-P04 is a pure observer over OT-P01's own captured relay data -- three
+#: cases pinned to the one sanctioned OT-P01 dependency (plan section 5.3
+#: rule 1), never each other. OT-P05 has no case dependency: it needs a real
+#: trip pending (e.g. FL-11's S6a before it's cleared), which is a runtime
+#: precondition its own judge reports INCONCLUSIVE for, not a prior case.
+get_case("OT-P02").depends_on = "OT-P01"
+get_case("OT-P03").depends_on = "OT-P01"
+get_case("OT-P04").depends_on = "OT-P01"
 #: AT-03 reads back the unsettled fit AT-02 (its short, self-aborted step
 #: run) leaves behind; AT-05 reads GET /api/autotune/matrix after AT-01's
 #: zone-0 fit populates it. Both are the one sanctioned dependency each
