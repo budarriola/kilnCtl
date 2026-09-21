@@ -292,9 +292,14 @@ def check_kilnfw_stale(kiln_fw_root: str) -> StaleResult:
     # that thin wrapper's own CMakeLists.txt (idf_component_register) pulls
     # its real sources from firmware/hwAbstraction/esp/**, plus exactly one
     # file from firmware/hwAbstraction/common/ (hal_status.c), plus headers
-    # from firmware/hwAbstraction/interface/ (INCLUDE_DIRS) -- NOT
+    # from firmware/hwAbstraction/interface/ (INCLUDE_DIRS). That wrapper's
+    # own CMakeLists.txt is itself a build input -- it is the SRCS/
+    # INCLUDE_DIRS/REQUIRES list, so editing it changes what the KilnFW
+    # image contains -- hence firmware/hwAbstraction/idf/hwabstraction_esp
+    # is in scope too. (SaftyFW needs no equivalent entry: its source list
+    # lives in firmware/SaftyFW/CMakeLists.txt, already in scope.) NOT
     # firmware/hwAbstraction as a whole, which also holds pico/, host/,
-    # idf/, test/ and README.md that never reach the KilnFW image. Same
+    # test/ and README.md that never reach the KilnFW image. Same
     # class of bug just fixed for check_saftyfw_stale() below (987050f6): a
     # commit touching only these subdirectories changes the KilnFW binary
     # but was previously invisible to this check.
@@ -304,6 +309,7 @@ def check_kilnfw_stale(kiln_fw_root: str) -> StaleResult:
         os.path.join(tree_root, "firmware", "hwAbstraction", "esp"),
         os.path.join(tree_root, "firmware", "hwAbstraction", "common"),
         os.path.join(tree_root, "firmware", "hwAbstraction", "interface"),
+        os.path.join(tree_root, "firmware", "hwAbstraction", "idf", "hwabstraction_esp"),
     ]
     return check_stale(
         header_path=os.path.join(kiln_fw_root, "build", "esp-idf", "drivers", "build_info.h"),

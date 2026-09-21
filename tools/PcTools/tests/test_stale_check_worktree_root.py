@@ -237,6 +237,24 @@ class StaleCheckKilnfwHwAbstractionScopingTest(unittest.TestCase):
 
         self.assertTrue(result.stale, f"expected stale: {result.reason}")
 
+    def test_hwabstraction_esp_component_cmakelists_change_is_stale(self):
+        """The wrapper component's own CMakeLists.txt IS the source list
+        (idf_component_register SRCS/INCLUDE_DIRS/REQUIRES), so editing it
+        changes the KilnFW image and must be in scope."""
+        tree_root, kiln_fw_root, recorded_commit = self._make_override_tree()
+        _commit(
+            tree_root,
+            os.path.join(
+                "firmware", "hwAbstraction", "idf", "hwabstraction_esp", "CMakeLists.txt"
+            ),
+            "# changed\n",
+            "hwabstraction_esp component CMakeLists change after the recorded build",
+        )
+
+        result = stale_check.check_kilnfw_stale(kiln_fw_root)
+
+        self.assertTrue(result.stale, f"expected stale: {result.reason}")
+
     def test_hwabstraction_pico_change_after_recorded_commit_is_not_stale(self):
         """Sanity check the scoping is exact, not the whole hwAbstraction
         tree: firmware/hwAbstraction/pico never reaches the KilnFW image
