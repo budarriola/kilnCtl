@@ -72,6 +72,21 @@
 >   trip. Full detail and the two anomalies: `docs/BENCH_TEST_LOG.md`'s
 >   2026-09-21 Class B/C section; matrix rows annotated in
 >   `docs/COMMISSIONING_TEST_MATRIX.md`.
+> - **M18 backend Class B continuation, 2026-09-21**: ran the 9 previously
+>   not-run Class B rows. 1 new PASS (B30, profile save/delete + favorite,
+>   both read-back verified), 3 BLOCKED (B6 — zones POST timing-profile shape
+>   not confirmed against source; B9/B17 — `sw_reset_esp` needs the AP
+>   password with no env-var fallback, unsafe to type into a tool call), and
+>   one FAIL finding across 5 rows (B19/B20/B21/B22/B23 — the board's
+>   kiln_configs store is quarantined at boot, `POST /api/kiln_configs/save`
+>   400s regardless of request shape; a real defect, not a test artifact).
+>   All 28 Class C rows deliberately left NOT RUN and deferred to the owner
+>   for row-by-row authorization rather than run as a blanket batch — most
+>   fall directly under this project's standing hard safety rules (no
+>   estop-verify, no reflash, no real firing, no unsafe relay drive). No
+>   heating, no reflash, no Pico reset, no credential exposure. Full detail:
+>   `docs/BENCH_TEST_LOG.md`'s "M18 Class B continuation" section; matrix
+>   updated in `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
@@ -2746,6 +2761,17 @@ Owner instruction, 2026-09-21.
   stack overflow this uncovered is still live in source), acknowledge the
   standing `pico_auto_updat` crash report, then Class B/C backend rows, web
   UI write rows, and LCD rows.
+- **M18 Class B backend rows done, 2026-09-21** (see the top-of-file entry
+  above): 14/32 rows PASS initially, then a continuation pass ran the 9
+  remaining rows — 1 more PASS (B30), 3 BLOCKED (B6, B9, B17), and one FAIL
+  finding across 5 rows (B19–B23: kiln_configs store quarantined at boot).
+  All 32 Class B rows are now either PASS, BLOCKED, N/A, or a diagnosed FAIL
+  — none left NOT RUN. Class C (28 rows) deliberately deferred to the owner
+  for row-by-row authorization rather than run as a blanket batch; most rows
+  fall under this project's standing hard safety rules (estop-verify,
+  reflash, real firing, unsafe relay drive). Remaining: owner authorization
+  for Class C scope, a fix for the quarantined kiln_configs store, then web
+  UI write rows and LCD rows.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at

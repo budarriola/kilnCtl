@@ -78,6 +78,24 @@ B/C section. Rows below are annotated only where directly exercised this
 sweep; unexercised Class B/C rows are left blank per this document's own
 legend.
 
+**2026-09-21 Class B continuation (M18 step 3, completion pass):** ran the 9
+previously-not-run Class B rows. Result: 1 PASS (B30, profile save/delete +
+favorite round trip, both verified by read-back), 3 BLOCKED (B6 -- zones POST
+timing-profile field shape not confirmed against source in time available; B9
+and B17 -- `sw_reset_esp` requires the AP Wi-Fi password with no env-var
+fallback in this tool, and typing it into a visible tool call would violate
+the never-print-credentials rule), and one FAIL finding spanning 5 rows
+(B19/B20/B21/B22/B23 -- `POST /api/kiln_configs/save` returns 400 "kiln
+config store was unreadable at boot and is quarantined"; the store is
+quarantined board-side and refuses every write regardless of request shape;
+B20/B21/B23 fail as direct downstream consequences, B22 correctly found
+nothing to clean up). Class C (28 rows) was deliberately left NOT RUN this
+pass, deferred to the owner for row-by-row authorization rather than run as
+a blanket batch -- see `docs/BENCH_TEST_LOG.md`'s M18 continuation section
+for the full reasoning. No heating, no reflash, no Pico reset, no credential
+exposure. Full detail in `docs/BENCH_TEST_LOG.md`'s "M18 Class B
+continuation" section.
+
 ---
 
 ## Page-by-page inventory
