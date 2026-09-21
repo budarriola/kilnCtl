@@ -2970,6 +2970,28 @@ Owner instruction, 2026-09-21.
   W42/W50 (field-edit-then-save rows), W45/W51 (destructive
   import/Wi-Fi-forget), and the heat/E-stop/OTA/auth/Pico-reset rows named
   in the task's owner-gated list.
+  **2026-09-21 further update**: added a `fills` primitive to
+  `_web_commission_cdp.mjs` (a list of `{selector, value}` pairs applied via
+  `Runtime.evaluate` setting `.value` and dispatching `input`/`change`
+  before the click) and a matching `fills` field on `Row`, then wired W22
+  (safety config's `#pcLink`), W38 (display brightness `#kcDpBrightness`)
+  and W42 (kiln config save-as-new + delete, a dedicated
+  `_run_kiln_config_create_delete` shape) — each reads its current value
+  via `verify_endpoint` first, fills a distinct test value, confirms the
+  change, then restores the original value (or, for W42, deletes the
+  throwaway config it created) with a second POST plus read-back, all
+  inside the row so nothing persists on the board. `ROWS` now covers 26 of
+  51 runbook rows (89 tests passing, up from 73). W8/W9/W10 stay unwired:
+  profile delete/favorite act on dynamically-rendered per-row buttons with
+  no stable id, so a single fixed-selector fill risks hitting the wrong row
+  or leaving stray data; the segment-builder shape needed for a real
+  profile create is out of scope for one fills list. W50 stays unwired for
+  a different reason than the others in its old group: its fields
+  (`/api/unit_pref`/`/api/settings/tz`) only exist after client-side
+  setup-wizard step navigation, which `fills` cannot drive (not a
+  Wi-Fi-related skip). Results for the three new rows are NOT RUN — no
+  bench access this pass; matrix updated in
+  `docs/COMMISSIONING_TEST_MATRIX.md`.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at

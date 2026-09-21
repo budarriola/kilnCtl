@@ -281,7 +281,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load | `GET /api/safety/rate_guard/auto` | ADMIN | `safety_get_rate_guard` | Home safety/temperature page has read-only status only | Testable | PASS 2026-09-21 (A19; web /settings/safety page load); PASS 2026-09-21 (W21, LIVE-CONFIRMED via web_commission_row.py's run_row_live() with one shared login cookie -- prior wording claimed PASS on the day the Row() was only unit-tested, not yet run against hardware; corrected here with the actual read-back: GET /api/safety/rate_guard/auto -> 200 (no zone identified yet, expected)) |
-| Save (`save`) | `POST /api/safety/rate_guard/auto` | ADMIN | `safety_set_rate_guard` | -- | Testable | BLOCKED 2026-09-21 (B8: relay ARMED, write staged not committed; would need an unauthorized Pico reset to open the write-grace window, value confirmed unchanged) |
+| Save (`save`) | `POST /api/safety/rate_guard/auto` | ADMIN | `safety_set_rate_guard` | -- | Testable | BLOCKED 2026-09-21 (B8: relay ARMED, write staged not committed; would need an unauthorized Pico reset to open the write-grace window, value confirmed unchanged); NOTE 2026-09-21: current `safety_config_page.html` source's `#save` button actually POSTs the whole page (incl. `#pcLink`, `pc_link_abort_silence_ms`) to `/api/zones`, not this route -- this table's endpoint citation is stale, kept here for history; wired as W22 in `web_commission_row.py` against the real `/api/zones` shape (read, fill `#pcLink`, Save, confirm, restore, confirm) -- NOT RUN, no bench access this pass |
 
 ### `/safety` -- safety status (`safety_page.html`)
 
@@ -343,7 +343,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load | `GET /api/settings/display_power` | ADMIN | none direct | LCD screen-idle/timeout behavior (`screen_idle.c`) | Testable | PASS 2026-09-21 (A41; web /settings/display page load); PASS 2026-09-21 (W37, LIVE-CONFIRMED via web_commission_row.py's run_row_live() with one shared login cookie -- prior wording claimed PASS on the day the Row() was only unit-tested, not yet run against hardware; corrected here with the actual read-back: GET /api/settings/display_power -> 200, brightness_percent=100) |
-| Save (`kcDpSave`) | `POST /api/settings/display_power` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B24) |
+| Save (`kcDpSave`) | `POST /api/settings/display_power` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B24); wired as W38 in `web_commission_row.py` (read `brightness_percent`, fill `#kcDpBrightness`, Save, confirm, restore, confirm) -- NOT RUN, no bench access this pass |
 | Unit preference (temp C/F, submitted from main page, not this page) | `POST /api/unit_pref` | ADMIN | none direct | Home page unit toggle | Testable | PASS 2026-09-21 (B25) |
 
 ### `/settings/security` -- credentials & auth policy (`security_page.html`)
@@ -363,7 +363,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | PASS 2026-09-21 (web /settings/kiln_configs page load); PASS 2026-09-21 (W41, LIVE-CONFIRMED via web_commission_row.py's run_row_live() with one shared login cookie -- prior wording claimed PASS on the day the Row() was only unit-tested, not yet run against hardware; corrected here with the actual read-back: GET /api/kiln_configs -> 200, active_id=1) |
 | Apply (`kcApplyBtn`) | `POST /api/kiln_configs/apply` | ADMIN | `load_config_preset`/`capability_preflight_check` (facade presets are file-based, not identical to these board-stored slots) | -- | Testable | N-A 2026-09-21 (B18: board reports zero existing config slots to round-trip against) |
 | Apply status poll | `GET /api/kiln_configs/apply_status` | USER | none direct | -- | Testable | PASS 2026-09-21 (A33) |
-| Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, after `kiln_configs_quarantine_clear`; form-urlencoded body, field `name`) |
+| Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, after `kiln_configs_quarantine_clear`; form-urlencoded body, field `name`); Save-as-new + Delete selected wired together as W42 in `web_commission_row.py` (`_run_kiln_config_create_delete`: create a uniquely-named throwaway config, confirm via GET, select it in `#kilnConfigSelect` and delete it, confirm removed) -- NOT RUN, no bench access this pass |
 | Overwrite selected (`kcOverwriteBtn`) | `POST /api/kiln_configs/save` (existing id) | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, id field variant) |
 | Clone selected (`kcCloneBtn`) | `POST /api/kiln_configs/clone` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B20; fields `id`+`name`) |
 | Rename (`kcRenameBtn`) | `POST /api/kiln_configs/rename` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B21; fields `id`+`name`) |

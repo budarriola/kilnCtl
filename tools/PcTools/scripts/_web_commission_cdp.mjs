@@ -32,6 +32,18 @@
 //                           report its status in the JSON `post` field.
 //                           Without it the script instead waits (bounded)
 //                           for the page to go network-quiet.
+//   --fills <json>          a JSON array of {"selector": "<css selector>",
+//                           "value": "<string>"} objects, applied via
+//                           document.querySelector(selector).value = value
+//                           followed by dispatching 'input' and 'change'
+//                           events, in order, after navigation but BEFORE
+//                           the click. Used by web_commission_row.py's
+//                           form-fill rows (a typed value before Save,
+//                           e.g. W22/W38/W42) -- selector is a full CSS
+//                           selector (e.g. "#pcLink"), not the bare id the
+//                           --selector click argument takes. A missing
+//                           selector is a hard failure, same as a missing
+//                           click target.
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -71,10 +83,12 @@ function parseArgs(argv) {
     else if (a === '--port') out.port = parseInt(argv[++i], 10);
     else if (a === '--expect-post') out.expectPost = argv[++i];
     else if (a === '--accept-dialogs') out.acceptDialogs = true;
+    else if (a === '--fills') out.fillsJson = argv[++i];
   }
   for (const req of ['host', 'route', 'selectorKind']) {
     if (!out[req]) throw new Error(`--${req} is required`);
   }
+  out.fills = out.fillsJson ? JSON.parse(out.fillsJson) : [];
   // The session cookie is deliberately NOT a CLI argument -- argv is visible
   // in process listings and gets logged by callers more often than an
   // environment variable does. web_commission_row.py's run_row_live() sets
@@ -270,6 +284,28 @@ class CdpSession {
   }
 }
 
+// Sets .value on each fill's target element and dispatches 'input'/'change'
+// so the page's own listeners (e.g. settings_display_page.html's brightness
+// live-preview handler) see the new value the same way a real keystroke or
+// drag would. Runs strictly before the click -- a Save button reads these
+// fields' current DOM value at click time, not at page-load time.
+async function applyFills(cdp, fills) {
+  for (const f of fills) {
+    const expr = `(() => {
+      const el = document.querySelector(${JSON.stringify(f.selector)});
+      if (!el) return 'NOT_FOUND';
+      el.value = ${JSON.stringify(f.value)};
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'OK';
+    })()`;
+    const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
+    if (res.result.value !== 'OK') {
+      throw new Error(`fill selector ${JSON.stringify(f.selector)} not found on page`);
+    }
+  }
+}
+
 // Post-click settle. The dialog (if any) has already been answered by the
 // CdpSession message handler by the time the click's Runtime.evaluate
 // returns; what is still outstanding is the handler's own fetch(). Give the
@@ -334,6 +370,10 @@ async function main() {
     await cdp.send('Page.navigate', { url: `http://${args.host}${args.route}` });
     await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 500))', awaitPromise: true });
 
+    if (args.fills.length) {
+      await applyFills(cdp, args.fills);
+    }
+
     if (args.selectorKind === 'id') {
       const expr = `(() => { const el = document.getElementById(${JSON.stringify(args.selector)}); if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
       const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
@@ -357,7 +397,7 @@ async function main() {
 
     console.log(JSON.stringify({
       ok: true, route: args.route, selector: args.selector || null,
-      dialogs: cdp.dialogs, post: postResult,
+      fills: args.fills, dialogs: cdp.dialogs, post: postResult,
     }));
   } finally {
     try { chrome.kill(); } catch { /* already gone */ }

@@ -69,10 +69,36 @@ class Row:
     # the 2026-09-21 live run). None = no POST expected (page loads,
     # client-side-only controls).
     expect_post: "Optional[str]" = None
+    # Form-fill fields for a row whose write needs typed/selected input
+    # before the click, not just a bare click (added alongside the CDP
+    # script's --fills support). A tuple of (css_selector, value) pairs --
+    # tuple rather than dict so the frozen dataclass stays hashable. The
+    # selector here is a full CSS selector (e.g. "#pcLink"), unlike
+    # `selector` above which is a bare id/text per `selector_kind`.
+    fills: "Optional[tuple[tuple[str, str], ...]]" = None
+    # For a simple "edit one field, Save, read GET-merge-POST style
+    # read-back, then restore" row (W22, W38): the JSON keys in
+    # verify_endpoint's response body holding each fill's ORIGINAL value,
+    # in the same order as `fills`. run_row_live() reads these before the
+    # primary click, then re-runs the same click with these original
+    # values re-filled in as a second, restoring action. None = no
+    # automatic restore step (either a read-only/no-fills row, or a row
+    # using `special` below for a shape this generic path can't express).
+    restore_from_field: "Optional[tuple[str, ...]]" = None
+    # Extra element ids (beyond `selector` and any `fills` selectors) that
+    # a `special` run path also depends on, checked by validate_selector so
+    # a stale id in one of those paths is still caught by --dry-run.
+    special_selectors: "Optional[tuple[str, ...]]" = None
+    # Name of a dedicated run function in this module for a write shape the
+    # generic fills/restore_from_field path can't express (currently only
+    # "kiln_config_create_delete", W42's create-then-delete-the-same-slot
+    # flow). None = use the generic single-click (optionally fills+restore)
+    # path in run_row_live().
+    special: "Optional[str]" = None
 
 
-# 23 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
-# (W1-W7, W15, W16, W21, W23, W25, W28-W31, W37, W39, W41, W43, W46, W48,
+# 26 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
+# (W1-W7, W15, W16, W21-W23, W25, W28-W31, W37-W39, W41-W43, W46, W48,
 # W49) -- enough to cover both selector kinds ("id" and "page") and both
 # the read-only and write classes. The remaining rows are documented in the
 # runbook but do not yet have a Row() entry; adding one for each is
@@ -91,9 +117,41 @@ class Row:
 # CDP driver only clicks and screenshots -- it cannot fill a form field),
 # an existing GET/POST pair (/api/ramp_assist) for read-back, and the same
 # restore-before-leaving shape already used by W30's watchdog-panic toggle.
-# Rows that would need in-page text entry to exercise safely (W8/W9/W10,
-# a real edit for W16-style rows, W38, W42, W50, ...) are left unwired --
-# see this task's hand-back note for the full list and why.
+#
+# Second addition, same day: a `fills` primitive was added to the CDP
+# script (a list of {selector, value} applied before the click), closing
+# the "no form-fill primitive yet" gap noted on W16's live run. W22 (edit
+# `#pcLink`, Save) and W38 (edit `#kcDpBrightness`, Save) use the generic
+# fills+restore_from_field path in run_row_live(): read the field's
+# current value from verify_endpoint, fill in a distinct test value and
+# click Save, confirm the read-back changed, then re-fill the ORIGINAL
+# value and click Save again, confirming the read-back is restored -- all
+# within the one row, nothing left changed on the board. W42 (save current
+# setup as a new named kiln_configs slot, then delete that same slot) uses
+# a dedicated `special="kiln_config_create_delete"` path instead, since its
+# restore is "delete what was just created", not "write back an old
+# value" -- see _run_kiln_config_create_delete() below.
+#
+# Left unwired, and why:
+#   - W8/W9/W10 (profile create / delete / favorite toggle): creating a
+#     profile safely needs the segment-builder UI (dynamically added
+#     segment rows, a zone selector, per-segment temp/hold/rate fields --
+#     see profiles_page.html's #segments/#addSegBtn), which the fills
+#     primitive (fixed selector -> value, applied once before one click)
+#     cannot drive; and delete/favorite act on a specific LIST ROW's
+#     button, which only exists after the list renders with the new
+#     profile in it and has no stable id (`modeDeleteBtn` arms bulk-delete
+#     mode for whichever rows get checked afterward -- a second, unmodeled
+#     interaction). Getting this wrong risks leaving a stray profile or,
+#     worse, deleting/favoriting the wrong row. Not attempted this pass.
+#   - W50 (setup wizard step save, /api/unit_pref or /api/settings/tz):
+#     the runbook's own read-back column says the field only appears after
+#     client-side-only Next/Back navigation through the wizard's steps,
+#     which (like W8-W10) is a second interaction this driver has no
+#     model for -- the fills primitive fills fields already in the DOM,
+#     it does not navigate between wizard steps first. Not attempted this
+#     pass (not a Wi-Fi row, so not skipped for that reason -- skipped for
+#     the same "needs multi-step navigation first" reason as W8-W10).
 ROWS: "dict[str, Row]" = {
     "W1": Row("W1", "/login", "firmware/KilnFW/App/drivers/http/login_page.html",
               "login-form", "id", "submit the login form",
@@ -152,6 +210,18 @@ ROWS: "dict[str, Row]" = {
                "safety timing profile/zone timing fields render",
                "read-only", "safety_get_rate_guard matches",
                verify_endpoint="/api/safety/rate_guard/auto"),
+    "W22": Row("W22", "/settings/safety", "firmware/KilnFW/App/drivers/http/safety_config_page.html",
+               "save", "id", "edit the PC-link abort silence timer (`#pcLink`), click Save",
+               "save confirms; a whole-page GET-merge-POST via /api/zones "
+               "(same route/shape as W16's #saveBtn on /settings/zones -- "
+               "this page's own #save button posts to /api/zones too, "
+               "despite the matrix's stale note citing "
+               "/api/safety/rate_guard/auto for an older page shape)",
+               "write", "GET /api/zones shows the new pc_link_abort_silence_ms, "
+               "then restored to its original value by a second Save",
+               verify_endpoint="/api/zones", expect_post="/api/zones",
+               fills=(("#pcLink", "54000"),),
+               restore_from_field=("pc_link_abort_silence_ms",)),
     "W23": Row("W23", "/safety", "firmware/KilnFW/App/drivers/http/safety_page.html",
                "", "page", "load the safety page",
                "safety status/banner renders",
@@ -187,6 +257,14 @@ ROWS: "dict[str, Row]" = {
                "display settings render",
                "read-only", "GET /api/settings/display_power matches",
                verify_endpoint="/api/settings/display_power"),
+    "W38": Row("W38", "/settings/display", "firmware/KilnFW/App/drivers/http/settings_display_page.html",
+               "kcDpSave", "id", "edit the brightness slider (`#kcDpBrightness`), click Save",
+               "save confirms",
+               "write", "GET /api/settings/display_power shows the new brightness_percent, "
+               "then restored to its original value by a second Save",
+               verify_endpoint="/api/settings/display_power", expect_post="/api/settings/display_power",
+               fills=(("#kcDpBrightness", "45"),),
+               restore_from_field=("brightness_percent",)),
     "W39": Row("W39", "/settings/security", "firmware/KilnFW/App/drivers/net/security_page.html",
                "", "page", "load the settings/security page",
                "auth config/policy fields render",
@@ -197,6 +275,18 @@ ROWS: "dict[str, Row]" = {
                "config-preset list renders",
                "read-only", "GET /api/kiln_configs matches",
                verify_endpoint="/api/kiln_configs"),
+    "W42": Row("W42", "/settings/kiln_configs", "firmware/KilnFW/App/drivers/http/kiln_configs_page.html",
+               "kcSaveNewBtn", "id",
+               "fill `#kcSaveNewName` with a unique throwaway name, click Save as new "
+               "(`#kcSaveNewBtn`), then select the new slot in `#kilnConfigSelect` and "
+               "click Delete selected (`#kcDeleteBtn`)",
+               "new slot appears in #kilnConfigSelect, then is removed",
+               "write", "GET /api/kiln_configs lists the throwaway slot after create, "
+               "then no longer does after delete",
+               verify_endpoint="/api/kiln_configs", expect_post="/api/kiln_configs/save",
+               fills=(("#kcSaveNewName", "__kc_web_commission_test__"),),
+               special_selectors=("kilnConfigSelect", "kcDeleteBtn"),
+               special="kiln_config_create_delete"),
     "W43": Row("W43", "/settings/backup", "firmware/KilnFW/App/drivers/http/backup_page.html",
                "", "page", "load the settings/backup page",
                "backup/restore controls render",
@@ -230,23 +320,42 @@ class SelectorNotFoundError(RuntimeError):
     pass
 
 
+def _id_present(text: str, elem_id: str) -> bool:
+    """True if `elem_id` shows up as either an `id="..."` attribute or a
+    getElementById() call in `text`. Shared by validate_selector()'s main
+    selector check and its extra checks for `fills`/`special_selectors`
+    ids, which are always plain element ids (never button text)."""
+    pattern = re.compile(r"""id=["']""" + re.escape(elem_id) + r"""["']""")
+    return bool(pattern.search(text)) or f"getElementById('{elem_id}')" in text \
+        or f'getElementById("{elem_id}")' in text
+
+
 def validate_selector(row: Row, repo_root: Optional[str] = None) -> str:
     """Reads the row's source file off disk and confirms its selector is
     present. Raises SelectorNotFoundError if the file is missing or the
     selector cannot be found. Returns a short human-readable confirmation
-    string on success. Pure file I/O -- no network."""
+    string on success. Pure file I/O -- no network.
+
+    Also confirms every id referenced by `row.fills` (stripped of its
+    leading '#') and `row.special_selectors` is present, so a stale id in
+    either of those -- not just the row's own primary `selector` -- is
+    still caught by --dry-run before anything touches a real browser."""
     root = repo_root or _repo_root()
     path = os.path.join(root, row.source_file.replace("/", os.sep))
     if not os.path.isfile(path):
         raise SelectorNotFoundError(f"source file not found: {row.source_file}")
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
+
+    for extra_id in _extra_ids(row):
+        if not _id_present(text, extra_id):
+            raise SelectorNotFoundError(
+                f"id \"{extra_id}\" (from fills/special_selectors) not found in {row.source_file}")
+
     if row.selector_kind == "page":
         return f"page source present ({row.source_file})"
     if row.selector_kind == "id":
-        pattern = re.compile(r"""id=["']""" + re.escape(row.selector) + r"""["']""")
-        if not pattern.search(text) and f"getElementById('{row.selector}')" not in text \
-                and f'getElementById("{row.selector}")' not in text:
+        if not _id_present(text, row.selector):
             raise SelectorNotFoundError(
                 f"id \"{row.selector}\" not found in {row.source_file}")
         return f'id="{row.selector}" confirmed in {row.source_file}'
@@ -256,6 +365,19 @@ def validate_selector(row: Row, repo_root: Optional[str] = None) -> str:
                 f'button text "{row.selector}" not found in {row.source_file}')
         return f'button text "{row.selector}" confirmed in {row.source_file}'
     raise SelectorNotFoundError(f"unknown selector_kind {row.selector_kind!r}")
+
+
+def _extra_ids(row: Row) -> "list[str]":
+    """The extra element ids a row's fills/special path depends on, beyond
+    its primary `selector` -- fills selectors are CSS selectors (e.g.
+    "#pcLink"), so only the leading '#' id form is checked here (the only
+    form this module's Row entries ever use)."""
+    out: "list[str]" = []
+    for css_selector, _value in (row.fills or ()):
+        if css_selector.startswith("#"):
+            out.append(css_selector[1:])
+    out.extend(row.special_selectors or ())
+    return out
 
 
 def dry_run(row_id: str, repo_root: Optional[str] = None) -> "tuple[bool, str]":
@@ -337,6 +459,177 @@ def _get_json_with_cookie(host: str, path: str, cookie: str, timeout: float = 5.
         return status, None
 
 
+_PASSTHROUGH_ENV_KEYS = ("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP",
+                         "COMSPEC", "WINDIR", "PROGRAMFILES", "PROGRAMFILES(X86)",
+                         "LOCALAPPDATA", "APPDATA", "USERPROFILE", "NUMBER_OF_PROCESSORS")
+
+
+def _child_env(cookie: str) -> dict:
+    # Only KC_SID plus a minimal allowlist reaches the Chrome child -- Chrome
+    # does not need this process's unrelated secrets, and a minimal env keeps
+    # the child's inherited surface reviewable.
+    child_env = {k: os.environ[k] for k in _PASSTHROUGH_ENV_KEYS if k in os.environ}
+    child_env["KC_SID"] = cookie
+    return child_env
+
+
+def _run_cdp(row: Row, host: str, screenshot_dir: str, cookie: str, *,
+             selector: Optional[str] = None, selector_kind: Optional[str] = None,
+             fills: "Optional[tuple[tuple[str, str], ...]]" = None,
+             expect_post: Optional[str] = None, accept_dialogs: Optional[bool] = None,
+             shot_suffix: str = "") -> "subprocess.CompletedProcess":
+    """Runs the CDP driver once against `row.route`, with any of
+    selector/selector_kind/fills/expect_post/accept_dialogs overridden from
+    the row's own defaults. Extracted out of run_row_live() so a row that
+    needs more than one CDP action -- a fill-then-restore pair (W22, W38)
+    or a create-then-delete pair (W42) -- can call this twice with
+    different overrides and a distinct `shot_suffix` per screenshot,
+    instead of duplicating the subprocess/env-building logic per shape."""
+    selector = row.selector if selector is None else selector
+    selector_kind = row.selector_kind if selector_kind is None else selector_kind
+    if expect_post is None:
+        expect_post = row.expect_post
+    if accept_dialogs is None:
+        accept_dialogs = row.classification != "read-only"
+    script = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
+    cmd = [
+        "node", script,
+        "--host", host,
+        "--route", row.route,
+        "--selector-kind", selector_kind,
+        "--selector", selector,
+        "--screenshot", os.path.join(screenshot_dir, f"{row.row_id}{shot_suffix}.png"),
+    ]
+    # Dialog policy is per row, not global: only a row this module already
+    # classifies as a write/owner-gated action (or an explicit override, for
+    # a restore/delete sub-step of one) may ANSWER a native confirm() with
+    # OK. A read-only row that unexpectedly raises one gets it dismissed --
+    # that unhangs the renderer without authorizing whatever the dialog
+    # guards, which on these pages includes Danger Mode and the per-relay
+    # lifetime-cycle reset. The driver logs every dialog with its message
+    # either way.
+    if accept_dialogs:
+        cmd.append("--accept-dialogs")
+    if expect_post:
+        cmd += ["--expect-post", expect_post]
+    if fills:
+        cmd += ["--fills", json.dumps([{"selector": s, "value": v} for s, v in fills])]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=_child_env(cookie))
+
+
+def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """Generic 'edit one or more fields, Save, confirm the read-back
+    changed, put the ORIGINAL value(s) back, confirm restored' shape for a
+    row with both `fills` and `restore_from_field` set (W22, W38). Every
+    failure path below names exactly what state, if any, may have been
+    left on the board -- this must never report PASS with a field still
+    holding the test value."""
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, dict):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    originals: "list[str]" = []
+    for key in row.restore_from_field:
+        if key not in pre_body:
+            return False, f"{row.row_id} FAIL: expected field {key!r} missing from {row.verify_endpoint} body"
+        originals.append(str(pre_body[key]))
+
+    proc = _run_cdp(row, host, screenshot_dir, cookie, fills=row.fills, shot_suffix="_set")
+    if proc.returncode != 0:
+        return False, f"{row.row_id} FAIL: CDP driver (set) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
+
+    mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if mid_status != 200 or not isinstance(mid_body, dict):
+        return False, (f"{row.row_id} FAIL: post-set read-back GET {row.verify_endpoint} -> "
+                        f"{mid_status}: {json.dumps(mid_body)[:300]}")
+    unchanged = [k for k, orig in zip(row.restore_from_field, originals) if str(mid_body.get(k)) == orig]
+    if unchanged:
+        return False, (f"{row.row_id} FAIL: field(s) {unchanged} did not change after Save "
+                        f"(still {[mid_body.get(k) for k in unchanged]!r}) -- write likely did not land")
+
+    restore_fills = tuple((sel, orig) for (sel, _new), orig in zip(row.fills, originals))
+    restore_proc = _run_cdp(row, host, screenshot_dir, cookie, fills=restore_fills, shot_suffix="_restore")
+    if restore_proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver (restore) exited {restore_proc.returncode}: "
+                        f"{restore_proc.stderr.strip()[-500:]} -- board may be LEFT with the test "
+                        f"value, restore by hand: {dict(zip(row.restore_from_field, originals))}")
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, dict):
+        return False, (f"{row.row_id} FAIL: post-restore read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]} -- restore POST landed, "
+                        f"but read-back could not confirm it")
+    not_restored = [k for k, orig in zip(row.restore_from_field, originals) if str(final_body.get(k)) != orig]
+    if not_restored:
+        return False, (f"{row.row_id} FAIL: restore did not take -- field(s) {not_restored} still read "
+                        f"{[final_body.get(k) for k in not_restored]!r}, expected original "
+                        f"{dict(zip(row.restore_from_field, originals))}")
+
+    return True, (
+        f"{row.row_id} PASS: set {dict(row.fills)} via Save, confirmed via GET {row.verify_endpoint}, "
+        f"restored to original {dict(zip(row.restore_from_field, originals))} via a second Save, "
+        f"confirmed restored | expected: {row.expected_outcome}"
+    )
+
+
+def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W42's shape: save the board's CURRENT setup as a new, uniquely-named
+    kiln_configs slot, confirm it appears, select that exact slot (matched
+    by the unique name this function chose, never whatever the dropdown
+    happens to have selected) and delete it, confirm it's gone. Never
+    touches any other slot -- the active one or a builtin -- since it only
+    ever selects the id it just read back for its own generated name."""
+    unique_name = f"__kc_web_commission_test_{int(time.time())}__"
+    create_fills = (("#kcSaveNewName", unique_name),)
+
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, dict):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+
+    proc = _run_cdp(row, host, screenshot_dir, cookie, fills=create_fills, shot_suffix="_create")
+    if proc.returncode != 0:
+        return False, f"{row.row_id} FAIL: CDP driver (create) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
+
+    mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if mid_status != 200 or not isinstance(mid_body, dict):
+        return False, (f"{row.row_id} FAIL: post-create read-back GET {row.verify_endpoint} -> "
+                        f"{mid_status}: {json.dumps(mid_body)[:300]}")
+    configs = mid_body.get("configs") or []
+    match = [c for c in configs if isinstance(c, dict) and c.get("name") == unique_name]
+    if not match:
+        return False, (f"{row.row_id} FAIL: no config named {unique_name!r} found in "
+                        f"{row.verify_endpoint} after create -- write did not land")
+    new_id = str(match[0].get("id"))
+
+    delete_fills = (("#kilnConfigSelect", new_id),)
+    delete_proc = _run_cdp(row, host, screenshot_dir, cookie,
+                            selector="kcDeleteBtn", selector_kind="id",
+                            fills=delete_fills, expect_post="/api/kiln_configs/delete",
+                            accept_dialogs=True, shot_suffix="_delete")
+    if delete_proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver (delete) exited {delete_proc.returncode}: "
+                        f"{delete_proc.stderr.strip()[-500:]} -- board may be LEFT with throwaway "
+                        f"config id={new_id} name={unique_name!r}, delete by hand")
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, dict):
+        return False, (f"{row.row_id} FAIL: post-delete read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]} -- delete POST landed, "
+                        f"but read-back could not confirm it")
+    still_present = [c for c in (final_body.get("configs") or [])
+                      if isinstance(c, dict) and c.get("name") == unique_name]
+    if still_present:
+        return False, (f"{row.row_id} FAIL: config {unique_name!r} (id={new_id}) still present "
+                        f"after delete -- LEFT ON BOARD, delete by hand")
+
+    return True, (
+        f"{row.row_id} PASS: created {unique_name!r} (id={new_id}) via Save as new, confirmed via "
+        f"GET {row.verify_endpoint}, deleted it via Delete selected, confirmed removed | "
+        f"expected: {row.expected_outcome}"
+    )
+
+
 def run_row_live(row_id: str, host: str, screenshot_dir: str,
                   find_chrome: Optional[Callable[[], str]] = None,
                   cookie: Optional[str] = None) -> "tuple[bool, str]":
@@ -370,6 +663,22 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         user, password = _read_credentials()
         cookie = _login_once(host, user, password)
     os.makedirs(screenshot_dir, exist_ok=True)
+
+    # A row with a dedicated multi-step shape (currently only W42's
+    # create-then-delete) is handled entirely by its own function -- it
+    # does its own CDP invocations, read-backs and restore, and returns
+    # directly rather than falling through to the generic single-click path
+    # below.
+    if row.special == "kiln_config_create_delete":
+        return _run_kiln_config_create_delete(row, host, screenshot_dir, cookie)
+
+    # A row with both `fills` and `restore_from_field` set (W22, W38) is the
+    # generic "edit a field, Save, confirm, restore, confirm" shape -- also
+    # handled by its own function so this one stays the simple single-click
+    # path for every other row.
+    if row.fills and row.restore_from_field:
+        return _run_fill_and_restore(row, host, screenshot_dir, cookie)
+
     # The actual CDP navigate/click/screenshot sequence reuses the Node CDP
     # session helper already reviewed for this repo
     # (firmware/KilnFW/App/test/ui_responsive_sweep.mjs's CdpSession class)
@@ -377,39 +686,7 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
     # CDP client a second time in Python. The session cookie is passed
     # through the child's environment, never on argv, so it cannot leak via
     # a process listing or a logged command line.
-    script = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
-    cmd = [
-        "node", script,
-        "--host", host,
-        "--route", row.route,
-        "--selector-kind", row.selector_kind,
-        "--selector", row.selector,
-        "--screenshot", os.path.join(screenshot_dir, f"{row_id}.png"),
-    ]
-    # Dialog policy is per row, not global: only a row this module already
-    # classifies as a write/owner-gated action may ANSWER a native confirm()
-    # with OK. A read-only row that unexpectedly raises one gets it
-    # dismissed -- that unhangs the renderer (the original defect) without
-    # authorizing whatever the dialog guards, which on these pages includes
-    # Danger Mode and the per-relay lifetime-cycle reset. The driver logs
-    # every dialog with its message either way.
-    if row.classification != "read-only":
-        cmd.append("--accept-dialogs")
-    # And when the row declares the POST its control should issue, the
-    # driver waits for that request to complete instead of sleeping a fixed
-    # 500 ms and killing Chrome underneath it (the W30 defect).
-    if row.expect_post:
-        cmd += ["--expect-post", row.expect_post]
-    # Only KC_SID plus a minimal environment reaches the Chrome child --
-    # Chrome does not need this process's unrelated secrets (e.g. any other
-    # credential env vars this session happens to hold), and a minimal env
-    # keeps the child's inherited surface reviewable.
-    _passthrough_keys = ("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP",
-                         "COMSPEC", "WINDIR", "PROGRAMFILES", "PROGRAMFILES(X86)",
-                         "LOCALAPPDATA", "APPDATA", "USERPROFILE", "NUMBER_OF_PROCESSORS")
-    child_env = {k: os.environ[k] for k in _passthrough_keys if k in os.environ}
-    child_env["KC_SID"] = cookie
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=child_env)
+    proc = _run_cdp(row, host, screenshot_dir, cookie, fills=row.fills)
     if proc.returncode != 0:
         return False, f"{row_id} FAIL: CDP driver exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
 

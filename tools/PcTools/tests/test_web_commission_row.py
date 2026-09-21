@@ -8,6 +8,7 @@ bench_test/cases_web_rw.py rather than inventing a new one).
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 
@@ -329,3 +330,251 @@ def test_new_read_only_rows_get_no_dialog_flag_via_capture(monkeypatch, row_id):
     captured = _capture_cmd(monkeypatch, row_id)
     assert "--accept-dialogs" not in captured["cmd"]
     assert "--expect-post" not in captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 addition: the `fills` primitive (a list of {selector, value}
+# applied to the page before the click, via CDP Runtime.evaluate setting
+# .value and dispatching input/change) plus three newly-wired write rows
+# that use it -- W22 (safety config), W38 (display brightness), both via the
+# generic read-fill-save-confirm-restore-confirm helper
+# (_run_fill_and_restore), and W42 (kiln config save-as-new + delete), via
+# its own dedicated helper (_run_kiln_config_create_delete). None of this
+# touches a real board -- every network/subprocess call is mocked.
+# ---------------------------------------------------------------------------
+
+def test_w22_and_w38_declare_fills_and_restore_from_field():
+    for row_id, selector, endpoint, field in (
+        ("W22", "#pcLink", "/api/zones", "pc_link_abort_silence_ms"),
+        ("W38", "#kcDpBrightness", "/api/settings/display_power", "brightness_percent"),
+    ):
+        row = wcr.ROWS[row_id]
+        assert row.classification == "write"
+        assert row.verify_endpoint == endpoint
+        assert row.expect_post == endpoint
+        assert row.fills and row.fills[0][0] == selector
+        assert row.restore_from_field == (field,)
+
+
+def test_w42_declares_special_create_delete_shape():
+    row = wcr.ROWS["W42"]
+    assert row.classification == "write"
+    assert row.special == "kiln_config_create_delete"
+    assert row.verify_endpoint == "/api/kiln_configs"
+    assert row.expect_post == "/api/kiln_configs/save"
+    assert "kcSaveNewName" in row.fills[0][0]
+    assert "kilnConfigSelect" in row.special_selectors
+    assert "kcDeleteBtn" in row.special_selectors
+
+
+def test_run_cdp_renders_fills_as_json_arg(monkeypatch):
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    row = wcr.ROWS["W22"]
+    proc = wcr._run_cdp(row, "192.0.2.1", "/tmp/whatever", "fake-cookie", fills=row.fills)
+    assert proc.returncode == 0
+    assert "--fills" in captured["cmd"]
+    import json as _json
+    fills_arg = captured["cmd"][captured["cmd"].index("--fills") + 1]
+    assert _json.loads(fills_arg) == [{"selector": "#pcLink", "value": "54000"}]
+
+
+def _sequential_get_json(responses):
+    it = iter(responses)
+
+    def fake(host, path, cookie):
+        return next(it)
+
+    return fake
+
+
+def test_fill_and_restore_full_flow_passes(monkeypatch):
+    # Pre-read shows the original value, post-set read-back shows it changed,
+    # post-restore read-back shows it back to the original -- three distinct
+    # GETs, none of which may be skipped or reused stale.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"pc_link_abort_silence_ms": 30000}),
+            (200, {"pc_link_abort_silence_ms": 54000}),
+            (200, {"pc_link_abort_silence_ms": 30000}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert "restored" in msg
+
+
+def test_fill_and_restore_fails_if_value_never_changes(monkeypatch):
+    # The write silently didn't land -- must FAIL, not report PASS with a
+    # restore of a value that was never actually different.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"pc_link_abort_silence_ms": 30000}),
+            (200, {"pc_link_abort_silence_ms": 30000}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "did not change" in msg
+
+
+def test_fill_and_restore_fails_loud_if_restore_does_not_take(monkeypatch):
+    # Restore POST "succeeded" (CDP exit 0) but the read-back after it still
+    # shows the test value -- must fail loud rather than report PASS, since
+    # this is exactly the "board left with the test value" hazard.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"pc_link_abort_silence_ms": 30000}),
+            (200, {"pc_link_abort_silence_ms": 54000}),
+            (200, {"pc_link_abort_silence_ms": 54000}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "restore did not take" in msg
+
+
+def test_kiln_config_create_delete_full_flow_passes(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"configs": [{"id": "1", "name": "existing"},
+                                {"id": "7", "name": "__kc_web_commission_test_123__"}]}),
+            (200, {"configs": [{"id": "1", "name": "existing"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert "deleted" in msg
+
+
+def test_kiln_config_create_delete_fails_if_left_on_board(monkeypatch):
+    # The delete step's own read-back still lists the throwaway config --
+    # must fail loud and say so, never silently report success.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"configs": []}),
+            (200, {"configs": [{"id": "7", "name": "__kc_web_commission_test_123__"}]}),
+            (200, {"configs": [{"id": "7", "name": "__kc_web_commission_test_123__"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "LEFT ON BOARD" in msg
+
+
+def test_kiln_config_create_delete_fails_if_create_never_landed(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"configs": []}),
+            (200, {"configs": []}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "write did not land" in msg
+
+
+def test_run_row_live_dispatches_to_fill_and_restore_for_w22(monkeypatch):
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    seen = {}
+
+    def fake_fill_restore(row, host, screenshot_dir, cookie):
+        seen["called"] = row.row_id
+        return True, "ok"
+
+    monkeypatch.setattr(wcr, "_run_fill_and_restore", fake_fill_restore)
+    ok, msg = wcr.run_row_live("W22", "192.0.2.1", "/tmp/whatever")
+    assert ok, msg
+    assert seen["called"] == "W22"
+
+
+def test_run_row_live_dispatches_to_create_delete_for_w42(monkeypatch):
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    seen = {}
+
+    def fake_create_delete(row, host, screenshot_dir, cookie):
+        seen["called"] = row.row_id
+        return True, "ok"
+
+    monkeypatch.setattr(wcr, "_run_kiln_config_create_delete", fake_create_delete)
+    ok, msg = wcr.run_row_live("W42", "192.0.2.1", "/tmp/whatever")
+    assert ok, msg
+    assert seen["called"] == "W42"
+
+
+def test_negative_mangled_selector_caught_by_dry_run_then_restored():
+    # Required negative test: mangle a selector on a newly-wired row,
+    # confirm --dry-run fails, restore by hand, confirm it passes again.
+    # W22's #pcLink is temporarily swapped for an id that does not exist in
+    # safety_config_page.html.
+    good = wcr.ROWS["W22"]
+    bad = dataclasses.replace(good, selector="save_typo_does_not_exist")
+    wcr.ROWS["W22"] = bad
+    try:
+        ok, msg = wcr.dry_run("W22", repo_root=_repo_root())
+        assert not ok
+        assert "not found" in msg
+    finally:
+        wcr.ROWS["W22"] = good  # restore by hand, never git checkout --
+
+    ok, msg = wcr.dry_run("W22", repo_root=_repo_root())
+    assert ok, msg
+
+
+def test_negative_mangled_fill_selector_caught_by_dry_run_then_restored():
+    # Same shape, but mangling a `fills` selector (not the click selector)
+    # -- proves _extra_ids/validate_selector actually inspects fills, not
+    # just row.selector.
+    good = wcr.ROWS["W38"]
+    bad = dataclasses.replace(good, fills=(("#kcDpBrightnessTypo", "45"),))
+    wcr.ROWS["W38"] = bad
+    try:
+        ok, msg = wcr.dry_run("W38", repo_root=_repo_root())
+        assert not ok
+        assert "not found" in msg
+    finally:
+        wcr.ROWS["W38"] = good
+
+    ok, msg = wcr.dry_run("W38", repo_root=_repo_root())
+    assert ok, msg
