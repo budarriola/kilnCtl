@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_routes below */
 #include "esp_log.h"
 
 #include "http_auth_enforce.h"
@@ -23,11 +24,22 @@ void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
 
 static const char *AUTH_HTTP_TAG = "http_auth";
 
-// Fixed-size, .bss-resident wrapper table -- no heap allocation, matching
-// this feature's RAM-cost discipline (plan section 4). 192 leaves headroom
-// over the 138 rows route_tier_table.h currently carries; if this ever
-// fills, registration fails loudly (see kiln_http_register()) rather than
+// Fixed-size wrapper table -- no heap allocation, matching this feature's
+// RAM-cost discipline (plan section 4). 192 leaves headroom over the 138
+// rows route_tier_table.h currently carries; if this ever fills,
+// registration fails loudly (see kiln_http_register()) rather than
 // silently overflowing.
+//
+// EXT_RAM_BSS_ATTR (PSRAM, not internal .dram0.bss): measured 2026-09-21 at
+// 19200 B (192 * 100 B) of internal DRAM, ~67% of the regression that took
+// the board's idle largest-free-block down to 7936 B against the 8704 B
+// alarm (docs/audits/dram_bss_profiles_fallback_2026-09-20.md). Every access
+// is from kiln_http_register() (HTTP server bringup, after app_main, so
+// PSRAM is already mapped) and kiln_http_prehandler() (an ordinary httpd
+// task callback on request dispatch) -- never an ISR, never DMA, never a
+// flash-cache-disabled section, and no pointer into this table is ever
+// handed to a flash write. Same fix shape as s_profiles_fallback in
+// profiles_http.c.
 #define KILN_HTTP_MAX_ROUTES 192
 
 typedef struct {
@@ -42,7 +54,7 @@ typedef struct {
     httpd_method_t method;
 } kiln_http_route_ctx_t;
 
-static kiln_http_route_ctx_t s_routes[KILN_HTTP_MAX_ROUTES];
+static EXT_RAM_BSS_ATTR kiln_http_route_ctx_t s_routes[KILN_HTTP_MAX_ROUTES];
 static size_t s_route_count = 0;
 
 // Finds the named cookie's value inside a raw "Cookie:" header value (e.g.

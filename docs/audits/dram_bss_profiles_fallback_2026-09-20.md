@@ -116,3 +116,33 @@ Negative tests run before landing:
   `ESP_ERROR_CHECK` abort inside a Wi-Fi library task presents this way. Fetch
   the real coredump and symbolize against the archived ELF for the running
   build before reasoning from the summary fields.
+
+## Follow-up 2026-09-21
+
+Moved `s_routes` (`firmware/KilnFW/App/drivers/http/http_auth_http.c:45`, the
+HTTP route-dispatch metadata table, `kiln_http_route_ctx_t[KILN_HTTP_MAX_ROUTES]`,
+192 * 100 B) to `EXT_RAM_BSS_ATTR` (PSRAM), same fix shape as
+`s_profiles_fallback` above. It was ~67% of the regression since the
+2026-09-05 baseline (idle largest free internal-DRAM block 7936 B vs the
+8704 B alarm).
+
+Safety review before moving it: confirmed every access is from
+`kiln_http_register()` (HTTP server bringup, called from application code
+after `app_main` -- PSRAM is mapped by then) and `kiln_http_prehandler()` (an
+ordinary `esp_http_server` task callback on request dispatch). No
+`IRAM_ATTR`, no ISR or DMA context, no `spi_flash`/flash-cache-disabled
+section, and no pointer into the table is ever handed to a flash write.
+
+Measured on the built ELF (`objdump -h`, `.dram0.bss`): 114408 B before
+(`da37ffa2`) -> 95272 B after this change, a reduction of 19136 B --
+consistent with the table's 19200 B internal-DRAM footprint (a few dozen
+bytes of residual variance from other build-generated symbols).
+`tools/run_all_checks.ps1 -AllowFewerChecks` in an isolated worktree: 124
+passed, 0 skipped, 0 failed, including
+`check_kilnfw_dram_bss_budget.ps1` and the three full target builds.
+
+Left for a later pass, both still in internal `.dram0.bss` and both smaller
+than `s_routes` was:
+
+- `s_bulk_pairs` (`firmware/KilnFW/App/drivers/safety_cfg_write.c:683`, 1846 B)
+- `s_scan_buf` (`firmware/KilnFW/App/drivers/pico_image_source.c:30`, 1080 B)
