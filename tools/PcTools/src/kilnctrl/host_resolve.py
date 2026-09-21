@@ -19,8 +19,6 @@ RESOLUTION ORDER, cheapest/most-authoritative first:
      this file, gitignored. Updated by :func:`record_host_seen`, which
      :mod:`kilnctrl.http_auth` calls after every successful request that
      goes through its ``urlopen`` seam -- which is nearly all of them.
-     (A write aimed at that real, shared file from inside a test process
-     is silently dropped instead -- see :func:`record_host_seen`.)
   3. The board's own AP fallback address, ``192.168.4.1`` -- unchanged
      behaviour for a from-scratch board nothing has ever talked to.
 
@@ -28,6 +26,21 @@ This module never *chooses* a host to try; it only says what the *default*
 for an unspecified ``host`` argument should be right now. A caller that
 knows better (an explicit ``host=`` argument, or ``flash_firmware()``'s own
 ordered candidate list) is untouched by this module and always wins.
+
+RECORDING IS OPT-IN, DEFAULT OFF. :func:`record_host_seen` is a no-op
+until :func:`enable_recording` has been called once in this process.
+Real entry points (the MCP server's own startup, the GUI's startup) call
+it; nothing else should. This is what keeps a test that mocks
+``urllib.request.urlopen`` and calls a client with a fixture host (e.g.
+"kiln.local") from silently writing that fixture host into the real,
+shared ``settings.json`` -- which would then poison every
+``*_AP_DEFAULT_HOST`` module constant (each resolved once, at import
+time) for whichever module happens to import next in a LATER process.
+Earlier revisions of this module instead special-cased "running under
+pytest" (``PYTEST_CURRENT_TEST``); that was fragile (anything importing
+this package from a test runner other than pytest would still leak) and
+backwards (recording should default off everywhere until a real caller
+turns it on, not default on everywhere except one test framework).
 """
 
 from __future__ import annotations
@@ -46,10 +59,26 @@ HOST_ENV = "KILNCTL_HOST"
 #: every module's previous hardcoded default.
 FALLBACK_HOST = "192.168.4.1"
 
-#: The real on-disk settings file, captured once at import time -- used only
-#: to recognize (in :func:`record_host_seen`) a write that is about to land
-#: on the SHARED, real file rather than a test's own tempfile.
-_PRODUCTION_SETTINGS_PATH = settings.SETTINGS_PATH
+#: Opt-in switch for :func:`record_host_seen`. Default OFF: see the module
+#: docstring's "RECORDING IS OPT-IN" section. Set by :func:`enable_recording`.
+_recording_enabled = False
+
+
+def enable_recording() -> None:
+    """Turn on :func:`record_host_seen`'s writes for the rest of this
+    process. Call exactly once, from a real entry point (the MCP server's
+    startup, the GUI's startup) -- never from library code, and never from
+    a test unless that test is specifically exercising this wiring (in
+    which case it should also patch ``host_resolve.settings.SETTINGS_PATH``
+    or pass an explicit ``path=`` to avoid touching the real file)."""
+    global _recording_enabled
+    _recording_enabled = True
+
+
+def disable_recording() -> None:
+    """Test/teardown helper: the inverse of :func:`enable_recording`."""
+    global _recording_enabled
+    _recording_enabled = False
 
 
 def resolve_default_host(path: Optional[Path] = None) -> str:
@@ -76,6 +105,9 @@ def resolve_default_host(path: Optional[Path] = None) -> str:
 def record_host_seen(host: str, path: Optional[Path] = None) -> None:
     """Remember that ``host`` just answered a real request.
 
+    A no-op until :func:`enable_recording` has been called in this process
+    -- see the module docstring's "RECORDING IS OPT-IN" section.
+
     ``host`` may be a bare host, a "host:port" netloc, or a full origin
     ("http://host:port") -- only the hostname is persisted, never a port or
     scheme, so it composes with every client's own ``f"http://{host}..."``
@@ -83,21 +115,12 @@ def record_host_seen(host: str, path: Optional[Path] = None) -> None:
     (never raises -- this is a best-effort cache update piggybacked on
     another call's success, not a call any caller is making on purpose).
     """
+    if not _recording_enabled:
+        return
     name = _hostname_only(host)
     if not name:
         return
-    target = path if path is not None else settings.SETTINGS_PATH
-    if target == _PRODUCTION_SETTINGS_PATH and "PYTEST_CURRENT_TEST" in os.environ:
-        # A test exercising http_auth.urlopen's success path (a mocked
-        # urllib.request.urlopen returning 200 for some fixture host like
-        # "kiln.local") is not a real board answering -- never let that
-        # land in the real, shared settings.json, where it would silently
-        # change every *_AP_DEFAULT_HOST constant for whichever module
-        # happens to import next (test_host_resolve.py's own tests pass an
-        # explicit tempfile ``path=`` or patch ``host_resolve.settings.
-        # SETTINGS_PATH``, so they never hit this branch).
-        return
-    settings.set_last_host(name, target)
+    settings.set_last_host(name, path if path is not None else settings.SETTINGS_PATH)
 
 
 def _hostname_only(host: str) -> Optional[str]:

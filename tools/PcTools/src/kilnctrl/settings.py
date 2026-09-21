@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -36,18 +38,41 @@ def load(path: Path = SETTINGS_PATH) -> dict:
 
 
 def save(data: dict, path: Path = SETTINGS_PATH) -> None:
-    """Write the JSON settings file, swallowing (but logging) I/O errors."""
+    """Write the JSON settings file, swallowing (but logging) I/O errors.
+
+    Written via a tempfile in the SAME directory + ``os.replace`` rather
+    than truncating ``path`` in place: several independent processes (the
+    GUI, the MCP server, an ad-hoc script) can call this concurrently, and
+    a plain truncate-then-write leaves a window where a reader (``load``)
+    sees a truncated/partial file and silently treats it as ``{}`` --
+    quietly dropping every OTHER key already on disk (``last_port``,
+    ``openocd_exe``, ...), not just the one this call meant to set.
+    ``os.replace`` is atomic on both POSIX and Windows, so a reader always
+    sees either the old, complete file or the new, complete one.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-            fh.write("\n")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+                fh.write("\n")
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+            raise
     except OSError:
         log.warning("could not write settings to %s", path, exc_info=True)
 
 
 def _update(key: str, value: object, path: Path = SETTINGS_PATH) -> None:
     data = load(path)
+    if data.get(key) == value:
+        return  # unchanged -- skip the write (and the churn/race window)
     data[key] = value
     save(data, path)
 

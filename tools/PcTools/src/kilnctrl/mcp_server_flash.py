@@ -22,7 +22,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -372,7 +372,16 @@ def _resolve_verify_hosts(host: Optional[str], pre_flash_host: Optional[str] = N
          the only candidate backed by evidence rather than inference.
       2. `_ota_resolve_host(None)` -- the package-wide resolution (STA IP
          from wifi_get_status() over UART, else the AP fallback).
-      3. the AP fallback address itself.
+      3. `partition_http_client.PARTITION_AP_DEFAULT_HOST` -- whatever
+         host_resolve.resolve_default_host() currently resolves to (a
+         cached last-seen host, if any -- otherwise the AP fallback).
+      4. `host_resolve.FALLBACK_HOST`, unconditionally -- the board's own
+         AP address, ALWAYS tried regardless of what step 3 resolved to.
+         Needed because step 3 is no longer guaranteed to be the AP
+         address: once a last-seen host is cached, it dedupes against
+         candidate 2 (both being the same LAN address) and the true AP
+         fallback would never be tried at all, breaking genuine bring-up
+         verification on a from-scratch board.
 
     WHY THIS IS A LIST AND NOT ONE ADDRESS (the 2026-09-04 defect): a
     previous fix had verification call `_ota_resolve_host(host)` once. That
@@ -404,6 +413,7 @@ def _resolve_verify_hosts(host: Optional[str], pre_flash_host: Optional[str] = N
     except Exception:  # pragma: no cover - resolution is best-effort here
         pass
     _add(partition_http_client.PARTITION_AP_DEFAULT_HOST)
+    _add(host_resolve.FALLBACK_HOST)
     return candidates
 
 

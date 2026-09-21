@@ -834,6 +834,7 @@ def _as_float(var: tk.StringVar, name: str) -> float:
 
 def main() -> int:
     """Entry point for the ``kilnctrl-gui`` console script."""
+    host_resolve.enable_recording()
     root = tk.Tk()
     try:
         ttk.Style().theme_use("vista")

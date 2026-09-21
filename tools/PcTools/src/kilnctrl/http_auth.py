@@ -218,9 +218,11 @@ def urlopen(req, timeout=None):
         if exc.code != 401:
             raise
     else:
-        # A response of any kind (including a non-2xx one that isn't 401)
-        # means this host is alive and answering HTTP -- worth remembering
-        # as the default for the next call that doesn't name a host.
+        # No exception means urllib got a genuine 2xx (or a redirect it
+        # already followed) -- a non-2xx, non-401 status raises HTTPError
+        # above and is re-raised, never reaching here. A confirmed 2xx
+        # response is worth remembering as the default for the next call
+        # that doesn't name a host.
         host_resolve.record_host_seen(origin)
         return resp
     # Exactly one login, exactly one retry. A 401 on the retry propagates to

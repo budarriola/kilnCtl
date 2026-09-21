@@ -449,6 +449,22 @@ class WrongAddressRegressionTest(unittest.TestCase):
                 ["192.168.1.156", "192.168.1.200", "192.168.4.1"],
             )
 
+    def test_candidate_order_still_tries_the_true_ap_fallback_with_a_cached_last_host(self):
+        """Regression: PARTITION_AP_DEFAULT_HOST is no longer a literal --
+        it's host_resolve.resolve_default_host(), which can resolve to a
+        cached last-seen LAN host. If that collides with candidate 2 and
+        192.168.4.1 is never separately appended, the true AP fallback is
+        silently dropped from the list, breaking verification on a genuine
+        from-scratch bring-up (nothing has ever answered at the AP address
+        in that case, so it must still be tried)."""
+        with self._patch_resolve("192.168.1.200"), unittest.mock.patch.object(
+            partition_http_client, "PARTITION_AP_DEFAULT_HOST", "192.168.1.200",
+        ):
+            self.assertEqual(
+                mf._resolve_verify_hosts(None, pre_flash_host="192.168.1.156"),
+                ["192.168.1.156", "192.168.1.200", "192.168.4.1"],
+            )
+
     def test_preflash_probe_returns_the_answering_address(self):
         def fake_get_partitions(host, timeout=None):
             if host != "192.168.1.156":

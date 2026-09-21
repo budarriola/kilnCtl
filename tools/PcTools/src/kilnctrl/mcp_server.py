@@ -77,7 +77,7 @@ from mcpkit import workbench
 from mcpkit.registry import check_staleness, collapse
 from mcpkit.serve import serve
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, host_resolve, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -536,6 +536,7 @@ def _close() -> None:
 
 def main() -> int:
     """Sync entry point for the ``kilnctrl-mcp-server`` console script."""
+    host_resolve.enable_recording()
     return serve(mcp, name="kilnctrl", default_port=mcp_facade.DEFAULT_PORT, on_close=_close,
                 freshness=registry.freshness)
 
