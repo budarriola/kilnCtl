@@ -212,7 +212,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | PASS 2026-09-21 (A8/A11; web /settings/zones page load) |
 | Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | PASS 2026-09-21 (B4/B6: form shape established from source and exercised on hardware -- GET-merge-POST via `zones_http_client.py`, exact shape recorded in `docs/COMMISSIONING_BACKEND_RUNBOOK.md`'s B4 row; round-trip test changed only `zones[0].name`, confirmed byte-identical elsewhere including after restore, `zones_config_valid`/`load_fault` unchanged, no reboot -- see `docs/BENCH_TEST_LOG.md`'s dated M18 B6 section) |
 | PID save | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | PASS 2026-09-21 (B3, flagged anomaly: writing identical gains still invalidated `tuning_valid`, see log; B10 same-value round trip confirmed by read-back) |
-| Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | NOT ATTEMPTED 2026-09-21 (C1/C9: E-stop now verified via C5, unblocking this row, but time-boxed out this session in favor of the profile/live chain and autotune; not declined, deferred to follow-up) |
+| Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | PASS 2026-09-21 (C1/C9: sweep started, polled to completion, drained; all zones reported "unmeasured" as expected -- fixture current sits below the 0.045A noise floor) |
 | Abort sweep (`sweepAbortBtn`) | `POST /api/zones/current_sweep/abort` | SAFETY_REDUCE | `zone_current_sweep_abort` | -- | Testable (abort path itself, even if the sweep's numbers are meaningless on bench) | |
 | Sweep status poll | `GET /api/zones/current_sweep/status` | ADMIN | `zone_current_sweep_status` | -- | Testable | PASS 2026-09-21 (A12) |
 | CT channel map read | `GET /api/zones/ct_channel_map` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A13) |
@@ -258,7 +258,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load / thermo faults | `GET /api/thermo/faults` | ADMIN | `thermo_read_faults` | "diagnostics" LCD page | Testable | PASS 2026-09-21 (A22; web /diagnostics page load) |
-| Crash report banner + Acknowledge (`crashAckBtn`) | `GET /api/crash_report`, `POST /api/crash_report/ack` | ADMIN | `crash_report_ack` | -- | Testable | |
+| Crash report banner + Acknowledge (`crashAckBtn`) | `GET /api/crash_report`, `POST /api/crash_report/ack` | ADMIN | `crash_report_ack` | -- | Testable | N/A 2026-09-21 (C21/C22: no crash report pending at session start, correctly not exercised) |
 | Clear crash log (`crashClearBtn`) | `POST /api/crash_report/clear` | ADMIN | none direct | -- | Testable | |
 | Watchdog PANIC toggle (`wdPanicToggleBtn`) | `GET`/`POST /api/watchdog_cfg` | ADMIN | `get_watchdog_panic_disabled`/`set_watchdog_panic_disabled` | -- | Testable but disruptive -- disabling PANIC masks real overflow-class crashes; use deliberately | PASS 2026-09-21 (A24 (GET only; toggle not exercised)) |
 | Ramp-assist toggle (`rampAssistToggleBtn`) | `GET`/`POST /api/ramp_assist` | ADMIN | `ramp_assist_*` | -- | Testable | |
@@ -267,7 +267,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Exit Danger Mode now (`dangerExitBtn`) | `POST /api/diagnostics/danger/stop` | SAFETY_REDUCE | none direct (`io_all_relays_off` is the safe fallback) | -- | Testable (the exit path itself) | |
 | Danger status poll | `GET /api/diagnostics/danger` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A25) |
 | E-stop verify | `POST /api/estop/verify` | ADMIN | none direct | -- | **Hardware-gated**: bench E-stop jumper is fitted (NOT asserted, per `project_estop_jumper_is_fitted`) -- verifying the real switch needs the jumper removed and a physical actuation |
-| Relay cycle counters: reset/restore per-relay (`relay-reset-btn`) | `POST /api/relay_cycles/reset`, `POST /api/relay_cycles/restore` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B12, flagged anomaly: restore's monotonic guard clamped relays 1/2 to internal live counts not reflected in `/api/status`'s `relay_life`, see log) |
+| Relay cycle counters: reset/restore per-relay (`relay-reset-btn`) | `POST /api/relay_cycles/reset`, `POST /api/relay_cycles/restore` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B12, prior flagged anomaly re-checked and no longer reproduces: `/api/status` `relay_life` now correctly shows 3802/4469 matching internal counts, see log) |
 | Dual-write window record restore (`dwwRecordRestoreBtn`) | `POST /api/dualwrite_window/restore_verified` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is now mounted and populated on this bench per `GET /api/cfgfs`, per `project_cfg_partition_and_user_data_move` -- verify against the live file state, not the old unformatted assumption) | PASS 2026-09-21 (B13) |
 | Dual-write window status | `GET /api/dualwrite_window` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A26) |
 | lwIP stats | `GET /api/debug/lwip_stats` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A27) |
@@ -280,12 +280,12 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Reboot both processors, no config change (`swResetBtn`) | `POST /api/sw_reset` | ADMIN | `sw_reset_esp` | -- | Testable (watch for the expected S6a trip during a dual reflash, per CLAUDE.md) | |
-| Reset Wi-Fi only (`data-scope="wifi"`) | `POST /api/factory_reset` (scope param) | ADMIN | none direct (`factory_default_then_load_preset`/`wifi_forget` are the nearest facade equivalents) | -- | Testable | |
-| Reset kiln config only (`data-scope="kiln"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset` | -- | Testable | |
+| Reboot both processors, no config change (`swResetBtn`) | `POST /api/sw_reset` | ADMIN | `sw_reset_esp` | -- | Testable (watch for the expected S6a trip during a dual reflash, per CLAUDE.md) | PASS 2026-09-21 (B9/B17: env-fallback password, no S6a trip this time -- Pico link never dropped, benign deviation, see log) |
+| Reset Wi-Fi only (`data-scope="wifi"`) | `POST /api/factory_reset` (scope param) | ADMIN | none direct (`factory_default_then_load_preset`/`wifi_forget` are the nearest facade equivalents) | -- | Testable | DECLINED 2026-09-21 (C6: would erase this session's own LAN reachability to the board with no rejoin path -- see log) |
+| Reset kiln config only (`data-scope="kiln"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset` | -- | Testable | NOT ATTEMPTED 2026-09-21 (C6 scope `wifi` declined for reachability risk; `kiln`/`profiles`/`all` scopes not attempted, out of this session's scope) |
 | Reset fire profiles only (`data-scope="profiles"`) | `POST /api/factory_reset` | ADMIN | none direct | -- | Testable | |
 | Factory default -- erase everything (`data-scope="all"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset`(scope=all) | -- | Testable, but destructive -- re-provision Wi-Fi/credentials afterward | |
-| Format cfg partition (`cfgFsFormatConfirmBtn`) | `GET /api/cfgfs/format_pending`, `POST /api/cfgfs/format_confirm` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is mounted and populated with 7 files on this bench, per `GET /api/cfgfs` -- this is now a real destructive format, not a no-op) | |
+| Format cfg partition (`cfgFsFormatConfirmBtn`) | `GET /api/cfgfs/format_pending`, `POST /api/cfgfs/format_confirm` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is mounted and populated with 7 files on this bench, per `GET /api/cfgfs` -- this is now a real destructive format, not a no-op) | BLOCKED 2026-09-21 (C26: `ota_http_client.py::derive_mac()` is missing a `"factory-reset"` context allow-list entry the firmware actually uses for this route; no code edit authorized this session, see log) |
 | Timezone save | `POST /api/settings/tz` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (C27: posted current value "UTC0" (read via /api/status's time_tz, no dedicated GET route exists) back unchanged, confirmed by read-back) |
 
 ### `/settings/display` -- display settings (`settings_display_page.html`)
@@ -301,7 +301,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load | `GET /api/auth/config` | ADMIN | none direct | -- (no LCD credentials editor) | Testable | PASS 2026-09-21 (A39; web /settings/security page load) |
-| Save administrator/user password, admin/user PIN, policy (`kcSecAdminPwSave` etc.), Clear login credentials (`kcSecClearCreds`) | `POST /api/auth/security` | ADMIN | none direct | -- | Testable -- see `project_web_auth_verified_and_blinds_pctools`: enabling auth policy blinds PcTools clients until they log in, plan the session accordingly | PASS 2026-09-21 (B26, unmodified set_policy round trip) |
+| Save administrator/user password, admin/user PIN, policy (`kcSecAdminPwSave` etc.), Clear login credentials (`kcSecClearCreds`) | `POST /api/auth/security` | ADMIN | none direct | -- | Testable -- see `project_web_auth_verified_and_blinds_pctools`: enabling auth policy blinds PcTools clients until they log in, plan the session accordingly | PASS 2026-09-21 (B26, unmodified set_policy round trip; C16, `cmd=set_web_password` re-set to the same env-var value via raw form POST -- `web_auth_setup` MCP tool has no "re-affirm current credential" path, worked around, see log) |
 | Bootstrap admin password (first-run, `login_page.html`'s "Set password" form) | `POST /api/auth/bootstrap_password` | ADMIN_BOOTSTRAP | none direct | -- | Testable | |
 | Log in (`login_page.html`) | `POST /api/auth/login` | OPEN | none direct | -- | Testable; see `project_login_latency_measured_4s` and `project_owner_decisions_2026_09_21_login` for expected latency/lockout behavior -- never iterate logins | PASS 2026-09-21 (web UI sweep, real login POST /api/auth/login 200) |
 | Session status poll / extend | `GET /api/auth/session`, `POST /api/auth/session/extend` | OPEN / USER | none direct | -- | Testable | PASS 2026-09-21 (A40 poll; B29 extend) |
@@ -313,13 +313,13 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | PASS 2026-09-21 (web /settings/kiln_configs page load) |
 | Apply (`kcApplyBtn`) | `POST /api/kiln_configs/apply` | ADMIN | `load_config_preset`/`capability_preflight_check` (facade presets are file-based, not identical to these board-stored slots) | -- | Testable | N-A 2026-09-21 (B18: board reports zero existing config slots to round-trip against) |
 | Apply status poll | `GET /api/kiln_configs/apply_status` | USER | none direct | -- | Testable | PASS 2026-09-21 (A33) |
-| Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | |
-| Overwrite selected (`kcOverwriteBtn`) | `POST /api/kiln_configs/save` (existing id) | ADMIN | none direct | -- | Testable | |
-| Clone selected (`kcCloneBtn`) | `POST /api/kiln_configs/clone` | ADMIN | none direct | -- | Testable | |
-| Rename (`kcRenameBtn`) | `POST /api/kiln_configs/rename` | ADMIN | none direct | -- | Testable | |
-| Delete selected (`kcDeleteBtn`) | `POST /api/kiln_configs/delete` | ADMIN | none direct | -- | Testable | |
-| Download selected (`kcDownloadBtn`) | `GET /api/kiln_configs/export` | ADMIN | none direct | -- | Testable | |
-| Upload/import (`kcUploadBtn`) | `POST /api/kiln_configs/import` | ADMIN | `convert_config` (offline conversion only, not the upload itself) | -- | Testable | |
+| Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, after `kiln_configs_quarantine_clear`; form-urlencoded body, field `name`) |
+| Overwrite selected (`kcOverwriteBtn`) | `POST /api/kiln_configs/save` (existing id) | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, id field variant) |
+| Clone selected (`kcCloneBtn`) | `POST /api/kiln_configs/clone` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B20; fields `id`+`name`) |
+| Rename (`kcRenameBtn`) | `POST /api/kiln_configs/rename` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B21; fields `id`+`name`) |
+| Delete selected (`kcDeleteBtn`) | `POST /api/kiln_configs/delete` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B22: active-config slot correctly refused deletion with a named 400, own interlock working; left slot on board rather than switching config to force it) |
+| Download selected (`kcDownloadBtn`) | `GET /api/kiln_configs/export` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B23, export/import round trip) |
+| Upload/import (`kcUploadBtn`) | `POST /api/kiln_configs/import` | ADMIN | `convert_config` (offline conversion only, not the upload itself) | -- | Testable | PASS 2026-09-21 (B23, JSON package body, re-imported exported config under a new name) |
 
 ### `/settings/backup` -- backup/restore (`backup_page.html`)
 

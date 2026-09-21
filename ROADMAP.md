@@ -121,6 +121,27 @@
 >   `docs/BENCH_TEST_LOG.md`'s 2026-09-21 "Backend Class C owner-authorized
 >   rows (M18)" section; matrix rows annotated in
 >   `docs/COMMISSIONING_TEST_MATRIX.md`.
+> - **M18 backend reruns after reflash to 7098b2ee, 2026-09-21**: re-ran
+>   B19-B23 (kiln_configs quarantine clear + save/clone/rename/export/import/
+>   delete — all PASS; B22 correctly refused to delete the active slot), B12
+>   (relay_life display anomaly re-checked, no longer reproduces), B9/B17
+>   (`sw_reset_esp` env-fallback, PASS, no S6a trip this time — benign, link
+>   never dropped), C1/C9 (zone current sweep, PASS, all zones correctly
+>   "unmeasured" below the fixture's noise floor), C16 (credential re-write
+>   to the same value, PASS via a raw-HTTP workaround — `web_auth_setup` has
+>   no "re-affirm current credential" path), and C21/C22 (N/A, no crash
+>   pending). C6 (factory_reset scope `wifi`) DECLINED: it would erase this
+>   session's only path back to the board with no rejoin route, a risk the
+>   task's "STOP if web auth erased" clause didn't cover. C26 (cfgfs format)
+>   BLOCKED on a genuine PC-tooling gap: `ota_http_client.py::derive_mac()`'s
+>   context allow-list is missing `"factory-reset"`, which the firmware
+>   itself uses (`OTA_HTTP_CONTEXT_FACTORY_RESET`) for both this route and
+>   `POST /api/factory_reset` — needs that one entry added before either
+>   route can be exercised from PC tooling without a raw-HMAC workaround
+>   (correctly refused this session as a validation-bypass, not a fix). Full
+>   detail: `docs/BENCH_TEST_LOG.md`'s "Backend reruns after reflash to
+>   7098b2ee (M18)" section; matrix rows annotated in
+>   `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
