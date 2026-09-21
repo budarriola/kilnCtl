@@ -254,7 +254,19 @@ BaseType_t uart_bridge_ext_retry_task_create_pinned(TaskFunction_t task_fn, cons
  * fallback so the lazy path still works if the explicit call is ever skipped.
  * ======================================================================== */
 
-#define BX_WORKER_STACK 8192
+/* 8192 -> 10240, 2026-09-21: a REAL hardware stack overflow in this task
+ * (docs/audits/bx_flash_worker_panic_after_cfgfs_format_2026-09-21.md) --
+ * CONTROL_CMD_SET_ZONE_PID runs ON this worker, and the first cfg-LittleFS
+ * write after a format took control_handle_message -> zones nvs_save ->
+ * cfg_fs_write_atomic -> esp_vfs -> lfs mkdir/create/rename past 8192 B.
+ * cfg_fs_write_atomic gave ~2 kB back in the same pass (see
+ * cfg_fs_write_scratch_t), but the LittleFS half of that chain recurses
+ * (lfs_dir_traverse) and cannot be bounded statically -- see
+ * check_all_task_stack_budgets.py, which grades this task at a
+ * self-declared LOWER BOUND, not a measurement. Costs 2048 B of permanent
+ * internal DRAM; the allocation still fits the ~31744 B largest free
+ * internal block at the explicit start point described above. */
+#define BX_WORKER_STACK 10240
 
 typedef void (*bx_job_fn)(void *arg);
 

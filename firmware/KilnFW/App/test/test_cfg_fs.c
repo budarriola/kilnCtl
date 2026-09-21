@@ -389,6 +389,70 @@ static void test_write_large_payload_spans_multiple_verify_chunks(void)
                "the full multi-chunk payload reads back byte-for-byte identical");
 }
 
+// ---------------------------------------------------------------------
+// 8. write_atomic()'s early-rejection branches, after the path buffers
+//    moved off the stack and into one heap-allocated cfg_fs_write_scratch_t
+//    (docs/audits/bx_flash_worker_panic_after_cfgfs_format_2026-09-21.md --
+//    a real hardware stack overflow in bx_flash_worker on the first cfg
+//    write after a format). That refactor turned five plain `return
+//    ESP_ERR_INVALID_ARG` statements into five free-then-return branches,
+//    so each rejection path is now a place a leak or a use-after-free can
+//    hide, and -- much more importantly -- a place where an early return
+//    must STILL leave any existing file completely untouched. Nothing
+//    covered these rejections before; the pre-existing tests only ever pass
+//    well-formed relative paths.
+// ---------------------------------------------------------------------
+static void test_write_atomic_rejections_leave_existing_file_untouched(void)
+{
+    TEST_SECTION("cfg_fs: write_atomic() rejects malformed rel_paths and leaves the existing file intact");
+
+    const char *base = "cfg_fs_test_reject";
+    reset_scratch(base, NULL);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "init succeeds");
+
+    TEST_CHECK(cfg_fs_write_atomic("keep.dat", "GOOD", 4) == ESP_OK, "the file that must survive is written");
+
+    /* A PARENT directory component at/over CFG_FS_MAX_NAME: split_one_level()
+     * refuses on `dir_len >= dir_cap`, which is the FIRST free-then-return
+     * branch after the scratch allocation and the one that writes into
+     * sc->parent_rel. (A long BARE name is NOT refused here -- split_one_level()
+     * only bounds the directory component -- so this case, not that one, is
+     * what actually exercises the branch.) */
+    char longparent[CFG_FS_MAX_NAME + 8];
+    memset(longparent, 'x', sizeof(longparent) - 1);
+    longparent[sizeof(longparent) - 1] = '\0';
+    char longpath[CFG_FS_MAX_NAME + 20];
+    snprintf(longpath, sizeof(longpath), "%s/f.dat", longparent);
+    TEST_CHECK(cfg_fs_write_atomic(longpath, "BAD", 3) == ESP_ERR_INVALID_ARG,
+               "an over-length parent directory component is refused with INVALID_ARG");
+
+    /* Two levels of nesting: split_one_level() allows exactly one. */
+    TEST_CHECK(cfg_fs_write_atomic("a/b/c.json", "BAD", 3) == ESP_ERR_INVALID_ARG,
+               "two levels of nesting are refused with INVALID_ARG");
+
+    /* A trailing slash has no bare filename at all. */
+    TEST_CHECK(cfg_fs_write_atomic("dir/", "BAD", 3) == ESP_ERR_INVALID_ARG,
+               "a rel_path with no bare filename is refused with INVALID_ARG");
+
+    /* An empty rel_path. */
+    TEST_CHECK(cfg_fs_write_atomic("", "BAD", 3) == ESP_ERR_INVALID_ARG,
+               "an empty rel_path is refused with INVALID_ARG");
+
+    /* The whole point: none of those rejections may have disturbed the
+     * filesystem. The surviving file must still hold its original bytes,
+     * and no stray temp entry may have been left behind. */
+    char back[16];
+    size_t out_len = 0;
+    TEST_CHECK(cfg_fs_read("keep.dat", back, sizeof(back), &out_len) == ESP_OK && out_len == 4 &&
+                   memcmp(back, "GOOD", 4) == 0,
+               "keep.dat still holds its original bytes after every rejected write");
+
+    cfg_fs_entry_t top[8];
+    size_t top_count = 0;
+    TEST_CHECK(cfg_fs_list("", top, 8, &top_count) == ESP_OK && top_count == 1,
+               "exactly one file exists -- no rejected write created or orphaned anything");
+}
+
 void run_test_cfg_fs(void)
 {
     test_mount_and_round_trip();
@@ -399,6 +463,7 @@ void run_test_cfg_fs(void)
     test_recovery_mode_skips_mount();
     test_list_round_trip_with_nesting();
     test_write_large_payload_spans_multiple_verify_chunks();
+    test_write_atomic_rejections_leave_existing_file_untouched();
 
     cfg_fs_deinit();
 }

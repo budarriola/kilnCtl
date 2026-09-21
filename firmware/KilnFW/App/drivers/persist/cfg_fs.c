@@ -314,7 +314,8 @@ static bool flatten_for_tmp(const char *rel_path, char *out, size_t cap)
  * no "missing collapses to expected" shortcut here, unlike a normal read
  * path's defaults, because a verification step must tell "confirmed
  * correct" apart from "could not confirm" rather than conflating them. */
-static bool verify_write_readback(const char *final_path, const void *data, size_t len)
+static bool verify_write_readback(const char *final_path, const void *data, size_t len,
+                                  uint8_t *chunk, size_t chunk_cap)
 {
     FILE *f = fopen(final_path, "rb");
     if (!f) {
@@ -342,11 +343,10 @@ static bool verify_write_readback(const char *final_path, const void *data, size
          * low-water mark (docs/audits/heap_low_water_9051_2026-09-21.md).
          * Semantics are unchanged: any short read or any byte mismatch,
          * anywhere in the stream, still fails the verify. */
-        uint8_t chunk[256];
         const uint8_t *expected = (const uint8_t *)data;
         size_t remaining = len;
         while (remaining > 0) {
-            size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+            size_t want = remaining < chunk_cap ? remaining : chunk_cap;
             size_t got = fread(chunk, 1, want, f);
             if (got != want || memcmp(chunk, expected, want) != 0) {
                 ok = false;
@@ -360,6 +360,38 @@ static bool verify_write_readback(const char *final_path, const void *data, size
     return ok;
 }
 
+/* HEAP, never the stack -- the same rule cfg_fs_mount.c's
+ * maybe_auto_format_and_remount() and zones_config_cfg_fs.c already follow,
+ * and for the same reason. These six buffers used to be six locals of
+ * cfg_fs_write_atomic(), whose frame measured 2000 B out of the flashed
+ * ELF: the single largest first-party contributor to the stack overflow that
+ * panicked bx_flash_worker on the first cfg write after a format
+ * (docs/audits/bx_flash_worker_panic_after_cfgfs_format_2026-09-21.md).
+ * CONTROL_CMD_SET_ZONE_PID is handled ON that worker, so the whole
+ * control_handle_message -> zones nvs_save -> dual-write -> here ->
+ * esp_vfs -> LittleFS chain nests in ONE 8 KB stack, and the LittleFS half
+ * of it (lfs_dir_traverse recursion, deepest on a just-formatted volume)
+ * cannot be bounded statically -- check_all_task_stack_budgets.py says so in
+ * its own bx_flash_worker comment. Taking ~2 kB off this frame is the part
+ * that is actually under our control.
+ *
+ * Allocation failure degrades, never panics (same convention as
+ * scan_partition()'s chunk buffer in cfg_fs_mount.c): ESP_ERR_NO_MEM comes
+ * back before anything on the filesystem has been touched, so the old file
+ * -- if any -- is left exactly as it was, identical to every other
+ * pre-rename failure branch below. */
+typedef struct {
+    char    parent_rel[CFG_FS_MAX_NAME];
+    char    parent_abs[CFG_FS_PATH_MAX];
+    char    tmp_dir[CFG_FS_PATH_MAX];
+    char    flat[CFG_FS_MAX_NAME * 2];
+    char    tmp_path[CFG_FS_PATH_MAX];
+    char    final_path[CFG_FS_PATH_MAX];
+    /* verify_write_readback()'s streaming compare buffer, carried here
+     * rather than as a 256 B local of its own, for the same reason. */
+    uint8_t chunk[256];
+} cfg_fs_write_scratch_t;
+
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len)
 {
     if (!rel_path || (!data && len > 0)) {
@@ -369,37 +401,44 @@ esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* See cfg_fs_write_scratch_t's comment: every path buffer this function
+     * needs lives in one heap block, not in this frame. */
+    cfg_fs_write_scratch_t *sc = malloc(sizeof(*sc));
+    if (!sc) {
+        return ESP_ERR_NO_MEM;
+    }
+
     /* Ensure the immediate parent directory exists (one level of nesting
      * only, matching split_one_level()'s contract). */
-    char parent_rel[CFG_FS_MAX_NAME];
     const char *bare_name = NULL;
-    if (!split_one_level(rel_path, parent_rel, sizeof(parent_rel), &bare_name)) {
+    if (!split_one_level(rel_path, sc->parent_rel, sizeof(sc->parent_rel), &bare_name)) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
-    if (parent_rel[0] != '\0') {
-        char parent_abs[CFG_FS_PATH_MAX];
-        if (!path_join_ok(parent_abs, sizeof(parent_abs), s_base_dir, parent_rel)) {
+    if (sc->parent_rel[0] != '\0') {
+        if (!path_join_ok(sc->parent_abs, sizeof(sc->parent_abs), s_base_dir, sc->parent_rel)) {
+            free(sc);
             return ESP_ERR_INVALID_ARG;
         }
-        ensure_dir(parent_abs);
+        ensure_dir(sc->parent_abs);
     }
 
-    char tmp_dir[CFG_FS_PATH_MAX];
-    if (!path_join_ok(tmp_dir, sizeof(tmp_dir), s_base_dir, ".tmp")) {
+    if (!path_join_ok(sc->tmp_dir, sizeof(sc->tmp_dir), s_base_dir, ".tmp")) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
-    ensure_dir(tmp_dir);
+    ensure_dir(sc->tmp_dir);
 
-    char flat[CFG_FS_MAX_NAME * 2];
-    if (!flatten_for_tmp(rel_path, flat, sizeof(flat))) {
+    if (!flatten_for_tmp(rel_path, sc->flat, sizeof(sc->flat))) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
-    char tmp_path[CFG_FS_PATH_MAX];
-    if (!path_join_ok(tmp_path, sizeof(tmp_path), tmp_dir, flat)) {
+    if (!path_join_ok(sc->tmp_path, sizeof(sc->tmp_path), sc->tmp_dir, sc->flat)) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
-    char final_path[CFG_FS_PATH_MAX];
-    if (!path_join_ok(final_path, sizeof(final_path), s_base_dir, rel_path)) {
+    if (!path_join_ok(sc->final_path, sizeof(sc->final_path), s_base_dir, rel_path)) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -407,8 +446,9 @@ esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len
      * temp file and returns without touching `final_path` at all -- the
      * old file (if any) is left exactly as it was. Binary mode ("wb") so
      * no CRLF translation touches the bytes on a Windows host build. */
-    FILE *f = fopen(tmp_path, "wb");
+    FILE *f = fopen(sc->tmp_path, "wb");
     if (!f) {
+        free(sc);
         return ESP_FAIL;
     }
     size_t wrote = (len == 0) ? 0 : fwrite(data, 1, len, f);
@@ -417,12 +457,14 @@ esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len
     bool sync_ok = flush_ok && (cfg_fs_fsync(f) == 0);
     int close_rc = fclose(f);
     if (!write_ok || !flush_ok || !sync_ok || close_rc != 0) {
-        remove(tmp_path);
+        remove(sc->tmp_path);
+        free(sc);
         return ESP_FAIL;
     }
 
-    if (cfg_fs_atomic_rename(tmp_path, final_path) != 0) {
-        remove(tmp_path);
+    if (cfg_fs_atomic_rename(sc->tmp_path, sc->final_path) != 0) {
+        remove(sc->tmp_path);
+        free(sc);
         return ESP_FAIL;
     }
 
@@ -434,7 +476,9 @@ esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len
      * disk disagree with the caller's buffer must never be handed back as
      * success. See verify_write_readback()'s comment for why this mirrors
      * boot_guard_mark_healthy()'s verified-clear discipline. */
-    if (!verify_write_readback(final_path, data, len)) {
+    bool verified = verify_write_readback(sc->final_path, data, len, sc->chunk, sizeof(sc->chunk));
+    free(sc);
+    if (!verified) {
         return ESP_FAIL;
     }
     return ESP_OK;
