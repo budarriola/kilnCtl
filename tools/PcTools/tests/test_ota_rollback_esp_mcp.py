@@ -85,5 +85,70 @@ class OtaRollbackEspErrorPathTests(unittest.TestCase):
         self.assertIn("403", result)
 
 
+class ApPasswordEnvFallbackTests(unittest.TestCase):
+    """Covers the KILNCTL_AP_PASSWORD fallback added to mirror
+    mcp_server_flash.py's ap_password handling: an omitted `password`
+    argument should fall back to the env var, the resolved secret must
+    never appear in the tool's returned text, and a caller with neither
+    source gets a clear error naming the env var."""
+
+    def setUp(self):
+        self._old = os.environ.pop(mo.KILNCTL_AP_PASSWORD_ENV, None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._old is None:
+            os.environ.pop(mo.KILNCTL_AP_PASSWORD_ENV, None)
+        else:
+            os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = self._old
+
+    def test_sw_reset_esp_uses_env_var_when_password_omitted(self):
+        os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = "s3cr3t-env-pw"
+        with unittest.mock.patch.object(
+            mo.ota_http, "sw_reset",
+            return_value={"ok": True, "detail": "resetting"},
+        ) as mock_reset:
+            result = mo.sw_reset_esp(confirm=True, host="10.0.0.5")
+        mock_reset.assert_called_once_with("10.0.0.5", "s3cr3t-env-pw")
+        self.assertTrue(result.startswith("ok"))
+        self.assertNotIn("s3cr3t-env-pw", result)
+
+    def test_sw_reset_esp_explicit_password_wins_over_env(self):
+        os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = "env-pw"
+        with unittest.mock.patch.object(
+            mo.ota_http, "sw_reset",
+            return_value={"ok": True, "detail": "resetting"},
+        ) as mock_reset:
+            result = mo.sw_reset_esp("explicit-pw", confirm=True, host="10.0.0.5")
+        mock_reset.assert_called_once_with("10.0.0.5", "explicit-pw")
+        self.assertNotIn("explicit-pw", result)
+        self.assertNotIn("env-pw", result)
+
+    def test_sw_reset_esp_missing_credential_names_env_var(self):
+        # KILNCTL_AP_PASSWORD is unset (removed in setUp).
+        with unittest.mock.patch.object(mo.ota_http, "sw_reset") as mock_reset:
+            result = mo.sw_reset_esp(confirm=True, host="10.0.0.5")
+        mock_reset.assert_not_called()
+        self.assertTrue(result.startswith("error"))
+        self.assertIn(mo.KILNCTL_AP_PASSWORD_ENV, result)
+
+    def test_ota_rollback_esp_uses_env_var_when_password_omitted(self):
+        os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = "rollback-env-pw"
+        with unittest.mock.patch.object(
+            mo.ota_http, "rollback_esp",
+            return_value={"ok": True, "version_before": "1.0.0"},
+        ) as mock_rollback:
+            result = mo.ota_rollback_esp(host="10.0.0.5")
+        mock_rollback.assert_called_once_with("10.0.0.5", "rollback-env-pw")
+        self.assertNotIn("rollback-env-pw", result)
+
+    def test_ota_rollback_esp_missing_credential_names_env_var(self):
+        with unittest.mock.patch.object(mo.ota_http, "rollback_esp") as mock_rollback:
+            result = mo.ota_rollback_esp(host="10.0.0.5")
+        mock_rollback.assert_not_called()
+        self.assertTrue(result.startswith("error"))
+        self.assertIn(mo.KILNCTL_AP_PASSWORD_ENV, result)
+
+
 if __name__ == "__main__":
     unittest.main()

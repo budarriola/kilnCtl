@@ -606,9 +606,11 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
     caused it would defeat that purpose. A REQUIRED follow-up before heating
     is a separate, explicit call to clear the trip (POST
     /api/safety/clear_trip) once the safety link is confirmed back up and the
-    trip mask is confirmed to be ONLY SAFETY_TRIP_MAIN_FAULT (bit 6, 0x0040)
-    -- never clear a trip carrying any other bit without understanding it
-    first.
+    trip mask is confirmed to be ONLY SAFETY_TRIP_MAIN_FAULT (bit 5, 0x0020;
+    per link_frame_trip_mask_for_reason() mask = 1 << (trip_reason - 1) and
+    SAFETY_TRIP_MAIN_FAULT is trip_reason 6, so bit 5 -- 0x0040 is bit 6,
+    SAFETY_TRIP_LINK_DEAD/S6b) -- never clear a trip carrying any other bit
+    without understanding it first.
 
     On success (200), this ESP is already committed to rebooting itself from
     a short-lived background task -- this call returns as soon as the
