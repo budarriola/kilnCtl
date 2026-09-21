@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_profiles_fallback in profiles_storage_ensure() */
 #include "esp_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
@@ -262,8 +263,23 @@ profiles_state_t *profiles_storage_ensure(void)
          * `s_profiles` goes through this function, so falling back to one
          * static instance leaves the profile store empty-but-valid (no
          * profiles resident this boot) instead of crashing the first
-         * request that touches it. */
-        static profiles_state_t s_profiles_fallback;
+         * request that touches it.
+         *
+         * EXT_RAM_BSS_ATTR is NOT optional here. Without it this one
+         * never-normally-used instance costs sizeof(profiles_state_t) --
+         * 42416 bytes at PROFILES_MAX_COUNT 100 -- of INTERNAL .dram0.bss
+         * on every boot, whether or not the fallback is ever taken. The
+         * first bench flash of the 100-slot build (5f58ba09, 2026-09-20)
+         * did exactly that: internal heap fell to 8447 B free / 263 B
+         * low-water, and the Wi-Fi ppTask aborted on
+         * esp_timer_create() == ESP_ERR_NO_MEM inside phy_track_pll_init()
+         * (docs/audits/dram_bss_profiles_fallback_2026-09-20.md). PSRAM
+         * .bss is mapped before app_main() runs, so if PSRAM were absent
+         * the boot would already have failed long before this line;
+         * placing the fallback there keeps the never-NULL guarantee at
+         * zero internal-RAM cost. check_kilnfw_dram_bss_budget.ps1 now
+         * fails the suite if .dram0.bss grows past its budget again. */
+        static EXT_RAM_BSS_ATTR profiles_state_t s_profiles_fallback;
         ESP_LOGE(PROFILES_TAG, "profiles storage: internal RAM allocation also failed -- "
                  "profile store starting EMPTY (no user profiles available this boot)");
         p = &s_profiles_fallback;

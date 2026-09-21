@@ -78,8 +78,10 @@ not a constant bump. Say so in `profiles_types.h` next to the new value.
 ## 3. Where profiles live, and capacity in each store
 
 They live in **both**, unchanged: `profiles_nvs` is authoritative and unconditional,
-`cfg` is a per-slot dual-write mirror (`profiles_cfg_fs.c`), and on this bench board
-`cfg` is still unformatted and unmounted so the mirror is inert today. Raising the slot
+`cfg` is a per-slot dual-write mirror (`profiles_cfg_fs.c`). (Correction 2026-09-20: this
+section originally said `cfg` was unformatted and unmounted on the bench. It was not -- the
+bench board reports `cfg` mounted with seven files and the dual-write mirror live, and has
+since at least the 2026-09-18 `ae3160df` flash.) Raising the slot
 count does not change that policy and must not be used as an excuse to change it.
 
 **`profiles_nvs` (0x19D000, 0x60000 = 384 KiB) -- the tighter of the two.** It holds
@@ -200,8 +202,13 @@ lands for that id only.
 
 ## 6. Bench migration
 
-`cfg` is unformatted and not mounted at boot today, so **the resize loses nothing** --
-there is no volume to preserve. Nothing else on the table moves.
+**Premise corrected 2026-09-20, after the flash:** `cfg` WAS mounted on the bench (see
+section 3). The resize still lost nothing -- `program_esp` never touches the `cfg` region,
+NVS is authoritative for every dual-written item, and the board came back with the same
+seven files -- but the LittleFS superblock keeps the volume at its formatted 512 KiB
+geometry (`/api/cfgfs` reports `total_bytes: 524288`) on the new 0x250000 partition until
+it is reformatted via `GET /api/cfgfs/format_pending` + `POST /api/cfgfs/format_confirm`,
+which is HMAC-gated on the AP password. Nothing else on the table moves.
 
 What must be flashed: an ordinary `flash_firmware()` from a clean worktree at HEAD. That
 tool writes exactly three images (`tools/PcTools/src/kilnctrl/mcp_server_flash.py`, the
@@ -224,8 +231,9 @@ Procedure:
    against the board's live table; `app` is unchanged, so it passes.
 4. Confirm with `debug_check_partition_table()` that the board reports `cfg` at 0xDB0000
    size 0x250000.
-5. `cfg` stays unmounted and unformatted until the separate mount-at-boot work lands --
-   this pass must not also turn mounting on. Two changes, two flashes.
+5. (Step written against the wrong premise; kept for the record.) `cfg` was already
+   mounted at boot on the bench. The remaining follow-up is the reformat to full geometry,
+   which needs the AP password and is deferred until one is available to a session.
 
 Risks, none of them caused by this change and all three in `CLAUDE.md`'s flash section: a
 dual reset trips S6a (expected -- confirm `trip_mask` 0x0020, then `safety_clear_trip()`);
