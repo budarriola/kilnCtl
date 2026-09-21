@@ -284,6 +284,13 @@ class ClientsUseTheSeamTest(unittest.TestCase):
     _EXEMPT_FUNCTIONS = {
         ("ota_http_client.py", "push_esp_image_unauthenticated"),  # OT-E09: no credential at all
         ("ota_http_client.py", "push_esp_image_with_session"),     # OT-E10: explicit session cookie, no auto-login
+        # ROUTE_TIER_ADMIN_BOOTSTRAP requires no session at all (and there is
+        # no admin credential yet to log in with), so this is deliberately
+        # unauthenticated.
+        ("web_auth_setup_http_client.py", "post_bootstrap_password"),
+        # A one-shot credential check: http_auth's auto-login-on-401 would
+        # defeat the "log in exactly once, never retry" contract here.
+        ("web_auth_setup_http_client.py", "try_login"),
     }
 
     @staticmethod
