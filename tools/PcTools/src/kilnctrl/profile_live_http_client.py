@@ -214,6 +214,17 @@ def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: flo
     status=409 on a window violation (the candidate would change an
     already-passed or in-flight segment) -- both delivered as the board's
     own {"ok":false,"error":"..."} text in .detail.
+
+    A field the caller did not supply for a given segment is NEVER sent as
+    an explicit 0 -- it is simply omitted, so the firmware applies its own
+    default or rejection for that field (profiles_edit_http.c). This
+    matters concretely: a missing seg%u_io_blocking defaults to 1 (safe/
+    blocking) on the firmware side, so sending an explicit 0 there would
+    silently turn a blocking I/O segment into a non-blocking one; and
+    PROFILE_TARGET_C_MIN/PROFILE_RAMP_C_PER_HR_MIN are both 0.0f, so
+    sending an explicit 0 for an omitted target/ramp would be silently
+    accepted as "0 C" instead of triggering the firmware's own
+    "target_c missing" 400.
     """
     ramp_dwell_keys = {"target", "target_c", "ramp", "ramp_c_per_hr", "dwell", "dwell_min"}
     io_keys = {"io_target", "io_state", "io_blocking", "io_leave_on", "io_leave_on_at_end"}
@@ -229,19 +240,22 @@ def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: flo
             )
         kind = seg.get("kind", 0)
         fields[f"seg{i}_kind"] = str(kind)
-        if ramp_dwell_keys & seg.keys():
-            target = seg.get("target", seg.get("target_c", 0))
-            ramp = seg.get("ramp", seg.get("ramp_c_per_hr", 0))
-            dwell = seg.get("dwell", seg.get("dwell_min", 0))
-            fields[f"seg{i}_target"] = str(target)
-            fields[f"seg{i}_ramp"] = str(ramp)
-            fields[f"seg{i}_dwell"] = str(dwell)
-        if io_keys & seg.keys():
-            io_leave_on = seg.get("io_leave_on", seg.get("io_leave_on_at_end", 0))
-            fields[f"seg{i}_io_target"] = str(seg.get("io_target", 0))
-            fields[f"seg{i}_io_state"] = str(seg.get("io_state", 0))
-            fields[f"seg{i}_io_blocking"] = str(seg.get("io_blocking", 0))
-            fields[f"seg{i}_io_leave_on"] = str(io_leave_on)
+
+        if "target" in seg or "target_c" in seg:
+            fields[f"seg{i}_target"] = str(seg.get("target", seg.get("target_c")))
+        if "ramp" in seg or "ramp_c_per_hr" in seg:
+            fields[f"seg{i}_ramp"] = str(seg.get("ramp", seg.get("ramp_c_per_hr")))
+        if "dwell" in seg or "dwell_min" in seg:
+            fields[f"seg{i}_dwell"] = str(seg.get("dwell", seg.get("dwell_min")))
+
+        if "io_target" in seg:
+            fields[f"seg{i}_io_target"] = str(seg["io_target"])
+        if "io_state" in seg:
+            fields[f"seg{i}_io_state"] = str(seg["io_state"])
+        if "io_blocking" in seg:
+            fields[f"seg{i}_io_blocking"] = str(seg["io_blocking"])
+        if "io_leave_on" in seg or "io_leave_on_at_end" in seg:
+            fields[f"seg{i}_io_leave_on"] = str(seg.get("io_leave_on", seg.get("io_leave_on_at_end")))
     return _post_form(host, "/api/profile/live", fields, timeout)
 
 

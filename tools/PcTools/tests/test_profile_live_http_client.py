@@ -220,6 +220,42 @@ class EditLiveTest(unittest.TestCase):
         body = captured["data"]
         self.assertIn("seg0_io_leave_on=1", body)
 
+    def test_missing_dwell_omits_the_field_rather_than_sending_zero(self):
+        # PROFILE_RAMP_C_PER_HR_MIN/PROFILE_TARGET_C_MIN are 0.0f, so an
+        # explicit 0 for an omitted field would be silently accepted by the
+        # firmware instead of triggering its own "missing" 400 -- the field
+        # must simply not be sent.
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["data"] = req.data.decode()
+            return _fake_response(json.dumps({"ok": True, "warnings": []}).encode())
+
+        segments = [{"kind": 0, "target": 1000, "ramp": 100}]  # no dwell/dwell_min at all
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=_capture):
+            plive.edit_live("192.168.4.1", "test", 3, segments)
+        body = captured["data"]
+        self.assertIn("seg0_target=1000", body)
+        self.assertIn("seg0_ramp=100", body)
+        self.assertNotIn("seg0_dwell=", body)
+
+    def test_missing_io_blocking_omits_the_field_rather_than_sending_zero(self):
+        # Firmware defaults a missing seg%u_io_blocking to 1 (safe/blocking);
+        # sending an explicit 0 would silently turn the segment non-blocking.
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["data"] = req.data.decode()
+            return _fake_response(json.dumps({"ok": True, "warnings": []}).encode())
+
+        segments = [{"kind": 1, "io_target": 2, "io_state": 1}]  # no io_blocking at all
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=_capture):
+            plive.edit_live("192.168.4.1", "iotest", 1, segments)
+        body = captured["data"]
+        self.assertIn("seg0_io_target=2", body)
+        self.assertIn("seg0_io_state=1", body)
+        self.assertNotIn("seg0_io_blocking=", body)
+
     def test_unknown_segment_key_raises_value_error(self):
         segments = [{"kind": 0, "target": 1000, "ramp": 100, "dwell": 30, "bogus_field": 1}]
         with self.assertRaises(ValueError) as ctx:
