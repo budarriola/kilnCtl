@@ -218,11 +218,23 @@ Open:
       any relay no zone currently claims (`renderRelayNames()`), and shown on
       the LCD temperature page (`ui_page_temperature.c`) in place of the
       zone-owned label. Covered by `test_relay_names_cfg_fs.c`.
-- [ ] **LCD**: no manual toggling of zone-assigned relays on the temperature
+- [x] **LCD**: no manual toggling of zone-assigned relays on the temperature
       page (visible, not hidden); safety-processor / board-health /
       thermocouple-fault pages folded into LCD diagnostics and removed; kiln
       setup, thermocouple types and kiln config pages removed; profiles to the
-      top-left of the main menu, whole menu on one page.
+      top-left of the main menu, whole menu on one page. DONE -- verified
+      2026-09-20 against the tree: `ui_page_temperature.c` already lists every
+      physical relay once, disables (`LV_STATE_DISABLED`, re-checked again in
+      `relay_toggle_cb()`) whichever ones `relay_is_zone_owned()` claims for a
+      zone while leaving their live state visible, and drives every write
+      through `dashboard_set_relay()` (same manual-block/safety-fault gating
+      as the web dashboard's own manual relay control) -- see that file's
+      header comment. `ui_page_board_health.c`, `ui_page_safety.c`,
+      `ui_page_thermo_faults.c`, `ui_page_tc_types.c`, `ui_page_kiln_setup.c`,
+      `ui_page_kiln_cfg_setup.c` and `ui_page_zones.c` no longer exist in the
+      tree and are not registered in `kiln_ui.c`. `ui_page_config.c`'s nav
+      grid builds "Profiles" as its first (top-left) cell, one page, no
+      scrolling.
 
 ### Two constraints that now bind everything here
 
