@@ -18,6 +18,20 @@
 // selector-kind "page" performs no click, just navigates and screenshots
 // (page-load-only rows). Exit 0 + one JSON line to stdout on success; exit 1
 // + an error message on stderr on failure.
+//
+// Optional:
+//   --accept-dialogs        answer a native confirm() with OK instead of
+//                           Cancel. Off by default: a row that is not
+//                           classified as a write gets any unexpected
+//                           dialog dismissed, never accepted. Dialogs are
+//                           always logged (stderr) and reported (JSON
+//                           `dialogs`), accepted or not.
+//   --expect-post <path>    after the click, wait (bounded) for a POST whose
+//                           URL contains <path> to actually complete before
+//                           screenshotting and tearing Chrome down, and
+//                           report its status in the JSON `post` field.
+//                           Without it the script instead waits (bounded)
+//                           for the page to go network-quiet.
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -27,6 +41,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 const CDP_CALL_TIMEOUT_MS = 20000;
+// Bounded post-click waits (see CdpSession.waitForPost/waitForQuiet).
+const POST_WAIT_TIMEOUT_MS = 10000;
+const QUIET_TIMEOUT_MS = 5000;
 
 function findChrome() {
   const candidates = [
@@ -52,6 +69,8 @@ function parseArgs(argv) {
     else if (a === '--selector') out.selector = argv[++i];
     else if (a === '--screenshot') out.screenshot = argv[++i];
     else if (a === '--port') out.port = parseInt(argv[++i], 10);
+    else if (a === '--expect-post') out.expectPost = argv[++i];
+    else if (a === '--accept-dialogs') out.acceptDialogs = true;
   }
   for (const req of ['host', 'route', 'selectorKind']) {
     if (!out[req]) throw new Error(`--${req} is required`);
@@ -114,10 +133,25 @@ async function waitForPort(port, timeoutMs, chrome) {
 }
 
 class CdpSession {
-  constructor(ws) {
+  // `acceptDialogs` decides what a native window.confirm()/alert() gets
+  // answered with. It is NOT a blanket default: web_commission_row.py passes
+  // --accept-dialogs only for a row it already classifies as a write/
+  // owner-gated action, so a read-only row that unexpectedly raises a
+  // confirm() is DISMISSED (no state change) instead of silently
+  // authorizing whatever it guards -- several of these dialogs gate
+  // genuinely destructive controls (diagnostics_page.html's dangerEnterBtn,
+  // the per-relay lifetime-cycle reset). Either way the dialog's type and
+  // message are recorded and reported, so a run never accepts or dismisses
+  // something without saying which prompt it answered.
+  constructor(ws, acceptDialogs = false) {
     this.ws = ws;
     this.nextId = 1;
     this.pending = new Map();
+    this.acceptDialogs = !!acceptDialogs;
+    this.dialogs = [];
+    // In-flight request bookkeeping for waitForQuiet()/waitForPost() below.
+    this.inFlight = new Map();   // requestId -> {method, url}
+    this.completed = [];         // {method, url, status|null, failed}
     const failPending = (why) => {
       const err = new Error(`CDP connection closed: ${why}`);
       for (const { reject } of this.pending.values()) reject(err);
@@ -133,6 +167,26 @@ class CdpSession {
         this.pending.delete(msg.id);
         if (msg.error) reject(new Error(JSON.stringify(msg.error)));
         else resolve(msg.result);
+      } else if (msg.method === 'Network.requestWillBeSent') {
+        const p = msg.params || {};
+        this.inFlight.set(p.requestId, {
+          method: (p.request && p.request.method) || '?',
+          url: (p.request && p.request.url) || '',
+        });
+      } else if (msg.method === 'Network.responseReceived') {
+        const rec = this.inFlight.get(msg.params.requestId);
+        if (rec) rec.status = msg.params.response && msg.params.response.status;
+      } else if (msg.method === 'Network.loadingFinished' || msg.method === 'Network.loadingFailed') {
+        const rec = this.inFlight.get(msg.params.requestId);
+        if (rec) {
+          this.inFlight.delete(msg.params.requestId);
+          this.completed.push({
+            method: rec.method,
+            url: rec.url,
+            status: rec.status === undefined ? null : rec.status,
+            failed: msg.method === 'Network.loadingFailed',
+          });
+        }
       } else if (msg.method === 'Page.javascriptDialogOpening') {
         // Defect found running the first live class sweep: several controls
         // (e.g. diagnostics_page.html's watchdog-panic toggle, main_page.html's
@@ -142,11 +196,18 @@ class CdpSession {
         // returns (the renderer thread is frozen waiting on the dialog) and
         // every such row hangs for the full CDP_CALL_TIMEOUT_MS before
         // failing, never actually completing or rejecting the action.
-        // Auto-accepting (never auto-dismissing) matches a human operator who
-        // intends the click's action to proceed -- this script is only ever
-        // invoked for one already-authorized row at a time, never as a blind
-        // sweep, so the underlying action itself is not this fix's concern.
-        this.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {
+        // Answering it is opt-in per invocation (--accept-dialogs, set by
+        // web_commission_row.py only for a write/owner-gated row): a
+        // read-only row gets the dialog DISMISSED, which unhangs the
+        // renderer without authorizing the guarded action. Every dialog is
+        // recorded with its message and reported on stderr + in the result
+        // JSON, so the run log always names the prompt that was answered.
+        const p = msg.params || {};
+        const accept = this.acceptDialogs;
+        this.dialogs.push({ type: p.type || 'confirm', message: p.message || '', accepted: accept });
+        console.error(`_web_commission_cdp: ${accept ? 'ACCEPTED' : 'DISMISSED'} ` +
+                      `${p.type || 'confirm'} dialog: ${JSON.stringify(p.message || '')}`);
+        this.send('Page.handleJavaScriptDialog', { accept }).catch(() => {
           /* best effort -- if this races the page/context going away, the
              row's own error handling (selector-not-found / timeout) still
              surfaces the underlying problem */
@@ -172,10 +233,62 @@ class CdpSession {
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
+
+  // W30 defect (2026-09-21 live run): the watchdog toggle's click handler
+  // does its state-changing fetch('/api/watchdog_cfg', {method:'POST'})
+  // asynchronously AFTER the confirm() dialog resolves. The old fixed 500 ms
+  // post-click sleep followed by chrome.kill() in main()'s finally block
+  // could tear the browser down before that request was written, so the
+  // write never landed and the row read back unchanged -- an invisible
+  // false negative. These two waits replace "sleep and hope": waitForPost()
+  // when the row declares the request it expects, waitForQuiet() otherwise.
+  // Both are bounded, and both return what they saw so the caller can
+  // report it rather than assume it.
+  async waitForPost(pathFragment, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    const matches = (r) => r.method === 'POST' && r.url.includes(pathFragment);
+    for (;;) {
+      const hit = this.completed.find(matches);
+      if (hit) return hit;
+      if (Date.now() >= deadline) {
+        const inflight = [...this.inFlight.values()].filter(matches).length;
+        throw new Error(
+          `expected POST containing "${pathFragment}" did not complete within ${timeoutMs}ms ` +
+          `(${inflight} still in flight; completed: ` +
+          `${JSON.stringify(this.completed.map((r) => `${r.method} ${r.url}`))})`);
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  async waitForQuiet(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.inFlight.size > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return this.inFlight.size === 0;
+  }
+}
+
+// Post-click settle. The dialog (if any) has already been answered by the
+// CdpSession message handler by the time the click's Runtime.evaluate
+// returns; what is still outstanding is the handler's own fetch(). Give the
+// handler a moment to issue it, then either wait for the row's declared
+// POST or for the page to go network-quiet -- never just sleep, since the
+// caller kills Chrome immediately after this returns.
+async function settle(cdp, args) {
+  await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 500))', awaitPromise: true });
+  if (args.expectPost) {
+    const hit = await cdp.waitForPost(args.expectPost, POST_WAIT_TIMEOUT_MS);
+    return { method: hit.method, url: hit.url, status: hit.status, failed: hit.failed };
+  }
+  await cdp.waitForQuiet(QUIET_TIMEOUT_MS);
+  return null;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  let postResult = null;
   const chromePath = findChrome();
   if (!chromePath) throw new Error('no Chrome/Edge binary found (set KC_SWEEP_CHROME)');
 
@@ -206,7 +319,7 @@ async function main() {
       ws.addEventListener('open', resolve, { once: true });
       ws.addEventListener('error', reject, { once: true });
     });
-    const cdp = new CdpSession(ws);
+    const cdp = new CdpSession(ws, args.acceptDialogs);
     await cdp.send('Page.enable');
     await cdp.send('Network.enable');
     // The cookie must be set before navigation so the request the page load
@@ -227,13 +340,14 @@ async function main() {
       if (res.result.value !== 'CLICKED') {
         throw new Error(`selector #${args.selector} not found on ${args.route} at runtime`);
       }
-      await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 500))', awaitPromise: true });
+      postResult = await settle(cdp, args);
     } else if (args.selectorKind === 'text') {
       const expr = `(() => { const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes(${JSON.stringify(args.selector)})); if (!btn) return 'NOT_FOUND'; btn.click(); return 'CLICKED'; })()`;
       const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
       if (res.result.value !== 'CLICKED') {
         throw new Error(`button text "${args.selector}" not found on ${args.route} at runtime`);
       }
+      postResult = await settle(cdp, args);
     } // "page": no click, load only
 
     if (args.screenshot) {
@@ -241,7 +355,10 @@ async function main() {
       await writeFile(args.screenshot, Buffer.from(shot.data, 'base64'));
     }
 
-    console.log(JSON.stringify({ ok: true, route: args.route, selector: args.selector || null }));
+    console.log(JSON.stringify({
+      ok: true, route: args.route, selector: args.selector || null,
+      dialogs: cdp.dialogs, post: postResult,
+    }));
   } finally {
     try { chrome.kill(); } catch { /* already gone */ }
     try { await rm(userDataDir, { recursive: true, force: true }); } catch { /* best effort */ }

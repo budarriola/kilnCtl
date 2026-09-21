@@ -175,6 +175,83 @@ def test_run_row_live_still_logs_in_when_no_cookie_supplied(monkeypatch):
     assert calls == [1]
 
 
+def _capture_cmd(monkeypatch, row_id="W30", **kwargs):
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env")
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    ok, msg = wcr.run_row_live(row_id, "192.0.2.1", "/tmp/whatever", **kwargs)
+    assert ok, msg
+    return captured
+
+
+def test_cookie_never_appears_in_child_argv(monkeypatch):
+    # The cookie travels in the child's environment only (KC_SID). A value
+    # on argv is visible in a process listing and in any logged command
+    # line, so this asserts it is nowhere in the argument vector -- the
+    # reason main() has no --cookie flag either (see the next test).
+    captured = _capture_cmd(monkeypatch, cookie="secret-cookie-value")
+    assert captured["env"]["KC_SID"] == "secret-cookie-value"
+    assert not any("secret-cookie-value" in str(tok) for tok in captured["cmd"]), captured["cmd"]
+
+
+def test_main_rejects_a_cookie_on_the_command_line(monkeypatch):
+    # Negative test for the argv rule: --cookie must not exist as a flag.
+    # argparse exits 2 on an unknown option.
+    with pytest.raises(SystemExit) as exc:
+        wcr.main(["W2", "--host", "192.0.2.1", "--cookie", "secret-cookie-value"])
+    assert exc.value.code == 2
+
+
+def test_main_reuses_cookie_from_environment(monkeypatch):
+    monkeypatch.setenv("KC_REUSE_SID", "env-cookie")
+    seen = {}
+
+    def fake_live(row_id, host, shots, cookie=None):
+        seen["cookie"] = cookie
+        return True, "ok"
+
+    monkeypatch.setattr(wcr, "run_row_live", fake_live)
+    assert wcr.main(["W2", "--host", "192.0.2.1"]) == 0
+    assert seen["cookie"] == "env-cookie"
+
+
+def test_write_row_gets_dialog_and_post_flags_read_only_row_does_not(monkeypatch):
+    # W30's click opens a native confirm() and then POSTs /api/watchdog_cfg
+    # asynchronously; the driver must be told both (accept the dialog, wait
+    # for that POST to complete before teardown -- the 2026-09-21 W30 race).
+    write_cmd = _capture_cmd(monkeypatch, "W30")
+    assert "--accept-dialogs" in write_cmd["cmd"]
+    assert "--expect-post" in write_cmd["cmd"]
+    assert write_cmd["cmd"][write_cmd["cmd"].index("--expect-post") + 1] == "/api/watchdog_cfg"
+
+    # A read-only row must NOT be allowed to answer a confirm() with OK:
+    # dismissing unhangs the renderer without authorizing the action.
+    ro_cmd = _capture_cmd(monkeypatch, "W28")
+    assert "--accept-dialogs" not in ro_cmd["cmd"]
+    assert "--expect-post" not in ro_cmd["cmd"]
+
+
+def test_every_write_row_declares_the_post_it_expects():
+    # A write row with no expect_post silently falls back to the old
+    # "sleep 500ms then kill Chrome" behavior, which is exactly how W30's
+    # write went missing. W1 is the one deliberate exception: the login form
+    # submits as a navigation, not a fetch(), so the post-click network-quiet
+    # wait covers it and an expect_post would be the wrong shape.
+    missing = [r.row_id for r in wcr.ROWS.values()
+               if r.classification == "write" and not r.expect_post and r.row_id != "W1"]
+    assert missing == [], missing
+
+
 def test_run_row_live_passes_minimal_env_to_child(monkeypatch):
     # Advisory fix: only KC_SID plus a minimal allowlist should reach the
     # Chrome child, not this process's full environment.

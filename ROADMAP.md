@@ -2897,13 +2897,16 @@ Owner instruction, 2026-09-21.
   `web_commission_row.py` (`tools/PcTools/src/kilnctrl/web_commission_row.py`)
   in live mode against the real board for the first time — previously only
   exercised by its own pytest suite. One login only, cookie reused for the
-  whole class. All 12 wired rows run (W1/W2/W6/W15/W16/W28/W48 PASS; W3/W4
+  whole class. All 12 wired rows run (W2/W6/W15/W16/W28/W48 PASS; W1
+  PARTIAL — the driver's own login POST/session read-back passed but the
+  login *form* was not submitted, see the matrix row; W3/W4
   FAIL-EXPECTED — no last-run/trip state to act on; W5/W29 skipped, both
   real writes with no safe restore path or forbidden by rule; W30 found a
   real driver defect — see below). Also drove 10 additional read-only
   page-load rows by hand through the same CDP path ahead of their `Row()`
   entries being added (W7/W21/W23/W25/W37/W39/W41/W43/W46/W49), all PASS.
-  Two driver defects found and fixed in this run: (1) `run_row_live()`
+  Three driver defects found and fixed (the first two during the run, the
+  third in review of it): (1) `run_row_live()`
   logged in on every call — a class-wide sweep would have logged in once
   per row, against the one-login rule; added an optional `cookie` parameter
   so a caller can log in once and reuse it (new tests in
@@ -2911,13 +2914,21 @@ Owner instruction, 2026-09-21.
   handling for native `window.confirm()` dialogs, which several controls
   route through (`app.js`'s `kcConfirm` is literally `window.confirm`) —
   the click's `Runtime.evaluate` hung for the full 20 s timeout with the
-  renderer frozen on the dialog. Fixed by auto-accepting
-  `Page.javascriptDialogOpening`. Left as a known follow-up: even with the
-  dialog fixed, W30's actual write (`POST /api/watchdog_cfg`) still loses a
-  race against the script's fixed post-click wait and immediate Chrome
-  teardown, so the value never lands (confirmed unchanged via read-back) —
-  a real fix needs the script to wait on the specific request's
-  `Network.loadingFinished` instead of a fixed sleep. No board defect
+  renderer frozen on the dialog. Fixed by handling
+  `Page.javascriptDialogOpening`: answered OK only for a row this driver
+  classifies as a write/owner-gated action (`--accept-dialogs`), dismissed
+  otherwise, and logged with its message either way — the same dialogs gate
+  Danger Mode and the relay lifetime-cycle reset, so a blanket accept was
+  not safe for a driver that must stay read-only unless the row is
+  authorized. (3) W30's actual write (`POST /api/watchdog_cfg`) lost a race
+  against the script's fixed post-click wait and immediate Chrome teardown,
+  so the value never landed (confirmed unchanged via read-back); fixed in
+  review by giving a row an `expect_post` path and having the CDP script
+  wait, bounded, for that request to complete
+  (`Network.requestWillBeSent`/`loadingFinished`) before screenshotting and
+  teardown, with a bounded network-quiet wait for rows declaring none.
+  Unit-tested only — **W30 needs a live re-run to confirm the write now
+  lands.** No board defect
   found; uptime rose monotonically with no trip/reboot/firing throughout.
   Full detail, per-row evidence, and defect writeups:
   `docs/BENCH_TEST_LOG.md`'s "M18 web-interface class, first LIVE run"

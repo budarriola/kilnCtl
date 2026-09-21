@@ -61,6 +61,14 @@ class Row:
     classification: str  # "read-only" | "write" | "owner-gated"
     readback_desc: str
     verify_endpoint: "Optional[str]" = None  # GET path polled after the UI action in live mode; None = no automated read-back (e.g. client-side-only rows)
+    # Path fragment of the POST the row's control is expected to issue. When
+    # set, the CDP driver waits (bounded) for that request to actually
+    # complete before screenshotting and killing Chrome -- without it, an
+    # async fetch() started by the click handler can be torn down before it
+    # is written, so the write silently never lands (the W30 defect found on
+    # the 2026-09-21 live run). None = no POST expected (page loads,
+    # client-side-only controls).
+    expect_post: "Optional[str]" = None
 
 
 # 12 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
@@ -85,17 +93,17 @@ ROWS: "dict[str, Row]" = {
               "ackLastRunBtn", "id", "click Dismiss",
               "last-run banner disappears",
               "write", "GET /api/profile_exec shows no last-run banner condition",
-              verify_endpoint="/api/profile_exec"),
+              verify_endpoint="/api/profile_exec", expect_post="/api/profile_exec/ack_last_run"),
     "W4": Row("W4", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "clearTripBtn", "id", "click Clear Trip",
               "trip banner clears",
               "write", "GET /api/status trip_reason/trip_mask return to none",
-              verify_endpoint="/api/status"),
+              verify_endpoint="/api/status", expect_post="/api/safety/clear_trip"),
     "W5": Row("W5", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "pidPopupApplyBtn", "id", "click Apply in the PID popup",
               "popup closes, zone PID row updates",
               "write", "GET /api/zones reflects the applied gains",
-              verify_endpoint="/api/zones"),
+              verify_endpoint="/api/zones", expect_post="/api/zones/pid"),
     "W6": Row("W6", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "themeBtn", "id", "click the theme toggle",
               "page recolors light/dark",
@@ -109,7 +117,7 @@ ROWS: "dict[str, Row]" = {
                "saveBtn", "id", "edit a zone name, click Save",
                "save confirms, no error banner",
                "write", "control_get_zones shows the new name (GET-merge-POST body)",
-               verify_endpoint="/api/zones"),
+               verify_endpoint="/api/zones", expect_post="/api/zones"),
     "W28": Row("W28", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
                "", "page", "load the diagnostics page",
                "thermo fault table + diagnostics tiles render",
@@ -119,12 +127,12 @@ ROWS: "dict[str, Row]" = {
                "crashAckBtn", "id", "click Acknowledge",
                "crash banner disappears/greys out",
                "write", "crash_report_ack read-back shows acknowledged: true",
-               verify_endpoint="/api/crash_report"),
+               verify_endpoint="/api/crash_report", expect_post="/api/crash_report/ack"),
     "W30": Row("W30", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
                "wdPanicToggleBtn", "id", "click the watchdog PANIC toggle",
                "toggle state flips",
                "write", "get_watchdog_panic_disabled shows the new value; restore to enabled",
-               verify_endpoint="/api/watchdog_cfg"),
+               verify_endpoint="/api/watchdog_cfg", expect_post="/api/watchdog_cfg"),
     "W48": Row("W48", "/readiness", "firmware/KilnFW/App/drivers/http/readiness_page.html",
                "", "page", "load the readiness page",
                "commissioning checklist renders",
@@ -293,6 +301,20 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         "--selector", row.selector,
         "--screenshot", os.path.join(screenshot_dir, f"{row_id}.png"),
     ]
+    # Dialog policy is per row, not global: only a row this module already
+    # classifies as a write/owner-gated action may ANSWER a native confirm()
+    # with OK. A read-only row that unexpectedly raises one gets it
+    # dismissed -- that unhangs the renderer (the original defect) without
+    # authorizing whatever the dialog guards, which on these pages includes
+    # Danger Mode and the per-relay lifetime-cycle reset. The driver logs
+    # every dialog with its message either way.
+    if row.classification != "read-only":
+        cmd.append("--accept-dialogs")
+    # And when the row declares the POST its control should issue, the
+    # driver waits for that request to complete instead of sleeping a fixed
+    # 500 ms and killing Chrome underneath it (the W30 defect).
+    if row.expect_post:
+        cmd += ["--expect-post", row.expect_post]
     # Only KC_SID plus a minimal environment reaches the Chrome child --
     # Chrome does not need this process's unrelated secrets (e.g. any other
     # credential env vars this session happens to hold), and a minimal env
@@ -334,13 +356,14 @@ def main(argv=None) -> int:
     ap.add_argument("--host", default=os.environ.get("KILNCTL_BOARD_HOST", ""),
                      help="board host:port, live mode only")
     ap.add_argument("--screenshot-dir", default=os.path.join(_repo_root(), "logs", "web_commission"))
-    ap.add_argument("--cookie", default=os.environ.get("KC_REUSE_SID"),
-                     help="reuse an already-obtained session cookie instead of logging in "
-                          "again (for a multi-row class run doing exactly one login; see "
-                          "run_row_live()'s docstring). Read from KC_REUSE_SID if not given "
-                          "explicitly; never pass a cookie value as a literal CLI token from "
-                          "a shared shell history.")
+    # Deliberately NO --cookie flag: a session cookie must never appear in
+    # argv (process listings, shell history, and this repo's own logged
+    # command lines all capture it -- the same reason
+    # _web_commission_cdp.mjs takes KC_SID from the environment). A caller
+    # reusing one login across a class sets KC_REUSE_SID in the child's
+    # environment instead, or calls run_row_live(cookie=...) in-process.
     args = ap.parse_args(argv)
+    reuse_cookie = os.environ.get("KC_REUSE_SID") or None
 
     if args.dry_run:
         ok, msg = dry_run(args.row_id)
@@ -348,7 +371,7 @@ def main(argv=None) -> int:
         if not args.host:
             print("live mode requires --host (or KILNCTL_BOARD_HOST)", file=sys.stderr)
             return 2
-        ok, msg = run_row_live(args.row_id, args.host, args.screenshot_dir, cookie=args.cookie)
+        ok, msg = run_row_live(args.row_id, args.host, args.screenshot_dir, cookie=reuse_cookie)
 
     print(("PASS: " if ok else "FAIL: ") + msg)
     return 0 if ok else 1
