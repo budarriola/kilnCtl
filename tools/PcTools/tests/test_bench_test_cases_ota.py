@@ -1069,6 +1069,21 @@ class Otp03Test(unittest.TestCase):
         result = C._case_otp03(self._ctx(ota_http_client=client))
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
 
+    def test_skips_when_trip_pending(self):
+        client = _FakePicoOtaClient(push_result=_OtaPushResult(False, 400))
+        result = C._case_otp03(self._ctx(
+            srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_TRIP),
+            ota_http_client=client,
+        ))
+        self.assertEqual(result.verdict, Verdict.SKIP, result.reason)
+        self.assertEqual(client.pushed, [])
+
+    def test_no_trip_pending_proceeds(self):
+        result = C._case_otp03(self._ctx(
+            srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_NO_TRIP),
+        ))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
 
 class Otp04Test(unittest.TestCase):
     def test_not_run_without_otp01(self):

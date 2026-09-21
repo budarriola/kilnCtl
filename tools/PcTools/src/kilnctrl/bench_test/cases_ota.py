@@ -1115,6 +1115,10 @@ def _case_otp03(ctx: dict) -> CaseResult:
     if not ok:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
+    trip_pending = _pico_trip_pending(ctx)
+    if trip_pending:
+        return CaseResult(Verdict.SKIP, reason="a trip is currently pending, refusing to start OT-P03")
+
     commit_before, _ = _pico_commit_and_boot_reason(ctx)
 
     ota = _ota_client(ctx)
