@@ -171,7 +171,7 @@ each one separately if/when appropriate.
 | C10 | `POST /api/autotune/start` → `POST /api/autotune/accept` (full accept path) | ADMIN | `autotune_start`, `autotune_accept` | Runs a real closed-loop step test on the bench fixture and can overwrite PID gains if accepted — a real config mutation, not a mechanical sweep item; only `autotune_abort` (B5) is in Class B |
 | C11 | `POST /api/profile_exec/start` | USER | `profiles_start` | Starts a firing on the bench 4 W fixture — heating rows are deferred per this runbook's own scope, not run as part of the backend phase |
 | C12 | `POST /api/profile_exec/pause` / `POST /api/profile_exec/resume` | USER | `profiles_pause` / `profiles_resume` | Only meaningful against a firing started under C11 |
-| C13 | `POST /api/profile/live/fork` | ADMIN | `profile_live_fork` | Reachable only while a firing runs (per C11); refuses without `confirm=True`; a 409 here signals a window violation (per `profiles_live_http.c:313`) |
+| C13 | `POST /api/profile/live/fork` | ADMIN | `profile_live_fork` | Reachable only while a firing runs (per C11); refuses without `confirm=True`; a 409 here means no firing is active, or the fork itself failed (e.g. no free working slot) (per `profiles_live_http.c:313`) |
 | C14 | `POST /api/profile/live` (save changes) | ADMIN | `profile_live_edit` | Reachable only while a firing runs; refuses without `confirm=True`; per `profiles_live_http.c:365` a 400 signals a bound violation and a 409 a window violation |
 | C15 | `POST /api/profile/live/decide` (save as new / overwrite original / discard) | ADMIN | `profile_live_decide` | Reachable only while a firing runs; refuses without `confirm=True`; an overwrite decided against a builtin-origin profile is refused 403 |
 | C16 | `POST /api/auth/security` with `cmd=set_web_password`/`set_lcd_pin`/`clear_credentials` | ADMIN | none direct — raw HTTP | Writes one-way-hashed credentials with no readable-back value at all (unlike `cmd=set_policy`, Class B26) — owner coordinates the value with the session holding bench credentials; never write a new credential value into any log/doc |
@@ -195,7 +195,7 @@ each one separately if/when appropriate.
 An opus review of the first pass found rows missing entirely, not just
 mistiered: the live-profile-edit route group (`GET /api/profile/live`,
 `POST /api/profile/live/fork`, `POST /api/profile/live`, `POST
-/api/profile/live/decide` — A45, and the MCP tools `profile_live_get`/
+/api/profile/live/decide` — A45 and C13-C15, and the MCP tools `profile_live_get`/
 `_fork`/`_edit`/`_decide` from `docs/LIVE_PROFILE_EDIT_PLAN.md` section 10),
 `GET /api/profile/export` (A46), `POST /api/ota/esp/boot_guard_reset` (B32),
 `GET /api/logs/firing`/`GET /api/logs/autotune` (A47), `POST
