@@ -10,6 +10,11 @@
 #include "nvs_key_check.h"
 #include "psa/crypto.h"
 
+// taskYIELD() -- see web_auth_hash_compute()'s doc comment below (2026-09-20
+// watchdog fix) for why this loop yields periodically.
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 // --- Placement: default `nvs` partition, own namespace (see header) --------
 // partition == NULL -- the default `nvs` partition, per hal_kv_open()'s own
 // doc comment. Never "kiln_nvs" (that partition is erased by
@@ -212,6 +217,65 @@ static int hmac_sha256(const uint8_t *key_bytes, size_t key_len, const uint8_t *
     return (status == PSA_SUCCESS) ? 0 : (int)status;
 }
 
+// 2026-09-20 crash fix (POST /api/auth/login watchdog panic, IDLE1 CPU1):
+// web_auth_hash_compute() used to call hmac_sha256() above once per
+// iteration -- WEB_AUTH_ITERATIONS (20000) full psa_import_key /
+// psa_mac_compute / psa_destroy_key round trips back-to-back with no yield,
+// long enough on the httpd worker task to blow past
+// CONFIG_ESP_TASK_WDT_TIMEOUT_S=5 and trigger the idle-task watchdog. The
+// key bytes (`secret`) never change across iterations -- only the message
+// does (H_1 = HMAC(secret, salt), H_i = HMAC(secret, H_{i-1})) -- so the key
+// only needs to be imported ONCE for the whole KDF run: psa_mac_compute() is
+// a pure function of (already-imported key id, message), so calling it N
+// times against the same key_id produces exactly the same N outputs as N
+// separate import/compute/destroy cycles did. web_auth_hash_iterate() below
+// is that single-import loop; it also yields the CPU every
+// WEB_AUTH_HASH_YIELD_EVERY iterations (taskYIELD(), a no-op on the host
+// test build's FreeRTOS shim) so even a slow/blocked crypto backend can
+// never starve IDLE1 for the whole 20000-iteration run -- belt-and-suspenders
+// against the watchdog, independent of the import-count fix above. Neither
+// change alters a single output bit: the same HMAC-SHA256 chain over the
+// same inputs in the same order still produces the same hash -- only how
+// the key is (re)imported and how often the loop yields differ. See
+// test_web_auth_store.c's test_hash_compute_pinned_vectors() for two
+// pinned-digest regression vectors proving output is byte-identical to
+// before this fix.
+#define WEB_AUTH_HASH_YIELD_EVERY 256u
+
+static int web_auth_hash_iterate(const uint8_t *secret, size_t secret_len,
+                                  const uint8_t salt[WEB_AUTH_SALT_LEN], uint32_t iterations,
+                                  uint8_t out[WEB_AUTH_HASH_LEN])
+{
+    psa_key_attributes_t attr = psa_key_attributes_init();
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+
+    mbedtls_svc_key_id_t key_id;
+    psa_status_t status = psa_import_key(&attr, secret, secret_len, &key_id);
+    if (status != PSA_SUCCESS) {
+        return (int)status;
+    }
+
+    uint8_t buf[WEB_AUTH_HASH_LEN];
+    size_t mac_len = 0;
+    status = psa_mac_compute(key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256), salt, WEB_AUTH_SALT_LEN, buf,
+                              WEB_AUTH_HASH_LEN, &mac_len);
+    for (uint32_t i = 1; i < iterations && status == PSA_SUCCESS; i++) {
+        status = psa_mac_compute(key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256), buf, WEB_AUTH_HASH_LEN,
+                                  buf, WEB_AUTH_HASH_LEN, &mac_len);
+        if ((i % WEB_AUTH_HASH_YIELD_EVERY) == 0u) {
+            taskYIELD();
+        }
+    }
+    psa_destroy_key(key_id);
+    if (status != PSA_SUCCESS) {
+        return (int)status;
+    }
+    memcpy(out, buf, WEB_AUTH_HASH_LEN);
+    return 0;
+}
+
 // Iterated-HMAC-SHA256 KDF -- see web_auth_store.h's doc comment on
 // web_auth_hash_compute() for why this shape (H_1 = HMAC(secret, salt),
 // H_i = HMAC(secret, H_{i-1})) rather than a PSA PBKDF2 algorithm object.
@@ -219,13 +283,24 @@ void web_auth_hash_compute(const uint8_t *secret, size_t secret_len,
                             const uint8_t salt[WEB_AUTH_SALT_LEN], uint32_t iterations,
                             uint8_t out[WEB_AUTH_HASH_LEN])
 {
-    uint8_t buf[WEB_AUTH_HASH_LEN];
     if (iterations == 0u) {
         iterations = 1u;
     }
+    if (web_auth_hash_iterate(secret, secret_len, salt, iterations, out) == 0) {
+        return;
+    }
+    // Fallback, reachable only if psa_import_key() itself fails (e.g. the
+    // crypto backend is out of key slots): preserves the previous
+    // per-iteration import/compute/destroy behaviour rather than leaving
+    // `out` uninitialized, at the cost of the watchdog risk this fix exists
+    // to remove. Not expected to be hit in practice.
+    uint8_t buf[WEB_AUTH_HASH_LEN];
     (void)hmac_sha256(secret, secret_len, salt, WEB_AUTH_SALT_LEN, buf);
     for (uint32_t i = 1; i < iterations; i++) {
         (void)hmac_sha256(secret, secret_len, buf, WEB_AUTH_HASH_LEN, buf);
+        if ((i % WEB_AUTH_HASH_YIELD_EVERY) == 0u) {
+            taskYIELD();
+        }
     }
     memcpy(out, buf, WEB_AUTH_HASH_LEN);
 }

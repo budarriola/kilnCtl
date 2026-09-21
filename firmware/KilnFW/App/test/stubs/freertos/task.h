@@ -59,6 +59,14 @@ static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_
 static inline TickType_t xTaskGetTickCount(void) { return 0; }
 static inline void vTaskDelay(TickType_t ticks) { (void)ticks; }
 
+/* 2026-09-20: added for web_auth_store.c's watchdog fix (POST
+ * /api/auth/login panic) -- its KDF loop now calls taskYIELD() every
+ * WEB_AUTH_HASH_YIELD_EVERY iterations. On target this is the real FreeRTOS
+ * macro (cooperative yield to an equal/higher-priority ready task); a no-op
+ * here is correct for a single-threaded host test, same reasoning as
+ * vTaskDelay() immediately above. */
+#define taskYIELD() ((void)0)
+
 /* 2026-08-22: added for boot_button.c's host tests (test_boot_button.c),
  * same reasoning as xTaskCreatePinnedToCore() above -- boot_button_start()
  * is never called by the tests (only its pure boot_button_step()/

@@ -46,6 +46,14 @@ static const uint8_t SALT_A[WEB_AUTH_SALT_LEN] = {
 static const uint8_t SALT_B[WEB_AUTH_SALT_LEN] = {
     16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
 
+// Second-salt vector for the pinned-digest regression test below --
+// distinct from SALT_A/SALT_B so the pinned vectors don't accidentally
+// double as (and get silently protected by) the salt-differentiation
+// assertions in test_hash_properties() above.
+static const uint8_t SALT_C[WEB_AUTH_SALT_LEN] = {
+    0xaa, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+
 // --- CRC32 sanity: the standard test vector, same one boot_guard.c's own
 // construction is checked against elsewhere in this tree. ---------------
 static void test_crc32_vector(void)
@@ -171,6 +179,49 @@ static void test_hash_properties(void)
     // Plaintext must never appear verbatim inside the derived hash bytes.
     TEST_CHECK(memmem_local(h1, WEB_AUTH_HASH_LEN, pw, strlen(pw)) == NULL,
                "the plaintext secret must not appear inside its own hash output");
+}
+
+// 2026-09-20 watchdog-crash fix regression test (CLAUDE.md: "a negative test
+// must end with a forced full rebuild" -- see this repo's build gate for
+// that; the two digests below were computed with `git diff` empty, i.e.
+// against web_auth_hash_compute()'s PRE-FIX implementation -- one
+// psa_import_key/psa_mac_compute/psa_destroy_key cycle per iteration -- via
+// a standalone host harness linking this same file and psa/crypto.h's host
+// stub (the deterministic fake HMAC below, NOT real cryptography -- see that
+// stub's own header comment). They pin that no-longer-present
+// implementation's exact output at the real WEB_AUTH_ITERATIONS count (not
+// the smaller counts test_hash_properties() above uses) so the single-import
+// optimization above is proven byte-identical to it, not merely
+// "self-consistent". A password and PIN's derived hash format never
+// changes across this fix -- an existing stored credential must keep
+// verifying after this change ships.
+static void test_hash_compute_pinned_vectors(void)
+{
+    TEST_SECTION("web_auth_hash_compute: pinned digests at WEB_AUTH_ITERATIONS "
+                 "(byte-identical to the pre-fix per-iteration-import implementation)");
+
+    static const uint8_t EXPECTED_VEC1[WEB_AUTH_HASH_LEN] = {
+        0xaf, 0x7d, 0x4e, 0xe8, 0x6e, 0x66, 0xf3, 0x3f,
+        0x39, 0x3c, 0x3a, 0x20, 0x2b, 0x41, 0x6f, 0x83,
+        0x50, 0xb3, 0x7d, 0x7c, 0x5a, 0xaf, 0x5d, 0x69,
+        0xb5, 0x4f, 0xd7, 0xa2, 0x09, 0x84, 0x22, 0xde};
+    static const uint8_t EXPECTED_VEC2[WEB_AUTH_HASH_LEN] = {
+        0x87, 0xd9, 0x70, 0x88, 0xe7, 0x81, 0x7c, 0xea,
+        0x54, 0xc1, 0xbb, 0xb6, 0xc9, 0x24, 0x35, 0x02,
+        0xa9, 0x2b, 0xf4, 0xd3, 0x7a, 0x3b, 0x64, 0xe8,
+        0xe5, 0x09, 0x4d, 0x80, 0x94, 0x6f, 0x83, 0xba};
+
+    const char *pw1 = "SuperSecretPassw0rd!";
+    const char *pw2 = "AnotherOne_9876XYZ";
+    uint8_t h1[WEB_AUTH_HASH_LEN], h2[WEB_AUTH_HASH_LEN];
+
+    web_auth_hash_compute((const uint8_t *)pw1, strlen(pw1), SALT_A, WEB_AUTH_ITERATIONS, h1);
+    web_auth_hash_compute((const uint8_t *)pw2, strlen(pw2), SALT_C, WEB_AUTH_ITERATIONS, h2);
+
+    TEST_CHECK(web_auth_constant_time_equal(h1, EXPECTED_VEC1, WEB_AUTH_HASH_LEN),
+               "vector 1 (pw1/SALT_A/full iteration count) must match the pre-fix pinned digest");
+    TEST_CHECK(web_auth_constant_time_equal(h2, EXPECTED_VEC2, WEB_AUTH_HASH_LEN),
+               "vector 2 (pw2/SALT_C/full iteration count) must match the pre-fix pinned digest");
 }
 
 // --- Set/verify round trip, correct and wrong password (item 2) --------
@@ -866,6 +917,7 @@ int main(void)
     test_password_strength();
     test_pin_strength();
     test_hash_properties();
+    test_hash_compute_pinned_vectors();
     test_set_verify_password();
     test_username_exactly_max_length();
     test_verify_password_timing_oracle_closed();
