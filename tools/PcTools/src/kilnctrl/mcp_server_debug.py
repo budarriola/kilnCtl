@@ -180,7 +180,7 @@ def get_openocd_status() -> str:
     return "\n".join(lines)
 
 
-def _archive_flashed_safty_elf(elf_path: str) -> str:
+def _archive_flashed_safty_elf(elf_path: str, explicit_elf_path: Optional[str] = None) -> str:
     """Best-effort SaftyFW counterpart to mcp_server_flash._archive_flashed_elf
     -- SaftyFW has no archive_elf.cmake step at all (KilnFW's exists, SaftyFW's
     does not), so this is the ONLY thing that archives a flashed Pico ELF.
@@ -196,11 +196,28 @@ def _archive_flashed_safty_elf(elf_path: str) -> str:
     absent) ELF instead of the one just flashed -- the correct ELF had to be
     hand-copied into the archive afterward.
 
+    Second bug, same day: `archive_safty_elf()` reads
+    `<safty_fw_root>/build/saftyfw_build_info.h` for the identity keying the
+    manifest entry -- once `elf_path` was fixed to point at a worktree build,
+    `safty_fw_root` still always came from `debug_probe._safty_fw_root()`
+    (the main tree), so a worktree-built ELF got archived under the MAIN
+    TREE's git identity instead of its own. `explicit_elf_path` is the
+    caller's own (possibly None) `elf_path` argument to `debug_program()`;
+    when it is given, the root is instead derived as the parent of its
+    `build/` directory, so identity and binary come from the same tree. The
+    default path (`explicit_elf_path is None`) still uses
+    `debug_probe._safty_fw_root()`, since there the main tree IS what was
+    flashed.
+
     Never raises into the caller -- see elf_archive.py's module docstring --
     but a failure is always surfaced in the returned string (never silent);
     see mcp_server_flash._archive_flashed_elf for the same pattern."""
     try:
-        safty_fw_root = debug_probe._safty_fw_root()
+        if explicit_elf_path is not None:
+            resolved = os.path.abspath(explicit_elf_path)
+            safty_fw_root = os.path.dirname(os.path.dirname(resolved))
+        else:
+            safty_fw_root = debug_probe._safty_fw_root()
         result = elf_archive.archive_safty_elf(elf_path, safty_fw_root, "debug_program(peer=pico)")
         return f"\n\nelf archived: {result.archived_path} (identity {result.identity})"
     except Exception as exc:  # noqa: BLE001 - archiving is a diagnostic convenience, never fail the flash over it
@@ -272,7 +289,7 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
                 "exchanged) before calling safety_clear_trip()."
             )
             resolved_elf = elf_path or debug_probe._safty_fw_elf()
-            note += _archive_flashed_safty_elf(resolved_elf)
+            note += _archive_flashed_safty_elf(resolved_elf, explicit_elf_path=elf_path)
         return stale_prefix + f"programmed {peer} OK, reset and running" + note
     return _openocd_error_message(f"program failed for {peer}", output)
 

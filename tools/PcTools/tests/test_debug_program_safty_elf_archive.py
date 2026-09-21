@@ -19,6 +19,15 @@ Both proven fixed here:
      reporting the flash itself as successful (archiving is best-effort and
      must never fail the flash).
 
+Second history note (same day, reviewer advisory on this commit): fixing (1)
+alone still keys the archive manifest's identity off
+`debug_probe._safty_fw_root()`'s `build/saftyfw_build_info.h` -- the main
+tree -- even when the ELF itself came from a worktree, so a worktree-built
+ELF got the MAIN TREE's git identity recorded against it. Proven fixed here
+too: with an explicit `elf_path`, the root passed to `archive_safty_elf()`
+must be derived from that ELF's own `build/`'s parent, not the main tree's
+root.
+
 All against mocked debug_probe/elf_archive/stale_check -- no real OpenOCD
 session, no live board.
 
@@ -68,6 +77,14 @@ class DebugProgramSaftyElfArchiveTest(unittest.TestCase):
         self.assertNotEqual(archived_elf_arg, default_elf_mock.return_value)
         self.assertIn(archive_result.archived_path, result)
 
+        expected_root = os.path.dirname(os.path.dirname(os.path.abspath(caller_elf)))
+        archived_root_arg = archive_mock.call_args[0][1]
+        self.assertEqual(archived_root_arg, expected_root,
+                          "archive identity root must be derived from the caller's own "
+                          "elf_path (its build/'s parent), not debug_probe._safty_fw_root() "
+                          "(the main tree) -- else a worktree-built ELF gets archived under "
+                          "the main tree's git identity")
+
     def test_default_elf_path_used_only_when_caller_omits_one(self):
         """With no elf_path given, the archived path is the peer's default
         build output (unchanged prior behaviour for the common case)."""
@@ -87,6 +104,10 @@ class DebugProgramSaftyElfArchiveTest(unittest.TestCase):
 
         archive_mock.assert_called_once()
         self.assertEqual(archive_mock.call_args[0][0], "/default/main-tree/SaftyFW.elf")
+        self.assertEqual(archive_mock.call_args[0][1], "/fake/safty",
+                          "with no explicit elf_path, the archive identity root must "
+                          "still come from debug_probe._safty_fw_root() -- the main "
+                          "tree IS what was flashed")
 
     def test_archive_failure_surfaces_loud_warning_not_silent(self):
         """A raising archive_safty_elf() must never propagate (the flash
