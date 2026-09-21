@@ -463,6 +463,49 @@ def get_readiness(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def nvs_list_keys(partition: str, namespace: str, host: Optional[str] = None) -> str:
+    """READ-ONLY: list the key NAMES AND TYPES (never values, never blobs)
+    in one NVS namespace, over GET /api/nvs/keys?partition=<partition>&
+    namespace=<namespace> (diagnostics_http.c's nvs_keys_get_handler()).
+
+    Added 2026-09-21 for the bench-side half of the Wi-Fi factory_reset
+    driver-storage audit
+    (docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md): confirms
+    esp_wifi_restore() actually empties the driver's own `nvs.net80211`
+    namespace in the default `nvs` partition after
+    factory_reset(scope=wifi) -- call this before and after that reset and
+    compare the key lists, instead of a JTAG memory read.
+
+    Refuses the `kiln_auth` namespace locally (no request made) -- that
+    namespace holds the administrator credential record, and the board's
+    own handler refuses it too (403). No other namespace is special-cased.
+
+    Renders one line per key as ``key (type)``, sorted, followed by a
+    count. An empty namespace renders as a bare count of 0 -- exactly what
+    "successfully emptied" looks like.
+
+    Host is auto-resolved the same way get_readiness()/get_heap_status() do.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_readiness()
+    from . import nvs_keys_http_client
+
+    resolved = _ota_resolve_host(host)
+    try:
+        data = nvs_keys_http_client.get_nvs_keys(resolved, partition, namespace)
+    except nvs_keys_http_client.NvsKeysHttpError as exc:
+        return (f"error reading NVS keys over HTTP (host={resolved}, partition={partition!r}, "
+                f"namespace={namespace!r}): {exc}")
+
+    keys = data.get("keys", [])
+    lines = [f"host={resolved} partition={data.get('partition', partition)!r} "
+             f"namespace={data.get('namespace', namespace)!r}"]
+    for entry in sorted(keys, key=lambda e: e.get("key", "")):
+        lines.append(f"{entry.get('key', '?')} ({entry.get('type', '?')})")
+    lines.append(f"summary: {len(keys)} key(s)")
+    return "\n".join(lines)
+
+
+@_srv._tool()
 def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     """Fetch and decode the board's on-flash binary event log, over HTTP
     GET /api/logs/{firing,autotune}.

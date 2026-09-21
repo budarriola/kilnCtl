@@ -201,7 +201,12 @@ and the reads `GET /api/zones`, `/api/zones/ct_channel_map`,
 `/api/cfgfs/format_pending`, `/api/dualwrite_window`, `/api/partitions`,
 `/api/backup/export`, `/api/crash_report`, `/api/boot_guard`,
 `/api/coredump/info`, `/api/coredump/chunk`, `/api/debug/lwip_stats`,
-`/api/diagnostics/timing`, `/api/saftyfw_stack_margin`.
+`/api/diagnostics/timing`, `/api/saftyfw_stack_margin`, `/api/nvs/keys`
+(added 2026-09-21, `diagnostics_http.c`'s `nvs_keys_get_handler()`: lists
+NVS key NAMES AND TYPES ONLY for one partition/namespace, never a value or
+blob, and refuses the `kiln_auth` namespace outright with 403 regardless of
+tier — see `docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md`
+for why).
 Also `POST /api/dualwrite_window/restore_verified` (mutates the same
 persisted dual-write/migration state its GET sibling above reads — an
 earlier draft omitted it from every table here).

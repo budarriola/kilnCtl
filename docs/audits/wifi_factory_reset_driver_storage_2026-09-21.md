@@ -273,7 +273,12 @@ WEB_AUTH_PLAN 12b and would fail all four
 6. Bench, owner-authorized only (C6 is destructive): run
    `factory_reset(scope=wifi)`, and on the next boot dump the default `nvs`
    partition's `nvs.net80211` namespace to confirm the STA entry is gone.
-   Re-provision afterward from the STA environment variables.
+   Re-provision afterward from the STA environment variables. Same-day
+   follow-up: this no longer needs a JTAG memory read --
+   `GET /api/nvs/keys?partition=nvs&namespace=nvs.net80211`
+   (`diagnostics_http.c`'s `nvs_keys_get_handler()`, ROUTE_TIER_ADMIN, MCP
+   tool `nvs_list_keys`) lists that namespace's key names and types
+   directly; call it before and after the reset and diff the lists.
 7. While at it, settle the transient: issue paired reads of Wi-Fi status and
    board uptime from the SAME session, at roughly 200 ms cadence, across the
    reset. If every "old SSID" sample carries a pre-reboot uptime, the

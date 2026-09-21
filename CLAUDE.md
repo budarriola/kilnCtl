@@ -22,9 +22,22 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (178 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `cfgfs_format` was
-added -- an MCP tool wrapping the new `POST /api/cfgfs/format_confirm` route
+the rest behind a search facade (179 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `nvs_list_keys` was
+added -- an MCP tool wrapping the new `GET /api/nvs/keys` route
+(`diagnostics_http.c`'s `nvs_keys_get_handler()`, ROUTE_TIER_ADMIN) that
+lists NVS key NAMES AND TYPES ONLY (never a value, never a blob body) for
+one partition/namespace via `nvs_entry_find()`/`nvs_entry_info()`, refusing
+the `kiln_auth` namespace outright with 403 -- built to verify on the bench
+that `esp_wifi_restore()` really empties the driver's own `nvs.net80211`
+namespace in the default `nvs` partition after `factory_reset(scope=wifi)`
+(`docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md`), previously
+only checkable with a JTAG memory read. The route's own JSON is streamed in
+small fixed chunks, never a task-stack buffer, per this file's own "httpd
+stack blob class" note below. `config.max_uri_handlers` was bumped
+160 -> 165 in the same change (`wifi_provision_http.c`) for the usual
+~9-slot headroom. The one before it was `cfgfs_format`, same day -- an MCP
+tool wrapping the new `POST /api/cfgfs/format_confirm` route
 (`cfg_fs_format_http.c`, ROUTE_TIER_ADMIN) that lets an operator confirm
 erasing and reformatting the `cfg` LittleFS partition once `cfg_fs_mount.c`'s
 auto-format gate defers to that confirmation rather than silently discarding

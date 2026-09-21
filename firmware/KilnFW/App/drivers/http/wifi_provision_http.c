@@ -1108,8 +1108,14 @@ esp_err_t wifi_provision_http_start(void)
      * count is the actual authority here, not this comment's arithmetic --
      * set to 160 for the same ~9-slot headroom convention as every bump
      * above; re-verify with a fresh run of that check rather than trusting
-     * this number if it drifts. */
-    config.max_uri_handlers = 160;
+     * this number if it drifts.
+     *
+     * Bumped 160 -> 165, 2026-09-21: check_uri_handler_cap.ps1 counted 156
+     * routes against this cap (4 spare) before this change; the new
+     * GET /api/nvs/keys route (diagnostics_http.c's nvs_keys_get_handler())
+     * would have left only 3, below the check's own 4-slot warning
+     * threshold. Set to 165 for the same ~9-slot headroom convention. */
+    config.max_uri_handlers = 165;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

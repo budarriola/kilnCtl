@@ -22,6 +22,7 @@
 #include "display_power_cfg.h"
 #include "hal_kv.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_coredump_get_info()/_read() -- coredump_{info,chunk}_get_handler() below */
+#include "nvs.h" /* nvs_entry_find()/nvs_entry_info() -- nvs_keys_get_handler() below */
 #include "http_form.h"
 #include "kiln_cfg_store.h"
 #include "kiln_io.h"
@@ -1671,6 +1672,125 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
 }
 #undef CFGFS_FILE_BODY_MAX
 
+/* nvs_keys_get_handler() -- GET /api/nvs/keys?partition=<name>&namespace=<ns>
+ *
+ * Bench diagnostic for the 2026-09-21 Wi-Fi factory_reset driver-storage
+ * audit (docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md): the
+ * only way to confirm esp_wifi_restore() actually emptied the driver's own
+ * `nvs.net80211` namespace in the default `nvs` partition was a JTAG memory
+ * read. This lists KEY NAMES AND TYPES ONLY via nvs_entry_find()/
+ * nvs_entry_info() -- never a value, never a blob body -- so it is safe to
+ * leave reachable at ROUTE_TIER_ADMIN like every other diagnostics route in
+ * this file.
+ *
+ * kiln_auth is refused outright (403): that namespace holds the
+ * administrator credential record, and even key NAMES there are not this
+ * route's business to expose. No other namespace is special-cased --
+ * anything else in NVS is fair game for a names-and-types listing.
+ *
+ * Streamed in small fixed chunks (httpd_resp_send_chunk), never built up in
+ * a task-stack buffer -- same "no httpd stack blobs" discipline as every
+ * other handler in this file (see CLAUDE.md's "httpd stack blob class").
+ */
+static void nvs_keys_json_escape(const char *in, char *out, size_t out_cap)
+{
+    /* NVS key/namespace/partition names are already constrained (no '"' or
+     * '\\' possible in a valid NVS name), but this route echoes attacker-
+     * controlled query values back into JSON, so escape defensively rather
+     * than trust that constraint holds forever. */
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0' && o + 2 < out_cap; ++i) {
+        char c = in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+        }
+        out[o++] = c;
+    }
+    out[o] = '\0';
+}
+
+static const char *nvs_type_name(nvs_type_t t)
+{
+    switch (t) {
+        case NVS_TYPE_U8: return "u8";
+        case NVS_TYPE_I8: return "i8";
+        case NVS_TYPE_U16: return "u16";
+        case NVS_TYPE_I16: return "i16";
+        case NVS_TYPE_U32: return "u32";
+        case NVS_TYPE_I32: return "i32";
+        case NVS_TYPE_U64: return "u64";
+        case NVS_TYPE_I64: return "i64";
+        case NVS_TYPE_STR: return "str";
+        case NVS_TYPE_BLOB: return "blob";
+        default: return "unknown";
+    }
+}
+
+static esp_err_t nvs_keys_get_handler(httpd_req_t *req)
+{
+    char query[80];
+    char partition[NVS_PART_NAME_MAX_SIZE + 1];
+    char ns_raw[NVS_NS_NAME_MAX_SIZE];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "partition", partition, sizeof(partition)) != ESP_OK ||
+        httpd_query_key_value(query, "namespace", ns_raw, sizeof(ns_raw)) != ESP_OK ||
+        partition[0] == '\0' || ns_raw[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing/invalid \"partition\" or \"namespace\"");
+        return ESP_OK;
+    }
+    if (strcmp(ns_raw, "kiln_auth") == 0) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "kiln_auth namespace is never listed by this route");
+        return ESP_OK;
+    }
+
+    nvs_iterator_t it = NULL;
+    esp_err_t err = nvs_entry_find(partition, ns_raw, NVS_TYPE_ANY, &it);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "nvs_entry_find failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, msg);
+        return ESP_OK;
+    }
+
+    char part_esc[2 * NVS_PART_NAME_MAX_SIZE];
+    char ns_esc[2 * NVS_NS_NAME_MAX_SIZE];
+    nvs_keys_json_escape(partition, part_esc, sizeof(part_esc));
+    nvs_keys_json_escape(ns_raw, ns_esc, sizeof(ns_esc));
+
+    httpd_resp_set_type(req, "application/json");
+    char head[192];
+    int hn = snprintf(head, sizeof(head), "{\"partition\":\"%s\",\"namespace\":\"%s\",\"keys\":[",
+                       part_esc, ns_esc);
+    if (hn < 0 || httpd_resp_send_chunk(req, head, (size_t)hn) != ESP_OK) {
+        nvs_release_iterator(it);
+        return ESP_FAIL;
+    }
+
+    bool first = true;
+    while (err == ESP_OK) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+        char key_esc[2 * NVS_KEY_NAME_MAX_SIZE];
+        nvs_keys_json_escape(info.key, key_esc, sizeof(key_esc));
+        char item[80];
+        int n = snprintf(item, sizeof(item), "%s{\"key\":\"%s\",\"type\":\"%s\"}",
+                          first ? "" : ",", key_esc, nvs_type_name(info.type));
+        first = false;
+        if (n < 0 || httpd_resp_send_chunk(req, item, (size_t)n) != ESP_OK) {
+            nvs_release_iterator(it);
+            return ESP_FAIL;
+        }
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+
+    static const char tail[] = "]}";
+    if (httpd_resp_send_chunk(req, tail, sizeof(tail) - 1) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
 {
     s_diag_safety = safety;
@@ -1754,6 +1874,9 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     };
     static const httpd_uri_t estop_verify_uri = {
         .uri = "/api/estop/verify", .method = HTTP_POST, .handler = estop_verify_post_handler,
+    };
+    static const httpd_uri_t nvs_keys_get_uri = {
+        .uri = "/api/nvs/keys", .method = HTTP_GET, .handler = nvs_keys_get_handler,
     };
 
     esp_err_t err = kiln_http_register(server, &diagnostics_uri);
@@ -1879,6 +2002,11 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
     err = kiln_http_register(server, &estop_verify_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/estop/verify) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = kiln_http_register(server, &nvs_keys_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/nvs/keys) failed: %s", esp_err_to_name(err));
         return err;
     }
 

@@ -77,6 +77,7 @@ GROUP_OVERRIDES = {
     "get_watchdog_panic_disabled": "system",
     "set_watchdog_panic_disabled": "system",
     "get_readiness": "system",
+    "nvs_list_keys": "system",
     # OpenOCD, shared by both processors.
     "flash_firmware": "debug",
     "kill_openocd_sessions": "debug",
@@ -161,6 +162,9 @@ KEYWORDS = {
     "get_readiness": ("readiness", "commissioning checklist", "commissioning", "estop_verified",
                       "checklist", "not_done", "cannot_yet", "deliberately_off",
                       "ready to fire", "fix_url", "api/readiness"),
+    "nvs_list_keys": ("nvs", "nvs_entry_find", "nvs_entry_info", "key names", "namespace",
+                      "nvs.net80211", "wifi driver storage", "factory_reset audit",
+                      "api/nvs/keys", "partition", "kiln_auth forbidden", "esp_wifi_restore"),
     "web_auth_setup": ("web auth", "bootstrap", "bootstrap_password", "admin password",
                        "set password", "enable web auth", "login", "credential",
                        "kilnctl_web_username", "kilnctl_web_password", "security page",

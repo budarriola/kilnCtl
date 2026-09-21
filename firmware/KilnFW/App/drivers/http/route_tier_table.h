@@ -326,6 +326,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/debug/lwip_stats", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/timing", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/saftyfw_stack_margin", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Lists NVS key NAMES AND TYPES ONLY (never a value or blob), and
+     * refuses the kiln_auth namespace outright -- see diagnostics_http.c's
+     * nvs_keys_get_handler() comment. ADMIN like every other diagnostics
+     * route that can name internal storage layout. */
+    ROUTE_TIER("/api/nvs/keys", HTTP_GET, ROUTE_TIER_ADMIN),
     /* GET /api/ota/challenge stays OPEN per the plan -- it issues a nonce
      * plus the administrator record's salt/iteration count, neither usable
      * without the administrator password itself (plan section 1, the
