@@ -40,7 +40,23 @@ static size_t wifi_build_status(uint8_t *out)
     out[o++] = connected ? 1 : 0;
     o = uart_bridge_ext_put_lstring(out, BRIDGE_REPLY_MAX, o, wifi_prov_get_saved_ssid());
     o = uart_bridge_ext_put_lstring(out, BRIDGE_REPLY_MAX, o, wifi_prov_get_ap_ssid());
-    o = uart_bridge_ext_put_lstring(out, BRIDGE_REPLY_MAX, o, wifi_prov_get_ap_password());
+    /* Owner decision 2026-09-21: GET_STATUS used to emit the board's AP
+     * Wi-Fi password verbatim, in the clear, over the USB serial link --
+     * this bridge has no auth concept at all (see the file banner), so
+     * anyone with physical access to the port could read it. Nothing
+     * downstream ever needed the real value: mcp_server_wifi.py's status
+     * render already collapsed it to a "[set]"/"[unset]" marker
+     * (ap_password_state) and devices_common.py's redact_secret_fields()
+     * does the same for get_board_state()'s dump -- both PC-side, both
+     * applied only AFTER the secret had already crossed the wire. Fixed at
+     * the source instead: the wire field stays the same length-prefixed
+     * ASCII string (uart_bridge_ext_put_lstring) it always was, so the
+     * protocol version/layout is unchanged and wifi_uart.py's decode
+     * (devices_wifi_uart.py's parse_wifi_uart_response) and every existing
+     * consumer keep working unmodified -- only the content changes, from
+     * the real password to a "[set]"/"" presence marker. */
+    o = uart_bridge_ext_put_lstring(out, BRIDGE_REPLY_MAX, o,
+                                     (wifi_prov_get_ap_password()[0] != '\0') ? "[set]" : "");
     char sta_ip[16] = {0};
     if (connected) {
         wifi_prov_get_sta_ip(sta_ip, sizeof(sta_ip));
