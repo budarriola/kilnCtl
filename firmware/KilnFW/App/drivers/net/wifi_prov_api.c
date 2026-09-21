@@ -588,7 +588,37 @@ esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r)
         return ESP_ERR_INVALID_SIZE;
     }
     esp_ip4addr_ntoa(&ip_info.ip, r->sta_ip, (uint32_t)sizeof(r->sta_ip));
+    esp_ip4addr_ntoa(&ip_info.netmask, r->sta_netmask, (uint32_t)sizeof(r->sta_netmask));
     return ESP_OK;
+}
+
+esp_err_t wifi_prov_get_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap)
+{
+    if (!ip_out || ip_cap < 1 || !netmask_out || netmask_cap < 1) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ip_out[0] = '\0';
+    netmask_out[0] = '\0';
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Same compound-state round trip as wifi_prov_get_sta_ip() -- reuses
+     * CMD_GET_STA_IP rather than adding a new command type, since
+     * do_get_sta_ip() now fills both r->sta_ip and r->sta_netmask from the
+     * same single esp_netif_get_ip_info() call. */
+    wifi_cmd_t cmd = { .type = CMD_GET_STA_IP, .args.get_sta_ip = { .out_cap = ip_cap } };
+    wifi_result_t r;
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (r.err == ESP_OK) {
+        strncpy(ip_out, r.sta_ip, ip_cap - 1);
+        ip_out[ip_cap - 1] = '\0';
+        strncpy(netmask_out, r.sta_netmask, netmask_cap - 1);
+        netmask_out[netmask_cap - 1] = '\0';
+    }
+    return r.err;
 }
 
 esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap)

@@ -63,7 +63,20 @@ extern "C" {
 #define WEB_AUTH_SALT_LEN        16u
 #define WEB_AUTH_HASH_LEN        32u
 #define WEB_AUTH_USERNAME_MAX_LEN 32u /* +1 for NUL in the record */
-#define WEB_AUTH_ITERATIONS      20000u /* plan item 2: "20,000 iterations" */
+// 2026-09-21 owner decision: fast logon over the plan's original "20,000
+// iterations" -- measured on hardware at 20000 rounds: 4158 ms/attempt
+// (docs/BENCH_TEST_LOG.md, 2026-09-21). Scaling linearly (time is
+// proportional to iteration count -- see web_auth_hash_compute()'s single
+// hot loop, no other per-call cost that varies with `iterations`):
+// 20000 * (0.4 / 4.158) ~= 1924, rounded to 2000 for a clean number, giving
+// an estimated 4158 * (2000 / 20000) ~= 416 ms/attempt -- comfortably under
+// 1 s on this hardware. A record's OWN `iterations` field (not this
+// constant) is what verify actually uses (web_auth_store_verify_password()),
+// so an existing credential hashed at the old 20000 keeps verifying
+// correctly at that cost; it is only re-hashed at the new, lower count the
+// next time its password/PIN is SET (web_auth_store_set_password()/
+// _set_pin() both stamp rec->iterations = WEB_AUTH_ITERATIONS at set time).
+#define WEB_AUTH_ITERATIONS      2000u
 
 #define WEB_AUTH_STORE_VERSION 1u /* own schema version -- see header comment;
                                     * ZONES_CFG_VERSION (26) is untouched by

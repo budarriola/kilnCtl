@@ -149,6 +149,9 @@ typedef struct {
     wifi_prov_saved_network_t saved[WIFI_PROV_MAX_SAVED_NETWORKS];
     size_t saved_count;
     char sta_ip[16];
+    char sta_netmask[16]; // filled alongside sta_ip by do_get_sta_ip(), for
+                           // wifi_prov_get_sta_ip_netmask() (login backoff
+                           // subnet check)
     size_t scan_count;
 } wifi_result_t;
 

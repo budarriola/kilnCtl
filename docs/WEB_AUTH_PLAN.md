@@ -343,6 +343,63 @@ unrecoverable cannot be the one `GET /status` prints in plain text.
 > longer a watchdog risk: the loop blocks on `vTaskDelay(1)` every 1024
 > iterations rather than merely yielding, which actually lets IDLE1 run.
 
+**Fast logon — owner decision, 2026-09-21 (verbatim): "Auth should allow a
+fast logon. Then if a wrong password comes from an ip wait an increasing
+amount of time before the next is accepted. 1st retry 5 sec, second 10, then
+30, 60, then 5 min before the cycle resets."** Two changes landed together:
+
+- `WEB_AUTH_ITERATIONS` dropped from 20 000 to **2 000**, scaled linearly off
+  the 4158 ms measurement above (`web_auth_hash_compute()` has one hot loop
+  whose cost is proportional to the round count and nothing else that varies
+  with it): `20000 * (0.4 / 4.158) ~= 1924`, rounded to 2000, giving an
+  estimated **~416 ms/attempt** — comfortably under 1 s. A stored record's own
+  `iterations` field, not this constant, drives `web_auth_store_verify_password()`,
+  so a credential already hashed at 20 000 keeps verifying at that cost; only
+  the next `set_password`/`set_pin` call re-hashes at the new count.
+  `test_hash_compute_pinned_vectors()` now pins its digests at an explicit,
+  separate `PINNED_VECTOR_ITERATIONS = 20000u` rather than the
+  `WEB_AUTH_ITERATIONS` macro, so lowering that macro cannot silently make the
+  pinned vectors wrong.
+- The 3-failures-per-tier `ota_auth_lockout_state_t` scheme that
+  `POST /api/auth/login` used to reuse from OTA/LCD-PIN lockout is replaced,
+  **for this route only**, by a dedicated escalating ladder in
+  `web_auth_login_http.c`: one static table, `LOGIN_BACKOFF_LADDER_MS = {
+  5000, 10000, 30000, 60000, 300000 }` (a `_Static_assert` pins it at exactly
+  5 steps), with one failure already enough to arm the first (5 s) step. The
+  cycle resets to the first step once a slot's `locked_until_ms` has passed
+  with no intervening failure. A refused (429) attempt is answered entirely
+  from state already held under the per-IP lock — it never runs the KDF,
+  never increments the failure count, and never extends the wait — and
+  carries a `Retry-After` header (seconds, rounded up) naming exactly how long
+  that response is refused for. A success clears the slot's count/lock
+  outright. `ota_auth.h`'s lockout is untouched and still backs the OTA and
+  LCD-PIN paths (section 7) — this is a second, independent scheme, not a
+  change to the shared one. The 16-slot table, its saturation behavior, and
+  the "never evict a currently-locked slot" eviction discipline (2026-09-17
+  Finding 2) are unchanged; see `login_lockout_slot_for()`'s header comment
+  for that tradeoff's restatement.
+
+**Remote-vs-local scope — owner decision, 2026-09-20 (verbatim): "All remote
+ip addresses ie. not on the same subnet should be treated as the same ip as
+far as login timeouts go."** Reasoning: a single remote attacker can rotate
+through source addresses at will (NAT churn, proxies, botnets) and would
+otherwise get a fresh 16-slot table's worth of independent attempts for free,
+while a LAN user has no such freedom — their address is a fact about the
+network, not a choice they can make to dodge a lockout. `login_ip_scope.c`
+(new, pure, host-testable like `ota_auth.c`) classifies a client IP as
+**LOCAL** when it is on the fixed AP fallback subnet (192.168.4.0/24) or on
+the STA interface's *currently active* subnet (fetched live via the new
+`wifi_prov_get_sta_ip_netmask()`, not the configured static settings, since
+those read back nothing useful in DHCP mode), and **REMOTE** otherwise (a
+syntactically valid IPv4 address that matches neither). Every REMOTE-scope
+client shares **one** reserved backoff slot (`s_remote_login_slot`), kept
+entirely outside the 16-slot `s_login_lockouts[]` array so ordinary
+per-address table saturation can never evict it and it can never itself be
+evicted to make room for a LOCAL address. LOCAL clients keep the existing
+per-address slots unchanged. The pre-existing unresolvable-IP ("unknown")
+sentinel bypasses scope classification entirely and stays fail-closed and
+separate from both buckets, exactly as before this change.
+
 **Where the record lives — corrected, and this is load-bearing.** An earlier
 draft of this plan put the credentials in namespace `kiln_cfg` on
 `KILN_NVS_PARTITION`. **That is wrong**, and reading `factory_reset.c` is what

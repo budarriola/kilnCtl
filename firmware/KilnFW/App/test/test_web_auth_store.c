@@ -195,9 +195,18 @@ static void test_hash_properties(void)
 // "self-consistent". A password and PIN's derived hash format never
 // changes across this fix -- an existing stored credential must keep
 // verifying after this change ships.
+// Fixed at a literal count, deliberately NOT WEB_AUTH_ITERATIONS -- these
+// vectors were computed once, at 20000 rounds, and must stay reproducible
+// regardless of what WEB_AUTH_ITERATIONS is set to for real logins today
+// (2026-09-21: lowered to 2000 for the fast-logon change,
+// docs/WEB_AUTH_PLAN.md section 2). web_auth_hash_compute() takes
+// `iterations` as an explicit argument precisely so a pinned count like this
+// one is independent of the production default.
+#define PINNED_VECTOR_ITERATIONS 20000u
+
 static void test_hash_compute_pinned_vectors(void)
 {
-    TEST_SECTION("web_auth_hash_compute: pinned digests at WEB_AUTH_ITERATIONS "
+    TEST_SECTION("web_auth_hash_compute: pinned digests at a fixed 20000 iterations "
                  "(byte-identical to the pre-fix per-iteration-import implementation)");
 
     static const uint8_t EXPECTED_VEC1[WEB_AUTH_HASH_LEN] = {
@@ -215,8 +224,8 @@ static void test_hash_compute_pinned_vectors(void)
     const char *pw2 = "AnotherOne_9876XYZ";
     uint8_t h1[WEB_AUTH_HASH_LEN], h2[WEB_AUTH_HASH_LEN];
 
-    web_auth_hash_compute((const uint8_t *)pw1, strlen(pw1), SALT_A, WEB_AUTH_ITERATIONS, h1);
-    web_auth_hash_compute((const uint8_t *)pw2, strlen(pw2), SALT_C, WEB_AUTH_ITERATIONS, h2);
+    web_auth_hash_compute((const uint8_t *)pw1, strlen(pw1), SALT_A, PINNED_VECTOR_ITERATIONS, h1);
+    web_auth_hash_compute((const uint8_t *)pw2, strlen(pw2), SALT_C, PINNED_VECTOR_ITERATIONS, h2);
 
     TEST_CHECK(web_auth_constant_time_equal(h1, EXPECTED_VEC1, WEB_AUTH_HASH_LEN),
                "vector 1 (pw1/SALT_A/full iteration count) must match the pre-fix pinned digest");

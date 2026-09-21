@@ -1913,6 +1913,7 @@ try {
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
+            "`"$(Join-Path $driversDir 'http/login_ip_scope.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""

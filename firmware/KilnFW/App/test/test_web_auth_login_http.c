@@ -4,15 +4,20 @@
 // to reach its statics" convention as test_ota_http.c/test_web_auth_store.c:
 // login_lockout_slot_for() and the per-IP lockout table it owns are `static`
 // and have no other seam, and login_post_handler() itself is the only place
-// Finding 4 (global lockout) and Finding 5 (unlooped httpd_req_recv) can be
+// Finding 4 (global lockout), Finding 5 (unlooped httpd_req_recv), and the
+// 2026-09-21 escalating backoff ladder + remote/local scope split can be
 // exercised end-to-end.
 //
 // This file supplies its OWN test-controllable httpd_req_get_hdr_value_len/
-// _str, httpd_req_recv, and ota_http_get_client_ip bodies (never the shared
+// _str, httpd_req_recv, ota_http_get_client_ip, and
+// wifi_prov_get_sta_ip_netmask bodies (never the shared
 // stubs/http_auth_link_stub.c, which is deliberately non-controllable) so a
-// test can (a) stage a source IP per call (Finding 4) and (b) force
+// test can (a) stage a source IP per call (Finding 4), (b) force
 // httpd_req_recv() to hand back the body in several short chunks rather than
-// all at once (Finding 5).
+// all at once (Finding 5), and (c) stage a fake STA ip/netmask to drive the
+// remote-vs-local classification (login_ip_scope.h). Time advances via
+// fake_time_advance_ms() (fake_time.h, already linked for other host test
+// executables), never a real sleep.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,6 +31,7 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "fake_kv.h"
+#include "fake_time.h"
 #include "psa/crypto.h"
 
 // psa/crypto.h's host stub declares this `extern` (test_ota_http.c/
@@ -34,11 +40,26 @@ int g_test_count = 0;
 // it does not link either of those.
 psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
+// Counts real KDF invocations -- web_auth_store_verify_password() is the
+// ONLY path login_post_handler() takes to run the KDF, so a test can prove a
+// refused (429, ladder-locked) attempt never reaches it: "the point" of
+// refusing before the KDF runs, per web_auth_login_http.c's header comment.
+// Macro-rename trick so this is test-only instrumentation, not a change to
+// web_auth_store.c itself.
+static int s_verify_password_call_count = 0;
+#define web_auth_store_verify_password test_counted_verify_password_impl
+
 // web_auth_store.c -- direct #include, same convention test_web_auth_store.c
 // uses (needs psa/crypto.h's host stub + fake_kv.h, both already set up
 // above). login_post_handler() calls web_auth_store_load_password()/
 // verify_password() directly.
 #include "../drivers/persist/web_auth_store.c"
+#undef web_auth_store_verify_password
+static bool web_auth_store_verify_password(web_auth_role_t role, const char *password)
+{
+    s_verify_password_call_count++;
+    return test_counted_verify_password_impl(role, password);
+}
 
 // asm("_binary_...") is a GCC/binutils extension with no MSVC equivalent --
 // #define it away, same convention test_zones_http.c/test_profiles_http.c
@@ -66,12 +87,17 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *u
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 
 static char s_last_set_cookie[256];
+static char s_last_retry_after[16];
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
 {
     (void)r;
     if (field && value && strcmp(field, "Set-Cookie") == 0) {
         strncpy(s_last_set_cookie, value, sizeof(s_last_set_cookie) - 1);
         s_last_set_cookie[sizeof(s_last_set_cookie) - 1] = '\0';
+    }
+    if (field && value && strcmp(field, "Retry-After") == 0) {
+        strncpy(s_last_retry_after, value, sizeof(s_last_retry_after) - 1);
+        s_last_retry_after[sizeof(s_last_retry_after) - 1] = '\0';
     }
     return ESP_OK;
 }
@@ -195,6 +221,25 @@ void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 // never called by these tests.
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 
+// ---- wifi_prov.h -- test-controllable STA ip/netmask for the remote-vs-
+// local backoff scope check (login_backoff_slot_for()). Default: no STA
+// lease at all (both empty), i.e. only the fixed AP subnet counts as LOCAL
+// unless a test stages a specific STA ip/netmask.
+static char s_stub_sta_ip[16] = "";
+static char s_stub_sta_netmask[16] = "";
+esp_err_t wifi_prov_get_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap)
+{
+    if (ip_out && ip_cap > 0) {
+        strncpy(ip_out, s_stub_sta_ip, ip_cap - 1);
+        ip_out[ip_cap - 1] = '\0';
+    }
+    if (netmask_out && netmask_cap > 0) {
+        strncpy(netmask_out, s_stub_sta_netmask, netmask_cap - 1);
+        netmask_out[netmask_cap - 1] = '\0';
+    }
+    return (s_stub_sta_ip[0] != '\0') ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
 // ---------------------------------------------------------------------------
 
 static void reset_all(void)
@@ -208,12 +253,29 @@ static void reset_all(void)
     // accessor + destroy-all instead of poking the statics directly.
     web_auth_table_destroy_all(http_session_table());
     memset(s_login_lockouts, 0, sizeof(s_login_lockouts));
+    memset(&s_remote_login_slot, 0, sizeof(s_remote_login_slot));
+    fake_time_reset_all();
     s_last_err_status = 0;
     s_last_status_line = 0;
     s_last_sendstr[0] = '\0';
     s_last_set_cookie[0] = '\0';
+    s_last_retry_after[0] = '\0';
     strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
     s_stub_ip_known = true;
+    // Default STA lease covers the whole 10.0.0.0/8 range, which is where
+    // every pre-existing lockout test in this file picks its per-IP
+    // addresses from (10.0.0.x, 10.1.0.x, ... 10.9.0.x) -- with no STA
+    // lease staged at all, login_ip_scope_classify() would call every one
+    // of those REMOTE (since only the fixed 192.168.4.x AP subnet is LOCAL
+    // by default), collapsing them all onto the single shared remote slot
+    // and defeating the per-IP isolation those tests exist to prove. The
+    // remote/local scope tests below use 8.8.8.8/1.2.3.4, well outside
+    // 10.0.0.0/8, so they still classify REMOTE under this default; tests
+    // that need a different STA subnet (the non-/24 mask test) override
+    // this explicitly.
+    strncpy(s_stub_sta_ip, "10.0.0.1", sizeof(s_stub_sta_ip) - 1);
+    strncpy(s_stub_sta_netmask, "255.0.0.0", sizeof(s_stub_sta_netmask) - 1);
+    s_verify_password_call_count = 0;
 }
 
 static const uint8_t TEST_SALT[WEB_AUTH_SALT_LEN] = {
@@ -321,7 +383,7 @@ static void test_lockout_eviction_never_evicts_a_locked_slot(void)
     }
     unsigned locked_count = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        if (s_login_lockouts[i].in_use && ota_auth_lockout_is_locked(&s_login_lockouts[i].lockout, now_ms())) {
+        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
             locked_count++;
         }
     }
@@ -343,7 +405,7 @@ static void test_lockout_eviction_never_evicts_a_locked_slot(void)
     // was evicted to make room for the new arrival.
     unsigned still_locked = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        if (s_login_lockouts[i].in_use && ota_auth_lockout_is_locked(&s_login_lockouts[i].lockout, now_ms())) {
+        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
             still_locked++;
         }
     }
@@ -490,6 +552,229 @@ static void test_may_mint_session_pure_function(void)
                "an unresolved address (ip_known == false) is refused");
 }
 
+// ---------------------------------------------------------------------------
+// 2026-09-21: escalating backoff ladder (5s/10s/30s/60s/300s) + remote/local
+// scope split.
+// ---------------------------------------------------------------------------
+
+static void test_ladder_retry_after_steps(void)
+{
+    TEST_SECTION("login backoff ladder -- Retry-After matches 5/10/30/60/300s by failure count");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.1", sizeof(s_stub_client_ip) - 1);
+
+    static const uint32_t expect_s[LOGIN_BACKOFF_LADDER_LEN] = { 5, 10, 30, 60, 300 };
+    for (unsigned step = 0; step < LOGIN_BACKOFF_LADDER_LEN; step++) {
+        do_login("admin", "wrong-password");
+        s_last_status_line = 0;
+        s_last_retry_after[0] = '\0';
+        do_login("admin", "correct-horse-battery-staple"); // refused before KDF, regardless of password
+        TEST_CHECK(s_last_status_line == 429, "still locked after this ladder step's failure");
+        TEST_CHECK((uint32_t)atoi(s_last_retry_after) == expect_s[step],
+                   "Retry-After matches this ladder step");
+        // Advance past this step's wait so the NEXT failure lands on the next step.
+        fake_time_advance_ms(expect_s[step] * 1000u + 1u);
+    }
+}
+
+static void test_ladder_cycle_resets_after_full_window(void)
+{
+    TEST_SECTION("login backoff ladder -- cycle resets to the 5s step once the 300s window elapses");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.2", sizeof(s_stub_client_ip) - 1);
+
+    for (unsigned step = 0; step < LOGIN_BACKOFF_LADDER_LEN; step++) {
+        do_login("admin", "wrong-password");
+        fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[step] + 1u);
+    }
+    // Fully served the 300s (last) step's wait with no further failure --
+    // the next failure must land back on the FIRST ladder step (5s), not
+    // escalate past the table or stay parked at 300s.
+    do_login("admin", "wrong-password");
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "still locked after the post-reset failure");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 5u,
+               "the cycle reset to the ladder's first (5s) step, not stuck at 300s");
+}
+
+static void test_success_resets_the_ladder(void)
+{
+    TEST_SECTION("login backoff ladder -- a successful login resets the failure count/lock");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.3", sizeof(s_stub_client_ip) - 1);
+
+    do_login("admin", "wrong-password");
+    do_login("admin", "wrong-password");
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[1] + 1u); // clear the 10s wait from failure #2
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "the correct-password login after the wait succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "test setup: the success actually minted a session");
+
+    // Next failure must land back on the ladder's FIRST step (5s), proving
+    // the prior two failures were forgotten by the success.
+    s_last_set_cookie[0] = '\0';
+    do_login("admin", "wrong-password");
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "locked after the post-success failure");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 5u,
+               "a success resets the ladder back to its first (5s) step");
+}
+
+static void test_refused_attempt_does_not_count_or_extend_wait(void)
+{
+    TEST_SECTION("login backoff ladder -- a refused (429) attempt neither counts as a failure "
+                 "nor extends the wait, and never runs the KDF");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.4", sizeof(s_stub_client_ip) - 1);
+
+    do_login("admin", "wrong-password"); // failure #1: locks for 5s
+    int calls_after_first_failure = s_verify_password_call_count;
+
+    // Hammer it with several more attempts while still inside the 5s wait --
+    // none of these may reach the KDF, count as a failure, or extend the lock.
+    for (int i = 0; i < 3; i++) {
+        s_last_status_line = 0;
+        s_last_retry_after[0] = '\0';
+        do_login("admin", "correct-horse-battery-staple");
+        TEST_CHECK(s_last_status_line == 429, "still refused while inside the wait window");
+        TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 5u,
+                   "Retry-After does not grow from repeated refused attempts");
+    }
+    TEST_CHECK(s_verify_password_call_count == calls_after_first_failure,
+               "the KDF (web_auth_store_verify_password) was never invoked on a refused attempt");
+
+    // Serve exactly the original 5s wait (not extended) and confirm the
+    // very next failure escalates to the SECOND step (10s), proving the
+    // refused attempts above never re-armed a fresh 5s wait. (A correct-
+    // password login here would reset the ladder via login_backoff_record_success()
+    // and defeat the point of this check, so the unlock is proven directly
+    // with a second wrong-password failure instead.)
+    fake_time_advance_ms(5000u + 1u);
+    do_login("admin", "wrong-password"); // failure #2
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 10u,
+               "the wait was never extended by refused attempts -- failure #2 lands on the 10s step");
+}
+
+// ---- remote/local scope split (2026-09-20 owner addition) -----------------
+
+// AP fallback subnet is always LOCAL even with no STA lease staged.
+#define SCOPE_TEST_LOCAL_A "192.168.4.50"
+#define SCOPE_TEST_LOCAL_B "192.168.4.51"
+// Neither the AP subnet nor (with no STA lease staged) any STA subnet --
+// both classify REMOTE and must share the single reserved slot.
+#define SCOPE_TEST_REMOTE_A "8.8.8.8"
+#define SCOPE_TEST_REMOTE_B "1.2.3.4"
+
+static void test_remote_failure_delays_a_different_remote_address(void)
+{
+    TEST_SECTION("login backoff scope -- an off-subnet failure delays a DIFFERENT off-subnet address "
+                 "(shared remote slot)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_B, sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429,
+               "a second, DIFFERENT remote address is locked out by the first remote address's failure "
+               "-- all remote clients share one slot");
+}
+
+static void test_remote_failure_does_not_delay_a_local_address(void)
+{
+    TEST_SECTION("login backoff scope -- an off-subnet failure does NOT delay a local address");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_LOCAL_A, sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK for the unaffected local address");
+    TEST_CHECK(s_last_status_line != 429,
+               "a local (AP-subnet) address is never locked out by a remote address's failure");
+}
+
+static void test_local_success_does_not_reset_remote_counter(void)
+{
+    TEST_SECTION("login backoff scope -- a local success does NOT reset the remote counter");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u); // clear the 5s wait so failure #2 actually runs
+    do_login("admin", "wrong-password"); // remote failure count now 2 -> next lock step is 30s
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_LOCAL_A, sizeof(s_stub_client_ip) - 1);
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "test setup: the local login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "test setup: the local success actually minted a session");
+
+    // The remote slot's count must be untouched by the unrelated local
+    // success -- a third remote failure now must land on the THIRD ladder
+    // step (30s), not the first (5s), and a different remote address must
+    // still be locked out by it (still the shared slot).
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[1] + 1u); // clear the 10s wait from failure #2
+    do_login("admin", "wrong-password");
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_B, sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "the other remote address is locked by the shared remote slot");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 30u,
+               "the remote counter kept its prior failures across the unrelated local success "
+               "(3rd remote failure -> 30s step, not reset to 5s)");
+}
+
+static void test_scope_subnet_math_with_non_24_mask(void)
+{
+    TEST_SECTION("login backoff scope -- subnet classification with a non-/24 STA netmask");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    // STA lease 10.20.30.1/255.255.255.240 (/28): usable range 10.20.30.0-15.
+    strncpy(s_stub_sta_ip, "10.20.30.1", sizeof(s_stub_sta_ip) - 1);
+    strncpy(s_stub_sta_netmask, "255.255.255.240", sizeof(s_stub_sta_netmask) - 1);
+
+    // .14 is inside the /28 -> LOCAL: a remote failure must not touch it.
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+    strncpy(s_stub_client_ip, "10.20.30.14", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "an address inside the /28 is LOCAL and unaffected by the remote failure");
+    TEST_CHECK(s_last_status_line != 429, "10.20.30.14 classifies LOCAL under the /28 mask");
+
+    // .16 is just past the /28 boundary -> REMOTE: it must share the
+    // already-failed remote slot and be locked out.
+    strncpy(s_stub_client_ip, "10.20.30.16", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429,
+               "10.20.30.16 falls outside the /28 boundary and classifies REMOTE, sharing the "
+               "already-locked remote slot");
+}
+
 void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
@@ -499,6 +784,14 @@ void run_test_web_auth_login_http(void)
     test_login_body_split_across_recv_calls();
     test_unresolvable_ip_refuses_to_mint_a_session();
     test_may_mint_session_pure_function();
+    test_ladder_retry_after_steps();
+    test_ladder_cycle_resets_after_full_window();
+    test_success_resets_the_ladder();
+    test_refused_attempt_does_not_count_or_extend_wait();
+    test_remote_failure_delays_a_different_remote_address();
+    test_remote_failure_does_not_delay_a_local_address();
+    test_local_success_does_not_reset_remote_counter();
+    test_scope_subnet_math_with_non_24_mask();
 }
 
 int main(void)

@@ -13,10 +13,24 @@
 // minted here would then never resolve there. See http_session_iface.c's
 // own header comment, which names this file as the intended adopter.
 //
-// LOCKOUT: web login gets its OWN ota_auth_lockout_state_t instances,
+// LOCKOUT: web login gets its OWN escalating per-IP backoff ladder,
 // separate from the OTA-esp/OTA-pico/LCD-PIN lockouts -- WEB_AUTH_PLAN.md
 // section 7's explicit design note that each authentication surface must
-// not share lockout state with any other.
+// not share lockout state with any other. (Owner decision, 2026-09-21,
+// replacing the earlier 3-failures-per-tier ota_auth_lockout_state_t
+// scheme this route used to reuse: "Auth should allow a fast logon. Then
+// if a wrong password comes from an ip wait an increasing amount of time
+// before the next is accepted. 1st retry 5 sec, second 10, then 30, 60,
+// then 5 min before the cycle resets." See LOGIN_BACKOFF_LADDER_MS below.)
+//
+// REMOTE-VS-LOCAL SCOPE (owner decision, 2026-09-20, verbatim): "All remote
+// ip addresses ie. not on the same subnet should be treated as the same ip
+// as far as login timeouts go" -- a single remote attacker can rotate
+// through addresses to spread failures across many per-IP slots and defeat
+// a per-IP ladder entirely, while a genuine LAN client cannot spoof being
+// on the LAN. Every client classified off-subnet (login_ip_scope.h) shares
+// ONE reserved backoff slot (s_remote_login_slot below), never a slot in
+// the ordinary per-IP table -- see login_backoff_slot_for().
 //
 // Finding 4 fix (2026-09-17 review): a SINGLE global instance meant one
 // remote IP failing three logins locked out every other client on the LAN
@@ -56,7 +70,7 @@
 #include "http_auth_http.h" // kiln_http_register()
 #include "http_form.h"      // http_form_find_field()
 #include "http_session_iface.h" // http_session_table(), http_session_hash_token()
-#include "ota_auth.h"        // ota_auth_lockout_state_t (this route's own instance)
+#include "login_ip_scope.h"   // login_ip_scope_classify() -- remote-vs-local backoff scope
 #include "ota_http_util.h"   // ota_http_hex_encode()
 #include "security_http_core.h" // SECURITY_HTTP_USERNAME_MAX/PASSWORD_MAX
 #include "web_auth_login.h"  // web_auth_login_role_for_username()
@@ -64,6 +78,7 @@
 #include "web_auth_session.h"
 #include "web_auth_store.h"
 #include "web_encoding.h"
+#include "wifi_prov.h"           // wifi_prov_get_sta_ip_netmask() -- remote-vs-local backoff scope
 #include "wifi_provision_http.h" // wifi_provision_http_get_server()
 
 #include "freertos/FreeRTOS.h"
@@ -94,13 +109,83 @@ extern const uint8_t login_page_html_gz_end[] asm("_binary_login_page_html_gz_en
 // (Finding 4 fix, see this file's header comment) -- bounded LRU eviction,
 // never grows.
 #define LOGIN_LOCKOUT_MAX_IPS 16u
+
+// --- Escalating backoff ladder (owner decision 2026-09-21, see this file's
+// header comment) -------------------------------------------------------
+//
+// One static table, in the order the ladder is walked. `failure_count`
+// (1-based) after a failure indexes this table directly (clamped to the
+// last entry): 1st failure -> 5s, 2nd -> 10s, 3rd -> 30s, 4th -> 60s, 5th+
+// -> 300s. Once a slot's failure_count has reached the table's length AND
+// its lock has expired, the NEXT touch resets failure_count to 0 -- "the
+// cycle resets" -- so a subsequent failure starts back at the 5s step
+// rather than staying pinned at 300s forever.
+static const uint32_t LOGIN_BACKOFF_LADDER_MS[] = { 5000u, 10000u, 30000u, 60000u, 300000u };
+#define LOGIN_BACKOFF_LADDER_LEN (sizeof(LOGIN_BACKOFF_LADDER_MS) / sizeof(LOGIN_BACKOFF_LADDER_MS[0]))
+_Static_assert(LOGIN_BACKOFF_LADDER_LEN == 5, "login backoff ladder must have exactly 5 steps: 5s,10s,30s,60s,300s");
+
+typedef struct {
+    uint32_t failure_count;   // consecutive failures since the last success or cycle reset, 0..LOGIN_BACKOFF_LADDER_LEN
+    uint32_t locked_until_ms; // 0 = not currently locked
+} login_backoff_state_t;
+
+// True iff `s` is currently locked (now_ms has not yet reached locked_until_ms).
+static bool login_backoff_is_locked(const login_backoff_state_t *s, uint32_t now_ms)
+{
+    if (s->locked_until_ms == 0u) {
+        return false;
+    }
+    return (int32_t)(s->locked_until_ms - now_ms) > 0;
+}
+
+// Must be called before consulting is_locked()/failure_count on any read
+// path -- if the ladder's last step has both been reached AND its lock has
+// already expired, this is the point where "the cycle resets": the next
+// failure starts over at the 5s step, rather than the slot staying pinned
+// at the 300s tier indefinitely once it has fired once.
+static void login_backoff_cycle_reset_if_due(login_backoff_state_t *s, uint32_t now_ms)
+{
+    if (s->failure_count >= LOGIN_BACKOFF_LADDER_LEN && !login_backoff_is_locked(s, now_ms)) {
+        s->failure_count = 0;
+        s->locked_until_ms = 0;
+    }
+}
+
+// Records one failed attempt: advances (and clamps) the consecutive-failure
+// count and imposes the matching ladder step's wait, starting now. Callers
+// must never call this for an attempt that was itself refused by
+// is_locked() -- see login_post_handler()'s structure, which only reaches
+// this after a request has actually run the KDF, i.e. was NOT refused.
+static void login_backoff_record_failure(login_backoff_state_t *s, uint32_t now_ms)
+{
+    if (s->failure_count < LOGIN_BACKOFF_LADDER_LEN) {
+        s->failure_count++;
+    }
+    s->locked_until_ms = now_ms + LOGIN_BACKOFF_LADDER_MS[s->failure_count - 1];
+}
+
+// A successful login clears the ladder entirely for this slot.
+static void login_backoff_record_success(login_backoff_state_t *s)
+{
+    s->failure_count = 0;
+    s->locked_until_ms = 0;
+}
+
 typedef struct {
     bool in_use;
     char ip[46];
     uint32_t last_activity_ms;
-    ota_auth_lockout_state_t lockout;
+    login_backoff_state_t backoff;
 } login_lockout_slot_t;
 static login_lockout_slot_t s_login_lockouts[LOGIN_LOCKOUT_MAX_IPS];
+
+// Reserved shared slot for every client classified LOGIN_IP_SCOPE_REMOTE
+// (login_ip_scope.h) -- deliberately NOT one of s_login_lockouts[] above,
+// so ordinary per-IP table saturation by LOCAL clients can never evict it,
+// and it can never itself be evicted to make room for a LOCAL client
+// either. See this file's header comment for the owner requirement this
+// implements.
+static login_lockout_slot_t s_remote_login_slot;
 static SemaphoreHandle_t s_login_lock;
 
 // Must be called with s_login_lock already held. Finds the slot for `ip`,
@@ -117,7 +202,7 @@ static SemaphoreHandle_t s_login_lock;
 // address had been used, evicting his own oldest locked slot to make room --
 // three guesses per address, unlimited addresses, which is MORE permitted
 // guesses than the single global lockout ca7a7d31 replaced, not fewer. A
-// slot that is currently locked (ota_auth_lockout_is_locked() true at `now`)
+// slot that is currently locked (login_backoff_is_locked() true at `now`)
 // is now never a candidate for eviction.
 //
 // Returns NULL when every slot is in_use AND currently locked -- there is no
@@ -136,22 +221,23 @@ static SemaphoreHandle_t s_login_lock;
 //
 // ACCEPTED TRADEOFF (owner decision, 2026-09-17, not a defect awaiting a
 // fix -- do not "helpfully" undo this): with LOGIN_LOCKOUT_MAX_IPS == 16,
-// OTA_AUTH_LOCKOUT_THRESHOLD == 3 and lockout_tier never decaying on its own
-// (ota_auth.h:107-109; only ota_auth_lockout_record_success() clears a
-// tier, which an attacker never triggers), the steady-state cost to hold
-// all 16 slots simultaneously locked is 16 addresses x 3 POSTs per lock
-// cycle, and each address's lock settles at the OTA_AUTH_LOCKOUT_MAX_MS
-// (900 s / 15 min) ceiling once its tier has climbed there -- roughly
-// 48 requests per 900 s, i.e. about one POST every 19 s, to keep the whole
-// table saturated indefinitely. While saturated, this function returns NULL
-// for any IP without an existing slot, and login_post_handler() answers
-// that with a bare 429 *before* credentials are examined -- including the
-// legitimate operator's own laptop after a DHCP lease change, or a phone on
-// a different address. There is no admin override and no prune of expired-
-// but-still-in-use slots; recovery is either waiting out the attacker (up
-// to 15 minutes after they stop) or rebooting the board (this table is
-// static RAM, cleared by a reset). See login_post_handler()'s 429 site for
-// the matching oracle-safety note.
+// one failure is already enough to arm a slot's lock (the ladder's first
+// step, see LOGIN_BACKOFF_LADDER_MS), so an attacker who fails once from
+// each of 16 distinct LOCAL-subnet addresses and keeps re-failing each one
+// just as its wait expires can hold the whole table saturated
+// indefinitely at low request volume. While saturated, this function
+// returns NULL for any IP without an existing slot, and login_post_handler()
+// answers that with a bare 429 *before* credentials are examined --
+// including the legitimate operator's own laptop after a DHCP lease
+// change, or a phone on a different address. There is no admin override
+// and no prune of expired-but-still-in-use slots; recovery is either
+// waiting out the attacker or rebooting the board (this table is static
+// RAM, cleared by a reset). See login_post_handler()'s 429 site for the
+// matching oracle-safety note. (This is the LOCAL-subnet table only --
+// every REMOTE-subnet client shares one reserved slot instead, see this
+// file's header comment and login_backoff_slot_for() below, so this
+// specific saturation cost only applies to an attacker who can reach the
+// board from LAN-local addresses.)
 static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now)
 {
     int free_idx = -1;
@@ -159,6 +245,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
     uint32_t lru_time = UINT32_MAX;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         login_lockout_slot_t *s = &s_login_lockouts[i];
+        login_backoff_cycle_reset_if_due(&s->backoff, now);
         if (s->in_use && strcmp(s->ip, ip) == 0) {
             s->last_activity_ms = now;
             return s;
@@ -166,7 +253,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
-        if (s->in_use && !ota_auth_lockout_is_locked(&s->lockout, now) && s->last_activity_ms < lru_time) {
+        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) && s->last_activity_ms < lru_time) {
             lru_time = s->last_activity_ms;
             lru_idx = (int)i;
         }
@@ -185,6 +272,38 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
     strncpy(s->ip, ip, sizeof(s->ip) - 1);
     s->last_activity_ms = now;
     return s;
+}
+
+// Scope-aware entry point -- decides LOCAL (per-IP table slot, above) vs
+// REMOTE (the one shared s_remote_login_slot) before handing off to
+// login_lockout_slot_for(). The unresolvable-address sentinel ("unknown",
+// ip_known == false) deliberately bypasses classification altogether and
+// goes through the ordinary per-string table path unchanged -- it stays
+// fail-closed and separate from both the LOCAL and REMOTE buckets, per this
+// file's header comment.
+static login_lockout_slot_t *login_backoff_slot_for(const char *ip, bool ip_known, uint32_t now)
+{
+    if (ip_known) {
+        char sta_ip[16] = { 0 };
+        char sta_netmask[16] = { 0 };
+        // Best-effort: if the STA interface has no lease (AP-only mode, or
+        // between associations), both stay empty and
+        // login_ip_scope_classify() falls back to the fixed AP subnet check
+        // only -- never treats that failure as an error requiring a
+        // refusal, since a live login must not become collateral damage of
+        // a query about an unrelated interface.
+        (void)wifi_prov_get_sta_ip_netmask(sta_ip, sizeof(sta_ip), sta_netmask, sizeof(sta_netmask));
+        login_ip_scope_t scope = login_ip_scope_classify(ip, sta_ip, sta_netmask);
+        if (scope == LOGIN_IP_SCOPE_REMOTE) {
+            login_backoff_cycle_reset_if_due(&s_remote_login_slot.backoff, now);
+            s_remote_login_slot.in_use = true;
+            strncpy(s_remote_login_slot.ip, "*remote*", sizeof(s_remote_login_slot.ip) - 1);
+            s_remote_login_slot.ip[sizeof(s_remote_login_slot.ip) - 1] = '\0';
+            s_remote_login_slot.last_activity_ms = now;
+            return &s_remote_login_slot;
+        }
+    }
+    return login_lockout_slot_for(ip, now);
 }
 
 static uint32_t now_ms(void)
@@ -214,14 +333,21 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     bool ip_known = ota_http_get_client_ip_checked(req, ip, sizeof(ip));
 
     bool locked = false;
+    uint32_t retry_after_ms = 0;
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
-        login_lockout_slot_t *slot = login_lockout_slot_for(ip, now_ms());
-        // Finding 2 fix: NULL means every slot is in_use and currently
-        // locked (the table is saturated with active attacker lockouts) --
-        // refuse this attempt outright rather than dereferencing a slot that
-        // does not exist. See login_lockout_slot_for()'s header comment for
-        // the tradeoff.
-        locked = (slot == NULL) || ota_auth_lockout_is_locked(&slot->lockout, now_ms());
+        uint32_t now = now_ms();
+        login_lockout_slot_t *slot = login_backoff_slot_for(ip, ip_known, now);
+        // Finding 2 fix (kept under the new ladder): NULL means every LOCAL
+        // slot is in_use and currently locked (the table is saturated with
+        // active attacker lockouts) -- refuse this attempt outright rather
+        // than dereferencing a slot that does not exist. See
+        // login_lockout_slot_for()'s header comment for the tradeoff. A
+        // REMOTE-scope client never sees NULL here (its reserved slot is
+        // never subject to that saturation).
+        locked = (slot == NULL) || login_backoff_is_locked(&slot->backoff, now);
+        if (locked && slot != NULL) {
+            retry_after_ms = slot->backoff.locked_until_ms - now;
+        }
         xSemaphoreGive(s_login_lock);
     } else {
         ESP_LOGW(TAG, "login from %s: internal lock timeout, refused", ip);
@@ -230,14 +356,21 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     }
     if (locked) {
         // Deliberately identical status line and body whether `slot` was a
-        // genuine per-IP lockout or NULL (the whole table saturated with
+        // genuine per-IP lockout or NULL (the LOCAL table saturated with
         // OTHER IPs' locks -- see login_lockout_slot_for()'s header comment
-        // for the measured cost and the accepted tradeoff, 2026-09-17). If
-        // the saturation case answered any differently, the response itself
-        // would be an oracle telling an attacker whether the table is full,
-        // which is exactly the kind of side channel this lockout exists to
-        // deny -- so a legitimate operator refused here sees the same
-        // "too many failed attempts" message a genuinely locked-out IP does.
+        // for the tradeoff). If the saturation case answered any
+        // differently, the response itself would be an oracle telling an
+        // attacker whether the table is full, which is exactly the kind of
+        // side channel this backoff exists to deny -- so a legitimate
+        // operator refused here sees the same "too many failed attempts"
+        // message a genuinely locked-out IP does. Retry-After is safe to
+        // disclose either way: it names how long THIS response is refused
+        // for, not anything about other clients' state. Rounded up so a
+        // client that honors it never retries a fraction of a second early.
+        uint32_t retry_after_s = (retry_after_ms == 0) ? 1u : (retry_after_ms + 999u) / 1000u;
+        char retry_after_hdr[16];
+        snprintf(retry_after_hdr, sizeof(retry_after_hdr), "%u", (unsigned)retry_after_s);
+        httpd_resp_set_hdr(req, "Retry-After", retry_after_hdr);
         httpd_resp_set_status(req, "429 Too Many Requests");
         httpd_resp_send(req, "too many failed attempts, try again later", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
@@ -298,17 +431,22 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     memset(password, 0, sizeof(password));
 
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
-        login_lockout_slot_t *slot = login_lockout_slot_for(ip, now_ms());
-        // Finding 2 fix: the pre-check above already refused this request
-        // when the table is saturated with locked IPs, so NULL here would
-        // mean the saturation state changed between the two calls under the
-        // same held lock -- not expected, but handled rather than
-        // dereferencing NULL.
+        uint32_t now = now_ms();
+        login_lockout_slot_t *slot = login_backoff_slot_for(ip, ip_known, now);
+        // Finding 2 fix (kept under the new ladder): the pre-check above
+        // already refused this request when the table is saturated with
+        // locked IPs, so NULL here would mean the saturation state changed
+        // between the two calls under the same held lock -- not expected,
+        // but handled rather than dereferencing NULL. This attempt was NOT
+        // refused (we only reach here past the `locked` check above), so
+        // recording a failure/success here is exactly one ladder step, per
+        // this file's header comment -- a refused attempt never reaches
+        // this line at all, and therefore never counts or extends the wait.
         if (slot != NULL) {
             if (ok) {
-                ota_auth_lockout_record_success(&slot->lockout);
+                login_backoff_record_success(&slot->backoff);
             } else {
-                ota_auth_lockout_record_failure(&slot->lockout, now_ms());
+                login_backoff_record_failure(&slot->backoff, now);
             }
         }
         xSemaphoreGive(s_login_lock);

@@ -289,6 +289,16 @@ bool wifi_prov_is_sta_connected(void);
  * call. */
 esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap);
 
+/* Same round trip as wifi_prov_get_sta_ip() but also returns the STA
+ * interface's CURRENT netmask (out_cap/netmask_cap must each be at least
+ * 16) -- the actual DHCP- or static-assigned mask, not merely the
+ * configured static_netmask (wifi_prov_get_static_netmask() below), which
+ * reads back nothing useful in DHCP mode. Added for the login backoff
+ * subnet check (web_auth_login_http.c): telling a LAN client from an
+ * off-subnet one needs the real, currently-active mask regardless of IP
+ * mode. Same "not connected" contract as wifi_prov_get_sta_ip(). */
+esp_err_t wifi_prov_get_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap);
+
 /* Returns RSSI (signal strength in dBm) of the currently-connected station, or
  * -127 if not connected. RSSI is negative; -30 is excellent, -90 is weak. */
 int8_t wifi_prov_get_sta_rssi(void);

@@ -400,10 +400,15 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # calls it, mints/hashes the session token via
                        # http_session_iface.h's exposed helpers against the
                        # SAME table http_auth_session_resolve() reads, and
-                       # owns its own separate ota_auth_lockout_state_t
-                       # instance (section 7: no lockout is shared across
+                       # owns its own separate per-IP escalating backoff
+                       # ladder (section 2/7: no lockout is shared across
                        # authentication surfaces).
                        "net/web_auth_login.c"
+                       # Pure IPv4 subnet classifier for the login backoff's
+                       # local-vs-remote rule (2026-09-20 owner requirement,
+                       # see login_ip_scope.h) -- host-tested alongside
+                       # web_auth_login.c, no ESP-IDF dependency.
+                       "http/login_ip_scope.c"
                        "http/web_auth_login_http.c"
                        # WEB_AUTH_PLAN.md section 8, web-GUI half: the
                        # inactivity lock's status poll (GET /api/auth/session)

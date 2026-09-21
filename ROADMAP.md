@@ -2,6 +2,14 @@
 
 > **Status:** planning · **Last reviewed:** 2026-09-20 night, five landings on
 > `origin/main` (twenty-second sweep) — open items below.
+> - **Login fast-logon + escalating backoff landed** (worktree
+>   `C:\wt\loginbackoff_ioby37`, not yet on `origin/main`): `WEB_AUTH_ITERATIONS`
+>   20000 → 2000 (~416 ms/attempt, existing records unaffected until next
+>   set); `POST /api/auth/login` now uses its own 5s/10s/30s/60s/300s
+>   escalating backoff ladder in place of the shared 3-failures OTA lockout
+>   scheme, with `Retry-After` on refusal; all remote (off-subnet) clients
+>   share one reserved backoff slot per owner decision. See
+>   `docs/WEB_AUTH_PLAN.md` section 2.
 > - **SaftyFW `SAFTYFW_HONOR_SIM_PLANT` CMake option** (`b1b307f5`, review
 >   follow-ups `5425dd80`): S2/S3/S4 reset instead of evaluating while a
 >   SIM_PLANT context is active, gated OFF by default and enforced by
@@ -79,15 +87,29 @@
 >   pending three prerequisites (`docs/PICO_AUTO_UPDATE_PLAN.md` §11); stray
 >   "LiveEditTest" profile in slot 0 on the bench board and the live-edit
 >   fork/HARD-validation/executor-pickup path still need a session authorized
->   to start a non-heating firing (see the M-row on live profile editing,
->   updated below); set `KILNCTL_AP_PASSWORD` (boot_guard_reset skipped
->   without it); decide which of the stored `kiln_auth` record or the bench
->   env-var credentials is authoritative and bring the other into line
->   (re-run web auth setup, or correct the env vars — see the login note
->   above). **In progress:** the owner-decided login latency fix (fast login
->   plus an escalating per-IP wrong-password backoff) is being implemented;
->   see `docs/WEB_AUTH_PLAN.md` section 2 (owned by another session, do not
->   edit).
+>   to start a non-heating firing (see the M-row on live profile editing);
+>   end stale pytest PID 42424 (serial hub); set `KILNCTL_AP_PASSWORD`
+>   (boot_guard_reset skipped without it); read the board's own log for the
+>   "login credentials valid but client address could not be determined"
+>   line to tell which of the two documented 401 causes the 2026-09-21 clean
+>   login attempt hit — wrong bench web credentials against the board's
+>   stored `kiln_auth` record (re-run setup), or correct credentials refused
+>   by the unknown-client-IP fail-close (see login-latency note above) —
+>   before assuming either one;
+>   confirm and acknowledge (via `crash_report_ack`, owner-gated) an
+>   unacknowledged crash record seen on the board before the 2026-09-21
+>   a57d0138 reflash — exc_task httpd, IllegalInstruction, reset reason
+>   TASK_WDT, frame_trustworthy false (PC 0xfffffffd, no usable backtrace) —
+>   almost certainly the original login-KDF watchdog panic from the
+>   2026-09-20 build predating `77e90ad7`, not a new fault, since the
+>   2026-09-21 login attempt above did not reboot the board; the
+>   crash-report JSON carries no timestamp, build hash or dump_id so this
+>   cannot be dated from outside, which is a follow-up candidate, not a task.
+>   **Done:** the owner-decided login latency fix (fast login plus an
+>   escalating per-IP wrong-password backoff, remote/local IP scope) has
+>   landed, review-passed (six required fixes plus a docs/comment follow-up
+>   pass), and is fully host-test covered; see `docs/WEB_AUTH_PLAN.md`
+>   section 2.
 >
 > **Previously reviewed:** 2026-09-20/21, bench commissioning
 > pass (twentieth sweep) — both processors reflashed to HEAD; open items below.
