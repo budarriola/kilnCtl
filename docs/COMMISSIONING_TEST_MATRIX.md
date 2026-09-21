@@ -170,6 +170,31 @@ re-attempted here (out of this run's assigned scope). Full detail in
 `docs/BENCH_TEST_LOG.md`'s "M18 backend Class C carve-out: OTA rows"
 section.
 
+**2026-09-21 C26/C6 attempt -- run halted after a board panic, C6 not
+attempted:** C26 (`cfgfs_format`) run dry then confirmed: before 9 files,
+after 0, `GET /api/cfgfs` verified mounted/0 files. A follow-up zone-PID
+write to trigger a resave (same tuned z0 values, chosen since z0's
+`tuning_valid` was already `no`) got no CONTROL reply within 3.0 s, and the
+board was found rebooted with a fresh **unacknowledged** crash report
+(`exc_task='bx_flash_worker' exc_cause_str='IllegalInstruction'
+reset_reason='PANIC'`, uptime_s=13) -- not present at this run's baseline.
+Crash was read but NOT acknowledged, per read-only rules. Post-reboot,
+`cfg` had repopulated to 8 of the original 9 files (zones.json present at
+900 B; `tz.dat` did not reappear) as a side effect of normal boot-time
+config load, not a confirmed commit of the attempted PID write itself
+(`dual_write.zones` still reads "not file-backed yet" before and after). No
+trip, no firing, relays off throughout. **C6 (`factory_reset scope=wifi`)
+was not attempted** -- running a second disruptive operation against a
+board with a live, unreviewed panic was judged unsafe; none of C6's PC-side
+pre-checks (STA credential env vars, adapter list, UART provision path)
+were run since the row was never reached. Full detail, every request/
+response and the exact heap/readiness before/after in
+`docs/BENCH_TEST_LOG.md`'s "2026-09-21 C26 cfg-partition format (M18)"
+section. Open question for the owner: whether the panic is attributable to
+`cfgfs_format` immediately preceding a config write, to the PID write
+alone, or coincidental -- not investigated further this run; recommend a
+crash-report/coredump read before any repeat.
+
 ---
 
 ## Page-by-page inventory
@@ -299,7 +324,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Reboot both processors, no config change (`swResetBtn`) | `POST /api/sw_reset` | ADMIN | `sw_reset_esp` | -- | Testable (watch for the expected S6a trip during a dual reflash, per CLAUDE.md) | PASS 2026-09-21 (B9/B17: env-fallback password, no S6a trip this time -- Pico link never dropped, benign deviation, see log) |
-| Reset Wi-Fi only (`data-scope="wifi"`) | `POST /api/factory_reset` (scope param) | ADMIN | none direct (`factory_default_then_load_preset`/`wifi_forget` are the nearest facade equivalents) | -- | Testable | DECLINED 2026-09-21 (C6: would erase this session's own LAN reachability to the board with no rejoin path -- see log) |
+| Reset Wi-Fi only (`data-scope="wifi"`) | `POST /api/factory_reset` (scope param) | ADMIN | none direct (`factory_default_then_load_preset`/`wifi_forget` are the nearest facade equivalents) | -- | Testable | NOT ATTEMPTED 2026-09-21 (this run's pre-checks for C6 were never reached -- halted before C6 after an unrelated board panic surfaced during C26; earlier run's DECLINE for LAN-reachability reasons is unaddressed context, not superseded) |
 | Reset kiln config only (`data-scope="kiln"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset` | -- | Testable | NOT ATTEMPTED 2026-09-21 (C6 scope `wifi` declined for reachability risk; `kiln`/`profiles`/`all` scopes not attempted, out of this session's scope) |
 | Reset fire profiles only (`data-scope="profiles"`) | `POST /api/factory_reset` | ADMIN | none direct | -- | Testable | |
 | Factory default -- erase everything (`data-scope="all"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset`(scope=all) | -- | Testable, but destructive -- re-provision Wi-Fi/credentials afterward | |
