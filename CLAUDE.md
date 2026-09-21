@@ -137,8 +137,8 @@ refuse the newer-than-it-knows blob and run that boot on **firmware-default
 PID gains**, not the tuned ones — flash is left untouched, so reflashing the
 newer firmware restores everything, but a firing started right after the
 rollback and before reflashing runs on defaults with no separate warning.
-Read back `control_get_zones` (or `GET /api/zones/config`) after any rollback
-before heating. Full detail: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
+Read back `control_get_zones` (or `GET /api/zones`, unauthenticated per
+`zones_http.c`) after any rollback before heating. Full detail: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
 ("`ota_rollback(processor)`" bullet).
 
 Zones config (and profiles, and several preferences) now also dual-write to
