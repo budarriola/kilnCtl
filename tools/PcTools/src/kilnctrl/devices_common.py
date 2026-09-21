@@ -27,7 +27,7 @@ from dataclasses import dataclass
 _SECRET_KEY_RE = re.compile(r"(password|psk|passphrase)", re.IGNORECASE)
 
 
-def _redact_secret_fields(value):
+def redact_secret_fields(value):
     """Recursively replace any dict value whose key looks like a
     password/psk/passphrase field with "[set]" (truthy) or "[unset]"
     (falsy/empty), leaving every other field untouched. Safe to call on
@@ -38,10 +38,10 @@ def _redact_secret_fields(value):
             if isinstance(key, str) and _SECRET_KEY_RE.search(key):
                 redacted[key] = "[set]" if val else "[unset]"
             else:
-                redacted[key] = _redact_secret_fields(val)
+                redacted[key] = redact_secret_fields(val)
         return redacted
     if isinstance(value, (list, tuple)):
-        return [_redact_secret_fields(v) for v in value]
+        return [redact_secret_fields(v) for v in value]
     return value
 
 
