@@ -51,6 +51,18 @@ pointer (log path, screenshot, MCP call + response summary, or commit hash).
 Leave blank until exercised. `BLOCKED` = hardware-gated on this bench, not a
 defect.
 
+**2026-09-21 read-only sweeps (M18 step 1/2):** all 48 Class A backend rows
+of `docs/COMMISSIONING_BACKEND_RUNBOOK.md` PASS (ESP `8ab3b81a`, Pico
+`a57d0138`, host `192.168.1.156`), and all 19 web-UI read-only rows (1 login
++ 18 page loads) of `docs/COMMISSIONING_WEBUI_RUNBOOK.md` PASS via headless
+Chrome/CDP against the live board. No writes, trips, or reboots; the
+`pico_auto_updat` crash record was read but deliberately left unacknowledged.
+Full detail (per-item observed values, tool list, evidence) lives in
+`docs/BENCH_TEST_LOG.md`'s two 2026-09-21 sections, not duplicated here — the
+rows below are annotated PASS only where a read-only route/page load maps
+directly to one of those two sweeps. Write rows (POST actions), Class B/C
+backend rows, and LCD rows remain unexercised.
+
 ---
 
 ## Page-by-page inventory
@@ -62,7 +74,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Dashboard poll (page load) | `GET /api/status` | OPEN | `get_board_state` (superset) | Home page | Testable | |
+| Dashboard poll (page load) | `GET /api/status` | OPEN | `get_board_state` (superset) | Home page | Testable | PASS 2026-09-21 (A1) |
 | Start firing | `POST /api/profile_exec/start` | USER | `profiles_start` | Home "Start" / profile picker | Testable (bench load) | |
 | Stop firing | `POST /api/profile_exec/stop` | SAFETY_REDUCE | `profiles_stop` | Home stop control | Testable | |
 | Pause firing | `POST /api/profile_exec/pause` | USER | `profiles_pause` | -- | Testable | |
@@ -70,18 +82,18 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Dismiss last run (`ackLastRunBtn`) | `POST /api/profile_exec/ack_last_run` | USER | `profiles_ack_last_run` | -- | Testable | |
 | Clear Trip (`clearTripBtn`) | `POST /api/safety/clear_trip` | ADMIN | `safety_clear_trip` | Safety page clear-trip | Testable (bench can trip S6a) | |
 | PID popup: Use these / Apply (`pidPopupUseProposed`/`pidPopupApplyBtn`) | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | |
-| Profile feasibility icon / popup Proceed anyway | reads `GET /api/profile_plan` | OPEN | none (facade has no feasibility-specific tool; use `get_board_state`/plan reads) | -- | Testable | |
+| Profile feasibility icon / popup Proceed anyway | reads `GET /api/profile_plan` | OPEN | none (facade has no feasibility-specific tool; use `get_board_state`/plan reads) | -- | Testable | PASS 2026-09-21 (A5) |
 | Relay-life icon | reads status fields | OPEN | none | -- | Testable | |
 | Theme toggle (`themeBtn`, every page) | client-side only, no route | -- | none | -- | Testable | |
-| Live history chart/CSV | `GET /api/history.csv` | OPEN | none direct (`get_device_log`/`log_analyze` adjacent) | Home graph | Testable | |
-| Control status | `GET /api/control` | ADMIN | `control_get_zones` | -- | Testable | |
-| Firing history | `GET /api/firing_history` | OPEN | none direct | -- | Testable | |
+| Live history chart/CSV | `GET /api/history.csv` | OPEN | none direct (`get_device_log`/`log_analyze` adjacent) | Home graph | Testable | PASS 2026-09-21 (A3) |
+| Control status | `GET /api/control` | ADMIN | `control_get_zones` | -- | Testable | PASS 2026-09-21 (A8/A11) |
+| Firing history | `GET /api/firing_history` | OPEN | none direct | -- | Testable | PASS 2026-09-21 (A4) |
 
 ### `/profiles` -- profile library (`profiles_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / list | `GET /api/profiles`, `GET /api/profiles/builtin`, `GET /api/profiles/favorites` | USER | `profiles_list` | "profiles" / "profile_picker" / "profiles_builtin_list" pages | Testable | |
+| Page load / list | `GET /api/profiles`, `GET /api/profiles/builtin`, `GET /api/profiles/favorites` | USER | `profiles_list` | "profiles" / "profile_picker" / "profiles_builtin_list" pages | Testable | PASS 2026-09-21 (A9; web /profiles page load) |
 | Save profile (`saveBtn`) | `POST /api/profile` | ADMIN | `profiles_save` | Profile builder review save | Testable | |
 | New (`newBtn`) | client-side form reset, then Save | -- | -- | -- | Testable | |
 | Import (`importBtn`) | `POST /api/profile/import` | ADMIN | none (facade has no import wrapper; use raw HTTP) | -- | Testable | |
@@ -92,13 +104,13 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Favorite toggle (row action) | `POST /api/profile/favorite` | ADMIN | none direct | -- | Testable | |
 | Add segment / add out-of-band rule (`addSegBtn`/`addOoBtn`) | client-side, folded into Save | -- | -- | Profile builder segment page | Testable | |
 | Bulk cancel (`bulkCancelBtn`) | client-side only | -- | -- | -- | Testable | |
-| Profile detail read | `GET /api/profile` | USER | `profiles_get` | "profile_detail"/"profile_segments" pages | Testable | |
+| Profile detail read | `GET /api/profile` | USER | `profiles_get` | "profile_detail"/"profile_segments" pages | Testable | PASS 2026-09-21 (A10) |
 
 ### `/live_profile` -- live in-run profile edit (`live_profile_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/profile/live` | ADMIN | `profile_live_get` | none (LCD has no live-edit page) | Testable only while a firing is running | |
+| Page load | `GET /api/profile/live` | ADMIN | `profile_live_get` | none (LCD has no live-edit page) | Testable only while a firing is running | PASS 2026-09-21 (A45; web /live_profile page load) |
 | Fork the running profile (`forkBtn`) | `POST /api/profile/live/fork` | ADMIN | `profile_live_fork` | -- | Testable | |
 | Save changes (`saveBtn`) | `POST /api/profile/live` | ADMIN | `profile_live_edit` | -- | Testable | |
 | Save as new / Overwrite original / Discard (`saveAsBtn`/`overwriteBtn`/`discardBtn`) | `POST /api/profile/live/decide` | ADMIN | `profile_live_decide` | -- | Testable | |
@@ -108,42 +120,42 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | |
+| Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | PASS 2026-09-21 (A8/A11; web /settings/zones page load) |
 | Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | |
 | PID save | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | |
 | Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | |
 | Abort sweep (`sweepAbortBtn`) | `POST /api/zones/current_sweep/abort` | SAFETY_REDUCE | `zone_current_sweep_abort` | -- | Testable (abort path itself, even if the sweep's numbers are meaningless on bench) | |
-| Sweep status poll | `GET /api/zones/current_sweep/status` | ADMIN | `zone_current_sweep_status` | -- | Testable | |
-| CT channel map read | `GET /api/zones/ct_channel_map` | ADMIN | none direct | -- | Testable | |
-| Recommend (`tuningRecGoBtn`) | `GET /api/tuning_recommendations` | ADMIN | none direct | -- | **Hardware-gated**: recommendations are derived from the current-sweep result above | |
+| Sweep status poll | `GET /api/zones/current_sweep/status` | ADMIN | `zone_current_sweep_status` | -- | Testable | PASS 2026-09-21 (A12) |
+| CT channel map read | `GET /api/zones/ct_channel_map` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A13) |
+| Recommend (`tuningRecGoBtn`) | `GET /api/tuning_recommendations` | ADMIN | none direct | -- | **Hardware-gated**: recommendations are derived from the current-sweep result above | PASS 2026-09-21 (A17 (read succeeded; numbers not bench-meaningful)) |
 | Start step test (`atStartBtn`) | `POST /api/autotune/start` | ADMIN | `autotune_start` | -- | Testable on bench (closed-loop step response exists even at 4 W, though gains found are not representative of a real kiln -- see `project_bench_identification_limits`) | |
 | Abort (`atAbortBtn`) | `POST /api/autotune/abort` | SAFETY_REDUCE | `autotune_abort` | -- | Testable | |
 | Accept proposed gains (`atAcceptBtn`) | `POST /api/autotune/accept` | ADMIN | `autotune_accept` | -- | Testable | |
-| Autotune status/matrix | `GET /api/autotune`, `GET /api/autotune/matrix` | ADMIN | `autotune_get_status` | -- | Testable | |
-| Autotune trace CSV | `GET /api/autotune/trace.csv` | ADMIN | none direct | -- | Testable | |
+| Autotune status/matrix | `GET /api/autotune`, `GET /api/autotune/matrix` | ADMIN | `autotune_get_status` | -- | Testable | PASS 2026-09-21 (A14) |
+| Autotune trace CSV | `GET /api/autotune/trace.csv` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A15) |
 | Adaptive-tune revert (per-zone) | `POST /api/adaptive_tune/revert` | ADMIN | `adaptive_tune_revert` | -- | Testable | |
-| Adaptive-tune status | `GET /api/adaptive_tune` | ADMIN | `adaptive_tune_get_status` | -- | Testable | |
-| Ramp-assist toggle (also on diagnostics page) | `GET`/`POST /api/ramp_assist` | ADMIN | `ramp_assist_get_enabled`/`ramp_assist_set_enabled` | -- | Testable | |
+| Adaptive-tune status | `GET /api/adaptive_tune` | ADMIN | `adaptive_tune_get_status` | -- | Testable | PASS 2026-09-21 (A16) |
+| Ramp-assist toggle (also on diagnostics page) | `GET`/`POST /api/ramp_assist` | ADMIN | `ramp_assist_get_enabled`/`ramp_assist_set_enabled` | -- | Testable | PASS 2026-09-21 (A18 (GET only; POST not exercised)) |
 
 ### `/settings/safety` -- safety config page (`safety_config_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/safety/rate_guard/auto` | ADMIN | `safety_get_rate_guard` | Home safety/temperature page has read-only status only | Testable | |
+| Page load | `GET /api/safety/rate_guard/auto` | ADMIN | `safety_get_rate_guard` | Home safety/temperature page has read-only status only | Testable | PASS 2026-09-21 (A19; web /settings/safety page load) |
 | Save (`save`) | `POST /api/safety/rate_guard/auto` | ADMIN | `safety_set_rate_guard` | -- | Testable | |
 
 ### `/safety` -- safety status (`safety_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | reads `GET /api/status` safety fields | OPEN | `safety_get_status` | Home page safety banner | Testable | |
+| Page load | reads `GET /api/status` safety fields | OPEN | `safety_get_status` | Home page safety banner | Testable | PASS 2026-09-21 (A20; web /safety page load) |
 | Clear latched trip (`clearTripBtn`) + confirm dialog (`confirmYes`/`confirmNo`) | `POST /api/safety/clear_trip` | ADMIN | `safety_clear_trip` | -- | Testable (E-stop jumper fitted means S3/estop trips are not reachable this way on bench; S6a mainFault from a dual reflash is, per CLAUDE.md) | |
 
 ### `/safety/commissioning` -- guarded-value commissioning wizard (`safety_commissioning_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/safety/commissioning` | ADMIN | `safety_get_commissioning` | -- | Testable | |
+| Page load | `GET /api/safety/commissioning` | ADMIN | `safety_get_commissioning` | -- | Testable | PASS 2026-09-21 (A21; web /safety/commissioning page load) |
 | Wizard Start/Next/Back (`gStartBtn`, `gGoto`) | client-side only | -- | -- | -- | Testable | |
 | Stage & commit (`gCommitBtn`, `saveBtn`) | `POST /api/safety/commissioning` | ADMIN | `safety_set_commissioning_fields` | -- | Testable | |
 | Apply test preset (`benchBtn`, dev-only, hidden by default) | `POST /api/safety/commissioning/bench_preset` | ADMIN | none direct | -- | Testable -- this is literally the bench-values preset button | |
@@ -156,24 +168,24 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / thermo faults | `GET /api/thermo/faults` | ADMIN | `thermo_read_faults` | "diagnostics" LCD page | Testable | |
+| Page load / thermo faults | `GET /api/thermo/faults` | ADMIN | `thermo_read_faults` | "diagnostics" LCD page | Testable | PASS 2026-09-21 (A22; web /diagnostics page load) |
 | Crash report banner + Acknowledge (`crashAckBtn`) | `GET /api/crash_report`, `POST /api/crash_report/ack` | ADMIN | `crash_report_ack` | -- | Testable | |
 | Clear crash log (`crashClearBtn`) | `POST /api/crash_report/clear` | ADMIN | none direct | -- | Testable | |
-| Watchdog PANIC toggle (`wdPanicToggleBtn`) | `GET`/`POST /api/watchdog_cfg` | ADMIN | `get_watchdog_panic_disabled`/`set_watchdog_panic_disabled` | -- | Testable but disruptive -- disabling PANIC masks real overflow-class crashes; use deliberately | |
+| Watchdog PANIC toggle (`wdPanicToggleBtn`) | `GET`/`POST /api/watchdog_cfg` | ADMIN | `get_watchdog_panic_disabled`/`set_watchdog_panic_disabled` | -- | Testable but disruptive -- disabling PANIC masks real overflow-class crashes; use deliberately | PASS 2026-09-21 (A24 (GET only; toggle not exercised)) |
 | Ramp-assist toggle (`rampAssistToggleBtn`) | `GET`/`POST /api/ramp_assist` | ADMIN | `ramp_assist_*` | -- | Testable | |
 | Enter Danger Mode (`dangerEnterBtn`) | `POST /api/diagnostics/danger/enable` | ADMIN | none direct | -- | **Hardware-gated**: explicit purpose is driving relays outside the normal safety-gated path -- exercise only with the bench fixture's 4 W load, never near a real element |
 | Per-relay danger control (`dangerRelayBtn<N>`, `dangerFiringBtn`) | `POST /api/diagnostics/danger/relay` | ADMIN | none direct (`io_set_relay`/`io_set_relay_mask` are the lower-level equivalents) | -- | **Hardware-gated** (same reason) | |
 | Exit Danger Mode now (`dangerExitBtn`) | `POST /api/diagnostics/danger/stop` | SAFETY_REDUCE | none direct (`io_all_relays_off` is the safe fallback) | -- | Testable (the exit path itself) | |
-| Danger status poll | `GET /api/diagnostics/danger` | ADMIN | none direct | -- | Testable | |
+| Danger status poll | `GET /api/diagnostics/danger` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A25) |
 | E-stop verify | `POST /api/estop/verify` | ADMIN | none direct | -- | **Hardware-gated**: bench E-stop jumper is fitted (NOT asserted, per `project_estop_jumper_is_fitted`) -- verifying the real switch needs the jumper removed and a physical actuation |
 | Relay cycle counters: reset/restore per-relay (`relay-reset-btn`) | `POST /api/relay_cycles/reset`, `POST /api/relay_cycles/restore` | ADMIN | none direct | -- | Testable | |
 | Dual-write window record restore (`dwwRecordRestoreBtn`) | `POST /api/dualwrite_window/restore_verified` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is now mounted and populated on this bench per `GET /api/cfgfs`, per `project_cfg_partition_and_user_data_move` -- verify against the live file state, not the old unformatted assumption) | |
-| Dual-write window status | `GET /api/dualwrite_window` | ADMIN | none direct | -- | Testable | |
-| lwIP stats | `GET /api/debug/lwip_stats` | ADMIN | none direct | -- | Testable | |
-| Timing diagnostics | `GET /api/diagnostics/timing` | ADMIN | none direct | -- | Testable | |
-| SaftyFW stack margin | `GET /api/saftyfw_stack_margin` | ADMIN | none direct (`get_stack_margin` covers the ESP side only) | -- | Testable | |
-| Coredump info/chunk (implicit, feeds crash report tooling) | `GET /api/coredump/info`, `GET /api/coredump/chunk` | ADMIN | `read_esp_coredump` | -- | Testable | |
-| cfg filesystem status / file read+write | `GET /api/cfgfs`, `GET`/`POST /api/cfgfs/file` | ADMIN | `get_cfgfs_status` (status only; file get/post has no wrapper) | -- | Testable | |
+| Dual-write window status | `GET /api/dualwrite_window` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A26) |
+| lwIP stats | `GET /api/debug/lwip_stats` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A27) |
+| Timing diagnostics | `GET /api/diagnostics/timing` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A28) |
+| SaftyFW stack margin | `GET /api/saftyfw_stack_margin` | ADMIN | none direct (`get_stack_margin` covers the ESP side only) | -- | Testable | PASS 2026-09-21 (A29) |
+| Coredump info/chunk (implicit, feeds crash report tooling) | `GET /api/coredump/info`, `GET /api/coredump/chunk` | ADMIN | `read_esp_coredump` | -- | Testable | PASS 2026-09-21 (A30 (read_esp_coredump succeeded end to end, symbolized)) |
+| cfg filesystem status / file read+write | `GET /api/cfgfs`, `GET`/`POST /api/cfgfs/file` | ADMIN | `get_cfgfs_status` (status only; file get/post has no wrapper) | -- | Testable | PASS 2026-09-21 (A31/A48 (status+file read only; write not exercised)) |
 
 ### `/settings` -- settings hub (`settings_page.html`)
 
@@ -191,7 +203,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/settings/display_power` | ADMIN | none direct | LCD screen-idle/timeout behavior (`screen_idle.c`) | Testable | |
+| Page load | `GET /api/settings/display_power` | ADMIN | none direct | LCD screen-idle/timeout behavior (`screen_idle.c`) | Testable | PASS 2026-09-21 (A41; web /settings/display page load) |
 | Save (`kcDpSave`) | `POST /api/settings/display_power` | ADMIN | none direct | -- | Testable | |
 | Unit preference (temp C/F, submitted from main page, not this page) | `POST /api/unit_pref` | ADMIN | none direct | Home page unit toggle | Testable | |
 
@@ -199,19 +211,19 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/auth/config` | ADMIN | none direct | -- (no LCD credentials editor) | Testable | |
+| Page load | `GET /api/auth/config` | ADMIN | none direct | -- (no LCD credentials editor) | Testable | PASS 2026-09-21 (A39; web /settings/security page load) |
 | Save administrator/user password, admin/user PIN, policy (`kcSecAdminPwSave` etc.), Clear login credentials (`kcSecClearCreds`) | `POST /api/auth/security` | ADMIN | none direct | -- | Testable -- see `project_web_auth_verified_and_blinds_pctools`: enabling auth policy blinds PcTools clients until they log in, plan the session accordingly | |
 | Bootstrap admin password (first-run, `login_page.html`'s "Set password" form) | `POST /api/auth/bootstrap_password` | ADMIN_BOOTSTRAP | none direct | -- | Testable | |
-| Log in (`login_page.html`) | `POST /api/auth/login` | OPEN | none direct | -- | Testable; see `project_login_latency_measured_4s` and `project_owner_decisions_2026_09_21_login` for expected latency/lockout behavior -- never iterate logins | |
-| Session status poll / extend | `GET /api/auth/session`, `POST /api/auth/session/extend` | OPEN / USER | none direct | -- | Testable | |
+| Log in (`login_page.html`) | `POST /api/auth/login` | OPEN | none direct | -- | Testable; see `project_login_latency_measured_4s` and `project_owner_decisions_2026_09_21_login` for expected latency/lockout behavior -- never iterate logins | PASS 2026-09-21 (web UI sweep, real login POST /api/auth/login 200) |
+| Session status poll / extend | `GET /api/auth/session`, `POST /api/auth/session/extend` | OPEN / USER | none direct | -- | Testable | PASS 2026-09-21 (A40 (poll only; extend not exercised)) |
 
 ### `/settings/kiln_configs` -- config presets (`kiln_configs_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | |
+| Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | PASS 2026-09-21 (web /settings/kiln_configs page load) |
 | Apply (`kcApplyBtn`) | `POST /api/kiln_configs/apply` | ADMIN | `load_config_preset`/`capability_preflight_check` (facade presets are file-based, not identical to these board-stored slots) | -- | Testable | |
-| Apply status poll | `GET /api/kiln_configs/apply_status` | USER | none direct | -- | Testable | |
+| Apply status poll | `GET /api/kiln_configs/apply_status` | USER | none direct | -- | Testable | PASS 2026-09-21 (A33) |
 | Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | |
 | Overwrite selected (`kcOverwriteBtn`) | `POST /api/kiln_configs/save` (existing id) | ADMIN | none direct | -- | Testable | |
 | Clone selected (`kcCloneBtn`) | `POST /api/kiln_configs/clone` | ADMIN | none direct | -- | Testable | |
@@ -224,35 +236,35 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / Export (implicit download link) | `GET /api/backup/export` | ADMIN | none direct | -- | Testable -- see `project_backup_round_trip_coverage`, only the Wi-Fi password is irreducible across a round trip | |
+| Page load / Export (implicit download link) | `GET /api/backup/export` | ADMIN | none direct | -- | Testable -- see `project_backup_round_trip_coverage`, only the Wi-Fi password is irreducible across a round trip | PASS 2026-09-21 (A34 (export fetched, not re-imported); web /settings/backup page load) |
 | Restore from file (`restoreBtn`) | `POST /api/backup/import` | ADMIN | none direct | -- | Testable | |
 
 ### `/ota` -- firmware update (`ota_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / interlock status | `GET /api/ota/interlock`, `GET /api/ota/esp/status`, `GET /api/ota/pico/status` | ADMIN / OPEN(esp status) / ADMIN(pico status) | `ota_status` | -- (no LCD OTA UI) | Testable | |
+| Page load / interlock status | `GET /api/ota/interlock`, `GET /api/ota/esp/status`, `GET /api/ota/pico/status` | ADMIN / OPEN(esp status) / ADMIN(pico status) | `ota_status` | -- (no LCD OTA UI) | Testable | PASS 2026-09-21 (A35; web /ota page load) |
 | Update ESP (`espUpdateBtn`) | `GET /api/ota/challenge` then `POST /api/ota/esp` | OPEN then ADMIN | `ota_get_challenge`, `ota_update_esp` | -- | Testable, but CLAUDE.md's sanctioned path for a real flash is `flash_firmware()` (JTAG/OpenOCD) -- this route is the Wi-Fi OTA path, a different mechanism, both worth exercising | |
 | Roll back ESP (`espRollbackBtn`) | `POST /api/ota/esp/rollback` | ADMIN | `ota_rollback_esp` | -- | Testable; mind the `zones_cfg` schema-bump rollback hazard in CLAUDE.md | |
 | Exit recovery mode & reboot now (`recoveryExitBtn`) | `POST /api/ota/esp/recovery_exit` | ADMIN | `ota_recovery_exit_esp` | -- | Testable only while actually in recovery mode | |
 | boot_guard_reset (fired automatically by `flash_firmware()`, no dedicated button) | `POST /api/ota/esp/boot_guard_reset` | ADMIN | wired into `flash_firmware()`'s `reset_boot_guard` path, no standalone MCP tool | -- | Testable | |
-| boot_guard status | `GET /api/boot_guard` | ADMIN | none direct | -- | Testable | |
+| boot_guard status | `GET /api/boot_guard` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A36) |
 | Update Pico (`picoUpdateBtn`) | `POST /api/ota/pico` | ADMIN | `ota_update_pico` | -- | Testable; watch for the erase-watchdog-reset class, fixed per `project_pico_ota_erase_watchdog_resets_safety_processor` | |
 | Roll back Pico (`picoRollbackBtn`) | `POST /api/ota/pico/rollback` | ADMIN | `ota_rollback_pico` | -- | Testable | |
-| Pico rollback status | `GET /api/ota/pico/rollback/status` | ADMIN | none direct | -- | Testable | |
-| Partition table read (support for above, no button) | `GET /api/partitions` | ADMIN | `debug_check_partition_table` | -- | Testable | |
+| Pico rollback status | `GET /api/ota/pico/rollback/status` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A38) |
+| Partition table read (support for above, no button) | `GET /api/partitions` | ADMIN | `debug_check_partition_table` | -- | Testable | PASS 2026-09-21 (A37) |
 
 ### `/readiness` -- pre-firing readiness (`readiness_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load (no buttons besides theme) | `GET /api/readiness` | OPEN | none direct (`capability_preflight_check` is the nearest facade equivalent, board-agnostic) | -- | Testable | |
+| Page load (no buttons besides theme) | `GET /api/readiness` | OPEN | none direct (`capability_preflight_check` is the nearest facade equivalent, board-agnostic) | -- | Testable | PASS 2026-09-21 (A2; web /readiness page load) |
 
 ### `/setup` -- first-run setup wizard (`setup_wizard_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / progress | `GET /api/setup/progress` | ADMIN | none direct | -- | Testable | |
+| Page load / progress | `GET /api/setup/progress` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A42; web /setup page load) |
 | Resume where left off (`resumeBtn`) / Refresh (`loadAll`) / step navigation (`stepgo`) | client-side + `GET /api/setup/progress` | ADMIN | -- | -- | Testable | |
 | Step Save & mark done buttons (`step0Continue`..`step6Save`) | `POST /api/setup/progress` (+ underlying config routes: zones, safety, security depending on step) | ADMIN | matches whichever underlying group the step edits | -- | Testable | |
 | Apply channel/relay count (`s2rebuild`/`s5rebuild`) | `POST /api/zones` (channel/relay count fields) | ADMIN | none direct | -- | Testable | |
@@ -266,7 +278,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load (AP-mode captive index) | `GET /` (AP context), `GET /wifi` | OPEN | `wifi_get_status` | "network" LCD page | Testable | |
+| Page load (AP-mode captive index) | `GET /` (AP context), `GET /wifi` | OPEN | `wifi_get_status` | "network" LCD page | Testable | PASS 2026-09-21 (web /wifi page load; A43 wifi_get_status) |
 | Home Wi-Fi / Access Point mode (`modeHomeBtn`/`modeApBtn`) | implicit via `POST /provision` or mode switch | ADMIN | `wifi_set_mode` | "network_manage" LCD page | Testable | |
 | Scan (`scanBtn`) | `GET /scan` | OPEN | `wifi_scan` | -- | Testable | |
 | Connect (`connectSubmitBtn`) | `POST /provision` | ADMIN | `wifi_add_network` | -- | Testable | |
@@ -280,7 +292,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| `theme.css`, `nav.js`, `app.js`, `commissioning_shared.js` | `GET /theme.css`, `GET /nav.js`, `GET /app.js`, `GET /commissioning_shared.js` | OPEN | none (served assets, checked by `check_lint_pages.ps1`/responsive sweep, not the MCP facade) | -- | Testable | |
+| `theme.css`, `nav.js`, `app.js`, `commissioning_shared.js` | `GET /theme.css`, `GET /nav.js`, `GET /app.js`, `GET /commissioning_shared.js` | OPEN | none (served assets, checked by `check_lint_pages.ps1`/responsive sweep, not the MCP facade) | -- | Testable | PASS 2026-09-21 (A44 (200 once Accept-Encoding: identity dropped for these routes)) |
 
 ---
 

@@ -1,6 +1,71 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-20 night, five landings on
+> **Status:** planning · **Last reviewed:** 2026-09-21, pico-auto-update
+> hardening + M18 read-only sweeps (twenty-third sweep) — open items below.
+> - **Pico auto-update: readiness text fix, state tracking, kill switch
+>   landed** (`c48c9b4a`, `581f2679`, `cba52447`). `readiness_http.c` no
+>   longer prints a hardcoded "matches" sentence before any comparison ran;
+>   `pico_auto_update_state.c` tracks the last decision so the readiness page
+>   can tell a real match from nothing decided yet; the ESP now recognizes
+>   SaftyFW's `UPDATE_TASK_STATE_REFUSED_RUNNING_IMAGE_OVERLAP = 9` (mirrors
+>   `22b080bd`, below) at all four relay wait sites instead of falling out of
+>   the terminal set and sitting out a 120 s timeout; and a new compile-time
+>   kill switch, `PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT`, **defaults to
+>   0** — auto-update does not run in the default build. This makes the
+>   4096 B `pico_auto_updat` task-stack overflow (the M18 blocker below)
+>   unreachable in a default build, but does **not fix** the stack itself;
+>   see the owner-decisions block below. Third-review pass (`987050f6`) also
+>   added a mirror-drift test tying `safety_link.h`'s wire states to
+>   SaftyFW's own `update_task.c` enum.
+> - **SaftyFW: refuse to erase/program flash overlapping the running image**
+>   (`22b080bd`). `update_task_flash_guard.c`, a pure host-tested check
+>   driven by the linker's `__flash_binary_start`/`__flash_binary_end`
+>   symbols, wired into `update_task_process_begin()`/`_erase_slot()`/
+>   `_persist_metadata()`; this is what closes the "erased into its own
+>   running flat image" half of the M18 blocker.
+> - **SaftyFW build identity scoped to what it actually compiles, not repo
+>   HEAD** (`27c25d44`, review rounds `68e0a4db`, `987050f6`). Stamping
+>   `SAFTYFW_GIT_COMMIT` from plain `git rev-parse HEAD` meant any
+>   KilnFW-only commit restamped an otherwise byte-identical Pico image,
+>   which is what made `pico_auto_update.h`'s boot-time identity check think
+>   every ESP flash needed a Pico update. Now scoped to
+>   `firmware/SaftyFW`, `firmware/CommonFW`, and only the three
+>   subdirectories of `firmware/hwAbstraction` SaftyFW's `CMakeLists.txt`
+>   actually reaches (`pico/`, `common/hal_status.c`, `interface/` includes)
+>   — `hwAbstraction/esp,host,idf,test` and its `README.md` are correctly
+>   excluded (33 of the last 62 hwAbstraction-only commits touched only
+>   those unreached paths). `pico_image_freshness.py` and `stale_check.py`
+>   compare against the same scoped commit; `docs/PICO_AUTO_UPDATE_PLAN.md`
+>   section 13 has the full before/after. This is the other half of the M18
+>   blocker: it stops spurious auto-update triggers even once the kill
+>   switch above is eventually turned on.
+> - **`docs/COMMISSIONING_WEBUI_RUNBOOK.md` corrected to list routes, not
+>   source filenames** (`5489c498`): requesting a page-shell filename like
+>   `/login_page.html` 302s to `/` and never reaches the page; the runbook
+>   now carries a route-to-filename-to-tier table and notes the
+>   `Accept-Encoding` gzip requirement on static assets.
+> - **cfg-partition mount-status doc correction landed everywhere it was
+>   stale** (`33bf8578`, follow-up `21c1669e`): `CLAUDE.md`,
+>   `COMMISSIONING_BACKEND_RUNBOOK.md`, `RELEASE_HARDENING_PLAN.md`,
+>   `WEB_AUTH_PLAN.md`, `FILESYSTEM_PLAN.md`,
+>   `FILESYSTEM_USER_DATA_PLAN.md`, and `CONFIG_MIGRATION_CHAIN_PLAN.md` all
+>   now note the bench board (`8ab3b81a`) has `cfg` mounted and populated
+>   with 7 files, confirmed via `GET /api/cfgfs` — NVS stays authoritative.
+> - **M18 read-only sweeps run and PASS**, 2026-09-21, against ESP
+>   `8ab3b81a` / Pico `a57d0138`: all 48 Class A backend rows
+>   (`docs/COMMISSIONING_BACKEND_RUNBOOK.md`) via `kiln_call`/`kiln_batch`
+>   plus raw HTTP, and all 19 web-UI read-only rows
+>   (`docs/COMMISSIONING_WEBUI_RUNBOOK.md`, 1 login + 18 page loads) via
+>   headless Chrome/CDP. No writes, trips, or reboots. Results annotated
+>   into `docs/COMMISSIONING_TEST_MATRIX.md`; full detail in
+>   `docs/BENCH_TEST_LOG.md`'s two 2026-09-21 sections (uncommitted in the
+>   shared tree as of this sweep). See M18 below for what remains.
+> - **Owner decisions still open, listed once under M18** rather than
+>   repeated here: pico_auto_update task-stack size vs. keeping the kill
+>   switch off; readiness status wording for the gate-off state;
+>   `KILNCTL_AP_PASSWORD` unset; scope of an NVS reset at commission time.
+>
+> **Previously reviewed:** 2026-09-20 night, five landings on
 > `origin/main` (twenty-second sweep) — open items below.
 > - **Login fast-logon + escalating backoff landed** (`a3b59e9c`, review
 >   fixes `8ab3b81a`): `WEB_AUTH_ITERATIONS`
@@ -2644,18 +2709,29 @@ Owner instruction, 2026-09-21.
   restored to their correct values by `0edb60c9`/`9c4938fe` after
   `web_auth_setup` had persisted the `-1` never-expire sentinel from the fresh
   NVS erase. Pico unchanged at `a57d0138`. Board reachable at `192.168.1.156`.
-- **Open blocker, firing rows can't proceed:** first boot after the reflash
-  panicked in task `pico_auto_updat` (stack overflow, 4096 B task stack
-  against a measured 3104 B ceiling that excludes flash/NVS internals), and
-  the following boot's auto-update attempt erased into the Pico's own
-  running flat image and left it silent for ~120 s. Crash report is still
-  unacknowledged, which blocks `capability_preflight`. Fixes in flight, not
-  yet on main: `22b080bd` (landed) makes SaftyFW refuse an erase/program that
-  overlaps the running image (state 9); the ESP-side gate plus state-9
-  handling and a readiness text fix are in review in worktree `picoautoupd`;
-  SaftyFW build-identity scoping to the SaftyFW tree is in progress in
-  worktree `saftyid`. Owner decision still open: the `pico_auto_updat` task
-  stack itself (standing owner rule is never bump a stack ceiling).
+- **Original blocker's two root causes both fixed on `origin/main`,
+  2026-09-21:** `22b080bd` makes SaftyFW refuse an erase/program that
+  overlaps its own running flat image (new state 9,
+  `REFUSED_RUNNING_IMAGE_OVERLAP`); `27c25d44`/`68e0a4db`/`987050f6` scope
+  SaftyFW's embedded build identity to the trees it actually compiles
+  instead of repo HEAD, which is what made an ordinary KilnFW-only commit
+  look like a SaftyFW change and trigger a spurious auto-update in the
+  first place; `c48c9b4a`/`581f2679`/`cba52447` add the ESP-side state-9
+  handling, a readiness text fix, and (compile-time, default **off**)
+  `PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT`. With the kill switch at its
+  default of 0, auto-update does not run at all in a normal build, so the
+  4096 B `pico_auto_updat` task-stack overflow that started this is
+  currently unreachable — but it is **not fixed**, only inert; see the
+  owner-decisions block below. None of this has been re-verified on
+  hardware yet (no reflash since these landed).
+- **M18 read-only sweeps done, 2026-09-21** (see the top-of-file entry
+  above and `docs/COMMISSIONING_TEST_MATRIX.md`): 48/48 backend Class A
+  rows PASS, 19/19 web-UI read-only rows PASS, against the still-running
+  `8ab3b81a`/`a57d0138` pair. Remaining, in owner's stated order: reflash
+  both boards to HEAD (needs the owner decision below first, since the
+  stack overflow this uncovered is still live in source), acknowledge the
+  standing `pico_auto_updat` crash report, then Class B/C backend rows, web
+  UI write rows, and LCD rows.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at
@@ -2664,6 +2740,20 @@ Owner instruction, 2026-09-21.
   refuses with 429.
 - `KILNCTL_AP_PASSWORD` is still unset, so `flash_firmware()` cannot clear
   `boot_guard` (count sits at 2).
+
+**Owner decisions open, 2026-09-21:**
+
+1. `pico_auto_updat` task stack: raise it (4096→8192 B, against a measured
+   ~3104 B ceiling excluding flash/NVS internals — standing rule is never
+   bump a stack ceiling without review) or keep
+   `PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT` at 0 indefinitely.
+2. Readiness status for the auto-update gate while it is compiled off:
+   report `ok` (nothing to do) or `not_done` (feature exists but disabled).
+3. Set `KILNCTL_AP_PASSWORD` so `flash_firmware()` can clear `boot_guard`
+   (count sits at 2; skipped every reflash without it).
+4. Whether the next commission reflash should reset NVS more broadly than
+   just the `web_auth`-recovery erase already done 2026-09-21, given the
+   `zones_cfg`/config-schema rollback hazards documented in CLAUDE.md.
 
 ---
 
