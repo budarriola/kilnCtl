@@ -179,6 +179,13 @@ Side effects, checked:
   calls `esp_wifi_set_config()` (lines 88, 127) with default FLASH storage, so
   a recovery boot would repopulate the namespace. Follow-up, not a blocker for
   the app-side fix.
+- **Standing guard, 2026-09-21**: `tools/check_wifi_ram_storage_mirror.ps1`
+  (+ `.py`) now guards this pair mechanically -- it fails if either
+  `wifi_prov.c` or `recovery_wifi.c` loses its
+  `esp_wifi_set_storage(WIFI_STORAGE_RAM)` call, gains a second one, or has it
+  reordered to after the file's first Wi-Fi config apply, so one side being
+  edited away silently while the other still holds is no longer possible
+  without a red `run_all_checks.ps1`.
 
 ### B. Clear what is already there
 
