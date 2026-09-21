@@ -26,16 +26,34 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 _SECRET_KEY_RE = re.compile(r"(password|psk|passphrase)", re.IGNORECASE)
 
+# Status/flag suffixes that mean the key describes a boolean state ABOUT a
+# secret (e.g. "admin_password_set") rather than the secret's value itself --
+# these must never be redacted, or a status flag silently disappears behind
+# "[unset]"/"[set]". A bool-typed value is exempted the same way regardless
+# of key name, since it can never itself be the secret's literal value.
+_STATUS_SUFFIX_RE = re.compile(
+    r"(_set|_enabled|_required|_ok|_present)$", re.IGNORECASE
+)
+
 
 def redact_secret_fields(value):
     """Recursively replace any dict value whose key looks like a
     password/psk/passphrase field with "[set]" (truthy) or "[unset]"
     (falsy/empty), leaving every other field untouched. Safe to call on
-    dicts, lists/tuples of them, or any other JSON-shaped value."""
+    dicts, lists/tuples of them, or any other JSON-shaped value.
+
+    Keys ending in _set/_enabled/_required/_ok/_present, and any bool-typed
+    value, are exempted even when the key also matches the secret pattern
+    (e.g. "admin_password_set") -- those describe a status flag, not the
+    secret's value, and must not be hidden."""
     if isinstance(value, dict):
         redacted = {}
         for key, val in value.items():
-            if isinstance(key, str) and _SECRET_KEY_RE.search(key):
+            is_secret_key = isinstance(key, str) and _SECRET_KEY_RE.search(key)
+            is_status_flag = isinstance(val, bool) or (
+                isinstance(key, str) and _STATUS_SUFFIX_RE.search(key)
+            )
+            if is_secret_key and not is_status_flag:
                 redacted[key] = "[set]" if val else "[unset]"
             else:
                 redacted[key] = redact_secret_fields(val)

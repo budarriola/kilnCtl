@@ -163,6 +163,21 @@ class RedactSecretFieldsUnitTest(unittest.TestCase):
         self.assertEqual(redacted["list"][0]["password"], "[set]")
         self.assertEqual(redacted["list"][1]["other"], 1)
 
+    def test_status_suffix_keys_are_not_redacted(self):
+        """A boolean status flag whose name merely contains the secret
+        substring (e.g. admin_password_set) must pass through unredacted,
+        not collapse to "[set]"/"[unset]" and hide its real value."""
+        redacted = redact_secret_fields({
+            "ap_password_set": True,
+            "admin_password_set": False,
+            "ap_password": "x",
+            "psk": "",
+        })
+        self.assertIs(redacted["ap_password_set"], True)
+        self.assertIs(redacted["admin_password_set"], False)
+        self.assertEqual(redacted["ap_password"], "[set]")
+        self.assertEqual(redacted["psk"], "[unset]")
+
 
 class GetBoardStateRedactionTest(unittest.TestCase):
     """get_board_state() must never leak the sentinel password. Hermetic:
