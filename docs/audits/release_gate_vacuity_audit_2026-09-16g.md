@@ -174,7 +174,7 @@ then commit 6de75575's disclosure gating for the saved SSID and static-IP
 topology fields (superseded citation 0821916d, prefix not backtick-quoted
 here for the same reason), then commit ca202dbf's revert of an unnecessary
 `+ sizeof(sta_ip_field)` term in the `json[]` buffer sizing --
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`d8953318`
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`8fc84030`
 is the current one; see check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3
 spare slots for 137 routes against a cap of 140. That cap/count pair is
