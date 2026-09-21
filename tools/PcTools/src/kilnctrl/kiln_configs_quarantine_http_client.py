@@ -17,8 +17,10 @@ module for the same reason.
 
 The route's own ordering (kiln_cfg_http.c's quarantine_clear_post_handler())
 checks the store's quarantine state BEFORE the confirm gate, which is what
-lets this module offer a non-mutating status probe: a POST with no
-``confirm`` field still answers 409 "not quarantined" if the store is
+lets this module offer a non-mutating status probe: a POST with a non-empty
+but deliberately false ``confirm=0`` field (the body must be non-empty or
+the handler's read_small_body() rejects it with a 400 before the quarantine
+check ever runs) still answers 409 "not quarantined" if the store is
 healthy, or 400 "confirm=1 required" if it actually is quarantined --
 either way, no state changes. ``get_quarantine_status()`` below is exactly
 that probe. The mutating call, ``post_quarantine_clear()``, sends
@@ -94,7 +96,14 @@ def get_kiln_configs_list(host: str, timeout: float = KILN_CONFIGS_QUARANTINE_HT
 
 
 def _post_quarantine_clear_raw(host: str, confirm: bool, timeout: float) -> "tuple[Optional[int], str]":
-    body = urllib.parse.urlencode({"confirm": "1"} if confirm else {}).encode("ascii")
+    # The handler's first statement (read_small_body(), kiln_cfg_http.c:645)
+    # rejects an empty body with a 400 BEFORE the quarantine check ever runs
+    # (kiln_cfg_http.c:73) -- an empty-body probe therefore always looks
+    # quarantined, on a healthy board too. Send a non-empty, deliberately
+    # false confirm field ("confirm=0") so the body is non-empty and the
+    # handler actually reaches the quarantine check; confirm=0 is still not
+    # "1" so the confirm gate below it never fires either.
+    body = urllib.parse.urlencode({"confirm": "1" if confirm else "0"}).encode("ascii")
     req = urllib.request.Request(_url(host, _API_PATH), data=body, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:

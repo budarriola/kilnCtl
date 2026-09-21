@@ -49,7 +49,12 @@ class RequestShapeTest(unittest.TestCase):
         self.assertTrue(sent[0].full_url.endswith("/api/kiln_configs/quarantine_clear"))
         self.assertEqual(result["ok"], True)
 
-    def test_status_probe_sends_no_confirm_field(self):
+    def test_status_probe_sends_confirm_0_not_an_empty_body(self):
+        """An empty body hits read_small_body()'s own 400
+        (kiln_cfg_http.c:645/:73) BEFORE the quarantine check ever runs, so
+        an empty-body probe would read as quarantined on every board,
+        healthy or not. The probe must send a non-empty confirm=0 field so
+        the handler actually reaches the quarantine check."""
         sent = []
 
         def fake_urlopen(req, timeout=None):
@@ -58,9 +63,28 @@ class RequestShapeTest(unittest.TestCase):
 
         with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
             quarantined, detail = qc.get_quarantine_status("host")
-        self.assertEqual(sent[0].data, b"")
+        self.assertEqual(sent[0].data, b"confirm=0")
         self.assertFalse(quarantined)
         self.assertIn("not quarantined", detail)
+
+    def test_400_body_missing_reply_is_indistinguishable_from_quarantined(self):
+        """The handler's read_small_body() 400 (empty/oversized body) and its
+        confirm-check 400 (body present, quarantined, confirm!=1) both
+        surface to this client as a bare HTTP 400 with no machine-readable
+        code -- only the response TEXT differs, and this client does not
+        parse it. This test documents that the client relies entirely on
+        never producing an empty body (confirm=0, never an absent field) to
+        avoid ever hitting the body-missing 400 in the first place, rather
+        than trying to distinguish the two 400 causes after the fact."""
+        err = urllib.error.HTTPError(
+            "u", 400, "Bad Request", {}, io.BytesIO(b"request body missing or too large"))
+        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+            quarantined, detail = qc.get_quarantine_status("host")
+        # Both 400 causes map to quarantined=True in this client -- correct
+        # only because the client always sends a non-empty confirm=0 body
+        # and should therefore never actually observe the body-missing 400
+        # from a well-behaved server.
+        self.assertTrue(quarantined)
 
     def test_list_is_a_plain_get(self):
         sent = []

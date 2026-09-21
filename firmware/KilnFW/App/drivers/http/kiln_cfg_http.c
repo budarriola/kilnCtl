@@ -657,7 +657,7 @@ static esp_err_t quarantine_clear_post_handler(httpd_req_t *req)
 
     char confirm_val[4];
     int confirm_len = http_form_find_field(body, "confirm", confirm_val, sizeof(confirm_val));
-    if (confirm_len <= 0 || confirm_val[0] != '1') {
+    if (confirm_len <= 0 || strcmp(confirm_val, "1") != 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "confirm=1 required to discard the quarantined store");
         return ESP_OK;
     }
