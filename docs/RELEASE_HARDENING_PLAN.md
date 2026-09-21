@@ -665,10 +665,104 @@ confirmed the check FAILs naming it; removed by hand (not `git checkout`)
 and confirmed both an empty `git diff` and a `git hash-object` match against
 the pre-sabotage blob, then re-ran and confirmed PASS. Full foreground
 `run_all_checks.ps1 -AllowFewerChecks` run after adding the check:
-`125 passed, 0 skipped, 0 failed`. This closes the sweep for
-`tools/PcTools/src`; `tools/PcTools/tests` itself (test files, not
-production source) was never this item's target and remains out of scope by
-definition -- there is no "caller" concept for a test file to sweep.
+`125 passed, 0 skipped, 0 failed`. `tools/PcTools/tests` itself (test
+files, not production source) was a deliberate scope decision, not a gap
+closed by this pass -- there is no "caller" concept for a test file to
+sweep, and nothing below revisits that decision.
+
+**Status, 2026-09-20b: caller matching corrected from text match to
+token-based.** The 2026-09-20 pass above overclaimed coverage: its caller
+search was a plain `\bname\b` regex over whole file contents, so a mention
+in a comment, a docstring, an `__all__ = [...]` string-list entry, or a
+function's own recursive self-call all counted as "used" -- the exact false-
+negative shape a name-only text match always has. Fixed by switching the
+search to `tokenize`-based NAME-token matching (`build_mention_index()`):
+only identifiers that are real code -- never inside a string or a comment --
+count as a mention, and each function's own signature line plus its own
+indented body (computed via `_function_body_end()`) are excluded from its
+own caller search, so a recursive self-call is no longer mistaken for an
+outside caller. `__all__` membership specifically stops counting as a
+caller not through special-case logic but as a consequence of the token
+switch: an `__all__` entry is a STRING token, never a NAME token. The
+decorator-wiring carve-out for MCP-registered tools (`@_srv._tool()` etc.)
+is unaffected. Separately, allowlist/pending keys were `(path.name, name)`
+basenames despite the comment's claim that they name the defining file --
+`registry.py` exists at both `tools/PcTools/src/kilnctrl/bench_test/registry.py`
+and `tools/PcTools/src/mcpkit/registry.py`, so a same-named entry could have
+silently covered the wrong file's function. Keys are now the full
+repo-relative POSIX path.
+
+Re-running the corrected check (909 functions scanned, same two roots, ~1 s)
+surfaced 25 previously-hidden zero-caller functions, on top of the 8 already
+in `PENDING_OWNER_REVIEW` from the prior pass (which remained genuinely
+zero-caller and needed no changes). All 25 were reviewed by hand. Ten are
+NOT dead code -- they are `kilnlink_codec.py`'s `encode_context`/
+`encode_status`/`encode_announce`/`encode_diag`/`encode_trip`/`encode_power`/
+`encode_ceiling`/`encode_clear_trip`/`encode_get_fw_version`/
+`encode_set_clock`, each reached only via
+`getattr(kilnlink_codec, fn_name)` dispatch from a string-keyed manifest
+table in `tools/PcTools/selfcheck_commonfw.py`. This is the token matcher's
+own documented blind spot (dispatch by string name), confirmed by hand
+against that manifest table and added to `ZERO_CALLER_ALLOWLIST` with a note
+that they are real production callees, not benign-unused ones. The other 15
+had no caller anywhere the check or a by-hand `git grep` could find,
+including `tools/PcTools/scripts`/`ui_scripts` (outside the check's scan
+roots but inside its caller search): `devices_io.digital_io_label`,
+`http_capture_log.write_no_heat_diagnostic_tsv`,
+`load_estimator.estimate_from_capture_path`, `noise_floor.load_artifact`,
+`noise_floor.floor_lookup`, `log_analysis.parse_profile_exec_uart_capture`,
+`mcp_server_flash.fixture_flash` (unlike its sibling `flash_firmware()`, it
+carries no `@_srv._tool()` registration at all), `partition_table.
+check_chip_partition_table` (its own docstring calls it deprecated; the CLI
+script named after it calls the newer `_via_http()` variant instead),
+`pico_image_freshness.check_slot_bins_fresh`, `plant_sim.
+actuator_weight_sensitivity_sweep`, `plant_sim.per_zone_gain_holdout_report`,
+`ramp_assist.compare_heat_work`, `ramp_assist.dwell_credit_parity`,
+`stack_margin_baseline.load_pico_records`, and `mcpkit.registry.
+collapse_table` (genuinely called, but only from the separate `mykicadMcp`
+submodule this check deliberately excludes from its scan -- kilnctrl's own
+`mcp_server.py` calls the sibling `collapse()` instead). None matches the
+`web_auth_table_create_session` shape; all 15 went into
+`PENDING_OWNER_REVIEW`, never deleted.
+
+**Corrected totals.** Across both passes the sweep has now found **49**
+zero-caller functions in total: **26** in `ZERO_CALLER_ALLOWLIST` (13
+bulk-allowlisted 2026-09-20 as the same one-off-research-module shape as 3
+originally reviewed 2026-09-17, plus the 10 `kilnlink_codec` getattr-dispatch
+entries added this pass), and **23** in `PENDING_OWNER_REVIEW` (8 from
+2026-09-20 plus the 15 above) awaiting an explicit owner wire-up-or-delete
+call. The prior status text's "8 genuinely zero-caller functions" undercounted
+because its own matching missed the 15 above.
+
+**Remaining known blind spots**, stated plainly rather than implied by
+omission: this is token-based NAME-token matching over each file's own text,
+not full AST/type-aware call-graph analysis. It still cannot see (a)
+dispatch-by-string -- `getattr(module, name_from_a_table)()`, a dict keyed by
+function name, or any other call reached only through a string that happens
+to equal the identifier (the `kilnlink_codec` case above, and the reason
+that allowlist exists); (b) methods -- only top-level, non-underscore `def`
+statements are scanned as *candidates*, and a bare method call
+(`obj.some_method()`) is indistinguishable from an unrelated top-level
+function that happens to share `some_method`'s name, so a same-named
+method and top-level function could each hide the other's true caller
+count; and (c) genuine dead code shadowed by a same-named method elsewhere
+in the tree, for the same reason. These are accepted limits of a
+lightweight per-repo text/token scan, not defects introduced by this pass;
+negative-testing below still proves the check reliably catches the shapes it
+is designed to catch.
+
+Negative-tested three ways: (1) planted a genuinely dead function with no
+reference anywhere -- FAILed, naming it; (2) planted a function referenced
+ONLY inside a `#` comment and ONLY inside a string literal (both previously
+enough to hide a zero-caller under the old text match) -- confirmed the
+check still FAILs, naming it, proving the token switch actually changed
+behavior rather than coincidentally leaving the old regex's blind spot
+intact; restored both by hand (not `git checkout`) and confirmed an empty
+`git diff` plus a `git hash-object` match against each file's pre-sabotage
+blob. Full foreground `run_all_checks.ps1 -Fast -AllowFewerChecks`:
+`122 passed, 0 skipped, 0 failed` (SaftyFW's slot bins needed a fresh
+`check_00_saftyfw_target_build.ps1` run first -- unrelated to this change,
+a shared-tree build artifact left stale by another session).
 
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They

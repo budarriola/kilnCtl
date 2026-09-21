@@ -15,7 +15,6 @@
 # be caught again until someone re-ran it by hand. This makes it automatic.
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
 $pyScript = Join-Path $PSScriptRoot "check_python_zero_caller_sweep.py"
 
 if (-not (Test-Path $pyScript)) {

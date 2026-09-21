@@ -47,8 +47,10 @@ manual sweep.
 """
 from __future__ import annotations
 
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -78,33 +80,36 @@ DECORATOR_WIRING_MARKERS = ("_tool(", ".tool(", ".route(", "app.get(", "app.post
 # "Python-side zero-production-caller sweep", 2026-09-17 status) and
 # confirmed to be ad hoc, interactively-invoked research/analysis tooling
 # with no production caller by design -- not the web_auth_table_create_session
-# shape (a live, wired-in entry point nothing calls). Each entry names the
-# defining file so a same-named function elsewhere is NOT silently covered.
+# shape (a live, wired-in entry point nothing calls). Each entry keys on the
+# repo-relative POSIX path of the defining file (not just its basename) so
+# same-named files in different directories (e.g. `registry.py` exists at
+# both tools/PcTools/src/kilnctrl/bench_test/registry.py and
+# tools/PcTools/src/mcpkit/registry.py) are never silently conflated.
 ZERO_CALLER_ALLOWLIST = {
-    ("fuzzy_load_sweep.py", "find_best_strength_per_load"),
-    ("http_capture_log.py", "starting_temps_c"),
-    ("load_mass_sweep.py", "run_profile7_loaded"),
+    ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "find_best_strength_per_load"),
+    ("tools/PcTools/src/kilnctrl/http_capture_log.py", "starting_temps_c"),
+    ("tools/PcTools/src/kilnctrl/load_mass_sweep.py", "run_profile7_loaded"),
     # Below: same one-off research/analysis modules as the three above (no
     # __main__, no CLI entry point, no documented caller other than a human
     # importing the module by hand -- see each module's own docstring),
     # found by this check's first full-coverage run (2026-09-20) once the
     # methodology switched from "top 8 most-referenced names per pairing"
     # to every top-level name. Same benign shape, not re-litigated per name.
-    ("fuzzy_load_sweep.py", "run_grid"),
-    ("fuzzy_load_sweep.py", "summarize_by_strength_load"),
-    ("fuzzy_load_sweep.py", "format_grid_table"),
-    ("load_mass_sweep.py", "run_cone_schedule_loaded"),
-    ("load_mass_sweep.py", "format_metrics_table"),
-    ("coupled_ident.py", "identify_zone_dead_time_tau_from_capture_path"),
-    ("coupled_ident.py", "parse_manual_dwell_tsv"),
-    ("load_estimator.py", "estimate_per_source_from_capture_path"),
-    ("plant_sim.py", "format_per_zone_gain_holdout_report_text"),
-    ("plant_sim.py", "render_sim_report"),
-    ("plant_sim.py", "format_sim_report_text"),
+    ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "run_grid"),
+    ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "summarize_by_strength_load"),
+    ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "format_grid_table"),
+    ("tools/PcTools/src/kilnctrl/load_mass_sweep.py", "run_cone_schedule_loaded"),
+    ("tools/PcTools/src/kilnctrl/load_mass_sweep.py", "format_metrics_table"),
+    ("tools/PcTools/src/kilnctrl/coupled_ident.py", "identify_zone_dead_time_tau_from_capture_path"),
+    ("tools/PcTools/src/kilnctrl/coupled_ident.py", "parse_manual_dwell_tsv"),
+    ("tools/PcTools/src/kilnctrl/load_estimator.py", "estimate_per_source_from_capture_path"),
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "format_per_zone_gain_holdout_report_text"),
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "render_sim_report"),
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "format_sim_report_text"),
     # http_auth.clear_sessions's own docstring: "Used by tests, and available
     # to any [caller]" -- a deliberate test-support utility, not a dead
     # production path.
-    ("http_auth.py", "clear_sessions"),
+    ("tools/PcTools/src/kilnctrl/http_auth.py", "clear_sessions"),
     # capture_pool_provenance.assert_pool_gate_consistent is the "raises"
     # half of a documented pair (README.md's capture_pool_provenance.py
     # bullet): its sibling check_pool_gate_consistency (the "reports" half)
@@ -113,7 +118,32 @@ ZERO_CALLER_ALLOWLIST = {
     # a whole is wired -- assert_pool_gate_consistent is documented public
     # API for a future importer who wants raise-on-violation semantics
     # rather than a returned problem list, not a stray unwired path.
-    ("capture_pool_provenance.py", "assert_pool_gate_consistent"),
+    ("tools/PcTools/src/kilnctrl/capture_pool_provenance.py", "assert_pool_gate_consistent"),
+    # Below: NOT benign-unused -- these are real, live production callees,
+    # reached only through `getattr(kilnlink_codec, fn_name)` dispatch in
+    # tools/PcTools/selfcheck_commonfw.py's `_PAYLOAD_VECTOR_MANIFESTS` table
+    # (each entry names the encoder function by string, then
+    # `commonfw_payload_vector_checks()` does `getattr(...)` and calls the
+    # result). This is exactly the token-based matcher's documented blind
+    # spot (getattr/dispatch-by-string): the call site never contains a NAME
+    # token spelling the function's own identifier, only a STRING token, so
+    # it cannot be told apart from a true zero-caller by this check. Verified
+    # by hand (2026-09-20, this pass) against
+    # tools/PcTools/selfcheck_commonfw.py's `_PAYLOAD_VECTOR_MANIFESTS` --
+    # every name below appears there. Listed here (not deleted, not left
+    # failing the build) because the check has no way to confirm this on its
+    # own; a future reviewer should re-check selfcheck_commonfw.py's manifest
+    # table before trusting this note if either file changes materially.
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_context"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_status"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_announce"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_diag"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_trip"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_power"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_ceiling"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_clear_trip"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_get_fw_version"),
+    ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_set_clock"),
 }
 
 # Found genuinely zero-caller by this check's first full-coverage run
@@ -131,40 +161,101 @@ PENDING_OWNER_REVIEW = {
     # unit preference over HTTP (POST /api/unit_pref), so this CONTROL-task
     # pair (0x04 GET_UNIT_PREF / 0x05 SET_UNIT_PREF) was apparently built as
     # an alternate transport and never wired to any caller.
-    ("devices_control.py", "control_get_unit_pref"),
-    ("devices_control.py", "control_set_unit_pref"),
+    ("tools/PcTools/src/kilnctrl/devices_control.py", "control_get_unit_pref"),
+    ("tools/PcTools/src/kilnctrl/devices_control.py", "control_set_unit_pref"),
     # params_by_name's own docstring explains id-based lookup was deliberately
     # rejected in favor of name-based ("a renumbered id cannot silently
     # retarget a value at a different field") -- params_by_id looks like the
     # leftover of that decision, never removed.
-    ("safety_cfg_http_client.py", "params_by_id"),
+    ("tools/PcTools/src/kilnctrl/safety_cfg_http_client.py", "params_by_id"),
     # entry_from_dict (its deserializing counterpart, run_queue.py:1596) IS
     # called (run_queue.py:2600); entry_to_dict, the serializing half of the
     # same pair, has no caller anywhere -- an asymmetric pair, the
     # "reset-one-side" bug-class shape CLAUDE.md calls out, though here the
     # unused side is dead code rather than stale state.
-    ("run_queue.py", "entry_to_dict"),
+    ("tools/PcTools/src/kilnctrl/run_queue.py", "entry_to_dict"),
     # No caller anywhere in the repo, including tools/PcTools/scripts and
     # ui_scripts (outside this check's own scan roots, but inside its
     # caller-search universe). Reads a JSON preset file into a dict; nothing
     # calls it today.
-    ("run_queue.py", "load_preset_json"),
+    ("tools/PcTools/src/kilnctrl/run_queue.py", "load_preset_json"),
     # Thin `path.read_bytes()` + find_one_identity(...) wrapper; find_one_
     # identity itself is used elsewhere (check_slot_bins_fresh), this
     # convenience wrapper around it is not.
-    ("pico_image_freshness.py", "read_file_identity"),
+    ("tools/PcTools/src/kilnctrl/pico_image_freshness.py", "read_file_identity"),
     # cone_table's sibling functions (band_bottom_c, heat_work_weight) are
     # both actively used by ramp_assist.py; cone_for_temp_c -- a direct
     # mirror of firmware's cone_table_cone_for_temp_c -- has no caller
     # anywhere in tools/PcTools outside its own test.
-    ("cone_table.py", "cone_for_temp_c"),
+    ("tools/PcTools/src/kilnctrl/cone_table.py", "cone_for_temp_c"),
     # log_analysis.py is itself a CLI tool (has __main__/main()) built around
     # three input-source parsers (poll-capture JSONL, UART capture, and CSV);
     # parse_trace_csv (its /api/autotune/trace.csv sibling) is used by
     # render_autotune_report, but parse_history_csv (/api/history.csv) is
     # never called by any of this module's own report/main functions --
     # the CSV history-file input path looks implemented but never wired in.
-    ("log_analysis.py", "parse_history_csv"),
+    ("tools/PcTools/src/kilnctrl/log_analysis.py", "parse_history_csv"),
+    # Below: surfaced by this pass's methodology fix (2026-09-20b) -- moving
+    # the caller search from a plain `\bname\b` text match to a token/AST-
+    # based one (only NAME tokens outside strings/comments count; a mention
+    # in a comment, a docstring, an `__all__` string-list entry, or the
+    # function's own recursive self-call no longer counts as a caller).
+    # Each was individually confirmed by hand to have no real caller
+    # (production or test-only aside), not just a text-match artifact.
+    #
+    # devices.__all__ lists it (a STRING token, correctly no longer counted);
+    # no production code calls it.
+    ("tools/PcTools/src/kilnctrl/devices_io.py", "digital_io_label"),
+    # Only ever called from its own test file; no production caller.
+    ("tools/PcTools/src/kilnctrl/http_capture_log.py", "write_no_heat_diagnostic_tsv"),
+    ("tools/PcTools/src/kilnctrl/load_estimator.py", "estimate_from_capture_path"),
+    ("tools/PcTools/src/kilnctrl/noise_floor.py", "floor_lookup"),
+    # load_artifact's own sibling floor_lookup (above) reads the same
+    # artifact structure it returns; noise_floor.py's own `main()` builds/
+    # reports the artifact but never reads it back through this loader --
+    # only the test suite exercises it.
+    ("tools/PcTools/src/kilnctrl/noise_floor.py", "load_artifact"),
+    # Previously mentioned only in its own docstring and telemetry_capture.py
+    # comments (both non-NAME-token references that no longer count); no
+    # production module actually calls it, only test_log_analysis.py.
+    ("tools/PcTools/src/kilnctrl/log_analysis.py", "parse_profile_exec_uart_capture"),
+    # No `@_srv._tool()` (or any other) registration decorator above it --
+    # unlike its sibling `flash_firmware()`, it is not wired up as an MCP
+    # tool at all, and nothing else in production code calls it directly.
+    # Only test_flash_board_pinning.py exercises it.
+    ("tools/PcTools/src/kilnctrl/mcp_server_flash.py", "fixture_flash"),
+    # partition_table.py's own docstring calls this "now-deprecated";
+    # tools/PcTools/scripts/check_chip_partition_table.py -- the CLI script
+    # named after it -- actually calls the newer
+    # `check_chip_partition_table_via_http()` instead. Only
+    # test_partition_table.py still calls the deprecated one.
+    ("tools/PcTools/src/kilnctrl/partition_table.py", "check_chip_partition_table"),
+    # Only test_pico_image_freshness.py calls it; no script or MCP tool
+    # wires it up (the check_embedded_pico_image_fresh.ps1 standing check is
+    # a separate PowerShell/pytest path that does not import this module).
+    ("tools/PcTools/src/kilnctrl/pico_image_freshness.py", "check_slot_bins_fresh"),
+    # Only test_plant_sim.py calls it; no CLI/report path in plant_sim.py's
+    # own `main()` reaches it.
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "actuator_weight_sensitivity_sweep"),
+    ("tools/PcTools/src/kilnctrl/plant_sim.py", "per_zone_gain_holdout_report"),
+    # Only test_ramp_assist.py / test_ramp_assist_cone_scale.py call these;
+    # ramp_assist.py has no `__main__`/CLI entry point of its own that would
+    # reach either.
+    ("tools/PcTools/src/kilnctrl/ramp_assist.py", "compare_heat_work"),
+    ("tools/PcTools/src/kilnctrl/ramp_assist.py", "dwell_credit_parity"),
+    # Only test_bench_test_wave1d.py calls it.
+    ("tools/PcTools/src/kilnctrl/stack_margin_baseline.py", "load_pico_records"),
+    # `collapse_table()` IS called in production -- but only from
+    # tools/mykicadMcp/kicad_mcp_server.py, a separate git submodule this
+    # check deliberately excludes from both function discovery and the
+    # caller search (EXCLUDED_DIR_NAMES; that submodule is never edited from
+    # this repo). Within tools/PcTools's own scan universe, kilnctrl's own
+    # mcp_server.py calls the sibling `collapse()`, never `collapse_table()`.
+    # Not dead in the full picture, but genuinely zero-caller within this
+    # check's in-repo scope -- left for owner review rather than silently
+    # allowlisted, since a real in-repo caller appearing later should be
+    # investigated, not assumed benign.
+    ("tools/PcTools/src/mcpkit/registry.py", "collapse_table"),
 }
 
 
@@ -206,9 +297,32 @@ def _is_decorator_wired(lines, def_line_idx: int) -> bool:
     return False
 
 
+def _function_body_end(lines, def_line_no: int) -> int:
+    """Return the 1-based line number of the last line belonging to the
+    def statement starting at def_line_no (its signature continuation lines
+    and its indented body), so callers can exclude a recursive self-call --
+    a mention of the function's own name inside its own body -- from the
+    caller search. Blank lines inside the body do not end it; the first
+    non-blank line back at column 0 does."""
+    n = len(lines)
+    last_body_line = def_line_no
+    j = def_line_no  # 0-based index of the line AFTER the def line
+    while j < n:
+        line = lines[j]
+        if line.strip() == "":
+            j += 1
+            continue
+        leading = len(line) - len(line.lstrip(" \t"))
+        if leading == 0:
+            break
+        last_body_line = j + 1  # 1-based
+        j += 1
+    return last_body_line
+
+
 def find_top_level_functions(path: Path):
-    """Return [(name, line_no, decorator_wired)] for top-level (non-underscore,
-    non-indented) def statements in path."""
+    """Return [(name, line_no, decorator_wired, body_end_line)] for top-level
+    (non-underscore, non-indented) def statements in path."""
     out = []
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -222,7 +336,8 @@ def find_top_level_functions(path: Path):
         if name.startswith("_"):
             continue
         wired = _is_decorator_wired(lines, i - 1)
-        out.append((name, i, wired))
+        body_end = _function_body_end(lines, i)
+        out.append((name, i, wired, body_end))
     return out
 
 
@@ -253,30 +368,47 @@ def load_corpus(repo_root: Path):
     return corpus
 
 
-IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
 def build_mention_index(corpus):
-    """name -> set of (path, line_no) where that identifier appears.
+    """name -> set of (path, line_no) where that identifier appears as a
+    NAME token -- i.e. real code, never inside a string literal or a
+    comment. This is what makes a mention in a docstring, a plain '#'
+    comment, or an `__all__ = ["name", ...]` string list correctly NOT count
+    as a caller: none of those produce a tokenize.NAME token for `name`.
+    (`__all__` membership specifically: its entries are STRING tokens, not
+    NAME tokens, so listing a function there was never itself a caller once
+    scanning moved off a text/regex match.)
 
-    Equivalent to a per-name word-boundary scan of every corpus line (it
-    matches inside strings and comments exactly as the previous regex did),
-    but computed once instead of once per candidate function -- the per-name
-    scan was O(functions x lines) and cost ~34 s on this repo.
+    Computed once instead of once per candidate function -- the per-name
+    scan this replaced was O(functions x lines) and cost ~34 s on this repo.
     """
     index = {}
     for path, lines in corpus:
-        for i, line in enumerate(lines, start=1):
-            for tok in IDENT_RE.findall(line):
-                index.setdefault(tok, set()).add((path, i))
+        text = "\n".join(lines) + "\n"
+        try:
+            for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+                if tok.type == tokenize.NAME:
+                    index.setdefault(tok.string, set()).add(
+                        (path, tok.start[0]))
+        except (tokenize.TokenizeError, IndentationError, SyntaxError,
+                ValueError):
+            # A file that doesn't tokenize cleanly (encoding oddity, WIP
+            # syntax error elsewhere in a shared tree) contributes no
+            # mentions rather than crashing the sweep; it is not one of the
+            # scanned production files, so this cannot hide a real
+            # zero-caller finding, only a caller reference living in a
+            # broken file.
+            continue
     return index
 
 
-def has_any_production_caller(name: str, def_file: Path, def_line: int,
-                               index) -> bool:
-    for site in index.get(name, ()):
-        if site == (def_file, def_line):
-            continue  # the def statement itself is not a call
+def has_any_production_caller(name: str, def_file: Path, body_start: int,
+                               body_end: int, index) -> bool:
+    for path, line in index.get(name, ()):
+        if path == def_file and body_start <= line <= body_end:
+            # The def statement's own signature (which re-mentions `name`
+            # once for the `def name(...)` itself) and any recursive
+            # self-call inside the function's own body are not callers.
+            continue
         return True
     return False
 
@@ -291,14 +423,15 @@ def run_sweep(scan_roots, repo_root=REPO_ROOT):
         for path in iter_py_files(root):
             if _is_test_path(path.relative_to(repo_root)):
                 continue
-            for name, line_no, decorator_wired in find_top_level_functions(path):
+            rel = path.relative_to(repo_root)
+            for name, line_no, decorator_wired, body_end in find_top_level_functions(path):
                 checked += 1
                 if decorator_wired:
                     continue
-                if has_any_production_caller(name, path, line_no, index):
+                if has_any_production_caller(name, path, line_no, body_end,
+                                              index):
                     continue
-                key = (path.name, name)
-                rel = path.relative_to(repo_root)
+                key = (rel.as_posix(), name)
                 if key in ZERO_CALLER_ALLOWLIST:
                     allowed_hits.add(key)
                     continue
