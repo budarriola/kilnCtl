@@ -236,6 +236,15 @@ def load_corpus(repo_root: Path):
             continue
         if _is_test_path(path.relative_to(repo_root)):
             continue
+        if path.name == Path(__file__).name:
+            # This script itself must NOT be part of the caller universe:
+            # ZERO_CALLER_ALLOWLIST / PENDING_OWNER_REVIEW name their
+            # functions as string literals, so including this file made every
+            # listed name look "used" -- which silently defeated both sets
+            # (in particular the PENDING_OWNER_REVIEW report in main() never
+            # printed a single line, because no pending entry was ever
+            # reached).
+            continue
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -244,23 +253,39 @@ def load_corpus(repo_root: Path):
     return corpus
 
 
-def has_any_production_caller(name: str, def_file: Path, def_line: int,
-                               corpus) -> bool:
-    pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def build_mention_index(corpus):
+    """name -> set of (path, line_no) where that identifier appears.
+
+    Equivalent to a per-name word-boundary scan of every corpus line (it
+    matches inside strings and comments exactly as the previous regex did),
+    but computed once instead of once per candidate function -- the per-name
+    scan was O(functions x lines) and cost ~34 s on this repo.
+    """
+    index = {}
     for path, lines in corpus:
-        same_file = path == def_file
         for i, line in enumerate(lines, start=1):
-            if same_file and i == def_line:
-                continue  # the def statement itself is not a call
-            if pattern.search(line):
-                return True
+            for tok in IDENT_RE.findall(line):
+                index.setdefault(tok, set()).add((path, i))
+    return index
+
+
+def has_any_production_caller(name: str, def_file: Path, def_line: int,
+                               index) -> bool:
+    for site in index.get(name, ()):
+        if site == (def_file, def_line):
+            continue  # the def statement itself is not a call
+        return True
     return False
 
 
 def run_sweep(scan_roots, repo_root=REPO_ROOT):
-    corpus = load_corpus(repo_root)
+    index = build_mention_index(load_corpus(repo_root))
     findings = []
     pending = []
+    allowed_hits = set()
     checked = 0
     for root in scan_roots:
         for path in iter_py_files(root):
@@ -270,17 +295,24 @@ def run_sweep(scan_roots, repo_root=REPO_ROOT):
                 checked += 1
                 if decorator_wired:
                     continue
-                if has_any_production_caller(name, path, line_no, corpus):
+                if has_any_production_caller(name, path, line_no, index):
                     continue
                 key = (path.name, name)
                 rel = path.relative_to(repo_root)
                 if key in ZERO_CALLER_ALLOWLIST:
+                    allowed_hits.add(key)
                     continue
                 if key in PENDING_OWNER_REVIEW:
+                    allowed_hits.add(key)
                     pending.append((rel, line_no, name))
                     continue
                 findings.append((rel, line_no, name))
-    return checked, findings, pending
+    # Entries naming a function that is no longer zero-caller: it gained a
+    # caller (good -- delete the entry) or was renamed/removed. Reported so
+    # neither set rots unnoticed.
+    stale = sorted((ZERO_CALLER_ALLOWLIST | PENDING_OWNER_REVIEW)
+                   - allowed_hits)
+    return checked, findings, pending, stale
 
 
 def main(argv=None):
@@ -289,7 +321,17 @@ def main(argv=None):
     if argv:
         scan_roots = [Path(a) for a in argv]
 
-    checked, findings, pending = run_sweep(scan_roots)
+    checked, findings, pending, stale = run_sweep(scan_roots)
+
+    if stale:
+        print(
+            f"check_python_zero_caller_sweep: NOTE -- {len(stale)} "
+            f"ZERO_CALLER_ALLOWLIST/PENDING_OWNER_REVIEW entr(ies) are stale: "
+            f"the named function now has a caller, or was renamed/removed. "
+            f"Delete the entry from this script so the sets do not rot:"
+        )
+        for file_name, name in stale:
+            print(f"  ({file_name}, {name})")
 
     if pending:
         print(
@@ -306,8 +348,8 @@ def main(argv=None):
         print(
             f"check_python_zero_caller_sweep: {checked} top-level functions "
             f"scanned across {len(scan_roots)} root(s), 0 unreviewed "
-            f"zero-caller functions (beyond the reviewed allowlist of "
-            f"{len(ZERO_CALLER_ALLOWLIST)} and the {len(PENDING_OWNER_REVIEW)} "
+            f"zero-caller functions (beyond {len(ZERO_CALLER_ALLOWLIST)} "
+            f"reviewed-benign allowlist entries and {len(pending)} still "
             f"pending owner review)."
         )
         return 0
