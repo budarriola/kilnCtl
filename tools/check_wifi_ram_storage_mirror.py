@@ -10,7 +10,7 @@ Wi-Fi driver is ever handed a config, in two independent places:
 Both must keep switching the Wi-Fi driver to RAM storage before it is ever
 handed a config, or the driver silently resumes writing its own credential
 copy into the default nvs partition (see
-docs/audits/wifi_factory_reset_leaves_idf_driver_config_2026-09-21.md).
+docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md).
 These two files have no shared header or common call site, so nothing but
 a standing check keeps one edited-away or reordered fix from going
 unnoticed while its sibling still holds.
@@ -20,19 +20,32 @@ WHAT IS CHECKED, per file:
       go green by vanishing from the glob)
   (b) exactly one esp_wifi_set_storage(WIFI_STORAGE_RAM) call
   (c) that call happens before the driver can be handed a config, i.e.
-      before the first CALL (not definition) of any function -- defined in
-      the same file -- whose own body contains a literal
-      esp_wifi_set_config( call, reached from the function that contains
-      the storage call itself. (recovery_wifi.c's set_config calls live in
-      try_station()/start_softap(), which are DEFINED earlier in the file
-      than the storage call in recovery_wifi_start() but CALLED from it --
-      a plain top-to-bottom textual-position check would false-fail on
-      that shape, so this check follows one level of call graph instead of
-      raw line position. wifi_prov.c's own esp_wifi_set_config() call lives
-      in a different file (wifi_prov_link.c's apply_ap_config()/
-      apply_sta_config()) entirely, so there is nothing in-file to order
-      against there -- existence-and-uniqueness of the storage call is the
-      whole check for that file.)
+      before the first CALL (not definition), inside the function that
+      contains the storage call, of any "config applier" -- a function
+      whose own body contains a literal esp_wifi_set_config( call. One
+      level of call graph is followed, and appliers are collected from the
+      file itself AND from its sibling .c files in the same directory.
+      (recovery_wifi.c's set_config calls live in try_station()/
+      start_softap(), which are DEFINED earlier in the file than the
+      storage call in recovery_wifi_start() but CALLED from it -- a plain
+      top-to-bottom textual-position check would false-fail on that shape,
+      so this check follows the call graph instead of raw line position.
+      wifi_prov.c's own esp_wifi_set_config() calls live in a sibling file,
+      wifi_prov_link.c's apply_ap_config()/apply_sta_config(), but
+      wifi_prov_start() CALLS both of those, so the sibling scan gives that
+      file a real ordering assertion too rather than mere existence-and-
+      uniqueness.)
+
+      Limit, stated plainly: the sibling scan covers *.c next to the file
+      under test, not the whole tree. If an applier is ever moved further
+      away than that, this check quietly loses its ordering assertion for
+      the affected file and degrades to existence-and-uniqueness -- so
+      (d) below fails loudly instead when a file has no reachable applier
+      at all.
+  (d) at least one config applier is reachable (one level) from the
+      storage-containing function. Both files satisfy this today; a file
+      that stops satisfying it means the call graph moved out of this
+      check's reach, and the check says so rather than passing vacuously.
 
 This is deliberately a textual/call-graph-lite check, not a real
 control-flow one -- same class and same limits as the other
@@ -117,9 +130,24 @@ def check_file(repo_root: Path, rel_path: str, failures: list) -> None:
                          "FUNC_DEF_RE rather than letting it pass vacuously")
         return
 
-    # Functions (defined in this file) whose own body directly calls
-    # esp_wifi_set_config( -- the "config appliers".
+    # Functions whose own body directly calls esp_wifi_set_config( -- the
+    # "config appliers". Collected from this file AND from its sibling .c
+    # files, because wifi_prov.c's appliers (apply_ap_config()/
+    # apply_sta_config()) are defined in wifi_prov_link.c and merely CALLED
+    # from wifi_prov.c.
     appliers = {name for name, (s, e) in funcs.items() if SET_CONFIG_RE.search(text[s:e])}
+    for sibling in sorted(path.parent.glob("*.c")):
+        if sibling == path:
+            continue
+        try:
+            sib_text = strip_comments(sibling.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not SET_CONFIG_RE.search(sib_text):
+            continue
+        for name, (s, e) in extract_functions(sib_text).items():
+            if SET_CONFIG_RE.search(sib_text[s:e]):
+                appliers.add(name)
 
     # The function that contains the storage call.
     entry_name = None
@@ -155,12 +183,12 @@ def check_file(repo_root: Path, rel_path: str, failures: list) -> None:
             # (not expected here, but keep this honest).
             call_positions.append(m.start())
     if not call_positions:
-        # No config-applying call reachable (one level deep) from the
-        # storage-containing function in this file -- e.g. wifi_prov.c,
-        # where the real esp_wifi_set_config() call lives in a sibling
-        # file (wifi_prov_link.c). Existence-and-uniqueness of the
-        # storage call, already checked above, is this file's whole
-        # obligation.
+        # Nothing to order against means this check has lost its ordering
+        # assertion for this file, not that the file is fine. Say so.
+        failures.append(f"{rel_path}: no esp_wifi_set_config() applier is reachable one level from "
+                        f"{entry_name}() (searched this file and its sibling *.c) -- the ordering "
+                        "assertion has silently lost its subject; extend this check rather than "
+                        "letting it pass vacuously")
         return
 
     first_call_pos = min(call_positions) + entry_span[0]
