@@ -9,9 +9,10 @@
 // this script is invoked only for one named, pre-authorized commissioning
 // row at a time, never as a sweep.
 //
-// Usage:
-//   node _web_commission_cdp.mjs --host 192.168.1.156 --route /diagnostics \
-//     --cookie <kiln_sid value> --selector-kind id --selector crashAckBtn \
+// Usage (the session cookie is passed via the KC_SID environment variable,
+// never as a command-line argument -- see parseArgs() below):
+//   KC_SID=<kiln_sid value> node _web_commission_cdp.mjs --host 192.168.1.156 \
+//     --route /diagnostics --selector-kind id --selector crashAckBtn \
 //     --screenshot out.png
 //
 // selector-kind "page" performs no click, just navigates and screenshots
@@ -19,8 +20,9 @@
 // + an error message on stderr on failure.
 
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { writeFile, mkdtemp } from 'node:fs/promises';
+import { writeFile, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -46,7 +48,6 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--host') out.host = argv[++i];
     else if (a === '--route') out.route = argv[++i];
-    else if (a === '--cookie') out.cookie = argv[++i];
     else if (a === '--selector-kind') out.selectorKind = argv[++i];
     else if (a === '--selector') out.selector = argv[++i];
     else if (a === '--screenshot') out.screenshot = argv[++i];
@@ -55,7 +56,43 @@ function parseArgs(argv) {
   for (const req of ['host', 'route', 'selectorKind']) {
     if (!out[req]) throw new Error(`--${req} is required`);
   }
+  // The session cookie is deliberately NOT a CLI argument -- argv is visible
+  // in process listings and gets logged by callers more often than an
+  // environment variable does. web_commission_row.py's run_row_live() sets
+  // KC_SID in this child process's own environment instead.
+  out.cookie = process.env.KC_SID;
+  if (!out.cookie) throw new Error('KC_SID environment variable is required (session cookie)');
   return out;
+}
+
+// Same EADDRINUSE fallback as ui_responsive_sweep.mjs's pickPort(): a fixed
+// CDP port can already be held by a leftover Chrome or a concurrent run on
+// this shared machine -- fall back to an OS-assigned ephemeral port rather
+// than fail outright.
+function tryListen(port) {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', (err) => {
+      probe.close();
+      reject(err);
+    });
+    probe.once('listening', () => {
+      const bound = probe.address().port;
+      probe.close(() => resolve(bound));
+    });
+    probe.listen(port, '127.0.0.1');
+  });
+}
+
+async function pickPort(preferred) {
+  try {
+    return await tryListen(preferred);
+  } catch (err) {
+    if (err && err.code === 'EADDRINUSE') {
+      return tryListen(0);
+    }
+    throw err;
+  }
 }
 
 async function waitForPort(port, timeoutMs, chrome) {
@@ -124,6 +161,12 @@ async function main() {
   const chromePath = findChrome();
   if (!chromePath) throw new Error('no Chrome/Edge binary found (set KC_SWEEP_CHROME)');
 
+  const cdpPort = await pickPort(args.port);
+  if (cdpPort !== args.port) {
+    console.log(`_web_commission_cdp: CDP port ${args.port} was busy, using ${cdpPort} instead`);
+  }
+  args.port = cdpPort;
+
   const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'kc-web-commission-'));
   const chrome = spawn(chromePath, [
     `--remote-debugging-port=${args.port}`,
@@ -150,9 +193,12 @@ async function main() {
     await cdp.send('Network.enable');
     // The cookie must be set before navigation so the request the page load
     // itself makes is already authenticated -- this is the ONE login this
-    // process performs; it never re-POSTs /api/auth/login.
+    // process performs; it never re-POSTs /api/auth/login. `url`, not a
+    // bare `domain`, is what CDP documents as reliable for a plain IPv4
+    // host (a bare domain is intended for real DNS names and cookie-jar
+    // domain matching, which behaves inconsistently for a literal IP).
     await cdp.send('Network.setCookie', {
-      name: 'kiln_sid', value: args.cookie, domain: args.host.split(':')[0], path: '/',
+      name: 'kiln_sid', value: args.cookie, url: `http://${args.host}/`, path: '/',
     });
     await cdp.send('Page.navigate', { url: `http://${args.host}${args.route}` });
     await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 500))', awaitPromise: true });
@@ -180,6 +226,7 @@ async function main() {
     console.log(JSON.stringify({ ok: true, route: args.route, selector: args.selector || null }));
   } finally {
     try { chrome.kill(); } catch { /* already gone */ }
+    try { await rm(userDataDir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }
 

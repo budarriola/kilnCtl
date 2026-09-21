@@ -13,8 +13,7 @@ the missing layer those two identify but do not provide: a literal,
 selector-level UI action for each row, its expected visible outcome, and the
 backend call that confirms the click actually took effect. Every selector
 below was verified present in source at `origin/main` `fb1a933f` (grep
-against the listed file); see "Selectors not found" at the end for the one
-exception.
+against the listed file); see "Selectors not found" at the end.
 
 This document was produced without contacting any board.
 

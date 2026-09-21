@@ -38,6 +38,15 @@ def test_dry_run_unknown_row_fails_cleanly():
     assert "unknown row id" in msg
 
 
+def test_dry_run_uses_default_repo_root_when_omitted():
+    # No repo_root passed -- exercises web_commission_row's own _repo_root()
+    # default resolution (the off-by-one bug fixed after Opus review of
+    # 5fa097c7 landed exactly here: this file sits under the worktree, whose
+    # repo root and the test file's own computed root must agree).
+    ok, msg = wcr.dry_run("W2")
+    assert ok, msg
+
+
 def test_dry_run_reports_missing_source_file():
     bad = wcr.Row("WX", "/nope", "firmware/KilnFW/App/drivers/http/does_not_exist.html",
                    "", "page", "load a page that does not exist", "n/a", "read-only", "n/a")

@@ -41,9 +41,12 @@ from typing import Callable, Optional
 
 
 def _repo_root() -> str:
-    """tools/PcTools/src/kilnctrl/web_commission_row.py -> repo root is five
-    levels up. Same convention as bench_test/cases_web.py's _repo_root()."""
-    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+    """tools/PcTools/src/kilnctrl/web_commission_row.py -> repo root is four
+    levels up. This file sits directly in kilnctrl/, one level shallower
+    than bench_test/cases_web.py's own _repo_root() (which is five levels
+    up from inside kilnctrl/bench_test/) -- do not copy that constant
+    without adjusting for the extra directory."""
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,62 +60,76 @@ class Row:
     expected_outcome: str
     classification: str  # "read-only" | "write" | "owner-gated"
     readback_desc: str
+    verify_endpoint: "Optional[str]" = None  # GET path polled after the UI action in live mode; None = no automated read-back (e.g. client-side-only rows)
 
 
-# One entry per docs/COMMISSIONING_WEB_RUNBOOK.md row that has a concrete,
-# clickable selector (page-load-only rows with no click still get an entry
-# so --dry-run can confirm the page itself exists). Kept in sync by hand;
-# a mismatch here is a doc bug, not a code bug, and should be fixed in both
-# places together.
+# 12 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
+# (W1-W6, W15, W16, W28-W30, W48) -- enough to cover both selector kinds
+# ("id" and "page") and both the read-only and write classes. The remaining
+# rows are documented in the runbook but do not yet have a Row() entry;
+# adding one for each is straightforward follow-up work, not a gap in this
+# module's own logic. Kept in sync by hand; a mismatch here is a doc bug,
+# not a code bug, and should be fixed in both places together.
 ROWS: "dict[str, Row]" = {
     "W1": Row("W1", "/login", "firmware/KilnFW/App/drivers/http/login_page.html",
               "login-form", "id", "submit the login form",
               "redirect to / (or the originally requested page)",
-              "write", "GET /api/auth/session shows an authenticated session"),
+              "write", "GET /api/auth/session shows an authenticated session",
+              verify_endpoint="/api/auth/session"),
     "W2": Row("W2", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "", "page", "load the dashboard",
               "status tiles, history chart, zone rows render",
-              "read-only", "GET /api/status matches rendered temps/state"),
+              "read-only", "GET /api/status matches rendered temps/state",
+              verify_endpoint="/api/status"),
     "W3": Row("W3", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "ackLastRunBtn", "id", "click Dismiss",
               "last-run banner disappears",
-              "write", "GET /api/profile_exec shows no last-run banner condition"),
+              "write", "GET /api/profile_exec shows no last-run banner condition",
+              verify_endpoint="/api/profile_exec"),
     "W4": Row("W4", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "clearTripBtn", "id", "click Clear Trip",
               "trip banner clears",
-              "write", "safety_get_status trip_reason/trip_mask return to none"),
+              "write", "safety_get_status trip_reason/trip_mask return to none",
+              verify_endpoint="/api/status"),
     "W5": Row("W5", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "pidPopupApplyBtn", "id", "click Apply in the PID popup",
               "popup closes, zone PID row updates",
-              "write", "control_get_zones reflects the applied gains"),
+              "write", "control_get_zones reflects the applied gains",
+              verify_endpoint="/api/control"),
     "W6": Row("W6", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "themeBtn", "id", "click the theme toggle",
               "page recolors light/dark",
-              "read-only", "none -- client-side only"),
+              "read-only", "none -- client-side only, no route to read back"),
     "W15": Row("W15", "/settings/zones", "firmware/KilnFW/App/drivers/http/zones_page.html",
                "", "page", "load the zones page",
                "zone table + PID fields render",
-               "read-only", "control_get_zones matches"),
+               "read-only", "control_get_zones matches",
+               verify_endpoint="/api/zones"),
     "W16": Row("W16", "/settings/zones", "firmware/KilnFW/App/drivers/http/zones_page.html",
                "saveBtn", "id", "edit a zone name, click Save",
                "save confirms, no error banner",
-               "write", "control_get_zones shows the new name (GET-merge-POST body)"),
+               "write", "control_get_zones shows the new name (GET-merge-POST body)",
+               verify_endpoint="/api/zones"),
     "W28": Row("W28", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
                "", "page", "load the diagnostics page",
                "thermo fault table + diagnostics tiles render",
-               "read-only", "thermo_read_faults matches"),
+               "read-only", "thermo_read_faults matches",
+               verify_endpoint="/api/thermo/faults"),
     "W29": Row("W29", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
                "crashAckBtn", "id", "click Acknowledge",
                "crash banner disappears/greys out",
-               "write", "crash_report_ack read-back shows acknowledged: true"),
+               "write", "crash_report_ack read-back shows acknowledged: true",
+               verify_endpoint="/api/crash_report"),
     "W30": Row("W30", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
                "wdPanicToggleBtn", "id", "click the watchdog PANIC toggle",
                "toggle state flips",
-               "write", "get_watchdog_panic_disabled shows the new value; restore to enabled"),
+               "write", "get_watchdog_panic_disabled shows the new value; restore to enabled",
+               verify_endpoint="/api/watchdog_cfg"),
     "W48": Row("W48", "/readiness", "firmware/KilnFW/App/drivers/http/readiness_page.html",
                "", "page", "load the readiness page",
                "commissioning checklist renders",
-               "read-only", "get_readiness matches"),
+               "read-only", "get_readiness matches",
+               verify_endpoint="/api/readiness"),
 }
 
 
@@ -204,14 +221,38 @@ def _read_credentials() -> "tuple[str, str]":
     return user, pw
 
 
+def _get_json_with_cookie(host: str, path: str, cookie: str, timeout: float = 5.0) -> "tuple[Optional[int], Optional[dict]]":
+    """Bare authenticated GET, used only for the post-action read-back
+    below. Returns (status, parsed-json-or-None)."""
+    url = f"http://{host}{path}"
+    req = urllib.request.Request(url, headers={"Cookie": f"kiln_sid={cookie}", "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            text = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            text = None
+        status = exc.code
+    except (urllib.error.URLError, OSError) as exc:
+        return None, {"error": str(exc)}
+    try:
+        return status, json.loads(text) if text else None
+    except (ValueError, TypeError):
+        return status, None
+
+
 def run_row_live(row_id: str, host: str, screenshot_dir: str,
                   find_chrome: Optional[Callable[[], str]] = None) -> "tuple[bool, str]":
     """Live mode: log in once, drive headless Chrome over CDP against the
-    real board, click the row's control, screenshot, then read back via the
-    board's own API. This function contacts the board and must never be
-    called by this task's own tests -- see cases_web_rw.py's ctx-injection
-    convention for how a caller can fake the transport in a unit test
-    instead of hitting a real board.
+    real board, click the row's control, screenshot, then GET the row's
+    ``verify_endpoint`` (when it has one) so the caller can compare the
+    read-back against the expected outcome. This function contacts the
+    board and must never be called by this task's own tests -- see
+    cases_web_rw.py's ctx-injection convention for how a caller can fake
+    the transport in a unit test instead of hitting a real board.
     """
     row = ROWS.get(row_id)
     if row is None:
@@ -224,21 +265,33 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
     # session helper already reviewed for this repo
     # (firmware/KilnFW/App/test/ui_responsive_sweep.mjs's CdpSession class)
     # via a small companion script, rather than re-implementing a WebSocket
-    # CDP client a second time in Python.
+    # CDP client a second time in Python. The session cookie is passed
+    # through the child's environment, never on argv, so it cannot leak via
+    # a process listing or a logged command line.
     script = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
     cmd = [
         "node", script,
         "--host", host,
         "--route", row.route,
-        "--cookie", cookie,
         "--selector-kind", row.selector_kind,
         "--selector", row.selector,
         "--screenshot", os.path.join(screenshot_dir, f"{row_id}.png"),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    child_env = {**os.environ, "KC_SID": cookie}
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=child_env)
     if proc.returncode != 0:
         return False, f"{row_id} FAIL: CDP driver exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
-    return True, f"{row_id} PASS: {proc.stdout.strip()[-500:]} (read-back: {row.readback_desc})"
+
+    if row.verify_endpoint:
+        status, body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+        readback = f"GET {row.verify_endpoint} -> {status}: {json.dumps(body)[:300]}"
+    else:
+        readback = "no verify_endpoint for this row -- read-back is client-side only, not automated"
+
+    return True, (
+        f"{row_id} PASS: {proc.stdout.strip()[-300:]} | expected: {row.expected_outcome} | "
+        f"read-back ({row.readback_desc}): {readback}"
+    )
 
 
 def main(argv=None) -> int:
