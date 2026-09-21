@@ -208,7 +208,16 @@ Open:
       watchdog force-releases and force-offs its relays on a stale tick; that
       protection must be replaced, not merely deleted. DONE -- `rules_task.c`
       no longer exists in the tree.
-- [ ] **Names for relays not assigned to a zone.**
+- [x] **Names for relays not assigned to a zone.** DONE -- `relay_names_cfg_t`
+      (`zones_config_accessors.c`/`.h`, `zones_config_get_relay_name`/
+      `zones_config_set_relay_name`) already persists a name per relay
+      regardless of zone assignment, in its own NVS-backed blob keyed by
+      relay number, not zone; exposed dense over `relay_names`/`relay_types`
+      in the zones GET/POST HTTP API (`zones_http_get.c`/`zones_http_post.c`),
+      editable on `zones_page.html`'s per-relay name/device-type inputs for
+      any relay no zone currently claims (`renderRelayNames()`), and shown on
+      the LCD temperature page (`ui_page_temperature.c`) in place of the
+      zone-owned label. Covered by `test_relay_names_cfg_fs.c`.
 - [ ] **LCD**: no manual toggling of zone-assigned relays on the temperature
       page (visible, not hidden); safety-processor / board-health /
       thermocouple-fault pages folded into LCD diagnostics and removed; kiln
