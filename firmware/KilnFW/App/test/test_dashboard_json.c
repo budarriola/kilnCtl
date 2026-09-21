@@ -1050,6 +1050,7 @@ static void test_status_json_mutation_field_creep_goes_red(void)
 static bool render_diag_json(char *json, size_t cap, bool ever_received,
                              unsigned boot_reason, unsigned long frames_ok,
                              unsigned long frames_bad, unsigned long tx_dropped,
+                             unsigned long log_dropped, bool tc_reconfig_gave_up,
                              bool extra_field, size_t *out_len)
 {
     size_t o = 0;
@@ -1061,6 +1062,15 @@ static bool render_diag_json(char *json, size_t cap, bool ever_received,
         DIAG_APPEND(",\"diag_context_frames_ok\":%lu", frames_ok);
         DIAG_APPEND(",\"diag_context_frames_bad\":%lu", frames_bad);
         DIAG_APPEND(",\"diag_tx_frames_dropped\":%lu", tx_dropped);
+        /* 2026-09-20: this mirror had drifted from the handler by TWO fields
+         * before it was caught by the log_frames_dropped review --
+         * safety_tc_reconfig_gave_up (added 2026-09-16) was never mirrored
+         * either, so the "worst case" this file measured had been short by
+         * ~38 bytes for four days. Exactly the vacuity this block's own
+         * header comment warns about. */
+        DIAG_APPEND(",\"diag_log_frames_dropped\":%lu", log_dropped);
+        DIAG_APPEND(",\"safety_tc_reconfig_gave_up\":%s",
+                    tc_reconfig_gave_up ? "true" : "false");
     }
     /* Not emitted by the handler -- the mutation test's stand-in for a field
      * added to the diag document without checking that it still fits. */
@@ -1078,14 +1088,14 @@ static bool render_diag_json(char *json, size_t cap, bool ever_received,
 /* Widest the diag document can ever be: every numeric field at the maximum
  * width its C type admits (diag_boot_reason is uint8_t, the three counters are
  * uint32_t -- dashboard_http.h:293,306-308), and the gate true. The gate-false
- * literal is one byte longer but omits four fields, so gate-true is the worst
+ * literal is one byte longer but omits six fields, so gate-true is the worst
  * case; the size test below asserts that relationship rather than assuming it. */
 static bool render_worst_case_diag_json(char *json, size_t cap, bool extra_field,
                                         size_t *out_len)
 {
     return render_diag_json(json, cap, /*ever_received=*/true, 255u,
-                            4294967295UL, 4294967295UL, 4294967295UL,
-                            extra_field, out_len);
+                            4294967295UL, 4294967295UL, 4294967295UL, 4294967295UL,
+                            /*tc_reconfig_gave_up=*/false, extra_field, out_len);
 }
 
 static void test_diag_json_worst_case_render_fits_documented_buffer(void)
@@ -1104,6 +1114,7 @@ static void test_diag_json_worst_case_render_fits_documented_buffer(void)
     size_t gate_false_len = 0;
     bool ok_false = render_diag_json(json, sizeof(json), /*ever_received=*/false,
                                      255u, 4294967295UL, 4294967295UL, 4294967295UL,
+                                     4294967295UL, /*tc_reconfig_gave_up=*/false,
                                      /*extra_field=*/false, &gate_false_len);
     TEST_CHECK(ok_false, "the diag_ever_received=false ?diag=1 render must also fit");
     TEST_CHECK(gate_false_len < worst_len,
@@ -1134,6 +1145,8 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
                                /*frames_ok=*/123456789UL,
                                /*frames_bad=*/7UL,
                                /*tx_dropped=*/4294967295UL,
+                               /*log_dropped=*/6543UL,
+                               /*tc_reconfig_gave_up=*/true,
                                /*extra_field=*/false, &len);
     TEST_CHECK(ok, "the populated ?diag=1 document must render");
     TEST_CHECK(len == strlen(json), "the reported length must match the rendered string");
@@ -1156,6 +1169,11 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
     TEST_CHECK(strstr(json, "\"diag_tx_frames_dropped\":4294967295") != NULL,
               "diag_tx_frames_dropped must be present and correctly valued at the "
               "full uint32_t width");
+    TEST_CHECK(strstr(json, "\"diag_log_frames_dropped\":6543") != NULL,
+              "diag_log_frames_dropped must be present and correctly valued -- the "
+              "Pico's log_task.c drop counter, KILNLINK_PROTOCOL_VERSION 15 -> 16");
+    TEST_CHECK(strstr(json, "\"safety_tc_reconfig_gave_up\":true") != NULL,
+              "safety_tc_reconfig_gave_up must be present and correctly valued");
 
     /* The removed decodes must not silently come back as re-added bytes. */
     TEST_CHECK(strstr(json, "diag_boot_stack_overflow") == NULL,
@@ -1168,12 +1186,13 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
               "diag_boot_assert_failed was removed as a pure bit-decode -- it must "
               "not reappear");
 
-    /* The gate: with no DIAG frame ever received the four detail fields are
+    /* The gate: with no DIAG frame ever received the six detail fields are
      * absent entirely, not zero-valued -- safety_page.html must be able to tell
      * "never received" from "received, counters are zero". */
     size_t gated_len = 0;
     bool gated_ok = render_diag_json(json, sizeof(json), /*ever_received=*/false,
-                                     37u, 123456789UL, 7UL, 4294967295UL,
+                                     37u, 123456789UL, 7UL, 4294967295UL, 6543UL,
+                                     /*tc_reconfig_gave_up=*/true,
                                      /*extra_field=*/false, &gated_len);
     TEST_CHECK(gated_ok, "the gated ?diag=1 document must render");
     TEST_CHECK(strstr(json, "\"diag_ever_received\":false") != NULL,
@@ -1186,6 +1205,10 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
               "diag_context_frames_bad must be absent when the gate is false");
     TEST_CHECK(strstr(json, "diag_tx_frames_dropped") == NULL,
               "diag_tx_frames_dropped must be absent when the gate is false");
+    TEST_CHECK(strstr(json, "diag_log_frames_dropped") == NULL,
+              "diag_log_frames_dropped must be absent when the gate is false");
+    TEST_CHECK(strstr(json, "safety_tc_reconfig_gave_up") == NULL,
+              "safety_tc_reconfig_gave_up must be absent when the gate is false");
 }
 
 /* Proves the size assertion above is load-bearing: a field added to the diag

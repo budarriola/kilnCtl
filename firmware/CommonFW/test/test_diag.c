@@ -8,6 +8,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#endif
+
 #include "kilnlink/kilnlink_diag.h"
 
 static int g_failures = 0;
@@ -231,8 +235,35 @@ static void test_round_trip_fatal_boot_reason_bits(void)
           "MALLOC_FAILED must stay clear when it was never set");
 }
 
+/* FAIL FAST, DO NOT HANG (2026-09-20). The defect this file exists to catch
+ * -- a KILNLINK_DIAG_LEN that disagrees with the offsets
+ * kilnlink_diag_encode() actually writes -- overruns the `uint8_t
+ * buf[KILNLINK_DIAG_LEN]` locals above. Under MSVC's Debug runtime checks
+ * that raises Run-Time Check Failure #2 ("stack around the variable ... was
+ * corrupted"), which the debug CRT reports with its default
+ * _CRTDBG_MODE_WNDW: a MODAL DIALOG. Confirmed by hand against a sabotaged
+ * KILNLINK_DIAG_LEN (30 -> 28): the executable produced no output at all and
+ * was still alive after 20s -- a hang, not a failure, which every runner in
+ * this repo grades worse than a red test because it stalls rather than
+ * reporting. Routing _CRT_ERROR/_CRT_ASSERT/_CRT_WARN to stderr turns that
+ * same case into an immediate, named, non-zero exit. No effect on a healthy
+ * run, and none at all outside MSVC.
+ * check_commonfw_diag_vectors.ps1 keeps a wall-clock timeout as the backstop
+ * for anything this does not cover. */
+static void fail_fast_instead_of_dialog(void)
+{
+#ifdef _MSC_VER
+    int modes[] = { _CRT_WARN, _CRT_ERROR, _CRT_ASSERT };
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        _CrtSetReportMode(modes[i], _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(modes[i], _CRTDBG_FILE_STDERR);
+    }
+#endif
+}
+
 int main(void)
 {
+    fail_fast_instead_of_dialog();
     test_round_trip();
     test_round_trip_never_received_context();
     test_round_trip_fatal_boot_reason_bits();

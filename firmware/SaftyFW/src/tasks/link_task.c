@@ -20,7 +20,8 @@
 // kilnlink_diag_encode() codec (CommonFW/src/kilnlink_diag.c, host-tested in
 // CommonFW/test/test_diag.c) instead of this file's own hand-rolled
 // link_frame_pack_diag() -- the two were independent, byte-identical-by-
-// construction implementations of the same 26-byte layout, and this removes
+// construction implementations of the same layout (26 bytes then; 30 since
+// KILNLINK_PROTOCOL_VERSION 16 appended log_frames_dropped), and this removes
 // the duplication rather than leaving it. Frame D (SAFETY_CMD_TRIP_EVENT) is
 // new this pass: link_task_send_trip_event() below, driven by polling
 // safety_core_get_trip_event() every loop iteration (safety_core.c is the
@@ -1109,8 +1110,9 @@ static void link_task_send_diag(void)
     // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
     // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own
     // former hand-rolled link_frame_pack_diag() -- ROADMAP.md M5: the two
-    // were duplicate implementations of the identical 26-byte layout, and
-    // this removes the duplication now that the shared codec exists (it
+    // were duplicate implementations of the identical layout (26 bytes then;
+    // 30 since KILNLINK_PROTOCOL_VERSION 16), and this removes the
+    // duplication now that the shared codec exists (it
     // predates this file's own packer having been written before
     // kilnlink_diag.c landed).
     kilnlink_diag_t dg = {

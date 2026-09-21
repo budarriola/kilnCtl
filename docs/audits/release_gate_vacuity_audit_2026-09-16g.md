@@ -212,8 +212,10 @@ deliberately independent protocol versions.
 FAILED — "UART_PROTOCOL_VERSION must never be re-derived from
 KILNLINK_PROTOCOL_VERSION (or any other KILNLINK_* symbol)...". Restored to
 `((uint16_t)12)`; `git diff --quiet` empty; `git hash-object` (first 8
-chars blob:firmware/KilnFW/App/drivers/common/uart_task_ids.h`b2f1e683`)
-matched HEAD. Re-run: PASS.
+chars b2f1e683, at the time of this audit -- that file has since changed
+(UART_PROTOCOL_VERSION 12 -> 13, 2026-09-20), so its blob id is no longer
+cited as resolvable against current HEAD) matched HEAD at audit time.
+Re-run: PASS.
 
 **Verdict: load-bearing.**
 
