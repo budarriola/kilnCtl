@@ -30,7 +30,12 @@ docs/LIVE_PROFILE_EDIT_PLAN.md section 10. Mirrored here, not re-derived:
           board's own live_profile_fork() refusal text, e.g. no free slot).
   POST /api/profile/live  (form body -- same field set profiles_parse_profile_fields()
        accepts for POST /api/profile, MINUS `id`: the live route always
-       targets the implicit working slot)
+       targets the implicit working slot. Note this form NEVER sends
+       rule%u_* fields -- profiles_parse_profile_fields() treats their
+       absence as on_off_rule_count=0, so a live edit unconditionally
+       erases any ON_OFF zone rules on the working copy. This is
+       pre-existing firmware/page behaviour, not something this client
+       introduces or can route around.)
        name, zone_mask, seg_count, then per segment 0..seg_count-1:
        seg%u_kind (optional, default 0 = zone ramp/dwell) and either
        seg%u_target/seg%u_ramp/seg%u_dwell or
@@ -74,15 +79,12 @@ exercised, same caveat every other client module in this package carries.
 from __future__ import annotations
 
 import json
-import logging
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
 
 from . import http_auth
-
-log = logging.getLogger(__name__)
 
 PROFILE_LIVE_HTTP_TIMEOUT_S = 5.0
 
@@ -187,10 +189,25 @@ def fork_live(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
 def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S
               ) -> dict:
     """POST /api/profile/live -- saves `segments` (a list of dicts, each
-    shaped like one element of get_live_content()'s "segments" list, using
-    the same key names the firmware form parser expects: kind, target,
-    ramp, dwell, io_target, io_state, io_blocking, io_leave_on) into the
+    shaped like one element of get_live_content()'s "segments" list) into the
     working slot. `kind` defaults to 0 (zone ramp/dwell) when omitted.
+
+    Each segment dict accepts EXACTLY these keys (anything else raises
+    ValueError, so a typo or a get_live_content()-shaped key that this
+    function doesn't recognize fails loud instead of being silently
+    dropped -- see the io-branch footgun this replaced: a missing
+    io_leave_on/io_leave_on_at_end used to default to 0 and send the
+    board seg%u_io_leave_on=0, turning the relay OFF at segment end even
+    when the caller only meant to leave that field unspecified):
+      kind
+      target or target_c, ramp or ramp_c_per_hr, dwell or dwell_min
+      io_target, io_state, io_blocking, io_leave_on or io_leave_on_at_end
+    Both spellings are accepted per field specifically so the documented
+    read-modify-write round trip (GET ?content=1 -> mutate -> edit_live)
+    works without the caller renaming every key first: get_live_content()
+    returns target_c/ramp_c_per_hr/dwell_min/io_leave_on_at_end, while the
+    firmware form-field convention (and this function's own historical
+    kwarg style) is target/ramp/dwell/io_leave_on.
 
     Raises ProfileLiveHttpError(status=400) on a bound/parse violation (the
     board's message names the offending segment/value/limit), or
@@ -198,19 +215,33 @@ def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: flo
     already-passed or in-flight segment) -- both delivered as the board's
     own {"ok":false,"error":"..."} text in .detail.
     """
+    ramp_dwell_keys = {"target", "target_c", "ramp", "ramp_c_per_hr", "dwell", "dwell_min"}
+    io_keys = {"io_target", "io_state", "io_blocking", "io_leave_on", "io_leave_on_at_end"}
+    accepted_keys = {"kind"} | ramp_dwell_keys | io_keys
+
     fields = {"name": name, "zone_mask": str(zone_mask), "seg_count": str(len(segments))}
     for i, seg in enumerate(segments):
+        unknown = set(seg.keys()) - accepted_keys
+        if unknown:
+            raise ValueError(
+                f"segment {i}: unknown key(s) {sorted(unknown)!r} -- accepted keys are "
+                f"{sorted(accepted_keys)!r}"
+            )
         kind = seg.get("kind", 0)
         fields[f"seg{i}_kind"] = str(kind)
-        if "target" in seg or "ramp" in seg or "dwell" in seg:
-            fields[f"seg{i}_target"] = str(seg.get("target", 0))
-            fields[f"seg{i}_ramp"] = str(seg.get("ramp", 0))
-            fields[f"seg{i}_dwell"] = str(seg.get("dwell", 0))
-        if "io_target" in seg or "io_state" in seg or "io_blocking" in seg or "io_leave_on" in seg:
+        if ramp_dwell_keys & seg.keys():
+            target = seg.get("target", seg.get("target_c", 0))
+            ramp = seg.get("ramp", seg.get("ramp_c_per_hr", 0))
+            dwell = seg.get("dwell", seg.get("dwell_min", 0))
+            fields[f"seg{i}_target"] = str(target)
+            fields[f"seg{i}_ramp"] = str(ramp)
+            fields[f"seg{i}_dwell"] = str(dwell)
+        if io_keys & seg.keys():
+            io_leave_on = seg.get("io_leave_on", seg.get("io_leave_on_at_end", 0))
             fields[f"seg{i}_io_target"] = str(seg.get("io_target", 0))
             fields[f"seg{i}_io_state"] = str(seg.get("io_state", 0))
             fields[f"seg{i}_io_blocking"] = str(seg.get("io_blocking", 0))
-            fields[f"seg{i}_io_leave_on"] = str(seg.get("io_leave_on", 0))
+            fields[f"seg{i}_io_leave_on"] = str(io_leave_on)
     return _post_form(host, "/api/profile/live", fields, timeout)
 
 

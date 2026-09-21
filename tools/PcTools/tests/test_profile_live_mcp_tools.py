@@ -94,6 +94,16 @@ class ProfileLiveEditConfirmGateTests(unittest.TestCase):
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5", "x", 1, segments)
 
+    def test_unknown_segment_key_value_error_surfaces_as_error_string(self):
+        with unittest.mock.patch.object(
+            mpl.profile_live_http, "edit_live",
+            side_effect=ValueError("segment 0: unknown key(s) ['bogus_field']"),
+        ):
+            result = mpl.profile_live_edit("x", 1, [{"kind": 0, "bogus_field": 1}], confirm=True,
+                                           host="10.0.0.5")
+        self.assertTrue(result.startswith("error"))
+        self.assertIn("bogus_field", result)
+
     def test_bound_violation_reports_board_message(self):
         with unittest.mock.patch.object(
             mpl.profile_live_http, "edit_live",

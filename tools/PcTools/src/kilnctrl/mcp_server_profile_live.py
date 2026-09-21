@@ -96,10 +96,19 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
     profile before being accepted).
 
     `segments`: a list of dicts, one per segment, in execution order. Each
-    dict uses the same field names GET /api/profile/live?content=1 reports
-    (minus the "seg_" prefix): kind (optional, default 0 = zone ramp/dwell),
-    and either target/ramp/dwell (zone-ramp segments) or
-    io_target/io_state/io_blocking/io_leave_on (I/O segments).
+    dict accepts EXACTLY: kind (optional, default 0 = zone ramp/dwell);
+    target or target_c, ramp or ramp_c_per_hr, dwell or dwell_min (zone-ramp
+    segments); io_target, io_state, io_blocking, io_leave_on or
+    io_leave_on_at_end (I/O segments). Both spellings per field are accepted
+    so a get_live_content()-shaped dict (which uses target_c/ramp_c_per_hr/
+    dwell_min/io_leave_on_at_end) can be read, mutated, and passed straight
+    back in without renaming keys. Any other key raises ValueError -- a
+    typo or an unrecognized key is never silently dropped.
+
+    NOTE: this route never sends rule%u_* fields, so every live edit sets
+    on_off_rule_count=0 on the working copy and erases any existing ON_OFF
+    zone rules -- pre-existing firmware/page behaviour, not something this
+    tool can route around.
 
     Refused (400) on a bound violation -- the board's message names the
     offending segment/value/limit -- or on "fork before editing"/"no active
@@ -119,6 +128,8 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
     resolved = _profile_live_resolve_host(host)
     try:
         obj = profile_live_http.edit_live(resolved, name, zone_mask, segments)
+    except ValueError as exc:
+        return f"error: {exc}"
     except profile_live_http.ProfileLiveHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""

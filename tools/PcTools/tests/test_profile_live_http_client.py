@@ -187,6 +187,52 @@ class EditLiveTest(unittest.TestCase):
                 plive.edit_live("192.168.4.1", "x", 1, [{"kind": 0, "target": 100, "ramp": 1, "dwell": 1}])
         self.assertEqual(ctx.exception.status, 409)
 
+    def test_accepts_get_live_content_spelling_for_zone_ramp(self):
+        # A get_live_content()-shaped segment (target_c/ramp_c_per_hr/dwell_min)
+        # must round-trip straight into edit_live without renaming keys.
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["data"] = req.data.decode()
+            return _fake_response(json.dumps({"ok": True, "warnings": []}).encode())
+
+        segments = [{"kind": 0, "target_c": 1000, "ramp_c_per_hr": 100, "dwell_min": 30}]
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=_capture):
+            plive.edit_live("192.168.4.1", "test", 3, segments)
+        body = captured["data"]
+        self.assertIn("seg0_target=1000", body)
+        self.assertIn("seg0_ramp=100", body)
+        self.assertIn("seg0_dwell=30", body)
+
+    def test_accepts_get_live_content_spelling_for_io_leave_on(self):
+        # A get_live_content()-shaped io segment uses io_leave_on_at_end;
+        # this must map to the wire field seg%u_io_leave_on faithfully,
+        # not silently default to 0 (the bug this fix replaces).
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["data"] = req.data.decode()
+            return _fake_response(json.dumps({"ok": True, "warnings": []}).encode())
+
+        segments = [{"kind": 1, "io_target": 2, "io_state": 1, "io_blocking": 1, "io_leave_on_at_end": 1}]
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=_capture):
+            plive.edit_live("192.168.4.1", "iotest", 1, segments)
+        body = captured["data"]
+        self.assertIn("seg0_io_leave_on=1", body)
+
+    def test_unknown_segment_key_raises_value_error(self):
+        segments = [{"kind": 0, "target": 1000, "ramp": 100, "dwell": 30, "bogus_field": 1}]
+        with self.assertRaises(ValueError) as ctx:
+            plive.edit_live("192.168.4.1", "test", 3, segments)
+        self.assertIn("bogus_field", str(ctx.exception))
+
+    def test_unknown_segment_key_never_sends_a_request(self):
+        segments = [{"io_target": 2, "io_state": 1, "io_leave_on_at_end": 1, "typo_leave_on": 1}]
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen") as mock_urlopen:
+            with self.assertRaises(ValueError):
+                plive.edit_live("192.168.4.1", "x", 1, segments)
+        mock_urlopen.assert_not_called()
+
 
 class DecideLiveTest(unittest.TestCase):
     def test_discard_ok(self):
@@ -252,6 +298,20 @@ class DecideLiveTest(unittest.TestCase):
                 plive.decide_live_overwrite("192.168.4.1")
         self.assertEqual(ctx.exception.status, 403)
         self.assertIn("builtin", ctx.exception.detail)
+
+
+class HttpAuthSeamTest(unittest.TestCase):
+    def test_get_live_status_goes_through_http_auth_urlopen(self):
+        # Every request must go through http_auth.urlopen() (the ADMIN-tier
+        # session/login seam), not urllib.request.urlopen directly -- that is
+        # what lets a 401 under web auth log in and retry transparently.
+        body = json.dumps({"active": False, "origin_id": 0, "origin_is_builtin": False,
+                            "working_id": -1, "editable_from_segment": 0,
+                            "pending_decision": False, "last_refusal": None}).encode()
+        with unittest.mock.patch.object(plive.http_auth, "urlopen",
+                                         return_value=_fake_response(body)) as mock_auth_urlopen:
+            plive.get_live_status("192.168.4.1")
+        mock_auth_urlopen.assert_called_once()
 
 
 if __name__ == "__main__":
