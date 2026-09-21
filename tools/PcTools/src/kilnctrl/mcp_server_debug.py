@@ -180,19 +180,32 @@ def get_openocd_status() -> str:
     return "\n".join(lines)
 
 
-def _archive_flashed_safty_elf() -> str:
+def _archive_flashed_safty_elf(elf_path: str) -> str:
     """Best-effort SaftyFW counterpart to mcp_server_flash._archive_flashed_elf
     -- SaftyFW has no archive_elf.cmake step at all (KilnFW's exists, SaftyFW's
     does not), so this is the ONLY thing that archives a flashed Pico ELF.
-    Never raises into the caller; see elf_archive.py's module docstring."""
+
+    `elf_path` must be the ELF that was ACTUALLY flashed -- the caller's
+    resolved path (whatever debug_probe.program() used: the caller's own
+    `elf_path` argument if one was given, else the peer's default build
+    output), never re-derived independently here. 2026-09-21 bug: this used
+    to ignore the caller's `elf_path` entirely and always archive
+    debug_probe._safty_fw_elf() (the default main-tree build path), so a
+    `debug_program(peer="pico", elf_path=<worktree>/.../SaftyFW.elf)` flash
+    from a clean worktree archived the wrong (default, possibly stale or
+    absent) ELF instead of the one just flashed -- the correct ELF had to be
+    hand-copied into the archive afterward.
+
+    Never raises into the caller -- see elf_archive.py's module docstring --
+    but a failure is always surfaced in the returned string (never silent);
+    see mcp_server_flash._archive_flashed_elf for the same pattern."""
     try:
         safty_fw_root = debug_probe._safty_fw_root()
-        elf_path = debug_probe._safty_fw_elf()
         result = elf_archive.archive_safty_elf(elf_path, safty_fw_root, "debug_program(peer=pico)")
         return f"\n\nelf archived: {result.archived_path} (identity {result.identity})"
     except Exception as exc:  # noqa: BLE001 - archiving is a diagnostic convenience, never fail the flash over it
         _srv._session_log.warning("debug_program: safty elf archiving failed (non-fatal): %s", exc)
-        return ""
+        return f"\n\nWARNING: elf archiving FAILED (flash itself succeeded): {exc}"
 
 
 @_srv._tool()
@@ -258,8 +271,8 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
                 "link is up (safety_get_status shows link up and FW_VERSION "
                 "exchanged) before calling safety_clear_trip()."
             )
-            if elf_path is None:
-                note += _archive_flashed_safty_elf()
+            resolved_elf = elf_path or debug_probe._safty_fw_elf()
+            note += _archive_flashed_safty_elf(resolved_elf)
         return stale_prefix + f"programmed {peer} OK, reset and running" + note
     return _openocd_error_message(f"program failed for {peer}", output)
 
