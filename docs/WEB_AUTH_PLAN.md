@@ -329,6 +329,16 @@ unrecoverable cannot be the one `GET /status` prints in plain text.
 > `WEB_AUTH_ITERATIONS`, lowers `WEB_AUTH_HASH_YIELD_EVERY`, or reintroduces
 > a per-iteration key import must be re-measured against that budget on real
 > hardware.
+>
+> **Measured, 2026-09-21 — the 0.2–0.5 s estimate above was also wrong, by
+> roughly 10x.** One `POST /api/auth/login` on the bench board at
+> `origin/main` a57d0138 (ESP build 2026-09-21 04:03:13Z, after `77e90ad7`)
+> returned HTTP 401 "invalid username or password" in **4158 ms**. The board
+> did not reboot (uptime_s climbed 384 -> 461 -> 485 -> 513 across the
+> request) and no new crash report appeared, so the watchdog panic this
+> section fixed is confirmed gone. This is a single sample on the failure
+> (401) path, which runs the same KDF as success before comparing, so it is
+> the number to plan against until a success-path sample exists.
 
 **Where the record lives — corrected, and this is load-bearing.** An earlier
 draft of this plan put the credentials in namespace `kiln_cfg` on
