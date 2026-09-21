@@ -999,8 +999,10 @@ static void test_429_response_is_logged(void)
     TEST_CHECK(strlen(s_last_retry_after) > 0, "Retry-After header is still sent once logging is added");
     TEST_CHECK(esp_log_test_capture_contains("10.0.0.9"), "the 429 log line names the peer address");
     TEST_CHECK(esp_log_test_capture_contains("LOCAL"), "the 429 log line names the LOCAL scope for this address");
-    TEST_CHECK(esp_log_test_capture_contains(s_last_retry_after),
-               "the 429 log line's retry_after value matches the Retry-After header");
+    char expect_retry_after_token[32];
+    snprintf(expect_retry_after_token, sizeof(expect_retry_after_token), "retry_after=%ss", s_last_retry_after);
+    TEST_CHECK(esp_log_test_capture_contains(expect_retry_after_token),
+               "the 429 log line's retry_after=<N>s token matches the Retry-After header, not just a bare digit");
 }
 
 void run_test_web_auth_login_http(void)

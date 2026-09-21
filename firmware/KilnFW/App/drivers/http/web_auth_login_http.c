@@ -443,10 +443,6 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // blind per the comment above): so a locked-out client leaves a
         // trace in the device log. Never logs username/password -- neither
         // is available yet at this point in the handler.
-        // Log-only (never in the response, which stays deliberately scope-
-        // blind per the comment above): so a locked-out client leaves a
-        // trace in the device log. Never logs username/password -- neither
-        // is available yet at this point in the handler.
         ESP_LOGW(TAG, "login blocked (429) from %s scope=%s retry_after=%us", ip,
                  login_scope_label_for_log(ip, ip_known, have_slot_ip ? slot_ip_snapshot : NULL),
                  (unsigned)retry_after_s);
