@@ -89,3 +89,13 @@ bool pico_auto_update_state_decision_is_match(void)
 {
     return s_decision_is_match;
 }
+
+void pico_auto_update_state_reset_for_test(void)
+{
+    s_blocking = false;
+    s_reason[0] = '\0';
+    s_warning = false;
+    s_warning_reason[0] = '\0';
+    s_decision_is_match = false;
+    s_last_decision[0] = '\0';
+}

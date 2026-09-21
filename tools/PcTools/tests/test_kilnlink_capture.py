@@ -566,6 +566,7 @@ def test_link_device_enum_matches_uart_proto_device_t():
 
 UPDATE_TASK_C = REPO_ROOT / "firmware" / "SaftyFW" / "src" / "tasks" / "update_task.c"
 LINK_FRAME_H = REPO_ROOT / "firmware" / "SaftyFW" / "src" / "tasks" / "link_frame.h"
+SAFETY_LINK_H = REPO_ROOT / "firmware" / "KilnFW" / "App" / "drivers" / "safety" / "safety_link.h"
 
 
 def test_update_wire_format_matches_saftyfw_source():
@@ -647,6 +648,59 @@ def test_update_wire_format_matches_saftyfw_source():
     assert int(header_len_m.group(1)) == 16, (
         "UPDATE_STATUS_HEADER_LEN in update_task.c is no longer 16 -- "
         "kc._decode_update_status's fixed header parsing assumes exactly 16"
+    )
+
+
+def test_safety_link_update_states_match_saftyfw_source():
+    """A4, 2026-09-21 review: firmware/KilnFW/App/drivers/safety/safety_link.h's
+    safety_link_update_state_t is an ESP-side hand-mirror of SaftyFW's
+    update_task_wire_state_t (KilnFW cannot #include SaftyFW's header --
+    separate build target). This is a THIRD copy of the same wire enum
+    alongside kilnlink_capture.py's own UPDATE_STATE_NAMES dict (guarded by
+    test_update_wire_format_matches_saftyfw_source above) -- a state added to
+    one and not the other two is exactly the reset-one-side/split-mirror bug
+    class this codebase has hit before. Fails hard (never skips) if either
+    source file goes missing."""
+    assert UPDATE_TASK_C.is_file(), f"missing firmware source at {UPDATE_TASK_C}"
+    assert SAFETY_LINK_H.is_file(), f"missing firmware header at {SAFETY_LINK_H}"
+    update_task_text = UPDATE_TASK_C.read_text(encoding="utf-8", errors="replace")
+    safety_link_text = SAFETY_LINK_H.read_text(encoding="utf-8", errors="replace")
+
+    state_block_m = re.search(
+        r"typedef enum \{(.*?)\}\s*update_task_wire_state_t;", update_task_text, re.DOTALL
+    )
+    assert state_block_m, "update_task_wire_state_t enum body not found in update_task.c"
+    state_body = re.sub(r"//.*", "", state_block_m.group(1))
+    expected_states: dict[int, str] = {}
+    next_val = 0
+    for name, explicit in re.findall(r"UPDATE_TASK_STATE_([A-Z_]+)\s*(?:=\s*(\d+))?", state_body):
+        val = int(explicit) if explicit else next_val
+        expected_states[val] = name
+        next_val = val + 1
+    assert expected_states, "parsed no UPDATE_TASK_STATE_* entries from update_task.c"
+
+    safety_block_m = re.search(
+        r"typedef enum \{(.*?)\}\s*safety_link_update_state_t;", safety_link_text, re.DOTALL
+    )
+    assert safety_block_m, "safety_link_update_state_t enum body not found in safety_link.h"
+    # Strip both // and /* */ comments before parsing -- safety_link.h's
+    # copy carries long block-comment rationale between entries that the
+    # SaftyFW source doesn't.
+    safety_body = re.sub(r"/\*.*?\*/", "", safety_block_m.group(1), flags=re.DOTALL)
+    safety_body = re.sub(r"//.*", "", safety_body)
+    actual_states: dict[int, str] = {}
+    next_val = 0
+    for name, explicit in re.findall(
+        r"SAFETY_LINK_UPDATE_STATE_([A-Z_]+)\s*(?:=\s*(\d+))?", safety_body
+    ):
+        val = int(explicit) if explicit else next_val
+        actual_states[val] = name
+        next_val = val + 1
+    assert actual_states, "parsed no SAFETY_LINK_UPDATE_STATE_* entries from safety_link.h"
+
+    assert actual_states == expected_states, (
+        f"safety_link_update_state_t {actual_states} has drifted from "
+        f"update_task_wire_state_t {expected_states}"
     )
 
 

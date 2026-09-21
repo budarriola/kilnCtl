@@ -178,10 +178,13 @@ void run_test_pico_auto_update_state(void)
     test_other_unrecoverable_causes_still_block();
     test_prior_failed_sets_warning_without_blocking();
     test_set_blocking_false_clears_reason();
-    // Restore the decision-tracking statics to their zero-init default
-    // BEFORE test_default_decision_is_not_a_match() runs -- it must run
-    // first among the decision tests to actually observe the default, so
-    // it is listed immediately here, ahead of the calls that mutate it.
+    // A3 fix (2026-09-21 review): nothing above this line calls
+    // set_last_decision(), so this reset is currently a no-op -- but it is
+    // what actually GUARANTEES test_default_decision_is_not_a_match() below
+    // observes the true zero-init default, rather than depending on test
+    // ordering (and every earlier test never mutating these statics) to
+    // hold forever as this file grows.
+    pico_auto_update_state_reset_for_test();
     test_default_decision_is_not_a_match();
     test_set_last_decision_match_reads_back();
     test_set_last_decision_non_match_reads_back_false();

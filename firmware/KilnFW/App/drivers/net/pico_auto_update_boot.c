@@ -274,19 +274,19 @@ static bool attempt_update_embedded(const pico_image_embedded_info_t *emb, int s
  * decide() shape or its host tests: the gate short-circuits before decide()
  * is ever called, the same way the "no image at all" inert path already
  * does below. */
-#ifndef PICO_AUTO_UPDATE_BOOTLOADER_PRESENT
-#define PICO_AUTO_UPDATE_BOOTLOADER_PRESENT 0
+#ifndef PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT
+#define PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT 0
 #endif
 
 static void pico_auto_update_task(void *arg)
 {
     (void)arg;
 
-#if !PICO_AUTO_UPDATE_BOOTLOADER_PRESENT
+#if !PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT
     ESP_LOGW(TAG, "automatic Pico update is compiled OFF: no wire-level signal exists yet to "
                   "confirm this board's SaftyFW has an update-capable two-slot bootloader "
                   "installed (docs/PICO_AUTO_UPDATE_PLAN.md sec 11, NO-GO as of 2026-09-21) -- "
-                  "set -DPICO_AUTO_UPDATE_BOOTLOADER_PRESENT=1 once that is confirmed");
+                  "set -DPICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=1 once that is confirmed");
     pico_auto_update_state_set_blocking(false, NULL);
     pico_auto_update_state_set_warning(NULL);
     pico_auto_update_state_set_last_decision(

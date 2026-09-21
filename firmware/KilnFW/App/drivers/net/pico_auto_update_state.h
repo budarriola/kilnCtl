@@ -99,6 +99,15 @@ const char *pico_auto_update_state_last_decision(void);
  * pico_auto_update_state_set_last_decision() was a genuine identity match. */
 bool pico_auto_update_state_decision_is_match(void);
 
+/* TEST ONLY. Resets every static in this module back to its zero-init
+ * default (not blocking, not warning, no decision recorded). Never called
+ * from firmware -- this module's real "reset" is a fresh boot, which
+ * zero-inits its statics for free. Exists solely so host tests can observe
+ * the true default (test_default_decision_is_not_a_match()) without relying
+ * on function ordering within a single test process to never have mutated
+ * it first. */
+void pico_auto_update_state_reset_for_test(void);
+
 #ifdef __cplusplus
 }
 #endif
