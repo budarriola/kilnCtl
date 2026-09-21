@@ -3,13 +3,17 @@
 // the 10 catalogue entries whose Digital Fire source page states no cone
 // number (FSCG1, FSCGB1, FSCGCL, FSCGWM, FSCRGL, FSHP1, FSHP3, FSNM5, MDDCL,
 // QICA -- previously marked UNRESOLVED with an invented placeholder number
-// in profiles_builtin_table.inc) now carry that sentinel instead, and must:
-//   1. Print as "Unrated" via profiles_builtin_cone_label(), not a number.
-//   2. Sort AFTER every real cone within the same firing-type list -- the
-//      point of the sentinel is to stop pretending a number was published,
-//      not to silently sort as if it were cone -128 (INT8_MIN's raw value,
-//      which a plain signed compare would put FIRST, the opposite of what's
-//      wanted).
+// in profiles_builtin_table.inc) now carry that sentinel instead, and must
+// print as "Unrated" via profiles_builtin_cone_label(), not a number.
+//
+// Until 2026-09-21 this file also checked that the sentinel sorted AFTER
+// every real cone, via profiles_builtin_cone_sort_key(). That helper was
+// removed together with its last production caller, the dead LCD page
+// ui_page_profiles_builtin_list.c: nothing in the firmware orders builtins by
+// cone today -- the web list sorts by last run start, and the LCD picker
+// follows table order. Note for whoever adds cone ordering next: INT8_MIN
+// sorts FIRST under a plain signed compare, the opposite of what is wanted,
+// so re-add a widened sort key and a test that exercises it.
 //
 // This file #includes profiles_builtin.c directly (own executable, same
 // convention as test_profiles_http.c/test_zones_http.c) so it links the
