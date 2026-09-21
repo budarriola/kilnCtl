@@ -633,3 +633,55 @@ Home (position UNKNOWN per page, same caveat) — no explicit "restore step"
 is needed since nothing is written. For the three flagged write-capable
 sub-actions, do not run them as part of the mechanical sweep; they need
 owner authorization the same way the backend runbook's Class B/C rows do.
+
+## Bench confirmation, 2026-09-21 continuation (M18 LCD class, previously-NOT-RUN pages)
+
+Resolved five of the seven previously-NOT-RUN rows' unresolved geometry above
+by measured `touch_log_tap_targets()` dumps (explicitly authorized for this
+continuation, same panic-fix precondition as the prior pass). One page
+(`profiles_builtin_list`) turned out to be dead code, not a geometry gap —
+see the matrix row. One crash defect was found and is documented below and
+in the matrix (`profile_builder_segment` row).
+
+**Architecture correction: PICK vs MANAGE mode.** `ui_page_profiles.c` is a
+thin alias for `ui_page_profile_picker_build_manage()` — the profile list and
+the profile picker are the *same* widget (`ui_page_profile_picker.c`)
+differing only by a `manage` flag. Reached from `home` (PICK mode), a row tap
+selects that profile and returns to `home` immediately (a WRITE — do not tap
+rows here without owner sign-off). Reached from `config` → Profiles cell
+(MANAGE mode), a row tap instead navigates read-only to `profile_detail`.
+This document's earlier nav map did not distinguish the two paths.
+
+**Topbar icon order is deterministic** (`ui_topbar.c`): left-to-right,
+Back, Home, Prev, Next, Warning, Add, Gear — each present only if its
+`cfg` field is set. A page's icon x-coordinates can be derived by counting
+which flags are set rather than measured, once the icon width/spacing
+constants are known; this pass used dumps to confirm rather than derive.
+
+**Measured coordinates this pass:**
+
+| Page | Widget | Coordinates |
+|---|---|---|
+| `network` | "Manage networks" button | (239,283) |
+| `network_manage` | saved network row + Forget button | (407,197) |
+| `profiles` (MANAGE mode) | topbar, page 1 (Back/Home/Next/Add, no Prev) | Back (293,20), Home (333,20), Next (413,20), Add (453,20) |
+| `profiles` (MANAGE mode) | row tap → `profile_detail` | row centre ~(239,75) for row 1 |
+| `profile_detail` | action row | Segments (69,275), Edit (240,275), Start (410,275) |
+| `profile_builder_zones` | Next button (nav_row's actual clickable sub-region) | hit-box (384,180)-(471,223), centre **(427,201)** — NOT the nav_row container's overall centre (239,201), which does not register a click |
+
+**Defect found: `profile_builder_zones` → Next crashes the board.** With
+zone1 selected (enabling the Next button per its clickable-flag gate), a tap
+at the button's true centre (427,201) — not the wider container centre that
+was tried first and produced no transition — triggered an `IllegalInstruction`
+panic in the `lvgl` task and a `TASK_WDT` reset
+(`firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_zones.c`, the
+`next_btn_cb` handler wired to `s_next_btn` around line 93/230-237). The
+board rebooted cleanly on its own — no manual `debug_reset` or
+`safety_clear_trip()` was needed: firmware's own boot-time safety_link logic
+detected and cleared the resulting stale S6a trip itself (device log: "boot
+was clean but a stale S6a ... trip is still latched from before this boot --
+sending clear_trip to release it"). The crash report was left unacknowledged
+per this project's read-only rule (`crash_report_ack` never called). This
+blocks `profile_builder_segment` and `profile_builder_review` from being
+reached without retriggering the crash; both remain NOT RUN pending a fix.
+No coredump symbolization (`read_esp_coredump`) was attempted this pass.
