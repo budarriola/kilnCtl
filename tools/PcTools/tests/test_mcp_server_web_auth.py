@@ -120,6 +120,19 @@ class AlreadyConfiguredTest(_Base):
         post_mock.assert_not_called()
         self.assertIn("already configured, credentials valid", result)
 
+    def test_admin_exists_with_minus_one_board_timeouts_has_no_substitution_note(self):
+        """Regression: case 3 writes nothing regardless of what the board's
+        timeouts read, so a board reporting -1 for both must not make this
+        tool claim it substituted a default."""
+        config = dict(_ON_WITH_ADMIN, web_timeout_min=-1, lcd_timeout_min=-1)
+        with unittest.mock.patch.object(wac, "get_auth_config", return_value=config), \
+             unittest.mock.patch.object(wac, "try_login") as login_mock:
+            result = msw.web_auth_setup(confirm=True)
+        login_mock.assert_not_called()
+        self.assertIn("already configured, credentials valid", result)
+        self.assertNotIn("substituted default", result)
+        self.assertNotIn("NOTE:", result)
+
 
 class UnreadableConfigTest(_Base):
     """Review fix 1: pre-fetch denied (401/HttpAuthError, not "unreachable")
@@ -145,6 +158,17 @@ class UnreadableConfigTest(_Base):
         boot_mock.assert_not_called()
         self.assertIn("DRY RUN", result)
         self.assertIn("bootstrap_password", result)
+
+    def test_denied_prefetch_dry_run_has_no_substitution_note(self):
+        """Regression: case 1 (config unreadable) must not claim a timeout
+        substitution -- raw_* there is only the before.get(..., -1)
+        fallback over an empty dict, and nothing is ever sent in this case
+        regardless of it."""
+        err = wac.WebAuthSetupHttpError("HTTP Error 403: Forbidden", status=403)
+        with unittest.mock.patch.object(wac, "get_auth_config", side_effect=err):
+            result = msw.web_auth_setup(confirm=False)
+        self.assertNotIn("substituted default", result)
+        self.assertNotIn("NOTE:", result)
 
     def test_genuinely_unreachable_board_still_hard_errors(self):
         err = wac.WebAuthSetupHttpError("board unreachable: [Errno 111] Connection refused")

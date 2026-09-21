@@ -237,7 +237,14 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
         state_line = (f"before: GET /api/auth/config was refused -- treating this as web auth ON "
                       f"with no admin record yet (the only state that denies this ADMIN-tier read "
                       f"with no way to log in) ({presence}, host={resolved})")
-    if timeout_notes:
+    # Only case 2 (web auth confirmed OFF, no admin record yet) ever sends
+    # these values anywhere (via set_policy, in the real write or named in
+    # a dry run's "would:" line) -- appending the note in cases 1/3 too
+    # would claim a substitution that never happens: case 1's raw_* is only
+    # the before.get(..., -1) fallback over an unreadable config, and case 3
+    # writes nothing at all regardless of what the board's timeouts read.
+    in_case_2 = config_readable and not web_enabled and not admin_configured and enable_web_auth
+    if timeout_notes and in_case_2:
         state_line += "\n" + "\n".join(f"NOTE: {n}" for n in timeout_notes)
 
     # Case 3: an admin record already exists. Whatever web_enabled reads,
