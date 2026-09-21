@@ -300,3 +300,49 @@ reset" -- that mechanism does not exist in this code. The
 `docs/COMMISSIONING_TEST_MATRIX.md` C6 cell and the `docs/BENCH_TEST_LOG.md`
 C6 entry should be corrected to say so, rather than left implying an
 `esp_wifi_disconnect()` is needed in the no-saved-networks path.
+
+## 7. Bench verification of the fix (2026-09-21, post-1319e051)
+
+Fix landed in source at `1319e051` (`esp_wifi_set_storage(WIFI_STORAGE_RAM)`
+in `wifi_prov.c` plus `esp_wifi_restore()` in `factory_reset.c`'s
+`execute_scope_job()` for the `wifi`/`all` scopes, per section 3). Bench-ran
+this run at ESP commit `08f1c451` (board flashed and verified from a clean
+worktree; the fix commit itself predates `08f1c451`, so it was present).
+
+Ran section 5 step 6's plan as far as this bench setup allows: the real
+web-route `factory_reset(scope=wifi)` (challenge/HMAC via `kcOtaAuthedFetch`'s
+algorithm, context `factory-reset`), then `nvs_list_keys` (the new MCP tool
+over `GET /api/nvs/keys`, added `8f1f44ff` since this audit was written)
+against `nvs`/`nvs.net80211` before and after.
+
+**Result: inconclusive, not a pass or a fail.** Before: 86 keys, matching
+section 1's expectation. The reset correctly dropped the board off the LAN
+(no saved STA network to rejoin -- `wifi_get_status()` over UART confirmed
+`sta_connected=False`, `ssid=''`), which is exactly what makes the intended
+diff unreachable with this bench's setup: `GET /api/nvs/keys` is HTTP-only,
+and the bench PC has no route to the board's own provisioning AP
+(`192.168.4.1`) to poll it in the window between the erase and the next STA
+join. Re-provisioning over the UART link hub (the only reachable path) and
+re-checking after rejoining showed the same 86 keys again -- but this is
+uninformative either way, because `esp_wifi_set_config()` (called by
+`wifi_prov_link.c` on every join, section 1) repopulates `nvs.net80211` as an
+ordinary side effect of establishing *that new* connection, regardless of
+whether the namespace was empty or untouched immediately beforehand. A read
+taken only after a rejoin cannot separate "the wipe never happened" from "the
+wipe worked and the very next join refilled it."
+
+Confirmed independently, not affected by the above: `kiln_auth` is still
+refused by this route (client attempt was rejected before the request was
+even sent, matching the documented 403), and the board's own web
+authentication was still enforced post-reset (one authenticated
+`GET /api/status` succeeded via a real login, HTTP 200) -- so the reset did
+not collaterally disturb `kiln_auth`, consistent with section 3's design.
+
+**What would actually settle this**, neither done this run: (a) join the
+bench PC to the board's `kilnCtl` AP SSID and poll `GET /api/nvs/keys` at
+`192.168.4.1` in the window right after the erase and before any
+re-provisioning, or (b) a raw NVS-partition read (JTAG or `esptool
+read_flash` + an NVS parser) taken in that same window, independent of the
+app's own HTTP stack entirely. Until one of those runs, `1319e051`'s effect
+on hardware remains unverified by this audit -- the source-level reasoning in
+section 3 still stands on its own.

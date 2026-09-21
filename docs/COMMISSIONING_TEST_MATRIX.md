@@ -202,6 +202,33 @@ section. Open question for the owner: whether the panic is attributable to
 alone, or coincidental -- not investigated further this run; recommend a
 crash-report/coredump read before any repeat.
 
+**2026-09-21 C6 driver-storage fix (1319e051) bench check:** ESP flashed to
+`08f1c451` clean. Ran the real web-route `factory_reset(scope=wifi)` (challenge
++ HMAC-SHA256 keyed on the AP password, context `factory-reset`, matching
+`app.js`'s `kcOtaAuthedFetch`). `nvs_list_keys(nvs, nvs.net80211)` before: 86
+keys (`sta.ssid`, `sta.pswd`, `ap.ssid`, `ap.passwd`, `ap.pmk`, etc). The board
+correctly dropped off the LAN afterward (no STA config to rejoin, confirmed by
+`wifi_get_status()` over UART: `sta_connected=False ssid=''`) -- expected, but
+it also means `GET /api/nvs/keys` cannot be polled in the erased window,
+because that route is HTTP-only and the bench PC is not joined to the board's
+own provisioning AP (`kilnCtl`) to reach `192.168.4.1`. Re-provisioned via
+`wifi_add_network` over the UART link hub using the STA env vars; the board
+rejoined at `192.168.1.156`. `nvs_list_keys` immediately after showed the
+**same 86 keys again** -- but this is not evidence the fix failed: ESP-IDF's
+driver repopulates `nvs.net80211` as an ordinary side effect of establishing
+*any* new STA connection, including a fresh one from a legitimately empty
+namespace, so a read taken only after rejoining cannot distinguish "the wipe
+never happened" from "the wipe worked and this run's own re-provision just
+refilled it." **Verdict: INCONCLUSIVE on this hardware run** -- the intended
+before/after diff (audit section 5 step 6) requires observing the namespace
+*between* the erase and the next STA join, which needs either the bench PC
+joined to the board's AP to poll it at `192.168.4.1`, or a raw NVS partition
+read, neither done this run. `kiln_auth` correctly refused: `nvs_list_keys`
+against that namespace was rejected before ever issuing the HTTP request
+(client-side refusal matching the route's own 403). Web auth confirmed still
+ON post-reset via one authenticated `GET /api/status` (200). Full request/
+response detail in `docs/BENCH_TEST_LOG.md`.
+
 ---
 
 ## Page-by-page inventory
