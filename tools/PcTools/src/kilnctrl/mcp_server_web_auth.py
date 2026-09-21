@@ -16,6 +16,16 @@ from . import web_auth_setup_http_client as wac
 from .http_auth import PASSWORD_ENV, USERNAME_ENV
 
 
+def _describe_login_error(exc: wac.WebAuthSetupHttpError) -> str:
+    """Brand a 429 distinctly as the login lockout (project_login_lockout_
+    saturation_accepted -- ~1 request/19s per off-subnet address, an owner-
+    accepted saturation point, not a bug) rather than letting it read as a
+    generic, unexplained failure."""
+    if exc.status == 429:
+        return f"HTTP 429 (login rate-limited/locked out -- wait before retrying): {exc}"
+    return str(exc)
+
+
 @_srv._tool()
 def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
                     enable_web_auth: bool = True) -> str:
@@ -47,18 +57,29 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
        ``web_enabled`` is false, so setting the password here needs no
        session at all -- confirmed against the firmware source, not
        inferred from behaviour.
-    3. An admin record already exists and web auth is ON: this tool writes
-       nothing. It logs in once with the environment credentials
+    3. An admin record already exists: this tool writes nothing. If the
+       pre-fetch GET /api/auth/config itself succeeded while web auth reads
+       ON, that success was only possible over an authenticated session for
+       this exact credential (reused, or just established by
+       ``http_auth.urlopen()``'s own 401-retry login) -- reported as
+       "already configured, credentials valid" with no separate login POST,
+       to avoid a second, redundant login against the same per-IP lockout
+       the firmware enforces. Otherwise (web auth reads OFF, so the GET
+       proved nothing about the credential) it logs in once explicitly
        (POST /api/auth/login, form-encoded, ``Accept-Encoding: identity``)
-       and reports "already configured, credentials valid" only if that
-       login succeeds. A 401 is reported as a failure and this tool stops
-       -- it never retries a login and never guesses a different
-       credential.
+       and reports success only if that login succeeds. A 401 is reported
+       as a failure and this tool stops -- it never retries a login and
+       never guesses a different credential.
 
-    An admin record that exists while web auth reads OFF, or any other
-    combination GET /api/auth/config can report, is treated as "already
-    configured" too (case 3's login check) rather than guessed at further --
-    this tool only ever writes in the two specific bootstrap states above.
+    If the pre-fetch GET itself is denied (401/403 -- the state a board with
+    web auth already ON and no admin record yet produces, since that GET is
+    itself ROUTE_TIER_ADMIN and no login can succeed with no admin record to
+    check against), this tool treats it as case 1 above rather than failing
+    outright: it proceeds straight to POST /api/auth/bootstrap_password,
+    which requires no session at all and 409s harmlessly if an admin record
+    turns out to already exist (that 409 is then resolved with exactly one
+    login check). Only a pre-fetch failure whose message says the board is
+    unreachable is treated as a hard error.
 
     REFUSES every write unless ``confirm=True`` -- without it, this is a
     dry run: it reports which of the three states the board is in and what
@@ -90,52 +111,113 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
 
     resolved = _ota_resolve_host(host)
 
+    # GET /api/auth/config is itself ROUTE_TIER_ADMIN (http_auth_enforce.c).
+    # With web auth already ON and no admin record yet, this pre-fetch
+    # cannot succeed: there is no session, and http_auth's own 401-retry
+    # login attempt cannot succeed either (there is no admin credential yet
+    # for it to check against) -- it raises before ever reaching this
+    # function, either as a plain 401 HTTPError (wac.get_auth_config's own
+    # urllib.error.HTTPError branch) or wrapped from http_auth.HttpAuthError
+    # (the retried login itself being refused). Both are indistinguishable
+    # from "board unreachable" only by message text, so unreachable is ruled
+    # out explicitly and everything else is treated as "web auth is ON and
+    # this route is gated" -- exactly the state bootstrap_password() exists
+    # for. That POST requires no session at all (ROUTE_TIER_ADMIN_BOOTSTRAP)
+    # and answers 409 harmlessly if an admin record turns out to already
+    # exist, so proceeding here is always safe, never destructive.
+    config_readable = True
+    before: dict = {}
     try:
         before = wac.get_auth_config(resolved)
     except wac.WebAuthSetupHttpError as exc:
-        return f"error: could not read GET /api/auth/config (host={resolved}): {exc}"
+        if "unreachable" in str(exc).lower():
+            return f"error: could not read GET /api/auth/config (host={resolved}): {exc}"
+        config_readable = False
 
-    web_enabled = bool(before.get("web_enabled"))
-    admin_configured = bool(before.get("admin_password_set"))
+    web_enabled = bool(before.get("web_enabled")) if config_readable else True
+    admin_configured = bool(before.get("admin_password_set")) if config_readable else False
     lcd_enabled = bool(before.get("lcd_enabled"))
     lcd_timeout_min = before.get("lcd_timeout_min", -1)
     web_timeout_min = before.get("web_timeout_min", -1)
-    state_line = (f"before: web_enabled={web_enabled} admin_password_set={admin_configured} "
-                  f"lcd_enabled={lcd_enabled} web_timeout_min={web_timeout_min} "
-                  f"lcd_timeout_min={lcd_timeout_min} ({presence}, host={resolved})")
+    if config_readable:
+        state_line = (f"before: web_enabled={web_enabled} admin_password_set={admin_configured} "
+                      f"lcd_enabled={lcd_enabled} web_timeout_min={web_timeout_min} "
+                      f"lcd_timeout_min={lcd_timeout_min} ({presence}, host={resolved})")
+    else:
+        state_line = (f"before: GET /api/auth/config was refused -- treating this as web auth ON "
+                      f"with no admin record yet (the only state that denies this ADMIN-tier read "
+                      f"with no way to log in) ({presence}, host={resolved})")
 
     # Case 3: an admin record already exists. Whatever web_enabled reads,
     # this tool never bootstraps over an existing admin record -- it only
     # verifies the environment credential actually works.
     if admin_configured:
+        # If the pre-fetch above succeeded on an ADMIN-tier route while
+        # web_enabled is true, that success was only possible with a valid
+        # session for this exact credential -- either reused from an
+        # earlier call in this same long-running server process, or just
+        # established by http_auth.urlopen()'s own 401-retry login. A
+        # second POST /api/auth/login here would be a redundant login
+        # attempt against the same per-IP lockout the firmware enforces
+        # (see CLAUDE.md's login-lockout note) -- skip it. When web_enabled
+        # reads false, GET /api/auth/config needed no session at all, so
+        # this success proves nothing about the credential and the explicit
+        # check below is still required.
+        if config_readable and web_enabled:
+            return (f"already configured, credentials valid (confirmed by the successful "
+                    f"GET /api/auth/config read above -- no separate login was sent)\n{state_line}")
         try:
             ok = wac.try_login(resolved, username, password)
         except wac.WebAuthSetupHttpError as exc:
-            return f"error: login check failed (host={resolved}): {exc}\n{state_line}"
+            return f"error: login check failed (host={resolved}): {_describe_login_error(exc)}\n{state_line}"
         if ok:
             return f"already configured, credentials valid\n{state_line}"
         return (f"failed: administrator credential already configured, but the environment "
                 f"credential was refused (401) -- never retried\n{state_line}")
 
-    # No admin record yet. Case 1 (web auth already ON) uses the bootstrap
-    # route; case 2 (web auth OFF) sets the password directly, since that
-    # route requires no session at all while web_enabled is false.
+    # No admin record yet (or config was unreadable, which this tool treats
+    # the same way -- see above). Case 1 (web auth already ON, or assumed ON
+    # because the pre-fetch was denied) uses the bootstrap route; case 2
+    # (web auth confirmed OFF) sets the password directly, since that route
+    # requires no session at all while web_enabled is false.
     if not confirm:
-        action = ("POST /api/auth/bootstrap_password" if web_enabled
-                   else "POST /api/auth/security (set_web_password)"
-                   + (" then set_policy(web_enabled=1)" if enable_web_auth else ""))
+        if not config_readable:
+            action = "POST /api/auth/bootstrap_password (config unreadable; see above)"
+        elif web_enabled:
+            action = "POST /api/auth/bootstrap_password"
+        else:
+            action = ("POST /api/auth/security (set_web_password)"
+                       + (" then set_policy(web_enabled=1)" if enable_web_auth else ""))
         return f"DRY RUN (pass confirm=True to actually set it up) -- would: {action}\n{state_line}"
 
-    if web_enabled:
+    if not config_readable or web_enabled:
         try:
             wac.post_bootstrap_password(resolved, username, password)
         except wac.WebAuthSetupHttpError as exc:
             if exc.status == 409:
+                if not config_readable:
+                    # The unreadable pre-fetch above was ambiguous between
+                    # "bootstrap needed" and "admin exists, wrong
+                    # credential" -- this 409 resolves it to the latter.
+                    # One login attempt now gives the caller a real signal
+                    # instead of just "failed".
+                    try:
+                        ok = wac.try_login(resolved, username, password)
+                    except wac.WebAuthSetupHttpError as login_exc:
+                        return (f"failed: an administrator credential already exists (409 from "
+                                f"bootstrap_password); login check also failed: "
+                                f"{_describe_login_error(login_exc)}\n{state_line}")
+                    if ok:
+                        return (f"already configured, credentials valid (config was unreadable "
+                                f"beforehand, resolved via bootstrap_password's 409)\n{state_line}")
+                    return (f"failed: an administrator credential already exists (409 from "
+                            f"bootstrap_password), and the environment credential was refused "
+                            f"(401) -- never retried\n{state_line}")
                 return (f"failed: board reports an administrator credential already exists (409) "
                         f"even though the pre-fetch above saw none\n{state_line}: {exc}")
             if exc.status == 400:
                 return f"failed: password rejected (400, likely too weak)\n{state_line}: {exc}"
-            return f"failed: POST /api/auth/bootstrap_password: {exc}\n{state_line}"
+            return f"failed: POST /api/auth/bootstrap_password: {_describe_login_error(exc)}\n{state_line}"
     else:
         try:
             result = wac.post_security(resolved, {
@@ -143,11 +225,27 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
                 "username": username, "password": password,
             })
         except wac.WebAuthSetupHttpError as exc:
-            return f"failed: POST /api/auth/security (set_web_password): {exc}\n{state_line}"
+            return f"failed: POST /api/auth/security (set_web_password): {_describe_login_error(exc)}\n{state_line}"
         if not result.get("ok"):
             return f"failed: set_web_password rejected: {result.get('error')!r}\n{state_line}"
 
         if enable_web_auth:
+            # Never trust this write's own {"ok":true} alone (the same rule
+            # CLAUDE.md's boot_guard write-lies section applies elsewhere):
+            # read the config back and confirm the password actually stuck
+            # BEFORE turning web_enabled on. Turning auth on over a password
+            # that didn't really persist would strand the board -- gated,
+            # with no credential that works.
+            try:
+                mid = wac.get_auth_config(resolved)
+            except wac.WebAuthSetupHttpError as exc:
+                return (f"set_web_password reported ok, but could not read back GET "
+                        f"/api/auth/config to confirm it before enabling web auth -- refusing "
+                        f"to enable web auth: {exc}\n{state_line}")
+            if not mid.get("admin_password_set"):
+                return (f"FAILED verification: set_web_password reported ok:true but "
+                        f"admin_password_set still reads false -- refusing to enable web auth "
+                        f"over an unconfirmed credential\n{state_line}")
             try:
                 policy_result = wac.post_security(resolved, {
                     "cmd": "set_policy",

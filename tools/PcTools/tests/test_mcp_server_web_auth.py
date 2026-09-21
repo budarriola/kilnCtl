@@ -77,27 +77,33 @@ class AlreadyConfiguredTest(_Base):
     nothing is ever posted."""
 
     def test_valid_credentials_report_already_configured(self):
+        # web_enabled true + a successful pre-fetch read proves the session
+        # is already authenticated (fix 2) -- no separate login POST fires.
         with unittest.mock.patch.object(wac, "get_auth_config", return_value=_ON_WITH_ADMIN), \
-             unittest.mock.patch.object(wac, "try_login", return_value=True) as login_mock, \
+             unittest.mock.patch.object(wac, "try_login") as login_mock, \
              unittest.mock.patch.object(wac, "post_security") as post_mock, \
              unittest.mock.patch.object(wac, "post_bootstrap_password") as boot_mock:
             result = msw.web_auth_setup(confirm=True)
-        login_mock.assert_called_once_with("10.0.0.5", _USERNAME, _SECRET_PASSWORD)
+        login_mock.assert_not_called()
         post_mock.assert_not_called()
         boot_mock.assert_not_called()
         self.assertIn("already configured, credentials valid", result)
         self._assertNoSecretLeak(result)
 
     def test_valid_credentials_checked_even_without_confirm(self):
-        """A login is a read, not a write -- it must not be gated on confirm."""
+        """A dry run still must not fire a write, and the already-
+        authenticated pre-fetch alone is enough to report validity."""
         with unittest.mock.patch.object(wac, "get_auth_config", return_value=_ON_WITH_ADMIN), \
-             unittest.mock.patch.object(wac, "try_login", return_value=True) as login_mock:
+             unittest.mock.patch.object(wac, "try_login") as login_mock:
             result = msw.web_auth_setup(confirm=False)
-        login_mock.assert_called_once()
+        login_mock.assert_not_called()
         self.assertIn("already configured, credentials valid", result)
 
     def test_invalid_credentials_report_401_and_never_retry(self):
-        with unittest.mock.patch.object(wac, "get_auth_config", return_value=_ON_WITH_ADMIN), \
+        """When the pre-fetch itself needed no session (web auth off), a
+        successful GET proves nothing about the credential -- the explicit
+        login check still runs and can still fail."""
+        with unittest.mock.patch.object(wac, "get_auth_config", return_value=_OFF_WITH_ADMIN), \
              unittest.mock.patch.object(wac, "try_login", return_value=False) as login_mock:
             result = msw.web_auth_setup(confirm=True)
         login_mock.assert_called_once()
@@ -112,6 +118,75 @@ class AlreadyConfiguredTest(_Base):
             result = msw.web_auth_setup(confirm=True)
         login_mock.assert_called_once()
         post_mock.assert_not_called()
+        self.assertIn("already configured, credentials valid", result)
+
+
+class UnreadableConfigTest(_Base):
+    """Review fix 1: pre-fetch denied (401/HttpAuthError, not "unreachable")
+    must proceed to bootstrap_password rather than bailing with "could not
+    read"."""
+
+    def test_denied_prefetch_proceeds_to_bootstrap(self):
+        err = wac.WebAuthSetupHttpError("HTTP Error 401: Unauthorized", status=401)
+        with unittest.mock.patch.object(wac, "get_auth_config",
+                                         side_effect=[err, _ON_WITH_ADMIN]), \
+             unittest.mock.patch.object(wac, "post_bootstrap_password",
+                                         return_value={"ok": True}) as boot_mock:
+            result = msw.web_auth_setup(confirm=True)
+        boot_mock.assert_called_once_with("10.0.0.5", _USERNAME, _SECRET_PASSWORD)
+        self.assertNotIn("could not read", result)
+        self.assertIn("ok:", result)
+
+    def test_denied_prefetch_dry_run_names_bootstrap_action(self):
+        err = wac.WebAuthSetupHttpError("HTTP Error 403: Forbidden", status=403)
+        with unittest.mock.patch.object(wac, "get_auth_config", side_effect=err), \
+             unittest.mock.patch.object(wac, "post_bootstrap_password") as boot_mock:
+            result = msw.web_auth_setup(confirm=False)
+        boot_mock.assert_not_called()
+        self.assertIn("DRY RUN", result)
+        self.assertIn("bootstrap_password", result)
+
+    def test_genuinely_unreachable_board_still_hard_errors(self):
+        err = wac.WebAuthSetupHttpError("board unreachable: [Errno 111] Connection refused")
+        with unittest.mock.patch.object(wac, "get_auth_config", side_effect=err), \
+             unittest.mock.patch.object(wac, "post_bootstrap_password") as boot_mock:
+            result = msw.web_auth_setup(confirm=True)
+        boot_mock.assert_not_called()
+        self.assertIn("could not read", result)
+
+    def test_denied_prefetch_409_falls_back_to_single_login(self):
+        """The unreadable pre-fetch is ambiguous; bootstrap's 409 resolves it
+        to "admin already exists" and exactly one login check follows."""
+        prefetch_err = wac.WebAuthSetupHttpError("HTTP Error 401: Unauthorized", status=401)
+        boot_err = wac.WebAuthSetupHttpError("refused", status=409, detail="already configured")
+        with unittest.mock.patch.object(wac, "get_auth_config", side_effect=prefetch_err), \
+             unittest.mock.patch.object(wac, "post_bootstrap_password", side_effect=boot_err), \
+             unittest.mock.patch.object(wac, "try_login", return_value=True) as login_mock:
+            result = msw.web_auth_setup(confirm=True)
+        login_mock.assert_called_once_with("10.0.0.5", _USERNAME, _SECRET_PASSWORD)
+        self.assertIn("already configured, credentials valid", result)
+
+
+class SingleLoginTest(_Base):
+    """Review fix 2: when the pre-fetch itself succeeded through an
+    authenticated session (web_enabled true, admin configured), no second
+    login POST may be sent."""
+
+    def test_no_redundant_login_when_prefetch_already_authenticated(self):
+        with unittest.mock.patch.object(wac, "get_auth_config", return_value=_ON_WITH_ADMIN), \
+             unittest.mock.patch.object(wac, "try_login") as login_mock:
+            result = msw.web_auth_setup(confirm=True)
+        login_mock.assert_not_called()
+        self.assertIn("already configured, credentials valid", result)
+        self.assertIn("no separate login was sent", result)
+
+    def test_login_still_used_when_admin_exists_but_auth_off(self):
+        """web_enabled false means the successful GET proved nothing about
+        the credential -- the explicit login check must still run."""
+        with unittest.mock.patch.object(wac, "get_auth_config", return_value=_OFF_WITH_ADMIN), \
+             unittest.mock.patch.object(wac, "try_login", return_value=True) as login_mock:
+            result = msw.web_auth_setup(confirm=True)
+        login_mock.assert_called_once()
         self.assertIn("already configured, credentials valid", result)
 
 
@@ -181,7 +256,8 @@ class OffBranchTest(_Base):
 
     def test_confirmed_sets_password_and_enables_auth(self):
         with unittest.mock.patch.object(
-                wac, "get_auth_config", side_effect=[_OFF_NO_ADMIN, _ON_WITH_ADMIN]), \
+                wac, "get_auth_config",
+                side_effect=[_OFF_NO_ADMIN, _OFF_WITH_ADMIN, _ON_WITH_ADMIN]), \
              unittest.mock.patch.object(wac, "post_security", return_value={"ok": True}) as post_mock:
             result = msw.web_auth_setup(confirm=True, enable_web_auth=True)
         self.assertEqual(post_mock.call_count, 2)
@@ -227,7 +303,8 @@ class OffBranchTest(_Base):
                 return {"ok": True}
             return {"ok": False, "error": "invalid transition"}
 
-        with unittest.mock.patch.object(wac, "get_auth_config", return_value=_OFF_NO_ADMIN), \
+        with unittest.mock.patch.object(
+                wac, "get_auth_config", side_effect=[_OFF_NO_ADMIN, _OFF_WITH_ADMIN]), \
              unittest.mock.patch.object(wac, "post_security", side_effect=fake_post):
             result = msw.web_auth_setup(confirm=True)
         self.assertIn("password set", result)
@@ -237,11 +314,39 @@ class OffBranchTest(_Base):
         """POST set_policy answers {"ok":true} but the read-back still
         shows web_enabled false -- must fail loud, not report success."""
         with unittest.mock.patch.object(
-                wac, "get_auth_config", side_effect=[_OFF_NO_ADMIN, _OFF_WITH_ADMIN]), \
+                wac, "get_auth_config",
+                side_effect=[_OFF_NO_ADMIN, _OFF_WITH_ADMIN, _OFF_WITH_ADMIN]), \
              unittest.mock.patch.object(wac, "post_security", return_value={"ok": True}):
             result = msw.web_auth_setup(confirm=True, enable_web_auth=True)
         self.assertIn("FAILED", result)
         self.assertNotIn("ok:", result)
+
+
+class ReadBackRefusalTest(_Base):
+    """Review fix 3: set_web_password reports ok:true but the read-back
+    before set_policy still shows admin_password_set false -- must refuse
+    to enable web auth and must never call set_policy."""
+
+    def test_refuses_set_policy_when_readback_shows_no_admin(self):
+        with unittest.mock.patch.object(
+                wac, "get_auth_config", side_effect=[_OFF_NO_ADMIN, _OFF_NO_ADMIN]), \
+             unittest.mock.patch.object(
+                 wac, "post_security", return_value={"ok": True}) as post_mock:
+            result = msw.web_auth_setup(confirm=True, enable_web_auth=True)
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertEqual(post_mock.call_args_list[0].args[1]["cmd"], "set_web_password")
+        self.assertIn("FAILED verification", result)
+        self.assertIn("refusing to enable web auth", result)
+
+    def test_readback_failure_itself_refuses_set_policy(self):
+        readback_err = wac.WebAuthSetupHttpError("board unreachable: timed out")
+        with unittest.mock.patch.object(
+                wac, "get_auth_config", side_effect=[_OFF_NO_ADMIN, readback_err]), \
+             unittest.mock.patch.object(
+                 wac, "post_security", return_value={"ok": True}) as post_mock:
+            result = msw.web_auth_setup(confirm=True, enable_web_auth=True)
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertIn("refusing to enable web auth", result)
 
 
 class NoSecretLeakTest(_Base):
