@@ -164,29 +164,45 @@ def git_short_head(repo_root: Path) -> Optional[str]:
 
 # The exact set of repo-relative paths gen_build_info.cmake scopes both its
 # `git log -1` (SAFTYFW_GIT_COMMIT) and its `git status --porcelain`
-# (SAFTYFW_GIT_DIRTY) to -- every tree the SaftyFW build actually compiles.
-# Kept as one list here, referenced by git_saftyfw_scoped_head() below.
-# stale_check.py's check_saftyfw_stale() project_dirs is a separately-
-# maintained, independently-typed copy of this same list (different
-# file/language), and firmware/SaftyFW/tools/gen_build_info.cmake is a third.
-# A drift test
+# (SAFTYFW_GIT_DIRTY) to -- the three hwAbstraction subdirectories the
+# SaftyFW build actually compiles from/includes (firmware/CommonFW's own
+# add_subdirectory() is the other tree), NOT firmware/hwAbstraction as a
+# whole: esp/, host/, idf/, test/ and README.md under hwAbstraction never
+# reach the Pico image (CMakeLists.txt:242-265 only builds
+# hwAbstraction/pico/* and hwAbstraction/common/hal_status.c, and only
+# includes from hwAbstraction/interface) -- a host- or esp-only edit under
+# hwAbstraction must NOT restamp SAFTYFW_GIT_COMMIT, and did spuriously
+# before this narrowing (review round 3, docs/PICO_AUTO_UPDATE_PLAN.md sec
+# 13: 33 of the last 62 hwAbstraction-only commits touched only those
+# unreached subtrees). Kept as one list here, referenced by
+# git_saftyfw_scoped_head() below. stale_check.py's check_saftyfw_stale()
+# project_dirs is a separately-maintained, independently-typed copy of this
+# same list (different file/language), and
+# firmware/SaftyFW/tools/gen_build_info.cmake is a third. A drift test
 # (test_pico_image_freshness.py::test_scoped_paths_match_cmake_and_stale_check)
 # regexes the cmake file and stale_check.py and fails loud if either copy
 # diverges from this one.
-SCOPED_PATHS = ("firmware/SaftyFW", "firmware/CommonFW", "firmware/hwAbstraction")
+SCOPED_PATHS = (
+    "firmware/SaftyFW",
+    "firmware/CommonFW",
+    "firmware/hwAbstraction/pico",
+    "firmware/hwAbstraction/common",
+    "firmware/hwAbstraction/interface",
+)
 
 
 def git_saftyfw_scoped_head(repo_root: Path) -> Optional[str]:
     """Mirrors gen_build_info.cmake's exact invocation as of the
-    hwAbstraction-scoping fix (docs/PICO_AUTO_UPDATE_PLAN.md sec 12): `git
+    hwAbstraction-narrowing fix (docs/PICO_AUTO_UPDATE_PLAN.md sec 13): `git
     log -1 --format=%h -- firmware/SaftyFW firmware/CommonFW
-    firmware/hwAbstraction` (SCOPED_PATHS above), run with WORKING_DIRECTORY
-    = the repo root (SaftyFW is NOT a submodule -- it shares this main
-    repo). This is the commit SAFTYFW_GIT_COMMIT (and therefore the
-    embedded saftyfw_image_identity_t.commit) actually holds -- a plain
-    `rev-parse --short HEAD` no longer matches it whenever a commit outside
-    these paths landed since. Returns None if git is unavailable or the
-    call fails, so callers can SKIP rather than crash."""
+    firmware/hwAbstraction/pico firmware/hwAbstraction/common
+    firmware/hwAbstraction/interface` (SCOPED_PATHS above), run with
+    WORKING_DIRECTORY = the repo root (SaftyFW is NOT a submodule -- it
+    shares this main repo). This is the commit SAFTYFW_GIT_COMMIT (and
+    therefore the embedded saftyfw_image_identity_t.commit) actually holds
+    -- a plain `rev-parse --short HEAD` no longer matches it whenever a
+    commit outside these paths landed since. Returns None if git is
+    unavailable or the call fails, so callers can SKIP rather than crash."""
     try:
         out = subprocess.run(
             ["git", "log", "-1", "--format=%h", "--", *SCOPED_PATHS],

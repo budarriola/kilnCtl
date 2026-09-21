@@ -30,26 +30,39 @@ set(commit "unknown")
 set(dirty "1")
 
 if(GIT_EXECUTABLE)
-    # Path-scoped to every tree this build actually compiles: firmware/SaftyFW
-    # (THIS_PROJECT_DIR), firmware/CommonFW (`add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW
-    # kilnlink)`), and firmware/hwAbstraction (`add_library(hwabstraction_pico ...)`,
-    # further down this same CMakeLists.txt, linked into every SaftyFW target)
-    # -- NOT `rev-parse --short HEAD` of the whole monorepo. A plain repo-wide
-    # HEAD changes on every commit anywhere in the tree -- including
-    # KilnFW-only commits that touch nothing SaftyFW reads -- so the boot-time
-    # identity comparison in pico_auto_update.h
-    # (firmware/KilnFW/.../pico_auto_update.h) saw a "mismatch" on every
-    # KilnFW flash and tried to reflash the Pico with a byte-identical image
-    # every time. `git log -1` over exactly the paths this build depends on
-    # only changes when one of them actually does. This exact three-path list
-    # is kept in sync in two other places -- see the drift test that enforces
-    # it (tools/PcTools/tests/test_pico_image_freshness.py::test_scoped_paths_match_cmake_and_stale_check):
+    # Path-scoped to every tree this build actually compiles or includes
+    # from: firmware/SaftyFW (THIS_PROJECT_DIR), firmware/CommonFW
+    # (`add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW kilnlink)`),
+    # and ONLY three subdirectories of firmware/hwAbstraction --
+    # hwAbstraction/pico (`add_library(hwabstraction_pico ...)`, further
+    # down this same CMakeLists.txt, linked into every SaftyFW target),
+    # hwAbstraction/common (hal_status.c, compiled into that same library),
+    # and hwAbstraction/interface (the headers that library's
+    # target_include_directories exposes) -- NOT firmware/hwAbstraction as a
+    # whole: esp/, host/, idf/, test/ and README.md live under that same
+    # directory but never reach the Pico image, and scoping to the whole
+    # directory made an edit to any of those spuriously restamp
+    # SAFTYFW_GIT_COMMIT (review round 3, docs/PICO_AUTO_UPDATE_PLAN.md sec
+    # 13: 33 of the last 62 hwAbstraction-only commits touched only those
+    # unreached subtrees). This is also NOT `rev-parse --short HEAD` of the
+    # whole monorepo. A plain repo-wide HEAD changes on every commit
+    # anywhere in the tree -- including KilnFW-only commits that touch
+    # nothing SaftyFW reads -- so the boot-time identity comparison in
+    # pico_auto_update.h (firmware/KilnFW/.../pico_auto_update.h) saw a
+    # "mismatch" on every KilnFW flash and tried to reflash the Pico with a
+    # byte-identical image every time. `git log -1` over exactly the paths
+    # this build depends on only changes when one of them actually does.
+    # This exact five-path list is kept in sync in two other places -- see
+    # the drift test that enforces it
+    # (tools/PcTools/tests/test_pico_image_freshness.py::test_scoped_paths_match_cmake_and_stale_check):
     #   tools/PcTools/src/kilnctrl/pico_image_freshness.py's SCOPED_PATHS
     #   tools/PcTools/src/kilnctrl/stale_check.py's check_saftyfw_stale() project_dirs
     set(_commonfw_dir "${PROJECT_ROOT}/firmware/CommonFW")
-    set(_hwabstraction_dir "${PROJECT_ROOT}/firmware/hwAbstraction")
+    set(_hwabstraction_pico_dir "${PROJECT_ROOT}/firmware/hwAbstraction/pico")
+    set(_hwabstraction_common_dir "${PROJECT_ROOT}/firmware/hwAbstraction/common")
+    set(_hwabstraction_interface_dir "${PROJECT_ROOT}/firmware/hwAbstraction/interface")
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} log -1 --format=%h -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_dir}"
+        COMMAND ${GIT_EXECUTABLE} log -1 --format=%h -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_pico_dir}" "${_hwabstraction_common_dir}" "${_hwabstraction_interface_dir}"
         WORKING_DIRECTORY ${PROJECT_ROOT}
         OUTPUT_VARIABLE commit_out
         OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -60,7 +73,7 @@ if(GIT_EXECUTABLE)
         set(commit ${commit_out})
     endif()
 
-    # Dirty flag scoped to the SAME three paths as the commit above (it used
+    # Dirty flag scoped to the SAME five paths as the commit above (it used
     # to be scoped to THIS_PROJECT_DIR alone, under-covering CommonFW and
     # hwAbstraction relative to what the commit field claims as inputs -- a
     # CommonFW/hwAbstraction-only uncommitted edit would silently not mark
@@ -69,7 +82,7 @@ if(GIT_EXECUTABLE)
     # SaftyFW's own build as dirty. Matches KilnFW's gen_build_info.cmake,
     # same rationale.
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} status --porcelain -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_dir}"
+        COMMAND ${GIT_EXECUTABLE} status --porcelain -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_pico_dir}" "${_hwabstraction_common_dir}" "${_hwabstraction_interface_dir}"
         WORKING_DIRECTORY ${PROJECT_ROOT}
         OUTPUT_VARIABLE status_out
         OUTPUT_STRIP_TRAILING_WHITESPACE
