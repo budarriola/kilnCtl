@@ -213,14 +213,14 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Dashboard poll (page load) | `GET /api/status` | OPEN | `get_board_state` (superset) | Home page | Testable | PASS 2026-09-21 (A1) |
+| Dashboard poll (page load) | `GET /api/status` | OPEN | `get_board_state` (superset) | Home page | Testable | PASS 2026-09-21 (A1); PASS 2026-09-21 (W2, first live web_commission_row.py run, see BENCH_TEST_LOG web-interface class section) |
 | Start firing | `POST /api/profile_exec/start` | USER | `profiles_start` | Home "Start" / profile picker | Testable (bench load) | PASS 2026-09-21 (C11, owner-authorized: E-stop verified via C5, throwaway low-temp profile M18C_TEST started, "ok - firing #0"; stopped via profiles_stop() before hand-back) |
 | Stop firing | `POST /api/profile_exec/stop` | SAFETY_REDUCE | `profiles_stop` | Home stop control | Testable | |
 | Pause firing | `POST /api/profile_exec/pause` | USER | `profiles_pause` | -- | Testable | PASS 2026-09-21 (C12: paused, state=2, all zones relay=off duty=0.00 confirmed via profiles_get_exec_status) |
 | Resume firing | `POST /api/profile_exec/resume` | USER | `profiles_resume` | -- | Testable | PASS 2026-09-21 (C12: resumed cleanly, "ok - resumed") |
-| Dismiss last run (`ackLastRunBtn`) | `POST /api/profile_exec/ack_last_run` | USER | `profiles_ack_last_run` | -- | Testable | |
-| Clear Trip (`clearTripBtn`) | `POST /api/safety/clear_trip` | ADMIN | `safety_clear_trip` | Safety page clear-trip | Testable (bench can trip S6a) | |
-| PID popup: Use these / Apply (`pidPopupUseProposed`/`pidPopupApplyBtn`) | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | |
+| Dismiss last run (`ackLastRunBtn`) | `POST /api/profile_exec/ack_last_run` | USER | `profiles_ack_last_run` | -- | Testable | FAIL-EXPECTED 2026-09-21 (web_commission_row.py W3, live CDP: button not in DOM -- no last-run banner condition on this bench right now, JS only injects it when one exists; see BENCH_TEST_LOG) |
+| Clear Trip (`clearTripBtn`) | `POST /api/safety/clear_trip` | ADMIN | `safety_clear_trip` | Safety page clear-trip | Testable (bench can trip S6a) | FAIL-EXPECTED 2026-09-21 (web_commission_row.py W4, live CDP: button not in DOM -- no trip latched, confirmed via safety_get_status beforehand; see BENCH_TEST_LOG) |
+| PID popup: Use these / Apply (`pidPopupUseProposed`/`pidPopupApplyBtn`) | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | NOT RUN 2026-09-21 (W5 deliberately deferred: driver can't click `pidPopupUseProposed` first, cold Apply risked writing empty/stale gains; see BENCH_TEST_LOG) |
 | Profile feasibility icon / popup Proceed anyway | reads `GET /api/profile_plan` | OPEN | none (facade has no feasibility-specific tool; use `get_board_state`/plan reads) | -- | Testable | PASS 2026-09-21 (A5) |
 | Relay-life icon | reads status fields | OPEN | none | -- | Testable | |
 | Theme toggle (`themeBtn`, every page) | client-side only, no route | -- | none | -- | Testable | |
@@ -232,7 +232,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / list | `GET /api/profiles`, `GET /api/profiles/builtin`, `GET /api/profiles/favorites` | USER | `profiles_list` | "profiles" / "profile_picker" / "profiles_builtin_list" pages | Testable | PASS 2026-09-21 (A9; web /profiles page load) |
+| Page load / list | `GET /api/profiles`, `GET /api/profiles/builtin`, `GET /api/profiles/favorites` | USER | `profiles_list` | "profiles" / "profile_picker" / "profiles_builtin_list" pages | Testable | PASS 2026-09-21 (A9; web /profiles page load); PASS 2026-09-21 (W7, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Save profile (`saveBtn`) | `POST /api/profile` | ADMIN | `profiles_save` | Profile builder review save | Testable | |
 | New (`newBtn`) | client-side form reset, then Save | -- | -- | -- | Testable | |
 | Import (`importBtn`) | `POST /api/profile/import` | ADMIN | none (facade has no import wrapper; use raw HTTP) | -- | Testable | |
@@ -259,8 +259,8 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | PASS 2026-09-21 (A8/A11; web /settings/zones page load) |
-| Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | PASS 2026-09-21 (B4/B6: form shape established from source and exercised on hardware -- GET-merge-POST via `zones_http_client.py`, exact shape recorded in `docs/COMMISSIONING_BACKEND_RUNBOOK.md`'s B4 row; round-trip test changed only `zones[0].name`, confirmed byte-identical elsewhere including after restore, `zones_config_valid`/`load_fault` unchanged, no reboot -- see `docs/BENCH_TEST_LOG.md`'s dated M18 B6 section) |
+| Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | PASS 2026-09-21 (A8/A11; web /settings/zones page load); PASS 2026-09-21 (W15, web_commission_row.py live run) |
+| Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | PASS 2026-09-21 (B4/B6: form shape established from source and exercised on hardware -- GET-merge-POST via `zones_http_client.py`, exact shape recorded in `docs/COMMISSIONING_BACKEND_RUNBOOK.md`'s B4 row; round-trip test changed only `zones[0].name`, confirmed byte-identical elsewhere including after restore, `zones_config_valid`/`load_fault` unchanged, no reboot -- see `docs/BENCH_TEST_LOG.md`'s dated M18 B6 section); PASS 2026-09-21 (W16, live CDP click on the real `saveBtn` via web_commission_row.py -- no form-fill primitive yet so this resubmitted unchanged values, `GET /api/zones` 200; see BENCH_TEST_LOG web-interface class section) |
 | PID save | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | PASS 2026-09-21 (B3, flagged anomaly: writing identical gains still invalidated `tuning_valid`, see log; B10 same-value round trip confirmed by read-back) |
 | Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | PASS 2026-09-21 (C1/C9: sweep started, polled to completion, drained; all zones reported "unmeasured" as expected -- fixture current sits below the 0.045A noise floor) |
 | Abort sweep (`sweepAbortBtn`) | `POST /api/zones/current_sweep/abort` | SAFETY_REDUCE | `zone_current_sweep_abort` | -- | Testable (abort path itself, even if the sweep's numbers are meaningless on bench) | |
@@ -280,21 +280,21 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/safety/rate_guard/auto` | ADMIN | `safety_get_rate_guard` | Home safety/temperature page has read-only status only | Testable | PASS 2026-09-21 (A19; web /settings/safety page load) |
+| Page load | `GET /api/safety/rate_guard/auto` | ADMIN | `safety_get_rate_guard` | Home safety/temperature page has read-only status only | Testable | PASS 2026-09-21 (A19; web /settings/safety page load); PASS 2026-09-21 (W21, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Save (`save`) | `POST /api/safety/rate_guard/auto` | ADMIN | `safety_set_rate_guard` | -- | Testable | BLOCKED 2026-09-21 (B8: relay ARMED, write staged not committed; would need an unauthorized Pico reset to open the write-grace window, value confirmed unchanged) |
 
 ### `/safety` -- safety status (`safety_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | reads `GET /api/status` safety fields | OPEN | `safety_get_status` | Home page safety banner | Testable | PASS 2026-09-21 (A20; web /safety page load) |
+| Page load | reads `GET /api/status` safety fields | OPEN | `safety_get_status` | Home page safety banner | Testable | PASS 2026-09-21 (A20; web /safety page load); PASS 2026-09-21 (W23, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Clear latched trip (`clearTripBtn`) + confirm dialog (`confirmYes`/`confirmNo`) | `POST /api/safety/clear_trip` | ADMIN | `safety_clear_trip` | -- | Testable (E-stop jumper fitted means S3/estop trips are not reachable this way on bench; S6a mainFault from a dual reflash is, per CLAUDE.md) | |
 
 ### `/safety/commissioning` -- guarded-value commissioning wizard (`safety_commissioning_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/safety/commissioning` | ADMIN | `safety_get_commissioning` | -- | Testable | PASS 2026-09-21 (A21; web /safety/commissioning page load) |
+| Page load | `GET /api/safety/commissioning` | ADMIN | `safety_get_commissioning` | -- | Testable | PASS 2026-09-21 (A21; web /safety/commissioning page load); PASS 2026-09-21 (W25, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Wizard Start/Next/Back (`gStartBtn`, `gGoto`) | client-side only | -- | -- | -- | Testable | |
 | Stage & commit (`gCommitBtn`, `saveBtn`) | `POST /api/safety/commissioning` | ADMIN | `safety_set_commissioning_fields` | -- | Testable | PASS 2026-09-21 (C17/C19: this session was owner-authorized to reset the Pico to open the GRACE window; ct_cal commit succeeded with no-op values ch=2,a_fs=1,zero_mv=71 -- persisted true -- on the second reset after the first window expired between rows) |
 | Apply test preset (`benchBtn`, dev-only, hidden by default) | `POST /api/safety/commissioning/bench_preset` | ADMIN | none direct | -- | Testable -- this is literally the bench-values preset button | BLOCKED 2026-09-21 (C18: 404 -- GET /api/safety/commissioning shows dev_tools_enabled:false; handler compiled out behind CONFIG_KILNCTL_DEV_TOOLS on this board's build, a build-config limitation not a GRACE-window issue) |
@@ -307,10 +307,10 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / thermo faults | `GET /api/thermo/faults` | ADMIN | `thermo_read_faults` | "diagnostics" LCD page | Testable | PASS 2026-09-21 (A22; web /diagnostics page load) |
+| Page load / thermo faults | `GET /api/thermo/faults` | ADMIN | `thermo_read_faults` | "diagnostics" LCD page | Testable | PASS 2026-09-21 (A22; web /diagnostics page load); PASS 2026-09-21 (W28, web_commission_row.py live run) |
 | Crash report banner + Acknowledge (`crashAckBtn`) | `GET /api/crash_report`, `POST /api/crash_report/ack` | ADMIN | `crash_report_ack` | -- | Testable | N/A 2026-09-21 (C21/C22: no crash report pending at session start, correctly not exercised) |
 | Clear crash log (`crashClearBtn`) | `POST /api/crash_report/clear` | ADMIN | none direct | -- | Testable | |
-| Watchdog PANIC toggle (`wdPanicToggleBtn`) | `GET`/`POST /api/watchdog_cfg` | ADMIN | `get_watchdog_panic_disabled`/`set_watchdog_panic_disabled` | -- | Testable but disruptive -- disabling PANIC masks real overflow-class crashes; use deliberately | PASS 2026-09-21 (A24 (GET only; toggle not exercised)) |
+| Watchdog PANIC toggle (`wdPanicToggleBtn`) | `GET`/`POST /api/watchdog_cfg` | ADMIN | `get_watchdog_panic_disabled`/`set_watchdog_panic_disabled` | -- | Testable but disruptive -- disabling PANIC masks real overflow-class crashes; use deliberately | PASS 2026-09-21 (A24 (GET only; toggle not exercised)); FAIL 2026-09-21 (W30, live CDP: found and fixed a real web_commission_row.py/`_web_commission_cdp.mjs` defect -- the click opens a native `window.confirm()` via `kcConfirm()` that the driver had no dialog handling for, hanging 20s; fixed by auto-accepting `Page.javascriptDialogOpening`. Still not a clean PASS: the resulting async POST races the driver's fixed post-click wait and teardown and never lands -- `panic_disabled` confirmed unchanged (false) before and after via both the read-back and a separate `get_watchdog_panic_disabled` call. See BENCH_TEST_LOG for full defect writeup) |
 | Ramp-assist toggle (`rampAssistToggleBtn`) | `GET`/`POST /api/ramp_assist` | ADMIN | `ramp_assist_*` | -- | Testable | |
 | Enter Danger Mode (`dangerEnterBtn`) | `POST /api/diagnostics/danger/enable` | ADMIN | none direct | -- | **Hardware-gated**: explicit purpose is driving relays outside the normal safety-gated path -- exercise only with the bench fixture's 4 W load, never near a real element |
 | Per-relay danger control (`dangerRelayBtn<N>`, `dangerFiringBtn`) | `POST /api/diagnostics/danger/relay` | ADMIN | none direct (`io_set_relay`/`io_set_relay_mask` are the lower-level equivalents) | -- | **Hardware-gated** (same reason) | |
@@ -342,7 +342,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/settings/display_power` | ADMIN | none direct | LCD screen-idle/timeout behavior (`screen_idle.c`) | Testable | PASS 2026-09-21 (A41; web /settings/display page load) |
+| Page load | `GET /api/settings/display_power` | ADMIN | none direct | LCD screen-idle/timeout behavior (`screen_idle.c`) | Testable | PASS 2026-09-21 (A41; web /settings/display page load); PASS 2026-09-21 (W37, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Save (`kcDpSave`) | `POST /api/settings/display_power` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B24) |
 | Unit preference (temp C/F, submitted from main page, not this page) | `POST /api/unit_pref` | ADMIN | none direct | Home page unit toggle | Testable | PASS 2026-09-21 (B25) |
 
@@ -350,17 +350,17 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/auth/config` | ADMIN | none direct | -- (no LCD credentials editor) | Testable | PASS 2026-09-21 (A39; web /settings/security page load) |
+| Page load | `GET /api/auth/config` | ADMIN | none direct | -- (no LCD credentials editor) | Testable | PASS 2026-09-21 (A39; web /settings/security page load); PASS 2026-09-21 (W39, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Save administrator/user password, admin/user PIN, policy (`kcSecAdminPwSave` etc.), Clear login credentials (`kcSecClearCreds`) | `POST /api/auth/security` | ADMIN | none direct | -- | Testable -- see `project_web_auth_verified_and_blinds_pctools`: enabling auth policy blinds PcTools clients until they log in, plan the session accordingly | PASS 2026-09-21 (B26, unmodified set_policy round trip; C16, `cmd=set_web_password` re-set to the same env-var value via raw form POST -- `web_auth_setup` MCP tool has no "re-affirm current credential" path, worked around, see log) |
 | Bootstrap admin password (first-run, `login_page.html`'s "Set password" form) | `POST /api/auth/bootstrap_password` | ADMIN_BOOTSTRAP | none direct | -- | Testable | |
-| Log in (`login_page.html`) | `POST /api/auth/login` | OPEN | none direct | -- | Testable; see `project_login_latency_measured_4s` and `project_owner_decisions_2026_09_21_login` for expected latency/lockout behavior -- never iterate logins | PASS 2026-09-21 (web UI sweep, real login POST /api/auth/login 200) |
+| Log in (`login_page.html`) | `POST /api/auth/login` | OPEN | none direct | -- | Testable; see `project_login_latency_measured_4s` and `project_owner_decisions_2026_09_21_login` for expected latency/lockout behavior -- never iterate logins | PASS 2026-09-21 (web UI sweep, real login POST /api/auth/login 200); PASS 2026-09-21 (W1, first web_commission_row.py live run, one login reused across the whole class -- see BENCH_TEST_LOG) |
 | Session status poll / extend | `GET /api/auth/session`, `POST /api/auth/session/extend` | OPEN / USER | none direct | -- | Testable | PASS 2026-09-21 (A40 poll; B29 extend) |
 
 ### `/settings/kiln_configs` -- config presets (`kiln_configs_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | PASS 2026-09-21 (web /settings/kiln_configs page load) |
+| Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | PASS 2026-09-21 (web /settings/kiln_configs page load); PASS 2026-09-21 (W41, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Apply (`kcApplyBtn`) | `POST /api/kiln_configs/apply` | ADMIN | `load_config_preset`/`capability_preflight_check` (facade presets are file-based, not identical to these board-stored slots) | -- | Testable | N-A 2026-09-21 (B18: board reports zero existing config slots to round-trip against) |
 | Apply status poll | `GET /api/kiln_configs/apply_status` | USER | none direct | -- | Testable | PASS 2026-09-21 (A33) |
 | Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, after `kiln_configs_quarantine_clear`; form-urlencoded body, field `name`) |
@@ -375,14 +375,14 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / Export (implicit download link) | `GET /api/backup/export` | ADMIN | none direct | -- | Testable -- see `project_backup_round_trip_coverage`, only the Wi-Fi password is irreducible across a round trip | PASS 2026-09-21 (A34 (export fetched, not re-imported); web /settings/backup page load) |
+| Page load / Export (implicit download link) | `GET /api/backup/export` | ADMIN | none direct | -- | Testable -- see `project_backup_round_trip_coverage`, only the Wi-Fi password is irreducible across a round trip | PASS 2026-09-21 (A34 (export fetched, not re-imported); web /settings/backup page load); PASS 2026-09-21 (W43, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Restore from file (`restoreBtn`) | `POST /api/backup/import` | ADMIN | none direct | -- | Testable | |
 
 ### `/ota` -- firmware update (`ota_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / interlock status | `GET /api/ota/interlock`, `GET /api/ota/esp/status`, `GET /api/ota/pico/status` | ADMIN / OPEN(esp status) / ADMIN(pico status) | `ota_status` | -- (no LCD OTA UI) | Testable | PASS 2026-09-21 (A35; web /ota page load) |
+| Page load / interlock status | `GET /api/ota/interlock`, `GET /api/ota/esp/status`, `GET /api/ota/pico/status` | ADMIN / OPEN(esp status) / ADMIN(pico status) | `ota_status` | -- (no LCD OTA UI) | Testable | PASS 2026-09-21 (A35; web /ota page load); PASS 2026-09-21 (W46, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Update ESP (`espUpdateBtn`) | `GET /api/ota/challenge` then `POST /api/ota/esp` | OPEN then ADMIN | `ota_get_challenge`, `ota_update_esp` | -- | Testable, but CLAUDE.md's sanctioned path for a real flash is `flash_firmware()` (JTAG/OpenOCD) -- this route is the Wi-Fi OTA path, a different mechanism, both worth exercising | FAIL 2026-09-21 (C7, M18 carve-out: `esp_ota_begin failed: ESP_ERR_OTA_PARTITION_CONFLICT`, HTTP 500 -- the single-slot partition table has only one `ota_x` slot (`app`), and the board is running it, so `esp_ota_get_next_update_partition()` returns the running partition itself and ESP-IDF refuses to begin; every Wi-Fi OTA will hit this while running `app`. No reboot, `fw_build` unchanged) |
 | Roll back ESP (`espRollbackBtn`) | `POST /api/ota/esp/rollback` | ADMIN | `ota_rollback_esp` | -- | Testable; mind the `zones_cfg` schema-bump rollback hazard in CLAUDE.md | FAIL 2026-09-21 (C23, M18 carve-out: HTTP 409 "no previous valid image to roll back to", expected since C7 never wrote an image; `control_get_zones` read back unchanged/tuned) |
 | Exit recovery mode & reboot now (`recoveryExitBtn`) | `POST /api/ota/esp/recovery_exit` | ADMIN | `ota_recovery_exit_esp` | -- | Testable only while actually in recovery mode | |
@@ -397,13 +397,13 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load (no buttons besides theme) | `GET /api/readiness` | OPEN | none direct (`capability_preflight_check` is the nearest facade equivalent, board-agnostic) | -- | Testable | PASS 2026-09-21 (A2; web /readiness page load) |
+| Page load (no buttons besides theme) | `GET /api/readiness` | OPEN | none direct (`capability_preflight_check` is the nearest facade equivalent, board-agnostic) | -- | Testable | PASS 2026-09-21 (A2; web /readiness page load); PASS 2026-09-21 (W48, web_commission_row.py live run) |
 
 ### `/setup` -- first-run setup wizard (`setup_wizard_page.html`)
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load / progress | `GET /api/setup/progress` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A42; web /setup page load) |
+| Page load / progress | `GET /api/setup/progress` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A42; web /setup page load); PASS 2026-09-21 (W49, driven by hand through web_commission_row.py's CDP path, no Row() entry yet -- see BENCH_TEST_LOG) |
 | Resume where left off (`resumeBtn`) / Refresh (`loadAll`) / step navigation (`stepgo`) | client-side + `GET /api/setup/progress` | ADMIN | -- | -- | Testable | |
 | Step Save & mark done buttons (`step0Continue`..`step6Save`) | `POST /api/setup/progress` (+ underlying config routes: zones, safety, security depending on step) | ADMIN | matches whichever underlying group the step edits | -- | Testable | |
 | Apply channel/relay count (`s2rebuild`/`s5rebuild`) | `POST /api/zones` (channel/relay count fields) | ADMIN | none direct | -- | Testable | |

@@ -245,21 +245,37 @@ def _get_json_with_cookie(host: str, path: str, cookie: str, timeout: float = 5.
 
 
 def run_row_live(row_id: str, host: str, screenshot_dir: str,
-                  find_chrome: Optional[Callable[[], str]] = None) -> "tuple[bool, str]":
-    """Live mode: log in once, drive headless Chrome over CDP against the
-    real board, click the row's control, screenshot, then GET the row's
+                  find_chrome: Optional[Callable[[], str]] = None,
+                  cookie: Optional[str] = None) -> "tuple[bool, str]":
+    """Live mode: drive headless Chrome over CDP against the real board,
+    click the row's control, screenshot, then GET the row's
     ``verify_endpoint`` (when it has one) so the caller can compare the
     read-back against the expected outcome. This function contacts the
     board and must never be called by this task's own tests -- see
     cases_web_rw.py's ctx-injection convention for how a caller can fake
     the transport in a unit test instead of hitting a real board.
+
+    ``cookie``, when supplied, is reused as-is and no login is performed --
+    this lets a caller running an entire class of rows in one process log in
+    exactly ONCE (per docs/agent_rules/BENCH.md's "one login attempt" rule)
+    and pass the resulting session cookie into every row instead of this
+    function re-logging in per row, which is what the original
+    implementation always did (a defect found running the first live class
+    sweep: N rows meant N logins, risking the login lockout ladder in
+    project_owner_decisions_2026_09_21_login for no reason -- one CDP
+    session per row already needs its own cookie value, but obtaining that
+    value doesn't require a fresh HTTP login each time). When ``cookie`` is
+    omitted, the pre-existing single-row behavior (log in, then run) is
+    unchanged so a lone caller of this function keeps working exactly as
+    before.
     """
     row = ROWS.get(row_id)
     if row is None:
         return False, f"unknown row id {row_id!r}"
     validate_selector(row)  # fail fast on a stale selector before touching the board
-    user, password = _read_credentials()
-    cookie = _login_once(host, user, password)
+    if cookie is None:
+        user, password = _read_credentials()
+        cookie = _login_once(host, user, password)
     os.makedirs(screenshot_dir, exist_ok=True)
     # The actual CDP navigate/click/screenshot sequence reuses the Node CDP
     # session helper already reviewed for this repo
@@ -318,6 +334,12 @@ def main(argv=None) -> int:
     ap.add_argument("--host", default=os.environ.get("KILNCTL_BOARD_HOST", ""),
                      help="board host:port, live mode only")
     ap.add_argument("--screenshot-dir", default=os.path.join(_repo_root(), "logs", "web_commission"))
+    ap.add_argument("--cookie", default=os.environ.get("KC_REUSE_SID"),
+                     help="reuse an already-obtained session cookie instead of logging in "
+                          "again (for a multi-row class run doing exactly one login; see "
+                          "run_row_live()'s docstring). Read from KC_REUSE_SID if not given "
+                          "explicitly; never pass a cookie value as a literal CLI token from "
+                          "a shared shell history.")
     args = ap.parse_args(argv)
 
     if args.dry_run:
@@ -326,7 +348,7 @@ def main(argv=None) -> int:
         if not args.host:
             print("live mode requires --host (or KILNCTL_BOARD_HOST)", file=sys.stderr)
             return 2
-        ok, msg = run_row_live(args.row_id, args.host, args.screenshot_dir)
+        ok, msg = run_row_live(args.row_id, args.host, args.screenshot_dir, cookie=args.cookie)
 
     print(("PASS: " if ok else "FAIL: ") + msg)
     return 0 if ok else 1

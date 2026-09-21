@@ -131,6 +131,50 @@ def test_run_row_live_passes_on_clean_readback(monkeypatch):
     assert "PASS" in msg
 
 
+def test_run_row_live_reuses_supplied_cookie_without_logging_in(monkeypatch):
+    # Defect found running the first live class sweep: run_row_live() always
+    # called _login_once, so running N rows in a class meant N logins --
+    # against docs/agent_rules/BENCH.md's one-login-per-run rule and the
+    # login lockout ladder. A caller running a whole class must be able to
+    # log in once and pass the cookie into every row.
+    def _boom(*a, **k):  # pragma: no cover - must never be called
+        raise AssertionError("_login_once must not be called when a cookie is supplied")
+
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", _boom)
+    monkeypatch.setattr(wcr, "_login_once", _boom)
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    ok, msg = wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever", cookie="reused-cookie")
+
+    assert ok, msg
+    assert captured["env"]["KC_SID"] == "reused-cookie"
+
+
+def test_run_row_live_still_logs_in_when_no_cookie_supplied(monkeypatch):
+    # Backward-compat: a lone caller (no cookie argument) keeps the original
+    # single-row behavior of logging in itself.
+    calls = []
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: calls.append(1) or "fresh-cookie")
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever")
+    assert ok, msg
+    assert calls == [1]
+
+
 def test_run_row_live_passes_minimal_env_to_child(monkeypatch):
     # Advisory fix: only KC_SID plus a minimal allowlist should reach the
     # Chrome child, not this process's full environment.

@@ -2893,6 +2893,39 @@ Owner instruction, 2026-09-21.
   stale premise. Remaining: C1/C9, C6, C16 for a follow-up session; C7/C8/
   C21/C22/C23/C24/C26 need an owner ruling on the authorization conflict
   before any future attempt.
+- **M18 web-interface class, first LIVE run, 2026-09-21**: ran
+  `web_commission_row.py` (`tools/PcTools/src/kilnctrl/web_commission_row.py`)
+  in live mode against the real board for the first time — previously only
+  exercised by its own pytest suite. One login only, cookie reused for the
+  whole class. All 12 wired rows run (W1/W2/W6/W15/W16/W28/W48 PASS; W3/W4
+  FAIL-EXPECTED — no last-run/trip state to act on; W5/W29 skipped, both
+  real writes with no safe restore path or forbidden by rule; W30 found a
+  real driver defect — see below). Also drove 10 additional read-only
+  page-load rows by hand through the same CDP path ahead of their `Row()`
+  entries being added (W7/W21/W23/W25/W37/W39/W41/W43/W46/W49), all PASS.
+  Two driver defects found and fixed in this run: (1) `run_row_live()`
+  logged in on every call — a class-wide sweep would have logged in once
+  per row, against the one-login rule; added an optional `cookie` parameter
+  so a caller can log in once and reuse it (new tests in
+  `test_web_commission_row.py`). (2) `_web_commission_cdp.mjs` had no
+  handling for native `window.confirm()` dialogs, which several controls
+  route through (`app.js`'s `kcConfirm` is literally `window.confirm`) —
+  the click's `Runtime.evaluate` hung for the full 20 s timeout with the
+  renderer frozen on the dialog. Fixed by auto-accepting
+  `Page.javascriptDialogOpening`. Left as a known follow-up: even with the
+  dialog fixed, W30's actual write (`POST /api/watchdog_cfg`) still loses a
+  race against the script's fixed post-click wait and immediate Chrome
+  teardown, so the value never lands (confirmed unchanged via read-back) —
+  a real fix needs the script to wait on the specific request's
+  `Network.loadingFinished` instead of a fixed sleep. No board defect
+  found; uptime rose monotonically with no trip/reboot/firing throughout.
+  Full detail, per-row evidence, and defect writeups:
+  `docs/BENCH_TEST_LOG.md`'s "M18 web-interface class, first LIVE run"
+  section; matrix rows annotated in `docs/COMMISSIONING_TEST_MATRIX.md`.
+  Remaining: the 10 by-hand page-load rows above still have no `Row()`
+  entry in `web_commission_row.py` (ROWS only covers 12 of 51 runbook
+  rows); the remaining ~29 unwired rows are write/owner-gated rows not
+  attempted this session.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at

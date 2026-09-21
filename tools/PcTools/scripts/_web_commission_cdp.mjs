@@ -133,6 +133,24 @@ class CdpSession {
         this.pending.delete(msg.id);
         if (msg.error) reject(new Error(JSON.stringify(msg.error)));
         else resolve(msg.result);
+      } else if (msg.method === 'Page.javascriptDialogOpening') {
+        // Defect found running the first live class sweep: several controls
+        // (e.g. diagnostics_page.html's watchdog-panic toggle, main_page.html's
+        // clear-trip confirm) route through app.js's window.kcConfirm(), which
+        // today is literally window.confirm() -- a native, renderer-blocking
+        // dialog. Without this handler, the click's Runtime.evaluate never
+        // returns (the renderer thread is frozen waiting on the dialog) and
+        // every such row hangs for the full CDP_CALL_TIMEOUT_MS before
+        // failing, never actually completing or rejecting the action.
+        // Auto-accepting (never auto-dismissing) matches a human operator who
+        // intends the click's action to proceed -- this script is only ever
+        // invoked for one already-authorized row at a time, never as a blind
+        // sweep, so the underlying action itself is not this fix's concern.
+        this.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {
+          /* best effort -- if this races the page/context going away, the
+             row's own error handling (selector-not-found / timeout) still
+             surfaces the underlying problem */
+        });
       }
     });
   }
