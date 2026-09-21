@@ -320,7 +320,11 @@ def test_w31_gets_accept_dialogs_and_expect_post_flags(monkeypatch):
     assert captured["cmd"][captured["cmd"].index("--expect-post") + 1] == "/api/ramp_assist"
 
 
-@pytest.mark.parametrize("row_id", _NEW_READ_ONLY_ROWS[:3])
+# All ten, not a [:3] sample: the flag is derived per row from that row's
+# own classification, so sampling three of ten would leave seven rows'
+# dialog policy unchecked for no saving worth having (each case is one
+# mocked subprocess.run, no board, no browser).
+@pytest.mark.parametrize("row_id", _NEW_READ_ONLY_ROWS)
 def test_new_read_only_rows_get_no_dialog_flag_via_capture(monkeypatch, row_id):
     captured = _capture_cmd(monkeypatch, row_id)
     assert "--accept-dialogs" not in captured["cmd"]

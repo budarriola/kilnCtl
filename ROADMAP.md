@@ -2962,7 +2962,7 @@ Owner instruction, 2026-09-21.
   click on a stable id with no text entry, `expect_post="/api/ramp_assist"`,
   same restore-before-leaving shape as W30), now have `Row()` entries in
   `web_commission_row.py`, each with its own unit test in
-  `test_web_commission_row.py` (66 tests passing, up from 41). `ROWS` now
+  `test_web_commission_row.py` (73 tests passing, up from 41). `ROWS` now
   covers 23 of 51 runbook rows. Remaining unwired rows all need in-page
   text entry the CDP driver cannot do (click-and-screenshot only, no form
   fill) or are owner-gated/destructive: W8/W9/W10 (profile

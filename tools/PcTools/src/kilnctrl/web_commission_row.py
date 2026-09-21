@@ -141,7 +141,15 @@ ROWS: "dict[str, Row]" = {
               verify_endpoint="/api/profiles"),
     "W21": Row("W21", "/settings/safety", "firmware/KilnFW/App/drivers/http/safety_config_page.html",
                "", "page", "load the settings/safety page",
-               "rate-guard fields render",
+               # The runbook row says "rate-guard fields render"; the page is
+               # actually titled "Safety timings" and renders guard TIMING
+               # fields from GET /api/zones -- the rate/limit fields live on
+               # /settings/zones (safety_config_page.html says so in its own
+               # intro paragraph). Described here as what the page really
+               # shows so an operator does not grade this row against fields
+               # that are on a different page. verify_endpoint is kept as the
+               # matrix's paired read-back for this row.
+               "safety timing profile/zone timing fields render",
                "read-only", "safety_get_rate_guard matches",
                verify_endpoint="/api/safety/rate_guard/auto"),
     "W23": Row("W23", "/safety", "firmware/KilnFW/App/drivers/http/safety_page.html",
@@ -206,8 +214,15 @@ ROWS: "dict[str, Row]" = {
                verify_endpoint="/api/readiness"),
     "W49": Row("W49", "/setup", "firmware/KilnFW/App/drivers/http/setup_wizard_page.html",
                "", "page", "load the setup wizard page",
-               "wizard start step renders, no route hit (client-side)",
-               "read-only", "none -- client-side only, no route to read back"),
+               # The runbook row is "Start/Next/Back navigation"; this Row()
+               # covers the page load only (the CDP driver clicks one named
+               # id, not a multi-step sequence). The runbook's "no route hit"
+               # refers to the STEP navigation being client-side -- the page
+               # load itself does fetch /api/setup/progress and friends --
+               # so there is still no single endpoint that reads back the
+               # step change, hence no verify_endpoint.
+               "wizard start step renders; step navigation is client-side",
+               "read-only", "none -- step navigation is client-side, no route to read back"),
 }
 
 
