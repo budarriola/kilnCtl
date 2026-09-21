@@ -338,6 +338,30 @@ static uint32_t now_ms(void)
     return (uint32_t)hal_time_now_ms();
 }
 
+// Human-readable scope label for the 429 log line only, derived from the
+// already-resolved slot -- never re-classifies or re-reads the STA ip/netmask
+// cache (Finding 4's "a refused attempt makes at most one non-blocking cache
+// read" invariant, enforced by test_refused_login_makes_no_extra_sta_ip_netmask_calls(),
+// must hold here too). `slot_ip` is NULL when login_backoff_slot_for()
+// returned NULL (the LOCAL table saturated with other IPs' locks -- see
+// login_lockout_slot_for()'s header comment); REMOTE and UNKNOWN scope share
+// one slot keyed "*remote*" and are not distinguished here, which is fine
+// since this line is diagnostic only, never security-relevant (the response
+// itself stays scope-blind, see login_post_handler()'s 429 site for why).
+static const char *login_scope_label_for_log(const char *ip, bool ip_known, const char *slot_ip)
+{
+    if (!ip_known) {
+        return "UNKNOWN";
+    }
+    if (slot_ip == NULL) {
+        return "LOCAL(saturated)";
+    }
+    if (strcmp(slot_ip, ip) == 0) {
+        return "LOCAL";
+    }
+    return "REMOTE";
+}
+
 static esp_err_t login_page_get_handler(httpd_req_t *req)
 {
     if (!web_client_accepts_gzip(req)) {
@@ -360,10 +384,16 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     bool ip_known = ota_http_get_client_ip_checked(req, ip, sizeof(ip));
 
     bool locked = false;
+    bool have_slot_ip = false;
+    char slot_ip_snapshot[46] = { 0 };
     uint32_t retry_after_ms = 0;
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         uint32_t now = now_ms();
         login_lockout_slot_t *slot = login_backoff_slot_for(ip, ip_known, now);
+        if (slot != NULL) {
+            have_slot_ip = true;
+            strncpy(slot_ip_snapshot, slot->ip, sizeof(slot_ip_snapshot) - 1);
+        }
         // Finding 2 fix (kept under the new ladder): NULL means every LOCAL
         // slot is in_use and currently locked (the table is saturated with
         // active attacker lockouts) -- refuse this attempt outright rather
@@ -409,6 +439,17 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // for, not anything about other clients' state. Rounded up so a
         // client that honors it never retries a fraction of a second early.
         uint32_t retry_after_s = (retry_after_ms == 0) ? 1u : (retry_after_ms + 999u) / 1000u;
+        // Log-only (never in the response, which stays deliberately scope-
+        // blind per the comment above): so a locked-out client leaves a
+        // trace in the device log. Never logs username/password -- neither
+        // is available yet at this point in the handler.
+        // Log-only (never in the response, which stays deliberately scope-
+        // blind per the comment above): so a locked-out client leaves a
+        // trace in the device log. Never logs username/password -- neither
+        // is available yet at this point in the handler.
+        ESP_LOGW(TAG, "login blocked (429) from %s scope=%s retry_after=%us", ip,
+                 login_scope_label_for_log(ip, ip_known, have_slot_ip ? slot_ip_snapshot : NULL),
+                 (unsigned)retry_after_s);
         char retry_after_hdr[16];
         snprintf(retry_after_hdr, sizeof(retry_after_hdr), "%u", (unsigned)retry_after_s);
         httpd_resp_set_hdr(req, "Retry-After", retry_after_hdr);

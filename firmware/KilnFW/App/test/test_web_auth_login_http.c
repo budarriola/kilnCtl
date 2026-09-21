@@ -975,6 +975,34 @@ static void test_ip_scope_classify_mapped_ipv6_forms(void)
                "a non-mapped, non-dotted-quad string still classifies UNKNOWN");
 }
 
+// A 429 refusal must still leave a trace in the device log (previously it
+// sent Retry-After and returned silently) -- but the log line is diagnostic
+// only, so this test checks it exists and names the peer/retry seconds
+// without asserting exact wording, and separately re-confirms the response
+// itself (status + header) is unaffected by adding it.
+static void test_429_response_is_logged(void)
+{
+    TEST_SECTION("login_post_handler -- a 429 refusal is logged (peer, scope, Retry-After)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    strncpy(s_stub_client_ip, "10.0.0.9", sizeof(s_stub_client_ip) - 1);
+    for (int i = 0; i < 3; i++) {
+        do_login("admin", "wrong-password");
+    }
+    esp_log_test_capture_reset();
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK on the logged 429 path");
+    TEST_CHECK(s_last_status_line == 429, "still refused with 429 once logging is added");
+    TEST_CHECK(strlen(s_last_retry_after) > 0, "Retry-After header is still sent once logging is added");
+    TEST_CHECK(esp_log_test_capture_contains("10.0.0.9"), "the 429 log line names the peer address");
+    TEST_CHECK(esp_log_test_capture_contains("LOCAL"), "the 429 log line names the LOCAL scope for this address");
+    TEST_CHECK(esp_log_test_capture_contains(s_last_retry_after),
+               "the 429 log line's retry_after value matches the Retry-After header");
+}
+
 void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
@@ -997,6 +1025,7 @@ void run_test_web_auth_login_http(void)
     test_unknown_scope_shares_the_remote_slot();
     test_refused_login_makes_no_extra_sta_ip_netmask_calls();
     test_mapped_ipv6_dotted_quad_tail_classifies_local();
+    test_429_response_is_logged();
 }
 
 int main(void)
