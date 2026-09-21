@@ -103,6 +103,24 @@
 >   narrative and heap/readiness evidence: `docs/BENCH_TEST_LOG.md`'s
 >   2026-09-21 "Backend Class C sweep" section; matrix rows annotated in
 >   `docs/COMMISSIONING_TEST_MATRIX.md`.
+> - **M18 backend Class C owner-authorized rows, 2026-09-21 (continuation)**:
+>   owner authorized C5 and a deliberate Pico reset, unblocking C9-C15;
+>   also authorized C3-C8/C16/C21-C26. Results: C5, C11-C15, C17/C19/C20,
+>   C3/C4, C25 all PASS; C10 PARTIAL (deliberately aborted before the
+>   4-hour full accept, to keep the heat run short); C18 BLOCKED (board
+>   build lacks `CONFIG_KILNCTL_DEV_TOOLS`); C2 read-half PASS, C1/C9/C6/C16
+>   NOT ATTEMPTED (time-boxed out); C7/C8/C21/C22/C23/C24/C26 DECLINED —
+>   C7/C8/C21/C22 conflict with this same authorization's own "still
+>   forbidden: reflashing / acknowledging crash reports"; C23/C24 have no
+>   safe restore path while reflashing is forbidden; C26 rests on a stale
+>   runbook premise (`cfg` partition is now mounted+populated, not inert).
+>   Two deliberate Pico resets both showed the same known-flaky OpenOCD
+>   "Failed to select multidrop rp2040.dap1" error text while actually
+>   completing (confirmed via `safety_get_diag`); no S6a trip either time
+>   (both single-processor resets). No board defect found. Full detail:
+>   `docs/BENCH_TEST_LOG.md`'s 2026-09-21 "Backend Class C owner-authorized
+>   rows (M18)" section; matrix rows annotated in
+>   `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
@@ -2802,6 +2820,24 @@ Owner instruction, 2026-09-21.
   writes. Remaining: C3-C8/C16/C21-C26 stay owner-gated; C17-C20 need either
   an owner-authorized Pico reset in a future session or a different
   safety-processor write path.
+- **M18 Class C owner-authorized rows, 2026-09-21 (continuation)**: owner
+  authorized C5, a deliberate Pico reset, and C3-C8/C16/C21-C26. C5 PASS,
+  unblocking C9-C15 (all PASS: profile/live fork/edit/decide chain,
+  firing stopped clean); C17/C19/C20 PASS (GRACE window reopened via a
+  second deliberate reset); C18 BLOCKED (`CONFIG_KILNCTL_DEV_TOOLS` off on
+  this build); C10 PARTIAL (aborted before the 4-hour full accept, to keep
+  the heat run short); C3/C4 PASS (danger mode in/out clean); C25 PASS
+  (backup export/import no-op round trip); C2 read-half PASS; C1/C9/C6/C16
+  NOT ATTEMPTED (time-boxed out, not declined). C7/C8/C21/C22/C23/C24/C26
+  DECLINED with disclosed reasoning: C7/C8/C21/C22 conflict with this same
+  authorization's own "still forbidden: reflashing / acknowledging crash
+  reports"; C23/C24 have no safe restore path while reflashing is
+  forbidden; C26 rests on a stale runbook premise (`cfg` is now mounted and
+  populated with 7 files, not inert). No board defect found; every
+  BLOCKED/DECLINED outcome traces to build config, rule-text conflict, or a
+  stale premise. Remaining: C1/C9, C6, C16 for a follow-up session; C7/C8/
+  C21/C22/C23/C24/C26 need an owner ruling on the authorization conflict
+  before any future attempt.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at

@@ -126,6 +126,28 @@ before/mid/after are in `docs/BENCH_TEST_LOG.md`'s 2026-09-21 "Backend
 Class C sweep" section -- read that section before treating any C17-C20
 BLOCKED annotation below as inert.
 
+**2026-09-21 Backend Class C owner-authorized rows (M18, continuation):**
+owner gave verbatim "Authorize all", unblocking C5 (E-stop verify) and a
+deliberate Pico reset to open the GRACE window, plus C3-C8/C16/C21-C26.
+Result this session: C5 PASS (unblocked C9-C15's chain); C11-C15 all PASS
+(profile/live fork/edit/decide chain, firing stopped clean before
+hand-back); C17/C19/C20 PASS (GRACE window reopened via a second deliberate
+reset after the first expired between rows); C18 BLOCKED (board build lacks
+`CONFIG_KILNCTL_DEV_TOOLS`, not a GRACE-window issue); C10 PARTIAL
+(deliberately aborted before the 4-hour full accept path, to keep the heat
+run short); C3/C4 PASS (danger mode entered/exited cleanly, relay1 pulsed,
+confirmed off); C25 PASS (backup export/import no-op round trip); C2
+read-half PASS, C1/C9/C6/C16 NOT ATTEMPTED (time-boxed out, not declined).
+C7/C8/C21/C22/C23/C24/C26 DECLINED despite nominal authorization -- C7/C8/
+C21/C22 conflict with this run's own separately-stated "still forbidden:
+reflashing / acknowledging crash reports"; C23/C24 have no safe restore
+path available while reflashing is forbidden; C26 rests on a stale runbook
+premise (the `cfg` partition is now mounted and populated with 7 files, not
+"inert" as the runbook assumed when deferring it). Full detail, every
+request/response, and heap/readiness before/after in
+`docs/BENCH_TEST_LOG.md`'s 2026-09-21 "Backend Class C owner-authorized
+rows (M18)" section.
+
 ---
 
 ## Page-by-page inventory
@@ -138,10 +160,10 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Dashboard poll (page load) | `GET /api/status` | OPEN | `get_board_state` (superset) | Home page | Testable | PASS 2026-09-21 (A1) |
-| Start firing | `POST /api/profile_exec/start` | USER | `profiles_start` | Home "Start" / profile picker | Testable (bench load) | BLOCKED 2026-09-21 (C11: refused -- E-stop interlock not verified, gated by C5, owner-scheduled, not run) |
+| Start firing | `POST /api/profile_exec/start` | USER | `profiles_start` | Home "Start" / profile picker | Testable (bench load) | PASS 2026-09-21 (C11, owner-authorized: E-stop verified via C5, throwaway low-temp profile M18C_TEST started, "ok - firing #0"; stopped via profiles_stop() before hand-back) |
 | Stop firing | `POST /api/profile_exec/stop` | SAFETY_REDUCE | `profiles_stop` | Home stop control | Testable | |
-| Pause firing | `POST /api/profile_exec/pause` | USER | `profiles_pause` | -- | Testable | BLOCKED 2026-09-21 (C12: no firing reachable, see Start firing row) |
-| Resume firing | `POST /api/profile_exec/resume` | USER | `profiles_resume` | -- | Testable | BLOCKED 2026-09-21 (C12: no firing reachable, see Start firing row) |
+| Pause firing | `POST /api/profile_exec/pause` | USER | `profiles_pause` | -- | Testable | PASS 2026-09-21 (C12: paused, state=2, all zones relay=off duty=0.00 confirmed via profiles_get_exec_status) |
+| Resume firing | `POST /api/profile_exec/resume` | USER | `profiles_resume` | -- | Testable | PASS 2026-09-21 (C12: resumed cleanly, "ok - resumed") |
 | Dismiss last run (`ackLastRunBtn`) | `POST /api/profile_exec/ack_last_run` | USER | `profiles_ack_last_run` | -- | Testable | |
 | Clear Trip (`clearTripBtn`) | `POST /api/safety/clear_trip` | ADMIN | `safety_clear_trip` | Safety page clear-trip | Testable (bench can trip S6a) | |
 | PID popup: Use these / Apply (`pidPopupUseProposed`/`pidPopupApplyBtn`) | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | |
@@ -174,9 +196,9 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
 | Page load | `GET /api/profile/live` | ADMIN | `profile_live_get` | none (LCD has no live-edit page) | Testable only while a firing is running | PASS 2026-09-21 (A45; web /live_profile page load) |
-| Fork the running profile (`forkBtn`) | `POST /api/profile/live/fork` | ADMIN | `profile_live_fork` | -- | Testable | BLOCKED 2026-09-21 (C13: only reachable during a firing, see Start firing row) |
-| Save changes (`saveBtn`) | `POST /api/profile/live` | ADMIN | `profile_live_edit` | -- | Testable | BLOCKED 2026-09-21 (C14: only reachable during a firing) |
-| Save as new / Overwrite original / Discard (`saveAsBtn`/`overwriteBtn`/`discardBtn`) | `POST /api/profile/live/decide` | ADMIN | `profile_live_decide` | -- | Testable | BLOCKED 2026-09-21 (C15: only reachable during a firing) |
+| Fork the running profile (`forkBtn`) | `POST /api/profile/live/fork` | ADMIN | `profile_live_fork` | -- | Testable | PASS 2026-09-21 (C13: origin_id=0, working_id=100) |
+| Save changes (`saveBtn`) | `POST /api/profile/live` | ADMIN | `profile_live_edit` | -- | Testable | PASS 2026-09-21 (C14: edited working copy's dwell_min 2->3, accepted with 6 informational ramp-rate warnings, no error) |
+| Save as new / Overwrite original / Discard (`saveAsBtn`/`overwriteBtn`/`discardBtn`) | `POST /api/profile/live/decide` | ADMIN | `profile_live_decide` | -- | Testable | PASS 2026-09-21 (C15: action=discard, ok; working copy #100 discarded, origin profile #0 untouched; firing then stopped via profiles_stop(), relays confirmed off) |
 | Reload from board (`reloadBtn`) | `GET /api/profile/live` | ADMIN | `profile_live_get` | -- | Testable | |
 
 ### `/settings/zones` -- zones & PID (`zones_page.html`)
@@ -186,14 +208,14 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Page load / zone config | `GET /api/zones`, `GET /api/zones_diag` | ADMIN | `control_get_zones` | -- (no LCD zones editor) | Testable | PASS 2026-09-21 (A8/A11; web /settings/zones page load) |
 | Save (`saveBtn`) | `POST /api/zones` | ADMIN | none direct (raw HTTP; `control_set_zone_pid`/`control_set_zone_model` cover the PID/model sub-fields) | -- | Testable | PASS 2026-09-21 (B4/B6: form shape established from source and exercised on hardware -- GET-merge-POST via `zones_http_client.py`, exact shape recorded in `docs/COMMISSIONING_BACKEND_RUNBOOK.md`'s B4 row; round-trip test changed only `zones[0].name`, confirmed byte-identical elsewhere including after restore, `zones_config_valid`/`load_fault` unchanged, no reboot -- see `docs/BENCH_TEST_LOG.md`'s dated M18 B6 section) |
 | PID save | `POST /api/zones/pid` | ADMIN | `control_set_zone_pid` | -- | Testable | PASS 2026-09-21 (B3, flagged anomaly: writing identical gains still invalidated `tuning_valid`, see log; B10 same-value round trip confirmed by read-back) |
-| Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | BLOCKED 2026-09-21 (C1/C9: refused -- E-stop interlock not verified) |
+| Measure Normal Current (`sweepStartBtn`) | `POST /api/zones/current_sweep/start` | ADMIN | `zone_current_sweep_start` | -- | **Hardware-gated**: energizes each zone's relay in turn to measure real amp draw -- meaningful only with a real heating-element load; bench's 4 W fixture reads near-zero/noise | NOT ATTEMPTED 2026-09-21 (C1/C9: E-stop now verified via C5, unblocking this row, but time-boxed out this session in favor of the profile/live chain and autotune; not declined, deferred to follow-up) |
 | Abort sweep (`sweepAbortBtn`) | `POST /api/zones/current_sweep/abort` | SAFETY_REDUCE | `zone_current_sweep_abort` | -- | Testable (abort path itself, even if the sweep's numbers are meaningless on bench) | |
 | Sweep status poll | `GET /api/zones/current_sweep/status` | ADMIN | `zone_current_sweep_status` | -- | Testable | PASS 2026-09-21 (A12) |
 | CT channel map read | `GET /api/zones/ct_channel_map` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A13) |
-| Recommend (`tuningRecGoBtn`) | `GET /api/tuning_recommendations` | ADMIN | none direct | -- | **Hardware-gated**: recommendations are derived from the current-sweep result above | PASS 2026-09-21 (A17 (read succeeded; numbers not bench-meaningful)); C2 follow-through BLOCKED (no sweep result to act on, see Measure Normal Current row) |
-| Start step test (`atStartBtn`) | `POST /api/autotune/start` | ADMIN | `autotune_start` | -- | Testable on bench (closed-loop step response exists even at 4 W, though gains found are not representative of a real kiln -- see `project_bench_identification_limits`) | BLOCKED 2026-09-21 (C10: refused before any heat applied -- E-stop interlock not verified) |
+| Recommend (`tuningRecGoBtn`) | `GET /api/tuning_recommendations` | ADMIN | none direct | -- | **Hardware-gated**: recommendations are derived from the current-sweep result above | PASS 2026-09-21 (A17 read; C2 read-half PASS -- route returns a body cleanly; acting on the recommendation still needs C1/C9's sweep, NOT ATTEMPTED this session) |
+| Start step test (`atStartBtn`) | `POST /api/autotune/start` | ADMIN | `autotune_start` | -- | Testable on bench (closed-loop step response exists even at 4 W, though gains found are not representative of a real kiln -- see `project_bench_identification_limits`) | PARTIAL 2026-09-21 (C10: ran 180s settle + ~190s real closed-loop stepping, temperature rise ~25.4C->~32.6C observed, then deliberately autotune_abort()'d rather than run the full 4-hour max-duration step-identify phase -- mechanism confirmed working, full accept path not exercised) |
 | Abort (`atAbortBtn`) | `POST /api/autotune/abort` | SAFETY_REDUCE | `autotune_abort` | -- | Testable | |
-| Accept proposed gains (`atAcceptBtn`) | `POST /api/autotune/accept` | ADMIN | `autotune_accept` | -- | Testable | BLOCKED 2026-09-21 (C10: autotune never started, see Start step test row) |
+| Accept proposed gains (`atAcceptBtn`) | `POST /api/autotune/accept` | ADMIN | `autotune_accept` | -- | Testable | NOT ATTEMPTED 2026-09-21 (C10: autotune was deliberately aborted before reaching accept, to keep the heat run short, see Start step test row) |
 | Autotune status/matrix | `GET /api/autotune`, `GET /api/autotune/matrix` | ADMIN | `autotune_get_status` | -- | Testable | PASS 2026-09-21 (A14) |
 | Autotune trace CSV | `GET /api/autotune/trace.csv` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (A15) |
 | Adaptive-tune revert (per-zone) | `POST /api/adaptive_tune/revert` | ADMIN | `adaptive_tune_revert` | -- | Testable | |
@@ -220,12 +242,12 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 |---|---|---|---|---|---|---|
 | Page load | `GET /api/safety/commissioning` | ADMIN | `safety_get_commissioning` | -- | Testable | PASS 2026-09-21 (A21; web /safety/commissioning page load) |
 | Wizard Start/Next/Back (`gStartBtn`, `gGoto`) | client-side only | -- | -- | -- | Testable | |
-| Stage & commit (`gCommitBtn`, `saveBtn`) | `POST /api/safety/commissioning` | ADMIN | `safety_set_commissioning_fields` | -- | Testable | BLOCKED 2026-09-21 (C17: safety processor refused -- config commit only lands during the 60s post-Pico-reset GRACE window while ARMED otherwise; this run's scope forbids resetting the Pico, so the window could not be legitimately opened. Baseline fields read via GET /api/safety/commissioning, unchanged) |
-| Apply test preset (`benchBtn`, dev-only, hidden by default) | `POST /api/safety/commissioning/bench_preset` | ADMIN | none direct | -- | Testable -- this is literally the bench-values preset button | BLOCKED 2026-09-21 (C18: same GRACE-window/no-Pico-reset reason as Stage & commit above) |
-| Relay-type field (submitted with commit) | `POST /api/safety/commissioning/relay_type` | ADMIN | none direct | -- | Testable | BLOCKED 2026-09-21 (C20: same GRACE-window/no-Pico-reset reason; current value read as relay_type="contactor", unchanged) |
-| CT calibration Apply (`.ct-cal-apply`) | `POST /api/safety/commissioning/ct_cal` | ADMIN | `safety_set_commissioning_fields`(fields incl. ct_cal) / raw | -- | Testable (bench CT calibration already closed, see `project_ct_calibration_closed_and_presence_branch`) | BLOCKED 2026-09-21 (C19: same GRACE-window/no-Pico-reset reason) |
-| CT Auto-zero (`.ct-cal-auto-zero`) | `POST /api/safety/commissioning/ct_auto_zero` | ADMIN | none direct | -- | Testable | BLOCKED 2026-09-21 (C19: same GRACE-window/no-Pico-reset reason) |
-| CT trim Apply (`.ct-trim-apply`) | `POST /api/safety/commissioning/ct_trim` | ADMIN | none direct | -- | Testable | BLOCKED 2026-09-21 (C19: same GRACE-window/no-Pico-reset reason) |
+| Stage & commit (`gCommitBtn`, `saveBtn`) | `POST /api/safety/commissioning` | ADMIN | `safety_set_commissioning_fields` | -- | Testable | PASS 2026-09-21 (C17/C19: this session was owner-authorized to reset the Pico to open the GRACE window; ct_cal commit succeeded with no-op values ch=2,a_fs=1,zero_mv=71 -- persisted true -- on the second reset after the first window expired between rows) |
+| Apply test preset (`benchBtn`, dev-only, hidden by default) | `POST /api/safety/commissioning/bench_preset` | ADMIN | none direct | -- | Testable -- this is literally the bench-values preset button | BLOCKED 2026-09-21 (C18: 404 -- GET /api/safety/commissioning shows dev_tools_enabled:false; handler compiled out behind CONFIG_KILNCTL_DEV_TOOLS on this board's build, a build-config limitation not a GRACE-window issue) |
+| Relay-type field (submitted with commit) | `POST /api/safety/commissioning/relay_type` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (C20: field name is `type`, not `relay_type`; posted type=contactor matching baseline, no-op by construction) |
+| CT calibration Apply (`.ct-cal-apply`) | `POST /api/safety/commissioning/ct_cal` | ADMIN | `safety_set_commissioning_fields`(fields incl. ct_cal) / raw | -- | Testable (bench CT calibration already closed, see `project_ct_calibration_closed_and_presence_branch`) | PASS 2026-09-21 (C19: see Stage & commit row above -- committed no-op values during the reopened GRACE window) |
+| CT Auto-zero (`.ct-cal-auto-zero`) | `POST /api/safety/commissioning/ct_auto_zero` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (C19: field name is `channel`, not `ch`; applied ESP-side, no grace-window dependency) |
+| CT trim Apply (`.ct-trim-apply`) | `POST /api/safety/commissioning/ct_trim` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (C19: ch=2,trim_offset_a=0,trim_gain=1, applied ESP-side only, no grace-window dependency) |
 
 ### `/diagnostics` -- diagnostics (`diagnostics_page.html`)
 
