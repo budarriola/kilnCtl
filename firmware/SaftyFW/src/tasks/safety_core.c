@@ -1282,6 +1282,23 @@ static safety_guard_input_t safety_core_build_input(void)
         }
     }
 
+    // S2/S3/S4 SIM_PLANT disable (TODO.md "Honour the SIM_PLANT flag"). See
+    // safety_guard_input_t::sim_plant_disable_active's own comment
+    // (safety_guards.h) for the full reasoning -- in short, this ANDs the
+    // ESP's own runtime claim (CONTEXT_FLAG_SIM_PLANT, only meaningful while
+    // context_valid) with a LOCAL compile-time fact this Pico firmware was
+    // built with, so an ESP claiming SIM_PLANT can never disable this
+    // board's own guards unless this build was deliberately compiled with
+    // SAFTYFW_HONOR_SIM_PLANT (CMakeLists.txt, default OFF). In every
+    // production/target build the #if branch below is simply never
+    // compiled, so this is `false` unconditionally -- there is no runtime
+    // toggle and nothing here can ever weaken a guard in that build.
+#if SAFTYFW_HONOR_SIM_PLANT
+    bool sim_plant_disable_active = context_valid && (ctx.flags & CONTEXT_FLAG_SIM_PLANT) != 0u;
+#else
+    bool sim_plant_disable_active = false;
+#endif
+
     return (safety_guard_input_t){
         // 2026-08-27 audit item 2: thermo.valid alone is not enough -- a
         // thermo_task that keeps losing its publish mutex leaves this struct
@@ -1316,6 +1333,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .main_fault_asserted = discrete_task_main_fault(),
         .heat_commanded = any_current_present,
         .context_valid = context_valid,
+        .sim_plant_disable_active = sim_plant_disable_active,
         .zone_count = zone_count,
         .max_zone_setpoint_c = max_zone_setpoint_c,
         .nearest_zone_measured_c = nearest_zone_measured_c,

@@ -395,14 +395,15 @@ real wire** — the pi↔ESP UART link is currently dead on the bench
       Wiring a reset here would loosen the guards instead. Full reasoning:
       `link_task.c`'s `link_task_handle_push_context()` comment, and the
       "reset one side of a pair" bug class this codebase has hit before.
-- [~] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently
-      — the seen-tracking/DIAG warning bit is real, but the disable action
-      itself is still not wired into `safety_guards.c`. **Correction,
-      2026-09-18**: the earlier "S3/S4 don't exist yet" reason is stale --
-      S3/S4 are implemented (`safety_guards.c`, gated INERT via
-      `current_sensing_disabled` until CT channel mapping is confirmed, see
-      the Phase 6 bullet below) -- what remains open is only the SIM_PLANT
-      -> disable wiring, not the guards themselves.
+- [x] **Honour the `SIM_PLANT` flag** (2026-09-20): disable action wired into
+      `safety_guards.c` for S2/S3/S4 only, gated by a new
+      `safety_guard_input_t::sim_plant_disable_active` (caller-computed AND of
+      the ESP's runtime SIM_PLANT context claim and a new compile-time
+      `SAFTYFW_HONOR_SIM_PLANT` CMake option, default OFF). Build identity
+      carries `SAFTYFW_BUILD_SIM_PLANT_HONORED` in `saftyfw_build_info.h`, and
+      `check_no_sim_plant_guard_disable.ps1` fails a target build with the
+      option ON. S10/S13/S14/S15 are unaffected; the pre-existing
+      `s_context_sim_seen` DIAG warning latch is unaffected.
 - [x] **`tc_placement_mode` commissioning field** (`CHAMBER_AGREED` /
       `EXTERNAL_OVERHEAT`). **Re-swept 2026-09-03: already landed, this
       checklist had simply never been ticked.** `config_store.h`/`.c` carry

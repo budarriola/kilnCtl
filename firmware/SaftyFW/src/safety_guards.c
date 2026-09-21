@@ -818,6 +818,23 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             state->s15_warn[ch] = false;
         }
     } else {
+        /* --- S2/S3/S4 SIM_PLANT disable (TODO.md "Honour the SIM_PLANT
+         * flag"). See safety_guard_input_t::sim_plant_disable_active's own
+         * comment for how this bool got here and why it can only ever be
+         * true in a Pico firmware deliberately built with SAFTYFW_HONOR_
+         * SIM_PLANT. Scoped to S2/S3/S4 ONLY (TODO.md's own scope) -- S10/
+         * S13/S14/S15 below are NOT gated by this and always evaluate
+         * normally, sim-plant context or not, since they do not correlate
+         * against the plant model the way S2/S3/S4 do. When active, S2/S3/
+         * S4 go inactive for the tick, the identical reset shape
+         * !in->context_valid gets just above -- an old accumulating window
+         * from before SIM_PLANT started reporting must not silently resume
+         * and trip on its pre-disable progress once it stops. */
+        if (in->sim_plant_disable_active) {
+            state->s2_over_elapsed_s = 0.0f;
+            state->s3_stuck_elapsed_s = 0.0f;
+            state->s4_warn = false;
+        } else {
         /* --- S2: sustained excess over setpoint --------------------------------
          * CHAMBER_AGREED only -- comparing a shell/exhaust reading against a
          * chamber setpoint is meaningless (SAFETY_MODEL.md section 4, S2).
@@ -873,6 +890,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * S4): a dead element ruins a firing, it does not start one. */
         state->s4_warn = !in->current_sensing_disabled && in->relay_commanded_continuously &&
                           !in->any_current_present;
+        }
 
         /* --- S10: safety TC disagrees with every zone TC -- WARN only ----------
          * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section

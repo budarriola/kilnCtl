@@ -1556,6 +1556,149 @@ static void test_s3_s4(void)
     }
 }
 
+static void test_sim_plant_disable(void)
+{
+    TEST_SECTION("sim_plant_disable_active -- SIM_PLANT guard-disable gate (S2/S3/S4 only)");
+
+    /* Flag OFF (the production default: base_input() zero-inits this field,
+     * exactly as it is on every board built without SAFTYFW_HONOR_SIM_PLANT,
+     * since safety_core.c hardcodes sim_plant_disable_active=false in that
+     * configuration regardless of what the ESP claims). S2 must still trip
+     * exactly per its own test above -- restated here, explicitly pinned to
+     * sim_plant_disable_active==false, so this test alone documents and
+     * proves the required "flag-off path still trips S2" behaviour. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = false;
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 990.0f; /* 90C over, above the 75C margin */
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 13 && !tripped; i++) { /* 13*10s = 130s > 120s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "sim_plant_disable_active==false: S2 still trips on a sustained excess");
+        TEST_CHECK(s.reason == SAFETY_TRIP_OVER_SETPOINT, "reason is SAFETY_TRIP_OVER_SETPOINT");
+    }
+
+    /* Flag OFF: S3 still trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = false;
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) { /* 5*5s = 25s > 20s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "sim_plant_disable_active==false: S3 still trips on load stuck on");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LOAD_STUCK_ON, "reason is SAFETY_TRIP_LOAD_STUCK_ON");
+    }
+
+    /* Flag OFF: S4 still warns (S4 never trips by design, flag or no flag). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = false;
+        in.context_valid = true;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = false;
+        in.dt_s = 60.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s4_warn, "sim_plant_disable_active==false: S4 still warns on load inactive");
+    }
+
+    /* Flag ON (bench-only: SAFTYFW_HONOR_SIM_PLANT compiled in AND the ESP's
+     * context claims SIM_PLANT): the same S2 excess that just tripped above
+     * must now stay silent, no matter how long it is sustained -- this is
+     * the actual disable action the TODO asked for. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = true;
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 990.0f;
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "sim_plant_disable_active==true: S2 never trips, however long sustained");
+    }
+
+    /* Flag ON: S3's same stuck-on excess stays silent. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = true;
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "sim_plant_disable_active==true: S3 never trips, however long sustained");
+    }
+
+    /* Flag ON: S4's WARN also clears -- the disable is a full reset of the
+     * S2/S3/S4 group's state, not merely a suppressed trip. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = true;
+        in.context_valid = true;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = false;
+        in.dt_s = 60.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s4_warn, "sim_plant_disable_active==true: S4's WARN is also reset, not just its trip");
+    }
+
+    /* sim_plant_disable_active must be scoped to S2/S3/S4 only -- S1 (an
+     * unrelated, context-independent guard) must still trip normally while
+     * the flag is on, proving this is not a global "ignore everything"
+     * switch. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.sim_plant_disable_active = true;
+        in.tc_c = 1400.0f; /* well over abs_max_temp_c=1300 */
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "sim_plant_disable_active==true does not touch S1, which still trips");
+    }
+}
+
 static void test_s14(void)
 {
     TEST_SECTION("S14 -- zone current above its measured normal (context, WARN only)");
@@ -3918,6 +4061,7 @@ void run_test_safety_guards(void)
     test_s8();
     test_s2();
     test_s3_s4();
+    test_sim_plant_disable();
     test_s14();
     test_s14_s15_summed_topology();
     test_s14_s15_zone_ct_channel_collapse();

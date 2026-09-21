@@ -14,8 +14,15 @@
 #
 # PROJECT_ROOT is the git working tree root (passed in via -DPROJECT_ROOT=...),
 # THIS_PROJECT_DIR is firmware/SaftyFW itself (-DTHIS_PROJECT_DIR=..., used to
-# scope the dirty check -- see below), and OUT is the header path to write
-# (-DOUT=...).
+# scope the dirty check -- see below), OUT is the header path to write
+# (-DOUT=...), and SIM_PLANT_HONORED is the resolved 0/1 value of the
+# SAFTYFW_HONOR_SIM_PLANT CMake option (-DSIM_PLANT_HONORED=..., see
+# CMakeLists.txt's own comment on that option for why this needs to be
+# visible in the build's own identity reporting rather than only in the
+# CMake cache).
+if(NOT DEFINED SIM_PLANT_HONORED)
+    set(SIM_PLANT_HONORED 0)
+endif()
 
 find_package(Git QUIET)
 
@@ -82,6 +89,13 @@ string(APPEND _content "#define SAFTYFW_GIT_DIRTY ${dirty}\n")
 string(APPEND _content "// UTC build date/time, wall-clock at the moment this header was generated.\n")
 string(APPEND _content "#define SAFTYFW_BUILD_DATE \"${build_date}\"\n")
 string(APPEND _content "#define SAFTYFW_BUILD_TIME \"${build_time}\"\n")
+string(APPEND _content "// 1 if this build was configured with -DSAFTYFW_HONOR_SIM_PLANT=ON (BENCH-ONLY:\n")
+string(APPEND _content "// safety_guards.c will disable S2/S3/S4 when the ESP's context reports\n")
+string(APPEND _content "// SIM_PLANT), 0 in every production/target build (the default). Never set from\n")
+string(APPEND _content "// runtime state -- this is the compile-time fact, so a sim-gated image can be\n")
+string(APPEND _content "// identified from this header alone and never mistaken for a production one.\n")
+string(APPEND _content "// See CMakeLists.txt's SAFTYFW_HONOR_SIM_PLANT comment.\n")
+string(APPEND _content "#define SAFTYFW_BUILD_SIM_PLANT_HONORED ${SIM_PLANT_HONORED}\n")
 string(APPEND _content "\n#endif // SAFTYFW_BUILD_INFO_H\n")
 
 string(RANDOM LENGTH 8 _nonce)

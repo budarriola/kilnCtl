@@ -338,6 +338,47 @@ endif()
 # target_link_libraries -- see that call site's comment for why it is
 # conditional on this same option rather than a second, separate call here.
 
+# SAFTYFW_HONOR_SIM_PLANT -- TODO.md "Honour the SIM_PLANT flag" item. The
+# ESP already announces its own CONFIG_KILNCTL_SIM_PLANT build over the
+# isolated link, unconditionally, as CONTEXT_FLAG_SIM_PLANT in every
+# PUSH_CONTEXT frame (safety_link_frames.c's `#if CONFIG_KILNCTL_SIM_PLANT`
+# block) -- this Pico ALREADY sees that bit and latches a persistent DIAG
+# warning off it (s_context_sim_seen / KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN,
+# link_task.c). What was still missing is the DISABLE action itself: S2
+# (sustained over-setpoint), S3 (load stuck on) and S4 (load inactive WARN)
+# all correlate against context the ESP supplies, and a simulated plant can
+# legitimately produce readings/timing those guards were never tuned for.
+#
+# This option is the safety-side half of that fix, and it is deliberately a
+# SECOND, independent gate on top of the ESP's own bit -- same "plain CMake
+# option is this project's Kconfig" pattern as the two flags above, default
+# OFF, and disabling a safety detector exactly like SAFTYFW_THERMO_ASSUME_
+# DRDY, so it gets the same #warning-on-every-build treatment. The reason
+# for a SECOND gate rather than trusting the ESP's bit alone: this Pico
+# firmware structurally CANNOT honour SIM_PLANT unless it was itself
+# deliberately built for it -- an ESP asserting CONTEXT_FLAG_SIM_PLANT
+# (whether legitimately, from a bug, or from a compromised/misbehaving main
+# controller) must never be able to switch off a production safety
+# processor's own guards by itself. With this OFF (default, every
+# production/target build), the disable path in safety_guards.c is gated on
+# a compile-time-false expression and can never fire regardless of what the
+# ESP claims. Visible in this build's own identity reporting: gen_build_
+# info.cmake bakes the resolved value into saftyfw_build_info.h as
+# SAFTYFW_BUILD_SIM_PLANT_HONORED, the same generated header that already
+# carries git commit/dirty/build time, so a sim-gated image can be
+# identified from that header and never mistaken for a production one.
+# check_no_sim_plant_guard_disable.ps1 fails a target build whose generated
+# header reports this as 1.
+option(SAFTYFW_HONOR_SIM_PLANT "Let a Pico built this way disable S2/S3/S4 when the ESP's context reports SIM_PLANT (BENCH-ONLY: disables three safety detectors)" OFF)
+if(SAFTYFW_HONOR_SIM_PLANT)
+    target_compile_definitions(SaftyFW PRIVATE SAFTYFW_HONOR_SIM_PLANT=1)
+    message(WARNING
+        "SAFTYFW_HONOR_SIM_PLANT=ON: this Pico build will DISABLE S2 (sustained "
+        "over-setpoint), S3 (load stuck on) and S4 (load inactive) whenever "
+        "the ESP's context reports SIM_PLANT. Bench-only -- never ship this "
+        "on a board wired to a real kiln.")
+endif()
+
 target_link_libraries(SaftyFW PRIVATE
     pico_stdlib
     hardware_gpio
@@ -390,15 +431,26 @@ if(NOT SAFTYFW_GIT_TOPLEVEL)
     set(SAFTYFW_GIT_TOPLEVEL ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
+# SAFTYFW_HONOR_SIM_PLANT resolved to a plain 0/1 for gen_build_info.cmake --
+# CMake option() values are the strings ON/OFF, not booleans a CMake `if()`
+# in a -P script can trust the same way; normalising here keeps that script
+# ignorant of CMake's ON/OFF spelling.
+if(SAFTYFW_HONOR_SIM_PLANT)
+    set(_saftyfw_sim_plant_honored 1)
+else()
+    set(_saftyfw_sim_plant_honored 0)
+endif()
+
 set(SAFTYFW_BUILD_INFO_HEADER "${CMAKE_CURRENT_BINARY_DIR}/saftyfw_build_info.h")
 add_custom_target(saftyfw_build_info ALL
     COMMAND ${CMAKE_COMMAND}
         -DOUT=${SAFTYFW_BUILD_INFO_HEADER}
         -DPROJECT_ROOT=${SAFTYFW_GIT_TOPLEVEL}
         -DTHIS_PROJECT_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DSIM_PLANT_HONORED=${_saftyfw_sim_plant_honored}
         -P ${CMAKE_CURRENT_LIST_DIR}/tools/gen_build_info.cmake
     BYPRODUCTS ${SAFTYFW_BUILD_INFO_HEADER}
-    COMMENT "Regenerating saftyfw_build_info.h (git commit/dirty/build time)"
+    COMMENT "Regenerating saftyfw_build_info.h (git commit/dirty/build time/SIM_PLANT-honored)"
     VERBATIM
 )
 add_dependencies(SaftyFW saftyfw_build_info)
@@ -500,6 +552,9 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     # whatever value the option was configured with.
     if(SAFTYFW_ENABLE_USB_STDIO)
         target_compile_definitions(${TARGET_NAME} PRIVATE SAFTYFW_ENABLE_USB_STDIO=1)
+    endif()
+    if(SAFTYFW_HONOR_SIM_PLANT)
+        target_compile_definitions(${TARGET_NAME} PRIVATE SAFTYFW_HONOR_SIM_PLANT=1)
     endif()
     if(SAFTYFW_THERMO_ASSUME_DRDY)
         target_compile_definitions(${TARGET_NAME} PRIVATE SAFTYFW_THERMO_ASSUME_DRDY=1)

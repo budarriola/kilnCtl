@@ -425,6 +425,29 @@ typedef struct {
     bool relay_commanded_recently;
     bool relay_commanded_continuously;
 
+    /* S2/S3/S4's SIM_PLANT disable (TODO.md "Honour the SIM_PLANT flag").
+     * True only when ALL of: context_valid, the ESP's most recent
+     * PUSH_CONTEXT set CONTEXT_FLAG_SIM_PLANT, AND this Pico firmware was
+     * itself built with SAFTYFW_HONOR_SIM_PLANT (CMakeLists.txt) -- the
+     * caller (safety_core.c) ANDs in that compile-time fact so this pure
+     * module never needs its own #ifdef. In every production/target build
+     * (SAFTYFW_HONOR_SIM_PLANT OFF, the default) the caller's expression is
+     * compile-time-false, so this field is always false and safety_guards.c
+     * behaves exactly as if it did not exist -- an ESP claiming SIM_PLANT
+     * cannot disable this Pico's guards by itself; only a Pico deliberately
+     * built for it can ever honour that claim. When true, S2/S3/S4 go
+     * inactive for the tick (their own accumulators reset), the same
+     * "inactive, not pessimistic" treatment context_valid == false already
+     * gets -- this never widens what a WARN/TRIP means, only whether S2/S3/
+     * S4 evaluate at all. The persistent operator-visible warning that a
+     * SIM_PLANT context was ever seen is unrelated to this field and
+     * already exists (s_context_sim_seen / KILNLINK_DIAG_FLAG_
+     * SIM_CONTEXT_SEEN, link_task.c) -- it latches from the ESP's bit alone
+     * and is not gated by SAFTYFW_HONOR_SIM_PLANT, since knowing a sim
+     * context was seen is useful information regardless of whether this
+     * build acts on it. */
+    bool sim_plant_disable_active;
+
     /* S9 only (2026-08-27 audit, second pass). True iff the current-sensing
      * chain behind any_current_present is actually CALIBRATED -- the same
      * branch current_presence_policy.h's current_presence_is_flowing()
