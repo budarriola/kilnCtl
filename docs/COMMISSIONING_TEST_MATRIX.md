@@ -33,7 +33,7 @@ commit this worktree started from.
 | Web pages (page-shell HTML files served) | 18 |
 | LCD pages (`kiln_ui_register_page` registrations) | 16 |
 | Distinct web controls inventoried below (buttons/inputs/selects) | ~120 (button scan; text/number/select inputs not separately enumerated per-page, see note) |
-| HTTP routes (`route_tier_table.h`, authoritative) | 138 (`ROUTE_TIER_TABLE_COUNT`; +1 undocumented-in-plan `POST /api/dualwrite_window/restore_verified` already included) |
+| HTTP routes (`route_tier_table.h`, authoritative) | 155 (counted directly from `kRouteTierTable[]`'s rows, i.e. `grep -c '^\s*ROUTE_TIER("'` over the file -- not the file's own header-comment prose, which says 138 and is stale) |
 | Routes with an MCP facade tool | ~95 (estimate; every `safety`, `profiles`, `zones`, `ota`, `wifi`, `autotune`, `adaptive_tune`, `control`, `ramp`, `system` group route is wrapped; page-shell GETs and a handful of settings/backup/security POSTs are not) |
 | Routes classified hardware-gated below | ~30 (relay/heat-driving, OTA/reboot, CT sweep, factory reset, E-stop verify, danger mode) |
 
