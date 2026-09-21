@@ -338,7 +338,10 @@ unrecoverable cannot be the one `GET /status` prints in plain text.
 > request) and no new crash report appeared, so the watchdog panic this
 > section fixed is confirmed gone. This is a single sample on the failure
 > (401) path, which runs the same KDF as success before comparing, so it is
-> the number to plan against until a success-path sample exists.
+> the number to plan against until a success-path sample exists. 4158 ms sits
+> within roughly a second of `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`, but this is no
+> longer a watchdog risk: the loop blocks on `vTaskDelay(1)` every 1024
+> iterations rather than merely yielding, which actually lets IDLE1 run.
 
 **Where the record lives — corrected, and this is load-bearing.** An earlier
 draft of this plan put the credentials in namespace `kiln_cfg` on
