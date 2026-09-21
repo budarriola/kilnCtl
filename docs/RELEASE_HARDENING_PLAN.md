@@ -629,8 +629,46 @@ shared branch. The fifth pass's unplanned real failure
 (`-Werror=format-truncation`) stands as the direct evidence that path
 propagates. Suite unchanged at `113 passed, 0 skipped, 0 failed.` -- this
 pass modified an existing glob-discovered check rather than adding one.
-Still open: full Python-side coverage of the zero-production-caller sweep for
-`tools/PcTools/tests`.
+
+**Closed, 2026-09-20: full Python-side coverage of the zero-production-caller
+sweep.** The prior one-off passes (2026-09-17, twice) ran the sweep by hand
+and were never made a standing check, so a new zero-caller function could
+slip back in unnoticed. `tools/check_python_zero_caller_sweep.py` +
+`tools/check_python_zero_caller_sweep.ps1` (glob-discovered) make it
+permanent: every top-level, non-underscore function under
+`tools/PcTools/src/kilnctrl` and `tools/PcTools/src/mcpkit` is checked for a
+caller anywhere in the non-test tree (methodology fix vs. the one-off
+scripts: the caller search now INCLUDES each function's own defining file,
+so a `static`-shaped helper called only elsewhere in its own file is no
+longer a false positive; a decorator-registered MCP tool -- `@_srv._tool()`
+-- is also correctly treated as wired, the Python equivalent of the C
+sweep's `httpd_uri_t`-table carve-out). First full-coverage run (909
+functions scanned) found 8 genuinely zero-caller functions beyond the 3
+already-reviewed benign ones: `devices_control.control_get_unit_pref`/
+`control_set_unit_pref` (the shipped unit-preference feature went over HTTP
+instead, leaving this CONTROL-task wire-protocol pair unused),
+`safety_cfg_http_client.params_by_id` (superseded by name-based lookup per
+its own sibling's docstring), `run_queue.entry_to_dict` (asymmetric pair --
+`entry_from_dict` is called, this serializing half is not), `run_queue.
+load_preset_json`, `pico_image_freshness.read_file_identity`, `cone_table.
+cone_for_temp_c` (sibling functions `band_bottom_c`/`heat_work_weight` are
+both used by `ramp_assist.py`; this one is not), and `log_analysis.
+parse_history_csv` (the module's own CLI/report functions never call it,
+unlike its CSV-parsing sibling `parse_trace_csv`). None matches the
+`web_auth_table_create_session` shape (a live, wired-in production entry
+point); all are unused helpers/leftovers. Recorded in the script's
+`PENDING_OWNER_REVIEW` set (distinct from the benign `ZERO_CALLER_ALLOWLIST`)
+with a one-line reason each, so the check stays green but the finding is not
+silently dropped -- an owner call on wire-up-vs-delete is left open per item.
+Negative-tested: planted a real zero-caller function in `cone_table.py`,
+confirmed the check FAILs naming it; removed by hand (not `git checkout`)
+and confirmed both an empty `git diff` and a `git hash-object` match against
+the pre-sabotage blob, then re-ran and confirmed PASS. Full foreground
+`run_all_checks.ps1 -AllowFewerChecks` run after adding the check:
+`125 passed, 0 skipped, 0 failed`. This closes the sweep for
+`tools/PcTools/src`; `tools/PcTools/tests` itself (test files, not
+production source) was never this item's target and remains out of scope by
+definition -- there is no "caller" concept for a test file to sweep.
 
 **Already covered, name the evidence:** the two `check_01_*_pushed_build.ps1`
 scripts are the strongest single piece of process coverage in the repo. They
@@ -743,6 +781,24 @@ acted on without re-deriving anything:
   one of: build the jig, ship with the safety case saying openly it's
   unproven until commissioned on the installed kiln, or sign off on the risk
   explicitly. This pass does not pick for them.
+
+**Status, 2026-09-20: re-verified the (b) "provable by host test but not yet
+done" bucket independently.** Re-read `SAFETY_CASE.md` §4's evidence table
+row by row against its own **not done** / hardware-only markers rather than
+trusting the 2026-09-17 rollup at face value: every row not labeled
+hardware-verified is either **host-tested** (a real host test already pins
+the pure trip logic) or explicitly **not done, hardware-only** (S1/S3/S6b/
+S9/S11 hardware trips, S6a's "cannot be provoked by any current host
+fixture, permanently," S8's real threshold, both link-loss/OTA-interlock
+real-bench rows, and the three KilnFW thermal_guard rows marked
+"host-tested, not hardware-verified"). None of those hardware-only rows is
+closeable by a host test by construction -- they are precisely the claims
+whose entire content is "does this work on real wiring/sensors/actuation,"
+which a host test cannot exercise. Confirms the 2026-09-17 finding: **the
+(b) bucket is empty.** No new host test was added this pass, because there
+is nothing left in it to add one for -- what remains is exclusively buckets
+A/B/C above (hardware-verification-only), consistent with this item's own
+instruction to say so per-condition rather than skip silently.
 
 ---
 
