@@ -617,7 +617,10 @@ void relay_cycles_budget(uint8_t relay, relay_cycles_budget_t *out)
         /* No budget at all -- ssr never shows a percent (plan's "Design"
          * section: "ssr = no budget (icon never shown, percent reported as
          * null)"). An override on an ssr relay is ignored on purpose: the
-         * type itself is the "this relay has no wear budget" statement. */
+         * type itself is the "this relay has no wear budget" statement.
+         * cycles must still be the real live count -- only percent/rated/
+         * tier/has_budget are null for SSR (dashboard_status_http.c). */
+        out->cycles = cycles;
         return;
     }
 

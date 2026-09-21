@@ -143,6 +143,9 @@ static void test_budget_ssr_has_no_budget(void)
     relay_cycles_budget(0, &b);
     TEST_CHECK(b.has_budget == false, "ssr never has a budget, however high the count");
     TEST_CHECK(b.tier == RELAY_BUDGET_TIER_NONE, "no budget means no tier either");
+    TEST_CHECK(b.cycles == 1000000,
+               "cycles must still be the real live count for ssr -- only percent/rated/tier/"
+               "has_budget are null (dashboard_status_http.c), not cycles itself");
 }
 
 static void test_budget_quantized_thresholds(void)
