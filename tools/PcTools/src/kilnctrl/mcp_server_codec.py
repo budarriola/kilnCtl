@@ -25,6 +25,7 @@ from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
 from .devices import LogLine
+from .devices_common import _redact_secret_fields
 from .display import BlitError, DisplayClient, DisplayQueryError
 from .touch import TouchClient, TouchQueryError
 from .ui_test_client import UiTestClient, UiTestQueryError
@@ -235,6 +236,13 @@ def get_board_state() -> str:
         "profiles_exec_status": _snapshot_section(_srv._profiles.get_exec_status),
         "autotune_status": _snapshot_section(_srv._autotune.get_status),
     }
+    # 2026-09-21 fix: "wifi_status" carries UartWifiStatus.ap_password
+    # (devices_wifi_uart.py) straight through dataclasses.asdict() -- the
+    # board's own AP Wi-Fi password in plaintext. Redact every
+    # password/psk/passphrase-shaped field to a "[set]"/"[unset]" marker
+    # before this ever leaves the process, not just before logging it (see
+    # _redact_secret_fields()'s doc comment in devices_common.py).
+    state = _redact_secret_fields(state)
     return json.dumps(_sanitize_nan(state), default=_json_default, indent=2)
 
 

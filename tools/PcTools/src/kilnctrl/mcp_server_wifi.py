@@ -73,15 +73,22 @@ from . import mcp_server as _srv
 # ---------------------------------------------------------------------------
 @_srv._tool()
 def wifi_get_status() -> str:
-    """Report Wi-Fi mode (home/ap), connection state, SSID(s), IP and RSSI."""
+    """Report Wi-Fi mode (home/ap), connection state, SSID(s), IP and RSSI.
+
+    The board's own AP password is never rendered here -- only whether one is
+    set (2026-09-21 fix: the UART GET_STATUS reply carries it in plaintext,
+    same as the wire always has, but no tool output should repeat the value).
+    """
     try:
         status = _srv._wifi.get_status()
     except WifiUartQueryError as exc:
         return f"error: {exc}"
+    ap_password_state = "[set]" if status.ap_password else "[unset]"
     return (
         f"mode={status.mode_name} state={status.state} "
         f"sta_connected={status.sta_connected} ssid={status.ssid!r} "
-        f"ap_ssid={status.ap_ssid!r} sta_ip={status.sta_ip!r} "
+        f"ap_ssid={status.ap_ssid!r} ap_password={ap_password_state} "
+        f"sta_ip={status.sta_ip!r} "
         f"sta_rssi={status.sta_rssi} ap_clients={status.ap_clients}"
     )
 

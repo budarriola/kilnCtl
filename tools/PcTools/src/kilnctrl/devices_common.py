@@ -6,7 +6,43 @@ docstring for the overall map.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
+
+
+# ---------------------------------------------------------------------------
+# Secret-field redaction -- 2026-09-21 fix: get_board_state() was passing
+# UartWifiStatus (devices_wifi_uart.py) through dataclasses.asdict() straight
+# into its JSON snapshot, which includes the board's own AP Wi-Fi password
+# (ap_password) in plaintext. The UART GET_STATUS reply legitimately carries
+# that value in the clear (uart_bridge_ext_wifi.c's GET_STATUS handler has no
+# auth concept at all -- the UART link is physical-access-gated by design,
+# same reasoning as the HTTP /status route's on_ap disclosure), but nothing
+# downstream of that decode should ever repeat it into a tool's rendered
+# output. This is the single choke point: any dict key that looks like a
+# password/psk/passphrase field gets replaced with a "[set]"/"[unset]"
+# boolean-shaped string instead of its value, recursively, so a future field
+# with the same shape is covered without another audit pass.
+# ---------------------------------------------------------------------------
+_SECRET_KEY_RE = re.compile(r"(password|psk|passphrase)", re.IGNORECASE)
+
+
+def _redact_secret_fields(value):
+    """Recursively replace any dict value whose key looks like a
+    password/psk/passphrase field with "[set]" (truthy) or "[unset]"
+    (falsy/empty), leaving every other field untouched. Safe to call on
+    dicts, lists/tuples of them, or any other JSON-shaped value."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, val in value.items():
+            if isinstance(key, str) and _SECRET_KEY_RE.search(key):
+                redacted[key] = "[set]" if val else "[unset]"
+            else:
+                redacted[key] = _redact_secret_fields(val)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [_redact_secret_fields(v) for v in value]
+    return value
 
 
 def _check_bool_byte(value: object) -> int:
