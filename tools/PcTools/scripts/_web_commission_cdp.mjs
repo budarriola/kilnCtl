@@ -43,7 +43,11 @@
 //                           selector (e.g. "#pcLink"), not the bare id the
 //                           --selector click argument takes. A missing
 //                           selector is a hard failure, same as a missing
-//                           click target.
+//                           click target -- and so is an assignment the
+//                           element rejects (an unpopulated <select>, an
+//                           off-step range value), since clicking on with a
+//                           value nobody asked for is how a delete lands on
+//                           the wrong row.
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -289,20 +293,42 @@ class CdpSession {
 // live-preview handler) see the new value the same way a real keystroke or
 // drag would. Runs strictly before the click -- a Save button reads these
 // fields' current DOM value at click time, not at page-load time.
+// The assignment is READ BACK and compared before the events are dispatched:
+// setting .value does not always take. A <select> whose <option> list has not
+// been populated yet (these pages fill their pickers from an async fetch, and
+// this runs on a fixed post-navigate delay) silently leaves .value as '', and
+// an <input type="range"> snaps an off-step value to a neighbouring step.
+// Either way the page would then be clicked while holding a value nobody
+// asked for -- for a delete button that means acting on whatever row the
+// page's own fallback selection lands on, i.e. a wrong-target destructive
+// click rather than a failed test. So a rejected assignment is a hard
+// failure here, never a silent continue.
 async function applyFills(cdp, fills) {
+  const REJECTED = 'VALUE_REJECTED:';
   for (const f of fills) {
     const expr = `(() => {
       const el = document.querySelector(${JSON.stringify(f.selector)});
       if (!el) return 'NOT_FOUND';
       el.value = ${JSON.stringify(f.value)};
+      if (String(el.value) !== ${JSON.stringify(String(f.value))}) {
+        return ${JSON.stringify(REJECTED)} + String(el.value);
+      }
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return 'OK';
     })()`;
     const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-    if (res.result.value !== 'OK') {
-      throw new Error(`fill selector ${JSON.stringify(f.selector)} not found on page`);
+    const verdict = res.result.value;
+    if (verdict === 'OK') continue;
+    if (typeof verdict === 'string' && verdict.startsWith(REJECTED)) {
+      throw new Error(
+        `fill selector ${JSON.stringify(f.selector)} did not accept value ` +
+        `${JSON.stringify(String(f.value))} -- element reads ` +
+        `${JSON.stringify(verdict.slice(REJECTED.length))} instead ` +
+        `(option list not populated yet, or value out of range/step). ` +
+        `Refusing to click with an unintended value.`);
     }
+    throw new Error(`fill selector ${JSON.stringify(f.selector)} not found on page`);
   }
 }
 

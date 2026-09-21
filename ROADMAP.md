@@ -2992,6 +2992,14 @@ Owner instruction, 2026-09-21.
   Wi-Fi-related skip). Results for the three new rows are NOT RUN — no
   bench access this pass; matrix updated in
   `docs/COMMISSIONING_TEST_MATRIX.md`.
+  Review follow-up, same day: the CDP `fills` primitive now reads the
+  assigned `.value` back before dispatching events and fails hard if the
+  element rejected it (an unpopulated `<select>` keeps `''`, so W42's
+  delete would otherwise have clicked on whatever the page's own fallback
+  selection landed on), and `Row` gained `guard_fields` -- the other keys a
+  whole-form Save posts alongside the edited one, snapshotted before the
+  first Save and re-checked after the restore, since `restore_from_field`
+  only ever puts the edited field back (95 tests).
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at

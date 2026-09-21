@@ -395,6 +395,17 @@ def _sequential_get_json(responses):
     return fake
 
 
+def _zones_body(pclink, **guard_overrides):
+    """A /api/zones response body carrying both W22's edited field and the
+    three top-level counts W22 declares as `guard_fields` -- the page posts
+    all of them in one whole-page submit, so a realistic fixture has to
+    include them or the guard check has nothing to compare."""
+    body = {"pc_link_abort_silence_ms": pclink,
+            "thermo_count": 3, "relay_count": 4, "max_simultaneous_relays": 2}
+    body.update(guard_overrides)
+    return body
+
+
 def test_fill_and_restore_full_flow_passes(monkeypatch):
     # Pre-read shows the original value, post-set read-back shows it changed,
     # post-restore read-back shows it back to the original -- three distinct
@@ -402,9 +413,9 @@ def test_fill_and_restore_full_flow_passes(monkeypatch):
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
-            (200, {"pc_link_abort_silence_ms": 30000}),
-            (200, {"pc_link_abort_silence_ms": 54000}),
-            (200, {"pc_link_abort_silence_ms": 30000}),
+            (200, _zones_body(30000)),
+            (200, _zones_body(54000)),
+            (200, _zones_body(30000)),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -421,8 +432,8 @@ def test_fill_and_restore_fails_if_value_never_changes(monkeypatch):
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
-            (200, {"pc_link_abort_silence_ms": 30000}),
-            (200, {"pc_link_abort_silence_ms": 30000}),
+            (200, _zones_body(30000)),
+            (200, _zones_body(30000)),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -440,9 +451,9 @@ def test_fill_and_restore_fails_loud_if_restore_does_not_take(monkeypatch):
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
-            (200, {"pc_link_abort_silence_ms": 30000}),
-            (200, {"pc_link_abort_silence_ms": 54000}),
-            (200, {"pc_link_abort_silence_ms": 54000}),
+            (200, _zones_body(30000)),
+            (200, _zones_body(54000)),
+            (200, _zones_body(54000)),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -578,3 +589,114 @@ def test_negative_mangled_fill_selector_caught_by_dry_run_then_restored():
 
     ok, msg = wcr.dry_run("W38", repo_root=_repo_root())
     assert ok, msg
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 review follow-up: collateral-write guard (`guard_fields`) and the
+# CDP driver's fill read-back. Both close paths where the row could report a
+# clean result while something the operator did not ask for was written, or
+# while a click landed on a target nobody selected.
+# ---------------------------------------------------------------------------
+
+def test_w22_and_w38_declare_guard_fields_for_every_other_posted_field():
+    # Both pages submit their whole form in one body, so every other field
+    # that body carries must be guarded -- restore_from_field alone only
+    # ever puts the EDITED field back.
+    assert wcr.ROWS["W22"].guard_fields == (
+        "thermo_count", "relay_count", "max_simultaneous_relays")
+    assert wcr.ROWS["W38"].guard_fields == (
+        "timeout_setting", "keep_on_while_firing", "display_on_error")
+
+
+def test_fill_and_restore_fails_if_save_also_changed_a_guarded_field(monkeypatch):
+    # settings_display_page.html's Save has no "loaded yet?" guard and posts
+    # all four fields together, so a Save racing its own loadCurrent() writes
+    # the markup defaults over the other three. That must FAIL loudly, not
+    # pass because the one edited field round-tripped.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"brightness_percent": 100, "timeout_setting": 300,
+                   "keep_on_while_firing": True, "display_on_error": True}),
+            # Brightness took, but the three others got the markup defaults.
+            (200, {"brightness_percent": 45, "timeout_setting": 0,
+                   "keep_on_while_firing": False, "display_on_error": False}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W38"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "collateral write" in msg
+    assert "timeout_setting" in msg
+
+
+def test_fill_and_restore_guard_check_precedes_the_did_not_change_check(monkeypatch):
+    # The clobbering Save can also leave the EDITED field reading its
+    # original value (the race posts the form's defaults for everything).
+    # The older "write did not land" message would then be the only thing
+    # reported, hiding the collateral write.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _zones_body(30000)),
+            (200, _zones_body(30000, thermo_count=0)),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "collateral write" in msg
+    assert "did not change" not in msg
+
+
+def test_fill_and_restore_fails_if_the_restore_save_drifts_a_guarded_field(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _zones_body(30000)),
+            (200, _zones_body(54000)),
+            (200, _zones_body(30000, relay_count=0)),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "restore Save CHANGED" in msg
+    assert "relay_count" in msg
+
+
+def test_fill_and_restore_refuses_to_write_if_a_guarded_field_is_absent(monkeypatch):
+    # No baseline for a guarded field means no way to prove the Save left it
+    # alone -- refuse before the first CDP run, not after.
+    ran = []
+    monkeypatch.setattr(wcr, "_get_json_with_cookie",
+                        lambda host, path, cookie: (200, {"pc_link_abort_silence_ms": 30000}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: ran.append(1) or _FakeProc())
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "refusing to write" in msg
+    assert ran == []
+
+
+def test_cdp_driver_fill_reads_back_the_assigned_value():
+    # The driver must compare .value after assigning it: a <select> whose
+    # option list has not been populated yet silently keeps '' (W42's delete
+    # step selects the slot it just created by id), and a range input snaps
+    # an off-step value. Both would click with a value nobody asked for.
+    src = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
+    with open(src, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert "VALUE_REJECTED" in text
+    assert "      if (String(el.value) !== " in text
+    assert "Refusing to click with an unintended value" in text
+    # ...and the comparison must come BEFORE the events are dispatched, so a
+    # rejected value never reaches the page's own listeners.
+    assert text.index("if (String(el.value) !== ") < text.index("new Event('input'")

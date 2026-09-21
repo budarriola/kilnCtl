@@ -95,6 +95,17 @@ class Row:
     # flow). None = use the generic single-click (optionally fills+restore)
     # path in run_row_live().
     special: "Optional[str]" = None
+    # Other keys in verify_endpoint's response body that this row's Save
+    # posts alongside the filled field and must therefore leave UNCHANGED.
+    # These pages submit every field on the form in one body, not just the
+    # one being edited, so a Save clicked before the page's own async
+    # loadCurrent() has populated the rest of the form writes that form's
+    # MARKUP DEFAULTS over the board's real values -- and
+    # `restore_from_field` only ever restores the field being edited, so
+    # nothing else would notice. _run_fill_and_restore() snapshots these
+    # before the first Save and re-checks them after the restore, so a
+    # collateral write fails the row loudly instead of passing.
+    guard_fields: "Optional[tuple[str, ...]]" = None
 
 
 # 26 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
@@ -221,7 +232,10 @@ ROWS: "dict[str, Row]" = {
                "then restored to its original value by a second Save",
                verify_endpoint="/api/zones", expect_post="/api/zones",
                fills=(("#pcLink", "54000"),),
-               restore_from_field=("pc_link_abort_silence_ms",)),
+               restore_from_field=("pc_link_abort_silence_ms",),
+               # /api/zones is a whole-page submit; these three top-level
+               # counts ride along in every Save this page issues.
+               guard_fields=("thermo_count", "relay_count", "max_simultaneous_relays")),
     "W23": Row("W23", "/safety", "firmware/KilnFW/App/drivers/http/safety_page.html",
                "", "page", "load the safety page",
                "safety status/banner renders",
@@ -264,7 +278,12 @@ ROWS: "dict[str, Row]" = {
                "then restored to its original value by a second Save",
                verify_endpoint="/api/settings/display_power", expect_post="/api/settings/display_power",
                fills=(("#kcDpBrightness", "45"),),
-               restore_from_field=("brightness_percent",)),
+               restore_from_field=("brightness_percent",),
+               # settings_display_page.html's Save always posts all four
+               # fields together and has no "loaded yet?" guard, so a Save
+               # racing its own loadCurrent() would write the markup
+               # defaults (Never / both off) over these three.
+               guard_fields=("timeout_setting", "keep_on_while_firing", "display_on_error")),
     "W39": Row("W39", "/settings/security", "firmware/KilnFW/App/drivers/net/security_page.html",
                "", "page", "load the settings/security page",
                "auth config/policy fields render",
@@ -533,6 +552,12 @@ def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str)
         if key not in pre_body:
             return False, f"{row.row_id} FAIL: expected field {key!r} missing from {row.verify_endpoint} body"
         originals.append(str(pre_body[key]))
+    guarded = {k: str(pre_body[k]) for k in (row.guard_fields or ()) if k in pre_body}
+    missing_guards = [k for k in (row.guard_fields or ()) if k not in pre_body]
+    if missing_guards:
+        return False, (f"{row.row_id} FAIL: guard field(s) {missing_guards} missing from "
+                        f"{row.verify_endpoint} body -- cannot prove this row's Save left them "
+                        f"alone, refusing to write")
 
     proc = _run_cdp(row, host, screenshot_dir, cookie, fills=row.fills, shot_suffix="_set")
     if proc.returncode != 0:
@@ -542,6 +567,18 @@ def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str)
     if mid_status != 200 or not isinstance(mid_body, dict):
         return False, (f"{row.row_id} FAIL: post-set read-back GET {row.verify_endpoint} -> "
                         f"{mid_status}: {json.dumps(mid_body)[:300]}")
+    # Checked BEFORE the "did the edited field change?" test below: a Save
+    # that raced the page's own loadCurrent() can post the form's markup
+    # defaults for every field it carries, including one that leaves the
+    # edited field reading its original value -- that path would otherwise
+    # return "write did not land" while the collateral write went
+    # unmentioned.
+    drifted = [k for k, orig in guarded.items() if str(mid_body.get(k)) != orig]
+    if drifted:
+        return False, (f"{row.row_id} FAIL: this row's Save also CHANGED field(s) {drifted} "
+                        f"(now {[mid_body.get(k) for k in drifted]!r}, were "
+                        f"{[guarded[k] for k in drifted]!r}) -- collateral write, LEFT ON BOARD, "
+                        f"restore by hand")
     unchanged = [k for k, orig in zip(row.restore_from_field, originals) if str(mid_body.get(k)) == orig]
     if unchanged:
         return False, (f"{row.row_id} FAIL: field(s) {unchanged} did not change after Save "
@@ -564,11 +601,20 @@ def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str)
         return False, (f"{row.row_id} FAIL: restore did not take -- field(s) {not_restored} still read "
                         f"{[final_body.get(k) for k in not_restored]!r}, expected original "
                         f"{dict(zip(row.restore_from_field, originals))}")
+    # The restore is a second full-form Save, so it can drift the guarded
+    # fields just as the first one can.
+    final_drifted = [k for k, orig in guarded.items() if str(final_body.get(k)) != orig]
+    if final_drifted:
+        return False, (f"{row.row_id} FAIL: the restore Save CHANGED field(s) {final_drifted} "
+                        f"(now {[final_body.get(k) for k in final_drifted]!r}, were "
+                        f"{[guarded[k] for k in final_drifted]!r}) -- the edited field is back to "
+                        f"its original, but this collateral write is LEFT ON BOARD, restore by hand")
 
     return True, (
         f"{row.row_id} PASS: set {dict(row.fills)} via Save, confirmed via GET {row.verify_endpoint}, "
         f"restored to original {dict(zip(row.restore_from_field, originals))} via a second Save, "
-        f"confirmed restored | expected: {row.expected_outcome}"
+        f"confirmed restored; guarded field(s) {sorted(guarded)} confirmed unchanged throughout "
+        f"| expected: {row.expected_outcome}"
     )
 
 
