@@ -134,7 +134,7 @@ why those are excluded even when a restore step exists for them):
 | Adaptive-tune revert | `/api/adaptive_tune/revert` | reverts to firmware-default gains -- only run this if the current adaptive gains are already known/logged, since revert is itself the "undo" for adaptive tuning, not something that itself needs undoing |
 | Watchdog PANIC toggle | `/api/watchdog_cfg` | must be restored to enabled before ending the session -- **disabling it masks real overflow-class crashes for as long as it stays off**, so keep the disabled window as short as possible |
 | Relay-cycle counters reset/restore | `/api/relay_cycles/*` | the route itself provides `restore`, use it (this resets a counter, not a relay; no relay is driven) |
-| Dual-write window restore-verified | `/api/dualwrite_window/restore_verified` | `cfg` partition is unformatted/inert on this bench -- expect a true no-op, confirm via status GET |
+| Dual-write window restore-verified | `/api/dualwrite_window/restore_verified` | Superseded 2026-09-21: `cfg` is mounted and populated on this bench (per `GET /api/cfgfs`), so this is no longer a true no-op -- confirm the actual effect via status GET |
 | Timezone save | `POST /api/settings/tz` | read current tz first, restore |
 | Display-power save | `POST /api/settings/display_power` | read first, restore |
 | Unit preference toggle | `POST /api/unit_pref` | read first, restore |
@@ -175,7 +175,9 @@ and firing-state write this review moved here:
   cal/auto-zero/trim** (`POST /api/safety/commissioning*`) -- all safety-
   config writes.
 - **cfgfs format-confirm** (`POST /api/cfgfs/format_confirm`) -- erases the
-  `cfg` filesystem; inert-but-still-destructive-in-intent on this bench.
+  `cfg` filesystem; superseded 2026-09-21 -- `cfg` is now mounted and
+  populated on this bench, so this is a real destructive format, not merely
+  destructive-in-intent.
 - **Backup restore/import** (`POST /api/backup/import`) -- import is a
   destructive overwrite of board config; only the export/read side stays in
   the reversible bucket above.

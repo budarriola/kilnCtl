@@ -68,7 +68,12 @@ it** — see "Auto-format and the ask-first path" below. This is source and
 host-test evidence only, not a hardware observation: as of 2026-09-17 this
 code has never run on the bench board, which is still on commit `3b0c82e`
 (built 2026-09-05, 1057 commits behind), so nothing below in this paragraph
-has been seen actually happen. The bench board's `cfg` partition reads
+has been seen actually happen. **Superseded 2026-09-21:** the bench board,
+now running `8ab3b81a`, has `cfg` mounted and populated with 7 files
+(including `zones.json`, 900 B), confirmed via `GET /api/cfgfs` on
+hardware, not inferred from source; NVS remains authoritative and the
+rollback hazard described elsewhere in this repo is unchanged. The bench
+board's `cfg` partition reads
 86.6% non-erased (residual bytes left over from before the `cfg` partition
 existed in `partitions.csv`, not a filesystem — the density-based gate this
 section originally shipped with wrongly treated that as evidence of content
@@ -223,7 +228,11 @@ count.
 
 ## Open items (2026-09-07)
 
-- **Not yet reflashed to the bench board (added 2026-09-17).** Everything
+- **Not yet reflashed to the bench board (added 2026-09-17) — superseded
+  2026-09-21.** The bench board now runs `8ab3b81a` and `cfg` is mounted
+  and populated (7 files, observed via `GET /api/cfgfs`, not inferred from
+  source); NVS is still authoritative and the rollback hazard is
+  unchanged. The rest of this bullet is kept for history. Everything
   below in this section describes what the mount/auto-format code in
   `main_boot_early.c`/`cfg_fs_mount.c` does; none of it has actually run on
   the bench board as of 2026-09-17. `get_fw_version()` against the live
@@ -246,7 +255,9 @@ count.
 - **`cfg` was unformatted on the bench board — now resolved.** The mount
   call and the auto-format-or-ask gate both landed this pass (see
   "Auto-format and the ask-first path" above); the bench board's next boot
-  auto-formats and mounts. The LCD/`/api/status` banner for the ask-first
+  auto-formats and mounts. **Confirmed on hardware 2026-09-21:** the bench
+  board (`8ab3b81a`) now has `cfg` mounted with 7 files present, per
+  `GET /api/cfgfs`. The LCD/`/api/status` banner for the ask-first
   refusal path is still not wired in — only the boot log and the Settings
   page know about it today.
 - **RP2040 `config_store`'s zero-valid-copies erase window — fixed.** The

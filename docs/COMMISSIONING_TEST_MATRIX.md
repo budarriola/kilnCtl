@@ -167,7 +167,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Danger status poll | `GET /api/diagnostics/danger` | ADMIN | none direct | -- | Testable | |
 | E-stop verify | `POST /api/estop/verify` | ADMIN | none direct | -- | **Hardware-gated**: bench E-stop jumper is fitted (NOT asserted, per `project_estop_jumper_is_fitted`) -- verifying the real switch needs the jumper removed and a physical actuation |
 | Relay cycle counters: reset/restore per-relay (`relay-reset-btn`) | `POST /api/relay_cycles/reset`, `POST /api/relay_cycles/restore` | ADMIN | none direct | -- | Testable | |
-| Dual-write window record restore (`dwwRecordRestoreBtn`) | `POST /api/dualwrite_window/restore_verified` | ADMIN | none direct | -- | Testable (per `project_cfg_partition_and_user_data_move`, `cfg` partition is unformatted/inert on this bench, so verify this is a true no-op there) | |
+| Dual-write window record restore (`dwwRecordRestoreBtn`) | `POST /api/dualwrite_window/restore_verified` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is now mounted and populated on this bench per `GET /api/cfgfs`, per `project_cfg_partition_and_user_data_move` -- verify against the live file state, not the old unformatted assumption) | |
 | Dual-write window status | `GET /api/dualwrite_window` | ADMIN | none direct | -- | Testable | |
 | lwIP stats | `GET /api/debug/lwip_stats` | ADMIN | none direct | -- | Testable | |
 | Timing diagnostics | `GET /api/diagnostics/timing` | ADMIN | none direct | -- | Testable | |
@@ -184,7 +184,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Reset kiln config only (`data-scope="kiln"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset` | -- | Testable | |
 | Reset fire profiles only (`data-scope="profiles"`) | `POST /api/factory_reset` | ADMIN | none direct | -- | Testable | |
 | Factory default -- erase everything (`data-scope="all"`) | `POST /api/factory_reset` | ADMIN | `factory_default_then_load_preset`(scope=all) | -- | Testable, but destructive -- re-provision Wi-Fi/credentials afterward | |
-| Format cfg partition (`cfgFsFormatConfirmBtn`) | `GET /api/cfgfs/format_pending`, `POST /api/cfgfs/format_confirm` | ADMIN | none direct | -- | Testable (`cfg` partition is unformatted/inert on this bench today) | |
+| Format cfg partition (`cfgFsFormatConfirmBtn`) | `GET /api/cfgfs/format_pending`, `POST /api/cfgfs/format_confirm` | ADMIN | none direct | -- | Testable (superseded 2026-09-21: `cfg` is mounted and populated with 7 files on this bench, per `GET /api/cfgfs` -- this is now a real destructive format, not a no-op) | |
 | Timezone save | `POST /api/settings/tz` | ADMIN | none direct | -- | Testable | |
 
 ### `/settings/display` -- display settings (`settings_display_page.html`)

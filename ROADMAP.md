@@ -2483,7 +2483,10 @@ closed alongside it: the generic `pref_cfg_fs` bridge to the `cfg` filesystem
 is parameterised by one fixed item size, so a v1-length *file* would have been
 dropped silently rather than migrated. `relay_names_load()` now upgrades such a
 file in place at the same rev before the divergence tie-break runs, with its
-own host test. Inert today — no board mounts `cfg` yet.
+own host test. Inert on the bench at the time this was written — no board
+mounted `cfg` yet; **superseded 2026-09-21**, the bench board (`8ab3b81a`)
+now has `cfg` mounted and populated (7 files, confirmed via `GET
+/api/cfgfs`), NVS still authoritative.
 
 **Stage 1 landed**: `relay_device_type_t` (with `unset` as enum 0), the
 `types[]` array, `RELAY_NAMES_CFG_VERSION` 1 → 2, the frozen
