@@ -725,8 +725,8 @@ CEILING_BYTES = {
     # against a KilnCtrl.elf freshly built by check_00_kilnfw_target_build.ps1.
     # The previous 48 was the loop alone: it ceilinged the dispatch, not the
     # work, so every job this task has ever run sat above an unmeasured, and
-    # unmeasuring, tripwire. Honest free at this number: 4100 B (50.0%) of the
-    # declared 8192 B. Still a LOWER BOUND (NVS/LittleFS internals dispatch
+    # unmeasuring, tripwire. Honest free at this number: 6448 B (63.0%) of the
+    # declared 10240 B. Still a LOWER BOUND (NVS/LittleFS internals dispatch
     # indirectly) and still reported INDETERMINATE, never a pass.
     "bx_flash_worker": 3792,
     "info_uart_bridge": 2208,

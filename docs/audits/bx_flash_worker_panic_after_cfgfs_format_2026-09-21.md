@@ -106,8 +106,8 @@ before, and why the *first* write after the format is the one that died.
 
 ## Hypotheses tested and rejected
 
-- **`59ae974c` would have prevented it — NO; it would have made it marginally
-  worse.** `59ae974c` ("cfg_fs: stream write_atomic's readback verify instead
+- **`2e923303` would have prevented it — NO; it would have made it marginally
+  worse.** `2e923303` ("cfg_fs: stream write_atomic's readback verify instead
   of malloc'ing the whole blob") is on `origin/main` but not in `7098b2ee`
   (`git merge-base --is-ancestor` confirms). It replaces a whole-blob `malloc`
   with a **256 B stack** `chunk[]` inside the same `cfg_fs_write_atomic` frame.

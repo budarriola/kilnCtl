@@ -390,17 +390,21 @@ static void test_write_large_payload_spans_multiple_verify_chunks(void)
 }
 
 // ---------------------------------------------------------------------
-// 8. write_atomic()'s early-rejection branches, after the path buffers
-//    moved off the stack and into one heap-allocated cfg_fs_write_scratch_t
+// 8. write_atomic()'s early-rejection path, after the path buffers moved
+//    off the stack and into one heap-allocated cfg_fs_write_scratch_t
 //    (docs/audits/bx_flash_worker_panic_after_cfgfs_format_2026-09-21.md --
 //    a real hardware stack overflow in bx_flash_worker on the first cfg
-//    write after a format). That refactor turned five plain `return
-//    ESP_ERR_INVALID_ARG` statements into five free-then-return branches,
-//    so each rejection path is now a place a leak or a use-after-free can
-//    hide, and -- much more importantly -- a place where an early return
-//    must STILL leave any existing file completely untouched. Nothing
-//    covered these rejections before; the pre-existing tests only ever pass
-//    well-formed relative paths.
+//    write after a format). That refactor turned a plain `return
+//    ESP_ERR_INVALID_ARG` into a free-then-return branch, so a rejection is
+//    now a place a leak or a use-after-free can hide, and -- much more
+//    importantly -- a place where an early return must STILL leave any
+//    existing file completely untouched. All four malformed inputs below
+//    are refused by split_one_level(), so they exercise that one
+//    free-then-return branch four different ways, not four distinct
+//    branches; the path_join/flatten and ESP_ERR_NO_MEM free-then-return
+//    branches are not covered here. Nothing covered this rejection path
+//    before; the pre-existing tests only ever pass well-formed relative
+//    paths.
 // ---------------------------------------------------------------------
 static void test_write_atomic_rejections_leave_existing_file_untouched(void)
 {
