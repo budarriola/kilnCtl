@@ -474,6 +474,7 @@ from .mcp_server_config_convert import *  # noqa: F401,F403
 from .mcp_server_capability_preflight import *  # noqa: F401,F403
 from .mcp_server_ui_test import *  # noqa: F401,F403
 from .mcp_server_profiles import *  # noqa: F401,F403
+from .mcp_server_profile_live import *  # noqa: F401,F403
 from .mcp_server_autotune import *  # noqa: F401,F403
 from .mcp_server_adaptive_tune import *  # noqa: F401,F403
 from .mcp_server_ramp_assist import *  # noqa: F401,F403
