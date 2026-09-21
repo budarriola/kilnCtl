@@ -647,10 +647,16 @@ def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Op
     try:
         after = dashboard_http_client.get_cfgfs_status(resolved)
     except dashboard_http_client.DashboardHttpError as exc:
-        return (f"ok - POST /api/cfgfs/format_confirm returned {result!r}, but the confirming "
+        return (f"WARNING: POST /api/cfgfs/format_confirm returned {result!r}, but the confirming "
                 f"re-read failed (host={resolved}): {exc} -- after-state UNKNOWN, re-check "
                 f"before trusting this")
     after_count = after.get("file_count")
+    after_mounted = after.get("mounted")
+
+    if after_mounted is not True or after_count != 0:
+        return (f"error: POST /api/cfgfs/format_confirm returned {result!r}, but the re-read "
+                f"(host={resolved}) shows mounted={after_mounted!r}, file_count={after_count!r} "
+                f"-- expected mounted=True, file_count=0; before file_count={before_count}")
 
     return (f"ok - cfg partition formatted (host={resolved}): before file_count={before_count}, "
             f"after file_count={after_count}; board detail: {result.get('detail')!r}")

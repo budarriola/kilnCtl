@@ -102,6 +102,40 @@ class ConfirmedFormatTest(_Base):
             result = msi.cfgfs_format(confirm=True, password="hunter2")
         self.assertIn("re-read failed", result)
         self.assertIn("UNKNOWN", result)
+        self.assertTrue(result.startswith("WARNING:"))
+        self.assertNotIn("ok - cfg partition formatted", result)
+
+    def test_readback_shows_nonzero_file_count_is_graded_error(self):
+        """The POST reported success but the re-read shows files still
+        present -- must not be reported as 'ok'."""
+        after_nonzero = {"mounted": True, "status": "mounted", "file_count": 3, "files": []}
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 dashboard_http_client, "get_cfgfs_status",
+                 side_effect=[_BEFORE, after_nonzero]), \
+             unittest.mock.patch.object(
+                 ota_http, "format_cfgfs",
+                 return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
+            result = msi.cfgfs_format(confirm=True, password="hunter2")
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("file_count=3", result)
+        self.assertNotIn("ok - cfg partition formatted", result)
+
+    def test_readback_shows_unmounted_is_graded_error(self):
+        """The POST reported success but the re-read shows the partition not
+        mounted -- must not be reported as 'ok'."""
+        after_unmounted = {"mounted": False, "status": "unmounted", "file_count": 0, "files": []}
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 dashboard_http_client, "get_cfgfs_status",
+                 side_effect=[_BEFORE, after_unmounted]), \
+             unittest.mock.patch.object(
+                 ota_http, "format_cfgfs",
+                 return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
+            result = msi.cfgfs_format(confirm=True, password="hunter2")
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("mounted=False", result)
+        self.assertNotIn("ok - cfg partition formatted", result)
 
 
 class UnreadableInitialFetchTest(_Base):

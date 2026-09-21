@@ -847,6 +847,13 @@ class DeriveMacSwResetContextTest(unittest.TestCase):
         want = hmac.new(key, nonce + b"sw-reset", hashlib.sha256).digest()
         self.assertEqual(got, want)
 
+    def test_diverges_from_every_other_context(self):
+        nonce = bytes(range(16))
+        sw_reset_mac = ota.derive_mac("hunter2", nonce, "sw-reset")
+        for other in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset"):
+            self.assertNotEqual(sw_reset_mac, ota.derive_mac("hunter2", nonce, other),
+                                 f"sw-reset MAC must differ from {other!r}'s MAC")
+
 
 class DeriveMacFactoryResetContextTest(unittest.TestCase):
     """Tooling-gap fix: firmware defines OTA_HTTP_CONTEXT_FACTORY_RESET
@@ -966,10 +973,3 @@ class FormatCfgfsTest(unittest.TestCase):
         with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
                 ota.format_cfgfs("192.0.2.1", "hunter2")
-
-    def test_diverges_from_every_other_context(self):
-        nonce = bytes(range(16))
-        sw_reset_mac = ota.derive_mac("hunter2", nonce, "sw-reset")
-        for other in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset"):
-            self.assertNotEqual(sw_reset_mac, ota.derive_mac("hunter2", nonce, other),
-                                 f"sw-reset MAC must differ from {other!r}'s MAC")
