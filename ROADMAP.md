@@ -1,6 +1,30 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-18, CT commissioning bench
+> **Status:** planning · **Last reviewed:** 2026-09-20/21, bench commissioning
+> pass (twentieth sweep) — both processors reflashed to HEAD; open items below.
+> - **Bench board reflashed to `da37ffa2` on both processors, 2026-09-20
+>   evening to 2026-09-21 ~01:00 UTC.** Pico (SaftyFW) via
+>   `debug_program(peer="pico")` from a clean worktree at `da37ffa2`; reports
+>   `safety_build_commit 5f58ba09` (SaftyFW source unchanged 5f58ba09..da37ffa2),
+>   link_up true, commissioned true. ESP32-S3 via `flash_firmware()`: flashed
+>   and verified OK, tree clean, embedded Pico image commit 5f58ba09,
+>   config_format_version 3. Prior build 5f58ba09's Wi-Fi ppTask ENOMEM panic
+>   (`docs/audits/dram_bss_profiles_fallback_2026-09-20.md`, fixed in `da37ffa2`)
+>   was acknowledged via `crash_report_ack`. **Open items:** no
+>   `KILNCTL_AP_PASSWORD` in any scope, so `boot_guard_reset` was skipped and
+>   `cfgfs` reformat is blocked; the serial link hub (COM14, port 8765) is held
+>   by a stale pytest (PID 42424) blocking every serial-only tool; `cfgfs`'s
+>   `relay_cycles` item is DIVERGED between NVS (authoritative) and the file
+>   mirror, expected to self-clear on next write; post-flash heap_internal
+>   largest free block (~7936-8192 B) sits under the ~8704/11900 B alarm
+>   thresholds, under investigation. **Smoke-suite run flagged a false
+>   readiness signal, needs an owner decision:** case SP-05 POSTs
+>   `/api/estop/verify`, an admin write that marks `estop_verified` confirmed
+>   by operator — readiness now shows that item ok though no operator ran the
+>   procedure; per `estop_verification.h` only committing param `0x0212`
+>   (`estop_active_level`) or a kiln/all factory reset clears it.
+>
+> **Previously reviewed:** 2026-09-18, CT commissioning bench
 > check (nineteenth sweep) — live board read of channel 2's CT calibration
 > and of S9/S14/S15 status; no source or firmware changed this sweep.
 > - **Channel 2's CT calibration is correct and complete on the live board:**
