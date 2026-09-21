@@ -72,6 +72,7 @@ GROUP_OVERRIDES = {
     "get_cfgfs_status": "system",
     "get_watchdog_panic_disabled": "system",
     "set_watchdog_panic_disabled": "system",
+    "get_readiness": "system",
     # OpenOCD, shared by both processors.
     "flash_firmware": "debug",
     "kill_openocd_sessions": "debug",
@@ -150,6 +151,9 @@ KEYWORDS = {
                         "display_flush_us", "thermo_read_us", "timing"),
     "crash_report_ack": ("crash", "panic", "acknowledge", "ack", "dismiss", "unacknowledged",
                          "coredump", "exception", "backtrace", "reviewed", "clear the banner"),
+    "get_readiness": ("readiness", "commissioning checklist", "commissioning", "estop_verified",
+                      "checklist", "not_done", "cannot_yet", "deliberately_off",
+                      "ready to fire", "fix_url", "api/readiness"),
     "get_device_log": ("console", "printf", "esp_logx", "serial", "tail"),
     "fetch_event_log": ("event log", "event_log", "flash log", "log_store", "firing history",
                         "autotune history", "run started", "run faulted", "binary log",

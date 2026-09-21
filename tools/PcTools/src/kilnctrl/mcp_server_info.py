@@ -331,6 +331,61 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def get_readiness(host: Optional[str] = None) -> str:
+    """READ-ONLY: fetch and render the commissioning checklist from GET
+    /api/readiness (readiness_http.c's api_readiness_get_handler(), the
+    same data the board's own readiness page renders). Pure GET, no side
+    effects -- safe to call at any time, including during a live firing.
+
+    Each item is ``{key, label, status, detail, fix_url}``; `status` is one
+    of "ok", "not_done", "cannot_yet", "deliberately_off" (readiness_
+    status_t's four required distinctions -- see readiness_http.c's own
+    comment: "not_done" means an operator step is outstanding, "cannot_yet"
+    means a prerequisite item is blocking this one, "deliberately_off"
+    means an operator chose to skip it, not that it is broken). Renders one
+    line per item as ``STATUS key: detail`` (fix_url appended when present),
+    followed by a summary count of ok / not_done / other (cannot_yet +
+    deliberately_off + anything unrecognised).
+
+    Host is auto-resolved the same way get_heap_status()/the OTA/control
+    tools do; pass `host` explicitly for kilnctl.local or a board reachable
+    only from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_heap_status()
+    from . import readiness_http_client
+
+    resolved = _ota_resolve_host(host)
+    try:
+        data = readiness_http_client.get_readiness(resolved)
+    except readiness_http_client.ReadinessHttpError as exc:
+        return f"error reading readiness over HTTP (host={resolved}): {exc}"
+
+    items = data.get("items", [])
+    lines = [f"host={resolved}"]
+    ok_count = 0
+    not_done_count = 0
+    other_count = 0
+    for item in items:
+        key = item.get("key", "?")
+        status = item.get("status", "?")
+        detail = item.get("detail", "")
+        fix_url = item.get("fix_url", "")
+        line = f"{status} {key}: {detail}"
+        if fix_url:
+            line += f" (fix: {fix_url})"
+        lines.append(line)
+        if status == "ok":
+            ok_count += 1
+        elif status == "not_done":
+            not_done_count += 1
+        else:
+            other_count += 1
+    lines.append(f"summary: {ok_count} ok, {not_done_count} not_done, {other_count} other "
+                 f"({len(items)} total)")
+    return "\n".join(lines)
+
+
+@_srv._tool()
 def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     """Fetch and decode the board's on-flash binary event log, over HTTP
     GET /api/logs/{firing,autotune}.

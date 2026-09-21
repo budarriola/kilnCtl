@@ -22,9 +22,12 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (170 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-20, when `crash_report_ack` was
-added -- an MCP tool for POST /api/crash_report/ack (diagnostics_http.c,
+the rest behind a search facade (171 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-20, when `get_readiness` was
+added -- a READ-ONLY MCP tool wrapping GET /api/readiness (readiness_http.c),
+rendering the board's commissioning checklist (one line per item: status,
+key, detail, with ok/not_done/other counts). The one before it was
+`crash_report_ack`, same day -- an MCP tool for POST /api/crash_report/ack (diagnostics_http.c,
 ROUTE_TIER_ADMIN), which acknowledges the board's last-crash record the same
 way the diagnostics page's own "Acknowledge" button does; it fetches
 GET /api/crash_report first and reports the pending record's summary before
