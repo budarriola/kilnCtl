@@ -18,8 +18,10 @@
 #   5. the two records agree with each other -- commit, dirty flag, AND
 #      config_format_version (D5: a schema mismatch between slots is just
 #      as real a defect as a commit mismatch, and used to slip through);
-#   6. the record's commit matches the current repo HEAD (`git rev-parse
-#      --short HEAD`, the same invocation SaftyFW's own build stamps with) --
+#   6. the record's commit matches `git log -1 --format=%h` scoped to
+#      firmware/SaftyFW, firmware/CommonFW and firmware/hwAbstraction (the
+#      same pathspec SaftyFW's own build stamps with, NOT plain `git
+#      rev-parse --short HEAD` -- see docs/PICO_AUTO_UPDATE_PLAN.md sec 12) --
 #      UNLESS the record's `dirty` flag is set, in which case this step is
 #      skipped and the check reports WARN instead of PASS (a deliberately
 #      dirty local build is not a staleness bug, but it is worth flagging

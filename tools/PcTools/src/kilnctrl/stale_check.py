@@ -297,10 +297,21 @@ def check_kilnfw_stale(kiln_fw_root: str) -> StaleResult:
 
 def check_saftyfw_stale(safty_fw_root: str) -> StaleResult:
     tree_root = _tree_root_for_project(safty_fw_root)
+    # project_dirs mirrors firmware/SaftyFW/tools/gen_build_info.cmake's own
+    # git-log/git-status pathspec (firmware/SaftyFW, firmware/CommonFW,
+    # firmware/hwAbstraction -- the three trees the SaftyFW build actually
+    # compiles) and tools/PcTools/src/kilnctrl/pico_image_freshness.py's
+    # SCOPED_PATHS -- a third, independently-maintained copy of the same
+    # list. See docs/PICO_AUTO_UPDATE_PLAN.md sec 12 and the drift test
+    # tools/PcTools/tests/test_pico_image_freshness.py::test_scoped_paths_match_cmake_and_stale_check.
     return check_stale(
         header_path=os.path.join(safty_fw_root, "build", "saftyfw_build_info.h"),
         commit_macro="SAFTYFW_GIT_COMMIT",
         binary_path=os.path.join(safty_fw_root, "build", "SaftyFW.elf"),
-        project_dirs=[safty_fw_root, os.path.join(tree_root, "firmware", "CommonFW")],
+        project_dirs=[
+            safty_fw_root,
+            os.path.join(tree_root, "firmware", "CommonFW"),
+            os.path.join(tree_root, "firmware", "hwAbstraction"),
+        ],
         repo_root=tree_root,
     )

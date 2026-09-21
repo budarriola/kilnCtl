@@ -218,15 +218,112 @@ def test_stale_record_fails(tmp_path, monkeypatch):
 def test_git_saftyfw_scoped_head_real_repo_matches_git_cli():
     """Sanity check against the real repo (not a fixture):
     git_saftyfw_scoped_head() must return exactly what `git log -1
-    --format=%h -- firmware/SaftyFW firmware/CommonFW` returns, since that
-    is the exact invocation gen_build_info.cmake uses to stamp
-    SAFTYFW_GIT_COMMIT (docs/PICO_AUTO_UPDATE_PLAN.md sec 12) -- any
-    difference would make every real board read as stale."""
+    --format=%h -- <SCOPED_PATHS>` returns, since that is the exact
+    invocation gen_build_info.cmake uses to stamp SAFTYFW_GIT_COMMIT
+    (docs/PICO_AUTO_UPDATE_PLAN.md sec 12) -- any difference would make
+    every real board read as stale."""
     import subprocess
     expected = subprocess.run(
-        ["git", "log", "-1", "--format=%h", "--", "firmware/SaftyFW", "firmware/CommonFW"],
+        ["git", "log", "-1", "--format=%h", "--", *fresh.SCOPED_PATHS],
         cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=10,
     ).stdout.strip()
     if not expected:
         pytest.skip("git not available in this environment")
     assert fresh.git_saftyfw_scoped_head(_REPO_ROOT) == expected
+
+
+# ---------------------------------------------------------------------------
+# Drift guard: SCOPED_PATHS vs. gen_build_info.cmake vs. stale_check.py
+# ---------------------------------------------------------------------------
+#
+# Three separately-maintained, differently-typed copies of the same
+# three-path list exist (docs/PICO_AUTO_UPDATE_PLAN.md sec 12, review round
+# 2 -- round 1 shipped only two of the three paths kept in sync, missing
+# firmware/hwAbstraction, exactly this class of drift):
+#   - fresh.SCOPED_PATHS (this module, a Python tuple)
+#   - firmware/SaftyFW/tools/gen_build_info.cmake's two `execute_process`
+#     pathspecs (CMake command args)
+#   - stale_check.py's check_saftyfw_stale() project_dirs (a Python list
+#     built from os.path.join calls)
+# This test regexes the latter two and fails loud if either has drifted
+# from fresh.SCOPED_PATHS, rather than trusting three hand-edited copies to
+# stay aligned silently.
+
+_GEN_BUILD_INFO_CMAKE = (
+    _REPO_ROOT / "firmware" / "SaftyFW" / "tools" / "gen_build_info.cmake"
+)
+_STALE_CHECK_PY = _REPO_ROOT / "tools" / "PcTools" / "src" / "kilnctrl" / "stale_check.py"
+
+
+def test_scoped_paths_match_cmake_and_stale_check():
+    expected = set(fresh.SCOPED_PATHS)
+    assert expected == {"firmware/SaftyFW", "firmware/CommonFW", "firmware/hwAbstraction"}, (
+        "this assertion is deliberately a literal, not a tautology against "
+        "itself -- if SCOPED_PATHS is edited, this line must be edited too, "
+        "reviewed, and only then do the cmake/stale_check comparisons below "
+        "mean anything"
+    )
+
+    cmake_text = _GEN_BUILD_INFO_CMAKE.read_text(encoding="utf-8")
+    # Both execute_process(COMMAND ${GIT_EXECUTABLE} log -1 ...) and
+    # execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain ...)
+    # reference the same three CMake variables in the same order:
+    # "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_dir}".
+    # THIS_PROJECT_DIR is firmware/SaftyFW itself (passed in via
+    # -DTHIS_PROJECT_DIR=..., not a literal path in this file), and
+    # _commonfw_dir/_hwabstraction_dir are set from PROJECT_ROOT plus a
+    # literal repo-relative suffix -- assert on those suffixes plus the use
+    # of THIS_PROJECT_DIR, since the literal "firmware/SaftyFW" string
+    # itself does not appear in this file.
+    assert 'set(_commonfw_dir "${PROJECT_ROOT}/firmware/CommonFW")' in cmake_text, (
+        "gen_build_info.cmake's CommonFW path literal has changed or moved -- "
+        "update this test and fresh.SCOPED_PATHS together"
+    )
+    assert 'set(_hwabstraction_dir "${PROJECT_ROOT}/firmware/hwAbstraction")' in cmake_text, (
+        "gen_build_info.cmake's hwAbstraction path is missing or has changed -- "
+        "this is exactly the review-round-1 drift this test exists to catch"
+    )
+    log_calls = re.findall(
+        r"execute_process\(\s*COMMAND \$\{GIT_EXECUTABLE\} log -1 --format=%h -- ([^\n]+)",
+        cmake_text,
+    )
+    status_calls = re.findall(
+        r"execute_process\(\s*COMMAND \$\{GIT_EXECUTABLE\} status --porcelain -- ([^\n]+)",
+        cmake_text,
+    )
+    assert len(log_calls) == 1, "expected exactly one `git log -1` execute_process in gen_build_info.cmake"
+    assert len(status_calls) == 1, "expected exactly one `git status --porcelain` execute_process in gen_build_info.cmake"
+    expected_args = '"${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_dir}"'
+    assert log_calls[0].strip() == expected_args, (
+        f"gen_build_info.cmake's `git log -1` pathspec is {log_calls[0].strip()!r}, "
+        f"expected {expected_args!r} -- commit-field scoping has drifted from SCOPED_PATHS"
+    )
+    assert status_calls[0].strip() == expected_args, (
+        f"gen_build_info.cmake's `git status --porcelain` pathspec is {status_calls[0].strip()!r}, "
+        f"expected {expected_args!r} -- dirty-flag scoping has drifted from the commit field "
+        "(the exact review-round-2 defect: dirty was left scoped to THIS_PROJECT_DIR alone)"
+    )
+
+    stale_check_text = _STALE_CHECK_PY.read_text(encoding="utf-8")
+    project_dirs_match = re.search(
+        r"def check_saftyfw_stale.*?project_dirs=\[(.*?)\],",
+        stale_check_text, re.DOTALL,
+    )
+    assert project_dirs_match, "check_saftyfw_stale()'s project_dirs list not found -- has it been renamed/restructured?"
+    project_dirs_body = project_dirs_match.group(1)
+    for suffix in ("CommonFW", "hwAbstraction"):
+        assert f'"firmware", "{suffix}"' in project_dirs_body, (
+            f"stale_check.py's check_saftyfw_stale() project_dirs is missing "
+            f"firmware/{suffix} -- it has drifted from fresh.SCOPED_PATHS"
+        )
+
+
+def test_scoped_paths_drift_is_actually_caught(monkeypatch):
+    """Negative test for the drift guard above: prove it actually fails on
+    real drift, not just on the fixture's current (correct) state. Patches
+    fresh.SCOPED_PATHS itself, not the files on disk -- cheaper than editing
+    and restoring gen_build_info.cmake/stale_check.py by hand, and exercises
+    the same comparison logic (the literal-vs-file mismatch branch)."""
+    monkeypatch.setattr(fresh, "SCOPED_PATHS", ("firmware/SaftyFW", "firmware/CommonFW"))
+    with pytest.raises(AssertionError):
+        test_scoped_paths_match_cmake_and_stale_check()

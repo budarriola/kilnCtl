@@ -30,23 +30,26 @@ set(commit "unknown")
 set(dirty "1")
 
 if(GIT_EXECUTABLE)
-    # Path-scoped to firmware/SaftyFW (THIS_PROJECT_DIR) and firmware/CommonFW
-    # (the only other tree this build actually compiles -- see CMakeLists.txt's
-    # `add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW kilnlink)`), NOT
-    # `rev-parse --short HEAD` of the whole monorepo. A plain repo-wide HEAD
-    # changes on every commit anywhere in the tree -- including KilnFW-only
-    # commits that touch nothing SaftyFW reads -- so the boot-time identity
-    # comparison in pico_auto_update.h (firmware/KilnFW/.../pico_auto_update.h)
-    # saw a "mismatch" on every KilnFW flash and tried to reflash the Pico with
-    # a byte-identical image every time. `git log -1` over exactly the paths
-    # this build depends on only changes when one of them actually does.
-    # pico_image_freshness.py's check_slot_bins_fresh() and
-    # tools/PcTools/src/kilnctrl/stale_check.py's ancestor+scoped-diff check
-    # were updated to compare against this same scoped commit rather than
-    # plain HEAD -- see those files' own comments.
+    # Path-scoped to every tree this build actually compiles: firmware/SaftyFW
+    # (THIS_PROJECT_DIR), firmware/CommonFW (`add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW
+    # kilnlink)`), and firmware/hwAbstraction (`add_library(hwabstraction_pico ...)`,
+    # further down this same CMakeLists.txt, linked into every SaftyFW target)
+    # -- NOT `rev-parse --short HEAD` of the whole monorepo. A plain repo-wide
+    # HEAD changes on every commit anywhere in the tree -- including
+    # KilnFW-only commits that touch nothing SaftyFW reads -- so the boot-time
+    # identity comparison in pico_auto_update.h
+    # (firmware/KilnFW/.../pico_auto_update.h) saw a "mismatch" on every
+    # KilnFW flash and tried to reflash the Pico with a byte-identical image
+    # every time. `git log -1` over exactly the paths this build depends on
+    # only changes when one of them actually does. This exact three-path list
+    # is kept in sync in two other places -- see the drift test that enforces
+    # it (tools/PcTools/tests/test_pico_image_freshness.py::test_scoped_paths_match_cmake_and_stale_check):
+    #   tools/PcTools/src/kilnctrl/pico_image_freshness.py's SCOPED_PATHS
+    #   tools/PcTools/src/kilnctrl/stale_check.py's check_saftyfw_stale() project_dirs
     set(_commonfw_dir "${PROJECT_ROOT}/firmware/CommonFW")
+    set(_hwabstraction_dir "${PROJECT_ROOT}/firmware/hwAbstraction")
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} log -1 --format=%h -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}"
+        COMMAND ${GIT_EXECUTABLE} log -1 --format=%h -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_dir}"
         WORKING_DIRECTORY ${PROJECT_ROOT}
         OUTPUT_VARIABLE commit_out
         OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -57,13 +60,16 @@ if(GIT_EXECUTABLE)
         set(commit ${commit_out})
     endif()
 
-    # Scoped to firmware/SaftyFW only (THIS_PROJECT_DIR), not the whole
-    # kilnCtl monorepo -- this project shares a repo with KiCad hardware
-    # files, KilnFW, CommonFW, docs, etc. that get their own in-progress
-    # changes; those must not mark SaftyFW's own build as dirty. Matches
-    # KilnFW's gen_build_info.cmake, same rationale.
+    # Dirty flag scoped to the SAME three paths as the commit above (it used
+    # to be scoped to THIS_PROJECT_DIR alone, under-covering CommonFW and
+    # hwAbstraction relative to what the commit field claims as inputs -- a
+    # CommonFW/hwAbstraction-only uncommitted edit would silently not mark
+    # the build dirty). Still excludes the rest of the kilnCtl monorepo
+    # (KiCad hardware files, KilnFW, docs, etc.) -- those must not mark
+    # SaftyFW's own build as dirty. Matches KilnFW's gen_build_info.cmake,
+    # same rationale.
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} status --porcelain -- "${THIS_PROJECT_DIR}"
+        COMMAND ${GIT_EXECUTABLE} status --porcelain -- "${THIS_PROJECT_DIR}" "${_commonfw_dir}" "${_hwabstraction_dir}"
         WORKING_DIRECTORY ${PROJECT_ROOT}
         OUTPUT_VARIABLE status_out
         OUTPUT_STRIP_TRAILING_WHITESPACE
