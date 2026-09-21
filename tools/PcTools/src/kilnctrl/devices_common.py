@@ -14,13 +14,14 @@ from dataclasses import dataclass
 # Secret-field redaction -- 2026-09-21 fix: get_board_state() was passing
 # UartWifiStatus (devices_wifi_uart.py) through dataclasses.asdict() straight
 # into its JSON snapshot, which includes the board's own AP Wi-Fi password
-# (ap_password) in plaintext. The UART GET_STATUS reply legitimately carries
-# that value in the clear (uart_bridge_ext_wifi.c's GET_STATUS handler has no
-# auth concept at all -- the UART link is physical-access-gated by design,
-# same reasoning as the HTTP /status route's on_ap disclosure), but nothing
-# downstream of that decode should ever repeat it into a tool's rendered
-# output. This is the single choke point: any dict key that looks like a
-# password/psk/passphrase field gets replaced with a "[set]"/"[unset]"
+# (ap_password) in plaintext. As of 64dd7d65 the UART GET_STATUS reply itself
+# carries only a "[set]"/"" presence marker for this field, never the actual
+# value (uart_bridge_ext_wifi.c's GET_STATUS handler has no auth concept at
+# all -- the UART link is physical-access-gated by design, same reasoning as
+# the HTTP /status route's on_ap disclosure) -- so this PC-side redaction is
+# defence in depth, not the only thing standing between the value and a tool's
+# rendered output. It stays as the single choke point: any dict key that
+# looks like a password/psk/passphrase field gets replaced with a "[set]"/"[unset]"
 # boolean-shaped string instead of its value, recursively, so a future field
 # with the same shape is covered without another audit pass.
 # ---------------------------------------------------------------------------

@@ -1722,9 +1722,14 @@
  *   byte3       = sta_connected (0/1)
  *   byte4       = ssid_len (N1)         N1 bytes = ssid (active/best-guess)
  *   byte(5+N1)  = ap_ssid_len (N2)      N2 bytes = ap_ssid
- *   byte(6+N1+N2) = ap_password_len (N3) N3 bytes = ap_password (plaintext
- *                 -- see wifi_prov_get_ap_password()'s doc comment for why
- *                 this one field is deliberately not a saved-network secret)
+ *   byte(6+N1+N2) = ap_password_len (N3) N3 bytes = ap_password -- since
+ *                 64dd7d65 this field carries only a presence marker,
+ *                 "[set]" (N3=5) when an AP password is configured or ""
+ *                 (N3=0) otherwise, never the actual value. Wire layout and
+ *                 UART_PROTOCOL_VERSION are unchanged -- this is a
+ *                 content-only change to an existing lstring field; see
+ *                 wifi_prov_get_ap_password()'s doc comment for the prior
+ *                 reasoning this supersedes
  *   byte(7+N1+N2+N3) = sta_ip_len (N4)  N4 bytes = sta_ip, dotted-quad ASCII
  *   byte(8+N1+N2+N3+N4) = sta_rssi, i8 (signed, dBm; -127 if not connected)
  *   byte(9+N1+N2+N3+N4) = ap_clients
