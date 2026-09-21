@@ -178,6 +178,14 @@ set(SAFTYFW_APP_SOURCES
     # reason as update_task_erase_plan.c immediately above -- see
     # update_task_slot_linkage.h.
     src/tasks/update_task_slot_linkage.c
+    # 2026-09-21 -- hard refusal to erase/program any flash region overlapping
+    # the RUNNING image's own extent (triage finding: a flat, bootloader-less
+    # bench image loaded at XIP_BASE overlapped the metadata sector, and
+    # persisting metadata there corrupted the board's own running code). Pure
+    # overlap arithmetic, split out for host-testability the same way
+    # update_task_slot_linkage.c/update_task_erase_plan.c are -- see
+    # update_task_flash_guard.h.
+    src/tasks/update_task_flash_guard.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
     # pure modules from src/update/; bootloader/crc32.c and

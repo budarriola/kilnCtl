@@ -155,6 +155,12 @@ try {
         # its slot's metadata is flipped active. See update_task_slot_linkage.h.
         (Join-Path $srcDir "tasks\update_task_slot_linkage.c"),
         (Join-Path $testDir "test_update_task_slot_linkage.c"),
+        # 2026-09-21 -- hard refusal to erase/program any flash region
+        # overlapping the RUNNING image's own extent (a flat, bootloader-less
+        # bench image loaded at XIP_BASE overlapped the metadata sector; see
+        # update_task_flash_guard.h).
+        (Join-Path $srcDir "tasks\update_task_flash_guard.c"),
+        (Join-Path $testDir "test_update_task_flash_guard.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),
         (Join-Path $testDir "test_clear_trip_diag_codec.c"),
         (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),

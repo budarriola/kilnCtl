@@ -59,6 +59,7 @@ void run_test_link_task_announce_eval(void);
 void run_test_update_task_reboot_policy(void);
 void run_test_update_task_erase_plan(void);
 void run_test_update_task_slot_linkage(void);
+void run_test_update_task_flash_guard(void);
 void run_test_relay_owner_gpio_init(void);
 void run_test_current_sense_hal_adc(void);
 void run_test_guard_nuisance(void);
@@ -124,6 +125,7 @@ int main(void)
     run_test_update_task_reboot_policy();
     run_test_update_task_erase_plan();
     run_test_update_task_slot_linkage();
+    run_test_update_task_flash_guard();
     run_test_relay_owner_gpio_init();
     run_test_current_sense_hal_adc();
     run_test_scratch_migration();

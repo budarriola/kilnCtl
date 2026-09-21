@@ -109,6 +109,9 @@
 #include "received_ranges.h" // src/update/
 #include "update_receiver.h" // src/update/
 
+#include "update_task_flash_guard.h" // 2026-09-21 -- see this file's own header comment
+                                      // on update_task_running_image_flash_range() below
+
 #include "kilnlink/kilnlink_frame.h" // KILNLINK_FRAME_MAX_PAYLOAD
 #include "kilnlink/kilnlink_reboot_result.h" // kilnlink_reboot_result_reason_t, for update_task_reboot_allowed()'s out_reason_code
 #include "kilnlink/kilnlink_rollback_result.h" // kilnlink_rollback_result_reason_t, for update_task_request_rollback()'s out_reason_code
@@ -242,6 +245,27 @@ typedef enum {
     // by this value. (See the coordinator's task brief: a codec/name table
     // for this value in tools/PcTools is a separate agent's follow-up.)
     UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE = 8,
+
+    // 2026-09-21 (triage finding, running-image flash-overlap guard -- see
+    // update_task_flash_guard.h's header comment): a DISTINCT wire state for
+    // "this board's own running image occupies flash the requested operation
+    // would have to erase or program" -- observed on a bench Pico running a
+    // flat, bootloader-less image loaded at XIP_BASE, whose extent overlapped
+    // BOOTLOADER_METADATA_FLASH_OFFSET and part of slot A. Same reasoning as
+    // UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE immediately above: a NEW legal
+    // value of the existing 1-byte `state` field, not a wire layout change,
+    // so no protocol-version bump is needed. The accompanying `last_error`
+    // byte still reports UPDATE_STATUS_ERR_INTERNAL -- the closest existing
+    // bit (all 8 are already assigned) -- for a caller that only reads
+    // `last_error`; a caller that also reads `state` can tell this apart from
+    // an ordinary internal erase/program failure. NOTE for the ESP side
+    // (KilnFW, not touched by this change): safety_link.h's mirrored
+    // SAFETY_LINK_UPDATE_STATE_* enum and ota_pico_relay.c's handling of
+    // SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE (the same-shaped prior
+    // addition) need a matching SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_
+    // IMAGE_OVERLAP = 9 and a render/handling path, or this state number
+    // reaches the ESP unrecognised.
+    UPDATE_TASK_STATE_REFUSED_RUNNING_IMAGE_OVERLAP = 9,
 } update_task_wire_state_t;
 
 // last_error bits. The first three mirror update_receiver.h's
@@ -250,7 +274,9 @@ typedef enum {
 // are this frame's own additions for outcomes update_precondition_flag_t has
 // no bit for. All 8 bits of this field are now assigned -- see
 // UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE above for why a new failure mode
-// added 2026-09-20 reuses CRC_MISMATCH here rather than getting its own bit.
+// added 2026-09-20 reuses CRC_MISMATCH here rather than getting its own bit,
+// and UPDATE_TASK_STATE_REFUSED_RUNNING_IMAGE_OVERLAP (added 2026-09-21) for
+// why that one reuses INTERNAL the same way.
 #define UPDATE_STATUS_ERR_RELAY_CLOSED         (1u << 0)
 #define UPDATE_STATUS_ERR_TRIP_PENDING         (1u << 1)
 #define UPDATE_STATUS_ERR_TOO_HOT              (1u << 2)
@@ -329,6 +355,70 @@ static void put_u16_le(uint8_t *out, uint16_t v)
 // region-relative.
 static hal_flash_region_t s_flash_region;
 static bool s_flash_region_ready = false;
+
+// --- Running-image flash-overlap guard (2026-09-21 triage finding) ---------
+//
+// __flash_binary_start/__flash_binary_end are linker symbols this file's own
+// linker script (bootloader/app_slot.ld.in's `.flash_begin`/`.flash_end`
+// sections) places at the very first and very last byte of THIS executable's
+// own flash image -- and, per that file's own header comment, this shape is
+// copied unchanged from the stock pico-sdk linker script
+// (memmap_default.ld), so the same two symbols exist and mean the same thing
+// in a flat, bootloader-less build too. Because this is XIP-resident code,
+// "where the linker placed it" and "where it is actually running from right
+// now" are the same address by construction -- there is no copy/relocate
+// step to make them drift apart. Reading them at runtime is therefore this
+// firmware's own ground truth for its own extent, not a guess about what
+// might be running.
+//
+// This is exactly the fact the triage finding turns on: a normal slot-linked
+// build's extent starts at BOOTLOADER_SLOT_A/B_FLASH_OFFSET and cannot reach
+// back to the metadata sector or the OTHER slot, so this guard is inert for
+// the ordinary two-slot path. A flat/bootloader-less build's extent starts
+// at flash offset 0 and can overlap the metadata sector and part of slot A
+// -- exactly what corrupted the bench board's own running code when
+// update_task_persist_metadata() programmed the metadata sector out from
+// under it.
+extern uint8_t __flash_binary_start;
+extern uint8_t __flash_binary_end;
+
+// XIP_BASE as a local literal, same reasoning and same value as
+// UPDATE_TASK_SLOT_LINKAGE_XIP_BASE below (architectural RP2040 constant,
+// restated here rather than pulled from pico-sdk's hardware/regs/
+// addressmap.h so this file's existing HAL-include-boundary allowlist does
+// not need a new entry).
+#define UPDATE_TASK_FLASH_GUARD_XIP_BASE 0x10000000u
+
+// Fills *out_start_offset/*out_end_offset with this running image's own
+// flash-relative extent (flash_layout.h's own offset convention -- add
+// XIP_BASE for an execute-in-place pointer), i.e. exactly the two arguments
+// update_task_flash_guard_overlaps() needs as its "running image" side.
+static void update_task_running_image_flash_range(uint32_t *out_start_offset, uint32_t *out_end_offset)
+{
+    *out_start_offset = (uint32_t)&__flash_binary_start - UPDATE_TASK_FLASH_GUARD_XIP_BASE;
+    *out_end_offset = (uint32_t)&__flash_binary_end - UPDATE_TASK_FLASH_GUARD_XIP_BASE;
+}
+
+// Single call site every erase/program path below funnels through: true iff
+// the given flash-relative region would touch any byte of this running
+// image's own extent, in which case the caller MUST refuse outright --
+// never erase, never program, regardless of which region or which path
+// reached this point. Also refuses (fails closed, returns true) if this
+// running image's own extent cannot be trusted (malformed symbols) --
+// update_task_flash_guard_running_image_extent_valid()'s own doc comment
+// explains why an unusable extent must never be read as "no overlap".
+static bool update_task_region_overlaps_running_image(uint32_t region_offset, uint32_t region_size)
+{
+    uint32_t image_start = 0;
+    uint32_t image_end = 0;
+    update_task_running_image_flash_range(&image_start, &image_end);
+
+    if (!update_task_flash_guard_running_image_extent_valid(image_start, image_end)) {
+        return true; // fail closed -- see this function's own header comment
+    }
+
+    return update_task_flash_guard_overlaps(region_offset, region_size, image_start, image_end);
+}
 
 static bool update_task_ensure_flash_region(void)
 {
@@ -462,6 +552,19 @@ static bool update_task_persist_metadata(bootloader_metadata_t *meta, size_t lat
         return false;
     }
 
+    // Assert-like guard (2026-09-21 triage finding): never erase or program
+    // the metadata sector if doing so would touch this board's own running
+    // image. See update_task_region_overlaps_running_image()'s header
+    // comment -- this is the exact operation that corrupted the bench board
+    // when it was running a flat, bootloader-less image whose extent
+    // overlapped BOOTLOADER_METADATA_FLASH_OFFSET.
+    if (update_task_region_overlaps_running_image(BOOTLOADER_METADATA_FLASH_OFFSET,
+                                                    BOOTLOADER_METADATA_FLASH_SIZE)) {
+        log_task_log(LOG_LEVEL_ERROR, "update",
+                     "persist_metadata: refused -- metadata sector overlaps running image");
+        return false;
+    }
+
     meta->seq = meta->seq + 1u;
 
     update_metadata_write_args_t args;
@@ -546,6 +649,16 @@ static void update_erase_cb(void *param)
 static bool update_task_erase_slot(uint32_t slot_offset)
 {
     if (!update_task_ensure_flash_region()) {
+        return false;
+    }
+
+    // Assert-like guard (2026-09-21 triage finding): never erase a slot that
+    // would touch this board's own running image. Checked against the WHOLE
+    // slot up front, before the first chunk, rather than per-chunk -- the
+    // hazard is "this operation must never start", not "stop partway".
+    if (update_task_region_overlaps_running_image(slot_offset, BOOTLOADER_SLOT_FLASH_SIZE)) {
+        log_task_log(LOG_LEVEL_ERROR, "update",
+                     "erase_slot: refused -- target slot overlaps running image");
         return false;
     }
 
@@ -810,6 +923,27 @@ static void update_task_process_begin(const uint8_t *payload, uint8_t length)
     s_target_slot = decision.target_slot;
     s_slot_flash_offset = (s_target_slot == BOOTLOADER_SLOT_A) ? BOOTLOADER_SLOT_A_FLASH_OFFSET
                                                                 : BOOTLOADER_SLOT_B_FLASH_OFFSET;
+
+    // Running-image flash-overlap guard (2026-09-21 triage finding), checked
+    // HERE -- before announcing ERASING at all -- so a board in this state
+    // gets the specific, descriptive refusal below rather than reaching
+    // update_task_erase_slot()'s own defence-in-depth copy of this same
+    // check (still present there and in update_task_persist_metadata(), see
+    // both functions' own comments) and only being reported generically as
+    // UPDATE_STATUS_ERR_INTERNAL. Checks both regions this flow is about to
+    // touch: the target slot (about to be erased) and the metadata sector
+    // (about to be programmed once STAGED metadata is persisted below).
+    if (update_task_region_overlaps_running_image(s_slot_flash_offset, BOOTLOADER_SLOT_FLASH_SIZE) ||
+        update_task_region_overlaps_running_image(BOOTLOADER_METADATA_FLASH_OFFSET,
+                                                    BOOTLOADER_METADATA_FLASH_SIZE)) {
+        log_task_log(LOG_LEVEL_ERROR, "update",
+                     "begin: refused -- this board's running image is flat/bootloader-less and "
+                     "overlaps the metadata sector or the target slot; refusing rather than risk "
+                     "corrupting the running image (2026-09-21 triage finding)");
+        update_task_send_status_now(UPDATE_TASK_STATE_REFUSED_RUNNING_IMAGE_OVERLAP, UPDATE_STATUS_ERR_INTERNAL);
+        return;
+    }
+
     s_header = hdr;
     s_sticky_error = 0;
 

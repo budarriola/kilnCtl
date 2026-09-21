@@ -411,6 +411,40 @@ flash operation, so K4 stays de-energized throughout — but a write during a
 firing would stall the guard evaluation for tens of milliseconds, which is
 exactly the moment not to.
 
+### Never erase/program flash that overlaps the running image (2026-09-21)
+
+Triage finding: the bench Pico runs a flat, bootloader-less image loaded
+directly at `XIP_BASE` (flash offset 0), size 0x1D204 — overlapping
+`BOOTLOADER_METADATA_FLASH_OFFSET` (0x10000..0x11000) and the first 0xC204
+bytes of slot A. `update_task_process_begin()`'s metadata-missing fallback
+(`update_task_read_latest_metadata_or_default()`) assumes active_slot=A,
+target=B, erases slot B (harmless), then persists metadata at
+0x10000 — on that flat image, this overwrites part of the code/data the chip
+is *currently executing from*. Observed on the bench as ERASING followed by
+120 s of silence.
+
+Fix: `update_task_flash_guard.{h,c}` is a pure overlap check (host-testable,
+no SDK dependency) that `update_task.c` calls with the *running* image's own
+flash extent, read from the linker symbols `__flash_binary_start`/
+`__flash_binary_end` — trustworthy for any XIP-resident build, slot-linked
+or flat, since code can only execute from where it physically sits in flash.
+Guarded at three points: `update_task_process_begin()` (refuses before the
+ERASING status is even sent, replying `UPDATE_TASK_STATE_REFUSED_RUNNING_
+IMAGE_OVERLAP = 9`), `update_task_erase_slot()`, and
+`update_task_persist_metadata()` — the latter two as defence-in-depth for any
+other call path (rollback, revert-target-slot) that reaches raw
+erase/program. A malformed/unreadable running-image extent fails **closed**
+(treated as overlap → refuse), never open.
+
+New `state` value 9 is not a wire-layout change (the 1-byte `state` field
+already carried values 0-8), so no KILNLINK protocol version bump. It reuses
+`UPDATE_STATUS_ERR_INTERNAL` as its `last_error` bit, since all 8 bits were
+already assigned. **The ESP side does not yet recognize state 9** —
+`firmware/KilnFW/App/drivers/safety/safety_link.h`'s `SAFETY_LINK_UPDATE_
+STATE_*` enum and `ota_pico_relay.c`'s handling need a matching addition to
+render this state instead of an unrecognized-number fallback; not done as
+part of this (SaftyFW-only) change.
+
 ### Latch the trip reason in the watchdog scratch registers
 
 The RP2040's watchdog block has **eight 32-bit scratch registers that survive a
