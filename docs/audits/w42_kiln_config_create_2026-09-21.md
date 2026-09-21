@@ -20,10 +20,10 @@ the right elements and the POST did fire).
   builds `unique_name = f"__kc_web_commission_test_{int(time.time())}__"`
   (`tools/PcTools/src/kilnctrl/web_commission_row.py:628`). With a 10-digit
   Unix timestamp (true today and for the entirety of this decade) that is
-  `len("__kc_web_commission_test_") + 10 + len("__")` = `26 + 10 + 2` = **38
+  `len("__kc_web_commission_test_") + 10 + len("__")` = `25 + 10 + 2` = **37
   characters**. The driver's own decisive failure line from the bench run
   names the exact string: `'__kc_web_commission_test_1790032582__'` — counted
-  directly, that literal is 38 characters long.
+  directly, that literal is 37 characters long.
 - **The firmware's limit is 23.** `#define KILN_CFG_NAME_MAX_LEN 23`
   (`firmware/KilnFW/App/drivers/persist/kiln_cfg_store.h:87`). The `save`
   handler declares `char name[KILN_CFG_NAME_MAX_LEN + 1];` and calls
@@ -35,7 +35,7 @@ the right elements and the POST did fire).
   check at `kiln_cfg_store.c:814`: `if (trimmed_len == 0 || trimmed_len >
   KILN_CFG_NAME_MAX_LEN || trimmed_len >= out_cap)`) — the handler sends
   `HTTPD_400_BAD_REQUEST, "name missing or too long"`
-  (`kiln_cfg_http.c:192`). 38 > 23, so this POST is refused.
+  (`kiln_cfg_http.c:192`). 37 > 23, so this POST is refused.
 - **The page surfaces the refusal correctly; it does not swallow it.**
   `kcPost()` always resolves `{httpOk: r.ok, body: parsed-json-or-{}}`
   (`firmware/KilnFW/App/drivers/http/kiln_configs_page.html:258-263`).
