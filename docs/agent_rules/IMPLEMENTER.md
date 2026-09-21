@@ -1,0 +1,66 @@
+# Implementer rules
+
+Read `COMMON.md` first. You change code, tests, or docs and hand a reviewed-ready commit
+back to the coordinator. You do not push.
+
+## Worktree and commits
+
+- Mint a private worktree with the PowerShell tool:
+  `powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label <name>`
+  (prints a path under `C:\wt\`). Work only there. Fresh worktrees need
+  `-AllowFewerChecks` on `run_all_checks.ps1`.
+- `git fetch` first, then commit with `git commit -o <every changed path, explicitly>`.
+  Never `git add -A`, never `--amend`, never force-push. Normal-prose message; end it with
+  exactly this trailer line:
+  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`
+- Do not push, rebase, or remove the worktree unless the prompt says to.
+- Preserve each file's existing line endings (`ROADMAP.md`, firmware sources, TODO files and
+  most docs are CRLF in the working copy).
+
+## Checks
+
+- Run `powershell -ExecutionPolicy Bypass -File tools\run_all_checks.ps1` in the foreground
+  before handing back. `-Only <regex>` / `-Skip <regex>` filter by path while iterating;
+  `-Fast` skips the three target builds only when you ran them yourself. A SKIP fails the
+  run by default; under `-Fast`, `check_recovery_image_size.ps1` and
+  `check_embedded_pico_image_fresh.ps1` SKIP by design.
+- Every new check or test gets a negative test: break the thing, watch it fail, restore the
+  source by hand (never `git checkout --`), then force a full rebuild. An empty `git diff`
+  proves the source, not the binaries.
+- PcTools tests: `tools\PcTools\.venv\Scripts\python -m pytest <named files>`. Never
+  `uv run`, never `pip install` into the shared `.venv`. SaftyFW host tests need a short
+  worktree path (`C:\wt\...`).
+- Docs: a backticked hex string of 7+ characters is read as a commit id by
+  `check_doc_hash_citations.ps1`; leave crash PCs and addresses unbackticked. Editing a file
+  that a doc cites by blob reddens that check; grep docs for `blob:<path>` first.
+- After splitting or renaming a file, grep `tools/`, `firmware/*/tools/` and
+  `tools/PcTools/tests/` for the old name and any renamed identifiers, then re-run every
+  check, not just the build.
+
+## Firmware invariants
+
+- Register every new task for stack-margin reporting
+  (`check_stack_margin_registration.ps1` enforces it). Never bump a stack ceiling or task
+  stack size. Never enlarge httpd stack buffers or the zones JSON buffer.
+- A task with a PSRAM stack must not write NVS. NVS keys are 15 characters or fewer.
+- Never hold a module lock across producer or blocking calls. Lock order: `s_exec.lock`
+  then `s_at.lock`.
+- No new HTTP route without bumping `max_uri_handlers` in the same change; the cap is
+  nearly full. Never weaken an auth gate. Handlers are target-build only, so a host test
+  passing says nothing about a gate.
+- Pico `abs_max_temp_c` always equals the ESP's. Never alter builtin schedule values.
+- LCD is 480x320; pages never scroll.
+- When you reset a counter, window, timestamp or seed, ask who else holds a copy or a
+  derived expectation of it (the "reset one side of a pair" class; see CLAUDE.md).
+- Anything that starts a task unconditionally in early boot must gate on
+  `boot_guard_is_recovery_mode()` before calling a subsystem recovery mode skips.
+
+## Docs you own
+
+- Keep plan docs lean: pending work only. When a line lands, update its ROADMAP row in the
+  same commit. Do not add owner decisions that the prompt did not give you.
+
+## Hand-back
+
+Worktree path, commit hash(es), files changed, check and test results as counts,
+negative-test evidence, and anything you could not verify.
