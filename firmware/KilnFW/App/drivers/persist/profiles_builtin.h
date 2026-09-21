@@ -129,9 +129,9 @@ _Static_assert(sizeof("Unrated") <= 8, "profiles_builtin_cone_label()'s document
 /* Widened sort key: every real cone (int8_t range) sorts by its ordinary
  * signed value, but PROFILES_BUILTIN_CONE_UNRATED maps to INT16_MAX so it
  * always sorts after every real cone, never before. Single source for this
- * rule -- ui_page_profiles_builtin_list.c's browse-list sort and
- * test_profiles_builtin.c's negative check both call this, not a local
- * copy. */
+ * rule -- test_profiles_builtin.c's negative check calls this, not a local
+ * copy. (ui_page_profiles_builtin_list.c was a caller too until it was
+ * removed 2026-09-21 as dead code.) */
 int16_t profiles_builtin_cone_sort_key(int8_t cone);
 
 /* Hidden mask -- "removed by the user", persisted. Hiding is per entry and

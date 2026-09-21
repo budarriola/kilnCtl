@@ -1,8 +1,7 @@
 // ui_page_profile_detail -- one profile's detail screen: full title, segment
 // count, a feasibility-coloured card, and the START action. Reached from
 // "profiles" (ui_page_profile_picker.c's MANAGE mode, a user slot or a
-// visible builtin) or ui_page_profiles_builtin_list.c (a builtin catalogue
-// entry) -- either caller must call
+// visible builtin) -- the caller must call
 // ui_page_profile_detail_set_id() with the id it's about to show BEFORE
 // kiln_ui_show("profile_detail"), same "set state, then navigate" pattern
 // ui_page_home.c's menu_nav_cb() already uses for the Config hub's paging
@@ -33,10 +32,10 @@ extern "C" {
 #endif
 
 /* Sets which profile id (user slot 0..7 or builtin PROFILE_BUILTIN_ID_BASE+n)
- * this screen shows next, and which page ("profiles" or
- * "profiles_builtin_list") Back should return to. back_page is remembered
- * rather than hardcoded to one hub because this screen has two distinct
- * callers with two distinct "one level up" destinations. */
+ * this screen shows next, and which page Back should return to. back_page is
+ * remembered rather than hardcoded to one hub id since a future caller may
+ * add a second "one level up" destination (today there is only one:
+ * "profiles", ui_page_profile_picker.c's MANAGE mode). */
 void ui_page_profile_detail_set_id(uint8_t profile_id, const char *back_page);
 
 /* The id currently shown -- ui_page_profile_segments.c reads this rather

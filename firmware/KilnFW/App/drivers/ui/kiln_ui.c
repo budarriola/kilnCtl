@@ -21,7 +21,6 @@
 #include "ui_page_profile_segments.h"
 #include "ui_page_profile_picker.h"
 #include "ui_page_profiles.h"
-#include "ui_page_profiles_builtin_list.h"
 #include "ui_page_temperature.h"
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
@@ -230,12 +229,19 @@ esp_err_t kiln_ui_init(void)
      * START) and a paginated segment list, unchanged. Closes the gap the
      * user reported: the home page's Start button previously had no way to
      * pick a DIFFERENT profile than whatever the fallback chain resolved to.
-     * See ui_page_profiles.c's header comment for the full tree. */
+     * See ui_page_profiles.c's header comment for the full tree.
+     *
+     * "profiles_builtin_list" (ui_page_profiles_builtin_list.c, the old
+     * per-firing-type builtin browse list) was REMOVED 2026-09-21: it was
+     * registered here but nothing anywhere called
+     * kiln_ui_show("profiles_builtin_list") after the 6.2 picker rewrite
+     * collapsed builtins into "profiles"'s unified list -- confirmed dead by
+     * the M18 LCD commissioning run (docs/COMMISSIONING_TEST_MATRIX.md,
+     * `profiles_builtin_list` row) and by this file's own now-removed
+     * registration comment, which already said so. */
     err = kiln_ui_register_page("profiles", ui_page_profiles_build);
     if (err != ESP_OK) return err;
     err = kiln_ui_register_page("profile_picker", ui_page_profile_picker_build_pick);
-    if (err != ESP_OK) return err;
-    err = kiln_ui_register_page("profiles_builtin_list", ui_page_profiles_builtin_list_build);
     if (err != ESP_OK) return err;
     err = kiln_ui_register_page("profile_detail", ui_page_profile_detail_build);
     if (err != ESP_OK) return err;

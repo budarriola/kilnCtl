@@ -104,11 +104,13 @@ static const char *TAG = "ui_page_profile_detail";
  * fits a single screen. */
 
 static uint8_t s_profile_id;
-/* Back destination is NOT fixed like every other page in this pass -- this
- * page is reached from both "profiles" (ui_page_profile_picker.c's MANAGE
- * mode, which replaced ui_page_profiles_mine.c, UI_PLAN.md Section 6.2) and
- * ui_page_profiles_builtin_list.c, and ui_page_profile_detail_set_id() is how
- * the caller says which one to return to. ui_topbar_cfg_t::back_page is a
+/* Back destination is a mutable buffer rather than a literal, even though
+ * "profiles" (ui_page_profile_picker.c's MANAGE mode, which replaced
+ * ui_page_profiles_mine.c, UI_PLAN.md Section 6.2) is the only caller today
+ * -- ui_page_profiles_builtin_list.c was a second caller until it was
+ * removed 2026-09-21 as dead code (nothing ever navigated to it), and
+ * ui_page_profile_detail_set_id() is how a caller says which page to return
+ * to. ui_topbar_cfg_t::back_page is a
  * plain `const char *` handed to nav_cb as event user_data and read again at
  * TAP time, not copied at build time (ui_topbar.h's own comment: "The string
  * is not copied, so pass a literal") -- so a mutable static buffer works just

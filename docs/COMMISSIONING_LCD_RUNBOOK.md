@@ -125,7 +125,6 @@ profile_detail --[Back]--> home
 profile_builder_zones --[Next]--> profile_builder_segment
 profile_builder_segment --[Next]--> profile_builder_review
 profile_builder_review --[Save]--> profiles
-profiles --[builtin section row]--> profiles_builtin_list --[row tap]--> profile_detail
 every page's topbar --[Back/Home icon]--> back_page / home (per ui_topbar_cfg_t.back_page)
 ```
 Every arrow above is a direct grep hit (`kiln_ui_show("<name>")`) at the
@@ -299,32 +298,25 @@ state-changing pick (see below)
 - Backend read-back: `profiles_list()`/`profiles_get()` for what should be
   offered.
 
-### 11. `profiles_builtin_list` — READ-ONLY
-- Source: `ui_page_profiles_builtin_list.c`. Purpose: built-in profile list.
-- Nav: reached from `profiles`' builtin section (row tap in
-  `ui_page_profiles.c`, exact callback not traced this session — grep found
-  the destination call in `ui_page_profiles_builtin_list.c:111` going the
-  other way, not the entry button). Entry point pixel geometry: **UNKNOWN**.
-- Verification region: **UNKNOWN**.
-- Backend read-back: `profiles_list()`'s builtin subset.
-
-### 12. `profile_detail` — READ-ONLY
+### 11. `profile_detail` — READ-ONLY
 - Source: `ui_page_profile_detail.c`. Purpose: view one profile.
 - Nav: `profile_picker` --[row tap]--> `profile_detail`
-  (`ui_page_profile_picker.c:247`); also `profiles_builtin_list` --[row
-  tap]--> `profile_detail` (`ui_page_profiles_builtin_list.c:111`). Pixel
+  (`ui_page_profile_picker.c:247`). ("`profiles_builtin_list` --[row
+  tap]--> `profile_detail`" was a second nav path until
+  `ui_page_profiles_builtin_list.c` was removed 2026-09-21 as dead code --
+  nothing ever called `kiln_ui_show("profiles_builtin_list")`.) Pixel
   geometry: **UNKNOWN** (row position depends on list scroll/index).
 - Verification region: **UNKNOWN**.
 - Backend read-back: `profiles_get()` (`GET /api/profile`, A10) for the same
   profile id — compare segment count/zone targets shown.
 
-### 13. `profile_segments` — READ-ONLY
+### 12. `profile_segments` — READ-ONLY
 - Source: `ui_page_profile_segments.c`. Purpose: segment list.
 - Nav: `profile_detail` --[Segments button, `ui_page_profile_detail.c:443`]--> `profile_segments`.
   Pixel geometry: **UNKNOWN**.
 - Backend read-back: `profiles_get()`'s segment array.
 
-### 14. `profile_builder_zones` — WRITE flow entry, owner-gated for actual
+### 13. `profile_builder_zones` — WRITE flow entry, owner-gated for actual
 save; page-load itself is read-only
 - Source: `ui_page_profile_builder_zones.c`. Purpose: new-profile zone
   selection.
@@ -338,17 +330,17 @@ save; page-load itself is read-only
   runbook's profile-write rows (owner-scheduled), not repeated here.
 - Backend read-back: none needed for a load-only check.
 
-### 15. `profile_builder_segment` — page-load READ-ONLY, same caveat as #14
+### 14. `profile_builder_segment` — page-load READ-ONLY, same caveat as #13
 - Source: `ui_page_profile_builder_segment.c`.
 - Nav: `profile_builder_zones` --[Next, `ui_page_profile_builder_zones.c:100`]--> `profile_builder_segment`.
   Pixel geometry: **UNKNOWN**.
 
-### 16. `profile_builder_review` — page-load READ-ONLY, same caveat as #14
+### 15. `profile_builder_review` — page-load READ-ONLY, same caveat as #13
 - Source: `ui_page_profile_builder_review.c`.
 - Nav: `profile_builder_segment` --[Next,
   `ui_page_profile_builder_segment.c:176`]--> `profile_builder_review`.
   Pixel geometry: **UNKNOWN**. Its own Save button
-  (`ui_page_profile_builder_review.c:124`) is the WRITE action noted in #14
+  (`ui_page_profile_builder_review.c:124`) is the WRITE action noted in #13
   — do not tap it in this class.
 
 ---
@@ -357,18 +349,19 @@ save; page-load itself is read-only
 
 | Class | Rows |
 |---|---|
-| Read-only (page-load navigate + numeric-sample + backend read-back) | `home`, `config`, `temperature`, `network` (load only), `diagnostics`, `profiles`, `profile_picker` (load only), `profiles_builtin_list`, `profile_detail`, `profile_segments`, `profile_builder_zones` (load only), `profile_builder_segment` (load only), `profile_builder_review` (load only) — 13 |
-| Write (owner-gated, not part of this read-only pass) | `network_manage` connect/forget actions; `profile_picker` pick-and-return; the builder chain's terminal Save (`profile_builder_review`) — 3 flagged sub-actions on top of the 13 rows above |
+| Read-only (page-load navigate + numeric-sample + backend read-back) | `home`, `config`, `temperature`, `network` (load only), `diagnostics`, `profiles`, `profile_picker` (load only), `profile_detail`, `profile_segments`, `profile_builder_zones` (load only), `profile_builder_segment` (load only), `profile_builder_review` (load only) — 12 |
+| Write (owner-gated, not part of this read-only pass) | `network_manage` connect/forget actions; `profile_picker` pick-and-return; the builder chain's terminal Save (`profile_builder_review`) — 3 flagged sub-actions on top of the 12 rows above |
 | N/A on this bench hardware | `touch_cal`, `touch_test` — 2 |
 
-16 registered LCD pages total, matching `docs/COMMISSIONING_TEST_MATRIX.md`'s
-count.
+15 registered LCD pages total, matching `docs/COMMISSIONING_TEST_MATRIX.md`'s
+count (`profiles_builtin_list` removed 2026-09-21 as dead code -- was never
+navigated to).
 
 ## Rows whose tap geometry could not be derived from source
 
 All of them except the two noted with a prior live measurement
 (`config` hub's Diagnostics cell, and that page's own topbar icons) — i.e.
-**14 of 16 pages'** entry-tap coordinates are UNKNOWN from static analysis
+**13 of 15 pages'** entry-tap coordinates are UNKNOWN from static analysis
 alone, for the structural reason in "What this document is" above (flex/grid
 layout, not fixed positions; topbar icon sets vary per page). Both of the
 two exceptions carry an unresolved coordinate-space caveat (capture-crop
@@ -473,7 +466,6 @@ less. `n` = icon count that page's `ui_topbar_cfg_t` builds.
 | `diagnostics` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_diagnostics.c:1572-1578` |
 | `profiles` (picker, manage mode) | Back, Home, Prev, Next, Add | 5 | Back (294,21), Home (334,21), Prev (374,21), Next (414,21), Add (454,21) | `ui_page_profile_picker.c:469-479` |
 | `profile_picker` (non-manage) | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profile_picker.c:469-476` |
-| `profiles_builtin_list` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profiles_builtin_list.c:213-225` |
 | `profile_detail` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_profile_detail.c:563-567` |
 | `profile_segments` | Back, Home, Prev, Next | 4 | Back (334,21), Home (374,21), Prev (414,21), Next (454,21) | `ui_page_profile_segments.c:167-173` |
 | `profile_builder_zones` | Back, Home | 2 | Back (414,21), Home (454,21) | `ui_page_profile_builder_zones.c:183-187` |
@@ -537,7 +529,6 @@ list's content.
 |---|---|---|---|---|
 | `profiles` (picker, manage) / `profile_picker` | 4 | 64px, 4px gap | y: 76, 144, 212, 280 (zero slack — 4*64+3*4=268=`UI_THEME_PAGE_CONTENT_BUDGET_PX` exactly) | `ui_page_profile_picker.h:37-38` |
 | `profile_segments` | `ROWS_PER_PAGE` (see file) | 48px (`ROW_HEIGHT_PX`) | Not derived further this pass — list top position after the paging indicator label was not traced | `ui_page_profile_segments.c:30-31,61,181` |
-| `profiles_builtin_list` | — | **UNRESOLVED** — no fixed row-height `#define` found in this page's header/source; appears to use `LV_SIZE_CONTENT` rows | — | `ui_page_profiles_builtin_list.c` |
 
 ### Unresolved — could not be derived from source this pass
 
@@ -566,8 +557,6 @@ list's content.
 - **`profile_builder_zones`/`_segment`/`_review` internal controls** — not
   inspected below the topbar this pass; each page's own zone-selector/
   segment-editor/review-summary widget geometry is unresolved.
-- **`profiles_builtin_list` row geometry** — see Table 4; no fixed-height
-  `#define` was found for this page's rows in the time available this pass.
 
 ### What remains true from the original pass
 
@@ -640,8 +629,13 @@ Resolved five of the seven previously-NOT-RUN rows' unresolved geometry above
 by measured `touch_log_tap_targets()` dumps (explicitly authorized for this
 continuation, same panic-fix precondition as the prior pass). One page
 (`profiles_builtin_list`) turned out to be dead code, not a geometry gap —
-see the matrix row. One crash defect was found and is documented below and
-in the matrix (`profile_builder_segment` row).
+see the matrix row. Confirmed unreachable (registered in `kiln_ui.c` but
+nothing anywhere called `kiln_ui_show("profiles_builtin_list")`) and removed
+outright the same day: `ui_page_profiles_builtin_list.c`/`.h` deleted, its
+`kiln_ui.c` registration and `CMakeLists.txt` entry dropped, this runbook's
+nav map/tables renumbered, and the matrix row updated to "removed, dead
+code". One crash defect was found and is documented below and in the matrix
+(`profile_builder_segment` row).
 
 **Architecture correction: PICK vs MANAGE mode.** `ui_page_profiles.c` is a
 thin alias for `ui_page_profile_picker_build_manage()` — the profile list and
