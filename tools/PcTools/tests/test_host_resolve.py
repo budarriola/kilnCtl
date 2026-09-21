@@ -87,6 +87,30 @@ class HostResolveTest(unittest.TestCase):
         host_resolve.record_host_seen("", self.path)
         self.assertEqual(host_resolve.resolve_default_host(self.path), host_resolve.FALLBACK_HOST)
 
+    # --- never pollute the real, shared settings.json from a test ----------
+    def test_record_host_seen_refuses_to_write_the_real_settings_file_under_pytest(self):
+        """The bug this guards against: test_ota_http_client.py (and others)
+        mock ``urllib.request.urlopen`` and call a client function with a
+        fixture host like "kiln.local", with NO patch on
+        ``settings.SETTINGS_PATH`` -- exactly what an ordinary client test
+        looks like. Before this guard, that meant a mocked "success" inside
+        the test suite silently wrote "kiln.local" into the real, shared
+        settings.json, which then poisoned every *_AP_DEFAULT_HOST constant
+        computed at import time in a LATER pytest process (this really
+        happened -- see the commit message)."""
+        self.assertTrue(host_resolve._PRODUCTION_SETTINGS_PATH.name == "settings.json")
+        with unittest.mock.patch.object(host_resolve.settings, "set_last_host") as mock_set:
+            host_resolve.record_host_seen("kiln.local")  # no path= -- real default
+        mock_set.assert_not_called()
+
+    def test_record_host_seen_still_writes_an_explicit_tempfile_path_under_pytest(self):
+        """The guard must not swallow every write while under pytest -- only
+        ones aimed at the real, shared file. This is exactly what
+        test_a_successful_request_through_http_auth_updates_the_cache below
+        depends on."""
+        host_resolve.record_host_seen("192.168.1.156", self.path)
+        self.assertEqual(host_resolve.resolve_default_host(self.path), "192.168.1.156")
+
     # --- wiring into http_auth.urlopen --------------------------------------
     def test_a_successful_request_through_http_auth_updates_the_cache(self):
         """This is the point of the whole feature: a real, successful HTTP

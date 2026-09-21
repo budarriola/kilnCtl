@@ -19,6 +19,8 @@ RESOLUTION ORDER, cheapest/most-authoritative first:
      this file, gitignored. Updated by :func:`record_host_seen`, which
      :mod:`kilnctrl.http_auth` calls after every successful request that
      goes through its ``urlopen`` seam -- which is nearly all of them.
+     (A write aimed at that real, shared file from inside a test process
+     is silently dropped instead -- see :func:`record_host_seen`.)
   3. The board's own AP fallback address, ``192.168.4.1`` -- unchanged
      behaviour for a from-scratch board nothing has ever talked to.
 
@@ -43,6 +45,11 @@ HOST_ENV = "KILNCTL_HOST"
 #: The board's own softAP fallback address -- last resort, unchanged from
 #: every module's previous hardcoded default.
 FALLBACK_HOST = "192.168.4.1"
+
+#: The real on-disk settings file, captured once at import time -- used only
+#: to recognize (in :func:`record_host_seen`) a write that is about to land
+#: on the SHARED, real file rather than a test's own tempfile.
+_PRODUCTION_SETTINGS_PATH = settings.SETTINGS_PATH
 
 
 def resolve_default_host(path: Optional[Path] = None) -> str:
@@ -77,8 +84,20 @@ def record_host_seen(host: str, path: Optional[Path] = None) -> None:
     another call's success, not a call any caller is making on purpose).
     """
     name = _hostname_only(host)
-    if name:
-        settings.set_last_host(name, path if path is not None else settings.SETTINGS_PATH)
+    if not name:
+        return
+    target = path if path is not None else settings.SETTINGS_PATH
+    if target == _PRODUCTION_SETTINGS_PATH and "PYTEST_CURRENT_TEST" in os.environ:
+        # A test exercising http_auth.urlopen's success path (a mocked
+        # urllib.request.urlopen returning 200 for some fixture host like
+        # "kiln.local") is not a real board answering -- never let that
+        # land in the real, shared settings.json, where it would silently
+        # change every *_AP_DEFAULT_HOST constant for whichever module
+        # happens to import next (test_host_resolve.py's own tests pass an
+        # explicit tempfile ``path=`` or patch ``host_resolve.settings.
+        # SETTINGS_PATH``, so they never hit this branch).
+        return
+    settings.set_last_host(name, target)
 
 
 def _hostname_only(host: str) -> Optional[str]:
