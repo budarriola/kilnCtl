@@ -367,7 +367,15 @@ array and that route can only 404 on it.
 
 **Still open:**
 
-- **Bench verification.** Nothing here has run on hardware. Everything in
+- **Bench verification.** Attempted 2026-09-20 on ESP `cd6073e5`: fork
+  refused when idle confirmed (409 "no active firing to fork from"). Fork,
+  HARD validation, and executor pickup NOT RUN because the tooling
+  permission layer refused `POST /api/profile_exec/start` and `POST
+  /api/profile/delete` in that session, not a firmware defect; needs a
+  session authorized to start a non-heating firing. Two open bench items
+  found: a stray test profile "LiveEditTest" in slot 0 on the bench board
+  needs deletion, and `POST /api/auth/login` hung twice and reset after 60 s
+  on `cd6073e5` (under investigation; `web_auth_login_http.c`). Everything in
   section 11's "cannot be tested without a real firing" list is still
   unverified, and so is the page itself against a live firing.
 
