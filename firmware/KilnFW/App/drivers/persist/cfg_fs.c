@@ -1,5 +1,6 @@
 #include "cfg_fs.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -334,14 +335,26 @@ static bool verify_write_readback(const char *final_path, const void *data, size
     }
     bool ok = true;
     if (len > 0) {
-        void *readback = malloc(len);
-        if (!readback) {
-            fclose(f);
-            return false;
+        /* Stream the comparison through a small fixed chunk instead of
+         * malloc()'ing the whole blob -- this path runs on the
+         * commissioning boot sequence and a whole-blob heap allocation here
+         * was the strongest identified contributor to the internal-DRAM
+         * low-water mark (docs/audits/heap_low_water_9051_2026-09-21.md).
+         * Semantics are unchanged: any short read or any byte mismatch,
+         * anywhere in the stream, still fails the verify. */
+        uint8_t chunk[256];
+        const uint8_t *expected = (const uint8_t *)data;
+        size_t remaining = len;
+        while (remaining > 0) {
+            size_t want = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+            size_t got = fread(chunk, 1, want, f);
+            if (got != want || memcmp(chunk, expected, want) != 0) {
+                ok = false;
+                break;
+            }
+            expected += want;
+            remaining -= want;
         }
-        size_t got = fread(readback, 1, len, f);
-        ok = (got == len) && (memcmp(readback, data, len) == 0);
-        free(readback);
     }
     fclose(f);
     return ok;

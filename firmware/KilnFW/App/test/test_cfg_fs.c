@@ -348,6 +348,47 @@ static void test_list_round_trip_with_nesting(void)
                "list() clamps to max_out without overflowing the caller's array");
 }
 
+// ---------------------------------------------------------------------
+// 7. write_atomic()'s post-rename read-back verify streams the comparison
+//    through a small fixed chunk rather than malloc()'ing the whole blob
+//    (docs/audits/heap_low_water_9051_2026-09-21.md). This payload is
+//    several multiples of that chunk size plus a remainder, with a
+//    distinct byte pattern so a chunk-boundary bug (off-by-one in the
+//    stream loop, a chunk silently skipped, `expected`/`chunk` pointer
+//    arithmetic wrong) would corrupt the comparison rather than coincide
+//    with all-zero or repeating bytes.
+// ---------------------------------------------------------------------
+static void test_write_large_payload_spans_multiple_verify_chunks(void)
+{
+    TEST_SECTION("cfg_fs: write_atomic() verifies a payload spanning multiple readback chunks");
+
+    const char *base = "cfg_fs_test_largeverify";
+    reset_scratch(base, NULL);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "init succeeds");
+
+    /* 256-byte chunk size in cfg_fs.c: use a length that is neither an
+     * exact multiple nor smaller than one chunk. */
+    static uint8_t payload[900];
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        /* (i*37+5) alone is periodic with period 256 (37 is odd, so mod 256
+         * it cycles every 256 indices) -- that would make every 256-byte
+         * chunk of this payload byte-identical to the others, which could
+         * mask a bug that compares the wrong chunk against the wrong
+         * offset. The `(i >> 8) * 91` term breaks that periodicity so each
+         * chunk's content is genuinely distinct from every other chunk's. */
+        payload[i] = (uint8_t)((i * 37 + 5 + (i >> 8) * 91) & 0xFF);
+    }
+
+    TEST_CHECK(cfg_fs_write_atomic("big.bin", payload, sizeof(payload)) == ESP_OK,
+               "write_atomic succeeds and its internal read-back verify passes across chunk boundaries");
+
+    uint8_t readback[sizeof(payload)];
+    size_t out_len = 0;
+    TEST_CHECK(cfg_fs_read("big.bin", readback, sizeof(readback), &out_len) == ESP_OK &&
+                   out_len == sizeof(payload) && memcmp(readback, payload, sizeof(payload)) == 0,
+               "the full multi-chunk payload reads back byte-for-byte identical");
+}
+
 void run_test_cfg_fs(void)
 {
     test_mount_and_round_trip();
@@ -357,6 +398,7 @@ void run_test_cfg_fs(void)
     test_mount_failure_degrades_cleanly();
     test_recovery_mode_skips_mount();
     test_list_round_trip_with_nesting();
+    test_write_large_payload_spans_multiple_verify_chunks();
 
     cfg_fs_deinit();
 }
