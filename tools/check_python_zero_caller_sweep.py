@@ -86,6 +86,15 @@ DECORATOR_WIRING_MARKERS = ("_tool(", ".tool(", ".route(", "app.get(", "app.post
 # both tools/PcTools/src/kilnctrl/bench_test/registry.py and
 # tools/PcTools/src/mcpkit/registry.py) are never silently conflated.
 ZERO_CALLER_ALLOWLIST = {
+    # binary_provenance.assert_binary_fresh: the public raise-on-stale entry
+    # point (docs/audits/review_sim_fuzzy_commits_2026-09-13.md) meant for
+    # ad hoc/interactive measurement callers to invoke by hand before
+    # reading a number out of a host-test .exe -- check_binary_fresh (its
+    # non-raising sibling) is the one wired into
+    # check_host_test_binary_freshness.py today; no PcTools measurement
+    # script currently reads a host-test binary directly, so this has no
+    # in-repo caller yet, only test coverage (test_binary_provenance.py).
+    ("tools/PcTools/src/kilnctrl/binary_provenance.py", "assert_binary_fresh"),
     ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "find_best_strength_per_load"),
     ("tools/PcTools/src/kilnctrl/http_capture_log.py", "starting_temps_c"),
     ("tools/PcTools/src/kilnctrl/load_mass_sweep.py", "run_profile7_loaded"),
