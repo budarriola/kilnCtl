@@ -34,7 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from typing import Optional
 
 _module_log = logging.getLogger(__name__)
@@ -49,9 +49,7 @@ _RAMP_ASSIST_PATH = "/api/ramp_assist"
 #: Same fallback-AP address ota_http_client.py's OTA_AP_DEFAULT_HOST /
 #: adaptive_tune_http_client.py's ADAPTIVE_TUNE_AP_DEFAULT_HOST name -- the
 #: board's own AP-mode IP when no station connection is up.
-RAMP_ASSIST_AP_DEFAULT_HOST = "192.168.4.1"
-
-
+RAMP_ASSIST_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 class RampAssistHttpError(Exception):
     """Any transport or protocol failure talking to GET/POST
     /api/ramp_assist -- unreachable host, non-2xx, or a response shape this

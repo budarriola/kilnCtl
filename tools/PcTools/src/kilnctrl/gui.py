@@ -43,7 +43,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable, Optional
 
-from . import devices, pin_overlay, pinout_reference, settings, wifi_credentials
+from . import devices, host_resolve, pin_overlay, pinout_reference, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -155,8 +155,7 @@ _DEVICE_LOG_SESSION_METHOD_NAME: dict[LogLevel, str] = {
 #: this popup's default host) lives before/whenever the board isn't joined
 #: to a home network. The PC must itself be joined to that AP for requests
 #: here to route, same as a phone doing first-time setup would be.
-_WIFI_AP_DEFAULT_HOST = "192.168.4.1"
-
+_WIFI_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 #: mDNS hostname the firmware advertises unconditionally at boot (see
 #: app_main's mdns_hostname_set("kiln") in KilnFW/App/main.c) -- resolves in
 #: both AP-fallback and station mode, so it's shown to the user as a

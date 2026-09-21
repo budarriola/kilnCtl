@@ -25,7 +25,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable, Optional
 
-from . import devices, pin_overlay, pinout_reference, settings, wifi_credentials
+from . import devices, host_resolve, pin_overlay, pinout_reference, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -96,7 +96,7 @@ _DEVICE_LOG_SESSION_METHOD_NAME: dict[LogLevel, str] = {
     LogLevel.ERROR: "error",
     LogLevel.WARN: "warning",
 }
-_WIFI_AP_DEFAULT_HOST = "192.168.4.1"
+_WIFI_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 _WIFI_MDNS_HOST = "kilnctl.local"
 _WIFI_HTTP_TIMEOUT_S = 8.0
 _OK_COLOR = "#0a7d28"

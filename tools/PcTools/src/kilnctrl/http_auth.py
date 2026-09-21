@@ -51,6 +51,8 @@ import urllib.parse
 import urllib.request
 from typing import Optional, Tuple
 
+from . import host_resolve
+
 #: Environment variables holding the board's web credential. Nothing else in
 #: this package reads a password from anywhere, and nothing writes one.
 USERNAME_ENV = "KILNCTL_WEB_USERNAME"
@@ -211,13 +213,21 @@ def urlopen(req, timeout=None):
         request = req
 
     try:
-        return urllib.request.urlopen(request, timeout=timeout)
+        resp = urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
         if exc.code != 401:
             raise
+    else:
+        # A response of any kind (including a non-2xx one that isn't 401)
+        # means this host is alive and answering HTTP -- worth remembering
+        # as the default for the next call that doesn't name a host.
+        host_resolve.record_host_seen(origin)
+        return resp
     # Exactly one login, exactly one retry. A 401 on the retry propagates to
     # the caller unchanged rather than starting another round.
     cookie = _login(origin, timeout)
     retry = _copy_request(original)
     retry.add_unredirected_header("Cookie", f"{SESSION_COOKIE_NAME}={cookie}")
-    return urllib.request.urlopen(retry, timeout=timeout)
+    resp = urllib.request.urlopen(retry, timeout=timeout)
+    host_resolve.record_host_seen(origin)
+    return resp

@@ -91,3 +91,17 @@ def get_openocd_path(path: Path = SETTINGS_PATH) -> Optional[str]:
 
 def set_openocd_path(value: str, path: Path = SETTINGS_PATH) -> None:
     _update("openocd_exe", value, path)
+
+
+# ---------------------------------------------------------------------------
+# last-seen board host (host_resolve.py)
+# ---------------------------------------------------------------------------
+def get_last_host(path: Path = SETTINGS_PATH) -> Optional[str]:
+    """The host (bare IP/hostname, no scheme or port) that most recently
+    answered a real HTTP request from any kilnctrl client, if any."""
+    value = load(path).get("last_host")
+    return value if isinstance(value, str) and value else None
+
+
+def set_last_host(value: str, path: Path = SETTINGS_PATH) -> None:
+    _update("last_host", value, path)

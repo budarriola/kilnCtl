@@ -59,14 +59,13 @@ import urllib.request
 from html.parser import HTMLParser
 from typing import Dict, List, Optional, Tuple
 
-from . import http_auth
+from . import host_resolve, http_auth
 
 #: Default wall-clock budget for the fetch. These pages are large but local.
 DEFAULT_TIMEOUT_S = 15.0
 
 #: Same fallback-AP address every other HTTP client in this package names.
-PAGE_AP_DEFAULT_HOST = "192.168.4.1"
-
+PAGE_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 #: The page this tool exists for: the zones settings page carries the kiln
 #: graphic. Not special-cased anywhere -- just the default argument.
 DEFAULT_PAGE_PATH = "/settings/zones"

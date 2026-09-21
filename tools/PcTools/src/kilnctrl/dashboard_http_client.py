@@ -27,7 +27,7 @@ import json
 import urllib.error
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from typing import Optional
 
 DASHBOARD_HTTP_TIMEOUT_S = 5.0
@@ -36,8 +36,7 @@ DASHBOARD_HTTP_TIMEOUT_S = 5.0
 # softAP address, reachable even with no home Wi-Fi configured. Not imported
 # from there to avoid a cross-module dependency for one string literal; kept
 # identical on purpose (see this module's own test for a same-value check).
-DASHBOARD_AP_DEFAULT_HOST = "192.168.4.1"
-
+DASHBOARD_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 _HEAP_KEYS = ("heap_internal", "heap_spiram", "heap_dma")
 
 

@@ -68,7 +68,7 @@ import json
 import urllib.error
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from typing import Optional
 
 PARTITION_HTTP_TIMEOUT_S = 5.0
@@ -77,8 +77,7 @@ PARTITION_HTTP_TIMEOUT_S = 5.0
 #: uses (ota_http_client.OTA_AP_DEFAULT_HOST, dashboard_http_client.
 #: DASHBOARD_AP_DEFAULT_HOST) -- the board's own softAP address, reachable
 #: even with no home Wi-Fi configured.
-PARTITION_AP_DEFAULT_HOST = "192.168.4.1"
-
+PARTITION_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 _REQUIRED_KEYS = ("label", "type", "subtype", "offset", "size", "encrypted")
 
 

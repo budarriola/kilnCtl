@@ -42,7 +42,7 @@ import logging
 import urllib.error
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from typing import Optional
 
 _module_log = logging.getLogger(__name__)
@@ -58,8 +58,7 @@ _SWEEP_ABORT_PATH = "/api/zones/current_sweep/abort"
 _SWEEP_STATUS_PATH = "/api/zones/current_sweep/status"
 
 #: Same fallback-AP address every other HTTP client in this package uses.
-ZONE_SWEEP_AP_DEFAULT_HOST = "192.168.4.1"
-
+ZONE_SWEEP_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 #: zones_current_sweep_engine.c's ZONE_SWEEP_NORMAL_NOISE_FLOOR_A -- a
 #: measured per-zone current below this is refused (reported as
 #: "unmeasured", never recorded), because it cannot be reliably

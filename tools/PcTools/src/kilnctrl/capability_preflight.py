@@ -74,7 +74,7 @@ import logging
 import urllib.error
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -83,8 +83,7 @@ _module_log = logging.getLogger(__name__)
 #: Same "board's fallback-AP address" default every other HTTP client in
 #: this package uses (ramp_assist_http_client.RAMP_ASSIST_AP_DEFAULT_HOST,
 #: dashboard_http_client.DASHBOARD_AP_DEFAULT_HOST, ...).
-PREFLIGHT_AP_DEFAULT_HOST = "192.168.4.1"
-
+PREFLIGHT_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 PREFLIGHT_HTTP_TIMEOUT_S = 8.0
 
 #: The board's own precise error body for a route the httpd never

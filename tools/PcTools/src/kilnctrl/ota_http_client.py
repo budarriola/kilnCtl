@@ -65,7 +65,7 @@ import os
 import urllib.error
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -95,9 +95,7 @@ OTA_PICO_STAGE_TIMEOUT_S = 60.0
 
 #: Mirrors gui.py's _WIFI_AP_DEFAULT_HOST -- the board's own fallback-AP
 #: address, reachable when nothing has ever joined a home network yet.
-OTA_AP_DEFAULT_HOST = "192.168.4.1"
-
-
+OTA_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 class OtaHttpError(Exception):
     """Raised for any transport or protocol failure talking to the board's
     OTA endpoints -- unreachable host, a non-2xx response, or a response

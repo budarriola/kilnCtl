@@ -43,7 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -59,9 +59,7 @@ _REVERT_PATH = "/api/adaptive_tune/revert"
 
 #: Same fallback-AP address ota_http_client.py's OTA_AP_DEFAULT_HOST names --
 #: the board's own AP-mode IP when no station connection is up.
-ADAPTIVE_TUNE_AP_DEFAULT_HOST = "192.168.4.1"
-
-
+ADAPTIVE_TUNE_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 class AdaptiveTuneHttpError(Exception):
     """Any transport or protocol failure talking to
     GET /api/adaptive_tune or POST /api/adaptive_tune/enable -- unreachable

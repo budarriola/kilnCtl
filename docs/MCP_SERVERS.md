@@ -265,6 +265,30 @@ suppression of this was tried and reverted as unsafe. Procedure:
    actually up just re-trips (`safety_guards_try_clear()` re-checks live
    inputs and refuses while the condition still holds).
 
+## Default host resolution (`kilnctrl.host_resolve`)
+
+Every `*_http_client.py` used to hardcode its own `*_AP_DEFAULT_HOST =
+"192.168.4.1"` (the board's softAP fallback address) as the default `host`
+argument -- correct only for a board that has never joined a LAN, and wrong
+for a board already provisioned onto the bench LAN (e.g. 192.168.1.156),
+which cost one session a `/24` sweep to rediscover. `kilnctrl/host_resolve.py`
+centralizes the default in one resolution order: the `KILNCTL_HOST`
+environment variable if set, else the last host any client actually got a
+response from (persisted in the same gitignored `settings.json` the GUI
+already uses for the last serial port and OpenOCD path, via
+`kilnctrl.settings.get_last_host`/`set_last_host`), else `192.168.4.1`
+unchanged. Every module's `*_AP_DEFAULT_HOST` constant now calls
+`host_resolve.resolve_default_host()` instead of hardcoding the literal, and
+`http_auth.urlopen()` -- the seam nearly every client's request already goes
+through -- calls `host_resolve.record_host_seen()` after any request that
+gets a real HTTP response (success or a non-401 error), so the cache updates
+itself from ordinary tool use with no extra wiring, including inside
+`flash_firmware()`'s own post-flash verification (which calls
+`partition_http_client.get_partitions()`, itself routed through
+`http_auth.urlopen`). An explicit `host=` argument, or `flash_firmware()`'s
+own ordered candidate list, is untouched by any of this and always wins.
+Tests: `tools/PcTools/tests/test_host_resolve.py`.
+
 ## Flash provenance and the sensitive-dirty-file guard
 
 `get_fw_version()`'s `tree: dirty` has always been a single bit -- true or

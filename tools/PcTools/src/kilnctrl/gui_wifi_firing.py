@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import http_auth
+from . import host_resolve, http_auth
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -98,7 +98,7 @@ _DEVICE_LOG_SESSION_METHOD_NAME: dict[LogLevel, str] = {
     LogLevel.ERROR: "error",
     LogLevel.WARN: "warning",
 }
-_WIFI_AP_DEFAULT_HOST = "192.168.4.1"
+_WIFI_AP_DEFAULT_HOST = host_resolve.resolve_default_host()  # was a hardcoded "192.168.4.1"
 _WIFI_MDNS_HOST = "kilnctl.local"
 _WIFI_HTTP_TIMEOUT_S = 8.0
 _OK_COLOR = "#0a7d28"
