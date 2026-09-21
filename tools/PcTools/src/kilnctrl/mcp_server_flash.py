@@ -13,8 +13,10 @@ import json
 import math
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -236,6 +238,82 @@ def _check_app_flash_offset_matches_chip(
             "anyway (e.g. mid-migration with a plan in hand)."
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Data-partition erase, added 2026-09-21 (owner decision: reset the board's
+# web-auth admin record, whose password is unknown, by erasing the DEFAULT
+# `nvs` partition during the commission reflash -- see web_auth_store.c:18-31
+# and partitions.csv's `nvs,data,nvs,0x9000,0x6000` row). No tool previously
+# erased any data partition; a hand `flash erase_sector 0 0 last` once wiped
+# the WHOLE chip (see this module's header comment above) -- so this is
+# deliberately narrow: an explicit allowlist of DATA partitions only, never
+# app/recovery/otadata/bootloader/partition-table/coredump, resolved fresh
+# from the same partitions.csv `_resolve_app_flash_target()` already reads
+# (so a `kiln_fw_root` override's own table is what is consulted, never a
+# hardcoded offset), written in the SAME OpenOCD session as the app image
+# (after it, before the final reset) so a partial multi-call sequence can
+# never leave the board in a state where the app was reflashed but an
+# intended erase silently did not happen (or vice versa).
+# ---------------------------------------------------------------------------
+ERASABLE_DATA_PARTITIONS = frozenset({"nvs", "kiln_nvs", "wifi_nvs", "profiles_nvs", "cfg"})
+
+
+def _resolve_erase_targets(kiln_fw_root: str, names: "list[str]") -> "list[partition_table.PartitionEntry]":
+    """Resolves each requested partition `names` entry against
+    `<kiln_fw_root>/partitions.csv`, refusing (raising ValueError, naming the
+    partition) unless it is BOTH in `ERASABLE_DATA_PARTITIONS` and actually
+    present in that CSV. Never returns a partition outside the allowlist --
+    this is the one gate standing between `erase_partitions` and the
+    2026-08-11 full-chip-erase incident's much narrower, much safer cousin,
+    so it fails loud rather than silently skipping an unknown/disallowed
+    name."""
+    csv_path = os.path.join(kiln_fw_root, "partitions.csv")
+    try:
+        entries = partition_table.parse_partitions_csv(csv_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not parse {csv_path}: {exc}") from exc
+    by_name = {e.name: e for e in entries}
+    resolved: "list[partition_table.PartitionEntry]" = []
+    seen: "set[str]" = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        if name not in ERASABLE_DATA_PARTITIONS:
+            allowed = ", ".join(sorted(ERASABLE_DATA_PARTITIONS))
+            raise ValueError(
+                f"refusing to erase partition {name!r} -- not in the allowlist of erasable data "
+                f"partitions ({allowed}). app/recovery/otadata/bootloader/partition-table/coredump "
+                "are never erasable through this parameter."
+            )
+        entry = by_name.get(name)
+        if entry is None:
+            names_found = ", ".join(sorted(by_name)) or "(no partitions)"
+            raise ValueError(
+                f"{csv_path} has no partition named {name!r} -- cannot determine its offset/size "
+                f"to erase. Partitions found: {names_found}"
+            )
+        resolved.append(entry)
+    return resolved
+
+
+def _write_blank_partition_file(entry: partition_table.PartitionEntry, tmp_dir: str) -> str:
+    """Writes a 0xFF-filled file of exactly `entry.size` bytes into `tmp_dir`
+    and returns its path -- 0xFF is erased-flash's read-back value, so
+    `program_esp ... verify` writing this file over `entry`'s region has the
+    same effect as erasing it (blank NVS/LittleFS), through the same
+    byte-compare-on-write path every other image in this tool already uses,
+    rather than a bare `flash erase_sector` call."""
+    path = os.path.join(tmp_dir, f"erase_{entry.name}.bin")
+    chunk = b"\xff" * (1024 * 1024)
+    remaining = entry.size
+    with open(path, "wb") as f:
+        while remaining > 0:
+            n = min(remaining, len(chunk))
+            f.write(chunk[:n])
+            remaining -= n
+    return path
 
 
 def _enumerated_jtag_serials() -> "list[str]":
@@ -753,6 +831,8 @@ def flash_firmware(
     ap_password: Optional[str] = None,
     reset_boot_guard: bool = True,
     allow_partition_offset_mismatch: bool = False,
+    erase_partitions: Optional["list[str]"] = None,
+    confirm_erase: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -949,7 +1029,37 @@ def flash_firmware(
     and why `ota_rollback_esp()` cannot substitute for this. A board whose
     otadata already points at `app` (e.g. from a previous correctly-booted
     OTA) is unaffected; a from-scratch/never-OTA'd board may need that
-    resolved before this tool's own post-flash verification will pass."""
+    resolved before this tool's own post-flash verification will pass.
+
+    `erase_partitions` / `confirm_erase`: owner decision 2026-09-21 -- erase
+    one or more DATA partitions in the SAME OpenOCD session as the app image
+    (written after it, before the final reset), by writing a 0xFF-filled
+    (erased-flash-equivalent) file over that partition's exact offset/size
+    with the same `program_esp ... verify` byte-compare every other image in
+    this tool already uses. Each name is resolved fresh from
+    `<kiln_fw_root>/partitions.csv` (the same file `_resolve_app_flash_target()`
+    reads) and refused unless it is in `ERASABLE_DATA_PARTITIONS` -- `nvs`,
+    `kiln_nvs`, `wifi_nvs`, `profiles_nvs`, `cfg` -- never `app`, `recovery`,
+    `otadata`, `bootloader`, the partition table, or `coredump`. Requesting a
+    name outside that allowlist, or one absent from the CSV, refuses BEFORE
+    touching OpenOCD, naming the offending name. Requires
+    `confirm_erase=True` passed alongside `erase_partitions` -- omitting it
+    refuses, naming every requested partition, so an erase can never happen
+    as a side effect of a call that only meant to flash firmware.
+
+    Erasing `nvs` (`0x9000`, 0x6000 B) destroys: the web-auth admin record
+    for BOTH roles (`web_auth_store.c`'s `kiln_auth` namespace -- so both the
+    LCD PIN and the web admin password revert to unset/first-run), the auth
+    policy (auth reverts to OFF), and any pre-2026-08-13 legacy remnants
+    still stored there. It does NOT touch Wi-Fi credentials (`wifi_nvs`),
+    zones/profiles config (`kiln_nvs`/`profiles_nvs`), boot_guard or
+    crash_report state (also `kiln_nvs`), or the `cfg` LittleFS partition's
+    own data unless `cfg` is separately named.
+
+    The result names each erased partition (name, offset, size) and the
+    write's verify outcome, and this is persisted to `flash_provenance.json`
+    (`erased_partitions`) alongside the rest of that flash's record -- an
+    erase is never silent."""
     openocd_exe = _find_openocd_exe()
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
@@ -993,6 +1103,23 @@ def flash_firmware(
             f"{effective_kiln_fw_root}/partitions.csv). Writing it anyway would "
             f"overflow into whatever partition follows and corrupt it."
         )
+
+    # erase_partitions validation happens BEFORE the adapter/OpenOCD refusal
+    # below on purpose: a bad or unconfirmed erase request should never even
+    # get as far as checking whether the board is plugged in.
+    erase_targets: "list[partition_table.PartitionEntry]" = []
+    if erase_partitions:
+        if not confirm_erase:
+            return (
+                "error: refusing to erase partition(s) " + ", ".join(erase_partitions) +
+                " without confirm_erase=True -- pass confirm_erase=True alongside "
+                "erase_partitions once you have reviewed exactly what this will destroy "
+                "(see flash_firmware()'s erase_partitions docstring)."
+            )
+        try:
+            erase_targets = _resolve_erase_targets(effective_kiln_fw_root, erase_partitions)
+        except ValueError as exc:
+            return f"error: {exc}"
 
     adapter_refusal = _refuse_if_adapter_absent(MAIN_BOARD_JTAG_SERIAL, "main board (ESP32-S3)")
     if adapter_refusal:
@@ -1102,13 +1229,39 @@ def flash_firmware(
 
     kill_openocd_sessions()  # a stale session holding the JTAG interface looks identical to a flash failure
 
-    tcl = (
-        f"adapter serial {MAIN_BOARD_JTAG_SERIAL}; "
-        "program_esp build/bootloader/bootloader.bin 0x0 verify; "
-        "program_esp build/partition_table/partition-table.bin 0x8000 verify; "
-        f"program_esp build/KilnCtrl.bin 0x{app_target.offset:x} verify reset exit"
-    )
+    # Data-partition erase (2026-09-21): written in the SAME OpenOCD session,
+    # after the app image and before the final reset, so it can never be
+    # left half-applied relative to the app flash. Each blank (0xFF-filled)
+    # file lives in a temp dir for the duration of this OpenOCD session only,
+    # cleaned up in the `finally` below regardless of outcome.
+    erase_tmp_dir = tempfile.mkdtemp(prefix="kilnctl_erase_") if erase_targets else None
+    erase_note_entries: "list[dict]" = []
+    tcl_parts = [
+        f"adapter serial {MAIN_BOARD_JTAG_SERIAL}",
+        "program_esp build/bootloader/bootloader.bin 0x0 verify",
+        "program_esp build/partition_table/partition-table.bin 0x8000 verify",
+        f"program_esp build/KilnCtrl.bin 0x{app_target.offset:x} verify",
+    ]
+    for entry in erase_targets:
+        blank_path = _write_blank_partition_file(entry, erase_tmp_dir)
+        tcl_parts.append(f'program_esp "{blank_path.replace(chr(92), "/")}" 0x{entry.offset:x} verify')
+        erase_note_entries.append({"name": entry.name, "offset": entry.offset, "size": entry.size})
+    tcl_parts[-1] += " reset exit"
+    tcl = "; ".join(tcl_parts)
+
     stale_prefix = f"WARNING: flashed a stale binary anyway ({stale.reason})\n" if (stale.stale and allow_stale) else ""
+
+    def _erase_note(verify_outcome: str) -> str:
+        if not erase_note_entries:
+            return ""
+        erase_lines = "\n".join(
+            f"  - {e['name']}: offset=0x{e['offset']:x} size=0x{e['size']:x} ({e['size']} B)"
+            for e in erase_note_entries
+        )
+        return (
+            f"erased partitions (written 0xFF, same OpenOCD session as the app image, "
+            f"verify {verify_outcome}):\n{erase_lines}\n"
+        )
 
     def _post_flash(base_msg: str) -> str:
         base_msg = (
@@ -1142,42 +1295,50 @@ def flash_firmware(
         return (f"{base_msg}, and post-flash verification confirmed the board is running "
                 f"{app_target.name!r} with the matching build{suffix}")
 
-    ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
-    if ok:
-        flash_provenance.write_provenance_json(
-            tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
-            kiln_fw_root_override=kiln_fw_root,
-        )
-        archive_note = _archive_flashed_elf(build_dir, app_bin_path, tree_state, kiln_fw_root)
-        return _post_flash(stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running" + archive_note)
-
-    if retry_once:
-        _srv._session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
-        ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
-        if ok2:
+    try:
+        ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
+        if ok:
             flash_provenance.write_provenance_json(
                 tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
                 kiln_fw_root_override=kiln_fw_root,
+                erased_partitions=erase_note_entries or None,
             )
             archive_note = _archive_flashed_elf(build_dir, app_bin_path, tree_state, kiln_fw_root)
-            return _post_flash("flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)" + archive_note)
-        output = output2
+            return _post_flash(stale_prefix + _erase_note("OK") + "flashed and verified OK (bootloader + partition table + app), board reset and running" + archive_note)
 
-    tail = "\n".join(output.strip().splitlines()[-25:])
-    flash_provenance.write_provenance_json(
-        tree_state, provenance_path,
-        outcome=flash_provenance.OUTCOME_FLASH_FAILED,
-        detail=tail,
-        kiln_fw_root_override=kiln_fw_root,
-    )
-    return (
-        "error: flash failed" + (" twice" if retry_once else "") + f":\n{tail}\n\n"
-        "Do not run a raw `flash erase_sector`/full-chip-erase recovery by hand -- "
-        "that combination (partial reflash after a full erase) is what caused the "
-        "2026-08-11 incident this tool exists to prevent. If this persists, a full "
-        "USB power cycle of the board (not just a JTAG reset) has resolved a "
-        "flash-write-protect-stuck state before."
-    )
+        if retry_once:
+            _srv._session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
+            ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_kiln_fw_root, timeout_s=90)
+            if ok2:
+                flash_provenance.write_provenance_json(
+                    tree_state, provenance_path, outcome=flash_provenance.OUTCOME_FLASHED_OK,
+                    kiln_fw_root_override=kiln_fw_root,
+                    erased_partitions=erase_note_entries or None,
+                )
+                archive_note = _archive_flashed_elf(build_dir, app_bin_path, tree_state, kiln_fw_root)
+                return _post_flash(stale_prefix + _erase_note("OK") + "flashed and verified OK on retry (first attempt hit the known benign Verify-Failed quirk)" + archive_note)
+            output = output2
+
+        tail = "\n".join(output.strip().splitlines()[-25:])
+        flash_provenance.write_provenance_json(
+            tree_state, provenance_path,
+            outcome=flash_provenance.OUTCOME_FLASH_FAILED,
+            detail=tail,
+            kiln_fw_root_override=kiln_fw_root,
+            erased_partitions=erase_note_entries or None,
+        )
+        return (
+            "error: flash failed" + (" twice" if retry_once else "") + f":\n{tail}\n\n"
+            + _erase_note("FAILED (whole OpenOCD session failed -- see output above)") +
+            "Do not run a raw `flash erase_sector`/full-chip-erase recovery by hand -- "
+            "that combination (partial reflash after a full erase) is what caused the "
+            "2026-08-11 incident this tool exists to prevent. If this persists, a full "
+            "USB power cycle of the board (not just a JTAG reset) has resolved a "
+            "flash-write-protect-stuck state before."
+        )
+    finally:
+        if erase_tmp_dir:
+            shutil.rmtree(erase_tmp_dir, ignore_errors=True)
 
 
 def _reject_kiln_fw_build_path(path: str) -> Optional[str]:

@@ -226,6 +226,7 @@ def write_provenance_json(
     outcome: str = OUTCOME_PENDING,
     detail: Optional[str] = None,
     kiln_fw_root_override: Optional[str] = None,
+    erased_partitions: Optional[list] = None,
 ) -> None:
     """Persists the capture to `out_path` (the caller decides the path; see
     elf_archive.kiln_provenance_path() -- since 2026-09-15 this is
@@ -250,7 +251,13 @@ def write_provenance_json(
     passed in this case is already scoped to THAT tree (its own
     `git status --porcelain`/HEAD), not the main tree's -- this field just
     records which path produced it, so a later reader isn't misled into
-    thinking `head`/`dirty_files` describe the main working tree."""
+    thinking `head`/`dirty_files` describe the main working tree.
+
+    `erased_partitions`: non-None (a list of {"name", "offset", "size"}
+    dicts) when this flash also erased one or more data partitions via
+    `flash_firmware(erase_partitions=[...])` (2026-09-21, the web-auth-reset
+    commission reflash) -- recorded so "what was wiped at <time>" is
+    answerable from disk the same way the rest of this record is."""
     try:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -264,6 +271,7 @@ def write_provenance_json(
                     "outcome": outcome,
                     "detail": detail,
                     "kiln_fw_root_override": kiln_fw_root_override,
+                    "erased_partitions": erased_partitions,
                 },
                 f,
                 indent=2,

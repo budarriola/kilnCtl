@@ -366,6 +366,58 @@ reset was skipped for lack of credentials rather than saying nothing. Pass
 logged or echoed, and the result always names the counter's before/after
 values (or the skip reason).
 
+**Data-partition erase during a commission reflash (owner decision
+2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`
+plus a required `confirm_erase: bool = False` gate. This exists for one
+specific case first: the board's web-auth admin record has an unknown
+password, and `web_auth_store.c:18-31`'s `kiln_auth` namespace lives in the
+DEFAULT `nvs` partition (`partitions.csv`'s `nvs,data,nvs,0x9000,0x6000`
+row) -- so resetting that record means erasing that partition, not guessing
+or brute-forcing a credential. No tool erased any data partition before
+this: a hand `flash erase_sector` once wiped the WHOLE chip (see this
+module's header comment), which is exactly the failure mode this parameter
+is built to avoid repeating.
+
+Each requested name is resolved fresh from `<kiln_fw_root>/partitions.csv`
+(the same parser `_resolve_app_flash_target()` already uses, so a
+`kiln_fw_root` worktree override's own table is what is consulted, never a
+hardcoded offset) and refused -- before OpenOCD is touched at all -- unless
+it is BOTH in the allowlist `ERASABLE_DATA_PARTITIONS` (`nvs`, `kiln_nvs`,
+`wifi_nvs`, `profiles_nvs`, `cfg`) and actually present in that CSV.
+`app`/`recovery`/`otadata`/`bootloader`/the partition table/`coredump` can
+never be named here -- requesting one of those, or any name outside the
+allowlist, refuses immediately, naming the offending partition.
+`confirm_erase=True` must be passed alongside `erase_partitions`; omitting
+it refuses too, naming every requested partition, so an erase can never
+happen as a side effect of a call that only meant to flash firmware.
+
+Each resolved partition gets a 0xFF-filled file (erased flash's read-back
+value) written to a temp directory, sized to exactly that partition's
+`size`, and appended to the SAME OpenOCD session as the app image -- as its
+own `program_esp <file> <offset> verify` line, after the app image's write
+and before the session's final `reset exit` -- never a separate session,
+and never a bare `flash erase_sector`. The temp directory is removed after
+the session ends regardless of outcome. The result names each erased
+partition's name/offset/size and the write's verify outcome, and this is
+persisted to `flash_provenance.json` under `erased_partitions` -- an erase
+is never silent, and a failed flash still records what erase was attempted
+rather than dropping it from the record.
+
+Erasing `nvs` destroys: the web-auth admin record for BOTH roles
+(`web_auth_store.c`'s `kiln_auth` namespace -- the LCD PIN and the web admin
+password both revert to unset/first-run), the auth policy stored alongside
+it (auth reverts to OFF until reconfigured), any pre-2026-08-13 legacy
+remnants still stored in that namespace, and the Wi-Fi driver's own
+`nvs.net80211` data plus PHY calibration data that the ESP-IDF Wi-Fi/RF
+stack also keeps in this same default `nvs` partition -- both are
+regenerated automatically (a fresh scan/associate and a fresh calibration
+pass) and are not a credential, so this is a cosmetic one-time delay, not a
+config loss. It does NOT touch: Wi-Fi
+credentials (`wifi_nvs`), zones/profiles config (`kiln_nvs`/`profiles_nvs`),
+boot_guard or crash_report state (also `kiln_nvs`), or the `cfg` LittleFS
+partition's own data -- each of those is erased only if separately named in
+`erase_partitions`.
+
 ## Building from a clean worktree for `kiln_fw_root`
 
 `flash_firmware(kiln_fw_root=...)` exists for exactly the "build from a clean
