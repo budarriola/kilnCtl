@@ -98,11 +98,11 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 
 | Control | Route | Tier | MCP tool | LCD equivalent | Bench class | Result |
 |---|---|---|---|---|---|---|
-| Page load | `GET /api/profile/live` | ADMIN | none direct | none (LCD has no live-edit page) | Testable only while a firing is running | |
-| Fork the running profile (`forkBtn`) | `POST /api/profile/live/fork` | ADMIN | none | -- | Testable | |
-| Save changes (`saveBtn`) | `POST /api/profile/live` | ADMIN | none | -- | Testable | |
-| Save as new / Overwrite original / Discard (`saveAsBtn`/`overwriteBtn`/`discardBtn`) | `POST /api/profile/live/decide` | ADMIN | none | -- | Testable | |
-| Reload from board (`reloadBtn`) | `GET /api/profile/live` | ADMIN | none | -- | Testable | |
+| Page load | `GET /api/profile/live` | ADMIN | `profile_live_get` | none (LCD has no live-edit page) | Testable only while a firing is running | |
+| Fork the running profile (`forkBtn`) | `POST /api/profile/live/fork` | ADMIN | `profile_live_fork` | -- | Testable | |
+| Save changes (`saveBtn`) | `POST /api/profile/live` | ADMIN | `profile_live_edit` | -- | Testable | |
+| Save as new / Overwrite original / Discard (`saveAsBtn`/`overwriteBtn`/`discardBtn`) | `POST /api/profile/live/decide` | ADMIN | `profile_live_decide` | -- | Testable | |
+| Reload from board (`reloadBtn`) | `GET /api/profile/live` | ADMIN | `profile_live_get` | -- | Testable | |
 
 ### `/settings/zones` -- zones & PID (`zones_page.html`)
 
