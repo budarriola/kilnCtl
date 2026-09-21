@@ -61,6 +61,17 @@
 >   into `docs/COMMISSIONING_TEST_MATRIX.md`; full detail in
 >   `docs/BENCH_TEST_LOG.md`'s two 2026-09-21 sections (uncommitted in the
 >   shared tree as of this sweep). See M18 below for what remains.
+> - **M18 backend Class B sweep, 2026-09-21**, against ESP `05f1ab1f` / Pico
+>   `987050f6`: 14/32 rows PASS (2 with flagged, non-harmful anomalies — a
+>   same-value PID write invalidates `tuning_valid`; `relay_cycles/restore`'s
+>   monotonic guard disagrees with `/api/status`'s displayed counts for
+>   relays 1/2), 7 BLOCKED (ARMED-state/no-revert-available/not-in-that-mode
+>   reasons), 1 N/A, 9 not run for time (including the sw_reset/S6a/clear
+>   sequence and the kiln_configs create/delete family). No Class C row run
+>   (owner-scheduled, out of scope). No heating, no new crash, no unexpected
+>   trip. Full detail and the two anomalies: `docs/BENCH_TEST_LOG.md`'s
+>   2026-09-21 Class B/C section; matrix rows annotated in
+>   `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **Owner decisions, listed once under M18** rather than repeated here:
 >   pico_auto_update task-stack raised to 8192 B and readiness wording for
 >   the gate-off state both decided 2026-09-21; `KILNCTL_AP_PASSWORD` set-up
