@@ -323,10 +323,10 @@ class OffBranchTest(_Base):
 
 
 class TimeoutSubstitutionTest(_Base):
-    """project_..._: after an NVS erase, web_auth_backend_get_config()
-    reports -1 for both timeouts because no policy record exists yet --
-    the same sentinel that means "never expire". web_auth_setup() must not
-    echo that -1 straight back into set_policy."""
+    """After an NVS erase, web_auth_backend_get_config() reports -1 for both
+    timeouts because no policy record exists yet -- the same sentinel that
+    means "never expire". web_auth_setup() must not echo that -1 straight
+    back into set_policy."""
 
     _NO_RECORD = dict(_OFF_NO_ADMIN, web_timeout_min=-1, lcd_timeout_min=-1)
 
@@ -369,6 +369,25 @@ class TimeoutSubstitutionTest(_Base):
         self.assertIn("refused", result)
         self.assertIn("lcd_timeout_min=61", result)
         get_mock.assert_not_called()
+
+    def test_dry_run_names_substituted_defaults_not_raw_minus_one(self):
+        """A dry run never reaches the set_policy call, but its 'would:'
+        line must still report the values this tool would actually send --
+        not the board's raw -1 with no explanation of what's about to
+        happen to it. (The separate 'before:' line legitimately still shows
+        the board's raw -1 read; only the action line is asserted here.)"""
+        with unittest.mock.patch.object(wac, "get_auth_config", return_value=self._NO_RECORD):
+            result = msw.web_auth_setup(confirm=False, enable_web_auth=True)
+        self.assertIn("DRY RUN", result)
+        would_line = result.splitlines()[0]
+        self.assertIn("set_policy(web_enabled=1, web_timeout_min=30, lcd_timeout_min=10)", would_line)
+        self.assertIn("substituted default", result)
+
+    def test_dry_run_state_line_still_shows_raw_before_value(self):
+        with unittest.mock.patch.object(wac, "get_auth_config", return_value=self._NO_RECORD):
+            result = msw.web_auth_setup(confirm=False, enable_web_auth=True)
+        self.assertIn("before: ", result)
+        self.assertIn("web_timeout_min=-1 lcd_timeout_min=-1", result)
 
     def test_valid_override_is_used_verbatim_no_note(self):
         with unittest.mock.patch.object(

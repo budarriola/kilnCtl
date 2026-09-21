@@ -148,11 +148,13 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     and names the substitution in the result. Pass ``web_timeout_min``/
     ``lcd_timeout_min`` explicitly to override either default outright;
     each is validated against the firmware's own rule (-1, or 1-60) and
-    refused before any HTTP call if out of range. An explicit -1 is honored
-    (this tool never overrides a deliberate choice) but reported with a
-    loud warning that sessions will never expire. Only reachable in case 2
+    refused before any HTTP call if out of range -- this validation always
+    runs, regardless of which of the three cases the board turns out to be
+    in. The resolved (post-substitution) values are also named in a DRY
+    RUN's "would: ..." line. Only case 2 actually sends them anywhere
     (case 1's bootstrap_password route never calls set_policy, and case 3
-    writes nothing), so these two parameters are ignored otherwise.
+    writes nothing), so outside case 2 these two parameters are validated
+    but otherwise have no effect.
 
     After any write, re-reads GET /api/auth/config and fails loud (does not
     report success) if the result disagrees with what was requested --
@@ -218,6 +220,15 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     # send back to it.
     raw_lcd_timeout_min = before.get("lcd_timeout_min", -1)
     raw_web_timeout_min = before.get("web_timeout_min", -1)
+    # Computed here (not just before the set_policy call) so a DRY RUN --
+    # which never reaches that call -- still reports the value this tool
+    # would actually send and names any substitution, rather than echoing
+    # the board's raw -1 with no explanation.
+    eff_web_timeout_min, web_timeout_note = _resolve_timeout(
+        "web_timeout_min", _DEFAULT_WEB_TIMEOUT_MIN, raw_web_timeout_min, web_timeout_min)
+    eff_lcd_timeout_min, lcd_timeout_note = _resolve_timeout(
+        "lcd_timeout_min", _DEFAULT_LCD_TIMEOUT_MIN, raw_lcd_timeout_min, lcd_timeout_min)
+    timeout_notes = [n for n in (web_timeout_note, lcd_timeout_note) if n]
     if config_readable:
         state_line = (f"before: web_enabled={web_enabled} admin_password_set={admin_configured} "
                       f"lcd_enabled={lcd_enabled} web_timeout_min={raw_web_timeout_min} "
@@ -226,6 +237,8 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
         state_line = (f"before: GET /api/auth/config was refused -- treating this as web auth ON "
                       f"with no admin record yet (the only state that denies this ADMIN-tier read "
                       f"with no way to log in) ({presence}, host={resolved})")
+    if timeout_notes:
+        state_line += "\n" + "\n".join(f"NOTE: {n}" for n in timeout_notes)
 
     # Case 3: an admin record already exists. Whatever web_enabled reads,
     # this tool never bootstraps over an existing admin record -- it only
@@ -266,7 +279,8 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
             action = "POST /api/auth/bootstrap_password"
         else:
             action = ("POST /api/auth/security (set_web_password)"
-                       + (" then set_policy(web_enabled=1)" if enable_web_auth else ""))
+                       + (f" then set_policy(web_enabled=1, web_timeout_min={eff_web_timeout_min}, "
+                          f"lcd_timeout_min={eff_lcd_timeout_min})" if enable_web_auth else ""))
         return f"DRY RUN (pass confirm=True to actually set it up) -- would: {action}\n{state_line}"
 
     if not config_readable or web_enabled:
@@ -325,13 +339,6 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
                 return (f"FAILED verification: set_web_password reported ok:true but "
                         f"admin_password_set still reads false -- refusing to enable web auth "
                         f"over an unconfirmed credential\n{state_line}")
-            eff_web_timeout_min, web_timeout_note = _resolve_timeout(
-                "web_timeout_min", _DEFAULT_WEB_TIMEOUT_MIN, raw_web_timeout_min, web_timeout_min)
-            eff_lcd_timeout_min, lcd_timeout_note = _resolve_timeout(
-                "lcd_timeout_min", _DEFAULT_LCD_TIMEOUT_MIN, raw_lcd_timeout_min, lcd_timeout_min)
-            timeout_notes = [n for n in (web_timeout_note, lcd_timeout_note) if n]
-            if timeout_notes:
-                state_line += "\n" + "\n".join(f"NOTE: {n}" for n in timeout_notes)
             try:
                 policy_result = wac.post_security(resolved, {
                     "cmd": "set_policy",
