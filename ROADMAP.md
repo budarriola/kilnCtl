@@ -2633,9 +2633,34 @@ Owner instruction, 2026-09-21.
 - Done: `docs/COMMISSIONING_WEBUI_RUNBOOK.md` (`bb95e3ed`, review fix
   `58914003`) and `docs/COMMISSIONING_BACKEND_RUNBOOK.md` (`2c3d9787`,
   review fix `f2432e0c`).
-- In progress: reflash both boards to HEAD, NVS erase, `web_auth_setup`
-  bootstrap, and the M18 test-order phases (backend, then web UI, then
-  LCD) — flash is running now.
+- Done: reflash + NVS erase + bootstrap, 2026-09-21. ESP flashed to
+  `8ab3b81a` with only the `nvs` partition erased (`flash_firmware(erase_partitions=...)`;
+  `wifi`/`kiln`/`profiles` NVS namespaces untouched); `web_auth_setup` bootstrapped
+  the admin record from env vars (web auth enabled, LCD auth off); login now
+  answers 200 in ~0.9 s. Session timeouts (web 30 min / LCD 10 min) were
+  restored to their correct values by `0edb60c9`/`9c4938fe` after
+  `web_auth_setup` had persisted the `-1` never-expire sentinel from the fresh
+  NVS erase. Pico unchanged at `a57d0138`. Board reachable at `192.168.1.156`.
+- **Open blocker, firing rows can't proceed:** first boot after the reflash
+  panicked in task `pico_auto_updat` (stack overflow, 4096 B task stack
+  against a measured 3104 B ceiling that excludes flash/NVS internals), and
+  the following boot's auto-update attempt erased into the Pico's own
+  running flat image and left it silent for ~120 s. Crash report is still
+  unacknowledged, which blocks `capability_preflight`. Fixes in flight, not
+  yet on main: `22b080bd` (landed) makes SaftyFW refuse an erase/program that
+  overlaps the running image (state 9); the ESP-side gate plus state-9
+  handling and a readiness text fix are in review in worktree `picoautoupd`;
+  SaftyFW build-identity scoping to the SaftyFW tree is in progress in
+  worktree `saftyid`. Owner decision still open: the `pico_auto_updat` task
+  stack itself (standing owner rule is never bump a stack ceiling).
+- Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
+  (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
+  atomic settings writes); the kilnctrl MCP server was restarted at
+  `502e69a5`; `KILNCTL_HOST=192.168.1.156` is now set in User scope.
+  `0956c0d1`/`06ac13cd` add a device-side log line when the login endpoint
+  refuses with 429.
+- `KILNCTL_AP_PASSWORD` is still unset, so `flash_firmware()` cannot clear
+  `boot_guard` (count sits at 2).
 
 ---
 
