@@ -325,7 +325,8 @@ static bool relay_wait_for_states(SafetyLinkClass *link, uint32_t since_ms, uint
                 bool terminal = (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED) ||
                                  (st.state == SAFETY_LINK_UPDATE_STATE_FAILED) ||
                                  (st.state == SAFETY_LINK_UPDATE_STATE_ABORTED) ||
-                                 (st.state == SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE);
+                                 (st.state == SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE) ||
+                                 (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP);
                 if ((bit & accept_state_mask) || terminal) {
                     *out = st;
                     return true;
@@ -454,6 +455,11 @@ static void relay_task_fn(void *arg)
                      (unsigned)RELAY_BEGIN_REPLY_TIMEOUT_MS);
             goto abort_and_fail;
         }
+        if (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP) {
+            format_reason(reason, sizeof(reason),
+                     "Pico refused: update would overwrite its running flat image; reflash via SWD");
+            goto abort_and_fail;
+        }
         if (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED) {
             format_update_error(st.last_error, err_str, sizeof(err_str));
             format_reason(reason, sizeof(reason), "Pico refused UPDATE_BEGIN: %s", err_str);
@@ -473,6 +479,11 @@ static void relay_task_fn(void *arg)
             if (!got_recv) {
                 format_reason(reason, sizeof(reason), "Pico did not confirm RECEIVING within %u ms of erase",
                          (unsigned)RELAY_ERASE_TIMEOUT_MS);
+                goto abort_and_fail;
+            }
+            if (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP) {
+                format_reason(reason, sizeof(reason),
+                         "Pico refused: update would overwrite its running flat image; reflash via SWD");
                 goto abort_and_fail;
             }
             if (st.state != SAFETY_LINK_UPDATE_STATE_RECEIVING) {
@@ -558,6 +569,11 @@ static void relay_task_fn(void *arg)
                 // one missed cycle.
                 continue;
             }
+            if (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP) {
+                format_reason(reason, sizeof(reason),
+                         "Pico refused: update would overwrite its running flat image; reflash via SWD");
+                goto abort_and_fail;
+            }
             if (st.state == SAFETY_LINK_UPDATE_STATE_FAILED || st.state == SAFETY_LINK_UPDATE_STATE_ABORTED) {
                 format_update_error(st.last_error, err_str, sizeof(err_str));
                 format_reason(reason, sizeof(reason), "Pico reported %s during retransmission: %s",
@@ -626,6 +642,10 @@ static void relay_task_fn(void *arg)
         } else if (st.state == SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE) {
             format_reason(reason, sizeof(reason),
                      "Pico rejected the image: vector table not linked for the slot it was written into");
+            goto abort_and_fail;
+        } else if (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP) {
+            format_reason(reason, sizeof(reason),
+                     "Pico refused: update would overwrite its running flat image; reflash via SWD");
             goto abort_and_fail;
         } else {
             format_update_error(st.last_error, err_str, sizeof(err_str));

@@ -718,6 +718,19 @@ typedef enum {
      * it as a distinct, nameable rejection instead of falling through to a
      * generic 10 s UPDATE_END timeout. */
     SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE = 8,
+    /* 2026-09-21 (SaftyFW commit dbba6e71, update_task.c's running-image
+     * flash-overlap guard): a DISTINCT wire state for "this board's own
+     * running image occupies flash the requested erase/program would have
+     * to touch" -- observed on a bench Pico running a flat, bootloader-less
+     * image loaded at XIP_BASE, whose extent overlapped
+     * BOOTLOADER_METADATA_FLASH_OFFSET and part of slot A, so any relay
+     * attempt against it can never succeed. Mirrored here, same reasoning
+     * as SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE immediately above
+     * (reuses the last_error INTERNAL bit, no wire-layout change). Without
+     * this, ota_pico_relay.c's relay_wait_for_states() would not recognize
+     * it as terminal and would sit out the full RELAY_ERASE_TIMEOUT_MS
+     * (120 s) waiting for a RECEIVING that will never come. */
+    SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP = 9,
 } safety_link_update_state_t;
 
 /* UPDATE_STATUS_ERR_* bitmask, SaftyFW src/tasks/update_task.c -- mirrored,

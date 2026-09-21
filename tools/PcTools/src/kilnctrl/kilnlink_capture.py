@@ -172,6 +172,11 @@ CMD_NAMES: dict[int, str] = {
 #: protocol/wire-layout bump), so decode_payload's UPDATE_STATUS decoder
 #: below special-cases state 8 so an operator sees "rejected: image linked
 #: for the other slot", not a generic CRC-mismatch report.
+#:
+#: State 9 (2026-09-21, SaftyFW commit 22b080bd): the Pico refuses an
+#: erase/program that would overlap the flash range its own running image
+#: occupies (the flat, bootloader-less bench image case). Also reuses
+#: UPDATE_STATUS_ERR_INTERNAL's bit in `last_error`, no wire-layout change.
 UPDATE_STATE_NAMES: dict[int, str] = {
     0: "IDLE",
     1: "REFUSED",
@@ -182,6 +187,7 @@ UPDATE_STATE_NAMES: dict[int, str] = {
     6: "ABORTED",
     7: "FAILED",
     8: "REJECTED_SLOT_LINKAGE",
+    9: "REFUSED_RUNNING_IMAGE_OVERLAP",
 }
 
 #: UPDATE_STATUS_ERR_* bitmask (same source file), name only.
