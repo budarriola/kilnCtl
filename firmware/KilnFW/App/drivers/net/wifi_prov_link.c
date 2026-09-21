@@ -537,6 +537,24 @@ void do_ev_got_ip(void)
         s_wifi.sta_rssi = ap_info.rssi;
     }
 
+    /* Review fix (2026-09-21, finding 4): refresh the cheap-read STA ip/
+     * netmask cache right here on the GOT_IP event, on owner_task(), where
+     * an esp_netif_get_ip_info() call is already cheap and expected -- this
+     * is the "refresh on the GOT_IP event path" wifi_prov_get_cached_sta_ip_
+     * netmask()'s header comment promises, so a login backoff classification
+     * moments after a fresh join sees the new lease without any caller
+     * having to block on the owner task for it. */
+    if (s_wifi.sta_netif) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(s_wifi.sta_netif, &ip_info) == ESP_OK) {
+            char ip_str[16];
+            char mask_str[16];
+            esp_ip4addr_ntoa(&ip_info.ip, ip_str, (uint32_t)sizeof(ip_str));
+            esp_ip4addr_ntoa(&ip_info.netmask, mask_str, (uint32_t)sizeof(mask_str));
+            wifi_prov_update_sta_ip_cache(ip_str, mask_str);
+        }
+    }
+
     /* 2026-08-21 fix, TODO.md section 1: GOT_IP under a STATIC config proves
      * only L2 association, not that the configured gateway/subnet are
      * actually correct (see apply_sta_config()'s comment). Do NOT drop the

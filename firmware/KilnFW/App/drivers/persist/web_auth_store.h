@@ -74,9 +74,19 @@ extern "C" {
 // constant) is what verify actually uses (web_auth_store_verify_password()),
 // so an existing credential hashed at the old 20000 keeps verifying
 // correctly at that cost; it is only re-hashed at the new, lower count the
-// next time its password/PIN is SET (web_auth_store_set_password()/
-// _set_pin() both stamp rec->iterations = WEB_AUTH_ITERATIONS at set time).
+// next time its password is SET -- web_auth_store_set_password() stamps
+// rec->iterations = WEB_AUTH_ITERATIONS (this constant). The LCD PIN is a
+// SEPARATE surface the 2026-09-21 owner decision never named (that decision
+// was about web logon latency specifically, entered over a network round
+// trip -- the PIN is entered on-device with no equivalent latency
+// complaint), so web_auth_store_set_pin() keeps stamping its own, unchanged
+// WEB_AUTH_PIN_ITERATIONS below rather than silently inheriting a 10x KDF
+// cost cut it was never asked for (review fix, 2026-09-21, finding 5).
 #define WEB_AUTH_ITERATIONS      2000u
+
+// The LCD PIN's own iteration count -- unchanged since before the
+// 2026-09-21 fast-logon decision; see WEB_AUTH_ITERATIONS's comment above.
+#define WEB_AUTH_PIN_ITERATIONS  20000u
 
 #define WEB_AUTH_STORE_VERSION 1u /* own schema version -- see header comment;
                                     * ZONES_CFG_VERSION (26) is untouched by

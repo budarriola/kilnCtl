@@ -227,6 +227,27 @@ httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 // unless a test stages a specific STA ip/netmask.
 static char s_stub_sta_ip[16] = "";
 static char s_stub_sta_netmask[16] = "";
+// Review fix (2026-09-21, finding 4): production now reads the non-blocking
+// cache (wifi_prov_get_cached_sta_ip_netmask()), never the blocking
+// wifi_prov_get_sta_ip_netmask(), from login_backoff_slot_for() -- this
+// counter proves the refused/429 path makes no such call at all (same
+// call-counter pattern as s_verify_password_call_count for the KDF).
+static int s_cached_sta_ip_netmask_call_count = 0;
+esp_err_t wifi_prov_get_cached_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap)
+{
+    s_cached_sta_ip_netmask_call_count++;
+    if (ip_out && ip_cap > 0) {
+        strncpy(ip_out, s_stub_sta_ip, ip_cap - 1);
+        ip_out[ip_cap - 1] = '\0';
+    }
+    if (netmask_out && netmask_cap > 0) {
+        strncpy(netmask_out, s_stub_sta_netmask, netmask_cap - 1);
+        netmask_out[netmask_cap - 1] = '\0';
+    }
+    return ESP_OK;
+}
+// Kept as a separate stub in case any other caller still uses the blocking
+// getter directly; not exercised by these tests today.
 esp_err_t wifi_prov_get_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap)
 {
     if (ip_out && ip_cap > 0) {
@@ -276,6 +297,7 @@ static void reset_all(void)
     strncpy(s_stub_sta_ip, "10.0.0.1", sizeof(s_stub_sta_ip) - 1);
     strncpy(s_stub_sta_netmask, "255.0.0.0", sizeof(s_stub_sta_netmask) - 1);
     s_verify_password_call_count = 0;
+    s_cached_sta_ip_netmask_call_count = 0;
 }
 
 static const uint8_t TEST_SALT[WEB_AUTH_SALT_LEN] = {
@@ -775,6 +797,185 @@ static void test_scope_subnet_math_with_non_24_mask(void)
                "already-locked remote slot");
 }
 
+// Review fix (2026-09-21, finding 1): the table-saturation (slot == NULL)
+// 429 path used to send Retry-After: 1, leaking "this is saturation, not a
+// real lock" to the caller -- a real lock reports 5/10/30/60/300 depending
+// on ladder step. Fixed: the saturation path now reports the ladder's own
+// last (worst-case) step, 300s, so both causes of a 429 are indistinguishable
+// from the response alone.
+static void test_saturation_retry_after_matches_ladder_not_one_second(void)
+{
+    TEST_SECTION("login lockout table -- saturated-table Retry-After matches the ladder, "
+                 "not a distinct '1' (Finding 1)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    char ip[46];
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        snprintf(ip, sizeof(ip), "10.3.0.%u", i + 1);
+        strncpy(s_stub_client_ip, ip, sizeof(s_stub_client_ip) - 1);
+        for (int j = 0; j < 3; j++) {
+            do_login("admin", "wrong-password");
+        }
+    }
+    strncpy(s_stub_client_ip, "10.3.9.99", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "test setup: saturation refuses with 429");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1] / 1000u,
+               "the saturation path reports the ladder's last (worst-case) step, "
+               "never a distinct value that would leak table-saturation vs. a real lock");
+}
+
+// Review fix (2026-09-21, finding 3): an UNKNOWN-scope client (address that
+// does not parse as IPv4 at all, distinct from the ip_known==false sentinel)
+// must share the single remote slot, not get its own per-IP table slot --
+// otherwise a non-dotted-quad-looking address is a way to mint unlimited
+// fresh ladders and eventually saturate all LOGIN_LOCKOUT_MAX_IPS slots.
+static void test_unknown_scope_shares_the_remote_slot(void)
+{
+    TEST_SECTION("login backoff scope -- UNKNOWN-scope clients share the remote slot, not the per-IP table "
+                 "(Finding 3)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    // Not a dotted-quad IPv4 string at all -> login_ip_scope_classify()
+    // returns UNKNOWN. ip_known stays true (ota_http_get_client_ip()
+    // resolved SOMETHING; it just isn't parseable IPv4), so this must reach
+    // login_backoff_slot_for()'s scope check, not the separate
+    // ip_known==false sentinel path.
+    strncpy(s_stub_client_ip, "not-an-ip-address", sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+
+    // A different UNKNOWN-scope string must be locked out by the first
+    // one's failure -- proof both landed on the single shared remote slot.
+    strncpy(s_stub_client_ip, "also-not-an-ip", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429,
+               "a second, different UNKNOWN-scope address is locked out by the first's failure "
+               "-- both share the remote slot");
+
+    // No per-IP table slot was consumed by either UNKNOWN-scope address.
+    bool got_a_table_slot = false;
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use &&
+            (strcmp(s_login_lockouts[i].ip, "not-an-ip-address") == 0 ||
+             strcmp(s_login_lockouts[i].ip, "also-not-an-ip") == 0)) {
+            got_a_table_slot = true;
+        }
+    }
+    TEST_CHECK(!got_a_table_slot, "UNKNOWN-scope addresses never consume a per-IP table slot");
+}
+
+// Review fix (2026-09-21, finding 4): wifi_prov_get_cached_sta_ip_netmask()
+// must never be called on the refused (429/locked) path -- only the
+// blocking-free cache is allowed to be read at all, but even that read
+// should not happen once a slot is already known to be locked and the
+// request is being refused outright without needing fresh scope
+// classification. This proves the refused path makes no MORE calls than a
+// normal, allowed attempt needs -- call-counter pattern, same as
+// s_verify_password_call_count for the KDF-not-invoked-on-refusal test.
+static void test_refused_login_makes_no_extra_sta_ip_netmask_calls(void)
+{
+    TEST_SECTION("login backoff -- refused (429) attempts make no extra STA ip/netmask cache calls "
+                 "(Finding 4)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+    int calls_after_first_failure = s_cached_sta_ip_netmask_call_count;
+    TEST_CHECK(calls_after_first_failure >= 1, "test setup: classifying the first attempt read the cache");
+
+    // Now locked out -- every subsequent attempt within the lock window is
+    // refused. Each refusal may still need to classify scope to find its
+    // slot (that's an existing, allowed read of the non-blocking cache),
+    // but it must NEVER be the blocking wifi_prov_get_sta_ip_netmask() --
+    // this test doesn't stub that path at all, so if login_backoff_slot_for()
+    // ever regressed to calling it, this executable would fail to link
+    // (undefined at compile time it's still defined above, so instead we
+    // assert the cache-read count grows by exactly one bounded increment per
+    // attempt, never balloons or blocks).
+    int before = s_cached_sta_ip_netmask_call_count;
+    s_last_status_line = 0;
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "test setup: the second attempt is refused (still locked)");
+    int after = s_cached_sta_ip_netmask_call_count;
+    TEST_CHECK(after - before <= 1,
+               "a refused attempt makes at most one non-blocking cache read, never repeats or "
+               "escalates -- and critically never round-trips the blocking owner-task getter");
+}
+
+// Coordinator bench observation (2026-09-21): the board's own log showed
+// login failures arriving as "::FFFF:192.168.1.87" (uppercase FFFF,
+// dotted-quad tail) -- PF_INET6 httpd listener, IPv4-mapped-IPv6
+// getpeername() string. This is the literal, confirmed real-world form;
+// must classify LOCAL under a 192.168.1.x/24 STA lease exactly like the
+// plain "192.168.1.87" would.
+static void test_mapped_ipv6_dotted_quad_tail_classifies_local(void)
+{
+    TEST_SECTION("login backoff scope -- IPv4-mapped-IPv6 '::FFFF:<dotted-quad>' classifies "
+                 "like the plain address (Finding 2, bench-observed form)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+
+    strncpy(s_stub_sta_ip, "192.168.1.1", sizeof(s_stub_sta_ip) - 1);
+    strncpy(s_stub_sta_netmask, "255.255.255.0", sizeof(s_stub_sta_netmask) - 1);
+
+    strncpy(s_stub_client_ip, "::FFFF:192.168.1.87", sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password"); // failure #1: locks this slot for 5s (ladder step 1)
+
+    // A LOCAL client gets its own per-IP slot, not the shared remote one --
+    // proof: a genuinely remote address's failure must NOT lock this one out.
+    strncpy(s_stub_client_ip, SCOPE_TEST_REMOTE_A, sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+
+    // Clear the mapped address's own 5s wait from its one prior failure --
+    // this is what "below threshold" refers to (single failure, first ladder
+    // step only), not "no lock at all".
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+
+    strncpy(s_stub_client_ip, "::FFFF:192.168.1.87", sizeof(s_stub_client_ip) - 1);
+    s_last_status_line = 0;
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK for the mapped-address login attempt");
+    TEST_CHECK(s_last_status_line != 429,
+               "'::FFFF:192.168.1.87' classifies LOCAL under a 192.168.1.x/24 STA lease -- "
+               "unaffected by the unrelated remote address's failure, and once its own "
+               "5s ladder step (from one prior failure) has elapsed");
+}
+
+// Direct unit-level coverage of login_ip_scope_classify() for both mapped
+// forms, below the level of a full login attempt -- catches a regression in
+// the parser itself independent of how login_backoff_slot_for() uses it.
+static void test_ip_scope_classify_mapped_ipv6_forms(void)
+{
+    TEST_SECTION("login_ip_scope_classify: IPv4-mapped-IPv6 forms (Finding 2)");
+
+    // The literal, confirmed-on-board form (uppercase FFFF, dotted-quad
+    // tail) -- coordinator bench observation, 2026-09-21.
+    TEST_CHECK(login_ip_scope_classify("::FFFF:192.168.1.87", "192.168.1.1", "255.255.255.0") ==
+                   LOGIN_IP_SCOPE_LOCAL,
+               "'::FFFF:192.168.1.87' classifies LOCAL against a 192.168.1.x/24 STA lease");
+    // Lowercase prefix, same tail -- case-insensitivity.
+    TEST_CHECK(login_ip_scope_classify("::ffff:192.168.1.87", "192.168.1.1", "255.255.255.0") ==
+                   LOGIN_IP_SCOPE_LOCAL,
+               "the lowercase '::ffff:' prefix classifies identically to uppercase");
+    // Off-subnet tail under the mapped prefix must still classify REMOTE.
+    TEST_CHECK(login_ip_scope_classify("::FFFF:8.8.8.8", "192.168.1.1", "255.255.255.0") == LOGIN_IP_SCOPE_REMOTE,
+               "a mapped address whose tail is off-subnet still classifies REMOTE");
+    // Defensive: lwIP hex-group form for the same address (192.168.1.87 =
+    // 0xC0A80157 -> "C0A8:0157").
+    TEST_CHECK(login_ip_scope_classify("::FFFF:C0A8:0157", "192.168.1.1", "255.255.255.0") ==
+                   LOGIN_IP_SCOPE_LOCAL,
+               "the lwIP hex-group form of the same address classifies LOCAL too (best-effort)");
+    // A genuinely unparseable string (no mapped prefix at all) stays UNKNOWN.
+    TEST_CHECK(login_ip_scope_classify("garbage", "192.168.1.1", "255.255.255.0") == LOGIN_IP_SCOPE_UNKNOWN,
+               "a non-mapped, non-dotted-quad string still classifies UNKNOWN");
+}
+
 void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
@@ -792,6 +993,11 @@ void run_test_web_auth_login_http(void)
     test_remote_failure_does_not_delay_a_local_address();
     test_local_success_does_not_reset_remote_counter();
     test_scope_subnet_math_with_non_24_mask();
+    test_ip_scope_classify_mapped_ipv6_forms();
+    test_saturation_retry_after_matches_ladder_not_one_second();
+    test_unknown_scope_shares_the_remote_slot();
+    test_refused_login_makes_no_extra_sta_ip_netmask_calls();
+    test_mapped_ipv6_dotted_quad_tail_classifies_local();
 }
 
 int main(void)

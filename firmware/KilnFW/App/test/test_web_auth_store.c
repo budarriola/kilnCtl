@@ -407,6 +407,36 @@ static void test_set_verify_pin(void)
                "an incorrect PIN must be rejected");
     TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, "13579") == false,
                "a PIN set for one role must not verify for the other");
+
+    // Review fix (2026-09-21, finding 5): set_pin() must keep stamping its
+    // own WEB_AUTH_PIN_ITERATIONS (20000), never the 2000-round
+    // WEB_AUTH_ITERATIONS the 2026-09-21 fast-web-logon decision applies to
+    // passwords only.
+    web_auth_pin_record_t pin_rec;
+    TEST_CHECK(web_auth_store_load_pin(WEB_AUTH_ROLE_ADMINISTRATOR, &pin_rec) == WEB_AUTH_LOAD_OK,
+               "test setup: the just-set PIN record loads back");
+    TEST_CHECK(pin_rec.iterations == WEB_AUTH_PIN_ITERATIONS,
+               "set_pin() stamps WEB_AUTH_PIN_ITERATIONS (20000), unaffected by the web-logon "
+               "iteration cut");
+}
+
+static void test_set_password_stamps_the_web_iteration_count(void)
+{
+    TEST_SECTION("web_auth_store_set_password: stamps WEB_AUTH_ITERATIONS, distinct from the PIN's "
+                 "own higher count (Finding 5)");
+    reset_all();
+
+    hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "UserPassword1", SALT_A, false);
+    TEST_CHECK(st == HAL_OK, "test setup: set_password succeeds");
+
+    web_auth_password_record_t rec;
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_USER, &rec) == WEB_AUTH_LOAD_OK,
+               "test setup: the just-set password record loads back");
+    TEST_CHECK(rec.iterations == WEB_AUTH_ITERATIONS,
+               "set_password() stamps WEB_AUTH_ITERATIONS (2000, the 2026-09-21 fast-logon count), "
+               "never the PIN's higher WEB_AUTH_PIN_ITERATIONS");
+    TEST_CHECK(WEB_AUTH_PIN_ITERATIONS != WEB_AUTH_ITERATIONS,
+               "test sanity: the two constants must actually differ or this test proves nothing");
 }
 
 // --- Item 11: absent policy reads as both-off ---------------------------
@@ -931,6 +961,7 @@ int main(void)
     test_username_exactly_max_length();
     test_verify_password_timing_oracle_closed();
     test_set_verify_pin();
+    test_set_password_stamps_the_web_iteration_count();
     test_policy_absent_is_off();
     test_policy_set_and_load();
     test_upgrade_path_unreadable_fails_closed();

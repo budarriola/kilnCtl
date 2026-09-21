@@ -281,26 +281,53 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
 // goes through the ordinary per-string table path unchanged -- it stays
 // fail-closed and separate from both the LOCAL and REMOTE buckets, per this
 // file's header comment.
+// Claims/refreshes the shared remote slot -- factored out since both the
+// REMOTE and UNKNOWN cases below (finding 3) route here.
+static login_lockout_slot_t *claim_remote_slot(uint32_t now)
+{
+    login_backoff_cycle_reset_if_due(&s_remote_login_slot.backoff, now);
+    s_remote_login_slot.in_use = true;
+    strncpy(s_remote_login_slot.ip, "*remote*", sizeof(s_remote_login_slot.ip) - 1);
+    s_remote_login_slot.ip[sizeof(s_remote_login_slot.ip) - 1] = '\0';
+    s_remote_login_slot.last_activity_ms = now;
+    return &s_remote_login_slot;
+}
+
 static login_lockout_slot_t *login_backoff_slot_for(const char *ip, bool ip_known, uint32_t now)
 {
     if (ip_known) {
         char sta_ip[16] = { 0 };
         char sta_netmask[16] = { 0 };
-        // Best-effort: if the STA interface has no lease (AP-only mode, or
-        // between associations), both stay empty and
+        // Review fix (2026-09-21, finding 4): this used to call
+        // wifi_prov_get_sta_ip_netmask(), which round-trips through the
+        // Wi-Fi owner-task queue and can block for up to WIFI_OWNER_WAIT_MS
+        // (12s) -- called here while s_login_lock is held (both call sites
+        // below), which would stall every other concurrent login attempt,
+        // including 429 refusals, behind one slow owner-task round trip.
+        // wifi_prov_get_cached_sta_ip_netmask() is the non-blocking
+        // replacement: a plain spinlocked read of a cache kept fresh by the
+        // GOT_IP event handler (wifi_prov_link.c's do_ev_got_ip()), never a
+        // queue round trip. Best-effort in the same sense as before: an
+        // unpopulated/stale cache reads as empty strings, and
         // login_ip_scope_classify() falls back to the fixed AP subnet check
-        // only -- never treats that failure as an error requiring a
-        // refusal, since a live login must not become collateral damage of
-        // a query about an unrelated interface.
-        (void)wifi_prov_get_sta_ip_netmask(sta_ip, sizeof(sta_ip), sta_netmask, sizeof(sta_netmask));
+        // only -- never treated as an error requiring a refusal.
+        (void)wifi_prov_get_cached_sta_ip_netmask(sta_ip, sizeof(sta_ip), sta_netmask, sizeof(sta_netmask));
         login_ip_scope_t scope = login_ip_scope_classify(ip, sta_ip, sta_netmask);
-        if (scope == LOGIN_IP_SCOPE_REMOTE) {
-            login_backoff_cycle_reset_if_due(&s_remote_login_slot.backoff, now);
-            s_remote_login_slot.in_use = true;
-            strncpy(s_remote_login_slot.ip, "*remote*", sizeof(s_remote_login_slot.ip) - 1);
-            s_remote_login_slot.ip[sizeof(s_remote_login_slot.ip) - 1] = '\0';
-            s_remote_login_slot.last_activity_ms = now;
-            return &s_remote_login_slot;
+        // Review fix (2026-09-21, finding 3): LOGIN_IP_SCOPE_UNKNOWN (a
+        // syntactically address-shaped string login_ip_scope_classify()
+        // could not parse as IPv4 -- e.g. a raw IPv6 literal that slipped
+        // past ota_http_get_client_ip_checked()'s own normalization) used to
+        // fall through to the ordinary per-IP table below, keyed on that
+        // unparsed string. That gave an attacker who can present many
+        // distinct non-IPv4-parsing address strings a fresh ladder per
+        // string -- the exact per-IP-table-saturation attack the REMOTE
+        // bucket exists to close for ordinary IPv4 clients. Route UNKNOWN
+        // into the same shared remote slot. This is NOT the separate
+        // ip_known == false sentinel path (ota_http_get_client_ip_checked()
+        // returning false, e.g. getpeername() itself failing) -- that stays
+        // outside both buckets, below, unchanged.
+        if (scope == LOGIN_IP_SCOPE_REMOTE || scope == LOGIN_IP_SCOPE_UNKNOWN) {
+            return claim_remote_slot(now);
         }
     }
     return login_lockout_slot_for(ip, now);
@@ -345,8 +372,22 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // REMOTE-scope client never sees NULL here (its reserved slot is
         // never subject to that saturation).
         locked = (slot == NULL) || login_backoff_is_locked(&slot->backoff, now);
-        if (locked && slot != NULL) {
-            retry_after_ms = slot->backoff.locked_until_ms - now;
+        if (locked) {
+            // Review fix (2026-09-21, finding 1): slot == NULL (the LOCAL
+            // table saturated with OTHER IPs' active locks, see
+            // login_lockout_slot_for()'s header comment) used to fall
+            // through with retry_after_ms left at its 0 initializer, which
+            // the code below then reported as a bare "1" second -- visibly
+            // different from a genuine lock's 5/10/30/60/300, and exactly
+            // the side channel the comment below already says this path
+            // must not be: an attacker probing for a "1" vs a ladder value
+            // could infer table saturation itself, not merely "is this one
+            // IP locked". Report the ladder's LAST (worst-case) step here
+            // instead, matching what a maximally-escalated genuine lock
+            // would also show, so saturation is indistinguishable from an
+            // ordinary long lock.
+            retry_after_ms = (slot != NULL) ? (slot->backoff.locked_until_ms - now)
+                                             : LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1];
         }
         xSemaphoreGive(s_login_lock);
     } else {

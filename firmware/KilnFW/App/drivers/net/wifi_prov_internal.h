@@ -255,4 +255,10 @@ esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gate
 esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r);
 esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count);
 
+/* Defined in wifi_prov_api.c; called from wifi_prov_link.c's do_ev_got_ip()
+ * (owner_task()) to refresh the cheap-read cache the same event handler's
+ * own comment describes. See wifi_prov.h's wifi_prov_get_cached_sta_ip_
+ * netmask() for the public read side. */
+void wifi_prov_update_sta_ip_cache(const char *ip, const char *netmask);
+
 #endif /* WIFI_PROV_INTERNAL_H */

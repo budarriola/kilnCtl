@@ -219,8 +219,10 @@ static int hmac_sha256(const uint8_t *key_bytes, size_t key_len, const uint8_t *
 
 // 2026-09-20 crash fix (POST /api/auth/login watchdog panic, IDLE1 CPU1):
 // web_auth_hash_compute() used to call hmac_sha256() above once per
-// iteration -- WEB_AUTH_ITERATIONS (20000) full psa_import_key /
-// psa_mac_compute / psa_destroy_key round trips back-to-back with no yield,
+// iteration -- the record's own iteration count (WEB_AUTH_ITERATIONS or the
+// higher WEB_AUTH_PIN_ITERATIONS, whichever a given call is hashing for)
+// full psa_import_key / psa_mac_compute / psa_destroy_key round trips
+// back-to-back with no yield,
 // long enough on the httpd worker task to blow past
 // CONFIG_ESP_TASK_WDT_TIMEOUT_S=5 and trigger the idle-task watchdog. The
 // key bytes (`secret`) never change across iterations -- only the message
@@ -232,7 +234,8 @@ static int hmac_sha256(const uint8_t *key_bytes, size_t key_len, const uint8_t *
 // is that single-import loop; it also BLOCKS for one tick every
 // WEB_AUTH_HASH_YIELD_EVERY iterations (vTaskDelay(1), a no-op on the host
 // test build's FreeRTOS shim) so even a slow/blocked crypto backend can
-// never starve IDLE1 for the whole 20000-iteration run -- belt-and-suspenders
+// never starve IDLE1 for the whole run, however many iterations the caller's
+// record stamps -- belt-and-suspenders
 // against the watchdog, independent of the import-count fix above.
 //
 // It must be vTaskDelay(1), NOT taskYIELD(): taskYIELD() is portYIELD(),
@@ -245,9 +248,10 @@ static int hmac_sha256(const uint8_t *key_bytes, size_t key_len, const uint8_t *
 // FreeRTOS runs a lower-priority task only when the higher-priority one
 // BLOCKS, so this loop has to actually leave the ready list: vTaskDelay(1)
 // blocks for one tick (10 ms at CONFIG_FREERTOS_HZ=100), which lets IDLE0/
-// IDLE1 run and feed the watchdog. Cost: WEB_AUTH_ITERATIONS /
-// WEB_AUTH_HASH_YIELD_EVERY = 19 one-tick sleeps per KDF run, i.e. up to
-// ~190 ms added to a login or PIN check -- deliberately traded for a
+// IDLE1 run and feed the watchdog. Cost: record_iterations /
+// WEB_AUTH_HASH_YIELD_EVERY one-tick sleeps per KDF run -- e.g. 1 for a
+// WEB_AUTH_ITERATIONS (2000) web login, 19 for a WEB_AUTH_PIN_ITERATIONS
+// (20000) PIN check, up to ~190 ms added there -- deliberately traded for a
 // watchdog that is fed no matter how slow the crypto backend is. Neither
 // change alters a single output bit: the same HMAC-SHA256 chain over the
 // same inputs in the same order still produces the same hash -- only how
@@ -261,7 +265,7 @@ static int hmac_sha256(const uint8_t *key_bytes, size_t key_len, const uint8_t *
 // was: true = psa_import_key() never succeeded, so nothing was computed and
 // the per-iteration fallback below is worth trying; false = the key
 // imported fine but a psa_mac_compute() round failed, in which case
-// re-running the same 20000 computes through the fallback would only burn
+// re-running the same iteration count through the fallback would only burn
 // another full KDF run to fail the same way (and would double the worst-case
 // duration this fix exists to bound).
 static int web_auth_hash_iterate(const uint8_t *secret, size_t secret_len,
@@ -601,7 +605,11 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
     web_auth_pin_record_t *rec = &blob.roles[role];
     memset(rec, 0, sizeof(*rec));
     memcpy(rec->salt, salt, WEB_AUTH_SALT_LEN);
-    rec->iterations = WEB_AUTH_ITERATIONS;
+    // Review fix (2026-09-21, finding 5): the PIN keeps its own, higher-cost
+    // constant -- WEB_AUTH_ITERATIONS was cut for web logon latency only
+    // (2026-09-21 owner decision); see WEB_AUTH_PIN_ITERATIONS's comment in
+    // web_auth_store.h.
+    rec->iterations = WEB_AUTH_PIN_ITERATIONS;
     web_auth_hash_compute((const uint8_t *)pin, plen, rec->salt, rec->iterations, rec->hash);
     rec->digits = (uint8_t)plen;
     rec->configured = true;

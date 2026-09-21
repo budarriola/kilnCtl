@@ -12,6 +12,8 @@
 
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 
 /* Scan results staging. Written ONLY by owner_task() (via do_scan() below),
  * copied out by the producer after its semaphore is given. Deliberately
@@ -564,6 +566,63 @@ bool wifi_prov_is_sta_connected(void)
     return s_wifi.state == WIFI_PROV_STATE_CONNECTED;
 }
 
+/* Cheap-read cache for the STA ip/netmask, consumed by
+ * wifi_prov_get_cached_sta_ip_netmask() below. Review fix (2026-09-21,
+ * finding 4 on the login backoff commit): wifi_prov_get_sta_ip_netmask()
+ * round-trips through the owner-task queue and can block the CALLER for up
+ * to WIFI_OWNER_WAIT_MS (12s) -- fine for a UI action, fatal for a call made
+ * while web_auth_login_http.c holds its own module lock, since that stalls
+ * every OTHER concurrent login attempt (including the 429-refusal path,
+ * which must never touch the owner task at all) behind this one's wait.
+ * s_sta_ip_cache_mux is a plain spinlock rather than a semaphore: every
+ * critical section here is a fixed-size strncpy of two 16-byte buffers, so
+ * there is no wait worth naming and no risk of it itself becoming a stall
+ * point. Updated from owner_task() only (wifi_prov_update_sta_ip_cache()),
+ * read from any task. Starts zeroed (empty strings), which is the same
+ * "no lease yet" fallback wifi_prov_get_sta_ip_netmask() already returns
+ * for AP-only/not-yet-associated boards -- so an unpopulated cache is a
+ * correct, cheap answer, not a special case. */
+static char s_cached_sta_ip[16];
+static char s_cached_sta_netmask[16];
+static portMUX_TYPE s_sta_ip_cache_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Runs on owner_task() only -- called from do_get_sta_ip() below (every
+ * direct query keeps the cache fresh too) and from do_ev_got_ip()
+ * (wifi_prov_link.c), which is the actual "refresh on the GOT_IP event"
+ * path: a fresh lease is cached the moment the station associates, with no
+ * caller ever having to wait for it. */
+void wifi_prov_update_sta_ip_cache(const char *ip, const char *netmask)
+{
+    portENTER_CRITICAL(&s_sta_ip_cache_mux);
+    strncpy(s_cached_sta_ip, ip ? ip : "", sizeof(s_cached_sta_ip) - 1);
+    s_cached_sta_ip[sizeof(s_cached_sta_ip) - 1] = '\0';
+    strncpy(s_cached_sta_netmask, netmask ? netmask : "", sizeof(s_cached_sta_netmask) - 1);
+    s_cached_sta_netmask[sizeof(s_cached_sta_netmask) - 1] = '\0';
+    portEXIT_CRITICAL(&s_sta_ip_cache_mux);
+}
+
+/* Public: see wifi_prov.h. Never blocks and never touches the owner-task
+ * queue -- a plain spinlocked memcpy of whatever wifi_prov_update_sta_ip_
+ * cache() last wrote, which may be empty (no lease yet/lost) or briefly
+ * stale (up to one GOT_IP-to-DISCONNECT cycle behind). That staleness is
+ * the accepted tradeoff for finding 4: a login backoff classification that
+ * is a few seconds out of date on a lease change is harmless (worst case,
+ * one request is classified by the previous subnet for one beat), while
+ * blocking a login response on the owner task is not. */
+esp_err_t wifi_prov_get_cached_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap)
+{
+    if (!ip_out || ip_cap < 1 || !netmask_out || netmask_cap < 1) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&s_sta_ip_cache_mux);
+    strncpy(ip_out, s_cached_sta_ip, ip_cap - 1);
+    ip_out[ip_cap - 1] = '\0';
+    strncpy(netmask_out, s_cached_sta_netmask, netmask_cap - 1);
+    netmask_out[netmask_cap - 1] = '\0';
+    portEXIT_CRITICAL(&s_sta_ip_cache_mux);
+    return ESP_OK;
+}
+
 /* Runs on owner_task(). Writes the dotted-quad into the result slot; the
  * producer copies it out. */
 esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r)
@@ -589,6 +648,7 @@ esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r)
     }
     esp_ip4addr_ntoa(&ip_info.ip, r->sta_ip, (uint32_t)sizeof(r->sta_ip));
     esp_ip4addr_ntoa(&ip_info.netmask, r->sta_netmask, (uint32_t)sizeof(r->sta_netmask));
+    wifi_prov_update_sta_ip_cache(r->sta_ip, r->sta_netmask);
     return ESP_OK;
 }
 

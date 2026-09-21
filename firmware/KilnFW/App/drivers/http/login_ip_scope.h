@@ -39,8 +39,20 @@ typedef enum {
 // `ip` that fails to parse returns LOGIN_IP_SCOPE_UNKNOWN unconditionally --
 // callers must not route the "unknown" client-address sentinel through this
 // classifier at all (it has its own separate fail-closed handling; see
-// web_auth_login_http.c), but this is also a safe fallback if they do, since
-// UNKNOWN is never treated as LOCAL.
+// web_auth_login_http.c). A caller that DOES route a parseable-but-off-subnet
+// or genuinely unparseable address here gets UNKNOWN treated as REMOTE by
+// web_auth_login_http.c (review fix, 2026-09-21, finding 3): UNKNOWN is never
+// LOCAL, and routing it to the shared remote slot instead of its own per-IP
+// slot closes an evasion where a non-dotted-quad-looking address got its own
+// fresh 16-slot-table ladder.
+//
+// Before parsing, a leading "::ffff:"/"::FFFF:" (case-insensitive) IPv4-
+// mapped-IPv6 prefix is stripped so a PF_INET6 httpd listener's getpeername()
+// strings still classify correctly (review fix, 2026-09-21, finding 2):
+// confirmed board format is the dotted-quad tail, e.g.
+// "::FFFF:192.168.1.87" -> "192.168.1.87"; the lwIP hex-group spelling (e.g.
+// "::FFFF:C0A8:0157" for the same address) is also handled, best-effort,
+// since it is not the form actually observed on this board.
 login_ip_scope_t login_ip_scope_classify(const char *ip, const char *sta_ip, const char *sta_netmask);
 
 #ifdef __cplusplus

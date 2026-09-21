@@ -299,6 +299,21 @@ esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap);
  * mode. Same "not connected" contract as wifi_prov_get_sta_ip(). */
 esp_err_t wifi_prov_get_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap);
 
+/* Review fix (2026-09-21, finding 4 on the login backoff commit):
+ * wifi_prov_get_sta_ip_netmask() above round-trips through the owner-task
+ * queue and can block its caller for up to WIFI_OWNER_WAIT_MS (12s) -- never
+ * safe to call while holding another module's lock, which is exactly what
+ * web_auth_login_http.c's login_backoff_slot_for() used to do. This is the
+ * non-blocking replacement for that one caller: a plain spinlocked copy of
+ * a cache kept fresh by wifi_prov_update_sta_ip_cache() (owner_task() only,
+ * refreshed on every GOT_IP event and every direct wifi_prov_get_sta_ip_
+ * netmask()/wifi_prov_get_sta_ip() call). Always returns ESP_OK and writes
+ * empty strings for both if the STA interface has no lease yet or the cache
+ * has not been populated since boot -- that empty-string case is the same
+ * "no lease" fallback the blocking getter already returns, so callers that
+ * already tolerate that (login_ip_scope_classify()) need no special case. */
+esp_err_t wifi_prov_get_cached_sta_ip_netmask(char *ip_out, size_t ip_cap, char *netmask_out, size_t netmask_cap);
+
 /* Returns RSSI (signal strength in dBm) of the currently-connected station, or
  * -127 if not connected. RSSI is negative; -30 is excellent, -90 is weak. */
 int8_t wifi_prov_get_sta_rssi(void);

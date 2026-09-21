@@ -13,8 +13,9 @@
 // own pure-strength-check vs I/O-record split).
 //
 // WHY THIS EXISTS RATHER THAN JUST CALLING web_auth_store_verify_password()
-// TWICE: running the PBKDF2-style KDF (WEB_AUTH_ITERATIONS = 20,000 rounds)
-// against both roles' records for every login attempt would double the KDF
+// TWICE: running the PBKDF2-style KDF (WEB_AUTH_ITERATIONS rounds, per the
+// record's own stamped iteration count) against both roles' records for
+// every login attempt would double the KDF
 // cost on the httpd task for no benefit -- the administrator record's
 // username is not a secret (it is shown on the login form itself, same as
 // web_auth_backend_get_config()'s admin_username field), so comparing it
