@@ -273,3 +273,55 @@ def test_run_row_live_passes_minimal_env_to_child(monkeypatch):
 
     assert captured["env"]["KC_SID"] == "fake-cookie"
     assert "KILNCTL_WEB_PASSWORD_UNRELATED_SECRET" not in captured["env"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 addition: ten read-only page-load rows (previously run "by
+# hand" with no Row() entry, per docs/COMMISSIONING_TEST_MATRIX.md) plus
+# one new write row, W31. dry_run coverage for all of these already comes
+# free from test_dry_run_passes_for_every_known_row/test_all_row_source_files_exist
+# above (both are parametrized/iterate over every ROWS entry); the tests
+# below check the schema fields (classification, expect_post, restore
+# wording) that those two do not.
+# ---------------------------------------------------------------------------
+
+_NEW_READ_ONLY_ROWS = ("W7", "W21", "W23", "W25", "W37", "W39", "W41", "W43", "W46", "W49")
+
+
+@pytest.mark.parametrize("row_id", _NEW_READ_ONLY_ROWS)
+def test_new_read_only_rows_are_classified_read_only_and_rendered(row_id):
+    row = wcr.ROWS[row_id]
+    assert row.classification == "read-only"
+    ok, msg = wcr.dry_run(row_id, repo_root=_repo_root())
+    assert ok, msg
+    assert "class: read-only" in msg
+
+
+@pytest.mark.parametrize("row_id", _NEW_READ_ONLY_ROWS)
+def test_new_read_only_rows_declare_no_expect_post(row_id):
+    # A read-only row never issues a state-changing POST, so it must not
+    # declare one -- that field only exists to bound the wait for a write
+    # row's async fetch() (see the Row.expect_post docstring).
+    assert wcr.ROWS[row_id].expect_post is None
+
+
+def test_w31_ramp_assist_toggle_is_a_write_row_with_expect_post_and_restore_note():
+    row = wcr.ROWS["W31"]
+    assert row.classification == "write"
+    assert row.expect_post == "/api/ramp_assist"
+    assert row.verify_endpoint == "/api/ramp_assist"
+    assert "restore" in row.readback_desc.lower()
+
+
+def test_w31_gets_accept_dialogs_and_expect_post_flags(monkeypatch):
+    captured = _capture_cmd(monkeypatch, "W31")
+    assert "--accept-dialogs" in captured["cmd"]
+    assert "--expect-post" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--expect-post") + 1] == "/api/ramp_assist"
+
+
+@pytest.mark.parametrize("row_id", _NEW_READ_ONLY_ROWS[:3])
+def test_new_read_only_rows_get_no_dialog_flag_via_capture(monkeypatch, row_id):
+    captured = _capture_cmd(monkeypatch, row_id)
+    assert "--accept-dialogs" not in captured["cmd"]
+    assert "--expect-post" not in captured["cmd"]

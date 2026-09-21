@@ -2957,10 +2957,19 @@ Owner instruction, 2026-09-21.
   Full detail, per-row evidence, and defect writeups:
   `docs/BENCH_TEST_LOG.md`'s "M18 web-interface class, first LIVE run"
   section; matrix rows annotated in `docs/COMMISSIONING_TEST_MATRIX.md`.
-  Remaining: the 10 by-hand page-load rows above still have no `Row()`
-  entry in `web_commission_row.py` (ROWS only covers 12 of 51 runbook
-  rows); the remaining ~29 unwired rows are write/owner-gated rows not
-  attempted this session.
+  **2026-09-21 update**: those 10 by-hand rows (W7/W21/W23/W25/W37/W39/W41/
+  W43/W46/W49) plus one new write row, W31 (ramp-assist toggle, a single
+  click on a stable id with no text entry, `expect_post="/api/ramp_assist"`,
+  same restore-before-leaving shape as W30), now have `Row()` entries in
+  `web_commission_row.py`, each with its own unit test in
+  `test_web_commission_row.py` (66 tests passing, up from 41). `ROWS` now
+  covers 23 of 51 runbook rows. Remaining unwired rows all need in-page
+  text entry the CDP driver cannot do (click-and-screenshot only, no form
+  fill) or are owner-gated/destructive: W8/W9/W10 (profile
+  create/delete/favorite), W16-style edits with a real new value, W22/W38/
+  W42/W50 (field-edit-then-save rows), W45/W51 (destructive
+  import/Wi-Fi-forget), and the heat/E-stop/OTA/auth/Pico-reset rows named
+  in the task's owner-gated list.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at

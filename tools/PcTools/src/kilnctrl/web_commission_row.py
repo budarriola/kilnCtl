@@ -71,13 +71,29 @@ class Row:
     expect_post: "Optional[str]" = None
 
 
-# 12 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
-# (W1-W6, W15, W16, W28-W30, W48) -- enough to cover both selector kinds
-# ("id" and "page") and both the read-only and write classes. The remaining
-# rows are documented in the runbook but do not yet have a Row() entry;
-# adding one for each is straightforward follow-up work, not a gap in this
-# module's own logic. Kept in sync by hand; a mismatch here is a doc bug,
-# not a code bug, and should be fixed in both places together.
+# 23 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
+# (W1-W7, W15, W16, W21, W23, W25, W28-W31, W37, W39, W41, W43, W46, W48,
+# W49) -- enough to cover both selector kinds ("id" and "page") and both
+# the read-only and write classes. The remaining rows are documented in the
+# runbook but do not yet have a Row() entry; adding one for each is
+# straightforward follow-up work, not a gap in this module's own logic.
+# Kept in sync by hand; a mismatch here is a doc bug, not a code bug, and
+# should be fixed in both places together.
+#
+# 2026-09-21 addition: the ten read-only page-load rows below (W7, W21,
+# W23, W25, W37, W39, W41, W43, W46, W49) were previously run "by hand"
+# through this same CDP path with no Row() entry -- see
+# docs/COMMISSIONING_TEST_MATRIX.md's "driven by hand ... no Row() entry
+# yet" notes on the corresponding backend rows. Giving them a Row() entry
+# makes them runnable the same mechanical way as every other wired row
+# instead of ad hoc. W31 (rampAssistToggleBtn) is added alongside them as
+# the one new write row: a single click on a stable id, no text entry (the
+# CDP driver only clicks and screenshots -- it cannot fill a form field),
+# an existing GET/POST pair (/api/ramp_assist) for read-back, and the same
+# restore-before-leaving shape already used by W30's watchdog-panic toggle.
+# Rows that would need in-page text entry to exercise safely (W8/W9/W10,
+# a real edit for W16-style rows, W38, W42, W50, ...) are left unwired --
+# see this task's hand-back note for the full list and why.
 ROWS: "dict[str, Row]" = {
     "W1": Row("W1", "/login", "firmware/KilnFW/App/drivers/http/login_page.html",
               "login-form", "id", "submit the login form",
@@ -118,6 +134,26 @@ ROWS: "dict[str, Row]" = {
                "save confirms, no error banner",
                "write", "control_get_zones shows the new name (GET-merge-POST body)",
                verify_endpoint="/api/zones", expect_post="/api/zones"),
+    "W7": Row("W7", "/profiles", "firmware/KilnFW/App/drivers/http/profiles_page.html",
+              "", "page", "load the profiles page",
+              "profile list renders (builtin + saved + favorites)",
+              "read-only", "profiles_list matches rendered rows",
+              verify_endpoint="/api/profiles"),
+    "W21": Row("W21", "/settings/safety", "firmware/KilnFW/App/drivers/http/safety_config_page.html",
+               "", "page", "load the settings/safety page",
+               "rate-guard fields render",
+               "read-only", "safety_get_rate_guard matches",
+               verify_endpoint="/api/safety/rate_guard/auto"),
+    "W23": Row("W23", "/safety", "firmware/KilnFW/App/drivers/http/safety_page.html",
+               "", "page", "load the safety page",
+               "safety status/banner renders",
+               "read-only", "safety_get_status matches",
+               verify_endpoint="/api/status"),
+    "W25": Row("W25", "/safety/commissioning", "firmware/KilnFW/App/drivers/http/safety_commissioning_page.html",
+               "", "page", "load the safety/commissioning page",
+               "wizard renders current commissioning values",
+               "read-only", "safety_get_commissioning matches",
+               verify_endpoint="/api/safety/commissioning"),
     "W28": Row("W28", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
                "", "page", "load the diagnostics page",
                "thermo fault table + diagnostics tiles render",
@@ -133,11 +169,45 @@ ROWS: "dict[str, Row]" = {
                "toggle state flips",
                "write", "get_watchdog_panic_disabled shows the new value; restore to enabled",
                verify_endpoint="/api/watchdog_cfg", expect_post="/api/watchdog_cfg"),
+    "W31": Row("W31", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
+               "rampAssistToggleBtn", "id", "click the ramp-assist toggle",
+               "toggle state flips",
+               "write", "GET /api/ramp_assist shows the new value; restore before leaving",
+               verify_endpoint="/api/ramp_assist", expect_post="/api/ramp_assist"),
+    "W37": Row("W37", "/settings/display", "firmware/KilnFW/App/drivers/http/settings_display_page.html",
+               "", "page", "load the settings/display page",
+               "display settings render",
+               "read-only", "GET /api/settings/display_power matches",
+               verify_endpoint="/api/settings/display_power"),
+    "W39": Row("W39", "/settings/security", "firmware/KilnFW/App/drivers/net/security_page.html",
+               "", "page", "load the settings/security page",
+               "auth config/policy fields render",
+               "read-only", "GET /api/auth/config matches",
+               verify_endpoint="/api/auth/config"),
+    "W41": Row("W41", "/settings/kiln_configs", "firmware/KilnFW/App/drivers/http/kiln_configs_page.html",
+               "", "page", "load the settings/kiln_configs page",
+               "config-preset list renders",
+               "read-only", "GET /api/kiln_configs matches",
+               verify_endpoint="/api/kiln_configs"),
+    "W43": Row("W43", "/settings/backup", "firmware/KilnFW/App/drivers/http/backup_page.html",
+               "", "page", "load the settings/backup page",
+               "backup/restore controls render",
+               "read-only", "GET /api/backup/export responds (headers only, no body diff needed)",
+               verify_endpoint="/api/backup/export"),
+    "W46": Row("W46", "/ota", "firmware/KilnFW/App/drivers/net/ota_page.html",
+               "", "page", "load the ota page",
+               "OTA/interlock status renders",
+               "read-only", "ota_status matches",
+               verify_endpoint="/api/ota/interlock"),
     "W48": Row("W48", "/readiness", "firmware/KilnFW/App/drivers/http/readiness_page.html",
                "", "page", "load the readiness page",
                "commissioning checklist renders",
                "read-only", "get_readiness matches",
                verify_endpoint="/api/readiness"),
+    "W49": Row("W49", "/setup", "firmware/KilnFW/App/drivers/http/setup_wizard_page.html",
+               "", "page", "load the setup wizard page",
+               "wizard start step renders, no route hit (client-side)",
+               "read-only", "none -- client-side only, no route to read back"),
 }
 
 
