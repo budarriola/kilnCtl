@@ -116,6 +116,8 @@ static void reset_state(void)
     g_stub_getsockname_result = 0;
     strcpy(g_stub_local_ip, "0.0.0.0");
     g_stub_queue_send_calls = 0;
+    g_stub_wifi_set_storage_calls = 0;
+    g_stub_wifi_last_storage = WIFI_STORAGE_FLASH;
 }
 
 // ---- Tests -----------------------------------------------------------
@@ -311,9 +313,27 @@ static void test_static_ip_confirmed_false_at_boot(void)
     TEST_CHECK(!s_wifi.static_ip_confirmed, "a zero-initialized s_wifi (boot state) has static_ip_confirmed == false");
 }
 
+static void test_wifi_prov_start_sets_ram_storage(void)
+{
+    TEST_SECTION("wifi_prov_start -- switches the IDF Wi-Fi driver to RAM storage "
+                 "(docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md) so the driver "
+                 "never keeps its own flash copy of STA/AP config");
+
+    reset_state();
+
+    esp_err_t err = wifi_prov_start();
+
+    TEST_CHECK(err == ESP_OK, "wifi_prov_start() succeeds against the host stubs");
+    TEST_CHECK(g_stub_wifi_set_storage_calls >= 1,
+               "esp_wifi_set_storage() was called at least once during start-up");
+    TEST_CHECK(g_stub_wifi_last_storage == WIFI_STORAGE_RAM,
+               "the last esp_wifi_set_storage() call requested WIFI_STORAGE_RAM, not the flash-backed default");
+}
+
 void run_test_wifi_prov(void)
 {
     test_static_ip_confirmed_false_at_boot();
+    test_wifi_prov_start_sets_ram_storage();
     test_static_wrong_address_keeps_ap_up();
     test_static_correct_address_would_confirm();
     test_confirm_static_reachable_drops_ap();
