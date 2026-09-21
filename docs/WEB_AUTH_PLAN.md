@@ -291,6 +291,45 @@ unrecoverable cannot be the one `GET /status` prints in plain text.
   runs **on the httpd task**, so it must use no large stack locals (see
   item 3's stack budget) — PBKDF2's working set is two 32-byte blocks.
 
+> **Status correction, 2026-09-20 — the 30–60 ms estimate above was wrong,
+> and it crashed the board.** `POST /api/auth/login` panicked every time it
+> was called: crash id bb8ed4204c07 (a crash-report record id, not a git
+> commit -- deliberately not backticked, so check_doc_hash_citations.ps1 does
+> not read it as a commit citation), symbolized against
+> `KilnCtrl-727735eac269.elf` as `login_post_handler` →
+> `web_auth_store_verify_password` → `web_auth_hash_compute`. The KDF ran
+> long enough on the httpd worker task to starve **IDLE1** past
+> `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`, so the task watchdog fired and
+> `CONFIG_ESP_TASK_WDT_PANIC=y` turned that into a reboot. Cause: the loop
+> did a full `psa_import_key` → `psa_mac_compute` → `psa_destroy_key` round
+> trip **per iteration** — 20 000 key imports, not 20 000 HMACs — so the real
+> cost was ≥250 µs per iteration rather than the 1.5–3 µs the estimate above
+> assumed.
+>
+> **Fix** (`web_auth_store.c`, `web_auth_hash_iterate()`): import the HMAC key
+> **once** for the whole run and call `psa_mac_compute()` per round against
+> that key id, destroying it once at the end. The key bytes never change
+> across iterations, only the message does, and `psa_mac_compute()` is a pure
+> function of (key, message) — so the derived bytes are unchanged and no
+> stored credential needs migrating. `test_hash_compute_pinned_vectors()` in
+> `test_web_auth_store.c` pins two digests computed from the pre-fix
+> implementation at the real iteration count to hold that.
+>
+> The loop additionally calls `vTaskDelay(1)` every 1024 iterations so the
+> watchdog is fed regardless of how slow the crypto backend turns out to be.
+> It is **not** `taskYIELD()`: the httpd worker runs at
+> `tskIDLE_PRIORITY + 5`, and a yield only re-picks the highest-priority
+> *ready* task — the idle task would still never run. Only blocking gets the
+> loop off the ready list.
+>
+> **Login latency expectation** (none was documented before): one password or
+> PIN check costs the 20 000 HMAC-SHA256 rounds plus 19 one-tick sleeps,
+> i.e. **roughly 0.2–0.5 s**, and it must stay well under
+> `CONFIG_ESP_TASK_WDT_TIMEOUT_S`. Any change that raises
+> `WEB_AUTH_ITERATIONS`, lowers `WEB_AUTH_HASH_YIELD_EVERY`, or reintroduces
+> a per-iteration key import must be re-measured against that budget on real
+> hardware.
+
 **Where the record lives — corrected, and this is load-bearing.** An earlier
 draft of this plan put the credentials in namespace `kiln_cfg` on
 `KILN_NVS_PARTITION`. **That is wrong**, and reading `factory_reset.c` is what

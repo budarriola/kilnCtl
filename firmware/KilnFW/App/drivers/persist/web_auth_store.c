@@ -10,8 +10,8 @@
 #include "nvs_key_check.h"
 #include "psa/crypto.h"
 
-// taskYIELD() -- see web_auth_hash_compute()'s doc comment below (2026-09-20
-// watchdog fix) for why this loop yields periodically.
+// vTaskDelay() -- see web_auth_hash_compute()'s doc comment below (2026-09-20
+// watchdog fix) for why this loop sleeps periodically.
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -229,23 +229,46 @@ static int hmac_sha256(const uint8_t *key_bytes, size_t key_len, const uint8_t *
 // a pure function of (already-imported key id, message), so calling it N
 // times against the same key_id produces exactly the same N outputs as N
 // separate import/compute/destroy cycles did. web_auth_hash_iterate() below
-// is that single-import loop; it also yields the CPU every
-// WEB_AUTH_HASH_YIELD_EVERY iterations (taskYIELD(), a no-op on the host
+// is that single-import loop; it also BLOCKS for one tick every
+// WEB_AUTH_HASH_YIELD_EVERY iterations (vTaskDelay(1), a no-op on the host
 // test build's FreeRTOS shim) so even a slow/blocked crypto backend can
 // never starve IDLE1 for the whole 20000-iteration run -- belt-and-suspenders
-// against the watchdog, independent of the import-count fix above. Neither
+// against the watchdog, independent of the import-count fix above.
+//
+// It must be vTaskDelay(1), NOT taskYIELD(): taskYIELD() is portYIELD(),
+// which re-runs the scheduler and picks the highest-priority READY task on
+// this core. The httpd worker runs at tskIDLE_PRIORITY+5
+// (HTTPD_DEFAULT_CONFIG, see wifi_provision_http.c), so the scheduler would
+// simply pick this same task again every time and the idle task -- the only
+// watchdog subscriber that matters here
+// (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1=y) -- would still never run.
+// FreeRTOS runs a lower-priority task only when the higher-priority one
+// BLOCKS, so this loop has to actually leave the ready list: vTaskDelay(1)
+// blocks for one tick (10 ms at CONFIG_FREERTOS_HZ=100), which lets IDLE0/
+// IDLE1 run and feed the watchdog. Cost: WEB_AUTH_ITERATIONS /
+// WEB_AUTH_HASH_YIELD_EVERY = 19 one-tick sleeps per KDF run, i.e. up to
+// ~190 ms added to a login or PIN check -- deliberately traded for a
+// watchdog that is fed no matter how slow the crypto backend is. Neither
 // change alters a single output bit: the same HMAC-SHA256 chain over the
 // same inputs in the same order still produces the same hash -- only how
 // the key is (re)imported and how often the loop yields differ. See
 // test_web_auth_store.c's test_hash_compute_pinned_vectors() for two
 // pinned-digest regression vectors proving output is byte-identical to
 // before this fix.
-#define WEB_AUTH_HASH_YIELD_EVERY 256u
+#define WEB_AUTH_HASH_YIELD_EVERY 1024u
 
+// Returns 0 on success. On failure, *import_failed says WHICH failure it
+// was: true = psa_import_key() never succeeded, so nothing was computed and
+// the per-iteration fallback below is worth trying; false = the key
+// imported fine but a psa_mac_compute() round failed, in which case
+// re-running the same 20000 computes through the fallback would only burn
+// another full KDF run to fail the same way (and would double the worst-case
+// duration this fix exists to bound).
 static int web_auth_hash_iterate(const uint8_t *secret, size_t secret_len,
                                   const uint8_t salt[WEB_AUTH_SALT_LEN], uint32_t iterations,
-                                  uint8_t out[WEB_AUTH_HASH_LEN])
+                                  uint8_t out[WEB_AUTH_HASH_LEN], bool *import_failed)
 {
+    *import_failed = false;
     psa_key_attributes_t attr = psa_key_attributes_init();
     psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
     psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
@@ -254,6 +277,7 @@ static int web_auth_hash_iterate(const uint8_t *secret, size_t secret_len,
     mbedtls_svc_key_id_t key_id;
     psa_status_t status = psa_import_key(&attr, secret, secret_len, &key_id);
     if (status != PSA_SUCCESS) {
+        *import_failed = true;
         return (int)status;
     }
 
@@ -265,7 +289,7 @@ static int web_auth_hash_iterate(const uint8_t *secret, size_t secret_len,
         status = psa_mac_compute(key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256), buf, WEB_AUTH_HASH_LEN,
                                   buf, WEB_AUTH_HASH_LEN, &mac_len);
         if ((i % WEB_AUTH_HASH_YIELD_EVERY) == 0u) {
-            taskYIELD();
+            vTaskDelay(1);
         }
     }
     psa_destroy_key(key_id);
@@ -286,7 +310,19 @@ void web_auth_hash_compute(const uint8_t *secret, size_t secret_len,
     if (iterations == 0u) {
         iterations = 1u;
     }
-    if (web_auth_hash_iterate(secret, secret_len, salt, iterations, out) == 0) {
+    bool import_failed = false;
+    if (web_auth_hash_iterate(secret, secret_len, salt, iterations, out, &import_failed) == 0) {
+        return;
+    }
+    if (!import_failed) {
+        // The key imported but a psa_mac_compute() round failed. The
+        // fallback below would import the same key and run the same
+        // computes, so it can only fail the same way after another full
+        // 20000-round pass. Fail closed with a DEFINED value instead of
+        // leaving the caller's buffer uninitialized: an all-zero digest is
+        // still compared in constant time by every caller and will not match
+        // any stored hash, so verification denies rather than accepts.
+        memset(out, 0, WEB_AUTH_HASH_LEN);
         return;
     }
     // Fallback, reachable only if psa_import_key() itself fails (e.g. the
@@ -294,12 +330,17 @@ void web_auth_hash_compute(const uint8_t *secret, size_t secret_len,
     // per-iteration import/compute/destroy behaviour rather than leaving
     // `out` uninitialized, at the cost of the watchdog risk this fix exists
     // to remove. Not expected to be hit in practice.
-    uint8_t buf[WEB_AUTH_HASH_LEN];
+    // Zero-initialized so that if EVERY hmac_sha256() below also fails,
+    // `out` still gets a defined (non-matching) value rather than stack
+    // garbage -- same fail-closed reasoning as the !import_failed branch
+    // above. On any successful run buf is fully overwritten, so this does
+    // not change a single output bit of the normal path.
+    uint8_t buf[WEB_AUTH_HASH_LEN] = {0};
     (void)hmac_sha256(secret, secret_len, salt, WEB_AUTH_SALT_LEN, buf);
     for (uint32_t i = 1; i < iterations; i++) {
         (void)hmac_sha256(secret, secret_len, buf, WEB_AUTH_HASH_LEN, buf);
         if ((i % WEB_AUTH_HASH_YIELD_EVERY) == 0u) {
-            taskYIELD();
+            vTaskDelay(1);
         }
     }
     memcpy(out, buf, WEB_AUTH_HASH_LEN);
