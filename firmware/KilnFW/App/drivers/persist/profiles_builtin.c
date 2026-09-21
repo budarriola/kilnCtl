@@ -146,11 +146,6 @@ const builtin_profile_t *profiles_builtin_entry(uint8_t id)
     return &g_builtin_profiles[idx];
 }
 
-int16_t profiles_builtin_cone_sort_key(int8_t cone)
-{
-    return (cone == PROFILES_BUILTIN_CONE_UNRATED) ? INT16_MAX : (int16_t)cone;
-}
-
 const char *profiles_builtin_firing_type_label(profile_firing_type_t type)
 {
     switch (type) {

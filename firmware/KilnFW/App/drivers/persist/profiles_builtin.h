@@ -126,14 +126,6 @@ static_assert(sizeof("Unrated") <= 8, "profiles_builtin_cone_label()'s documente
 _Static_assert(sizeof("Unrated") <= 8, "profiles_builtin_cone_label()'s documented 8-byte buf_len contract must fit \"Unrated\"");
 #endif
 
-/* Widened sort key: every real cone (int8_t range) sorts by its ordinary
- * signed value, but PROFILES_BUILTIN_CONE_UNRATED maps to INT16_MAX so it
- * always sorts after every real cone, never before. Single source for this
- * rule -- test_profiles_builtin.c's negative check calls this, not a local
- * copy. (ui_page_profiles_builtin_list.c was a caller too until it was
- * removed 2026-09-21 as dead code.) */
-int16_t profiles_builtin_cone_sort_key(int8_t cone);
-
 /* Hidden mask -- "removed by the user", persisted. Hiding is per entry and
  * reversible; see this file's header comment for why it is not a delete. */
 bool      profiles_builtin_is_hidden(uint8_t id);

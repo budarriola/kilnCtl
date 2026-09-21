@@ -91,41 +91,6 @@ static void test_exactly_the_ten_named_entries_are_unrated(void)
                "all 10 named codes were actually present in the table and matched");
 }
 
-static void test_unrated_sorts_after_every_real_cone_same_firing_type(void)
-{
-    TEST_SECTION("sort key -- NEGATIVE CHECK: a real cone must sort BEFORE Unrated within the same "
-                 "firing-type group, not after (a naive plain-int8_t compare would put INT8_MIN "
-                 "first, which is backwards)");
-    // All 10 Unrated entries are PROFILE_FIRING_GLAZE or PROFILE_FIRING_OTHER
-    // (see profiles_builtin_table.inc). Cross-check against a real cone in
-    // each of those two groups.
-    bool any_glaze_unrated_checked = false;
-    bool any_other_unrated_checked = false;
-    for (size_t i = 0; i < g_builtin_profile_count; i++) {
-        const builtin_profile_t *u = &g_builtin_profiles[i];
-        if (u->cone != PROFILES_BUILTIN_CONE_UNRATED) {
-            continue;
-        }
-        for (size_t j = 0; j < g_builtin_profile_count; j++) {
-            const builtin_profile_t *r = &g_builtin_profiles[j];
-            if (r->firing_type != u->firing_type || r->cone == PROFILES_BUILTIN_CONE_UNRATED) {
-                continue;
-            }
-            TEST_CHECK(profiles_builtin_cone_sort_key(r->cone) < profiles_builtin_cone_sort_key(u->cone),
-                       "a real cone in the same firing-type group sorts strictly before Unrated");
-            if (u->firing_type == PROFILE_FIRING_GLAZE) {
-                any_glaze_unrated_checked = true;
-            } else if (u->firing_type == PROFILE_FIRING_OTHER) {
-                any_other_unrated_checked = true;
-            }
-            break; // one real comparison per Unrated entry is enough
-        }
-    }
-    TEST_CHECK(any_glaze_unrated_checked, "at least one Glaze Unrated entry was actually compared "
-                                          "(else the loop above silently checked nothing)");
-    TEST_CHECK(any_other_unrated_checked, "at least one Other Unrated entry was actually compared");
-}
-
 // SaftyFW's S8 sanity-rate guard ships with a compiled default of
 // 33.3 C/min = 2x the fastest RISING ramp_c_per_hr across every built-in
 // profile (999.0 C/hr, two tied steps in FSCGB1 -- see
@@ -185,7 +150,6 @@ void run_test_profiles_builtin(void)
     test_cone_label_unrated();
     test_cone_label_real_cone_unaffected();
     test_exactly_the_ten_named_entries_are_unrated();
-    test_unrated_sorts_after_every_real_cone_same_firing_type();
     test_every_rising_segment_has_bounded_positive_ramp();
 }
 
