@@ -89,13 +89,13 @@ ROWS: "dict[str, Row]" = {
     "W4": Row("W4", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "clearTripBtn", "id", "click Clear Trip",
               "trip banner clears",
-              "write", "safety_get_status trip_reason/trip_mask return to none",
+              "write", "GET /api/status trip_reason/trip_mask return to none",
               verify_endpoint="/api/status"),
     "W5": Row("W5", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "pidPopupApplyBtn", "id", "click Apply in the PID popup",
               "popup closes, zone PID row updates",
-              "write", "control_get_zones reflects the applied gains",
-              verify_endpoint="/api/control"),
+              "write", "GET /api/zones reflects the applied gains",
+              verify_endpoint="/api/zones"),
     "W6": Row("W6", "/", "firmware/KilnFW/App/drivers/http/main_page.html",
               "themeBtn", "id", "click the theme toggle",
               "page recolors light/dark",
@@ -277,7 +277,15 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         "--selector", row.selector,
         "--screenshot", os.path.join(screenshot_dir, f"{row_id}.png"),
     ]
-    child_env = {**os.environ, "KC_SID": cookie}
+    # Only KC_SID plus a minimal environment reaches the Chrome child --
+    # Chrome does not need this process's unrelated secrets (e.g. any other
+    # credential env vars this session happens to hold), and a minimal env
+    # keeps the child's inherited surface reviewable.
+    _passthrough_keys = ("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP",
+                         "COMSPEC", "WINDIR", "PROGRAMFILES", "PROGRAMFILES(X86)",
+                         "LOCALAPPDATA", "APPDATA", "USERPROFILE", "NUMBER_OF_PROCESSORS")
+    child_env = {k: os.environ[k] for k in _passthrough_keys if k in os.environ}
+    child_env["KC_SID"] = cookie
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=child_env)
     if proc.returncode != 0:
         return False, f"{row_id} FAIL: CDP driver exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
@@ -285,6 +293,12 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
     if row.verify_endpoint:
         status, body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
         readback = f"GET {row.verify_endpoint} -> {status}: {json.dumps(body)[:300]}"
+        # A non-200 (including None, meaning a transport-level failure such
+        # as a connection error) means the read-back itself could not
+        # confirm the action -- this must fail the row, not report PASS
+        # with an unreadable read-back baked into the message.
+        if status != 200:
+            return False, f"{row_id} FAIL: read-back GET {row.verify_endpoint} -> {status}: {json.dumps(body)[:300]}"
     else:
         readback = "no verify_endpoint for this row -- read-back is client-side only, not automated"
 

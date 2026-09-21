@@ -87,3 +87,68 @@ def test_live_mode_requires_credentials(monkeypatch):
     monkeypatch.delenv("KILNCTL_WEB_PASSWORD", raising=False)
     with pytest.raises(RuntimeError, match="not set"):
         wcr._read_credentials()
+
+
+class _FakeProc:
+    returncode = 0
+    stdout = '{"ok": true}'
+    stderr = ""
+
+
+@pytest.mark.parametrize("fake_status,fake_body", [
+    (401, {"error": "unauthorized"}),
+    (404, {"error": "not found"}),
+    (None, {"error": "connection refused"}),
+])
+def test_run_row_live_fails_when_readback_is_not_200(monkeypatch, fake_status, fake_body):
+    # Never contact a real board -- every network-touching call is mocked.
+    # This is the negative test for the required fix: a read-back that is
+    # not a clean 200 must fail the row, not report PASS with the failure
+    # text buried inside a "successful" message.
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (fake_status, fake_body))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    ok, msg = wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever")
+    assert not ok
+    assert "FAIL" in msg
+    assert str(fake_status) in msg
+
+
+def test_run_row_live_passes_on_clean_readback(monkeypatch):
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {"trip_reason": "none"}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    ok, msg = wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever")
+    assert ok, msg
+    assert "PASS" in msg
+
+
+def test_run_row_live_passes_minimal_env_to_child(monkeypatch):
+    # Advisory fix: only KC_SID plus a minimal allowlist should reach the
+    # Chrome child, not this process's full environment.
+    monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
+    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setenv("KILNCTL_WEB_PASSWORD_UNRELATED_SECRET", "should-not-leak")
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever")
+
+    assert captured["env"]["KC_SID"] == "fake-cookie"
+    assert "KILNCTL_WEB_PASSWORD_UNRELATED_SECRET" not in captured["env"]
