@@ -146,7 +146,11 @@ premise (the `cfg` partition is now mounted and populated with 7 files, not
 "inert" as the runbook assumed when deferring it). Full detail, every
 request/response, and heap/readiness before/after in
 `docs/BENCH_TEST_LOG.md`'s 2026-09-21 "Backend Class C owner-authorized
-rows (M18)" section.
+rows (M18)" section. Owner authorization of C7/C8/C21/C22/C23/C24 as rows
+stands; the DECLINE was this run's own narrower reading of a separate
+"still forbidden" clause, not a rejection of the authorization -- **the
+next run must be told these six rows are the carve-out** the "Authorize
+all" instruction meant to exempt from that clause.
 
 ---
 
