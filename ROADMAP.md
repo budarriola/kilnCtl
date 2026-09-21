@@ -2583,17 +2583,34 @@ Owner instruction, 2026-09-21.
    are old password (unknown) or physical reset gesture (E-stop asserted
    then four LCD corner taps, `docs/WEB_AUTH_PLAN.md`). Owner-gated, needs
    hands at bench.
-2. E-stop false verification record: committing `0x0212` refused while Pico
-   ARMED; needs `debug_reset(peer="pico")` then commit inside the 60 s
-   GRACE window (S6a trip expected, clear after). Awaiting owner
-   authorization for the Pico reset.
-3. Live-edit bench exercise: `/api/profile/live`, `/fork`, `/decide` have no
-   kilnctrl MCP tool; tools being added (in progress). Zero-heat exec run
-   start/stop/delete slot 0 verified clean, no reboot.
-4. LCD blue profile button: numeric check inconclusive, specular glare on
-   that region (Start button reads green fine); needs light or camera
-   repositioned. Code confirmed `UI_THEME_ACCENT_BLUE`.
-5. Zero-caller sweep deletion: in progress.
+2. E-stop false verification record: CLEARED 2026-09-21 by
+   `debug_reset(peer="pico")` — `get_readiness()` now correctly reports
+   `estop_verified` as `not_done` (board-state fact, no commit).
+3. Live-edit bench exercise: kilnctrl MCP tools landed (`bb61aac9`, fixes
+   `c7d57ecc`/`75641b82`) — `profile_live_get`/`fork`/`edit`/`decide` for
+   `/api/profile/live`'s five routes. Bench exercise itself still pending.
+4. LCD blue profile button: CLOSED by owner decision, 2026-09-21 — code
+   review of `UI_THEME_ACCENT_BLUE` accepted as sufficient given the
+   camera's specular-glare limit on this region.
+5. Zero-caller sweep deletion: DONE (`51effca5`) — 11 keep, 12 delete.
+
+**2026-09-21 landings:**
+
+- New kilnctrl MCP tools on main: `get_readiness` (`d7c32aac`, read-only
+  `GET /api/readiness`); `profile_live_get`/`fork`/`edit`/`decide`
+  (`bb61aac9`, `c7d57ecc`, `75641b82`); `flash_firmware()`
+  `erase_partitions`/`confirm_erase` for the commission-flash NVS reset
+  (`050baac7`).
+- Web auth credential recovery, owner decision: erase the `nvs` partition
+  via `flash_firmware(erase_partitions=...)` (`050baac7`) during the
+  commission reflash, then bootstrap `web_auth_setup` from env vars — that
+  bootstrap tool is still in review, not yet on main.
+- Login backoff ladder (owner decision 2026-09-21: fast first login, then
+  5/10/30/60/300 s per IP, off-subnet clients pooled) — in review, not yet
+  on main.
+- M18 board reflash to HEAD is blocked on the login-backoff and
+  `web_auth_setup` commits landing; the commissioning backend runbook doc
+  is in progress.
 
 ---
 
