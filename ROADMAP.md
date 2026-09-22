@@ -167,7 +167,7 @@
 >   owner-authorized by name for this run only) PASSed: `wifi_nvs` erased
 >   over UART, board re-provisioned from `KILNCTL_STA_SSID`/
 >   `KILNCTL_STA_PASSWORD`, reconnected at `192.168.1.156`, web auth
->   confirmed still ON. One new finding, not yet filed: ESP-IDF's own
+>   confirmed still ON. One new finding, filed and closed 2026-09-22 (`docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md`: no live mechanism at HEAD, the observed blip was a stale pre-reboot status read): ESP-IDF's own
 >   `WIFI_STORAGE_FLASH`-persisted STA config briefly auto-reconnects the
 >   board on its OLD credentials right after the erase, before the app's
 >   no-saved-networks logic drops it again — net outcome matched spec, but
