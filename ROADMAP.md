@@ -3104,6 +3104,12 @@ Owner instruction, 2026-09-21.
   `63a48ab3`: W8 **PASS**. Web class now 35/51 PASS wired. W9/W10 (profile
   delete rows) still never run live: a permission classifier refused the
   previous agent's retry, waiting on the owner's explicit go-ahead.
+  Re-run 2026-09-22 at harness `63b62945` after the W20 idle-gate fix
+  (done/aborted count as not running) and W50 POST-status grading: W20,
+  W50, W8 all **PASS** live, no reboot, board state restored. Also landed:
+  `kiln_config_apply` MCP tool (`2b9752ff`, kilnctrl facade now 180 tools,
+  distinguishes the interlock 428 from the hardware-differs 428) and
+  OT-P05 unreadable-vs-absent trip state (`4499314f`).
 - **Bench reflash, 2026-09-22 ~04:00Z**: ESP reflashed to `63a48ab3` (flash
   verified, ELF archived as `KilnCtrl-da119321dcbb.elf`); Pico unchanged at
   `05f1ab1f` build.
@@ -3117,7 +3123,9 @@ Owner instruction, 2026-09-21.
 - **Silent host-test build regression, 2026-09-22**: `0edfb313` dropped
   `nvs_entry_find`/`next`/`release_iterator` stubs, breaking the KilnFW
   host-test build silently; fixed in `032651c0`. A `run_all_checks` gate
-  for the KilnFW host-test build is in flight.
+  for the KilnFW host-test build landed 2026-09-22 (`a7088abc`,
+  `check_00_kilnfw_host_tests.ps1`, phase 2, isolated per-PID build dir,
+  excluded under `-Fast`; 130 checks discovered, 56/56 executables).
 - **Process note, 2026-09-21/22 evening:** every code review this window
   was done by a sonnet reviewer because opus returned HTTP 500 on every
   attempt. **Opus re-review complete, 2026-09-22**: `978a5a2a`/`3db48d8a`,
