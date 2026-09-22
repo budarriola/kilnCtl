@@ -2153,6 +2153,27 @@ def test_w20_passes_when_idle_before_and_after(monkeypatch):
     assert ok, msg
 
 
+def test_w20_passes_from_aborted_or_done_terminal_state(monkeypatch):
+    # 'aborted'/'done' are leftover terminal states from a *previous* run,
+    # not a run in progress -- autotune_engine_abort() is a verified no-op
+    # in both (autotune_engine_guard.c only acts when state_is_running()),
+    # so a board that has ever run autotune once (and can therefore never
+    # read back 'idle' again) must still be able to pass this row.
+    for terminal_state in ("aborted", "done"):
+        monkeypatch.setattr(
+            wcr, "_get_json_with_cookie",
+            _sequential_get_json([
+                (200, {"state": terminal_state}),
+                (200, {"state": terminal_state}),
+            ]),
+        )
+        monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+        monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+        ok, msg = wcr._run_autotune_abort_guarded(wcr.ROWS["W20"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+        assert ok, f"{terminal_state}: {msg}"
+
+
 def test_w33_refuses_when_danger_mode_active(monkeypatch):
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",

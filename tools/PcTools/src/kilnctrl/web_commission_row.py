@@ -1842,17 +1842,31 @@ def _run_sweep_abort_guarded(row: Row, host: str, screenshot_dir: str, cookie: s
                                busy_desc="a current-sweep run")
 
 
+
+# The states autotune_engine actually treats as "running" -- everything else
+# (idle, done, aborted) is a state where autotune_engine_abort() itself is a
+# verified no-op (autotune_engine_guard.c's autotune_engine_abort(): it takes
+# the lock, checks state_is_running(s_at.state), and returns immediately
+# without touching s_at at all when that's false). 'done'/'aborted' are
+# terminal states left over from a *previous* run and stay that way until the
+# next autotune_start -- on any board where autotune has ever run once, W20's
+# /api/autotune read-back can never show 'idle' again, so treating "anything
+# but idle" as busy (the original, more conservative reading) makes this
+# row's precondition permanently unsatisfiable rather than merely cautious.
+# Since the click is a true no-op in 'done'/'aborted' too, per the firmware
+# guard above, those two are idle-equivalent start states for this row.
+_AT_NON_RUNNING_STATES = ("idle", "done", "aborted")
+
+
 def _run_autotune_abort_guarded(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
-    """W20: refuses unless /api/autotune already reads state 'idle'
-    (zones_page.html's `AT_STATE_NAMES` lists 'idle' as the only non-running
-    state -- every other value, including 'aborted'/'done', means a run
-    happened and its result is still on screen, so treating anything but
-    'idle' as busy is the conservative choice: this row must never abort a
-    run whose result an operator hasn't looked at yet, not just one still
-    in flight)."""
+    """W20: refuses unless /api/autotune already reads a non-running state
+    (idle, done, or aborted -- see `_AT_NON_RUNNING_STATES` above). Anything
+    else (settling/stepping/relay_approach/relay_cycling, per
+    zones_page.html's `AT_STATE_NAMES`) means a run is actually in flight and
+    still counts as busy."""
     return _run_guarded_click(row, host, screenshot_dir, cookie,
-                               is_busy=lambda body: body.get("state") != "idle",
-                               busy_desc="an autotune run (or an unreviewed prior result)")
+                               is_busy=lambda body: body.get("state") not in _AT_NON_RUNNING_STATES,
+                               busy_desc="an autotune run in progress")
 
 
 def _run_danger_exit_guarded(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
