@@ -1617,3 +1617,235 @@ def test_setup_wizard_step1_fails_loud_if_the_progress_note_is_not_restored(monk
     # The note WAS sent -- the failure is that the board did not keep it.
     assert post_calls == [("/api/setup/progress",
                            {"step": "1", "state": "done", "note": "skipped: no CT fitted"})]
+
+
+# ---------------------------------------------------------------------------
+# W8/W9/W10 -- profile segment-builder create/delete, multi-select delete,
+# favorite toggle.
+# ---------------------------------------------------------------------------
+
+def _profiles_body(*names_and_ids):
+    """A GET /api/profiles-shaped body: a bare list of {id, name, builtin}."""
+    return [{"id": i, "name": n, "builtin": False} for n, i in names_and_ids]
+
+
+def test_w8_declares_create_delete_shape():
+    row = wcr.ROWS["W8"]
+    assert row.classification == "write"
+    assert row.special == "profile_segment_create_delete"
+    assert row.verify_endpoint == "/api/profiles"
+    assert row.expect_post == "/api/profile"
+    assert "pname" in row.special_selectors
+
+
+def test_w9_declares_multi_delete_shape():
+    row = wcr.ROWS["W9"]
+    assert row.classification == "write"
+    assert row.special == "profile_multi_delete"
+    assert row.verify_endpoint == "/api/profiles"
+    assert row.expect_post == "/api/profile/delete"
+    assert "bulkActionBtn" in row.special_selectors
+
+
+def test_w10_declares_favorite_toggle_shape():
+    row = wcr.ROWS["W10"]
+    assert row.classification == "write"
+    assert row.special == "profile_favorite_toggle"
+    assert row.verify_endpoint == "/api/profiles/favorites"
+    assert row.expect_post == "/api/profile/favorite"
+
+
+def test_new_scratch_profile_name_fits_firmware_limit():
+    name = wcr._new_scratch_profile_name()
+    assert name.startswith("wc_test_")
+    assert len(name) <= wcr._PROFILE_NAME_MAX_LEN
+    name2 = wcr._new_scratch_profile_name(7)
+    assert name2 != name or name2.endswith("7")
+
+
+def test_is_scratch_profile_name():
+    assert wcr._is_scratch_profile_name("wc_test_1234560")
+    assert not wcr._is_scratch_profile_name("kc_test_1234560")  # W42's own prefix, not this row's
+    assert not wcr._is_scratch_profile_name("my real profile")
+    assert not wcr._is_scratch_profile_name(None)
+    assert not wcr._is_scratch_profile_name("")
+
+
+def test_w8_full_flow_passes(monkeypatch):
+    monkeypatch.setattr(wcr.time, "time", lambda: 1000000)
+    name = wcr._new_scratch_profile_name()
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                   # pre-read
+            (200, _profiles_body(("existing", 1), (name, 9))),        # post-create
+            (200, _profiles_body(("existing", 1))),                   # post-delete
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_segment_create_delete(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert name in msg
+    assert "deleted" in msg
+
+
+def test_w8_refuses_when_leftover_scratch_profile_exists(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([(200, _profiles_body(("existing", 1), ("wc_test_999999", 5)))]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_segment_create_delete(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "leftover scratch profile" in msg
+    assert "wc_test_999999" in msg
+
+
+def test_w8_reports_left_on_board_when_delete_cdp_fails(monkeypatch):
+    # Negative test on the cleanup path: the create lands and is confirmed,
+    # but the delete's own CDP invocation exits non-zero -- this must FAIL
+    # loud and say LEFT ON BOARD, never silently report PASS or swallow the
+    # failure.
+    monkeypatch.setattr(wcr.time, "time", lambda: 2000000)
+    name = wcr._new_scratch_profile_name()
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),
+            (200, _profiles_body(("existing", 1), (name, 9))),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = "selector not found"
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeProc()  # the create succeeds
+        return _FailProc()  # the delete fails
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_profile_segment_create_delete(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "LEFT ON BOARD" in msg
+    assert name in msg
+
+
+def test_w9_full_flow_passes(monkeypatch):
+    monkeypatch.setattr(wcr.time, "time", lambda: 3000000)
+    n0 = wcr._new_scratch_profile_name(0)
+    n1 = wcr._new_scratch_profile_name(1)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                                    # pre-read
+            (200, _profiles_body(("existing", 1), (n0, 8), (n1, 9))),                   # post-create
+            (200, _profiles_body(("existing", 1))),                                     # post-delete
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert n0 in msg and n1 in msg
+
+
+def test_w9_refuses_when_leftover_scratch_profile_exists(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([(200, _profiles_body(("existing", 1), ("wc_test_111111", 5)))]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "leftover scratch profile" in msg
+
+
+def test_w9_still_present_after_bulk_delete_fails_loud(monkeypatch):
+    # The bulk-delete POST(s) look like they succeeded (CDP exit 0), but the
+    # read-back afterward still lists one of the two scratch profiles --
+    # must FAIL and say LEFT ON BOARD, never PASS on a half-finished delete.
+    monkeypatch.setattr(wcr.time, "time", lambda: 4000000)
+    n0 = wcr._new_scratch_profile_name(0)
+    n1 = wcr._new_scratch_profile_name(1)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),
+            (200, _profiles_body(("existing", 1), (n0, 8), (n1, 9))),
+            (200, _profiles_body(("existing", 1), (n1, 9))),  # n0 deleted, n1 still there
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "LEFT ON BOARD" in msg
+    assert n1 in msg
+
+
+def test_w10_full_flow_passes(monkeypatch):
+    monkeypatch.setattr(wcr.time, "time", lambda: 5000000)
+    name = wcr._new_scratch_profile_name()
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                     # pre-read /api/profiles
+            (200, _profiles_body(("existing", 1), (name, 9))),          # post-create /api/profiles
+            (200, {"ids": [9]}),                                        # post-toggle-on favorites
+            (200, {"ids": []}),                                         # post-toggle-off favorites
+            (200, _profiles_body(("existing", 1))),                     # post-delete /api/profiles
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert name in msg
+
+
+def test_w10_fails_if_toggle_off_does_not_take(monkeypatch):
+    # The toggle-off click "succeeds" (CDP exit 0), but the favorites
+    # read-back still shows the id -- must fail loud and still delete the
+    # scratch profile rather than leaving a favorited leftover on the board.
+    monkeypatch.setattr(wcr.time, "time", lambda: 6000000)
+    name = wcr._new_scratch_profile_name()
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),
+            (200, _profiles_body(("existing", 1), (name, 9))),
+            (200, {"ids": [9]}),
+            (200, {"ids": [9]}),  # toggle-off did not take
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "still in favorites" in msg
+    assert "deleted" in msg  # the cleanup delete was still attempted and succeeded
+
+
+def test_delete_profile_by_name_refuses_non_scratch_name():
+    ok, msg = wcr._delete_profile_by_name(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever",
+                                           "fake-cookie", "a real user profile", "_x")
+    assert not ok
+    assert "refusing" in msg

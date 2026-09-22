@@ -90,10 +90,12 @@ class Row:
     # a stale id in one of those paths is still caught by --dry-run.
     special_selectors: "Optional[tuple[str, ...]]" = None
     # Name of a dedicated run function in this module for a write shape the
-    # generic fills/restore_from_field path can't express (currently only
-    # "kiln_config_create_delete", W42's create-then-delete-the-same-slot
-    # flow). None = use the generic single-click (optionally fills+restore)
-    # path in run_row_live().
+    # generic fills/restore_from_field path can't express: "kiln_config_
+    # create_delete" (W42's create-then-delete-the-same-slot flow),
+    # "setup_wizard_step1" (W50), "profile_segment_create_delete" (W8),
+    # "profile_multi_delete" (W9), "profile_favorite_toggle" (W10). None =
+    # use the generic single-click (optionally fills+restore) path in
+    # run_row_live().
     special: "Optional[str]" = None
     # Other keys in verify_endpoint's response body that this row's Save
     # posts alongside the filled field and must therefore leave UNCHANGED.
@@ -108,8 +110,8 @@ class Row:
     guard_fields: "Optional[tuple[str, ...]]" = None
 
 
-# 27 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
-# (W1-W7, W15, W16, W21-W23, W25, W28-W31, W37-W39, W41-W43, W46, W48,
+# 30 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
+# (W1-W10, W15, W16, W21-W23, W25, W28-W31, W37-W39, W41-W43, W46, W48,
 # W49, W50) -- enough to cover both selector kinds ("id" and "page") and
 # both the read-only and write classes. The remaining rows are documented
 # in the runbook but do not yet have a Row() entry; adding one for each is
@@ -143,25 +145,24 @@ class Row:
 # restore is "delete what was just created", not "write back an old
 # value" -- see _run_kiln_config_create_delete() below.
 #
-# Left unwired, and why (re-verified 2026-09-21, still true):
-#   - W8/W9/W10 (profile create / delete / favorite toggle): creating a
-#     profile safely needs the segment-builder UI (dynamically added
-#     segment rows, a zone selector, per-segment temp/hold/rate fields --
-#     see profiles_page.html's #segments/#addSegBtn), which the fills
-#     primitive (fixed selector -> value, applied once before one click)
-#     cannot drive; and delete/favorite act on a specific LIST ROW's
-#     button, which only exists after the list renders with the new
-#     profile in it and has no stable id (`modeDeleteBtn` arms bulk-delete
-#     mode for whichever rows get checked afterward -- a second, unmodeled
-#     interaction; the favorite star's own per-row button has no id
-#     either -- it carries a per-profile aria-label, but its textContent
-#     is just the bare glyph "☆"/"★", IDENTICAL on every row, and
-#     _web_commission_cdp.mjs's "text" kind clicks the FIRST button whose
-#     textContent matches, so that selector kind would silently favorite
-#     whichever profile happens to render first, not the intended one).
-#     Getting this
-#     wrong risks leaving a stray profile or, worse, deleting/favoriting
-#     the wrong row. Not attempted this pass.
+# W8/W9/W10 (profile create / delete / favorite toggle) were left unwired
+# through 2026-09-21 for exactly the reasons this note used to describe:
+# the segment-builder UI needs more than one fixed selector->value fill,
+# and delete/favorite act on a specific LIST ROW's control that only
+# exists after the list renders with the new profile in it and has no
+# stable id -- the favorite star's own textContent is the bare glyph
+# "☆"/"★", IDENTICAL on every row, which the "text" selector kind would
+# have matched on whichever profile renders first, not the intended one.
+# Wired 2026-09-22 once the CDP driver gained `--steps` (ordered
+# click/fill/wait-for-selector/wait-for-post) and the `aria-label`/`css`
+# selector kinds (`_web_commission_cdp.mjs`'s `elementExpr()`): the
+# per-row favorite/delete/select-for-delete controls DO carry a per-profile
+# EXACT aria-label (`Add "<name>" to favorites"`, `Delete "<name>"`,
+# `Select "<name>" for delete"`, all confirmed against
+# profiles_page.html's favToggleBtn()/iconBtn()/selectionCheckbox()), which
+# the "text"-substring kind could never disambiguate but "aria-label"'s
+# exact match can -- see _run_profile_segment_create_delete(),
+# _run_profile_multi_delete(), _run_profile_favorite_toggle() below.
 #
 # W50 (setup wizard step save, /api/unit_pref and /api/settings/tz) turned
 # out to be automatable despite the note that used to sit here: the
@@ -362,6 +363,47 @@ ROWS: "dict[str, Row]" = {
                # own fills at runtime from the board's actual current values.
                fills=(("#wTz", "EST5EDT,M3.2.0,M11.1.0"), ("#wUnit", "C")),
                special="setup_wizard_step1"),
+    # W8/W9/W10, wired 2026-09-22 using the --steps/aria-label/css selector
+    # support that landed for exactly this purpose (see the "Left unwired"
+    # note above, now stale for these three). Every path a Row() here can
+    # express statically is checked by validate_selector() via
+    # special_selectors; the parts that genuinely cannot be checked without
+    # a live board -- the per-profile aria-label text built at runtime
+    # (favToggleBtn()/selectionCheckbox()/the per-row delete icon in
+    # profiles_page.html) and the zone-checkbox/segment-field CSS class
+    # selectors (.pzone-cb/.s-target/.s-ramp/.s-dwell, which have no id at
+    # all) -- were verified by hand against profiles_page.html's source
+    # instead and are cited in each special function's own docstring.
+    "W8": Row("W8", "/profiles", "firmware/KilnFW/App/drivers/http/profiles_page.html",
+              "saveBtn", "id",
+              "create a scratch profile via the segment builder (name, one zone, one "
+              "temperature ramp/dwell segment), Save, then delete it via its own row's "
+              "Delete icon",
+              "profile appears in the list after Save, then disappears after Delete",
+              "write", "GET /api/profiles shows the scratch profile after create, then "
+              "shows it gone after delete",
+              verify_endpoint="/api/profiles", expect_post="/api/profile",
+              special="profile_segment_create_delete",
+              special_selectors=("pname",)),
+    "W9": Row("W9", "/profiles", "firmware/KilnFW/App/drivers/http/profiles_page.html",
+              "modeDeleteBtn", "id",
+              "create two scratch profiles, enter delete mode, tick both via their "
+              "per-row select-for-delete checkboxes, click Bulk delete",
+              "both scratch profiles disappear from the list",
+              "write", "GET /api/profiles shows neither scratch profile afterward",
+              verify_endpoint="/api/profiles", expect_post="/api/profile/delete",
+              special="profile_multi_delete",
+              special_selectors=("pname", "saveBtn", "bulkActionBtn")),
+    "W10": Row("W10", "/profiles", "firmware/KilnFW/App/drivers/http/profiles_page.html",
+               "saveBtn", "id",
+               "create a scratch profile, toggle its favorite star on, confirm, toggle "
+               "it back off, confirm, then delete the scratch profile",
+               "favorite star toggles on then off; scratch profile is deleted afterward",
+               "write", "GET /api/profiles/favorites includes then excludes the scratch "
+               "profile's id",
+               verify_endpoint="/api/profiles/favorites", expect_post="/api/profile/favorite",
+               special="profile_favorite_toggle",
+               special_selectors=("pname",)),
 }
 
 
@@ -563,17 +605,33 @@ def _child_env(cookie: str) -> dict:
 def _run_cdp(row: Row, host: str, screenshot_dir: str, cookie: str, *,
              selector: Optional[str] = None, selector_kind: Optional[str] = None,
              fills: "Optional[tuple[tuple[str, str], ...]]" = None,
+             steps: "Optional[list[dict]]" = None,
              expect_post: Optional[str] = None, accept_dialogs: Optional[bool] = None,
              shot_suffix: str = "") -> "subprocess.CompletedProcess":
     """Runs the CDP driver once against `row.route`, with any of
-    selector/selector_kind/fills/expect_post/accept_dialogs overridden from
-    the row's own defaults. Extracted out of run_row_live() so a row that
-    needs more than one CDP action -- a fill-then-restore pair (W22, W38)
-    or a create-then-delete pair (W42) -- can call this twice with
+    selector/selector_kind/fills/steps/expect_post/accept_dialogs overridden
+    from the row's own defaults. Extracted out of run_row_live() so a row
+    that needs more than one CDP action -- a fill-then-restore pair (W22,
+    W38) or a create-then-delete pair (W42) -- can call this twice with
     different overrides and a distinct `shot_suffix` per screenshot,
-    instead of duplicating the subprocess/env-building logic per shape."""
-    selector = row.selector if selector is None else selector
-    selector_kind = row.selector_kind if selector_kind is None else selector_kind
+    instead of duplicating the subprocess/env-building logic per shape.
+
+    `steps` (added for W8/W9/W10) is an ordered list of the CDP script's
+    step objects (click/fill/wait-for-selector/wait-for-post -- see
+    _web_commission_cdp.mjs's `runStep()`), forwarded verbatim as
+    `--steps <json>`. When `steps` is given, this call defaults to
+    steps-only: no top-level `--selector-kind`/`--selector` is emitted
+    unless the caller ALSO passes an explicit `selector`/`selector_kind`
+    override. This matters because a `special` row's own `row.selector`/
+    `row.selector_kind` exist only so `validate_selector()` has something
+    static to check (a stable id referenced somewhere in the row's flow),
+    not because the row wants one more click tacked on after its steps
+    already ran -- the .mjs script itself documents this ("a --steps run
+    ... may have no top-level click at all").
+    """
+    if steps is None:
+        selector = row.selector if selector is None else selector
+        selector_kind = row.selector_kind if selector_kind is None else selector_kind
     if expect_post is None:
         expect_post = row.expect_post
     if accept_dialogs is None:
@@ -583,10 +641,10 @@ def _run_cdp(row: Row, host: str, screenshot_dir: str, cookie: str, *,
         "node", script,
         "--host", host,
         "--route", row.route,
-        "--selector-kind", selector_kind,
-        "--selector", selector,
         "--screenshot", os.path.join(screenshot_dir, f"{row.row_id}{shot_suffix}.png"),
     ]
+    if selector_kind is not None:
+        cmd += ["--selector-kind", selector_kind, "--selector", selector]
     # Dialog policy is per row, not global: only a row this module already
     # classifies as a write/owner-gated action (or an explicit override, for
     # a restore/delete sub-step of one) may ANSWER a native confirm() with
@@ -601,6 +659,8 @@ def _run_cdp(row: Row, host: str, screenshot_dir: str, cookie: str, *,
         cmd += ["--expect-post", expect_post]
     if fills:
         cmd += ["--fills", json.dumps([{"selector": s, "value": v} for s, v in fills])]
+    if steps:
+        cmd += ["--steps", json.dumps(steps)]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=_child_env(cookie))
 
 
@@ -1036,6 +1096,378 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     )
 
 
+# ---------------------------------------------------------------------------
+# W8/W9/W10 -- profile segment-builder create, multi-select delete, and
+# favorite toggle. Shared helpers first, then one function per row.
+# ---------------------------------------------------------------------------
+
+_PROFILE_NAME_MAX_LEN = 15  # profiles_page.html: <input id="pname" maxlength="15">
+
+
+def _is_scratch_profile_name(name: "Optional[str]") -> bool:
+    """True for a name one of this module's own generators
+    (_new_scratch_profile_name()) could have produced. Every scratch-profile
+    delete in W8/W9/W10 is gated on this -- never touch a profile whose name
+    doesn't match, builtin or otherwise."""
+    return bool(name) and str(name).startswith("wc_test_")
+
+
+def _new_scratch_profile_name(idx: int = 0) -> str:
+    # #pname's maxlength="15" leaves only 7 characters after the 8-char
+    # "wc_test_" prefix: 6 digits of epoch seconds (mod 1e6, wraps roughly
+    # every 11.6 days) plus one trailing digit distinguishing multiple
+    # profiles a single row run creates within the same second (W9 creates
+    # two). A wrap-around collision would be caught by this row's own
+    # up-front "leftover scratch profile already exists" refusal, same as
+    # W42's kc_test_* naming accepts an equivalent tradeoff for a tighter
+    # limit.
+    name = f"wc_test_{int(time.time()) % 1_000_000:06d}{idx % 10}"
+    assert len(name) <= _PROFILE_NAME_MAX_LEN and name.startswith("wc_test_")
+    return name
+
+
+def _profile_names(body) -> "list[str]":
+    """GET /api/profiles (profiles_page.html's refreshAll()) returns a bare
+    JSON array of {id, name, builtin, ...} objects, not a dict -- unlike
+    every other verify_endpoint in this module. Centralized here so a
+    caller never needs its own isinstance/.get() dance for this one shape."""
+    if not isinstance(body, list):
+        return []
+    return [c.get("name") for c in body if isinstance(c, dict)]
+
+
+def _profile_id_by_name(body, name: str) -> object:
+    if isinstance(body, list):
+        for c in body:
+            if isinstance(c, dict) and c.get("name") == name:
+                return c.get("id")
+    return None
+
+
+def _create_scratch_profile(row: Row, host: str, screenshot_dir: str, cookie: str,
+                             name: str, shot_suffix: str) -> "tuple[bool, str]":
+    """Drives profiles_page.html's segment builder to create one scratch
+    profile named `name` via POST /api/profile: fill #pname, tick the FIRST
+    zone checkbox (`#pzone label:nth-child(1) .pzone-cb` -- the checkboxes
+    are plain <input class="pzone-cb"> with no id or aria-label, per
+    selectedZoneMask()'s zero-mask "Select at least one zone" refusal,
+    which is why a zone tick is mandatory here even though the original
+    task description did not call it out), then fill one ramp/dwell
+    segment's default fields (.s-target/.s-ramp/.s-dwell -- segmentRow({})
+    defaults kind=0, and resetEditor() -- which loadZones().then(...) or a
+    #newBtn click both run -- already clicks #addSegBtn once on its own, so
+    exactly one such segment row already exists; no separate #addSegBtn
+    step is needed here). Passes `expect_post=""` explicitly so the
+    driver's post-steps settle() never waits on a caller row's own
+    unrelated `expect_post` default (W9's row default is
+    "/api/profile/delete", which would otherwise make settle() hang here
+    waiting for a delete that hasn't happened yet) -- the explicit
+    "wait-for-post" step already covers the actual save.
+
+    Returns (ok, detail); does not read back GET /api/profiles or clean up
+    -- callers do both themselves, since W8/W9/W10 verify and restore
+    differently."""
+    steps = [
+        {"action": "fill", "kind": "css", "selector": "#pname", "value": name},
+        {"action": "click", "kind": "css", "selector": "#pzone label:nth-child(1) .pzone-cb"},
+        {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) .s-target", "value": "150"},
+        {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) .s-ramp", "value": "60"},
+        {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) .s-dwell", "value": "5"},
+        {"action": "click", "kind": "id", "selector": "saveBtn"},
+        {"action": "wait-for-post", "path": "/api/profile"},
+    ]
+    proc = _run_cdp(row, host, screenshot_dir, cookie, steps=steps, expect_post="",
+                     shot_suffix=shot_suffix)
+    if proc.returncode != 0:
+        return False, f"CDP driver (create {name!r}) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
+    post = _cdp_post_status(proc)
+    if post is not None and (post.get("failed") or post.get("status") not in (200, None)):
+        return False, (f"create POST {post.get('url')} -> {post.get('status')} "
+                        f"(failed={post.get('failed')}) for {name!r}")
+    return True, f"created {name!r}"
+
+
+def _delete_profile_by_name(row: Row, host: str, screenshot_dir: str, cookie: str,
+                             name: str, shot_suffix: str) -> "tuple[bool, str]":
+    """Clicks the named profile's own row Delete icon (aria-label
+    'Delete "<name>"' -- profiles_page.html's per-row iconBtn('kgIconDelete',
+    ...)), answering the resulting confirm() with OK. Refuses -- without
+    touching the board -- if `name` does not pass _is_scratch_profile_name(),
+    the one gate every cleanup path in W8/W9/W10 shares."""
+    if not _is_scratch_profile_name(name):
+        return False, f"refusing to delete non-scratch profile name {name!r}"
+    proc = _run_cdp(row, host, screenshot_dir, cookie,
+                     selector=f'Delete "{name}"', selector_kind="aria-label",
+                     expect_post="/api/profile/delete", accept_dialogs=True,
+                     shot_suffix=shot_suffix)
+    if proc.returncode != 0:
+        return False, f"CDP driver (delete {name!r}) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
+    post = _cdp_post_status(proc)
+    if post is not None and (post.get("failed") or post.get("status") not in (200, None)):
+        return False, (f"delete POST {post.get('url')} -> {post.get('status')} "
+                        f"(failed={post.get('failed')}) for {name!r}")
+    return True, f"deleted {name!r}"
+
+
+def _run_profile_segment_create_delete(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W8: create one scratch profile through the segment builder, confirm
+    it via GET /api/profiles, delete it through its own row's Delete icon,
+    confirm it is gone. Refuses up front if a `wc_test_*` profile already
+    exists (a previous run's incomplete cleanup). Every failure path from
+    the create CDP call onward still attempts the delete and says so --
+    LEFT ON BOARD when it cannot confirm the board is clean afterward."""
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, list):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    existing_scratch = [n for n in _profile_names(pre_body) if _is_scratch_profile_name(n)]
+    if existing_scratch:
+        return False, (f"{row.row_id} FAIL: a leftover scratch profile {existing_scratch[0]!r} "
+                        f"already exists -- refusing to start; delete it by hand and re-run")
+
+    name = _new_scratch_profile_name()
+
+    def _cleanup_after_create_attempt() -> str:
+        chk_status, chk_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+        if chk_status != 200 or not isinstance(chk_body, list):
+            return (f"cannot confirm board state -- post-failure read-back GET "
+                     f"{row.verify_endpoint} -> {chk_status}; if {name!r} was created it is "
+                     f"LEFT ON BOARD, check by hand")
+        if name not in _profile_names(chk_body):
+            return "nothing was created"
+        del_ok, del_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name,
+                                                      "_cleanup_delete")
+        return f"cleaned up {name!r} ({del_detail})" if del_ok else \
+            f"{name!r} was created but cleanup delete FAILED ({del_detail}) -- LEFT ON BOARD"
+
+    ok, detail = _create_scratch_profile(row, host, screenshot_dir, cookie, name, "_create")
+    if not ok:
+        return False, f"{row.row_id} FAIL: create failed: {detail} -- {_cleanup_after_create_attempt()}"
+
+    mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if mid_status != 200 or not isinstance(mid_body, list):
+        return False, (f"{row.row_id} FAIL: post-create read-back GET {row.verify_endpoint} -> "
+                        f"{mid_status}: {json.dumps(mid_body)[:300]} -- if {name!r} was created it "
+                        f"is LEFT ON BOARD, check by hand")
+    if name not in _profile_names(mid_body):
+        return False, (f"{row.row_id} FAIL: no profile named {name!r} found in "
+                        f"{row.verify_endpoint} after create -- write did not land")
+
+    delete_ok, delete_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name, "_delete")
+    if not delete_ok:
+        return False, (f"{row.row_id} FAIL: created {name!r}, confirmed via GET "
+                        f"{row.verify_endpoint}, but delete failed: {delete_detail} -- "
+                        f"LEFT ON BOARD, delete by hand")
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, list):
+        return False, (f"{row.row_id} FAIL: post-delete read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]} -- delete POST landed, "
+                        f"but read-back could not confirm it")
+    if name in _profile_names(final_body):
+        return False, (f"{row.row_id} FAIL: profile {name!r} still present after delete -- "
+                        f"LEFT ON BOARD, delete by hand")
+
+    return True, (
+        f"{row.row_id} PASS: created {name!r} via the segment builder (POST /api/profile), "
+        f"confirmed via GET {row.verify_endpoint}, deleted via its own Delete icon "
+        f"(POST /api/profile/delete), confirmed removed | expected: {row.expected_outcome}"
+    )
+
+
+def _run_profile_multi_delete(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W9: create two scratch profiles, enter delete mode (#modeDeleteBtn),
+    tick each one's own per-row checkbox (aria-label 'Select "<name>" for
+    delete' -- profiles_page.html's selectionCheckbox()), click
+    #bulkActionBtn (bulkDelete(): one native confirm() then one POST
+    /api/profile/delete per ticked id, issued together via Promise.all --
+    which is why this row's own `expect_post` default is left in place on
+    the bulk-delete _run_cdp() call below: the explicit "wait-for-post"
+    step consumes the FIRST of those two POSTs in order, and the driver's
+    own post-steps settle() -- given no selectorKind, so it takes the
+    steps-only branch -- then waits on `args.expectPost` (this row's
+    default, "/api/profile/delete") for the SECOND, so both complete before
+    Chrome tears down rather than racing screenshot/exit against the
+    slower one).
+
+    Reads the full profile list FIRST and refuses to start if a leftover
+    `wc_test_*` scratch profile already exists. Only ever ticks/deletes
+    names this row generated itself -- never a builtin or a real saved
+    profile."""
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, list):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    existing_scratch = [n for n in _profile_names(pre_body) if _is_scratch_profile_name(n)]
+    if existing_scratch:
+        return False, (f"{row.row_id} FAIL: leftover scratch profile(s) {existing_scratch} already "
+                        f"exist -- refusing to start; delete by hand and re-run")
+
+    names = [_new_scratch_profile_name(0), _new_scratch_profile_name(1)]
+    created: "list[str]" = []
+    for i, name in enumerate(names):
+        ok, detail = _create_scratch_profile(row, host, screenshot_dir, cookie, name, f"_create{i}")
+        if not ok:
+            cleanup_results = [_delete_profile_by_name(row, host, screenshot_dir, cookie, n,
+                                                         f"_cleanup{j}")
+                                for j, n in enumerate(created)]
+            left = [n for n, (cok, _cd) in zip(created, cleanup_results) if not cok]
+            extra = (f" -- LEFT ON BOARD: {left}" if left else
+                     (f" -- cleaned up {created}" if created else " -- nothing was created"))
+            return False, f"{row.row_id} FAIL: create of {name!r} failed: {detail}{extra}"
+        created.append(name)
+
+    mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if mid_status != 200 or not isinstance(mid_body, list):
+        return False, (f"{row.row_id} FAIL: post-create read-back GET {row.verify_endpoint} -> "
+                        f"{mid_status}: {json.dumps(mid_body)[:300]} -- {created} may be LEFT ON "
+                        f"BOARD, check by hand")
+    mid_names = _profile_names(mid_body)
+    missing = [n for n in names if n not in mid_names]
+    if missing:
+        return False, (f"{row.row_id} FAIL: profile(s) {missing} not found after create -- write "
+                        f"did not land; {created} may be LEFT ON BOARD, check by hand")
+
+    # Defensive: every name here must be one this row generated. Refuses
+    # rather than ticking anything that fails this, even though
+    # _new_scratch_profile_name() cannot itself produce a non-matching name.
+    for n in names:
+        if not _is_scratch_profile_name(n):
+            return False, (f"{row.row_id} FAIL: internal error -- generated name {n!r} is not a "
+                            f"scratch name; refusing to select it for delete")
+
+    steps = [{"action": "click", "kind": "id", "selector": "modeDeleteBtn"}]
+    for name in names:
+        steps.append({"action": "click", "kind": "aria-label",
+                      "selector": f'Select "{name}" for delete'})
+    steps.append({"action": "click", "kind": "id", "selector": "bulkActionBtn"})
+    steps.append({"action": "wait-for-post", "path": "/api/profile/delete"})
+    proc = _run_cdp(row, host, screenshot_dir, cookie, steps=steps,
+                     accept_dialogs=True, shot_suffix="_bulkdelete")
+    if proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver (bulk delete) exited {proc.returncode}: "
+                        f"{proc.stderr.strip()[-500:]} -- {names} may be LEFT ON BOARD, check and "
+                        f"delete by hand")
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, list):
+        return False, (f"{row.row_id} FAIL: post-delete read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]} -- delete POST(s) may have "
+                        f"landed, but read-back could not confirm it; {names} may be LEFT ON BOARD")
+    still_present = [n for n in names if n in _profile_names(final_body)]
+    if still_present:
+        return False, (f"{row.row_id} FAIL: profile(s) {still_present} still present after bulk "
+                        f"delete -- LEFT ON BOARD, delete by hand")
+
+    return True, (
+        f"{row.row_id} PASS: created {names} via the segment builder, entered delete mode "
+        f"(#modeDeleteBtn), ticked both via their per-row aria-label checkboxes, clicked "
+        f"#bulkActionBtn (POST /api/profile/delete x{len(names)}), confirmed both removed via GET "
+        f"{row.verify_endpoint} | expected: {row.expected_outcome}"
+    )
+
+
+def _run_profile_favorite_toggle(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W10: create one scratch profile (never a user's real profile, so
+    nothing else's favorite state is ever touched), toggle its favorite
+    star on (aria-label 'Add "<name>" to favorites' -- profiles_page.html's
+    favToggleBtn()), confirm via GET /api/profiles/favorites (`{"ids": [...]}`
+    -- loadFavorites()'s own shape), toggle it back off (aria-label
+    'Remove "<name>" from favorites', confirmed verbatim against
+    favToggleBtn()'s string build), confirm off, then delete the scratch
+    profile via its own row's Delete icon."""
+    pre_status, pre_body = _get_json_with_cookie(host, "/api/profiles", cookie)
+    if pre_status != 200 or not isinstance(pre_body, list):
+        return False, (f"{row.row_id} FAIL: pre-read GET /api/profiles -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    existing_scratch = [n for n in _profile_names(pre_body) if _is_scratch_profile_name(n)]
+    if existing_scratch:
+        return False, (f"{row.row_id} FAIL: leftover scratch profile {existing_scratch[0]!r} "
+                        f"already exists -- refusing to start; delete by hand and re-run")
+
+    name = _new_scratch_profile_name()
+
+    def _cleanup_delete() -> str:
+        del_ok, del_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name, "_delete")
+        return f"deleted {name!r}" if del_ok else f"delete FAILED: {del_detail} -- LEFT ON BOARD, delete by hand"
+
+    ok, detail = _create_scratch_profile(row, host, screenshot_dir, cookie, name, "_create")
+    if not ok:
+        chk_status, chk_body = _get_json_with_cookie(host, "/api/profiles", cookie)
+        if chk_status == 200 and isinstance(chk_body, list) and name in _profile_names(chk_body):
+            del_ok, del_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name,
+                                                          "_cleanup_delete")
+            extra = f" -- cleaned up {name!r}" if del_ok else f" -- {name!r} LEFT ON BOARD ({del_detail})"
+        else:
+            extra = " -- nothing was created"
+        return False, f"{row.row_id} FAIL: create failed: {detail}{extra}"
+
+    mid_status, mid_body = _get_json_with_cookie(host, "/api/profiles", cookie)
+    if mid_status != 200 or not isinstance(mid_body, list) or name not in _profile_names(mid_body):
+        return False, (f"{row.row_id} FAIL: profile {name!r} not confirmed present after create "
+                        f"(GET /api/profiles -> {mid_status}) -- write did not land")
+    pid = _profile_id_by_name(mid_body, name)
+
+    on_proc = _run_cdp(row, host, screenshot_dir, cookie,
+                        selector=f'Add "{name}" to favorites', selector_kind="aria-label",
+                        shot_suffix="_favon")
+    if on_proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver (favorite on) exited {on_proc.returncode}: "
+                        f"{on_proc.stderr.strip()[-500:]} -- {_cleanup_delete()}")
+    on_post = _cdp_post_status(on_proc)
+    if on_post is not None and (on_post.get("failed") or on_post.get("status") not in (200, None)):
+        return False, (f"{row.row_id} FAIL: favorite-on POST {on_post.get('url')} -> "
+                        f"{on_post.get('status')} (failed={on_post.get('failed')}) -- {_cleanup_delete()}")
+
+    fav_status, fav_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if fav_status != 200 or not isinstance(fav_body, dict):
+        return False, (f"{row.row_id} FAIL: post-favorite-on read-back GET {row.verify_endpoint} -> "
+                        f"{fav_status}: {json.dumps(fav_body)[:300]} -- {_cleanup_delete()}")
+    if pid not in (fav_body.get("ids") or []):
+        return False, (f"{row.row_id} FAIL: {name!r} (id={pid}) not in favorites after toggle-on "
+                        f"(ids={fav_body.get('ids')}) -- write likely did not land -- {_cleanup_delete()}")
+
+    off_proc = _run_cdp(row, host, screenshot_dir, cookie,
+                         selector=f'Remove "{name}" from favorites', selector_kind="aria-label",
+                         shot_suffix="_favoff")
+    if off_proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver (favorite off) exited {off_proc.returncode}: "
+                        f"{off_proc.stderr.strip()[-500:]} -- favorite may be LEFT ON, and "
+                        f"{_cleanup_delete()}")
+    off_post = _cdp_post_status(off_proc)
+    if off_post is not None and (off_post.get("failed") or off_post.get("status") not in (200, None)):
+        return False, (f"{row.row_id} FAIL: favorite-off POST {off_post.get('url')} -> "
+                        f"{off_post.get('status')} (failed={off_post.get('failed')}) -- favorite may "
+                        f"be LEFT ON, and {_cleanup_delete()}")
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, dict):
+        return False, (f"{row.row_id} FAIL: post-favorite-off read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]} -- {_cleanup_delete()}")
+    if pid in (final_body.get("ids") or []):
+        return False, (f"{row.row_id} FAIL: {name!r} (id={pid}) still in favorites after "
+                        f"toggle-off -- {_cleanup_delete()}")
+
+    delete_ok, delete_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name, "_delete")
+    if not delete_ok:
+        return False, (f"{row.row_id} FAIL: favorite toggle verified on then off, but delete of "
+                        f"{name!r} failed: {delete_detail} -- LEFT ON BOARD, delete by hand")
+
+    end_status, end_body = _get_json_with_cookie(host, "/api/profiles", cookie)
+    if end_status != 200 or not isinstance(end_body, list):
+        return False, (f"{row.row_id} FAIL: post-delete read-back GET /api/profiles -> "
+                        f"{end_status}: {json.dumps(end_body)[:300]} -- delete POST landed, but "
+                        f"read-back could not confirm it")
+    if name in _profile_names(end_body):
+        return False, f"{row.row_id} FAIL: profile {name!r} still present after delete -- LEFT ON BOARD"
+
+    return True, (
+        f"{row.row_id} PASS: created {name!r}, toggled favorite on (POST /api/profile/favorite), "
+        f"confirmed via GET {row.verify_endpoint}, toggled off, confirmed removed, deleted the "
+        f"scratch profile, confirmed gone | expected: {row.expected_outcome}"
+    )
+
+
 def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
     """W50's shape: the setup wizard's step-1 screen (time zone + displayed
     unit) is built entirely by client-side JS after an async fetch
@@ -1303,6 +1735,12 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         return _run_kiln_config_create_delete(row, host, screenshot_dir, cookie)
     if row.special == "setup_wizard_step1":
         return _run_setup_wizard_step1(row, host, screenshot_dir, cookie)
+    if row.special == "profile_segment_create_delete":
+        return _run_profile_segment_create_delete(row, host, screenshot_dir, cookie)
+    if row.special == "profile_multi_delete":
+        return _run_profile_multi_delete(row, host, screenshot_dir, cookie)
+    if row.special == "profile_favorite_toggle":
+        return _run_profile_favorite_toggle(row, host, screenshot_dir, cookie)
 
     # A row with both `fills` and `restore_from_field` set (W22, W38) is the
     # generic "edit a field, Save, confirm, restore, confirm" shape -- also
