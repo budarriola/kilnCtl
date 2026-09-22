@@ -784,6 +784,41 @@ click, which is noted).
 
 ---
 
+## Link-loss heating block during a Pico update -- 2026-09-21 hardware exercise (SKIP)
+
+ROADMAP.md's open item (M8 area, "Link-loss heating block **not** bypassed during a
+Pico update") asked whether a real ESP-driven Pico firmware update can be exercised on
+the bench to observe `relay_authority_on_blocked()` holding through the link-loss
+window. **Premise checked read-only, verdict SKIP -- no update can be pushed on this
+fixture today:**
+
+- `docs/PICO_AUTO_UPDATE_PLAN.md` section 1's review is **NO-GO** for installing the
+  two-slot bootloader on the bench Pico (unverified metadata seeding, unverified restore
+  path, no atomic multi-image flash tool) -- matches the standing owner-gated NO-GO in
+  memory (`project_pico_bootloader_install_no_go.md`). A separate 2026-09-18/2026-09-20
+  passage of the same plan describes a *different* bench Pico later booting through a
+  two-slot bootloader with P1 marked CLOSED, then hitting an ESP-relay erase-watchdog
+  defect and a CRC-parameterization defect (both later marked FIXED/flashed); that
+  narrative is stale relative to this bench's current board (see live check below) --
+  this fixture's Pico is not running that bootloader today.
+- Live board check, 2026-09-21, ESP `63a48ab3` / Pico `05f1ab1f`, board idle
+  (`safety_get_status`: link up, SaftyFW armed, not tripped; `get_heap_status`:
+  `uptime_s=3674`, no unacknowledged-crash banner): `ota_status()` reports the **last**
+  Pico relay attempt already on record as
+  `last_update: processor='pico' success=False reason="Pico refused: update would
+  overwrite its running flat image; re[flash via SWD]"` -- the exact
+  `SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP` (state 9) refusal
+  `docs/PICO_AUTO_UPDATE_PLAN.md` section 2 describes for a flat-image Pico, confirming
+  from the board's own history that a relay is structurally refused before the data
+  phase ever starts, with no interlock/heating exposure to observe. Current phase at
+  read time: `pico relay: phase='idle' percent=0`.
+
+**No update was attempted this run** (per the coordinator's instruction, a confirmed
+structural refusal is the SKIP condition, not a reason to still push a POST for its own
+sake); no bootloader was installed, no `debug_program` call was made, no board state
+changed. ROADMAP.md's item carries a one-line note pointing here. Re-attempt only after
+an owner decision reopens the two-slot-bootloader install on this specific fixture.
+
 ## Gaps and caveats found while building this matrix
 
 - Several ADMIN POST routes (profile import/hide/restore/favorite, kiln_configs

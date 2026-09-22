@@ -2389,6 +2389,7 @@ path. Two facts set the shape of this milestone:
 - [x] Both update paths refused unless idle and cool, with the specific
       blocker named (2026-08-17)
 - [ ] Link-loss heating block **not** bypassed during a Pico update — now
+      **2026-09-21 SKIP note:** hardware-exercise attempt checked the premise first -- the bench Pico runs a flat image (two-slot bootloader install is owner-gated NO-GO per `docs/PICO_AUTO_UPDATE_PLAN.md` section 1), and the board's own `ota_status()` history shows the last Pico relay attempt already refused structurally (`REFUSED_RUNNING_IMAGE_OVERLAP`) before reaching the data phase, so no update -- and therefore no link-loss window -- can be pushed on this fixture today. No board state changed. Full record: `docs/COMMISSIONING_TEST_MATRIX.md` "Link-loss heating block during a Pico update -- 2026-09-21 hardware exercise (SKIP)".
       pinned in CI on both sides (2026-09-04), still OPEN as a
       hardware-exercise item (a test suite is not a substitute for running a
       real update on a real board):
