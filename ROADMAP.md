@@ -205,6 +205,13 @@
 >   (uptime 1905s -> 2220s+, `state=0` idle before and after). Full detail:
 >   `docs/BENCH_TEST_LOG.md`'s "M18 LCD class" section; matrix LCD rows
 >   annotated in `docs/COMMISSIONING_TEST_MATRIX.md`.
+> - **M18 LCD class, closed, 2026-09-21**: remaining testable rows run.
+>   Final tally, 16/16 rows accounted for: 13 PASS, 2 N/A (`touch_cal`,
+>   `touch_test` -- FT6336U self-calibrating, unreachable by nav path), 1
+>   N/A dead code (`profiles_builtin_list` -- `ui_page_profiles.c` is now a
+>   thin alias, no source calls `kiln_ui_show("profiles_builtin_list")`).
+>   No further LCD rows remain to run. Matrix updated in
+>   `docs/COMMISSIONING_TEST_MATRIX.md`.
 > - **New standing check `check_wifi_ram_storage_mirror.ps1`/`.py` for the
 >   `WIFI_STORAGE_RAM` pair** (`4c3648f0`, review fix `6a149535` making
 >   `wifi_prov.c`'s ordering assertion real by following one call level
@@ -3048,6 +3055,19 @@ Owner instruction, 2026-09-21.
   cleanly without them) wired into `run_all_checks.ps1` phase 3;
   discovered check count 128 -> 129. `ROWS` covers 27 of 51 runbook
   rows as of this entry.
+- **M18 web-interface class update, 2026-09-22**: W8/W9/W10 (profile
+  create/delete/favorite) wired into `web_commission_row.py`
+  (`23434e2d`, `f5a793ce` -- the latter fixing a W9 cleanup gap where a
+  failed-looking create can still land on the board). `ROWS` now covers
+  30 of 51 runbook rows. W8/W9/W10/W50 are wired but not yet run live.
+  W42 stays FAIL, pending the `kiln_cfg_swap` stack-overflow fix
+  (`76b78802`, in review) -- see the kiln_cfg_swap entry below.
+- **kiln_cfg_swap stack overflow, found live 2026-09-22**: a live W42
+  re-run on ESP `08f1c451` panicked the board ("A stack overflow in task
+  kiln_cfg_swap has been detected") on `POST /api/kiln_configs/apply`;
+  crash report left unacknowledged (`b024b33c`). Fix `76b78802` is in
+  review, not yet flashed -- no `/api/kiln_configs/apply` call until it
+  lands and is confirmed on hardware.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at
