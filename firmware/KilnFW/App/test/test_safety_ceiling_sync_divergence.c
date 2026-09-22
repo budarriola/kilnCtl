@@ -753,6 +753,24 @@ static void test_tc_type_revert_divergence_detected(void)
 
 int main(void)
 {
+    // 2026-09-22 advisory (review of 2cf2dcb1's static-mutex fix): no host
+    // test called safety_ceiling_sync_init() before this, so every test in
+    // this file (and every other host test linking this .c) exercised only
+    // the NULL-lock/no-op branches of divergence_state_lock_take()/_give()
+    // and reconcile_on_link_up_impl()'s s_reconcile_lock guard -- the actual
+    // statically-allocated-mutex path added 2026-09-22 had zero host
+    // coverage. Calling it once here, before any test runs, makes every
+    // divergence-state read/write and every reconcile call below in this
+    // file go through a REAL (non-NULL) SemaphoreHandle_t for the rest of
+    // this process, the same way main_control_bringup.c's first statement
+    // does on real hardware. Safe to call exactly once here (single-
+    // threaded host test, same one-time-before-any-task precondition the
+    // real call site documents) and safe to leave the locks non-NULL for
+    // every test that follows -- every take/give site is a plain
+    // snprintf/bool copy or a portMAX_DELAY blocking take, neither of which
+    // this stub environment can deadlock on.
+    safety_ceiling_sync_init();
+
     // test_uninstalled_hooks_are_a_safe_noop() MUST run first in this
     // process: safety_ceiling_sync_set_disable_heat_hooks() has no
     // unset/NULL-again entry point (by design -- see its own header
