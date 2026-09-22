@@ -1340,6 +1340,24 @@ def test_cdp_driver_click_timeout_zero_means_one_attempt_not_default():
     # (a do-at-least-once shape): the deadline check comes strictly after the
     # first Runtime.evaluate call in loop order, not before it.
     assert click_with_retry.index("cdp.send('Runtime.evaluate'") < click_with_retry.index("Date.now() >= deadline")
+    # The same swallow-zero hazard applied to the two other step actions that
+    # take a caller-supplied timeoutMs: wait-for-selector's own local default
+    # and wait-for-post's default. Both must use `??`, not `||`, too.
+    assert "step.timeoutMs || 5000" not in text
+    assert "step.timeoutMs ?? 5000" in text
+    assert "step.timeoutMs || POST_WAIT_TIMEOUT_MS" not in text
+    assert "step.timeoutMs ?? POST_WAIT_TIMEOUT_MS" in text
+    # wait-for-selector's own poll loop must also attempt once before its
+    # deadline check, same shape as clickWithRetry above.
+    wait_for_selector = text[text.index("if (step.action === 'wait-for-selector')"):]
+    wait_for_selector = wait_for_selector[:wait_for_selector.index("if (step.action === 'wait-for-post')")]
+    assert wait_for_selector.index("cdp.send('Runtime.evaluate'") < wait_for_selector.index("Date.now() >= deadline")
+    # waitForPost() (CdpSession method backing wait-for-post) must have the
+    # same shape: it scans for an already-completed match BEFORE its deadline
+    # check, so timeoutMs: 0 still gets one real look rather than none.
+    wait_for_post_method = text[text.index("async waitForPost(pathFragment, timeoutMs) {"):]
+    wait_for_post_method = wait_for_post_method[:wait_for_post_method.index("async waitForQuiet(")]
+    assert wait_for_post_method.index("this.completed.findIndex(") < wait_for_post_method.index("Date.now() >= deadline")
 
 
 def test_w50_declares_special_setup_wizard_step1_shape():

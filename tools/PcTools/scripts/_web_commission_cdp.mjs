@@ -483,8 +483,9 @@ async function clickWithRetry(cdp, kind, selector, label, timeoutMs = CLICK_WAIT
   const expr = `(() => { const el = ${elementExpr(kind, selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
   const deadline = Date.now() + timeoutMs;
   // At least one attempt always runs, even for an explicit timeoutMs: 0 --
-  // this is a do/while, not a while, specifically so 0 means "try once,
-  // immediately" rather than "never try."
+  // this is a `for (;;)` whose deadline check comes AFTER the first attempt
+  // (not a `while (Date.now() < deadline)` guard up front), specifically so
+  // 0 means "try once, immediately" rather than "never try."
   for (;;) {
     const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
     if (res.result.value === 'CLICKED') return;
@@ -531,7 +532,7 @@ async function runStep(cdp, step, idx) {
     throw new Error(`${label}: selector ${JSON.stringify(step.selector)} (kind=${step.kind}) not found`);
   }
   if (step.action === 'wait-for-selector') {
-    const timeoutMs = step.timeoutMs || 5000;
+    const timeoutMs = step.timeoutMs ?? 5000;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const expr = `document.querySelector(${JSON.stringify(step.selector)}) ? 'FOUND' : 'NOT_FOUND'`;
@@ -544,7 +545,7 @@ async function runStep(cdp, step, idx) {
     }
   }
   if (step.action === 'wait-for-post') {
-    await cdp.waitForPost(step.path, step.timeoutMs || POST_WAIT_TIMEOUT_MS);
+    await cdp.waitForPost(step.path, step.timeoutMs ?? POST_WAIT_TIMEOUT_MS);
     return;
   }
   throw new Error(`${label}: unknown step action ${JSON.stringify(step.action)}`);
