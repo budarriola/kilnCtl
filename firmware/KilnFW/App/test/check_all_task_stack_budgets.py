@@ -747,21 +747,31 @@ CEILING_BYTES = {
     "safety_uart_bridge": 2912,
     "thermo_uart_bridge": 2160,
     "touch_uart_bridge": 2176,
-    # Measured 2026-09-22 against a KilnCtrl.elf freshly built by
-    # check_00_kilnfw_target_build.ps1 in a clean worktree, AFTER the fix in
-    # docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md: the large
-    # per-call aggregates in kiln_cfg_swap_apply()/finish_esp_done()/
-    # kiln_cfg_swap_boot_recover() (target_blob[896], readback_blob/
-    # live_blob[896], kiln_pkg_safety_t target_pico[~772],
-    # kiln_cfg_swap_pending_t p[~1688] -- ~4.25 kB in kiln_cfg_swap_apply()
-    # alone) moved from stack locals to `static`, safe because this task's
-    # own worker (kiln_cfg_swap_worker.c) guarantees at most one of those
-    # three functions is ever executing at a time. 4608 B ceiling against the
-    # unchanged 8192 B declared stack -- 3584 B of honest headroom before
-    # even subtracting UNMODELED_OVERHEAD_BYTES, a wide margin over the
-    # razor-thin "112 B to spare" this same file's finish_esp_done() comment
-    # records for the PRE-fix combined-frame measurement.
-    "kiln_cfg_swap": 4608,
+    # Measured 2026-09-22 against a KilnCtrl.elf freshly built in worktree
+    # C:\wt\swapstack_yrljuq (rebased onto origin/main f5a793ce), superseding
+    # the same-day static-locals fix below. Review of that fix
+    # (docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md) found the
+    # `static` aggregates (target_blob[896]x2, kiln_pkg_safety_t ~772B x2,
+    # kiln_cfg_swap_pending_t ~1688B x2, live_blob[896]) cost ~8.5 kB of
+    # PERMANENT internal .bss every boot on a board with a real DRAM-
+    # exhaustion history (project_esp_internal_dram_exhaustion). Replaced
+    # with one heap_caps_malloc(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT) scratch
+    # struct allocated per job and freed before every return, inside a thin
+    # wrapper around each of kiln_cfg_swap_apply()/finish_esp_done()/
+    # kiln_cfg_swap_boot_recover() (still safe under the same one-job-at-a-
+    # time serialization: depth-1 queue, is_busy() interlock, boot_recover
+    # runs once before the job loop starts). Confirmed on a side-by-side
+    # build of the pre-fix `static` source against the same origin/main base:
+    # DIRAM .bss dropped from 102664 B to 94168 B (-8496 B), DIRAM total from
+    # 199698 B to 191202 B; .data unchanged at 23367 B. Declared task stack
+    # unchanged at 8192 B. New ceiling 4656 B (this walk's own measured
+    # total, not headroom-padded) -- 3236 B honest free (39.5% of the
+    # declared 8192 B, already net of UNMODELED_OVERHEAD_BYTES). Each
+    # wrapper fails loud
+    # (set_reason()/latch_boot_fault()) and returns before any state-
+    # mutating step if the allocation fails, so a failed allocation can
+    # never leave a partial swap.
+    "kiln_cfg_swap": 4656,
     "autotune_engine": 2944,
     # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
     # regression tripwire -- NOT a measured worst case. The task's deep path

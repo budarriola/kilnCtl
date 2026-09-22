@@ -64,11 +64,11 @@ it) carries its own `target_blob`/`target_pico`/`live_blob` (~2.56 kB) --
 all on the SAME worker task's stack, since `kiln_cfg_swap_boot_recover()`
 runs as that task's first act before its job-queue loop starts.
 
-## Fix
+## Fix (superseded -- see "Review update" below)
 
 `target_blob`, `target_pico`, `p`, and `readback_blob` in
 `kiln_cfg_swap_apply()`; `target_blob`, `target_pico`, and `live_blob` in
-`finish_esp_done()`; and `p` in `kiln_cfg_swap_boot_recover()` are now
+`finish_esp_done()`; and `p` in `kiln_cfg_swap_boot_recover()` were made
 `static` instead of stack locals.
 
 This is safe specifically because these three functions are the ONLY
@@ -169,3 +169,65 @@ skipped, 0 failed**, including the newly-added `kiln_cfg_swap` row inside
    worktree), then forced a full rebuild (`check_00_kilnfw_target_build.ps1`
    again, not merely a hand diff) and re-ran the full check selection above,
    confirming 12/12 green against the freshly rebuilt, restored source.
+
+## Review update -- 2026-09-22, worktree `C:\wt\swapstack_yrljuq`
+
+Review of the `static` fix flagged the permanent `.bss` cost above as large
+for a board with a real DRAM-exhaustion history
+(`project_esp_internal_dram_exhaustion`, sockets reset below ~11.9 kB free;
+a 100-slot static once panicked Wi-Fi) and asked for the smallest permanent
+footprint that still cannot fail mid-swap. Replaced the `static` locals with
+one `heap_caps_malloc(sizeof(*scratch), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)`
+scratch struct allocated per job, freed before every return, inside a thin
+wrapper (`kiln_cfg_swap_apply()`, `finish_esp_done()`,
+`kiln_cfg_swap_boot_recover()` are now wrappers around `_impl()` siblings
+that take the scratch as a parameter). Each wrapper fails loud
+(`set_reason()` for `kiln_cfg_swap_apply()`, `latch_boot_fault()` for the
+other two) and returns before any state-mutating step if the allocation is
+NULL, so a failed allocation can never leave a partial swap. The task stays
+on internal heap only (`MALLOC_CAP_INTERNAL`), unchanged from the `static`
+approach, since it writes NVS. Serialization is unchanged from the section
+above (depth-1 queue, `is_busy()` interlock, boot_recover runs once before
+the job loop) and was re-confirmed against this worktree's `kiln_cfg_swap.c`
+and `kiln_cfg_swap_worker.c`; the only other readers of this module's state
+(`kiln_cfg_swap_get_boot_fault()`, used by `dashboard_http.c`/
+`dashboard_status_http.c`, and `kiln_cfg_swap_worker_get_status()`, used by
+`kiln_cfg_http.c`'s status route) read only their own small, mutex-guarded
+fields and never touch the heap scratch, so no other task's read races the
+allocation/free.
+
+Measured on a side-by-side rebuild of the `static` source against the same
+origin/main base (`f5a793ce`), same sdkconfig, in this worktree:
+
+| | `.dram0.data` | `.dram0.bss` | DIRAM total |
+|---|---|---|---|
+| `static` locals (this doc's original fix) | 23367 B | 102664 B | 199698 B |
+| `heap_caps_malloc`/free per job (this update) | 23367 B | 94168 B | 191202 B |
+| Delta | 0 | **-8496 B** | **-8496 B** |
+
+Declared task stack unchanged at 8192 B (`SWAP_WORKER_STACK_BYTES`). The
+static call-depth ceiling shifted slightly with the new call shape (smaller
+per-function frames, same call chain depth): measured 4656 B against a
+freshly, fully rebuilt `KilnCtrl.elf` in this worktree (was 4608 B under the
+`static` fix) -- `CEILING_BYTES["kiln_cfg_swap"]` in
+`check_all_task_stack_budgets.py` updated to 4656 accordingly. Honest free
+at that ceiling: 3236 B (39.5% of 8192 B, already net of
+`UNMODELED_OVERHEAD_BYTES`).
+
+Negative test repeated against this fix specifically: reverted
+`kiln_cfg_swap.c` to the original, pre-any-fix source (`git show
+76b78802~1:...`, plain stack locals, no `static`, no heap), forced a full
+rebuild, and confirmed `check_all_task_stack_budgets.py` fails loud naming
+`kiln_cfg_swap`:
+
+```
+total 8720 B; ceiling 4656 B; honest free -828 B (-10.1% of 8192 B)
+FAIL: 8720 B exceeds the 4656 B ceiling for kiln_cfg_swap.
+FAIL: honest free is negative (-828 B) once the 300 B unmodeled-overhead allowance is counted.
+```
+
+Restored the heap-allocation source by hand from a saved copy (never `git
+checkout --`), forced another full rebuild (`idf.py fullclean` then `idf.py
+build`), and re-ran
+`tools\run_all_checks.ps1 -AllowFewerChecks -AllowSkips -Only "stack|kiln_cfg"`
+against that freshly rebuilt, restored source: 11/11 passed.
