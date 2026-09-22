@@ -245,7 +245,7 @@
         settled = true;
         loginFormEl.removeEventListener('submit', onSubmit);
         loginCancelEl.removeEventListener('click', onCancel);
-        loginFormEl.removeEventListener('keydown', onKeydown);
+        document.removeEventListener('keydown', onKeydown, true);
         loginModalEl.setAttribute('hidden', '');
         if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
           previouslyFocused.focus();
@@ -292,7 +292,14 @@
       }
       loginFormEl.addEventListener('submit', onSubmit);
       loginCancelEl.addEventListener('click', onCancel);
-      loginFormEl.addEventListener('keydown', onKeydown);
+      // Review fix, 2026-09-21: this listener is on `document` (capture
+      // phase), not on the panel. A click on the overlay backdrop moves
+      // focus to <body>, and a keydown bound to the panel would then never
+      // fire -- so both Escape and the Tab trap silently stopped working
+      // after one stray click, which is exactly the case a trap exists
+      // for. finish() removes it (same capture flag, or removal is a
+      // no-op), so no listener outlives the modal.
+      document.addEventListener('keydown', onKeydown, true);
     });
   }
 
@@ -356,12 +363,30 @@
         // page already does with a failed action (an inline error message,
         // its own .catch()) still runs exactly as before this change.
         //
-        // Review fix, 2026-09-21 (b): the retry goes back through
-        // window.fetch (this same wrapper), not nativeFetch, so a caller
-        // built on kcFetchWithSafetyAck/kcOtaAuthedFetch (both call the
-        // bare `fetch` identifier, which resolves to window.fetch) still
-        // gets its 428-ack / OTA-signing handling applied to the retried
-        // request instead of that retry reaching the page raw.
+        // Review fix, 2026-09-21 (b), CORRECTED by review the same day:
+        // the retry goes back through window.fetch (this same wrapper)
+        // rather than nativeFetch so that a 401 on the retry -- the session
+        // dropping again between the login and the resend -- still gets the
+        // /login redirect above instead of surfacing as a raw 401 body.
+        //
+        // What re-entry does NOT do, despite an earlier comment here saying
+        // it did: kcFetchWithSafetyAck and kcOtaAuthedFetch sit ABOVE this
+        // wrapper (they CALL fetch; this wrapper is the innermost layer),
+        // so re-entering window.fetch cannot re-run either of them. The
+        // retried request carries whatever headers the original init had,
+        // including an already-sent X-Ota-Mac -- it is a replay, not a
+        // re-signing. That replay is accepted by the board only because
+        // http_auth_http.c denies an insufficient_role request BEFORE the
+        // route handler runs, so ota_http_verify_request() never consumed
+        // the nonce -- and only while that nonce is still inside its 30 s
+        // OTA_AUTH_NONCE_EXPIRY_MS window, which a human typing into this
+        // modal can easily exceed. An OTA-family action retried after a
+        // slow login therefore fails with the board's own stale-nonce 403,
+        // which the page reports the way it reports any other failure;
+        // re-signing would have to happen in kcOtaAuthedFetch, not here.
+        // The 428/no-safety-ack path is unaffected either way:
+        // kcFetchWithSafetyAck inspects whatever response this wrapper's
+        // promise resolves to, retry included.
         return ensureAdminLogin('Administrator login required').then(function (ok) {
           if (!ok) return resp;
           var retryInit = {};

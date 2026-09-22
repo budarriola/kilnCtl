@@ -387,10 +387,12 @@ function extract_js_var_string(src, varName) {
   //   3. exactly one retry call follows that check, guarded by a one-shot
   //      "already retried" marker (`__kcAuthRetried`) so a second
   //      insufficient_role 403 on the retry itself does not loop into a
-  //      second modal -- the retry re-enters `window.fetch` (not
-  //      `nativeFetch`) so kcFetchWithSafetyAck/kcOtaAuthedFetch's 428-ack
-  //      and OTA-signing handling still apply to the retried request
-  //      (review fix, 2026-09-21 (b)).
+  //      second modal. The retry re-enters `window.fetch` rather than
+  //      `nativeFetch` so a 401 on the retry still gets the login
+  //      redirect; see app.js's own comment at that call site for what
+  //      re-entry does NOT buy (kcFetchWithSafetyAck/kcOtaAuthedFetch sit
+  //      ABOVE this wrapper, so nothing re-signs the retried request)
+  //      (review fix, 2026-09-21 (b); corrected by review 2026-09-21).
   //   4. the login modal is a real dialog: role="dialog" (+ aria-modal) so
   //      assistive tech announces it as one, and Escape cancels it the same
   //      as the Cancel button (review fix, 2026-09-21 (a)).
@@ -435,7 +437,13 @@ function extract_js_var_string(src, varName) {
                      `403 on the retry itself would loop into a second modal.`);
       }
     }
-    if (!/setAttribute\(\s*['"]role['"]\s*,\s*['"]dialog['"]\s*\)/.test(src) || !/aria-modal/.test(src)) {
+    // Both attributes are matched in their setAttribute() form specifically.
+    // A bare /aria-modal/ substring test passed VACUOUSLY (review,
+    // 2026-09-21): the explanatory comment above that code in app.js
+    // contains the literal text "aria-modal", so deleting the
+    // setAttribute('aria-modal', 'true') call left this check green.
+    if (!/setAttribute\(\s*['"]role['"]\s*,\s*['"]dialog['"]\s*\)/.test(src) ||
+        !/setAttribute\(\s*['"]aria-modal['"]\s*,\s*['"]true['"]\s*\)/.test(src)) {
       bad++;
       console.log(`app.js: the login modal is missing role="dialog"/aria-modal -- assistive tech ` +
                    `would not announce it as a dialog.`);
