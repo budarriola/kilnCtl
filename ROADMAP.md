@@ -3110,6 +3110,16 @@ Owner instruction, 2026-09-21.
   `kiln_config_apply` MCP tool (`2b9752ff`, kilnctrl facade now 180 tools,
   distinguishes the interlock 428 from the hardware-differs 428) and
   OT-P05 unreadable-vs-absent trip state (`4499314f`).
+- **Owner requests 2026-09-22 (in flight)**: (1) no "authentication
+  required" page anywhere on the web UI: with no session, any gated page
+  or action goes to the login page with a return URL; with a non-admin
+  session, an admin-tier action opens a pop-up offering to log into an
+  admin account and retries once on success. (2) Web session idle and
+  absolute timeouts and LCD inactivity re-lock, configurable, enforced.
+  (3) `kiln_configs` apply reported `diverged=true` on a successful
+  no-op self-apply: the post-swap clause read the ESP's own zeroed crc
+  cache tag (`docs/audits/kiln_config_self_apply_diverged_2026-09-22.md`,
+  `c3639d07`); fix in flight, then flash and re-apply on the bench.
 - **Bench reflash, 2026-09-22 ~04:00Z**: ESP reflashed to `63a48ab3` (flash
   verified, ELF archived as `KilnCtrl-da119321dcbb.elf`); Pico unchanged at
   `05f1ab1f` build.
