@@ -1255,6 +1255,35 @@ def test_cdp_driver_fill_reads_back_the_assigned_value():
     assert text.index("if (String(el.value) !== ") < text.index("new Event('input'")
 
 
+def test_cdp_driver_click_retries_before_giving_up():
+    # W8's live run (2026-09-22, board at 7dcde0dd) hit a runner selector
+    # defect: the create step passed and GET /api/profiles confirmed the new
+    # scratch profile server-side, but the very next CDP invocation's delete
+    # click (aria-label 'Delete "<name>"') fired only ~500ms after
+    # navigation -- before profiles_page.html's own refreshAll() fetch had
+    # repainted the list -- and failed NOT_FOUND. The fix is a bounded
+    # poll-and-click (clickWithRetry()), used for BOTH the top-level
+    # --selector-kind click and every `click` step, not a one-shot resolve.
+    src = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
+    with open(src, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert "async function clickWithRetry(" in text
+    assert "CLICK_WAIT_TIMEOUT_MS" in text
+    # The `click` step action must delegate to the retrying helper, not
+    # resolve-and-click exactly once.
+    click_step = text[text.index("if (step.action === 'click') {"):]
+    click_step = click_step[:click_step.index("if (step.action === 'fill')")]
+    assert "clickWithRetry(cdp, step.kind, step.selector" in click_step
+    assert "NOT_FOUND" not in click_step  # no more inline one-shot resolve here
+    # The top-level single-shot --selector-kind click (id/css/aria-label and
+    # text) must also delegate to it, not keep its own inline Runtime.evaluate.
+    top_click = text[text.index("if (args.selectorKind === 'id'"):]
+    top_click = top_click[:top_click.index("} else if (args.selectorKind === undefined")]
+    assert "clickWithRetry(cdp, args.selectorKind, args.selector" in top_click
+    assert "clickWithRetry(cdp, 'text', args.selector" in top_click
+    assert "NOT_FOUND" not in top_click
+
+
 def test_w50_declares_special_setup_wizard_step1_shape():
     row = wcr.ROWS["W50"]
     assert row.special == "setup_wizard_step1"

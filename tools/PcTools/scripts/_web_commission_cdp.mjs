@@ -130,6 +130,10 @@ const CDP_CALL_TIMEOUT_MS = 20000;
 // Bounded post-click waits (see CdpSession.waitForPost/waitForQuiet).
 const POST_WAIT_TIMEOUT_MS = 10000;
 const QUIET_TIMEOUT_MS = 5000;
+// Bounded poll for a click target to appear before giving up (2026-09-22:
+// W8's live run found the profiles list still mid-fetch/render when the
+// delete click fired -- see clickWithRetry()'s own comment below).
+const CLICK_WAIT_TIMEOUT_MS = 5000;
 
 function findChrome() {
   const candidates = [
@@ -455,6 +459,39 @@ function elementExpr(kind, selector) {
   throw new Error(`unknown selector kind ${JSON.stringify(kind)}`);
 }
 
+// Resolves and clicks an element, polling (bounded by `timeoutMs`) rather
+// than trying exactly once. Every click target this script resolves by
+// id/css/aria-label/text is rendered by an async fetch (profiles_page.html's
+// refreshAll(), loadZones(), etc.) that runs AFTER Page.navigate resolves --
+// the one flat 500ms sleep in main() before the first click/step is a
+// convenience, not a guarantee the list has finished rendering yet. W8's
+// live run (2026-09-22, board at 7dcde0dd) hit exactly this: the create step
+// passed and GET /api/profiles confirmed the new profile server-side, but
+// the very next CDP call's delete click fired before /profiles' own
+// GET /api/profiles fetch had repainted the list, so the per-row
+// aria-label="Delete "<name>"" button did not exist in the DOM yet and the
+// click failed NOT_FOUND. Retrying the resolve-and-click (not just a
+// resolve-and-wait, since a `text`-kind lookup targets a <button> click
+// directly) covers this for every selector kind and every call site --
+// single-shot --selector-kind/--selector, and each `click` step -- without
+// requiring every caller to also thread a separate wait-for-selector step in
+// front of its click (aria-label and text selectors have no CSS-escapable
+// form wait-for-selector could use anyway, see elementExpr()'s own comment
+// on why aria-label is an exact JS string compare, not a CSS attribute
+// selector).
+async function clickWithRetry(cdp, kind, selector, label, timeoutMs = CLICK_WAIT_TIMEOUT_MS) {
+  const expr = `(() => { const el = ${elementExpr(kind, selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
+    if (res.result.value === 'CLICKED') return;
+    if (Date.now() >= deadline) {
+      throw new Error(`${label}: selector ${JSON.stringify(selector)} (kind=${kind}) not found within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 // Executes one --steps entry. Mirrors applyFills()'s read-back-or-fail rule
 // for "fill" (a value the element silently rejects is a hard failure, never
 // a silent continue -- see that function's own comment for why), and
@@ -462,11 +499,7 @@ function elementExpr(kind, selector) {
 async function runStep(cdp, step, idx) {
   const label = `step[${idx}] ${step.action}`;
   if (step.action === 'click') {
-    const expr = `(() => { const el = ${elementExpr(step.kind, step.selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
-    const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-    if (res.result.value !== 'CLICKED') {
-      throw new Error(`${label}: selector ${JSON.stringify(step.selector)} (kind=${step.kind}) not found`);
-    }
+    await clickWithRetry(cdp, step.kind, step.selector, label, step.timeoutMs || CLICK_WAIT_TIMEOUT_MS);
     return;
   }
   if (step.action === 'fill') {
@@ -591,18 +624,10 @@ async function main() {
     }
 
     if (args.selectorKind === 'id' || args.selectorKind === 'css' || args.selectorKind === 'aria-label') {
-      const expr = `(() => { const el = ${elementExpr(args.selectorKind, args.selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
-      const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-      if (res.result.value !== 'CLICKED') {
-        throw new Error(`selector ${JSON.stringify(args.selector)} (kind=${args.selectorKind}) not found on ${args.route} at runtime`);
-      }
+      await clickWithRetry(cdp, args.selectorKind, args.selector, `selector click on ${args.route}`);
       postResult = await settle(cdp, args);
     } else if (args.selectorKind === 'text') {
-      const expr = `(() => { const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes(${JSON.stringify(args.selector)})); if (!btn) return 'NOT_FOUND'; btn.click(); return 'CLICKED'; })()`;
-      const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-      if (res.result.value !== 'CLICKED') {
-        throw new Error(`button text "${args.selector}" not found on ${args.route} at runtime`);
-      }
+      await clickWithRetry(cdp, 'text', args.selector, `button text click on ${args.route}`);
       postResult = await settle(cdp, args);
     } else if (args.selectorKind === undefined && args.steps.length) {
       // steps-only run (no top-level click): still settle so --expect-post
