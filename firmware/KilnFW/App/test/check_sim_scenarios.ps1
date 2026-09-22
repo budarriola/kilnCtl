@@ -15,7 +15,9 @@
 #
 # SUPERSEDED IN PART, 2026-09-21: check_00_kilnfw_host_tests.ps1 (same
 # directory) now builds and runs the WHOLE build_host_tests.ps1 suite --
-# sim_scenarios.exe included -- as its own phase-1 check_*.ps1, so a broken
+# sim_scenarios.exe included -- as its own discovered check_*.ps1 (in
+# run_all_checks.ps1's throttled phase 2, NOT phase 1 -- the check_00_
+# prefix there is for sort order, not phase membership), so a broken
 # BUILD of sim_scenarios.exe (or any of its 55 siblings) can no longer land
 # with every discovered check_*.ps1 green the way this file's header
 # originally described. This file's OWN, separate value is unchanged and
