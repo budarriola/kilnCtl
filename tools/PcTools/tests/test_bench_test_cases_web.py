@@ -10,6 +10,9 @@ Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_web.py -q
 from __future__ import annotations
 
 import gzip
+import urllib.request
+import urllib.error
+import email
 import os
 import sys
 import unittest
@@ -87,7 +90,7 @@ class HttpGetRawTest(unittest.TestCase):
             captured["req"] = req
             return resp
 
-        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+        with mock.patch.object(C._NO_REDIRECT_OPENER, "open", side_effect=_fake_urlopen):
             status, body = C._http_get_raw("1.2.3.4", "/nav.js")
         self.assertEqual(status, 200)
         self.assertEqual(body, "plain body")
@@ -100,10 +103,30 @@ class HttpGetRawTest(unittest.TestCase):
         resp.read.return_value = payload
         resp.headers.get.side_effect = lambda name, default=None: "gzip" if name == "Content-Encoding" else default
         resp.__enter__.return_value = resp
-        with mock.patch("urllib.request.urlopen", return_value=resp):
+        with mock.patch.object(C._NO_REDIRECT_OPENER, "open", return_value=resp):
             status, body = C._http_get_raw("1.2.3.4", "/theme.css")
         self.assertEqual(status, 200)
         self.assertEqual(body, '{"ok": true}')
+
+    def test_a_302_is_reported_not_followed(self):
+        """http_auth_http.c answers an unauthenticated gated PAGE GET with a
+        302 to /login. WEB-X-03 grades a 3xx as a valid refusal, so this
+        helper must hand the 302 BACK -- if urllib followed it, the sweep
+        would see "200 <login page>" on an ADMIN route and fail a healthy
+        board. Negative form of the same check: the real opener must be the
+        no-redirect one."""
+        err = urllib.error.HTTPError(
+            "http://1.2.3.4/settings", 302, "Found", email.message.Message(), None
+        )
+        with mock.patch.object(C._NO_REDIRECT_OPENER, "open", side_effect=err):
+            status, body = C._http_get_raw("1.2.3.4", "/settings")
+        self.assertEqual(status, 302)
+        self.assertIsNone(body)
+        self.assertTrue(
+            any(isinstance(h, C._NoRedirect) for h in C._NO_REDIRECT_OPENER.handlers),
+            "the opener _http_get_raw uses must carry the no-redirect handler",
+        )
+        self.assertIsNone(C._NoRedirect().redirect_request(None, None, 302, "Found", {}, "/login"))
 
 
 class NavX01Test(unittest.TestCase):

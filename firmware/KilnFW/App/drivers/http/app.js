@@ -301,7 +301,12 @@
   (function () {
     var params = new URLSearchParams(window.location.search);
     var target = params.get('admin_required');
-    if (!target || target.charAt(0) !== '/' || target.charAt(1) === '/') {
+    // Review fix, 2026-09-21: a BACKSLASH second character is rejected too --
+    // browsers normalise "/\" to "//", so "/?admin_required=/\evil.example"
+    // would otherwise navigate off-host. URLSearchParams has already decoded
+    // percent escapes, so the check runs on the decoded value.
+    if (!target || target.charAt(0) !== '/' || target.charAt(1) === '/' ||
+        target.charAt(1) === '\\') {
       // Missing, or not a same-page-relative path (a "//host" value would
       // be browser-interpreted as protocol-relative to an attacker's
       // host) -- same open-redirect guard as login_page.html's

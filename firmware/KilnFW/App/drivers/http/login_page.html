@@ -58,7 +58,13 @@
 function loginReturnPath() {
   var params = new URLSearchParams(window.location.search);
   var ret = params.get('return');
-  if (ret && ret.charAt(0) === '/' && ret.charAt(1) !== '/') {
+  // Review fix, 2026-09-21: the second character must be neither "/" NOR a
+  // BACKSLASH. Browsers normalise "\" to "/" in a URL path (WHATWG URL), so
+  // "/\evil.example" parses as "//evil.example" -- protocol-relative to an
+  // attacker's host -- and slipped past a "//"-only guard. URLSearchParams has
+  // already percent-decoded `ret` here, so "%2F%5Cevil.example" is checked in
+  // its decoded form, not its literal one.
+  if (ret && ret.charAt(0) === '/' && ret.charAt(1) !== '/' && ret.charAt(1) !== '\\') {
     return ret;
   }
   return '/';

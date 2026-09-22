@@ -57,6 +57,29 @@ def _web_client(ctx: dict):
     return WebUiClient(f"http://{host}")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: hand back the 3xx itself.
+
+    Review fix, 2026-09-21: http_auth_http.c now answers an unauthenticated
+    GET on a gated PAGE route (any registered URI outside "/api/") with
+    "302 Found -> /login?return=<uri>" instead of a 401 body, so a browser
+    lands on the login page rather than an "authentication required" screen.
+    urllib follows that 302 by default, which turned WEB-X-03's observation
+    of every ADMIN-tier page route from "302" into "200 <login page HTML>"
+    -- and 200 on an ADMIN route with web auth enabled is exactly what that
+    sweep exists to fail on. The sweep's grading already accepts a 3xx as a
+    refusal; it just has to be able to SEE one. No caller here wants the
+    redirect followed (the other three call sites are ROUTE_TIER_OPEN routes
+    that never redirect), so this opener serves all of them.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http_get_raw(host: str, path: str, timeout: float = 5.0) -> "tuple[Optional[int], Optional[str]]":
     """Bare, no-cookie GET -- used for the tier sweep, which must observe
     the response an unauthenticated client actually gets, not one built
@@ -70,7 +93,7 @@ def _http_get_raw(host: str, path: str, timeout: float = 5.0) -> "tuple[Optional
     # browser does and decode what comes back.
     req = urllib.request.Request(url, method="GET", headers={"Accept-Encoding": "gzip"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read()
             if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
                 raw = gzip.decompress(raw)

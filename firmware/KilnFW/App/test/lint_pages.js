@@ -374,7 +374,12 @@ function extract_js_var_string(src, varName) {
   //      caller in every page, including app.js's own kcFetchWithSafetyAck/
   //      kcOtaAuthedFetch, which call the bare `fetch` identifier and so
   //      pick up whatever window.fetch currently is).
-  //   2. the reassigned function checks X-Kiln-Auth-Reason (the header
+  //   2. the reassigned function actually READS the X-Kiln-Auth-Reason
+  //      response header -- matched as `headers.get('X-Kiln-Auth-Reason')`,
+  //      the code shape, not the bare name: review fix 2026-09-21, the
+  //      original /X-Kiln-Auth-Reason/ pattern also matched this file's own
+  //      explanatory comments in app.js, so renaming the header in the live
+  //      check left the guard green (negative-tested: it did). The header
   //      http_auth_http.c sets ONLY on HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
   //      the signed-in-wrong-role case) -- without this, a 403 from an
   //      unrelated route (ota_http.c's verify failure, etc.) would wrongly
@@ -392,7 +397,7 @@ function extract_js_var_string(src, varName) {
       console.log(`app.js: window.fetch is not reassigned -- the global 401/403 login-escalation ` +
                    `wrapper (owner report, 2026-09-21) is missing or was refactored away from the ` +
                    `one interception point every page's fetch() calls rely on.`);
-    } else if (!/X-Kiln-Auth-Reason/.test(src)) {
+    } else if (!/headers\.get\(['"]X-Kiln-Auth-Reason['"]\)/.test(src)) {
       bad++;
       console.log(`app.js: the fetch wrapper no longer checks X-Kiln-Auth-Reason -- it would treat ` +
                    `every 403 (including unrelated ones from ota_http.c/diagnostics_http.c/` +
