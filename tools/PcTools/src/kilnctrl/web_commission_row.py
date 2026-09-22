@@ -508,6 +508,44 @@ def _get_json_with_cookie(host: str, path: str, cookie: str, timeout: float = 5.
         return status, None
 
 
+def _post_form_with_cookie(host: str, path: str, cookie: str, fields: dict,
+                            timeout: float = 5.0) -> "tuple[Optional[int], Optional[dict]]":
+    """Authenticated form-urlencoded POST, used for the setup-progress
+    save/restore in `_run_setup_wizard_step1()` (this module's other write
+    paths all go through the CDP driver instead, since they need a real
+    page's own JS to build the request; the progress route's shape is
+    simple enough -- `step=<n>&state=<name>[&note=...]` -- to post directly
+    the same way `_login_once()` already posts the login form). Returns
+    (status, parsed-json-or-None), same contract as
+    `_get_json_with_cookie()`."""
+    url = f"http://{host}{path}"
+    body = urllib.parse.urlencode(fields).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Cookie": f"kiln_sid={cookie}",
+            "Accept-Encoding": "identity",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            text = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            text = None
+        status = exc.code
+    except (urllib.error.URLError, OSError) as exc:
+        return None, {"error": str(exc)}
+    try:
+        return status, json.loads(text) if text else None
+    except (ValueError, TypeError):
+        return status, None
+
+
 _PASSTHROUGH_ENV_KEYS = ("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP",
                          "COMSPEC", "WINDIR", "PROGRAMFILES", "PROGRAMFILES(X86)",
                          "LOCALAPPDATA", "APPDATA", "USERPROFILE", "NUMBER_OF_PROCESSORS")
@@ -572,7 +610,16 @@ def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str)
     row with both `fills` and `restore_from_field` set (W22, W38). Every
     failure path below names exactly what state, if any, may have been
     left on the board -- this must never report PASS with a field still
-    holding the test value."""
+    holding the test value.
+
+    Restore is UNCONDITIONAL once the first (flipping) Save has been
+    attempted: every failure path after that point -- a CDP driver that
+    exits non-zero or raises, a read-back that does not answer 200, a
+    collateral guard-field write, or a field that never changed -- still
+    runs the restoring Save and appends its outcome to the failure
+    message. The board must never be left holding the test value merely
+    because the check that would have noticed happened to fail first
+    (mirrors the W50 fix, 14e2324b)."""
     pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
     if pre_status != 200 or not isinstance(pre_body, dict):
         return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
@@ -589,56 +636,90 @@ def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str)
                         f"{row.verify_endpoint} body -- cannot prove this row's Save left them "
                         f"alone, refusing to write")
 
-    proc = _run_cdp(row, host, screenshot_dir, cookie, fills=row.fills, shot_suffix="_set")
-    if proc.returncode != 0:
-        return False, f"{row.row_id} FAIL: CDP driver (set) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
-
-    mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
-    if mid_status != 200 or not isinstance(mid_body, dict):
-        return False, (f"{row.row_id} FAIL: post-set read-back GET {row.verify_endpoint} -> "
-                        f"{mid_status}: {json.dumps(mid_body)[:300]}")
-    # Checked BEFORE the "did the edited field change?" test below: a Save
-    # that raced the page's own loadCurrent() can post the form's markup
-    # defaults for every field it carries, including one that leaves the
-    # edited field reading its original value -- that path would otherwise
-    # return "write did not land" while the collateral write went
-    # unmentioned.
-    drifted = [k for k, orig in guarded.items() if str(mid_body.get(k)) != orig]
-    if drifted:
-        return False, (f"{row.row_id} FAIL: this row's Save also CHANGED field(s) {drifted} "
-                        f"(now {[mid_body.get(k) for k in drifted]!r}, were "
-                        f"{[guarded[k] for k in drifted]!r}) -- collateral write, LEFT ON BOARD, "
-                        f"restore by hand")
-    unchanged = [k for k, orig in zip(row.restore_from_field, originals) if str(mid_body.get(k)) == orig]
-    if unchanged:
-        return False, (f"{row.row_id} FAIL: field(s) {unchanged} did not change after Save "
-                        f"(still {[mid_body.get(k) for k in unchanged]!r}) -- write likely did not land")
-
     restore_fills = tuple((sel, orig) for (sel, _new), orig in zip(row.fills, originals))
-    restore_proc = _run_cdp(row, host, screenshot_dir, cookie, fills=restore_fills, shot_suffix="_restore")
-    if restore_proc.returncode != 0:
-        return False, (f"{row.row_id} FAIL: CDP driver (restore) exited {restore_proc.returncode}: "
-                        f"{restore_proc.stderr.strip()[-500:]} -- board may be LEFT with the test "
-                        f"value, restore by hand: {dict(zip(row.restore_from_field, originals))}")
 
-    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
-    if final_status != 200 or not isinstance(final_body, dict):
-        return False, (f"{row.row_id} FAIL: post-restore read-back GET {row.verify_endpoint} -> "
-                        f"{final_status}: {json.dumps(final_body)[:300]} -- restore POST landed, "
-                        f"but read-back could not confirm it")
-    not_restored = [k for k, orig in zip(row.restore_from_field, originals) if str(final_body.get(k)) != orig]
-    if not_restored:
-        return False, (f"{row.row_id} FAIL: restore did not take -- field(s) {not_restored} still read "
-                        f"{[final_body.get(k) for k in not_restored]!r}, expected original "
-                        f"{dict(zip(row.restore_from_field, originals))}")
-    # The restore is a second full-form Save, so it can drift the guarded
-    # fields just as the first one can.
-    final_drifted = [k for k, orig in guarded.items() if str(final_body.get(k)) != orig]
-    if final_drifted:
-        return False, (f"{row.row_id} FAIL: the restore Save CHANGED field(s) {final_drifted} "
-                        f"(now {[final_body.get(k) for k in final_drifted]!r}, were "
-                        f"{[guarded[k] for k in final_drifted]!r}) -- the edited field is back to "
-                        f"its original, but this collateral write is LEFT ON BOARD, restore by hand")
+    def _restore() -> "tuple[bool, str]":
+        """The restoring second Save, plus its read-back. Called on EVERY
+        path that got as far as attempting the first (flipping) Save --
+        including a mid-state read-back that failed, a CDP driver that
+        errored, a collateral guard-field write, or a field that never
+        changed -- because any of those may have left the board on the
+        test value(s), and this row must never end with a field still
+        flipped."""
+        try:
+            restore_proc = _run_cdp(row, host, screenshot_dir, cookie,
+                                     fills=restore_fills, shot_suffix="_restore")
+        except Exception as exc:  # noqa: BLE001 -- subprocess timeout/OSError must not skip the report
+            return False, (f" -- RESTORE ATTEMPT ITSELF FAILED ({type(exc).__name__}: {exc}); board may "
+                            f"be LEFT with the test value, restore by hand: "
+                            f"{dict(zip(row.restore_from_field, originals))}")
+        if restore_proc.returncode != 0:
+            return False, (f" -- RESTORE FAILED: CDP driver (restore) exited {restore_proc.returncode}: "
+                            f"{restore_proc.stderr.strip()[-500:]}; board may be LEFT with the test "
+                            f"value, restore by hand: {dict(zip(row.restore_from_field, originals))}")
+        final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+        if final_status != 200 or not isinstance(final_body, dict):
+            return False, (f" -- RESTORE UNCONFIRMED: post-restore read-back GET {row.verify_endpoint} "
+                            f"-> {final_status}: {json.dumps(final_body)[:300]}; restore POST landed, "
+                            f"but read-back could not confirm it")
+        not_restored = [k for k, orig in zip(row.restore_from_field, originals) if str(final_body.get(k)) != orig]
+        if not_restored:
+            return False, (f" -- RESTORE FAILED: field(s) {not_restored} still read "
+                            f"{[final_body.get(k) for k in not_restored]!r}, expected original "
+                            f"{dict(zip(row.restore_from_field, originals))} -- LEFT ON BOARD, "
+                            f"restore by hand")
+        # The restore is a second full-form Save, so it can drift the
+        # guarded fields just as the first one can.
+        final_drifted = [k for k, orig in guarded.items() if str(final_body.get(k)) != orig]
+        if final_drifted:
+            return False, (f" -- RESTORE FAILED: the restore Save CHANGED field(s) {final_drifted} "
+                            f"(now {[final_body.get(k) for k in final_drifted]!r}, were "
+                            f"{[guarded[k] for k in final_drifted]!r}) -- the edited field is back to "
+                            f"its original, but this collateral write is LEFT ON BOARD, restore by hand")
+        return True, (f" -- board restored to {dict(zip(row.restore_from_field, originals))} and "
+                       f"confirmed; guarded field(s) {sorted(guarded)} confirmed unchanged")
+
+    failure: "Optional[str]" = None
+    try:
+        proc = _run_cdp(row, host, screenshot_dir, cookie, fills=row.fills, shot_suffix="_set")
+    except Exception as exc:  # noqa: BLE001
+        # The driver can die AFTER the click's POST landed (a screenshot or
+        # teardown error, a 60 s timeout on a page that already saved), so a
+        # raise here is not proof nothing was written -- restore anyway.
+        failure = f"{row.row_id} FAIL: CDP driver (set) raised {type(exc).__name__}: {exc}"
+    else:
+        if proc.returncode != 0:
+            failure = (f"{row.row_id} FAIL: CDP driver (set) exited {proc.returncode}: "
+                        f"{proc.stderr.strip()[-500:]}")
+
+    if failure is None:
+        mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+        if mid_status != 200 or not isinstance(mid_body, dict):
+            failure = (f"{row.row_id} FAIL: post-set read-back GET {row.verify_endpoint} -> "
+                        f"{mid_status}: {json.dumps(mid_body)[:300]}")
+        else:
+            # Checked BEFORE the "did the edited field change?" test below: a
+            # Save that raced the page's own loadCurrent() can post the
+            # form's markup defaults for every field it carries, including
+            # one that leaves the edited field reading its original value --
+            # that path would otherwise return "write did not land" while
+            # the collateral write went unmentioned.
+            drifted = [k for k, orig in guarded.items() if str(mid_body.get(k)) != orig]
+            unchanged = [k for k, orig in zip(row.restore_from_field, originals) if str(mid_body.get(k)) == orig]
+            if drifted:
+                failure = (f"{row.row_id} FAIL: this row's Save also CHANGED field(s) {drifted} "
+                            f"(now {[mid_body.get(k) for k in drifted]!r}, were "
+                            f"{[guarded[k] for k in drifted]!r}) -- collateral write")
+            elif unchanged:
+                failure = (f"{row.row_id} FAIL: field(s) {unchanged} did not change after Save "
+                            f"(still {[mid_body.get(k) for k in unchanged]!r}) -- write likely did "
+                            f"not land")
+
+    restored_ok, restore_note = _restore()
+    if failure is not None:
+        return False, failure + restore_note
+    if not restored_ok:
+        return False, f"{row.row_id} FAIL:{restore_note}"
 
     return True, (
         f"{row.row_id} PASS: set {dict(row.fills)} via Save, confirmed via GET {row.verify_endpoint}, "
@@ -979,17 +1060,34 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
     behind two different POST routes, not one verify_endpoint holding
     both.
 
-    THIRD WRITE, not restored: #step1Save's own handler also calls
+    THIRD WRITE, now also restored: #step1Save's own handler calls
     postStepState(1, 'done') -> POST /api/setup/progress after both field
     POSTs resolve (setup_wizard_page.html), so running this row marks
     wizard step 1 "done" in the board's persisted commissioning progress.
-    That is a real, persistent state change this function does NOT undo --
-    a commissioning-progress flag, not a control setting, and this module
-    has no POST helper for that route. It is also not deterministic:
-    `expect_post` waits for `/api/unit_pref`, the SECOND of the three, so
-    the driver may tear Chrome down before the progress POST is issued.
-    Treat step 1's progress state as unknown after this row runs and set it
-    deliberately, rather than reading it as evidence the step was done.
+    GET /api/setup/progress (setup_progress_http.c's
+    api_setup_progress_get_handler) reads back every step's
+    {state, ts, note} keyed by string index, and the same route's POST
+    handler (api_setup_progress_post_handler, form body
+    "step=<n>&state=pending|done|skipped[&note=...]") accepts an arbitrary
+    state for a valid step index -- there is no dedicated "undo" verb, but
+    writing the step back to its PRE-RUN state is a POST like any other, so
+    this function snapshots step 1's {state, note} before the flip and
+    re-POSTs that snapshot afterward via `_post_form_with_cookie()` (no
+    page/CDP round trip needed for this one, since the route's shape is
+    just two form fields). `ts` is not restorable -- the route has no field
+    for it and always stamps the current time on write -- so a run of this
+    row does leave step 1's `ts` at "now" even after a successful restore;
+    only `state`/`note` are round-tripped and verified.
+
+    Determinism: `expect_post` for the FIRST (flipping) CDP call is
+    overridden to `/api/setup/progress` -- the THIRD and last of the three
+    chained POSTs -- rather than the row's own default
+    (`/api/unit_pref`, the second), so the driver waits for the whole
+    chain (tz -> unit_pref -> progress) to resolve before tearing Chrome
+    down. The previous default let the driver exit after the second POST,
+    before the progress POST was necessarily issued, making the progress
+    write's occurrence a race; waiting for it makes the pre/post snapshot
+    comparison meaningful.
 
     Restore is UNCONDITIONAL once the first (flipping) Save has been
     attempted: every failure path after that point -- a CDP driver that
@@ -1008,47 +1106,96 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
         return False, (f"{row.row_id} FAIL: {row.verify_endpoint} body missing usable "
                         f"time_tz/temp_unit ({json.dumps(pre_body)[:300]}) -- refusing to guess "
                         f"a value to restore to")
+
+    # Step 1's pre-run progress state, so postStepState(1,'done') (the third
+    # of #step1Save's three chained POSTs) can be undone the same way the
+    # tz/unit fields are: read it back, POST the snapshot back afterward.
+    progress_path = "/api/setup/progress"
+    pre_prog_status, pre_prog_body = _get_json_with_cookie(host, progress_path, cookie)
+    if pre_prog_status != 200 or not isinstance(pre_prog_body, dict):
+        return False, (f"{row.row_id} FAIL: pre-read GET {progress_path} -> "
+                        f"{pre_prog_status}: {json.dumps(pre_prog_body)[:300]}")
+    pre_step1 = (pre_prog_body.get("steps") or {}).get("1")
+    if not isinstance(pre_step1, dict) or "state" not in pre_step1:
+        return False, (f"{row.row_id} FAIL: {progress_path} body missing usable steps.1.state "
+                        f"({json.dumps(pre_prog_body)[:300]}) -- refusing to guess a value to "
+                        f"restore to")
+    orig_step1_state = str(pre_step1["state"])
+    orig_step1_note = pre_step1.get("note")
     test_unit = "F" if orig_unit == "C" else "C"
 
     set_fills = (("#wTz", orig_tz), ("#wUnit", test_unit))
     restore_fills = (("#wTz", orig_tz), ("#wUnit", orig_unit))
 
+    def _restore_progress() -> "tuple[bool, str]":
+        """Re-POSTs step 1's pre-run {state, note} to /api/setup/progress
+        and confirms it took via read-back. `ts` is not restorable (the
+        route has no field for it and always stamps the write time), so
+        this only round-trips state/note -- see the docstring's "THIRD
+        WRITE" section."""
+        restore_fields = {"step": "1", "state": orig_step1_state}
+        if orig_step1_note:
+            restore_fields["note"] = orig_step1_note
+        prog_status, prog_body = _post_form_with_cookie(host, progress_path, cookie, restore_fields)
+        if prog_status != 200:
+            return False, (f" -- PROGRESS RESTORE FAILED: POST {progress_path} -> {prog_status}: "
+                            f"{json.dumps(prog_body)[:300]}; step 1 progress may be LEFT at "
+                            f"'done', restore by hand to state={orig_step1_state!r}")
+        final_prog_status, final_prog_body = _get_json_with_cookie(host, progress_path, cookie)
+        if final_prog_status != 200 or not isinstance(final_prog_body, dict):
+            return False, (f" -- PROGRESS RESTORE UNCONFIRMED: post-restore read-back GET "
+                            f"{progress_path} -> {final_prog_status}: {json.dumps(final_prog_body)[:300]}; "
+                            f"restore POST landed, but read-back could not confirm it")
+        final_step1 = (final_prog_body.get("steps") or {}).get("1")
+        if not isinstance(final_step1, dict) or str(final_step1.get("state")) != orig_step1_state:
+            got = final_step1.get("state") if isinstance(final_step1, dict) else None
+            return False, (f" -- PROGRESS RESTORE FAILED: step 1 state now {got!r}, expected "
+                            f"{orig_step1_state!r} -- LEFT ON BOARD, restore by hand")
+        return True, f" -- step 1 progress restored to state={orig_step1_state!r} and confirmed"
+
     def _restore() -> "tuple[bool, str]":
-        """The restoring second Save, plus its read-back. Called on EVERY
-        path that got as far as attempting the first (flipping) Save --
-        including a mid-state read-back that failed or a CDP driver that
-        errored -- because any of those may have left the board on
-        `test_unit`, and this row must never end with the displayed unit
-        flipped. The restore re-submits the ORIGINAL tz alongside the
-        original unit, so it also repairs a collateral tz write rather
-        than only reporting one."""
+        """The restoring second Save, plus its read-back, plus the setup-
+        progress restore. Called on EVERY path that got as far as
+        attempting the first (flipping) Save -- including a mid-state
+        read-back that failed or a CDP driver that errored -- because any
+        of those may have left the board on `test_unit` (and step 1 marked
+        'done'), and this row must never end with the displayed unit
+        flipped or the progress write unaddressed. The restore re-submits
+        the ORIGINAL tz alongside the original unit, so it also repairs a
+        collateral tz write rather than only reporting one."""
         try:
             restore_proc = _run_cdp(row, host, screenshot_dir, cookie,
                                      fills=restore_fills, shot_suffix="_restore")
         except Exception as exc:  # noqa: BLE001 -- subprocess timeout/OSError must not skip the report
+            _, prog_note = _restore_progress()
             return False, (f" -- RESTORE ATTEMPT ITSELF FAILED ({type(exc).__name__}: {exc}); board may "
                             f"be LEFT with temp_unit={test_unit!r}, restore by hand (originally "
-                            f"{orig_unit!r})")
+                            f"{orig_unit!r}){prog_note}")
         if restore_proc.returncode != 0:
+            _, prog_note = _restore_progress()
             return False, (f" -- RESTORE FAILED: CDP driver (restore) exited {restore_proc.returncode}: "
                             f"{restore_proc.stderr.strip()[-500:]}; board may be LEFT with "
-                            f"temp_unit={test_unit!r}, restore by hand (originally {orig_unit!r})")
+                            f"temp_unit={test_unit!r}, restore by hand (originally {orig_unit!r}){prog_note}")
         final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+        prog_ok, prog_note = _restore_progress()
         if final_status != 200 or not isinstance(final_body, dict):
             return False, (f" -- RESTORE UNCONFIRMED: post-restore read-back GET {row.verify_endpoint} "
                             f"-> {final_status}: {json.dumps(final_body)[:300]}; restore POST landed, "
-                            f"but read-back could not confirm it")
+                            f"but read-back could not confirm it{prog_note}")
         if str(final_body.get("time_tz")) != str(orig_tz):
             return False, (f" -- RESTORE FAILED: time_tz now {final_body.get('time_tz')!r}, expected "
-                            f"{orig_tz!r} -- LEFT ON BOARD, restore by hand")
+                            f"{orig_tz!r} -- LEFT ON BOARD, restore by hand{prog_note}")
         if final_body.get("temp_unit") != orig_unit:
             return False, (f" -- RESTORE FAILED: temp_unit still {final_body.get('temp_unit')!r}, "
-                            f"expected original {orig_unit!r} -- LEFT ON BOARD, restore by hand")
-        return True, f" -- board restored to temp_unit={orig_unit!r} and confirmed"
+                            f"expected original {orig_unit!r} -- LEFT ON BOARD, restore by hand{prog_note}")
+        if not prog_ok:
+            return False, f" -- board restored to temp_unit={orig_unit!r} and confirmed{prog_note}"
+        return True, f" -- board restored to temp_unit={orig_unit!r} and confirmed{prog_note}"
 
     failure: "Optional[str]" = None
     try:
-        proc = _run_cdp(row, host, screenshot_dir, cookie, fills=set_fills, shot_suffix="_set")
+        proc = _run_cdp(row, host, screenshot_dir, cookie, fills=set_fills,
+                         expect_post="/api/setup/progress", shot_suffix="_set")
     except Exception as exc:  # noqa: BLE001
         # The driver can die AFTER the click's POSTs landed (a screenshot or
         # teardown error, a 60 s timeout on a page that already saved), so a
@@ -1081,8 +1228,9 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
     return True, (
         f"{row.row_id} PASS: toggled temp_unit {orig_unit!r} -> {test_unit!r} via setup wizard "
         f"step 1 Save (time_tz re-submitted unchanged at {orig_tz!r}), confirmed via GET "
-        f"{row.verify_endpoint}, restored to {orig_unit!r} via a second Save, confirmed restored "
-        f"| expected: {row.expected_outcome}"
+        f"{row.verify_endpoint}, restored to {orig_unit!r} via a second Save, confirmed restored, "
+        f"and step 1's /api/setup/progress state restored to {orig_step1_state!r} via a direct "
+        f"POST | expected: {row.expected_outcome}"
     )
 
 

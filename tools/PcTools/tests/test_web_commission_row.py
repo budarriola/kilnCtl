@@ -396,6 +396,28 @@ def _sequential_get_json(responses):
     return fake
 
 
+def _get_json_by_path(responses_by_path):
+    """Like `_sequential_get_json`, but for a function under test that GETs
+    more than one endpoint (W50's `_run_setup_wizard_step1`, which reads
+    both `/api/status` and `/api/setup/progress`) -- each call consumes the
+    next queued response for ITS OWN path, so the test can declare each
+    endpoint's sequence independently instead of interleaving them by call
+    order."""
+    iters = {path: iter(responses) for path, responses in responses_by_path.items()}
+
+    def fake(host, path, cookie):
+        return next(iters[path])
+
+    return fake
+
+
+_DEFAULT_PROGRESS_BODY = {"version": 1, "steps": {"1": {"state": "pending", "ts": 0, "note": ""}}}
+
+
+def _progress_body(state="pending", note="", ts=0):
+    return {"version": 1, "steps": {"1": {"state": state, "ts": ts, "note": note}}}
+
+
 def _zones_body(pclink, **guard_overrides):
     """A /api/zones response body carrying both W22's edited field and the
     three top-level counts W22 declares as `guard_fields` -- the page posts
@@ -429,20 +451,26 @@ def test_fill_and_restore_full_flow_passes(monkeypatch):
 
 def test_fill_and_restore_fails_if_value_never_changes(monkeypatch):
     # The write silently didn't land -- must FAIL, not report PASS with a
-    # restore of a value that was never actually different.
+    # restore of a value that was never actually different. The restoring
+    # Save still runs and is still read back, even though the flip itself
+    # never landed.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
             (200, _zones_body(30000)),
             (200, _zones_body(30000)),
+            (200, _zones_body(30000)),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    runs = []
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
     assert "did not change" in msg
+    assert len(runs) == 2, "restore Save must run even when the mid-state check fails"
+    assert "restored" in msg
 
 
 def test_fill_and_restore_fails_loud_if_restore_does_not_take(monkeypatch):
@@ -462,7 +490,8 @@ def test_fill_and_restore_fails_loud_if_restore_does_not_take(monkeypatch):
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
-    assert "restore did not take" in msg
+    assert "RESTORE FAILED" in msg
+    assert "LEFT ON BOARD" in msg
 
 
 def test_kiln_config_create_delete_full_flow_passes(monkeypatch):
@@ -1030,7 +1059,8 @@ def test_fill_and_restore_fails_if_save_also_changed_a_guarded_field(monkeypatch
     # settings_display_page.html's Save has no "loaded yet?" guard and posts
     # all four fields together, so a Save racing its own loadCurrent() writes
     # the markup defaults over the other three. That must FAIL loudly, not
-    # pass because the one edited field round-tripped.
+    # pass because the one edited field round-tripped -- but the restoring
+    # Save still runs and repairs the collateral write.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
@@ -1039,15 +1069,22 @@ def test_fill_and_restore_fails_if_save_also_changed_a_guarded_field(monkeypatch
             # Brightness took, but the three others got the markup defaults.
             (200, {"brightness_percent": 45, "timeout_setting": 0,
                    "keep_on_while_firing": False, "display_on_error": False}),
+            # The restoring Save re-submits the original brightness alongside
+            # markup-default-free values, repairing the collateral write too.
+            (200, {"brightness_percent": 100, "timeout_setting": 300,
+                   "keep_on_while_firing": True, "display_on_error": True}),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    runs = []
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W38"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
     assert "collateral write" in msg
     assert "timeout_setting" in msg
+    assert len(runs) == 2, "restore Save must run after a collateral-write failure"
+    assert "restored" in msg
 
 
 def test_fill_and_restore_guard_check_precedes_the_did_not_change_check(monkeypatch):
@@ -1060,6 +1097,7 @@ def test_fill_and_restore_guard_check_precedes_the_did_not_change_check(monkeypa
         _sequential_get_json([
             (200, _zones_body(30000)),
             (200, _zones_body(30000, thermo_count=0)),
+            (200, _zones_body(30000)),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -1069,6 +1107,64 @@ def test_fill_and_restore_guard_check_precedes_the_did_not_change_check(monkeypa
     assert not ok
     assert "collateral write" in msg
     assert "did not change" not in msg
+
+
+def test_fill_and_restore_restores_even_when_the_set_driver_fails(monkeypatch):
+    # The CDP driver can die AFTER the click's POST landed (screenshot or
+    # teardown error, 60 s timeout on a page that already saved), so a
+    # non-zero exit is not proof nothing was written -- the restoring Save
+    # must run anyway, and its outcome must be reported (mirrors W50's
+    # _run_setup_wizard_step1 fix, 14e2324b).
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _zones_body(30000)),
+            (200, _zones_body(30000)),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        return _FailProc() if len(calls) == 1 else _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "CDP driver (set) exited 3" in msg
+    assert len(calls) == 2, "restore Save must run even when the set driver exits non-zero"
+    assert "restored" in msg
+
+
+def test_fill_and_restore_restores_when_the_set_driver_raises(monkeypatch):
+    # Same, for a subprocess that raises (TimeoutExpired/OSError) rather
+    # than returning a non-zero code -- a raise here is not proof nothing
+    # was written, so it must not skip the restore.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _zones_body(30000)),
+            (200, _zones_body(30000)),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise wcr.subprocess.TimeoutExpired(cmd="node", timeout=60)
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "raised TimeoutExpired" in msg
+    assert len(calls) == 2, "restore Save must run even when the set driver raises"
+    assert "restored" in msg
 
 
 def test_fill_and_restore_fails_if_the_restore_save_drifts_a_guarded_field(monkeypatch):
@@ -1128,25 +1224,60 @@ def test_w50_declares_special_setup_wizard_step1_shape():
     assert row.route == "/setup#step=1"
 
 
+def _w50_get_json(status_responses, progress_responses=None):
+    """Builds the `_get_json_with_cookie` fake for a W50 test: `/api/status`
+    gets `status_responses` in order, `/api/setup/progress` gets
+    `progress_responses` in order (default: 'pending' pre-read, then 'done'
+    confirmed after the restoring POST -- the common case where step 1
+    hadn't been marked done before this row ran)."""
+    if progress_responses is None:
+        progress_responses = [(200, _progress_body("pending")), (200, _progress_body("pending"))]
+    return _get_json_by_path({
+        "/api/status": status_responses,
+        "/api/setup/progress": progress_responses,
+    })
+
+
+def _w50_post_form(monkeypatch, status=200, body=None):
+    """Mocks `_post_form_with_cookie` (used only for the setup-progress
+    restore) and returns the list of calls made to it, so a test can assert
+    the restore POST carried the right step/state."""
+    calls = []
+
+    def fake(host, path, cookie, fields, timeout=5.0):
+        calls.append((path, fields))
+        return status, body if body is not None else {"ok": True}
+
+    monkeypatch.setattr(wcr, "_post_form_with_cookie", fake)
+    return calls
+
+
 def test_setup_wizard_step1_full_flow_passes(monkeypatch):
     # Pre-read shows the original tz/unit, post-set read-back shows the unit
     # flipped with tz unchanged, post-restore read-back shows the unit back
-    # to original -- three distinct GETs against ONE endpoint (/api/status)
-    # covering TWO fields written by two different POST routes in one click.
+    # to original -- three distinct GETs against /api/status covering TWO
+    # fields written by two different POST routes in one click, plus a
+    # pre-read and a post-restore read of /api/setup/progress covering the
+    # THIRD (postStepState) POST that same click makes.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
-            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
-            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
-            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
-        ]),
+        _w50_get_json(
+            [
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            ],
+            [(200, _progress_body("pending")), (200, _progress_body("pending"))],
+        ),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    post_calls = _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
     assert "restored" in msg
+    assert post_calls == [("/api/setup/progress", {"step": "1", "state": "pending"})]
 
 
 def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
@@ -1155,7 +1286,7 @@ def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
     # W22/W38's "did not change" negative case).
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
+        _w50_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             # ...and the restoring Save still runs and is still read back,
@@ -1166,6 +1297,7 @@ def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     runs = []
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+    _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1180,7 +1312,7 @@ def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
     # collateral write to a real timezone rule.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
+        _w50_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "UTC0", "temp_unit": "F"}),
             # The restoring Save re-submits the ORIGINAL tz alongside the
@@ -1192,6 +1324,7 @@ def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     runs = []
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+    _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1213,7 +1346,7 @@ def test_setup_wizard_step1_restores_even_when_the_set_driver_fails(monkeypatch)
     # must run anyway, and its outcome must be reported.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
+        _w50_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
         ]),
@@ -1226,6 +1359,7 @@ def test_setup_wizard_step1_restores_even_when_the_set_driver_fails(monkeypatch)
         return _FailProc() if len(calls) == 1 else _FakeProc()
 
     monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1239,7 +1373,7 @@ def test_setup_wizard_step1_restores_when_the_set_driver_raises(monkeypatch):
     # than returning a non-zero code.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
+        _w50_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
         ]),
@@ -1254,6 +1388,7 @@ def test_setup_wizard_step1_restores_when_the_set_driver_raises(monkeypatch):
         return _FakeProc()
 
     monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1267,7 +1402,7 @@ def test_setup_wizard_step1_reports_a_failed_restore_after_a_failed_set(monkeypa
     # failure and the fact the board may still hold the test unit.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
+        _w50_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
             (500, None),
@@ -1275,6 +1410,7 @@ def test_setup_wizard_step1_reports_a_failed_restore_after_a_failed_set(monkeypa
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1287,7 +1423,7 @@ def test_setup_wizard_step1_fails_loud_if_restore_does_not_take(monkeypatch):
     # this is exactly the "board left with the test value" hazard.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
-        _sequential_get_json([
+        _w50_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
@@ -1295,6 +1431,7 @@ def test_setup_wizard_step1_fails_loud_if_restore_does_not_take(monkeypatch):
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1317,3 +1454,100 @@ def test_setup_wizard_step1_refuses_when_status_body_unusable(monkeypatch):
     assert not ok
     assert "refusing to guess" in msg
     assert ran == []
+
+
+def test_setup_wizard_step1_refuses_when_progress_body_unusable(monkeypatch):
+    # Same posture, for the progress route: no usable steps.1.state means no
+    # known-good value to restore the commissioning-progress flag to, so
+    # this must refuse before ever touching the board -- the status
+    # pre-read succeeds, but the progress pre-read does not carry a step 1
+    # entry.
+    ran = []
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json(
+            [(200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"})],
+            [(200, {"version": 1, "steps": {}})],
+        ),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: ran.append(1) or _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "refusing to guess" in msg
+    assert "setup/progress" in msg
+    assert ran == []
+
+
+def test_setup_wizard_step1_restores_progress_state_to_its_pre_run_value(monkeypatch):
+    # If step 1 already read 'done' (an operator ran the wizard for real,
+    # then this row ran again later), the restore must put it back to
+    # 'done' -- not to 'pending' -- so this row never regresses a real
+    # commissioning milestone.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json(
+            [
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            ],
+            [(200, _progress_body("done", note="ran for real")), (200, _progress_body("done", note="ran for real"))],
+        ),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    post_calls = _w50_post_form(monkeypatch)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert post_calls == [("/api/setup/progress", {"step": "1", "state": "done", "note": "ran for real"})]
+
+
+def test_setup_wizard_step1_fails_loud_if_progress_restore_post_is_refused(monkeypatch):
+    # The tz/unit restore succeeded, but the progress-restore POST itself
+    # came back non-200 -- must fail loud and name the board's left-behind
+    # state, not report PASS just because the field-level restore worked.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    _w50_post_form(monkeypatch, status=500, body={"error": "internal"})
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "PROGRESS RESTORE FAILED" in msg
+    assert "restore by hand" in msg
+
+
+def test_setup_wizard_step1_fails_loud_if_progress_restore_does_not_take(monkeypatch):
+    # Progress-restore POST answered 200, but the read-back after it still
+    # shows 'done' instead of the pre-run 'pending' -- must fail loud, the
+    # same "board left with the test value" hazard as the tz/unit restore.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json(
+            [
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            ],
+            [(200, _progress_body("pending")), (200, _progress_body("done"))],
+        ),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    _w50_post_form(monkeypatch)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "PROGRESS RESTORE FAILED" in msg
+    assert "step 1 state now 'done'" in msg
+    assert "LEFT ON BOARD" in msg
