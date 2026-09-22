@@ -75,6 +75,15 @@ typedef struct {
     bool     dirty;
     uint16_t config_format_version;
 
+    /* This image's own declared KILNLINK_PROTOCOL_VERSION (record_version 2+
+     * only -- see saftyfw_image_identity.h). Zero means "not available":
+     * either the record predates this field (record_version 1, which fails
+     * saftyfw_image_identity_is_valid() outright and never reaches here as
+     * `usable` at all) or, defensively, an image that legitimately wrote 0.
+     * Callers must treat 0 the same as "unknown", never as a real mismatch --
+     * ota_http_pico.c's TODO.md 9.4 warning does exactly this. */
+    uint16_t link_protocol_version;
+
     /* Why `usable` is false, when it is. Empty string otherwise. */
     char reason[PICO_IMAGE_SOURCE_REASON_MAX];
 } pico_image_source_info_t;
@@ -85,9 +94,12 @@ typedef struct {
  * from an ISR or while holding a module lock. Not reentrant -- it uses a
  * static scan buffer, since the read buffer plus the required inter-chunk
  * overlap is far too large to sit on the caller's stack (this tree's
- * standing rule about big locals, and the reason the sole caller is a task
- * of its own). There is exactly one caller (pico_auto_update_boot.c) and it
- * calls this once per boot.
+ * standing rule about big locals, and the reason pico_auto_update_boot.c's
+ * caller is a task of its own). Two callers today: pico_auto_update_boot.c,
+ * once per boot, and ota_http_pico.c's manual-upload handler, once per
+ * completed stage -- the cross-processor update mutex (ota_http.h) already
+ * guarantees only one Pico-image operation is ever in flight at a time, so
+ * the two never race over the static scan buffer.
  *
  * NULL-safe: a NULL `out` returns false and does nothing. */
 bool pico_image_source_describe(pico_image_source_info_t *out);

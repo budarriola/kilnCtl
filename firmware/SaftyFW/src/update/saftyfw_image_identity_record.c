@@ -1,6 +1,7 @@
 #include "saftyfw_image_identity_record.h"
 
 #include "config_store.h"
+#include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- link_protocol_version below */
 #include "saftyfw_build_info.h"
 
 /* Populated entirely from generated/compile-time constants: no runtime
@@ -25,7 +26,7 @@ static const saftyfw_image_identity_t k_identity = {
     .commit_len = (uint8_t)(sizeof(k_commit) - 1u),
     .commit = SAFTYFW_GIT_COMMIT,
     .config_format_version = (uint16_t)CONFIG_STORE_FORMAT_VERSION,
-    .reserved = 0u,
+    .link_protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION,
     .magic_end = SAFTYFW_IMAGE_IDENTITY_MAGIC_END,
 };
 

@@ -524,6 +524,26 @@ with that in three places:
    ESP, and installing an image it cannot talk to turns the next update into a
    debug-probe job. An override exists for the case where the ESP is about to be
    updated too, and it must be an explicit, separately-confirmed action.
+
+   Implemented (`firmware/KilnFW/TODO.md` 9.4): the `UPDATE_BEGIN` wire
+   header's own `protocol_version` field is always the ESP's own compiled
+   `KILNLINK_PROTOCOL_VERSION` — it says what the ESP will speak while
+   relaying, not what the uploaded image itself was built against, so it
+   cannot be compared against itself. The uploaded image states that
+   separately, in the `saftyfw_image_identity_t` build-identity record every
+   SaftyFW slot image already carries (`kilnlink/saftyfw_image_identity.h`,
+   `link_protocol_version` field, added in
+   `SAFTYFW_IMAGE_IDENTITY_RECORD_VERSION` 2). `ota_http_pico.c`'s
+   manual-upload handler re-reads the staged image right after upload, and
+   if that field disagrees with the ESP's own `KILNLINK_PROTOCOL_VERSION`,
+   refuses with `409 Conflict` (a JSON body naming both versions) before the
+   relay ever starts, unless the request carries `X-Ota-Force-Version: 1` —
+   the explicit, separately-confirmed override this section calls for. This
+   is proactive and strictly earlier than, never a replacement for, the
+   Pico's own `UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE` refusal described
+   above, which still runs unconditionally against the wire header's own
+   `protocol_version`. The boot-time auto-update path never goes through
+   this handler and so never sees or sets the override.
 2. **Update the ESP first** when both need it. The ESP can always be recovered
    over USB; the Pico's easy path runs through the ESP. The GUI should say this
    rather than leaving the order to chance.

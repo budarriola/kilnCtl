@@ -64,8 +64,14 @@ extern "C" {
 #define SAFTYFW_IMAGE_IDENTITY_MAGIC_END 0x7BE1C35Au
 
 /* Bumped only if the layout below changes. A reader that does not recognise
- * the version must treat the record as absent, never guess. */
-#define SAFTYFW_IMAGE_IDENTITY_RECORD_VERSION 1u
+ * the version must treat the record as absent, never guess.
+ *
+ * 1 -> 2 (firmware/KilnFW/TODO.md 9.4's protocol-version-mismatch item):
+ * the trailing `reserved` field became `link_protocol_version`, same offset
+ * and size, so an image built before this bump reads back as record_version
+ * 1 and is correctly treated as "no protocol version available" rather than
+ * being misread as declaring protocol version 0. */
+#define SAFTYFW_IMAGE_IDENTITY_RECORD_VERSION 2u
 
 /* Room for a git short hash with generous headroom (`git rev-parse --short
  * HEAD` produces 7-12 characters in practice; SAFTYFW_GIT_COMMIT can also be
@@ -92,7 +98,17 @@ typedef struct {
      * the record the Pico is actually holding cannot carry the CT
      * calibration forward, and must not be pushed. */
     uint16_t config_format_version;
-    uint16_t reserved; /* 0 */
+    /* This image's own KILNLINK_PROTOCOL_VERSION, so the ESP can warn before
+     * relaying an image built against a different link protocol than the
+     * one it currently speaks -- TODO.md 9.4. The Pico's own
+     * UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE refusal (image_header.h's
+     * min_compatible/protocol_version fields, which describe the SENDER's
+     * protocol, not this image's own) remains the required floor; this
+     * field only lets the ESP ask before it starts, not instead of the
+     * Pico's own check after. Added in record_version 2 -- see that
+     * #define's comment for why record_version 1 images read as "unknown"
+     * here rather than "protocol version 0". */
+    uint16_t link_protocol_version;
     uint32_t magic_end;
 } saftyfw_image_identity_t;
 

@@ -41,7 +41,11 @@ transfer)/section 9.5-era pico staging. Mirrored here, not re-derived:
 Failure responses (400/403/409/500) are PLAIN TEXT
 (httpd_resp_send_err()/httpd_resp_set_status()+httpd_resp_send()), not JSON --
 so this client reads a non-2xx body as text and surfaces it verbatim in
-OtaHttpError.detail rather than trying to json.loads() it.
+OtaHttpError.detail rather than trying to json.loads() it. One exception
+(TODO.md 9.4): POST /api/ota/pico's 409 protocol_version_mismatch refusal IS
+JSON, and this module detects that one shape and raises the typed
+OtaPicoProtocolVersionMismatch instead -- every other 4xx/5xx on this surface
+is still plain text.
 
 CLOSED GAP (was open through 2026-08-18): there used to be no HTTP endpoint
 exposing ota_http_get_esp_progress() (the ESP self-update's own progress
@@ -108,6 +112,24 @@ class OtaHttpError(Exception):
         super().__init__(message)
         self.status = status
         self.detail = detail
+
+
+class OtaPicoProtocolVersionMismatch(OtaHttpError):
+    """POST /api/ota/pico refused with 409 {"error":"protocol_version_mismatch"}
+    (ota_http_pico.c's TODO.md 9.4 warning): the uploaded SaftyFW image
+    declares a KILNLINK_PROTOCOL_VERSION different from the one this ESP
+    currently speaks. This is a proactive, EARLIER warning on top of, never
+    instead of, the Pico's own UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE
+    refusal -- that floor still runs regardless of this exception. Retry
+    with `push_pico_image(..., force_version=True)` only after a human has
+    confirmed the mismatch is intentional; the board's response body is
+    still available verbatim in `.detail` for logging."""
+
+    def __init__(self, message: str, status: int, detail: str,
+                 image_protocol_version: int, esp_protocol_version: int):
+        super().__init__(message, status, detail)
+        self.image_protocol_version = image_protocol_version
+        self.esp_protocol_version = esp_protocol_version
 
 
 def _url(host: str, path: str) -> str:
@@ -202,7 +224,7 @@ class OtaPushResult:
 
 
 def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: str,
-                 timeout: float) -> OtaPushResult:
+                 timeout: float, extra_headers: Optional[dict] = None) -> OtaPushResult:
     """Shared body of push_esp_image()/push_pico_image(): validate the local
     file, fetch a fresh challenge, sign it, and POST the raw bytes with the
     X-Ota-Mac header -- the exact order ota_esp_post_handler()/
@@ -213,6 +235,11 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
     as "unknown whether the board received anything usable" -- re-uploading
     is a fresh, explicit action, never something this function does on its
     own behalf.
+
+    `extra_headers` (e.g. push_pico_image()'s X-Ota-Force-Version) are NOT
+    covered by X-Ota-Mac -- see that header's own doc comment for why a
+    local operator-policy relaxation is deliberately outside the request
+    HMAC.
     """
     if not os.path.isfile(path):
         raise OtaHttpError(f"no such file: {path}")
@@ -233,15 +260,18 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
     log.info("OTA push starting: endpoint=%s host=%s path=%s size=%d sha256=%s",
               endpoint, host, path, size, image_sha256)
 
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(len(data)),
+        "X-Ota-Mac": mac_hex,
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(
         _url(host, endpoint),
         data=data,
         method="POST",
-        headers={
-            "Content-Type": "application/octet-stream",
-            "Content-Length": str(len(data)),
-            "X-Ota-Mac": mac_hex,
-        },
+        headers=headers,
     )
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
@@ -251,6 +281,26 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
         status_code, detail = _http_error_detail(exc)
         log.warning("OTA push refused: endpoint=%s host=%s sha256=%s status=%s detail=%s",
                     endpoint, host, image_sha256, status_code, detail)
+        # ota_http_pico.c's TODO.md 9.4 protocol-version warning is the one
+        # refusal on this surface that comes back as JSON rather than plain
+        # text (this module's own header comment on 400/403/409/500 being
+        # plain text predates it) -- detect it here so a caller gets a
+        # typed exception with both version numbers instead of having to
+        # re-parse `.detail` itself.
+        if status_code == 409:
+            try:
+                detail_obj = json.loads(detail)
+            except Exception:
+                detail_obj = None
+            if isinstance(detail_obj, dict) and detail_obj.get("error") == "protocol_version_mismatch":
+                raise OtaPicoProtocolVersionMismatch(
+                    f"{endpoint} refused: image link protocol "
+                    f"{detail_obj.get('image_protocol_version')} != this board's "
+                    f"{detail_obj.get('esp_protocol_version')}",
+                    status_code, detail,
+                    image_protocol_version=detail_obj.get("image_protocol_version"),
+                    esp_protocol_version=detail_obj.get("esp_protocol_version"),
+                ) from exc
         raise OtaHttpError(f"{endpoint} refused: HTTP {status_code}: {detail}", status_code,
                             detail) from exc
     except urllib.error.URLError as exc:
@@ -296,7 +346,8 @@ def push_esp_image(host: str, path: str, ap_password: str,
 
 
 def push_pico_image(host: str, path: str, ap_password: str,
-                     timeout: float = OTA_PICO_STAGE_TIMEOUT_S) -> OtaPushResult:
+                     timeout: float = OTA_PICO_STAGE_TIMEOUT_S,
+                     force_version: bool = False) -> OtaPushResult:
     """POST /api/ota/pico -- streams the raw SaftyFW .bin into the `pico_img`
     staging partition at Wi-Fi speed, then returns as soon as staging
     finishes (202 Accepted,
@@ -305,8 +356,20 @@ def push_pico_image(host: str, path: str, ap_password: str,
     finish. A 202 here means "upload accepted and the relay task started",
     never "the safety processor is now running the new image" -- poll
     get_pico_status() afterward for the actual relay outcome.
+
+    Raises `OtaPicoProtocolVersionMismatch` (TODO.md 9.4) if the image
+    declares a KILNLINK_PROTOCOL_VERSION different from the one this board
+    currently speaks and `force_version` is False -- the board never even
+    starts the relay in that case, so nothing was written to the safety
+    processor. `force_version=True` sends X-Ota-Force-Version: 1, which
+    relays the image anyway despite a known mismatch; a caller should set
+    it only after a human has confirmed that intentionally. Never pass
+    `force_version=True` from an unattended/automatic path -- that
+    confirmation is the entire point of this gate.
     """
-    return _push_image(host, path, "/api/ota/pico", "pico", ap_password, timeout)
+    extra_headers = {"X-Ota-Force-Version": "1"} if force_version else None
+    return _push_image(host, path, "/api/ota/pico", "pico", ap_password, timeout,
+                        extra_headers=extra_headers)
 
 
 def get_pico_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:

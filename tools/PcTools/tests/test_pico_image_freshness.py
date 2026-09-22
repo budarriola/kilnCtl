@@ -29,6 +29,7 @@ _IDENTITY_HEADER = (
 
 def _make_record(commit: str, dirty: bool = False, config_format_version: int = 3,
                   record_version: int = fresh.RECORD_VERSION,
+                  link_protocol_version: int = 16,
                   magic_end: int = fresh.MAGIC_END) -> bytes:
     commit_bytes = commit.encode("ascii")
     assert len(commit_bytes) <= fresh.COMMIT_MAX
@@ -37,7 +38,7 @@ def _make_record(commit: str, dirty: bool = False, config_format_version: int = 
         fresh._STRUCT_FMT,
         fresh.MAGIC0, fresh.MAGIC1, record_version,
         1 if dirty else 0, len(commit_bytes), padded,
-        config_format_version, 0, magic_end,
+        config_format_version, link_protocol_version, magic_end,
     )
 
 
@@ -81,7 +82,7 @@ def test_struct_layout_matches_header():
     names = [f[1] for f in field_types]
     assert names == [
         "magic0", "magic1", "record_version", "dirty", "commit_len",
-        "commit", "config_format_version", "reserved", "magic_end",
+        "commit", "config_format_version", "link_protocol_version", "magic_end",
     ]
 
 

@@ -457,6 +457,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
     add_test(NAME test_fw_version COMMAND test_fw_version)
 
+    add_executable(test_saftyfw_image_identity test/test_saftyfw_image_identity.c)
+    target_link_libraries(test_saftyfw_image_identity PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_saftyfw_image_identity PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_saftyfw_image_identity PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_saftyfw_image_identity COMMAND test_saftyfw_image_identity)
+
     # -- benchproto host tests (independent of everything above) --------------
     add_executable(test_benchproto_frame test/test_benchproto_frame.c)
     target_link_libraries(test_benchproto_frame PRIVATE benchproto)

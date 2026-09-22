@@ -129,9 +129,10 @@ bool pico_image_source_describe(pico_image_source_info_t *out)
     out->commit_len = ident.commit_len;
     out->dirty = (ident.dirty != 0u);
     out->config_format_version = ident.config_format_version;
+    out->link_protocol_version = ident.link_protocol_version;
     out->usable = true;
-    ESP_LOGI(TAG, "staged SaftyFW image usable: %lu bytes, commit %s%s, config format v%u",
+    ESP_LOGI(TAG, "staged SaftyFW image usable: %lu bytes, commit %s%s, config format v%u, link protocol v%u",
              (unsigned long)length, out->commit, out->dirty ? " (dirty)" : "",
-             (unsigned)out->config_format_version);
+             (unsigned)out->config_format_version, (unsigned)out->link_protocol_version);
     return true;
 }

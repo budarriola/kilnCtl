@@ -60,14 +60,21 @@ from typing import Optional
 #     uint8_t  commit_len;
 #     char     commit[SAFTYFW_IMAGE_IDENTITY_COMMIT_MAX];  // 40
 #     uint16_t config_format_version;
-#     uint16_t reserved;
+#     uint16_t link_protocol_version;  // was `reserved` in record_version 1
 #     uint32_t magic_end;
 # } saftyfw_image_identity_t;   // SAFTYFW_IMAGE_IDENTITY_SIZE == 60, little-endian, no padding
+#
+# RECORD_VERSION bumped 1 -> 2 (firmware/KilnFW/TODO.md 9.4): the trailing
+# `reserved` field became `link_protocol_version`, same offset/size, so this
+# parser -- like the C side's saftyfw_image_identity_is_valid() -- requires
+# an EXACT record_version match rather than accepting 1 or 2. A
+# record_version 1 image correctly fails find_one_identity() here, the same
+# "unknown, never guessed at" contract the C scanner documents.
 
 MAGIC0 = 0x44494653
 MAGIC1 = 0xA5C31E7B
 MAGIC_END = 0x7BE1C35A
-RECORD_VERSION = 1
+RECORD_VERSION = 2
 COMMIT_MAX = 40
 RECORD_SIZE = 60
 
@@ -84,6 +91,7 @@ class ImageIdentity:
     dirty: bool
     commit: str
     config_format_version: int
+    link_protocol_version: int
     offset: int  # byte offset within the buffer the record was found at
 
 
@@ -110,7 +118,7 @@ def find_all_identities(buf: bytes) -> "list[ImageIdentity]":
         if magic0 == MAGIC0 and magic1 == MAGIC1:
             chunk = buf[off:off + RECORD_SIZE]
             (m0, m1, rec_ver, dirty, commit_len, commit_raw,
-             cfg_ver, _reserved, magic_end) = struct.unpack(_STRUCT_FMT, chunk)
+             cfg_ver, link_proto_ver, magic_end) = struct.unpack(_STRUCT_FMT, chunk)
             if (magic_end == MAGIC_END and rec_ver == RECORD_VERSION
                     and 0 <= commit_len <= COMMIT_MAX):
                 commit = commit_raw[:commit_len].decode("ascii", errors="replace")
@@ -119,6 +127,7 @@ def find_all_identities(buf: bytes) -> "list[ImageIdentity]":
                     dirty=bool(dirty),
                     commit=commit,
                     config_format_version=cfg_ver,
+                    link_protocol_version=link_proto_ver,
                     offset=off,
                 ))
         off += SCAN_STEP
@@ -134,7 +143,8 @@ def find_one_identity(buf: bytes) -> ImageIdentity:
     found = find_all_identities(buf)
     if not found:
         raise IdentityNotFound("no saftyfw_image_identity_t record found")
-    distinct = {(r.record_version, r.dirty, r.commit, r.config_format_version) for r in found}
+    distinct = {(r.record_version, r.dirty, r.commit, r.config_format_version,
+                 r.link_protocol_version) for r in found}
     if len(distinct) > 1:
         raise MultipleIdentitiesFound(
             "%d distinct identity records found at offsets %s"
@@ -244,15 +254,18 @@ def check_slot_bins_fresh(slot_a: Path, slot_b: Path, repo_root: Path) -> Freshn
         return FreshnessResult("FAIL", f"slotB identity record invalid: {exc}")
 
     if (ident_a.commit != ident_b.commit or ident_a.dirty != ident_b.dirty
-            or ident_a.config_format_version != ident_b.config_format_version):
+            or ident_a.config_format_version != ident_b.config_format_version
+            or ident_a.link_protocol_version != ident_b.link_protocol_version):
         return FreshnessResult(
             "FAIL",
             f"slotA identity ({ident_a.commit}, dirty={ident_a.dirty}, "
-            f"config_format_version={ident_a.config_format_version}) and "
+            f"config_format_version={ident_a.config_format_version}, "
+            f"link_protocol_version={ident_a.link_protocol_version}) and "
             f"slotB identity ({ident_b.commit}, dirty={ident_b.dirty}, "
-            f"config_format_version={ident_b.config_format_version}) "
+            f"config_format_version={ident_b.config_format_version}, "
+            f"link_protocol_version={ident_b.link_protocol_version}) "
             "disagree -- both slots must be built from the same commit and "
-            "config schema.",
+            "config/link schema.",
         )
 
     if ident_a.dirty:

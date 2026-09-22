@@ -190,6 +190,62 @@ class PushImageTest(unittest.TestCase):
                 ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
         self.assertEqual(ctx.exception.status, 403)
 
+    def test_push_pico_image_raises_typed_error_on_protocol_version_mismatch(self):
+        """TODO.md 9.4: ota_http_pico.c refuses with 409 JSON, not the plain
+        text every other 4xx/5xx on this surface sends -- this must come
+        back as OtaPicoProtocolVersionMismatch, carrying both version
+        numbers, not a generic OtaHttpError."""
+        detail = json.dumps({"ok": False, "error": "protocol_version_mismatch",
+                              "image_protocol_version": 11, "esp_protocol_version": 16})
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/pico", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(detail.encode()))
+        fake_urlopen, _ = self._mock_challenge_then(None, post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaPicoProtocolVersionMismatch) as ctx:
+                ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(ctx.exception.image_protocol_version, 11)
+        self.assertEqual(ctx.exception.esp_protocol_version, 16)
+
+    def test_push_pico_image_default_omits_force_version_header(self):
+        accepted_body = json.dumps({"ok": True, "status": "relay_started", "bytes": 17,
+                                     "crc32": "0xdeadbeef"}).encode()
+        captured_req = {}
+        calls = {"n": 0}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(json.dumps({"nonce": "11" * 16}).encode())
+            captured_req["req"] = req
+            return _fake_response(accepted_body, status=202)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
+        req = captured_req["req"]
+        self.assertIsNone(req.headers.get("X-ota-force-version") or req.headers.get("X-Ota-force-version"))
+
+    def test_push_pico_image_force_version_sets_header(self):
+        accepted_body = json.dumps({"ok": True, "status": "relay_started", "bytes": 17,
+                                     "crc32": "0xdeadbeef"}).encode()
+        captured_req = {}
+        calls = {"n": 0}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(json.dumps({"nonce": "11" * 16}).encode())
+            captured_req["req"] = req
+            return _fake_response(accepted_body, status=202)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.push_pico_image("kiln.local", self.tmp.name, "hunter2", force_version=True)
+        self.assertTrue(result.ok)
+        req = captured_req["req"]
+        header = req.headers.get("X-ota-force-version") or req.headers.get("X-Ota-force-version")
+        self.assertEqual(header, "1")
+
 
 class GetPicoStatusTest(unittest.TestCase):
     def test_parses_status_json(self):

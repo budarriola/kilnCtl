@@ -30,6 +30,7 @@
 #include "boot_button.h"
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
+#include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- TODO.md 9.4's protocol-version-mismatch warning */
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "ota_auth.h"
@@ -39,6 +40,8 @@
 #include "ota_record.h"
 #include "pico_image_manifest.h" /* pico_image_manifest_store() -- record what was staged, so a
                                   * LATER BOOT can re-use this image (PICO_AUTO_UPDATE_PLAN.md G1) */
+#include "pico_image_source.h" /* pico_image_source_describe() -- reads back the image just staged
+                                * to learn its declared link_protocol_version, TODO.md 9.4 */
 #include "pico_img_stage.h" /* shared erase/write/manifest sequence -- owner decision 2026-09-20,
                              * task 3: this HTTP path and net/pico_auto_update_boot.c's embedded-
                              * image path now both call into pico_img_stage_begin/write_chunk/
@@ -80,12 +83,35 @@ static uint8_t s_ota_pico_chunk[OTA_PICO_CHUNK_SIZE];
 // that the Pico could never agree with, for any image. See
 // docs/audits/pico_ota_staged_crc_mismatch_2026-09-18.md.
 //
+// --- TODO.md 9.4: protocol-version-mismatch second confirmation -----------
+//
+// A header, not a query parameter or a body field, for the same reasons
+// ota_http.h's OTA_ACK_NO_SAFETY_HEADER is one: this route's body IS the
+// raw image bytes, so there is no JSON/form field to add it to without
+// inventing a multipart envelope this codebase does not otherwise have, and
+// a header survives that binary upload unchanged, never lands in a server
+// access log or browser history the way a query string would, and (like the
+// ack header) is a local operator-policy relaxation that only matters to a
+// caller who has already cleared authentication -- it is NOT covered by the
+// request HMAC.
+#define OTA_FORCE_VERSION_HEADER "X-Ota-Force-Version"
+
+static bool ota_pico_req_force_version(httpd_req_t *req)
+{
+    char val[8];
+    if (httpd_req_get_hdr_value_str(req, OTA_FORCE_VERSION_HEADER, val, sizeof(val)) != ESP_OK) {
+        return false;
+    }
+    return val[0] == '1';
+}
+
 // On success, hands off to ota_pico_relay_start() and returns
 // without releasing the update mutex (see ota_http.h's header comment for
 // why); on any failure, releases the mutex itself and responds with a
 // specific error.
 static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
 {
+    bool force_version = ota_pico_req_force_version(req);
     bool started_relay = false;
     char fail_reason[256] = "unknown failure";
     // Declared up here, not at first use, so every goto below (including
@@ -236,6 +262,55 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
                       "this update proceeds, but a later boot will not be able to re-use this "
                       "staged image for an automatic update",
                  ip);
+    }
+
+    // TODO.md 9.4: proactively warn before relaying an image built against
+    // a different link protocol than this ESP currently speaks. This is a
+    // SECOND, EARLIER confirmation on top of, never instead of, the Pico's
+    // own UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE refusal (image_header.h's
+    // protocol_version/min_compatible fields, which describe the ESP as
+    // SENDER, not this image's own build) -- that floor is unchanged by
+    // this check and still runs regardless of what happens here.
+    //
+    // pico_image_source_describe() re-reads the bytes just staged (the same
+    // scan pico_auto_update_boot.c already trusts at boot) so this compares
+    // the image ACTUALLY on flash, not merely the one the client claimed to
+    // send. link_protocol_version == 0 means "unknown" (an image built
+    // before this field existed, or a manifest/CRC/identity problem
+    // pico_image_source_describe() already logged its own reason for) and
+    // is never treated as a mismatch -- this tree's standing rule about
+    // never gating on a fact it does not actually have.
+    //
+    // This gate exists only on this manual-upload path. The auto-update-at-
+    // boot path (pico_auto_update_boot.c) calls ota_pico_relay_start()
+    // directly and never reaches this function, so it can never set
+    // OTA_FORCE_VERSION_HEADER and never bypasses this warning -- there is
+    // also no version skew to warn about there, since the embedded slot
+    // images are built from the same commit as this ESP binary.
+    pico_image_source_info_t staged_info;
+    (void)pico_image_source_describe(&staged_info);
+    bool protocol_mismatch = staged_info.usable && staged_info.link_protocol_version != 0u &&
+                             staged_info.link_protocol_version != (uint16_t)KILNLINK_PROTOCOL_VERSION;
+    if (protocol_mismatch && !force_version) {
+        snprintf(fail_reason, sizeof(fail_reason),
+                 "uploaded image declares link protocol %u, this board speaks %u -- retry with "
+                 OTA_FORCE_VERSION_HEADER ": 1 to relay anyway",
+                 (unsigned)staged_info.link_protocol_version, (unsigned)KILNLINK_PROTOCOL_VERSION);
+        ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: refused, %s", ip, fail_reason);
+        char body[224];
+        int n = snprintf(body, sizeof(body),
+                          "{\"ok\":false,\"error\":\"protocol_version_mismatch\","
+                          "\"image_protocol_version\":%u,\"esp_protocol_version\":%u}",
+                          (unsigned)staged_info.link_protocol_version, (unsigned)KILNLINK_PROTOCOL_VERSION);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        ota_http_send_json_clamped(req, body, n, sizeof(body));
+        goto cleanup;
+    }
+    if (protocol_mismatch && force_version) {
+        ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: relaying despite link protocol mismatch "
+                      "(image %u, this board %u) -- forced via " OTA_FORCE_VERSION_HEADER,
+                 ip, (unsigned)staged_info.link_protocol_version, (unsigned)KILNLINK_PROTOCOL_VERSION);
     }
 
     ESP_LOGI(OTA_HTTP_TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",

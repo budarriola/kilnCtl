@@ -390,7 +390,8 @@ def sw_reset_esp(password: Optional[str] = None, confirm: bool = False, host: Op
 
 
 @_srv._tool()
-def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optional[str] = None) -> str:
+def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optional[str] = None,
+                     force_version: bool = False) -> str:
     """Push a new RP2040 safety-processor firmware image -- POST
     /api/ota/pico. Stages `image_path` (a raw SaftyFW .bin) into the ESP's
     `pico_img` partition at Wi-Fi speed, then hands off to a background task
@@ -408,6 +409,16 @@ def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optio
     see that tool's doc comment. Optional: falls back to the
     KILNCTL_AP_PASSWORD environment variable when omitted, and raises naming
     that variable if neither is set.
+
+    TODO.md 9.4: if the staged image declares a link protocol version
+    different from the one this ESP currently speaks, the board refuses
+    with a 409 naming both versions (surfaced here as
+    OtaPicoProtocolVersionMismatch) BEFORE the relay ever starts -- this is
+    a proactive, earlier warning on top of, never instead of, the Pico's
+    own UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE refusal, which still runs
+    regardless. Pass `force_version=True` only after a human operator has
+    confirmed the mismatch is intentional (e.g. deliberately testing an
+    older/newer link protocol); never set it from an unattended path.
 
     IMPORTANT: a successful response here means "the image was staged and
     the relay STARTED" -- it does NOT mean the RP2040 is now running the new
@@ -431,7 +442,13 @@ def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optio
     except ValueError as exc:
         return f"error: {exc}"
     try:
-        result = ota_http.push_pico_image(resolved, image_path, resolved_password)
+        result = ota_http.push_pico_image(resolved, image_path, resolved_password,
+                                           force_version=force_version)
+    except ota_http.OtaPicoProtocolVersionMismatch as exc:
+        return (f"error: protocol version mismatch -- image declares link protocol "
+                f"{exc.image_protocol_version}, this board speaks {exc.esp_protocol_version} "
+                f"(HTTP {exc.status}) (host={resolved}). Retry with force_version=True only "
+                f"after confirming this is intentional.")
     except ota_http.OtaHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved})"

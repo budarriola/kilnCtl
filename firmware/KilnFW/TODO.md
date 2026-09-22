@@ -1397,13 +1397,45 @@ reboot so it doesn't trip the safety processor's S6b guard, the update
 mutex's first real caller, an append-only (single-record) NVS update log,
 and polled progress for both paths.
 
-- [ ] **Protocol-version mismatch between an uploaded Pico image and the
-      running ESP is not proactively warned about with a second
-      confirmation** before the relay starts — explicitly out of scope for
-      the pass that built the transfer path. The Pico itself still refuses
-      an incompatible image on its own (`UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE`),
-      which is the protocol's required floor; this item is specifically
-      about a proactive ESP-side warning.
+- [x] **Protocol-version mismatch between an uploaded Pico image and the
+      running ESP is now proactively warned about with a second
+      confirmation** before the relay starts. DONE — the uploaded image's own
+      `KILNLINK_PROTOCOL_VERSION` was not previously captured anywhere on
+      disk (the wire-frame `UPDATE_BEGIN` header the ESP builds always
+      states the ESP's own version, never a value read out of the uploaded
+      bytes), so this added a new `link_protocol_version` field to the
+      `saftyfw_image_identity_t` build-identity record every SaftyFW slot
+      image already carries (`firmware/CommonFW/include/kilnlink/saftyfw_image_identity.h`,
+      `SAFTYFW_IMAGE_IDENTITY_RECORD_VERSION` bumped 1 -> 2, reusing the
+      previously-unused `reserved` field so the record stays 60 bytes; a
+      record_version 1 image correctly reads as "unknown", never a
+      fabricated protocol 0). `ota_http_pico.c`'s manual-upload handler
+      (`ota_pico_do_stage()`) now calls the existing
+      `pico_image_source_describe()` scanner right after staging finishes
+      and, if the staged image's `link_protocol_version` disagrees with this
+      board's compiled `KILNLINK_PROTOCOL_VERSION`, refuses with
+      `409 Conflict` and a JSON body naming both versions
+      (`{"error":"protocol_version_mismatch","image_protocol_version":N,"esp_protocol_version":M}`)
+      unless the request carries a new `X-Ota-Force-Version: 1` header
+      (mirroring `ota_http.h`'s existing `X-Ota-Ack-No-Safety` pattern — a
+      header, not a body field, since this route's body is the raw image).
+      No new HTTP route was added. The Pico's own
+      `UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE` refusal is unchanged and still
+      runs regardless — this is a strictly earlier, proactive warning on top
+      of it. The boot-time auto-update path (`pico_auto_update_boot.c`)
+      calls `ota_pico_relay_start()` directly and never reaches this
+      handler, so it can never set the force header and is structurally
+      unaffected. PC-side: `tools/PcTools/src/kilnctrl/ota_http_client.py`'s
+      `push_pico_image()` gained a `force_version` parameter (default
+      `False`) and raises a new typed `OtaPicoProtocolVersionMismatch` on the
+      409; the `ota_update_pico` MCP tool surfaces the same. Host-tested:
+      `firmware/CommonFW/test/test_saftyfw_image_identity.c` (new,
+      CMake-registered) covers the record_version bump end to end, including
+      that a record_version 1 image is rejected rather than misread; pytest
+      covers the client/MCP surface
+      (`tools/PcTools/tests/test_ota_http_client.py`) and the drift guard
+      against the C header
+      (`tools/PcTools/tests/test_pico_image_freshness.py`).
 - [x] **`ota_record_t` has no image SHA-256 field** — flagged, not faked;
       would need hashing the stream as it passes through the transfer
       handler (mbedTLS/PSA is already linked for the HMAC path). DONE --
