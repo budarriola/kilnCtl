@@ -1153,6 +1153,21 @@ class Otp05Test(unittest.TestCase):
         ctx = self._ctx(srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_NO_TRIP))
         result = C._case_otp05(ctx)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("no trip was pending", result.reason)
+
+    def test_unreadable_trip_state_skips_and_never_pushes(self):
+        """A diag that fails to parse must read distinctly from "no trip
+        pending" -- OT-P05 used to conflate the two (both falsy) and
+        proceed as though the trip precondition simply wasn't met, when in
+        fact the trip state was never determined at all. This must SKIP,
+        name the unreadability in its reason, and never attempt the push."""
+        client = _FakePicoOtaClient(push_result=_OtaPushResult(False, 409))
+        ctx = self._ctx(ota_http_client=client,
+                         srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_UNPARSEABLE))
+        result = C._case_otp05(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP, result.reason)
+        self.assertIn("trip state unreadable", result.reason)
+        self.assertEqual(client.pushed, [])
 
     def test_refused_with_trip_pending_passes_and_clears(self):
         cleared = {"v": False}

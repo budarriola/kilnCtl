@@ -909,20 +909,34 @@ def _pico_boot_id(ctx: dict) -> Optional[int]:
     return J.parse_fw_version_boot_id(fw_text)
 
 
-def _pico_trip_reason_mask(ctx: dict) -> "tuple[Optional[int], Optional[int]]":
+def _pico_trip_reason_mask(ctx: dict) -> "tuple[Optional[int], Optional[int], Optional[str]]":
+    """Returns (reason, mask, why). `why` is None whenever `reason` was
+    read successfully (even if that reason is 0, "no trip"); it is only
+    populated to explain why `reason` is None -- either the transport call
+    itself raised, or the diag text came back but didn't parse. Callers
+    must not conflate "reason is None" (unreadable) with "reason is 0"
+    (readable, no trip pending) -- see OT-P05's history of doing exactly
+    that."""
     srv = _srv(ctx)
     try:
         diag_text = srv.safety_get_diag()
-    except Exception:
-        return None, None
-    return J.parse_trip_reason(diag_text), J.parse_trip_mask(diag_text)
+    except Exception as exc:
+        return None, None, f"safety_get_diag raised {type(exc).__name__}: {exc}"
+    reason = J.parse_trip_reason(diag_text)
+    mask = J.parse_trip_mask(diag_text)
+    why = None if reason is not None else "trip_reason unparseable from diag text"
+    return reason, mask, why
 
 
-def _pico_trip_pending(ctx: dict) -> Optional[bool]:
-    reason, _mask = _pico_trip_reason_mask(ctx)
+def _pico_trip_pending(ctx: dict) -> "tuple[Optional[bool], Optional[str]]":
+    """Returns (pending, why). `pending` is None only when the trip state
+    could not be determined at all -- distinct from `False`, which means
+    the trip state WAS read and no trip is pending. `why` explains a None
+    `pending`; it is None whenever `pending` is not None."""
+    reason, _mask, why = _pico_trip_reason_mask(ctx)
     if reason is None:
-        return None
-    return reason != 0
+        return None, why
+    return reason != 0, None
 
 
 def _trip_is_the_clearable_s6a(ctx: dict) -> bool:
@@ -931,7 +945,7 @@ def _trip_is_the_clearable_s6a(ctx: dict) -> bool:
     `trip_mask == 1 << (trip_reason - 1)` (0x0020) and no other bit. Any
     other latched trip stops the run for a human; the harness leaves it
     alone. Anything unreadable is treated as "do not clear"."""
-    reason, mask = _pico_trip_reason_mask(ctx)
+    reason, mask, _why = _pico_trip_reason_mask(ctx)
     if reason != 6 or mask is None:
         return False
     return mask == J.safety_trip_mask_for_reason(reason)
@@ -992,9 +1006,9 @@ def _case_otp01(ctx: dict) -> CaseResult:
     if not ok:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
-    trip_pending = _pico_trip_pending(ctx)
+    trip_pending, trip_why = _pico_trip_pending(ctx)
     if trip_pending is None:
-        return CaseResult(Verdict.INCONCLUSIVE, reason="Pico trip status unreadable (diag unparseable); refusing to push for OT-P01 rather than assuming no trip")
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"trip state unreadable: {trip_why}; refusing to push for OT-P01 rather than assuming no trip")
     if trip_pending:
         return CaseResult(Verdict.SKIP, reason="a trip is currently pending, refusing to start OT-P01")
 
@@ -1117,9 +1131,9 @@ def _case_otp03(ctx: dict) -> CaseResult:
     if not ok:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
-    trip_pending = _pico_trip_pending(ctx)
+    trip_pending, trip_why = _pico_trip_pending(ctx)
     if trip_pending is None:
-        return CaseResult(Verdict.INCONCLUSIVE, reason="Pico trip status unreadable (diag unparseable); refusing to push for OT-P03 rather than assuming no trip")
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"trip state unreadable: {trip_why}; refusing to push for OT-P03 rather than assuming no trip")
     if trip_pending:
         return CaseResult(Verdict.SKIP, reason="a trip is currently pending, refusing to start OT-P03")
 
@@ -1180,8 +1194,11 @@ def _case_otp05(ctx: dict) -> CaseResult:
     if not ok:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
-    trip_pending = _pico_trip_pending(ctx)
+    trip_pending, trip_why = _pico_trip_pending(ctx)
     commit_before, _ = _pico_commit_and_boot_reason(ctx)
+
+    if trip_pending is None:
+        return CaseResult(Verdict.SKIP, reason=f"trip state unreadable: {trip_why}")
 
     push_refused = None
     if trip_pending:

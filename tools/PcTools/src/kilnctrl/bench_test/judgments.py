@@ -1637,10 +1637,16 @@ def judge_ota_pico_refused_with_trip_pending(
         "trip_pending": trip_pending, "push_refused": push_refused,
         "commit_before": commit_before, "commit_after": commit_after,
     }
-    if trip_pending is not True:
+    if trip_pending is None:
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason="no trip was actually pending at push time -- the case's own precondition was not met",
+            reason="trip state unreadable: could not determine whether a trip was pending before push",
+            observed=observed,
+        )
+    if trip_pending is False:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no trip was pending at push time -- the case's own precondition was not met",
             observed=observed,
         )
     if not push_refused:

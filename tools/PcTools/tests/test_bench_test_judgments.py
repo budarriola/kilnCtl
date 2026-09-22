@@ -516,6 +516,36 @@ class OtaUpdateRefusedDuringStateTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 
+class OtaPicoRefusedWithTripPendingTest(unittest.TestCase):
+    """OT-P05's judge: trip_pending=None (unreadable) must read distinctly
+    from trip_pending=False (readable, no trip) -- both are falsy in
+    Python, and the case-level bug this covers used to run one code path
+    for both. See cases_ota.py's _pico_trip_pending()."""
+
+    def test_unreadable_trip_state_is_inconclusive_and_named(self):
+        r = J.judge_ota_pico_refused_with_trip_pending(None, None, "aaa1111", "aaa1111")
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("unreadable", r.reason)
+
+    def test_no_trip_pending_is_inconclusive_and_named_differently(self):
+        r = J.judge_ota_pico_refused_with_trip_pending(False, None, "aaa1111", "aaa1111")
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("no trip was pending", r.reason)
+        self.assertNotIn("unreadable", r.reason)
+
+    def test_refused_and_unchanged_passes(self):
+        r = J.judge_ota_pico_refused_with_trip_pending(True, True, "aaa1111", "aaa1111")
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_accepted_while_pending_fails(self):
+        r = J.judge_ota_pico_refused_with_trip_pending(True, False, "aaa1111", "aaa1111")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_commit_changed_despite_refusal_fails(self):
+        r = J.judge_ota_pico_refused_with_trip_pending(True, True, "aaa1111", "bbb2222")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
 class OtaSessionAuthTiersTest(unittest.TestCase):
     def test_admin_ok_user_refused_passes(self):
         r = J.judge_ota_session_auth_tiers(True, True)
