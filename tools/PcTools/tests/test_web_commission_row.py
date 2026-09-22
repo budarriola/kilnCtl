@@ -1849,3 +1849,68 @@ def test_delete_profile_by_name_refuses_non_scratch_name():
                                            "fake-cookie", "a real user profile", "_x")
     assert not ok
     assert "refusing" in msg
+
+
+def test_w9_cleans_up_the_second_profile_even_when_its_own_create_reports_failure(monkeypatch):
+    # Negative test (reviewer-added): _create_scratch_profile() can report
+    # failure (e.g. a driver exit-code/stderr mismatch after the POST
+    # actually landed) even though the write reached the board. W8 and W10
+    # both re-read GET after a reported create failure and delete the name
+    # if it is actually present; W9's per-iteration failure branch used to
+    # skip this check entirely for the profile that just "failed" -- it
+    # only ever cleaned up names already in `created` from EARLIER
+    # iterations, so a second profile that landed despite a reported
+    # failure was never named and never deleted: silently LEFT ON BOARD
+    # with no trace in the failure message.
+    monkeypatch.setattr(wcr.time, "time", lambda: 7000000)
+    n0 = wcr._new_scratch_profile_name(0)
+    n1 = wcr._new_scratch_profile_name(1)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                       # pre-read
+            # post-failure read-back inside the loop: n1 actually landed
+            # despite _create_scratch_profile() reporting failure for it.
+            (200, _profiles_body(("existing", 1), (n0, 8), (n1, 9))),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeProc()  # create of n0 succeeds
+        if calls["n"] == 2:
+            # create of n1: driver reports failure (e.g. bad exit code),
+            # but the POST actually landed on the board (see the
+            # post-failure GET above).
+            class _FailProc:
+                returncode = 1
+                stdout = ""
+                stderr = "driver reported failure after the POST landed"
+            return _FailProc()
+        return _FakeProc()  # any cleanup delete calls
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    deleted_names = []
+    real_delete = wcr._delete_profile_by_name
+
+    def spy_delete(row, host, screenshot_dir, cookie, name, shot_suffix):
+        deleted_names.append(name)
+        return real_delete(row, host, screenshot_dir, cookie, name, shot_suffix)
+
+    monkeypatch.setattr(wcr, "_delete_profile_by_name", spy_delete)
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    # n1 actually landed on the board despite the reported create failure --
+    # it must be named and a cleanup delete attempted for it (or reported
+    # LEFT ON BOARD), never silently dropped. n0 alone is not enough: that
+    # was already covered by the pre-existing `created` list.
+    assert n1 in deleted_names, (
+        f"n1={n1!r} was never passed to a cleanup delete -- only {deleted_names} were; "
+        f"message was: {msg}"
+    )

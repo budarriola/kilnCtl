@@ -1308,12 +1308,24 @@ def _run_profile_multi_delete(row: Row, host: str, screenshot_dir: str, cookie: 
     for i, name in enumerate(names):
         ok, detail = _create_scratch_profile(row, host, screenshot_dir, cookie, name, f"_create{i}")
         if not ok:
+            # `ok=False` reports the driver's own verdict, not the board's:
+            # a CDP exit-code/stderr mismatch can still follow a POST that
+            # actually landed. Re-read GET before deciding what to clean up
+            # -- W8's _cleanup_after_create_attempt() and W10's inline check
+            # both do this for their own single scratch profile; without it
+            # here, a `name` that landed despite a reported failure was
+            # never added to `created` and so was never named or deleted,
+            # silently LEFT ON BOARD with no trace in the failure message.
+            cleanup_targets = list(created)
+            chk_status, chk_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+            if chk_status == 200 and isinstance(chk_body, list) and name in _profile_names(chk_body):
+                cleanup_targets.append(name)
             cleanup_results = [_delete_profile_by_name(row, host, screenshot_dir, cookie, n,
                                                          f"_cleanup{j}")
-                                for j, n in enumerate(created)]
-            left = [n for n, (cok, _cd) in zip(created, cleanup_results) if not cok]
+                                for j, n in enumerate(cleanup_targets)]
+            left = [n for n, (cok, _cd) in zip(cleanup_targets, cleanup_results) if not cok]
             extra = (f" -- LEFT ON BOARD: {left}" if left else
-                     (f" -- cleaned up {created}" if created else " -- nothing was created"))
+                     (f" -- cleaned up {cleanup_targets}" if cleanup_targets else " -- nothing was created"))
             return False, f"{row.row_id} FAIL: create of {name!r} failed: {detail}{extra}"
         created.append(name)
 
