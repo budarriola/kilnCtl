@@ -588,6 +588,38 @@ def test_kiln_config_create_delete_refuses_upfront_if_generated_name_already_lis
     assert calls["n"] == 1
 
 
+def test_kiln_config_create_delete_same_second_rerun_does_not_self_collide(monkeypatch):
+    # F2 fix: the pre-read `configs` list is captured BEFORE the leftover
+    # sweep deletes leftovers[0]. On a same-second re-run, the just-deleted
+    # leftover's own name ("kc_test_123", time.time() mocked to 123) equals
+    # the freshly generated unique_name -- the "already listed" upfront
+    # collision check must exclude that just-deleted id, or this refuses a
+    # name that no longer exists on the board.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "1", "configs": [
+                {"id": "1", "name": "existing"},
+                {"id": "5", "name": "kc_test_123"},   # leftovers[0]: same name as the new one
+            ]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert "deleted pre-existing leftover 'kc_test_123'" in msg
+
+
 def test_kiln_config_create_delete_cleans_up_inactive_leftover_first(monkeypatch):
     # A leftover from a previous incomplete run (not the active config) is
     # deleted before the real run starts, and reported as having done so.

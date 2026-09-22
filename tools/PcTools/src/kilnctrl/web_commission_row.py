@@ -1028,6 +1028,7 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     notes: "list[str]" = []
 
     leftovers = [c for c in configs if isinstance(c, dict) and _is_leftover_config_name(c.get("name"))]
+    deleted_leftover_id = None
     if leftovers:
         stale = leftovers[0]
         stale_id = stale.get("id")
@@ -1065,6 +1066,7 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
             return False, (f"{row.row_id} FAIL: cleanup of pre-existing leftover "
                             f"{stale_name!r} (id={stale_id}) failed: {detail}")
         notes.append(f"deleted pre-existing leftover {stale_name!r} (id={stale_id}) before the real run")
+        deleted_leftover_id = stale_id
 
     # Short and clearly a test artifact, but well under _KILN_CFG_NAME_MAX_LEN
     # (root cause of the 2026-09-21 W42 FAIL: the old 37-char name overflowed
@@ -1084,7 +1086,13 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     # taken -- would otherwise only be caught by the board's own "a saved
     # kiln config already has that name" 400 well after the CDP click. Fail
     # here instead, before touching the board at all, naming the collision.
-    if unique_name in [c.get("name") for c in configs if isinstance(c, dict)]:
+    # Excludes the leftover just deleted above: `configs` was read BEFORE
+    # that deletion, so on a same-second re-run the just-deleted leftover's
+    # own `kc_test_<epoch>` name can equal the freshly generated one and
+    # would otherwise cause a spurious refusal here for a name that no
+    # longer exists on the board.
+    if unique_name in [c.get("name") for c in configs
+                       if isinstance(c, dict) and c.get("id") != deleted_leftover_id]:
         return False, (f"{row.row_id} FAIL: generated name {unique_name!r} is already listed in "
                         f"{row.verify_endpoint} -- refusing to create before touching the board")
     create_fills = (("#kcSaveNewName", unique_name),)
