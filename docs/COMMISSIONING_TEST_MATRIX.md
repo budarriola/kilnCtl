@@ -229,6 +229,67 @@ against that namespace was rejected before ever issuing the HTTP request
 ON post-reset via one authenticated `GET /api/status` (200). Full request/
 response detail in `docs/BENCH_TEST_LOG.md`.
 
+**2026-09-21/22 W42 live re-run + C1/C9/C16 status check (firmware 08f1c451):**
+this run's premise ("C1, C9, C16 marked NOT ATTEMPTED") was stale for all
+three -- **C1 and C9 already show PASS** in the Page-by-page inventory's
+`/settings/zones` "Measure Normal Current" row below (dated 2026-09-21, same
+day, a later run than the one that wrote the "NOT ATTEMPTED" narrative
+above), and **C16 already shows PASS** in the `/settings/security` page's
+credentials-save row (`cmd=set_web_password` re-set to the same env-var
+value via raw form POST, working around `web_auth_setup`'s lack of a
+"re-affirm current credential" path). None of the three was re-run this
+session: C1/C9 to avoid needlessly re-cycling relays on an already-passed
+row, and C16 because this run had no reason to touch the shared admin web
+credential again once its already-PASS status was found -- re-attempting a
+one-way credential write (`set_web_password`/`set_lcd_pin`/
+`clear_credentials`, none of which has a clean single-field undo) without a
+fresh need would only add unnecessary risk to the credential every
+concurrent bench session authenticates with.
+
+W42 (`kiln_config create-then-delete`, `web_commission_row.py --special
+kiln_config_create_delete`) was re-run live against `08f1c451` with the fixed
+runner (79f70f04/ea05886d/9c02787d chain, 18-char `kc_test_<epoch>` name).
+Pre-check `GET /api/kiln_configs` showed 1 config, no leftovers. Create half
+PASSED (`kc_test_1790034646` id=4 appeared). **Delete half FAILED**, a new,
+real finding distinct from the name-length bug the fix chain closed:
+`POST /api/kiln_configs/delete` returned `400
+"'kc_test_1790034646' is the kiln config this controller is running; select
+another kiln config first, or use Save as to keep a copy"`. Root cause read
+from source (`kiln_cfg_store.c` `kiln_cfg_store_save_current_ex()` lines
+~1201-1216): a "Save as new" from the *current live* setup deliberately marks
+the new slot `active_id` on creation ("a config just saved FROM the running
+kiln is, by construction, exactly what's live right now -- marking it active
+is recording a fact, not applying anything"), and the H5 backstop interlock
+(`kiln_cfg_store_delete()`) unconditionally refuses to delete the active
+config. **W42's own scripted shape (create-then-immediately-delete the same
+slot) is structurally incompatible with this intentional firmware behavior**
+-- not a firmware defect, and not the same bug the fix chain closed; the
+runner needs a different design (e.g. apply/select a different existing
+config before deleting the fresh one, which is itself a zone-config-changing
+action a bench read-mostly run should not take unprompted) before this row
+can PASS end to end. Per this run's "do not patch firmware" instruction, no
+source change was made; the runner (`web_commission_row.py`) was likewise
+left unchanged since fixing it correctly needs a design decision (how should
+the throwaway slot's active-marking be undone) rather than a one-line patch.
+**Board state left behind:** the throwaway config `kc_test_1790034646`
+(id=4) is still present and marked active in `/api/kiln_configs` --
+undeletable via the ordinary UI/API path while active, and no route exists
+to clear `active_id` without applying a different config's blob (a zone-
+config-changing action this run did not take). Its blob content is
+byte-identical to the zone config that was already live before the test
+(that's the entire point of "Save as new" from current settings), so no
+zone/PID/relay parameter actually changed on the board -- only the
+`kiln_configs` store gained one harmless, byte-identical, currently-
+undeletable extra entry. `get_heap_status` confirmed no reboot across the
+whole sequence (uptime 785s -> 1066s, `reset_reason` unchanged,
+`software (esp_restart)` from before this session). `get_readiness` before
+and after: unchanged, 17 ok / 1 not_done / 3 other, no trip, crash
+acknowledged, no new crash. Recommend the next session either gets explicit
+authorization to apply a different existing kiln config (making id=4
+deletable) to clean this up, or the runbook/runner is updated to avoid this
+shape entirely (e.g. test against a config created via Clone, which does
+*not* mark itself active, rather than Save-as-new).
+
 ---
 
 ## Page-by-page inventory
@@ -390,7 +451,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 | Page load / list | `GET /api/kiln_configs` | USER | `list_config_presets` (local presets; board-stored slots have no direct wrapper) | -- | Testable | PASS 2026-09-21 (web /settings/kiln_configs page load); PASS 2026-09-21 (W41, LIVE-CONFIRMED via web_commission_row.py's run_row_live() with one shared login cookie -- prior wording claimed PASS on the day the Row() was only unit-tested, not yet run against hardware; corrected here with the actual read-back: GET /api/kiln_configs -> 200, active_id=1) |
 | Apply (`kcApplyBtn`) | `POST /api/kiln_configs/apply` | ADMIN | `load_config_preset`/`capability_preflight_check` (facade presets are file-based, not identical to these board-stored slots) | -- | Testable | N-A 2026-09-21 (B18: board reports zero existing config slots to round-trip against) |
 | Apply status poll | `GET /api/kiln_configs/apply_status` | USER | none direct | -- | Testable | PASS 2026-09-21 (A33) |
-| Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, after `kiln_configs_quarantine_clear`; form-urlencoded body, field `name`); Save-as-new + Delete selected wired together as W42 in `web_commission_row.py` (`_run_kiln_config_create_delete`: create a uniquely-named throwaway config, confirm via GET, select it in `#kilnConfigSelect` and delete it, confirm removed) -- **FAIL 2026-09-21, LIVE-RUN at board commit 33124aa8**: create step (fill `#kcSaveNewName`, click `#kcSaveNewBtn`) reported CDP success, but the follow-up `GET /api/kiln_configs` never listed a config named `__kc_web_commission_test_<ts>__` -- exact decisive line: "W42 FAIL: no config named '__kc_web_commission_test_1790032582__' found in /api/kiln_configs after create -- write did not land". Delete step never ran (function stops before selecting/deleting on a failed create, per its own guard), so no throwaway config was ever created or left behind; `GET /api/kiln_configs` before and after the attempt returned the same set, confirming the list is unchanged. **Root-caused `docs/audits/w42_kiln_config_create_2026-09-21.md` (verdict (c), runner-side fixture defect, no firmware defect):** the generated name was 37 chars (the audit doc says 38; `len("__kc_web_commission_test_")` is 25, not 26 -- the off-by-one does not change the verdict), over the firmware's `KILN_CFG_NAME_MAX_LEN` (23, `kiln_cfg_store.h`), so the `save` POST was correctly rejected 400 and the runner's success check never inspected the POST status, only the later GET, producing the generic message above. Fixed in `web_commission_row.py`: the generated name is now `kc_test_<ts>` (18 chars at today's epoch, asserted against a mirrored `_KILN_CFG_NAME_MAX_LEN` constant by driving the real generator), and the create step now parses the CDP driver's `--expect-post` result and reports a non-200 or network-failed create status directly instead of falling through to "write did not land". The delete step is NOT status-checked the same way (known, bounded gap: a rejected delete is still caught by the post-delete read-back, which fails with "LEFT ON BOARD", just without the POST status in the message). **Result stays FAIL** until re-run live against the board; this row is not yet re-verified on hardware |
+| Save as new (`kcSaveNewBtn`) | `POST /api/kiln_configs/save` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, after `kiln_configs_quarantine_clear`; form-urlencoded body, field `name`); Save-as-new + Delete selected wired together as W42 in `web_commission_row.py` (`_run_kiln_config_create_delete`: create a uniquely-named throwaway config, confirm via GET, select it in `#kilnConfigSelect` and delete it, confirm removed) -- **FAIL 2026-09-21, LIVE-RUN at board commit 33124aa8**: create step (fill `#kcSaveNewName`, click `#kcSaveNewBtn`) reported CDP success, but the follow-up `GET /api/kiln_configs` never listed a config named `__kc_web_commission_test_<ts>__` -- exact decisive line: "W42 FAIL: no config named '__kc_web_commission_test_1790032582__' found in /api/kiln_configs after create -- write did not land". Delete step never ran (function stops before selecting/deleting on a failed create, per its own guard), so no throwaway config was ever created or left behind; `GET /api/kiln_configs` before and after the attempt returned the same set, confirming the list is unchanged. **Root-caused `docs/audits/w42_kiln_config_create_2026-09-21.md` (verdict (c), runner-side fixture defect, no firmware defect):** the generated name was 37 chars (the audit doc says 38; `len("__kc_web_commission_test_")` is 25, not 26 -- the off-by-one does not change the verdict), over the firmware's `KILN_CFG_NAME_MAX_LEN` (23, `kiln_cfg_store.h`), so the `save` POST was correctly rejected 400 and the runner's success check never inspected the POST status, only the later GET, producing the generic message above. Fixed in `web_commission_row.py`: the generated name is now `kc_test_<ts>` (18 chars at today's epoch, asserted against a mirrored `_KILN_CFG_NAME_MAX_LEN` constant by driving the real generator), and the create step now parses the CDP driver's `--expect-post` result and reports a non-200 or network-failed create status directly instead of falling through to "write did not land". The delete step is NOT status-checked the same way (known, bounded gap: a rejected delete is still caught by the post-delete read-back, which fails with "LEFT ON BOARD", just without the POST status in the message). **Re-run 2026-09-21/22 at board commit 08f1c451 (fix chain 79f70f04/ea05886d/9c02787d): create step now PASSES** -- `kc_test_1790034646` (18 chars) appeared in `GET /api/kiln_configs` with `id=4` after the fixed create step. **Delete step FAILS, a new and different finding from the name-length bug above:** `POST /api/kiln_configs/delete` returned 400 `"'kc_test_1790034646' is the kiln config this controller is running; select another kiln config first, or use Save as to keep a copy"`. Root cause read from `kiln_cfg_store.c`: `kiln_cfg_store_save_current_ex()` deliberately marks a freshly-created "Save as new" slot as `active_id` (it is, by construction, exactly what's live), and `kiln_cfg_store_delete()`'s H5 backstop unconditionally refuses to delete the active config -- so W42's own scripted shape (create-then-immediately-delete the *same* slot) can never pass end to end against this firmware's intentional design; this is a runner test-design defect, not a firmware defect, and needs a different flow (e.g. delete a *different*, non-active slot, or apply another config first) rather than a one-line fix. Per this run's instruction, no firmware or runner change was made. **Board left with the throwaway `kc_test_1790034646` (id=4) still present and active** -- undeletable without applying a different config (a zone-config-changing write this run was not authorized to make); its blob is byte-identical to the zone config already live before the test, so no live parameter changed. Full narrative: the dated 2026-09-21/22 section above. **Result: FAIL (delete half), new root cause, not yet resolved** |
 | Overwrite selected (`kcOverwriteBtn`) | `POST /api/kiln_configs/save` (existing id) | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B19, id field variant) |
 | Clone selected (`kcCloneBtn`) | `POST /api/kiln_configs/clone` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B20; fields `id`+`name`) |
 | Rename (`kcRenameBtn`) | `POST /api/kiln_configs/rename` | ADMIN | none direct | -- | Testable | PASS 2026-09-21 (B21; fields `id`+`name`) |
