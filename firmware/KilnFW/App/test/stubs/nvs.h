@@ -318,4 +318,29 @@ static inline void nvs_release_iterator(nvs_iterator_t iterator)
     (void)iterator;
 }
 
+/* Added 2026-09-21: not yet used by any firmware source, but the next caller
+ * of either will silently break this ungated host-test build the same way
+ * nvs_entry_find/nvs_entry_next/nvs_release_iterator would have before they
+ * were added above. Same always-empty-partition behavior as those three.
+ * Signatures match esp-idf v6.0.2's components/nvs_flash/include/nvs.h. */
+static inline esp_err_t nvs_entry_find_in_handle(nvs_handle_t handle, nvs_type_t type,
+                                                  nvs_iterator_t *output_iterator)
+{
+    (void)handle;
+    (void)type;
+    if (output_iterator) {
+        *output_iterator = NULL;
+    }
+    return ESP_ERR_NVS_NOT_FOUND;
+}
+
+static inline esp_err_t nvs_entry_info(const nvs_iterator_t iterator, nvs_entry_info_t *out_info)
+{
+    (void)iterator;
+    if (out_info) {
+        memset(out_info, 0, sizeof(*out_info));
+    }
+    return ESP_ERR_NVS_NOT_FOUND;
+}
+
 #endif // TEST_STUB_NVS_H
