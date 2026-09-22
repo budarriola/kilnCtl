@@ -286,7 +286,7 @@ prevailing style in the surrounding JS string concatenation — gets an escaping
 in the page that configures safety limits, and the weakened helper looks exactly like
 the three correct ones at a glance.
 
-**Fixed 2026-09-22.** `safety_config_page.html`'s local `esc()` now aliases
+**Fixed 2026-09-22.** `safety_config_page.html`'s local `esc()` now delegates to
 `window.kcEscapeHtml` directly (app.js is already loaded on this page) instead of
 keeping a second, driftable copy. `tools/check_html_escape_helpers.ps1` was added to
 catch this class mechanically going forward: it finds every HTML-escape-shaped helper

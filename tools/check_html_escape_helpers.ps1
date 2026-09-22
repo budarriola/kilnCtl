@@ -47,7 +47,10 @@ $targets = @($trackedHtml) + @($trackedJs) | Where-Object { $_ } | Select-Object
 # function (non-greedy, single function at a time). This is intentionally
 # simple text matching, not a JS parser -- narrow and mechanical per the
 # design note above, matching this repo's other check_*.ps1 scripts.
-$funcPattern = [regex]'(?ms)function\s+\w*[Ee]sc\w*\s*\([^)]*\)\s*\{.*?\n\}|(?:window\.)?\w*[Ee]scapeHtml\s*=\s*function\s*\([^)]*\)\s*\{.*?\n\};?'
+# The closing brace is matched as `\n\s*\}` rather than `\n\}` so a helper
+# nested inside an indented block (e.g. an IIFE) is not silently skipped --
+# a bare `\n\}` only matches a closing brace sitting at column 0.
+$funcPattern = [regex]'(?ms)function\s+\w*[Ee]sc\w*\s*\([^)]*\)\s*\{.*?\n\s*\}|(?:window\.)?\w*[Ee]scapeHtml\s*=\s*function\s*\([^)]*\)\s*\{.*?\n\s*\};?'
 
 $requiredChars = @('&', '<', '>', '"', "'")
 
@@ -104,8 +107,22 @@ foreach ($rel in $targets) {
     }
 }
 
+# Pinned floor, not just "> 0": as of this check's introduction there are
+# at least three known helpers (app.js's window.kcEscapeHtml, zones_page.html's
+# kgEsc, live_profile_page.html's escapeHtml). If the count ever drops below
+# this floor, either a helper was deleted/renamed or the pattern silently
+# stopped matching one -- both are the same "pattern erosion" failure this
+# check exists to catch, so treat it as a failure, not a pass with fewer
+# helpers found. When a genuinely new helper is legitimately added, raise
+# this floor in the same change.
+$minExpectedHelpers = 3
+
 if ($checkedCount -eq 0) {
     throw "check_html_escape_helpers.ps1: found zero HTML-escape helper definitions under $httpDir -- the pattern likely broke, or the files moved. Refusing to pass vacuously."
+}
+
+if ($checkedCount -lt $minExpectedHelpers) {
+    throw "check_html_escape_helpers.ps1: found only $checkedCount HTML-escape helper(s), expected at least $minExpectedHelpers (app.js kcEscapeHtml, zones_page.html kgEsc, live_profile_page.html escapeHtml). Either a helper was removed/renamed or the pattern stopped matching one -- if a new helper was legitimately added, raise `$minExpectedHelpers` in this script in the same change."
 }
 
 if ($violations.Count -gt 0) {
