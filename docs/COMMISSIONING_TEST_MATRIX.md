@@ -556,6 +556,11 @@ this bench pass); flagging for the next backend pass. No firmware or
 runner change made. Board left exactly as found: the same single config
 (`id=1`, active), no crash, no reboot, safety link up/armed/not tripped.
 
+**Fixed:** landed as `a526b0a0`/`023b1cec`/`e1e2c00a` (a clean apply was
+reading a zeroed cache tag as a Pico-unconfigured divergence; see
+`project_config_apply_false_diverged_cache_tag.md`), bench-verified
+2026-09-22 -- self-apply `id=1` returned `done_ok`.
+
 ---
 
 ## Page-by-page inventory

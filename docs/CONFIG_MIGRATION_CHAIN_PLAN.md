@@ -111,8 +111,9 @@ restore it by re-entering values, not by importing an unreadably-old blob.**
    and cannot corrupt one.
 
 **Assessment: not a collision between the two owner decisions.** Single-slot
-OTA permits the sequential path D1 requires. The genuine blocker is §1.6's
-write-back defect, which is internal to the config store and fixable.
+OTA permits the sequential path D1 requires. The genuine blocker was §1.6's
+write-back defect, internal to the config store — CLOSED 2026-09-17
+(`d3f74d67`/`6985c89b`; see §1.6).
 
 ### 0.4 One-way
 

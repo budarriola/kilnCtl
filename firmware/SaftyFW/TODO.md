@@ -769,12 +769,13 @@ ROADMAP.md M8.
       the metadata write; corrupt slot rejected; bad-but-booting image rolled
       back; both slots invalidated and recovered over the link with no probe.
       Hardware-gated, entirely unstarted.
-- [ ] Reconcile host-side vs ESP-side UPDATE_BEGIN image CRC before trusting a
+- [x] Reconcile host-side vs ESP-side UPDATE_BEGIN image CRC before trusting a
       CRC match as proof of a correct transfer — the 2026-09-06 exercise saw
       host zlib CRC32 `0xc02711a8` against the ESP-reported `0x02F15704` for
       the same staged image, so the two sides are not computing the same
       CRC32 variant/parameters (`../CommonFW/docs/UPDATE_PROTOCOL.md`
-      "Hardware exercise 2026-09-05/06").
+      "Hardware exercise 2026-09-05/06"). **Fixed by `fabd270f`** (see
+      `../../docs/PICO_AUTO_UPDATE_PLAN.md:167`).
 
 ---
 

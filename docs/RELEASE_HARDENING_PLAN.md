@@ -324,7 +324,7 @@ unfixed, as a scoped follow-up — a real, currently-live vacuity gap in
 the `hwabstraction_esp` component omits `firmware/hwAbstraction/common`, even
 though that component's own `CMakeLists.txt` compiles `hal_status.c` from
 there, so `hal_status.c.obj` is silently misclassified as stale build output
-and excluded from duplicate-symbol scanning on every run. The sixth pass's
+and excluded from duplicate-symbol scanning on every run. **Fixed by the seventh pass** (below); confirmed at HEAD: `tools/check_duplicate_symbols.ps1:143` now lists `@("firmware\hwAbstraction\esp", "firmware\hwAbstraction\common")` for `hwabstraction_esp`. The sixth pass's
 own document lists what remains unexamined — five of the seven UI/layout
 checks, and both `check_00_*_target_build.ps1`/`check_01_*_pushed_build.ps1`
 pairs' FAIL paths (still only exercised at a clean baseline, never
@@ -1056,15 +1056,16 @@ hazards in it:
    verifies its own NVS write rather than trusting a return code, and
    `boot_guard_reset_counter()` exists for a tool that knows it just
    deliberately flashed. That second function is now wired into
-   `flash_firmware()`'s verify step (`b09294fb`, 2026-09-09): an opt-in
-   `ap_password` parameter makes `flash_firmware()` call the new
-   `POST /api/ota/esp/boot_guard_reset` route ONLY after post-flash
+   `flash_firmware()`'s verify step (`b09294fb`, 2026-09-09), and, per the
+   **owner decision 2026-09-19, is DEFAULT ON**: `flash_firmware()` calls
+   the new `POST /api/ota/esp/boot_guard_reset` route ONLY after post-flash
    verification confirms full, unambiguous success, and reports the
    counter's before/after values and whether the clear actually verified —
    see CLAUDE.md's `boot_guard_reset_counter()` paragraph for the full
-   wiring. A caller who omits `ap_password` gets the pre-existing behavior
-   unchanged, so this is closed for a caller that opts in, not yet closed
-   as a default every flash gets automatically.
+   wiring. A caller with no explicit `ap_password` falls back to the
+   `KILNCTL_AP_PASSWORD` environment variable; `reset_boot_guard=False`
+   opts out unconditionally. This is now closed by default, not merely for
+   a caller that opts in.
 
 The Pico half of field updates has additionally never completed a transfer:
 the 2026-09-06 attempt was refused by a genuine Pico-side interlock before any
@@ -1083,10 +1084,10 @@ over to it with a JTAG probe.
   `BootGuardResetWiringTest`, and `test_boot_guard.c`/`test_ota_http.c` on the
   firmware side) covering the central negative case (a hard verification
   failure must never clear the counter) and the lying-write/unreachable-
-  endpoint paths. Residual, not yet closed: the call is opt-in
-  (`ap_password` must be passed) rather than the flash-tool's default, so an
-  ordinary `flash_firmware()` call with no `ap_password` still gets none of
-  this protection.
+  endpoint paths. **Owner decision 2026-09-19 closed the residual**: the call
+  is now default on rather than opt-in (`reset_boot_guard=True` by default,
+  falling back to the `KILNCTL_AP_PASSWORD` environment variable when no
+  explicit `ap_password` is given; `reset_boot_guard=False` opts out).
 - ~~Make the schema-downgrade hazard impossible to hit silently: on boot, if
   the persisted config version is newer than this firmware understands,
   refuse to start a firing and say so on every surface, rather than running
@@ -1131,17 +1132,15 @@ over to it with a JTAG probe.
   `zones_cfg_load_fault_t` latch and `profile_executor_run()`'s prestart
   refusal — a rollback to firmware that cannot parse the persisted schema
   now refuses to start a firing rather than running on default gains).
-- **Item 3, `boot_guard_reset_counter()` default wiring — genuinely still
-  open, and not closeable at the source level.** `ap_password` remains
-  opt-in (`mcp_server_flash.py:605`, `733-754`) because the reset call goes
-  through an *authenticated* HTTP route
-  (`POST /api/ota/esp/boot_guard_reset`) — making it flash_firmware()'s
-  default would mean the tool needs a device credential on every call,
-  which is a credential-handling/architecture decision (where does the
-  password come from by default, and is a wrong guess worse than the
-  status quo of "no attempt, no warning"), not a wiring gap a source-level
-  pass should resolve unilaterally. **Needs an owner decision**, not
-  hardware.
+- **Item 3, `boot_guard_reset_counter()` default wiring — CLOSED, owner
+  decision 2026-09-19.** The credential-handling/architecture question this
+  status entry raised (where the password comes from by default, and
+  whether a wrong guess is worse than "no attempt, no warning") was decided
+  by the owner: `reset_boot_guard=True` is now the default
+  (`mcp_server_flash.py:843`), falling back to the `KILNCTL_AP_PASSWORD`
+  environment variable when no explicit `ap_password` is given
+  (`_resolve_boot_guard_password()`), with `reset_boot_guard=False` as the
+  opt-out. See CLAUDE.md's `boot_guard_reset_counter()` paragraph.
 - **Mechanical coverage added this pass (host-verifiable, no board):**
   - `tools/PcTools/tests/test_flash_board_pinning.py`'s new
     `FlashFirmwareSizePreflightTest`: the pre-flight
