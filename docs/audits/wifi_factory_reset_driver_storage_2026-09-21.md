@@ -394,3 +394,27 @@ remains unexercised on hardware. To exercise it deliberately, a board would
 have to be provisioned while storage mode is FLASH (a pre-1319e051 image),
 then flashed to a post-0edfb313 image and reset with scope=wifi, expecting a
 nonzero before-count and a zero after-count.
+
+**Update 2026-09-22 (re-verification, ROADMAP.md ~line 170 unfiled-finding
+sweep).** Re-checked the "unfiled finding" wording in
+`ROADMAP.md`'s 2026-09-21 C26/C6 entry -- "ESP-IDF's own
+`WIFI_STORAGE_FLASH`-persisted STA config briefly auto-reconnects the board
+on its OLD credentials right after the erase" -- against `origin/main` at
+`e1e2c00a`. Section 2 above already refutes that mechanism from source (the
+post-erase boot never starts the STA interface or calls
+`esp_wifi_connect()`, so nothing can report CONNECTED); this pass confirms
+the fix from section 3 is still present and unchanged at HEAD:
+`wifi_prov.c:303` still calls `esp_wifi_set_storage(WIFI_STORAGE_RAM)`
+immediately after `esp_wifi_init()`, and `factory_reset.c`'s
+`execute_scope_job()` still brackets `esp_wifi_restore()` with an explicit
+FLASH/RAM round-trip (`factory_reset.c:259-281`) for the `wifi`/`all`
+scopes, unchanged since the section 7 bench PASS at `63a48ab3`. No further
+code change is warranted: the reported "auto-reconnect" symptom has no
+mechanism in this source, and the real defect it was standing in for (the
+IDF driver's own retained STA credential copy) already has both a landed
+fix and a hardware PASS for the leak. Closing this line as
+already-resolved rather than re-opening a fix pass; the only remaining gap
+noted anywhere in this doc is the unexercised-on-hardware erase path
+(section 7's last paragraph), which needs a pre-1319e051 image to
+provision against FLASH storage before it can be exercised -- not a defect
+in current firmware.
