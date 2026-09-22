@@ -17,6 +17,8 @@
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_wdt.h"
+#include "nvs.h" /* nvs_entry_find()/nvs_entry_info() -- log_net80211_key_count() below, same
+                   * primitives as diagnostics_http.c's nvs_keys_get_handler() */
 #include "nvs_key_check.h"
 #include "http_form.h"
 #include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
@@ -152,6 +154,32 @@ static void reboot_task(void *arg)
  * remaining headroom on an unmeasured path -- same reasoning as
  * relay_cycles.c's reset_persist_job() and safety_cfg_store.c's
  * nvs_save_store_job(). */
+/* Bench self-check for docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md:
+ * an HTTP-only nvs_list_keys poll cannot reach this window (STA drops when
+ * esp_wifi_restore() tears the link down, and the reboot below follows
+ * shortly after), so the board has to report the result itself. Counts
+ * entries in the `nvs` partition's `net80211` namespace -- the exact
+ * nvs_entry_find()/nvs_entry_next()/nvs_entry_info() primitives
+ * nvs_keys_get_handler() (diagnostics_http.c) already uses for the same
+ * partition/namespace pair -- and logs the count only, never a key name or
+ * value. Runs on bx_flash_worker (10240 B stack, internal SRAM); the
+ * nvs_iterator_t and nvs_entry_info_t locals here are the same small,
+ * fixed-size structs that handler already carries on a task stack, so this
+ * adds no measurable ceiling risk. */
+static void log_net80211_key_count(const char *when)
+{
+    size_t count = 0;
+    nvs_iterator_t it = NULL;
+    esp_err_t err = nvs_entry_find("nvs", "net80211", NVS_TYPE_ANY, &it);
+    while (err == ESP_OK) {
+        count++;
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    ESP_LOGW(TAG, "factory_reset: nvs/net80211 key count %s esp_wifi_restore(): %u",
+             when, (unsigned)count);
+}
+
 typedef struct {
     const reset_scope_t *scope;
     esp_err_t err;
@@ -237,7 +265,9 @@ static void execute_scope_job(void *arg)
         if (store_flash_err != ESP_OK) {
             ESP_LOGW(TAG, "esp_wifi_set_storage(FLASH) before restore failed: %s", esp_err_to_name(store_flash_err));
         }
+        log_net80211_key_count("before");
         esp_err_t restore_err = esp_wifi_restore();
+        log_net80211_key_count("after");
         if (restore_err != ESP_OK) {
             ESP_LOGW(TAG, "esp_wifi_restore() failed: %s -- the Wi-Fi driver's own persisted "
                      "config may survive this reset", esp_err_to_name(restore_err));
