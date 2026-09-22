@@ -1551,3 +1551,69 @@ def test_setup_wizard_step1_fails_loud_if_progress_restore_does_not_take(monkeyp
     assert "PROGRESS RESTORE FAILED" in msg
     assert "step 1 state now 'done'" in msg
     assert "LEFT ON BOARD" in msg
+
+
+def test_setup_wizard_step1_both_cdp_calls_wait_for_the_progress_post(monkeypatch):
+    # BOTH the flipping Save and the restoring Save run the page's same
+    # three-POST chain (tz -> unit_pref -> setup/progress). If the restoring
+    # call waited only for /api/unit_pref (the row's default expect_post,
+    # the SECOND POST), the driver could exit while the page's own
+    # postStepState(1,'done') was still in flight, and _restore_progress()
+    # would then post + read back the pre-run state BEFORE that late 'done'
+    # landed -- leaving step 1 at 'done' on a run that reported PASS.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    cmds = []
+
+    def fake_run(cmd, **kwargs):
+        cmds.append(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    _w50_post_form(monkeypatch)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert len(cmds) == 2, cmds
+    for cmd in cmds:
+        assert "--expect-post" in cmd
+        assert cmd[cmd.index("--expect-post") + 1] == "/api/setup/progress", cmd
+
+
+def test_setup_wizard_step1_fails_loud_if_the_progress_note_is_not_restored(monkeypatch):
+    # The click's postStepState(1,'done') carries no note, and firmware
+    # CLEARS the stored note on a POST that omits it, so a pre-run note only
+    # survives if this row's restore POST puts it back. A restore whose
+    # state took but whose note did not must FAIL, never PASS with the
+    # operator's text silently gone.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json(
+            [
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+                (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            ],
+            [(200, _progress_body("done", note="skipped: no CT fitted")),
+             (200, _progress_body("done", note=""))],
+        ),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    post_calls = _w50_post_form(monkeypatch)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "PROGRESS RESTORE FAILED" in msg
+    assert "note" in msg
+    assert "restore by hand" in msg
+    # The note WAS sent -- the failure is that the board did not keep it.
+    assert post_calls == [("/api/setup/progress",
+                           {"step": "1", "state": "done", "note": "skipped: no CT fitted"})]

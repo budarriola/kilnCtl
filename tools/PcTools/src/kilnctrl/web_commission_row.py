@@ -1079,7 +1079,8 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
     row does leave step 1's `ts` at "now" even after a successful restore;
     only `state`/`note` are round-tripped and verified.
 
-    Determinism: `expect_post` for the FIRST (flipping) CDP call is
+    Determinism: `expect_post` for BOTH CDP calls (the flipping Save and
+    the restoring one -- each runs the same three-POST chain) is
     overridden to `/api/setup/progress` -- the THIRD and last of the three
     chained POSTs -- rather than the row's own default
     (`/api/unit_pref`, the second), so the driver waits for the whole
@@ -1151,7 +1152,22 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
             got = final_step1.get("state") if isinstance(final_step1, dict) else None
             return False, (f" -- PROGRESS RESTORE FAILED: step 1 state now {got!r}, expected "
                             f"{orig_step1_state!r} -- LEFT ON BOARD, restore by hand")
-        return True, f" -- step 1 progress restored to state={orig_step1_state!r} and confirmed"
+        # `note` is restored, so it is also VERIFIED. The click's own
+        # postStepState(1,'done') carries no note field, and
+        # setup_wizard_progress_set_step() CLEARS the stored note whenever
+        # the POST omits it or sends it empty (setup_wizard_progress.c:
+        # `note[0] = '\\0'` on a NULL/empty note), so any pre-run note is
+        # destroyed by the flip and only this restore puts it back.
+        # Comparing `state` alone would let a silently-dropped note (one
+        # too long for http_form_find_field's buffer, so refused as -2 and
+        # treated as absent) report PASS with the operator's text gone.
+        final_note = str(final_step1.get("note") or "")
+        if final_note != str(orig_step1_note or ""):
+            return False, (f" -- PROGRESS RESTORE FAILED: step 1 note now {final_note!r}, expected "
+                            f"{str(orig_step1_note or '')!r} (state itself was restored) -- the "
+                            f"pre-run note is LEFT changed on the board, restore by hand")
+        return True, (f" -- step 1 progress restored to state={orig_step1_state!r} "
+                       f"(note {str(orig_step1_note or '')!r}) and confirmed")
 
     def _restore() -> "tuple[bool, str]":
         """The restoring second Save, plus its read-back, plus the setup-
@@ -1164,8 +1180,18 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
         the ORIGINAL tz alongside the original unit, so it also repairs a
         collateral tz write rather than only reporting one."""
         try:
+            # Same `expect_post` override as the flipping Save above, and for
+            # the same reason plus a sharper one: the restoring Save runs the
+            # SAME three-POST chain, so its own postStepState(1,'done') can
+            # still be in flight when the driver exits. Waiting only for
+            # /api/unit_pref (the row default, the SECOND POST) would let
+            # _restore_progress() below post the pre-run state and read it
+            # back BEFORE the page's late 'done' POST lands -- leaving step 1
+            # at 'done' on the board while this row reported it restored and
+            # confirmed.
             restore_proc = _run_cdp(row, host, screenshot_dir, cookie,
-                                     fills=restore_fills, shot_suffix="_restore")
+                                     fills=restore_fills,
+                                     expect_post="/api/setup/progress", shot_suffix="_restore")
         except Exception as exc:  # noqa: BLE001 -- subprocess timeout/OSError must not skip the report
             _, prog_note = _restore_progress()
             return False, (f" -- RESTORE ATTEMPT ITSELF FAILED ({type(exc).__name__}: {exc}); board may "
