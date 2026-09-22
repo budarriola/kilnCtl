@@ -840,3 +840,53 @@ an owner decision reopens the two-slot-bootloader install on this specific fixtu
   `sample_lcd_region.ps1`'s numeric RGB sampling against a bezel reference,
   never eyeballing a screenshot -- `project_st7796_rgb565_byte_order` records
   a prior incident where this was gotten wrong (byte order, not inversion).
+
+## 2026-09-22 W20/W50/W8 live re-run (harness at 63b62945)
+
+Re-ran three M18 web rows against the live board with `web_commission_row.py`
+code as of `63b62945` (W20 now accepts idle/done/aborted autotune states,
+W50 now grades the `/api/settings/tz` and `/api/unit_pref` POST statuses,
+the CDP driver's `clickWithRetry` gained `??` timeout fallbacks). MCP
+`kilnctrl` server was reporting STALE (1 file changed since it started at
+commit `189326ff`) so the row tool itself was run from the docs worktree
+(`C:\wt\w20live_imixfl`) via the main tree's venv with `PYTHONPATH`
+pointing at the worktree's `tools/PcTools/src`; read-only board queries
+(`get_heap_status`, `safety_get_status`, `autotune_get_status`,
+`profiles_get_exec_status`, `profiles_list`) still went through the MCP
+facade, since those code paths were unaffected by the pending change.
+
+Precheck: `get_heap_status` showed `reset_reason='software (esp_restart)'`,
+`uptime_s=4483`, no unacknowledged-crash banner; `safety_get_status` showed
+link up, armed, not tripped; `autotune_get_status` idle; `profiles_get_exec_status`
+`state=0` (idle); `profiles_list` showed only `#0 'M18C_TEST'` plus built-ins,
+no leftover `wc_test_*`/`kc_test_*` scratch entries. No firing in progress.
+
+Baseline read via a direct `GET /api/status` (worktree `http_auth.urlopen()`
+seam, credentials from env, never printed): `temp_unit='C'`, `time_tz='UTC0'`.
+
+- **W20** (`atAbortBtn`, `/settings/zones`): **PASS** -- "confirmed
+  `/api/autotune` was idle/inactive before the click, clicked `atAbortBtn`,
+  confirmed it remains idle/inactive afterward." Screenshot:
+  `logs/web_commission/W20.png`.
+- **W50** (`/setup` wizard step 1 Save, `/api/unit_pref` + `/api/settings/tz`):
+  **PASS** -- toggled `temp_unit` 'C' -> 'F' via Save (`time_tz` re-submitted
+  unchanged at 'UTC0'), confirmed via `GET /api/status`, restored to 'C' via
+  a second Save, confirmed restored, and step 1's `/api/setup/progress`
+  state restored to `pending` via a direct POST. Independent confirmation
+  after the row returned: a fresh `GET /api/status` read `temp_unit='C'`,
+  `time_tz='UTC0'` -- identical to the pre-run baseline above. Screenshots:
+  `logs/web_commission/W50_set.png`, `logs/web_commission/W50_restore.png`.
+- **W8** (segment-builder create/delete, `/profiles`): **PASS** -- created
+  `wc_test_0491690` via the segment builder (`POST /api/profile`), confirmed
+  via `GET /api/profiles`, deleted via its own Delete icon (`POST
+  /api/profile/delete`), confirmed removed. This is the row that failed on
+  2026-09-22 against `7dcde0dd` (delete selector not found); the fix in the
+  current runner passed cleanly with no manual cleanup needed. Screenshots:
+  `logs/web_commission/W8_create.png`, `logs/web_commission/W8_delete.png`.
+
+Board final state: `get_heap_status` `uptime_s=4589` (up from 4483, no
+reboot across the three rows), `reset_reason` unchanged, no crash banner;
+`safety_get_status` link up, armed, not tripped, unchanged; `profiles_list`
+back to only `#0 'M18C_TEST'` plus built-ins, no scratch profiles left on
+board. No flash, no reset, no heating, no crash ack, W9/W10 not run, MCP
+servers not restarted.
