@@ -3022,6 +3022,32 @@ Owner instruction, 2026-09-21.
   `kc_test_<epoch>` (18 chars, under the 23-char limit) and the create step
   checks the POST status via the CDP driver's `post` field. W42 stays FAIL
   until re-run live (a re-run is in progress).
+  **Runner redesigned 2026-09-21** (`e862a35a`): W42 now matches
+  firmware's active-slot behavior -- `/api/kiln_configs/apply` is a real
+  two-processor swap, not bookkeeping -- rather than the create/delete-
+  same-slot shape that could never pass against the intentional H5
+  backstop (deleting an active config is refused 400; see the delete-half
+  FAIL below). **Live re-run 2026-09-22 on ESP `08f1c451`: board panicked**
+  ("A stack overflow in task kiln_cfg_swap has been detected"), nothing
+  moved, crash report left unacknowledged (`b024b33c`); firmware fix in
+  flight, not landed. **W42 stays FAIL.**
+  **Correction, 2026-09-21** (`459f692b`): C1/C9/C16 were already PASS
+  earlier the same day; the doc's stale NOT-ATTEMPTED premise for those
+  three was wrong, not the board -- corrected, no re-run needed. Board
+  left with one harmless, byte-identical, currently-undeletable
+  throwaway config (id=4, `kc_test_<ts>`).
+  **W50 wired 2026-09-21** (`d19620aa`, `14e2324b`): setup wizard step 1
+  deep-link (`#step=1`) now automated (flips `temp_unit`, restores it,
+  verifies no collateral tz drift). W8/W9/W10 (profile create/delete/
+  favorite) stay unwired -- no stable per-row ids the CDP driver's
+  selector kinds could target -- **wiring now in progress** in a
+  separate, not-yet-landed change now that `ccec2150`/`eec3e04b` added
+  aria-label/css selector kinds and a `--steps` runner to
+  `_web_commission_cdp.mjs`, plus a new standing check
+  `check_web_commission_cdp_driver.ps1` (node/Chrome-gated, SKIPs
+  cleanly without them) wired into `run_all_checks.ps1` phase 3;
+  discovered check count 128 -> 129. `ROWS` covers 27 of 51 runbook
+  rows as of this entry.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at
