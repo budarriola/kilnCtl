@@ -383,3 +383,14 @@ partition/namespace on this board: the driver's own `nvs.net80211` namespace in
 the default `nvs` partition read empty both immediately before and immediately
 after `esp_wifi_restore()` in this run. Full run detail:
 `docs/COMMISSIONING_TEST_MATRIX.md`'s 2026-09-22 W8/flash/C6 entry.
+
+**Caveat on that verdict (coordinator, same day).** Before=0 means the
+namespace was already empty when `esp_wifi_restore()` ran, so this run did
+not exercise the erase itself: it exercised the whole cycle (boot with
+`wifi_prov.c`'s RAM storage mode, STA provisioned over UART, scope=wifi reset)
+and found the driver copy never written. That is the end state the fix is
+for, so PASS stands for the leak, but the `esp_wifi_restore()` erase path
+remains unexercised on hardware. To exercise it deliberately, a board would
+have to be provisioned while storage mode is FLASH (a pre-1319e051 image),
+then flashed to a post-0edfb313 image and reset with scope=wifi, expecting a
+nonzero before-count and a zero after-count.
