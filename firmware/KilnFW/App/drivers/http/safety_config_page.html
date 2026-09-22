@@ -191,9 +191,20 @@ var PASSTHROUGH = [
 // replacement app.js's kcEscapeHtml has always had -- see
 // docs/audits/web_code_duplication_drift_2026-09-18.md section 2.4). app.js
 // is loaded on this page (see the <script defer src="/app.js"> above), so
-// this now aliases the one shared, five-character-correct implementation
-// instead of keeping a second copy that can drift again.
-var esc = window.kcEscapeHtml;
+// this now delegates to the one shared, five-character-correct
+// implementation instead of keeping a second copy that can drift again.
+//
+// It MUST be a wrapper, not `var esc = window.kcEscapeHtml;`: app.js is
+// loaded with `defer`, so it has not executed yet while this inline script
+// is being parsed, and a plain alias would capture `undefined` -- every
+// esc() call would then throw and the page would render nothing but
+// "Could not load the current settings". Resolving window.kcEscapeHtml at
+// CALL time is what makes this safe: every caller runs from a fetch
+// callback or an event handler, i.e. after the deferred app.js has run.
+// Same pattern as live_profile_page.html's escapeHtml().
+function esc(s) {
+  return window.kcEscapeHtml(s);
+}
 
 function renderProfiles() {
   var host = document.getElementById('profiles');
