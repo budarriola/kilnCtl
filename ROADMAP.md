@@ -828,10 +828,13 @@
 >   ramp-lag rule cells push `Kp`, not the `Ki` that actually governs
 >   ramp-following error, and the layer has no access to `d(setpoint)/dt` at
 >   all; the feedforward climb term remains the mechanism for objective 1,
->   unchanged from before. A new, cheap, **NOT YET TESTED** candidate for
->   objective 4 was also recorded: the setpoint-weight `b` in `pid.c`
->   (hardcoded to 1.0, `PID_SETPOINT_WEIGHT_B`), one parameter, no rule-table
->   change — see plan §0.0.2.
+>   unchanged from before. A cheap candidate for objective 4, the
+>   setpoint-weight `b` in `pid.c` (hardcoded to 1.0, `PID_SETPOINT_WEIGHT_B`),
+>   was swept in simulation 2026-09-22 and **falsified for the current gain
+>   set** — no overshoot to fix on the tested scenario, and lowering `b`
+>   sharply regresses ramp-lag, settle time, and steady-state accuracy
+>   instead; shipped `b=1.0` stays correct. See plan §0.0.2 and
+>   `docs/audits/setpoint_weight_b_sim_2026-09-22.md`.
 >
 > **Simulation fidelity — coupling-model replacement, in progress
 > elsewhere, do not describe an outcome.** Sources:

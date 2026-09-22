@@ -192,6 +192,15 @@ layer's own overshoot role, so any options weighing (ii)/(iv)/(v) should
 note this candidate as an unexplored cheaper alternative for the same
 objective.
 
+**Now tested, 2026-09-22, FALSIFIED for the current gain set:**
+`docs/audits/setpoint_weight_b_sim_2026-09-22.md` — with this baseline's
+`kp=0.0318 ki=0.0001 kd=0.8401`, the two "approach from below" dwells (where
+overshoot risk actually lives) show zero overshoot at every `b` including
+1.0, so there is nothing for `b<1.0` to fix, while ramp-lag, settle time, and
+steady-state RMS all regress sharply as `b` drops (two dwells never settle at
+all at `b<=0.6`). Shipped `b=1.0` stays correct; not closed for a materially
+larger `ki`, which this sweep does not cover.
+
 ---
 
 ## 0. Facts this plan rests on (each verified in this pass, not inherited)
