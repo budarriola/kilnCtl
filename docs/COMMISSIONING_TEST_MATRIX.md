@@ -494,6 +494,66 @@ STA reconnected, web auth ON. Worktrees kept for provenance:
 `C:\wt\flash63a_zw9974` (flash build) and `C:\wt\m18rec2_pkkk5a` (this
 record).
 
+**2026-09-22 `kiln_config_apply` MCP tool live exercise (backend, board
+firmware `63a48ab3`).** Precheck: `get_heap_status` no unacknowledged crash
+(`uptime_s=5235`, `reset_reason='software (esp_restart)'`),
+`safety_get_status` link up/armed/not tripped, `profiles_get_exec_status`
+state=0 (idle), `autotune_get_status` state=idle. `kiln_call(name=
+"kiln_config_apply", args={"id":0})` with `confirm` omitted correctly
+dry-ran: `"DRY RUN (pass confirm=True to actually apply) -- would POST
+/api/kiln_configs/apply for id=0 (ack_hardware_differs=False,
+host=192.168.1.156)"` -- no POST sent. No dedicated kiln_configs list/read
+MCP tool exists yet (`kiln_find(query="kiln configs")` surfaced only
+`kiln_config_apply`/`kiln_configs_quarantine_clear`); read the store
+instead via the existing PC client library directly
+(`kiln_configs_quarantine_http_client.get_kiln_configs_list()`, the same
+read-only `GET /api/kiln_configs` call `kiln_configs_quarantine_clear`'s
+own dry-run already makes internally) -- confirmed exactly one saved
+config, `id=1` `"M18RR_B21renamed"`, `active_id=1`, `is_active=true`.
+
+Applied it to itself (a no-op by content, per this run's scope rule --
+exactly one saved config and it is already active):
+`kiln_call(name="kiln_config_apply", args={"id":1,"confirm":true})`.
+**Result: FAILED/DIVERGED**, verbatim: `"FAILED: apply for id=1 left the
+board DIVERGED (state='done_failed', reason='both halves committed and
+matched, but the post-swap ceiling/arming check failed (Pico reports no
+config_crc after the swap) -- heaters disabled and alarmed, config left
+pending for retry') -- heaters should be disabled, do not trust config
+state (host=192.168.1.156)"`. This is a real, reproducible outcome, not a
+dry-run artifact -- `confirm=True` was set and the tool polled
+`/api/kiln_configs/apply_status` to this terminal state itself.
+`ack_hardware_differs` was never passed and never applicable (no 428 was
+returned; this was a 202-then-`done_failed` sequence, a different failure
+class from the hardware-shape refusal that flag answers). Per instruction,
+no retry, no crash ack, and no reset of either processor was attempted.
+
+Post-failure read-back: `GET /api/kiln_configs` unchanged --
+`{"active_id": 1, "configs": [{"id": 1, "name": "M18RR_B21renamed",
+"is_active": true}], "max_count": 10}` -- the active id never moved.
+`GET /api/kiln_configs/apply_status` read back
+`{"state": "done_failed", "id": 1, "diverged": true, "reason": "..."}`
+-- confirming the board's own `diverged=true` flag directly, not just the
+tool's rendering of it. `get_heap_status` immediately after: `uptime_s`
+advanced 5235 -> 5458, `reset_reason` unchanged (`software (esp_restart)`)
+-- no reboot. `safety_get_status`: link up, armed, not tripped -- unchanged
+from precheck; no alarm latched on the safety side despite the apply's own
+"alarmed" wording. `control_get_zones`: all three zones still `mode 3`
+(heat-capable), Kp/Ki/Kd unchanged from the pre-apply `get_board_state`
+snapshot. `get_readiness` immediately after: 16 ok / 2 not_done / 3 other,
+`control_mode: ok (3 of 3 zones can heat)`, `safety_trip: ok (no guard
+currently tripped)` -- no readiness regression observed.
+
+**Net finding: the board's externally-observable state (zones config,
+safety arm state, readiness) did not visibly degrade, but the apply route
+itself reports a genuine "heaters disabled and alarmed" DIVERGED outcome
+for what should have been a pure no-op (identical content, same id applied
+to itself) -- worth a firmware-side look at why a same-content swap's
+post-swap ceiling/arming check reads no `config_crc` back from the Pico.**
+Not root-caused this session (no source investigation was in scope for
+this bench pass); flagging for the next backend pass. No firmware or
+runner change made. Board left exactly as found: the same single config
+(`id=1`, active), no crash, no reboot, safety link up/armed/not tripped.
+
 ---
 
 ## Page-by-page inventory
