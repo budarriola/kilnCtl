@@ -876,6 +876,7 @@ _DIAG_WATCHDOG = _diag(boot="watchdog")
 _DIAG_TRIP = _diag(trip_reason=6, trip_mask=0x0020)
 _DIAG_TRIP_NOT_S6A = _diag(trip_reason=2, trip_mask=0x0002)
 _DIAG_NO_TRIP = _diag()
+_DIAG_UNPARSEABLE = "no such field here"  # _pico_trip_pending's is-None branch: reason=None
 _OVERLAP_ERROR = "Pico refused: update would overwrite its running flat image; reflash via SWD"
 
 
@@ -903,6 +904,20 @@ class Otp01Test(unittest.TestCase):
     def test_skips_when_trip_pending(self):
         result = C._case_otp01(self._ctx(srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_TRIP)))
         self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_unreadable_pico_diag_still_pushes(self):
+        """_pico_trip_pending() returns None (its is-None branch) when the
+        diag text is unparseable, and `if trip_pending:` treats None as
+        falsy -- so, as the code stands today, OT-P01 does NOT skip or
+        refuse when the Pico's trip status cannot be read; it proceeds to
+        push exactly as if no trip were pending. This pins that actual
+        behaviour rather than the more cautious one a reader might assume."""
+        client = _FakePicoOtaClient(phases=["done"])
+        ctx = self._ctx(ota_http_client=client)
+        ctx["srv"] = _FakeSafetySrv(fw_text=_FW_TEXT_B, diag_text=_DIAG_UNPARSEABLE)
+        result = C._case_otp01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(client.pushed, ["/tmp/pico.bin"])
 
     def test_interlock_not_ok_skips_before_pushing(self):
         client = _FakePicoOtaClient(interlock_ok=False, interlock_reason="not idle")
@@ -1033,6 +1048,17 @@ class Otp03Test(unittest.TestCase):
     def test_refused_unchanged_passes(self):
         result = C._case_otp03(self._ctx())
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_unreadable_pico_diag_still_pushes(self):
+        """Same is-None branch as Otp01Test.test_unreadable_pico_diag_still_
+        pushes: an unparseable diag makes trip_pending None, which
+        `if trip_pending:` treats as falsy, so OT-P03 proceeds to push the
+        corrupt image rather than skipping or refusing outright."""
+        client = _FakePicoOtaClient(push_result=_OtaPushResult(False, 400))
+        ctx = self._ctx(ota_http_client=client, srv=_FakeSafetySrv(fw_text=_FW_TEXT_A, diag_text=_DIAG_UNPARSEABLE))
+        result = C._case_otp03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(client.pushed, ["/tmp/bad_pico.bin"])
 
     def test_accepted_but_failed_phase_passes(self):
         client = _FakePicoOtaClient(push_result=_OtaPushResult(True, 200), phases=["failed"])

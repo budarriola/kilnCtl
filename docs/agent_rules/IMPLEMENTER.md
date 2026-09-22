@@ -40,8 +40,10 @@ back to the coordinator. You do not push.
 ## Firmware invariants
 
 - Register every new task for stack-margin reporting
-  (`check_stack_margin_registration.ps1` enforces it). Never bump a stack ceiling or task
-  stack size. Never enlarge httpd stack buffers or the zones JSON buffer.
+  (`check_stack_margin_registration.ps1` enforces it). Task stack SIZES may be raised
+  without asking when measured too small; report the DRAM impact when you do. What stays
+  forbidden: enlarging httpd stack buffers or the zones JSON buffer, and putting large
+  locals on the 8 KB httpd stack.
 - A task with a PSRAM stack must not write NVS. NVS keys are 15 characters or fewer.
 - Never hold a module lock across producer or blocking calls. Lock order: `s_exec.lock`
   then `s_at.lock`.

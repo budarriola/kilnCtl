@@ -1380,7 +1380,8 @@ static bool apply_hardware_differs(const kiln_pkg_safety_t *pico, char *msg, siz
             if (msg && msg_cap) {
                 snprintf(msg, msg_cap,
                          "this saved config's '%s' differs from what this controller currently reports "
-                         "-- confirm the hardware shape matches before applying",
+                         "-- confirm the hardware shape matches before applying"
+                         " Resend with X-Kiln-Ack-Hardware-Differs: 1.",
                          kFields[f].label);
             }
             return true;
