@@ -408,6 +408,89 @@ def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = N
 
 
 @_srv._tool()
+def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool = False,
+                       host: Optional[str] = None) -> str:
+    """Apply a saved kiln config by id (POST /api/kiln_configs/apply,
+    kiln_cfg_http.c's apply_post_handler(), ROUTE_TIER_ADMIN) -- the same
+    route the kiln_configs page's own "Apply" button drives, and the only
+    PcTools/MCP path to it before this tool: web_commission_row.py's
+    `_apply_kiln_config` exercises it through a raw web session for its own
+    commissioning test, not as a general-purpose client.
+
+    REFUSES UNLESS ``confirm=True`` -- without it, this is a dry run that
+    reports the id and does nothing else. Same rule kiln_configs_quarantine_
+    clear()/crash_report_ack() already use.
+
+    The apply is asynchronous: a successful POST returns 202 "running", not
+    "done" -- kiln_cfg_swap_apply() is a 60+ round-trip UART transaction
+    plus a flash write, dispatched to a worker rather than run on the httpd
+    stack. This tool polls GET /api/kiln_configs/apply_status to a terminal
+    state (done_ok/done_failed, up to 60s) before reporting a result, and
+    surfaces `diverged=true` loudly if the board reports the swap left
+    zone/guard settings in a mismatched state.
+
+    ``ack_hardware_differs`` controls the ``X-Kiln-Ack-Hardware-Differs``
+    header (kiln_cfg_store_slot_hardware_differs(), kiln_cfg_http.c around
+    line 361/kiln_cfg_store.c around line 1466/1480): a stored config whose
+    hardware shape (channel count, CT topology, etc.) differs from the
+    board's own is refused with 428 "Precondition Required" and the board's
+    own explanation UNLESS this header is set. It defaults to False so a
+    hardware mismatch is never silently masked -- on a 428 without it, this
+    tool returns the board's message verbatim plus a hint to retry with
+    ``ack_hardware_differs=True`` once that message has actually been read
+    and understood, never automatically.
+
+    Host is auto-resolved the same way get_heap_status()/crash_report_ack()
+    do; pass `host` explicitly for kilnctl.local or a board reachable only
+    from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as crash_report_ack()
+    from . import kiln_configs_apply_http_client as ac
+
+    resolved = _ota_resolve_host(host)
+
+    if not confirm:
+        return (f"DRY RUN (pass confirm=True to actually apply) -- would POST "
+                f"/api/kiln_configs/apply for id={id} (ack_hardware_differs={ack_hardware_differs}, "
+                f"host={resolved})")
+
+    try:
+        status, body = ac.post_apply(resolved, id, ack_hardware_differs=ack_hardware_differs)
+    except ac.KilnConfigsApplyHttpError as exc:
+        return f"error: could not reach {resolved} for POST /api/kiln_configs/apply: {exc}"
+
+    if status == 428:
+        return (f"refused (428, hardware differs) for id={id}: {body} -- retry with "
+                f"ack_hardware_differs=True only after reading and understanding this message "
+                f"(host={resolved})")
+    if status == 404:
+        return f"error: no such kiln config id={id} (404): {body} (host={resolved})"
+    if status not in (200, 202):
+        return f"error: POST /api/kiln_configs/apply returned unexpected HTTP {status}: {body} (host={resolved})"
+
+    try:
+        final = ac.poll_apply_status(resolved)
+    except ac.KilnConfigsApplyHttpError as exc:
+        return (f"error: apply for id={id} was accepted ({status}: {body}), but polling "
+                f"/api/kiln_configs/apply_status failed (host={resolved}): {exc} -- outcome UNKNOWN")
+
+    state = final.get("state")
+    diverged = final.get("diverged")
+    reason = final.get("reason")
+    if state == "done_ok" and not diverged:
+        return f"ok - applied id={id}, confirmed by apply_status (host={resolved})"
+    if diverged:
+        return (f"FAILED: apply for id={id} left the board DIVERGED (state={state!r}, "
+                f"reason={reason!r}) -- heaters should be disabled, do not trust config state "
+                f"(host={resolved})")
+    if state == "done_failed":
+        return f"FAILED: apply for id={id} refused/failed: {reason!r} (host={resolved})"
+    return (f"UNKNOWN: apply for id={id} did not reach a terminal state within the poll window "
+            f"(state={state!r}, reason={reason!r}) -- re-check /api/kiln_configs/apply_status by "
+            f"hand (host={resolved})")
+
+
+@_srv._tool()
 def get_readiness(host: Optional[str] = None) -> str:
     """READ-ONLY: fetch and render the commissioning checklist from GET
     /api/readiness (readiness_http.c's api_readiness_get_handler(), the
