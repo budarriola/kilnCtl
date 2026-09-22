@@ -6,6 +6,9 @@
 #include <stdio.h>
 
 #include "esp_crc.h"
+#include "esp_heap_caps.h" /* heap_caps_malloc()/_free(), MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT --
+                            * docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md's scratch
+                            * structs, kept off both the stack and .bss */
 #include "esp_log.h"
 #include "hal_kv.h"
 
@@ -489,8 +492,34 @@ static void persist_pico_flash_fallback(SafetyLinkClass *link, const kiln_pkg_sa
     }
 }
 
-bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap,
-                         bool *out_diverged)
+/* docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md, review follow-up:
+ * these four aggregates (target_blob/target_pico/p/readback_blob, ~4.25 kB
+ * combined) are the scratch a single in-flight kiln_cfg_swap_apply() call
+ * needs. HEAP, not static: a static (the original fix) is a PERMANENT
+ * +8.5 kB .bss cost paid every boot whether or not a swap has ever run,
+ * on a board whose internal-DRAM headroom this project has already
+ * exhausted once (project_esp_internal_dram_exhaustion). Allocating this
+ * struct on kiln_cfg_swap_apply()'s own entry and freeing it on every
+ * return -- see the thin kiln_cfg_swap_apply()/_impl() wrapper below --
+ * costs nothing when idle and only ever holds the memory for the duration
+ * of one apply job, the same "smallest permanent footprint, never partial"
+ * tradeoff profiles_live_http.c's own heap_caps_malloc()/_free() pairs
+ * already make. MALLOC_CAP_INTERNAL, not SPIRAM: this scratch is read by
+ * zones_config_import_blob()/_export_blob() (NVS/flash) and pushed over the
+ * safety-link UART, both of which this codebase's convention requires stay
+ * off PSRAM. Concurrency is unaffected by moving off `static`: this
+ * function still runs ONLY on the dedicated kiln_cfg_swap_worker task
+ * (kiln_cfg_swap_worker.c), serialized by a depth-1 queue plus an
+ * is_busy() interlock, so at most one heap instance is ever alive. */
+typedef struct {
+    uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    kiln_pkg_safety_t target_pico;
+    kiln_cfg_swap_pending_t p;
+    uint8_t readback_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+} kiln_cfg_swap_apply_scratch_t;
+
+static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_processor, char *reason_out,
+                                     size_t reason_cap, bool *out_diverged, kiln_cfg_swap_apply_scratch_t *scratch)
 {
     if (out_diverged) {
         *out_diverged = false;
@@ -510,35 +539,23 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
 
     /* step 1 (H17): a single call, pico_out non-NULL, so a half-package
      * (pico_populated==0) is refused right here before anything is
-     * snapshotted or touched.
-     *
-     * STATIC, not stack: docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md.
-     * target_blob/target_pico/p/readback_blob below summed to ~4.25 kB on
-     * this function's own frame alone -- over half the worker's 8192 B
-     * stack before counting the reason-string locals or the safety-link UART
-     * call chain beneath push_and_verify_pico()/rollback(). Safe as static:
-     * kiln_cfg_swap_apply() runs ONLY on the dedicated kiln_cfg_swap_worker
-     * task (kiln_cfg_swap_worker.c), which serializes every call through a
-     * depth-1 queue plus an is_busy() interlock -- at most one call is ever
-     * in flight, so a single static instance can never be shared between two
-     * concurrent callers the way it could be if e.g. an HTTP handler also
-     * called this directly. */
-    static uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+     * snapshotted or touched. */
+    uint8_t *target_blob = scratch->target_blob;
     uint16_t target_blob_len = 0;
-    static kiln_pkg_safety_t target_pico;
-    if (!kiln_cfg_store_get_full_package(target_id, target_blob, sizeof(target_blob), &target_blob_len,
-                                         &target_pico, reason_out, reason_cap)) {
+    kiln_pkg_safety_t *target_pico = &scratch->target_pico;
+    if (!kiln_cfg_store_get_full_package(target_id, target_blob, sizeof(scratch->target_blob), &target_blob_len,
+                                         target_pico, reason_out, reason_cap)) {
         return false;
     }
 
-    /* step 2: snapshot R and persist it, marker=STAGED. static -- see above. */
-    static kiln_cfg_swap_pending_t p;
-    memset(&p, 0, sizeof(p));
-    p.target_id = target_id;
+    /* step 2: snapshot R and persist it, marker=STAGED. */
+    kiln_cfg_swap_pending_t *p = &scratch->p;
+    memset(p, 0, sizeof(*p));
+    p->target_id = target_id;
     kiln_cfg_store_lock();
-    p.previous_active_id = kiln_cfg_store_get_active_id();
+    p->previous_active_id = kiln_cfg_store_get_active_id();
     uint32_t gen_before = kiln_cfg_store_generation();
-    bool exported = zones_config_export_blob(p.rollback_blob, sizeof(p.rollback_blob));
+    bool exported = zones_config_export_blob(p->rollback_blob, sizeof(p->rollback_blob));
     kiln_cfg_store_unlock();
     if (!exported) {
         return set_reason(reason_out, reason_cap, "could not snapshot the current ESP config for rollback");
@@ -546,14 +563,14 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     /* zones_config_export_blob() always writes the same fixed size (see its
      * own header comment) -- ZONES_CONFIG_BLOB_MAX_SIZE, which is also
      * target_blob_len's upper bound, so this length is safe to reuse. */
-    p.rollback_blob_len = (uint16_t)ZONES_CONFIG_BLOB_MAX_SIZE;
+    p->rollback_blob_len = (uint16_t)ZONES_CONFIG_BLOB_MAX_SIZE;
     {
         kiln_pkg_pico_source_t src = kiln_pkg_pico_source_default();
-        if (!kiln_package_capture_pico_half(&src, &p.rollback_pico)) {
+        if (!kiln_package_capture_pico_half(&src, &p->rollback_pico)) {
             return set_reason(reason_out, reason_cap, "could not snapshot the current Pico config for rollback");
         }
     }
-    if (!persist_marker(&p, KILN_CFG_SWAP_MARKER_STAGED)) {
+    if (!persist_marker(p, KILN_CFG_SWAP_MARKER_STAGED)) {
         return set_reason(reason_out, reason_cap, "could not persist the rollback record -- refusing to "
                                                     "start a swap with no way back");
     }
@@ -569,10 +586,10 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
      * state). */
     float target_ceiling = 0.0f;
     bool have_target_ceiling = false;
-    for (uint16_t i = 0; i < target_pico.count; i++) {
-        if (target_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
-            (target_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
-            memcpy(&target_ceiling, &target_pico.entries[i].value_bits, sizeof(target_ceiling));
+    for (uint16_t i = 0; i < target_pico->count; i++) {
+        if (target_pico->entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
+            (target_pico->entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
+            memcpy(&target_ceiling, &target_pico->entries[i].value_bits, sizeof(target_ceiling));
             have_target_ceiling = true;
             break;
         }
@@ -592,17 +609,17 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     }
 
     /* step 5 */
-    persist_marker(&p, KILN_CFG_SWAP_MARKER_PICO_OPEN);
+    persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_OPEN);
 
     /* step 6/7: push everything except the ceiling, read back, compare.
      * Item 15: volatile_install=true -- the owner's "Pico never leaves
      * ARMED" rule; see push_and_verify_pico()'s own doc comment. */
     char push_reason[KILN_CFG_SWAP_REASON_MAX];
     push_reason[0] = '\0';
-    if (!push_and_verify_pico(link, &target_pico, /*volatile_install=*/true, push_reason, sizeof(push_reason))) {
+    if (!push_and_verify_pico(link, target_pico, /*volatile_install=*/true, push_reason, sizeof(push_reason))) {
         char roll_reason[KILN_CFG_SWAP_REASON_MAX];
         roll_reason[0] = '\0';
-        if (!rollback(link, &p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
+        if (!rollback(link, p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
             /* leave the pending record intact for boot/retry */
             if (out_diverged) {
                 *out_diverged = true;
@@ -614,14 +631,14 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
         snprintf(reason_out, reason_cap, "swap refused, rolled back cleanly: %s", push_reason);
         return false;
     }
-    persist_marker(&p, KILN_CFG_SWAP_MARKER_PICO_DONE);
+    persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_DONE);
 
     /* generation check -- H6: refuse to proceed if another writer touched
      * the store while we were off doing the Pico round trip, unlocked. */
     if (kiln_cfg_store_generation() != gen_before) {
         char roll_reason[KILN_CFG_SWAP_REASON_MAX];
         roll_reason[0] = '\0';
-        if (!rollback(link, &p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
+        if (!rollback(link, p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
             if (out_diverged) {
                 *out_diverged = true;
             }
@@ -652,7 +669,7 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     if (!esp_ok) {
         char roll_reason[KILN_CFG_SWAP_REASON_MAX];
         roll_reason[0] = '\0';
-        if (!rollback(link, &p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
+        if (!rollback(link, p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
             if (out_diverged) {
                 *out_diverged = true;
             }
@@ -663,17 +680,17 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
         snprintf(reason_out, reason_cap, "ESP half refused, rolled back cleanly: %s", esp_reason);
         return false;
     }
-    persist_marker(&p, KILN_CFG_SWAP_MARKER_ESP_DONE);
+    persist_marker(p, KILN_CFG_SWAP_MARKER_ESP_DONE);
 
     kiln_cfg_store_lock();
-    static uint8_t readback_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
-    bool readback_ok = zones_config_export_blob(readback_blob, sizeof(readback_blob)) &&
+    uint8_t *readback_blob = scratch->readback_blob;
+    bool readback_ok = zones_config_export_blob(readback_blob, sizeof(scratch->readback_blob)) &&
                        memcmp(readback_blob, target_blob, target_blob_len) == 0;
     kiln_cfg_store_unlock();
     if (!readback_ok) {
         char roll_reason[KILN_CFG_SWAP_REASON_MAX];
         roll_reason[0] = '\0';
-        if (!rollback(link, &p, /*esp_was_committed=*/true, roll_reason, sizeof(roll_reason))) {
+        if (!rollback(link, p, /*esp_was_committed=*/true, roll_reason, sizeof(roll_reason))) {
             if (out_diverged) {
                 *out_diverged = true;
             }
@@ -749,10 +766,36 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
      * what is now proven live" case). See this function's own doc comment
      * for why this is allowed to fail and never affects the swap's own
      * result, which is already decided above. */
-    persist_pico_flash_fallback(link, &target_pico, target_ceiling, have_target_ceiling);
+    persist_pico_flash_fallback(link, target_pico, target_ceiling, have_target_ceiling);
 
     clear_pending();
     return true;
+}
+
+bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap,
+                         bool *out_diverged)
+{
+    /* MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT, not SPIRAM -- see
+     * kiln_cfg_swap_apply_scratch_t's own doc comment above. Failing loud
+     * here, before ota_http_check_interlocks()/kiln_cfg_store_get_full_package()
+     * have run, means an allocation failure can never leave a swap
+     * half-started: nothing has been snapshotted or touched yet. */
+    kiln_cfg_swap_apply_scratch_t *scratch =
+        heap_caps_malloc(sizeof(*scratch), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!scratch) {
+        if (out_diverged) {
+            *out_diverged = false;
+        }
+        ESP_LOGE(TAG, "kiln_cfg_swap_apply: heap_caps_malloc(%u B, INTERNAL) failed -- refusing, "
+                      "nothing touched",
+                 (unsigned)sizeof(*scratch));
+        return set_reason(reason_out, reason_cap,
+                          "out of memory staging the kiln config swap -- nothing was touched, try again");
+    }
+    bool ok = kiln_cfg_swap_apply_impl(target_id, ack_no_safety_processor, reason_out, reason_cap, out_diverged,
+                                       scratch);
+    heap_caps_free(scratch);
+    return ok;
 }
 
 /* ---- boot recovery (section 4.4 / plan item 8) ---------------------------- */
@@ -796,24 +839,32 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
 #define KILN_CFG_SWAP_NOINLINE __attribute__((noinline))
 #endif
 
-static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p)
+/* HEAP, not static -- see kiln_cfg_swap_apply_scratch_t's doc comment above;
+ * identical reasoning and the same review follow-up
+ * (docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md). finish_esp_done()
+ * is reachable only from kiln_cfg_swap_boot_recover(), itself only ever
+ * called from the dedicated kiln_cfg_swap_worker task before its job queue
+ * loop starts -- never concurrent with kiln_cfg_swap_apply() on that same
+ * task, so at most one heap instance of this scratch is ever alive too. */
+typedef struct {
+    uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    kiln_pkg_safety_t target_pico;
+    uint8_t live_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+} kiln_cfg_swap_finish_scratch_t;
+
+static void KILN_CFG_SWAP_NOINLINE finish_esp_done_impl(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
+                                                        kiln_cfg_swap_finish_scratch_t *scratch)
 {
     /* The one case where FINISHING is correct (section 4.4): both sides
      * already claim P. Re-verify both independently (never either side's
      * cache) and only then finish. */
-    /* static -- see kiln_cfg_swap_apply()'s identical comment and
-     * docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md. Safe for the
-     * same reason: finish_esp_done() is reachable only from
-     * kiln_cfg_swap_boot_recover(), itself only ever called from the
-     * dedicated kiln_cfg_swap_worker task before its job queue loop starts
-     * -- never concurrent with kiln_cfg_swap_apply() on that same task. */
-    static uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint8_t *target_blob = scratch->target_blob;
     uint16_t target_blob_len = 0;
-    static kiln_pkg_safety_t target_pico;
+    kiln_pkg_safety_t *target_pico = &scratch->target_pico;
     char sub[KILN_CFG_SWAP_REASON_MAX];
     sub[0] = '\0';
-    if (!kiln_cfg_store_get_full_package(p->target_id, target_blob, sizeof(target_blob), &target_blob_len,
-                                         &target_pico, sub, sizeof(sub))) {
+    if (!kiln_cfg_store_get_full_package(p->target_id, target_blob, sizeof(scratch->target_blob), &target_blob_len,
+                                         target_pico, sub, sizeof(sub))) {
         ESP_LOGE(TAG, "boot: ESP_DONE recovery could not re-read target slot %ld: %s -- rolling back "
                       "to the pre-swap config instead",
                  (long)p->target_id, sub);
@@ -831,13 +882,13 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const 
         return;
     }
     kiln_cfg_store_lock();
-    static uint8_t live_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
-    bool esp_matches = zones_config_export_blob(live_blob, sizeof(live_blob)) &&
+    uint8_t *live_blob = scratch->live_blob;
+    bool esp_matches = zones_config_export_blob(live_blob, sizeof(scratch->live_blob)) &&
                        memcmp(live_blob, target_blob, target_blob_len) == 0;
     kiln_cfg_store_unlock();
     bool pico_matches = false;
     if (link && safety_cfg_store_refetch(link, 0)) {
-        pico_matches = pico_readback_matches(&target_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, sub, sizeof(sub));
+        pico_matches = pico_readback_matches(target_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, sub, sizeof(sub));
     }
     if (esp_matches && pico_matches) {
         kiln_cfg_store_lock();
@@ -848,15 +899,15 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const 
          * above. */
         float target_ceiling = 0.0f;
         bool have_target_ceiling = false;
-        for (uint16_t i = 0; i < target_pico.count; i++) {
-            if (target_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
-                (target_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
-                memcpy(&target_ceiling, &target_pico.entries[i].value_bits, sizeof(target_ceiling));
+        for (uint16_t i = 0; i < target_pico->count; i++) {
+            if (target_pico->entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
+                (target_pico->entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
+                memcpy(&target_ceiling, &target_pico->entries[i].value_bits, sizeof(target_ceiling));
                 have_target_ceiling = true;
                 break;
             }
         }
-        persist_pico_flash_fallback(link, &target_pico, target_ceiling, have_target_ceiling);
+        persist_pico_flash_fallback(link, target_pico, target_ceiling, have_target_ceiling);
         clear_pending();
         ESP_LOGW(TAG, "boot: ESP_DONE swap confirmed complete on both sides -- finished");
     } else {
@@ -872,16 +923,34 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const 
     }
 }
 
-void kiln_cfg_swap_boot_recover(void)
+static void finish_esp_done(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p)
 {
-    /* static -- see kiln_cfg_swap_apply()'s identical comment and
-     * docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md. Runs once, as
-     * the kiln_cfg_swap_worker task's first act, before its job queue loop
-     * (and thus before kiln_cfg_swap_apply()) ever starts -- never
-     * concurrent with it. */
-    static kiln_cfg_swap_pending_t p;
+    kiln_cfg_swap_finish_scratch_t *scratch =
+        heap_caps_malloc(sizeof(*scratch), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!scratch) {
+        ESP_LOGE(TAG, "finish_esp_done: heap_caps_malloc(%u B, INTERNAL) failed -- cannot confirm "
+                      "the interrupted swap this boot, staying alarmed, will retry next boot",
+                 (unsigned)sizeof(*scratch));
+        char op_reason[KILN_CFG_SWAP_REASON_MAX];
+        snprintf(op_reason, sizeof(op_reason),
+                 "out of memory confirming an interrupted kiln-config swap at boot -- heaters stay "
+                 "alarmed/disabled; reboot or apply a kiln config again to retry");
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, p->target_id, op_reason);
+        return;
+    }
+    finish_esp_done_impl(link, p, scratch);
+    heap_caps_free(scratch);
+}
+
+/* HEAP, not static -- see kiln_cfg_swap_apply_scratch_t's doc comment above;
+ * identical reasoning. Runs once, as the kiln_cfg_swap_worker task's first
+ * act, before its job queue loop (and thus before kiln_cfg_swap_apply())
+ * ever starts -- never concurrent with it, so at most one heap instance of
+ * this scratch is ever alive too. */
+static void kiln_cfg_swap_boot_recover_impl(kiln_cfg_swap_pending_t *p)
+{
     bool existed_but_unreadable = false;
-    if (!load_pending_ex(&p, &existed_but_unreadable)) {
+    if (!load_pending_ex(p, &existed_but_unreadable)) {
         if (!existed_but_unreadable) {
             return; /* genuinely never staged a swap on this board -- ordinary case */
         }
@@ -893,7 +962,7 @@ void kiln_cfg_swap_boot_recover(void)
                          "stay alarmed/disabled; apply a kiln config again to clear this");
         return;
     }
-    if (pending_crc(&p) != p.crc32) {
+    if (pending_crc(p) != p->crc32) {
         /* H10: a corrupt marker is NOT treated as NONE. We cannot know
          * which side of an in-flight swap this board was on, so the
          * fail-safe default (section 3.4) applies exactly as it would for
@@ -919,7 +988,7 @@ void kiln_cfg_swap_boot_recover(void)
     SafetyLinkClass *link = s_link;
     char reason[KILN_CFG_SWAP_REASON_MAX];
     reason[0] = '\0';
-    switch ((kiln_cfg_swap_marker_t)p.marker) {
+    switch ((kiln_cfg_swap_marker_t)p->marker) {
     case KILN_CFG_SWAP_MARKER_NONE:
         return;
     case KILN_CFG_SWAP_MARKER_STAGED:
@@ -938,16 +1007,16 @@ void kiln_cfg_swap_boot_recover(void)
          * the swap" for either of these rows. */
         ESP_LOGE(TAG, "boot: recovering from an interrupted swap (marker=%d) -- re-applying the "
                       "pre-swap config to the Pico and verifying",
-                 (int)p.marker);
+                 (int)p->marker);
         if (!link) {
             ESP_LOGE(TAG, "boot: no safety link available to recover -- staying alarmed until one is up");
-            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_NO_LINK, p.target_id,
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_NO_LINK, p->target_id,
                              "an interrupted kiln-config swap cannot be recovered without the safety "
                              "processor link -- heaters stay alarmed/disabled; check the safety-link "
                              "connection, or reboot once it is up");
             return;
         }
-        if (rollback(link, &p, /*esp_was_committed=*/(p.marker == KILN_CFG_SWAP_MARKER_PICO_DONE), reason,
+        if (rollback(link, p, /*esp_was_committed=*/(p->marker == KILN_CFG_SWAP_MARKER_PICO_DONE), reason,
                     sizeof(reason))) {
             clear_pending();
             ESP_LOGW(TAG, "boot: interrupted swap recovered -- both sides confirmed back on the pre-swap config");
@@ -957,21 +1026,37 @@ void kiln_cfg_swap_boot_recover(void)
             snprintf(op_reason, sizeof(op_reason),
                      "an interrupted kiln-config swap could not be rolled back at boot (%.60s) -- heaters "
                      "stay alarmed/disabled; apply a kiln config again to clear this", reason);
-            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED, p.target_id, op_reason);
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED, p->target_id, op_reason);
         }
         return;
     case KILN_CFG_SWAP_MARKER_ESP_DONE:
         /* Body lives in finish_esp_done() above, in its own non-inlined
          * frame -- see that function's comment for the stack arithmetic that
          * forced the split. Behaviour is unchanged. */
-        finish_esp_done(link, &p);
+        finish_esp_done(link, p);
         return;
     default:
         ESP_LOGE(TAG, "boot: pending swap record has an unrecognised marker %u -- treating as unrecoverable",
-                 (unsigned)p.marker);
-        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER, p.target_id,
+                 (unsigned)p->marker);
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER, p->target_id,
                          "an interrupted kiln-config swap record has an unrecognised marker -- heaters "
                          "stay alarmed/disabled; apply a kiln config again to clear this");
         return;
     }
+}
+
+void kiln_cfg_swap_boot_recover(void)
+{
+    kiln_cfg_swap_pending_t *p = heap_caps_malloc(sizeof(*p), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!p) {
+        ESP_LOGE(TAG, "kiln_cfg_swap_boot_recover: heap_caps_malloc(%u B, INTERNAL) failed -- cannot "
+                      "check for an interrupted swap this boot",
+                 (unsigned)sizeof(*p));
+        latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE, KILN_CFG_NO_ACTIVE_ID,
+                         "out of memory checking for an interrupted kiln-config swap at boot -- heaters "
+                         "stay alarmed/disabled; reboot or apply a kiln config again to retry");
+        return;
+    }
+    kiln_cfg_swap_boot_recover_impl(p);
+    heap_caps_free(p);
 }
