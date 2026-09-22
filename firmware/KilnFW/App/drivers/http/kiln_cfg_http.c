@@ -408,9 +408,14 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
 /* ---- GET /api/kiln_configs/apply_status ------------------------------------
  *
  * The outcome half of the asynchronous apply above. Reports the worker's
- * state enum, the target id, whether a failure left the board DIVERGED
- * (heaters disabled, banner showing) as opposed to merely refused with
- * nothing changed, and the board's own refusal text verbatim. */
+ * state enum, the target id, whether a failure left the board DIVERGED as
+ * opposed to merely refused with nothing changed, and the board's own
+ * refusal text verbatim. 2026-09-22 fix: `diverged==true` alone does NOT
+ * mean heaters were disabled -- only the ceiling-latch divergence branch in
+ * kiln_cfg_swap.c does that; four other DIVERGED paths (rollback failures)
+ * disable nothing (docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
+ * sec 4). `reason` is the honest source for what actually happened; do not
+ * generically claim heat-off from `diverged` here. */
 static esp_err_t apply_status_get_handler(httpd_req_t *req)
 {
     kiln_cfg_swap_job_state_t state = KILN_CFG_SWAP_JOB_IDLE;

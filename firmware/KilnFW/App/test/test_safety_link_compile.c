@@ -104,6 +104,11 @@ bool zones_config_is_valid(void) { return true; }
  * tested (that is test_safety_ceiling_policy.c at the pure-logic layer and
  * test_zones_http.c's test_reconcile_on_link_up_*() at the ESP-glue layer). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link) { (void)link; }
+/* 2026-09-22: safety_link_poll.c's tick call site moved to the non-blocking
+ * entry point (advisory adopted from the opus review that also fixed the
+ * s_reconcile_lock TOCTOU race) -- faked here the same no-op way as the
+ * blocking form just above, for the same reason. */
+void safety_ceiling_sync_reconcile_on_link_up_nonblocking(SafetyLinkClass *link) { (void)link; }
 
 /* 2026-09-15 (item HIGH1 of review_divergence_wiring_60d6552f_2026-09-15.md):
  * safety_link_poll.c (#included below) now also owns the deferred Pico-half

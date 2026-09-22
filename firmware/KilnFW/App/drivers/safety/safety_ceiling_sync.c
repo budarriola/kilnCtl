@@ -151,20 +151,34 @@ void safety_ceiling_sync_set_expected_pico_fields_source(safety_ceiling_expected
     s_expected_pico_fields_source = fn;
 }
 
-/* MEDIUM 5 -- lazily-created lock guarding the four divergence-state fields
+/* MEDIUM 5 -- lock guarding the four divergence-state fields
  * (s_divergence_active/_reason, s_standing_warning_active/_reason) against
  * the cross-task read/write race: safety_poll_task writes them (via
  * enforce_ceiling_divergence() below), while the httpd task
  * (dashboard_status_http.c) and the LVGL task (ui_page_home_refresh.c) read
  * them lock-free today. Never held across a producer or blocking call --
- * every critical section below is a plain snprintf/bool copy. */
+ * every critical section below is a plain snprintf/bool copy.
+ *
+ * 2026-09-22 fix: this used to be a lazily-created mutex
+ * (`if (!lock) lock = xSemaphoreCreateMutex();`), a plain TOCTOU race on
+ * dual-core ESP32-S3 -- safety_poll_task and kiln_cfg_swap_worker (added
+ * 2026-09-15, see s_reconcile_lock's own doc comment below) can both reach
+ * this check with `lock` still NULL and each create and install their own
+ * separate SemaphoreHandle_t, so the two tasks end up serialized against
+ * DIFFERENT mutexes -- i.e. not serialized at all. Statically allocated and
+ * created once, deterministically, from safety_ceiling_sync_init(), which
+ * main_control_bringup.c calls single-threaded before either
+ * safety_poll_task or kiln_cfg_swap_worker can be running (see that call
+ * site's own comment). A host test that never calls
+ * safety_ceiling_sync_init() (every existing one) leaves this NULL, exactly
+ * the same safe no-lock behavior the lazy form gave a single-threaded host
+ * test -- the `if (lock)` guards below are kept for that reason, not to
+ * paper over a race in the real firmware. */
+static StaticSemaphore_t s_divergence_state_lock_storage;
 static SemaphoreHandle_t s_divergence_state_lock;
 
 static void divergence_state_lock_take(void)
 {
-    if (!s_divergence_state_lock) {
-        s_divergence_state_lock = xSemaphoreCreateMutex();
-    }
     if (s_divergence_state_lock) {
         xSemaphoreTake(s_divergence_state_lock, portMAX_DELAY);
     }
@@ -637,31 +651,54 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
     divergence_state_lock_give();
 }
 
-/* Serializes the whole of safety_ceiling_sync_reconcile_on_link_up(),
+/* Serializes the whole of reconcile_on_link_up_impl() below,
  * including enforce_ceiling_divergence()'s ~1.5 KB of file-scope statics and
- * this function's own now_us/s_last_log_us/s_reconcile_backoff statics --
+ * that function's own now_us/s_last_log_us/s_reconcile_backoff statics --
  * see enforce_ceiling_divergence()'s doc comment. This function is no
  * longer single-caller: safety_poll_task calls it every poll tick, and
  * kiln_cfg_swap.c's kiln_cfg_swap_worker task also calls it once per swap
  * (kiln_cfg_swap.c's step 10/11 comment). A plain mutex is far cheaper than
  * moving or enlarging that static state, and correct regardless of which
  * task calls in; the two calls are rare/short enough that lock contention
- * is not a concern. */
+ * is not a concern.
+ *
+ * 2026-09-22 fix: same TOCTOU hazard and same fix as
+ * s_divergence_state_lock above -- statically allocated, created once from
+ * safety_ceiling_sync_init(). See that function's doc comment. */
+static StaticSemaphore_t s_reconcile_lock_storage;
 static SemaphoreHandle_t s_reconcile_lock;
 
-void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
+/* 2026-09-22 (opus review, advisory adopted): the poll-side caller
+ * (safety_link_poll.c) ticks this every ~500 ms purely to re-assert a
+ * level-triggered condition -- if the lock is already held (the swap-worker
+ * path is mid stage+commit+read-back UART round trip, which can take a
+ * while), the very next poll tick will just re-check the same thing again,
+ * so blocking here would stall safety_poll_task -- and by extension the
+ * safety link's own liveness heartbeat -- behind a swap that has nothing to
+ * do with it, risking exactly the kind of late-heartbeat/S6b coupling this
+ * file's enforce_ceiling_divergence() doc comment already discusses for a
+ * different lock (profile_executor's s_exec.lock). `blocking` lets the two
+ * callers ask for what they actually need: the poll-side entry point below
+ * takes non-blocking (timeout 0) and skips the tick outright when busy,
+ * per the 7a8594d rule (never hold -- or wait to acquire -- a module lock
+ * around a producer/blocking call the caller doesn't own); the swap-worker
+ * entry point keeps the original blocking take, since a swap is a rare,
+ * one-shot event that must actually complete this call before its own
+ * caller (kiln_cfg_swap.c step 10/11) reads the result. */
+static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
 {
     if (!link) {
-        return; /* nothing to reconcile against */
+        return true; /* nothing to reconcile against */
     }
     if (!zones_config_is_valid()) {
-        return; /* same gate the removed safety_sync_tc_type() used -- no real config to derive a target from yet */
-    }
-    if (!s_reconcile_lock) {
-        s_reconcile_lock = xSemaphoreCreateMutex();
+        return true; /* same gate the removed safety_sync_tc_type() used -- no real config to derive a target from yet */
     }
     if (s_reconcile_lock) {
-        xSemaphoreTake(s_reconcile_lock, portMAX_DELAY);
+        if (blocking) {
+            xSemaphoreTake(s_reconcile_lock, portMAX_DELAY);
+        } else if (xSemaphoreTake(s_reconcile_lock, 0) != pdTRUE) {
+            return false; /* busy -- skip this tick, level-triggered, next tick retries */
+        }
     }
 
     /* 2026-09-10 opus review finding: the comment this replaces claimed
@@ -715,7 +752,7 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
         if (s_reconcile_lock) {
             xSemaphoreGive(s_reconcile_lock);
         }
-        return;
+        return true;
     }
 
     safety_ceiling_sync_result_t result = SAFETY_CEILING_SYNC_NONE;
@@ -742,7 +779,7 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
         if (s_reconcile_lock) {
             xSemaphoreGive(s_reconcile_lock);
         }
-        return;
+        return true;
     }
     if (result == SAFETY_CEILING_SYNC_RAISED) {
         ESP_LOGI(TAG,
@@ -754,5 +791,52 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
      * nothing worth logging. */
     if (s_reconcile_lock) {
         xSemaphoreGive(s_reconcile_lock);
+    }
+    return true;
+}
+
+/* Swap-worker entry point (kiln_cfg_swap.c step 10/11, boot_recover()'s
+ * rollback path) -- keeps the original blocking take. A swap is a rare,
+ * one-shot event whose caller needs this call to have actually run before
+ * it reads safety_ceiling_sync_is_diverged() right afterward. */
+void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
+{
+    (void)reconcile_on_link_up_impl(link, true);
+}
+
+/* Poll-side entry point (safety_link_poll.c, every ~500 ms tick) -- takes
+ * the lock non-blocking and skips this tick outright if a swap-worker
+ * reconcile is already in flight. See reconcile_on_link_up_impl()'s doc
+ * comment for why: this is level-triggered (re-run every tick regardless),
+ * so a skipped tick is not lost, only deferred to the next one, and
+ * blocking here would stall safety_poll_task -- and with it the safety
+ * link's own liveness heartbeat -- behind an unrelated swap's UART round
+ * trip (7a8594d: never hold or wait on a module lock across a producer
+ * call; safety_ceiling_sync_guard_raise() does a UART stage/commit/
+ * read-back under this same lock). */
+void safety_ceiling_sync_reconcile_on_link_up_nonblocking(SafetyLinkClass *link)
+{
+    (void)reconcile_on_link_up_impl(link, false);
+}
+
+/* 2026-09-22 fix: creates both of this file's mutexes once, statically,
+ * replacing the two lazy `if (!lock) lock = xSemaphoreCreateMutex();`
+ * TOCTOU races (s_divergence_state_lock and s_reconcile_lock above) --
+ * see either lock's own doc comment for the hazard. Must be called exactly
+ * once, single-threaded, before either safety_poll_task or
+ * kiln_cfg_swap_worker can be running; main_control_bringup.c is that call
+ * site (single-threaded bring-up, ahead of profile_executor_start()/
+ * kiln_cfg_swap_boot_recover(), both of which can reach this file's
+ * reconcile entry points). A build that never calls this (every existing
+ * host test) leaves both handles NULL, which every take/give site above
+ * already treats as "no lock, single-threaded caller" -- the same safe
+ * default the old lazy form gave those tests. */
+void safety_ceiling_sync_init(void)
+{
+    if (!s_divergence_state_lock) {
+        s_divergence_state_lock = xSemaphoreCreateMutexStatic(&s_divergence_state_lock_storage);
+    }
+    if (!s_reconcile_lock) {
+        s_reconcile_lock = xSemaphoreCreateMutexStatic(&s_reconcile_lock_storage);
     }
 }

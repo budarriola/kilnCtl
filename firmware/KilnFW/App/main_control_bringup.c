@@ -143,6 +143,14 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // autotune (profile_executor_start()/autotune_engine_start(), below).
     heat_enable_init(&ctx->safety);
 
+    /* 2026-09-22 fix: creates safety_ceiling_sync.c's two internal mutexes
+     * once, statically, single-threaded, before anything below can start a
+     * task that reaches its reconcile entry points (profile_executor_
+     * start()/kiln_cfg_swap_boot_recover() further down this function) --
+     * see safety_ceiling_sync_init()'s own doc comment for the TOCTOU race
+     * this replaces. */
+    safety_ceiling_sync_init();
+
     safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void, profile_executor_halt);
     /* 2026-09-15 audit fix, Defect 2: broadens the standing divergence check
      * from abs_max_temp_c alone to the active kiln-config slot's full

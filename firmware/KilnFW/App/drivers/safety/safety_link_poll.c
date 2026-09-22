@@ -231,8 +231,15 @@ static void safety_update_health(SafetyLinkClass *link)
          * reconciliation anywhere" gap the audit found). Cheap when nothing
          * needs correcting: safety_ceiling_sync_guard_raise() reads the
          * Pico's cached ceiling and only performs a real write+confirm UART
-         * round trip when a raise is actually needed. */
-        safety_ceiling_sync_reconcile_on_link_up(link);
+         * round trip when a raise is actually needed.
+         *
+         * 2026-09-22 (opus review, advisory adopted): non-blocking form --
+         * this call is level-triggered every tick, so skipping it while a
+         * kiln_cfg_swap.c reconcile is already in flight (blocking form,
+         * kiln_cfg_swap.c step 10/11) is a no-op, not a missed event; the
+         * next tick re-checks the same condition. See safety_ceiling_sync.h's
+         * doc comment on this entry point. */
+        safety_ceiling_sync_reconcile_on_link_up_nonblocking(link);
     } else if (!link->down_logged ||
                safety_elapsed_ms(link->down_log_tick) >= SAFETY_LINK_DOWN_LOG_PERIOD_MS) {
         /* TODO.md 9.6: text only -- the fault bit below still asserts

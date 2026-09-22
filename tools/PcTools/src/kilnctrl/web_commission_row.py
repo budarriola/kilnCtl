@@ -984,9 +984,13 @@ def _apply_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
     Returns (ok, detail, board_quiet). `board_quiet` is False when this
     function cannot prove the board is settled again: the swap is still
     reporting `running` when the poll budget runs out, or apply_status
-    reported `diverged` (kiln_cfg_swap.c's alarmed exit -- heaters disabled,
-    config left pending for retry). A caller MUST NOT issue any further
-    write (a delete, another apply) while `board_quiet` is False: a
+    reported `diverged` (kiln_cfg_swap.c's alarmed exit -- config left
+    pending for retry; heaters are actually disabled only on the
+    ceiling-latch branch of that exit, not the four rollback-failure
+    branches -- see docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
+    sec 4, `reason` below is the honest source for which one occurred). A
+    caller MUST NOT issue any further write (a delete, another apply) while
+    `board_quiet` is False: a
     kiln-config swap is a 60+ round-trip two-processor transaction, and
     kiln_cfg_swap.c's own H6 generation check exists precisely because a
     concurrent store write during one is a real hazard."""
@@ -1023,11 +1027,16 @@ def _apply_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
     # DIVERGED first: it is the single most consequential outcome this row
     # can produce and the operator has to be told about it before anything
     # else. kiln_cfg_swap.c sets it on the paths that leave the two halves
-    # (or the Pico ceiling/arming cross-check) unreconciled -- heaters
-    # disabled, alarm raised, config left pending for retry.
+    # (or the Pico ceiling/arming cross-check) unreconciled -- config left
+    # pending for retry. 2026-09-22 fix: this does NOT always mean heaters
+    # were disabled -- only the ceiling-latch branch does that, not the
+    # four rollback-failure branches (docs/audits/
+    # kiln_config_self_apply_diverged_2026-09-22.md sec 4) -- so this no
+    # longer claims "heaters disabled" generically; `last_reason` (from the
+    # board) is the honest source for what actually happened.
     if last_diverged:
-        return False, (f"apply id={target_id} left the board DIVERGED (heaters disabled and "
-                        f"alarmed, config left pending for retry): "
+        return False, (f"apply id={target_id} left the board DIVERGED "
+                        f"(alarmed, config left pending for retry; see reason): "
                         f"{last_reason or 'no reason reported by apply_status'}"), False
     if last_state == "running":
         return False, (f"apply id={target_id} still reports state=running after the ~60 s "
@@ -1213,8 +1222,10 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
             # A swap that is still in flight, or one that ended DIVERGED, is
             # not a board to issue another write at: kiln_cfg_swap.c's H6
             # generation check treats a concurrent store write during a swap
-            # as a hazard, and a diverged board is already alarmed with
-            # heaters disabled. Stop here and say exactly what is left.
+            # as a hazard, and a diverged board is already alarmed (heaters
+            # disabled only on the ceiling-latch branch -- see the DIVERGED
+            # detail string above for what actually happened). Stop here and
+            # say exactly what is left.
             return False, (f"{row.row_id} FAIL: re-select of original active "
                             f"id={original_active_id} after create failed: {restore_detail}; "
                             f"NO further write attempted (board not confirmed settled). "

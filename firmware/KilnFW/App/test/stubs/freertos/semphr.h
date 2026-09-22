@@ -18,6 +18,16 @@ static inline SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t *
     return (SemaphoreHandle_t)storage;
 }
 
+/* Added 2026-09-22 for safety_ceiling_sync.c's move off lazy TOCTOU mutex
+ * creation to statically-allocated mutexes created once at init -- same
+ * "identity doesn't matter on a single-threaded host test" reasoning as
+ * xSemaphoreCreateBinaryStatic() above: the storage pointer itself is a
+ * perfectly good non-NULL handle here. */
+static inline SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *storage)
+{
+    return (SemaphoreHandle_t)storage;
+}
+
 /* Added 2026-09-01 for esp_spi_owner.c's host test (test_esp_spi_owner.c),
  * which #includes esp_spi_owner.c directly -- spi_owner_init() calls this
  * for its shutdown_done semaphore. A single process-wide dummy is enough,

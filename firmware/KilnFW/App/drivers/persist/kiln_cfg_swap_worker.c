@@ -118,7 +118,15 @@ static void swap_worker_task(void *arg)
              * board is now alarmed with heaters disabled, not merely
              * refused with nothing changed. */
             if (diverged) {
-                ESP_LOGE(TAG, "kiln config swap target_id=%ld left the board DIVERGED (heaters disabled): %s",
+                /* 2026-09-22 fix (docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
+                 * sec 4 "Fix the message"): *out_diverged is set at five
+                 * sites in kiln_cfg_swap_apply_impl(), and only the
+                 * ceiling-latch branch actually disables heat -- the other
+                 * four (rollback-failure paths) disable nothing. This
+                 * generic line must not claim a heat-off outcome it cannot
+                 * know occurred; the ceiling-latch branch's own `reason`
+                 * text already carries that claim when it is true. */
+                ESP_LOGE(TAG, "kiln config swap target_id=%ld left the board DIVERGED; see reason: %s",
                          (long)job.target_id, reason);
             } else {
                 ESP_LOGW(TAG, "kiln config swap target_id=%ld refused/failed, nothing changed: %s",

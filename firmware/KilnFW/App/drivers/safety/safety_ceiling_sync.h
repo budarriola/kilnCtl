@@ -113,6 +113,32 @@ bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value);
  * (no fabricated ceiling from a zeroed default config). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link);
 
+/* 2026-09-22 (opus review, advisory adopted): identical contract to
+ * safety_ceiling_sync_reconcile_on_link_up() above, except it takes this
+ * file's internal reconcile lock NON-BLOCKING and simply skips the tick
+ * (no-op, no log) if a swap-worker reconcile (kiln_cfg_swap.c) is already
+ * in flight. Safe to skip a tick: this call is level-triggered, so the very
+ * next poll tick re-evaluates the same condition. Use this from
+ * safety_link_poll.c's every-tick call site; kiln_cfg_swap.c's one-shot
+ * swap/rollback callers should keep using the blocking form above, since
+ * they need this call to have actually completed before they read
+ * safety_ceiling_sync_is_diverged() right afterward. See
+ * safety_ceiling_sync.c's reconcile_on_link_up_impl() doc comment for the
+ * full rationale (7a8594d: never hold or wait on a module lock across a
+ * producer call this file doesn't own). */
+void safety_ceiling_sync_reconcile_on_link_up_nonblocking(SafetyLinkClass *link);
+
+/* 2026-09-22 fix: creates this file's two internal mutexes
+ * (s_divergence_state_lock, s_reconcile_lock) once, statically, replacing a
+ * lazy-create TOCTOU race that let safety_poll_task and
+ * kiln_cfg_swap_worker each install a different mutex for the same lock on
+ * dual-core ESP32-S3. Call exactly once, single-threaded, before either
+ * task can be running -- main_control_bringup.c is the real call site. Safe
+ * to skip entirely in a host test (leaves both locks NULL, the same
+ * no-lock/single-threaded default every existing host test already relied
+ * on under the old lazy form). */
+void safety_ceiling_sync_init(void);
+
 /* 2026-09-14 owner decision, verbatim: "if a config doesn't land and match
  * on both sides then alarm and dissable heaters." Every reconcile tick
  * above already compares the ESP's target ceiling against the Pico's
