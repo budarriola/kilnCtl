@@ -336,6 +336,18 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
  * neither is later mistaken for an unnoticed fault: a diverged board that
  * ALSO shows S6b trips, or that logs late/dropped heartbeats, is not a new
  * symptom to chase -- it is this coupling working as designed. */
+/* This function's file-scope statics (esp_fields/pico_fields/expected/
+ * extra_names below, ~1.5 KB) used to be justified as reentrancy-free on the
+ * premise that only safety_poll_task ever called this function (via
+ * safety_ceiling_sync_reconcile_on_link_up()). That premise broke once
+ * kiln_cfg_swap.c's kiln_cfg_swap_worker task started calling
+ * safety_ceiling_sync_reconcile_on_link_up() directly. Guarded by
+ * s_reconcile_lock, taken by the caller
+ * (safety_ceiling_sync_reconcile_on_link_up()) around its ENTIRE body --
+ * not just this call -- since that caller's own statics (now_us/
+ * s_last_log_us/s_reconcile_backoff) are exactly the same hazard and must
+ * be serialized against the same two tasks. See that function for the
+ * lock. */
 static void enforce_ceiling_divergence(float target_c, bool target_known, float pico_c, bool pico_known)
 {
     /* Snapshot the cache generation BEFORE reading any live safety_cfg_store
@@ -382,12 +394,13 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
      * doc comment in the header). `static` (file-scope), not stack-local:
      * these two arrays are ~1.5KB combined (96 config_identity_field_t
      * entries x 2, each holding a `const char *name` + bool + float) and
-     * this function is provably only ever called from safety_poll_task
-     * (see safety_ceiling_sync_reconcile_on_link_up()'s own comment on
-     * `now_us` for the identical single-caller/no-reentrancy reasoning) --
      * a stack local of this size risks tripping check_httpd_task_stack_
      * budget/check_executor_task_stack_budget the way the audit's rejected
-     * hazard-1 fix attempt did. */
+     * hazard-1 fix attempt did. This function is called from two tasks
+     * (safety_poll_task and kiln_cfg_swap_worker); s_reconcile_lock, taken
+     * by the caller (safety_ceiling_sync_reconcile_on_link_up()) around its
+     * whole body, is what makes reusing this static state across both safe
+     * -- see that function's doc comment. */
     static config_identity_field_t esp_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
     static config_identity_field_t pico_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
     static safety_ceiling_expected_param_t expected[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
@@ -624,6 +637,18 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
     divergence_state_lock_give();
 }
 
+/* Serializes the whole of safety_ceiling_sync_reconcile_on_link_up(),
+ * including enforce_ceiling_divergence()'s ~1.5 KB of file-scope statics and
+ * this function's own now_us/s_last_log_us/s_reconcile_backoff statics --
+ * see enforce_ceiling_divergence()'s doc comment. This function is no
+ * longer single-caller: safety_poll_task calls it every poll tick, and
+ * kiln_cfg_swap.c's kiln_cfg_swap_worker task also calls it once per swap
+ * (kiln_cfg_swap.c's step 10/11 comment). A plain mutex is far cheaper than
+ * moving or enlarging that static state, and correct regardless of which
+ * task calls in; the two calls are rare/short enough that lock contention
+ * is not a concern. */
+static SemaphoreHandle_t s_reconcile_lock;
+
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
 {
     if (!link) {
@@ -631,6 +656,12 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
     }
     if (!zones_config_is_valid()) {
         return; /* same gate the removed safety_sync_tc_type() used -- no real config to derive a target from yet */
+    }
+    if (!s_reconcile_lock) {
+        s_reconcile_lock = xSemaphoreCreateMutex();
+    }
+    if (s_reconcile_lock) {
+        xSemaphoreTake(s_reconcile_lock, portMAX_DELAY);
     }
 
     /* 2026-09-10 opus review finding: the comment this replaces claimed
@@ -643,11 +674,12 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
      * free. `now_us` stays static anyway (harmless, not a fix for anything)
      * purely for consistency with s_last_log_us/s_suppressed_log_count
      * below, which for the same reason as always -- rate-limiting a WARN
-     * log across calls -- genuinely must persist between calls; this
-     * function is only ever called from safety_poll_task, never
-     * concurrently, so there is no reentrancy hazard in reusing one
-     * instance. Do not cite this comment as a stack-budget justification
-     * for anything -- it is not one. */
+     * log across calls -- genuinely must persist between calls. This
+     * function is called from both safety_poll_task and (once per swap)
+     * kiln_cfg_swap_worker; s_reconcile_lock (taken above) is what removes
+     * the reentrancy hazard that used to be claimed away here on a
+     * single-caller premise that no longer holds. Do not cite this comment
+     * as a stack-budget justification for anything -- it is not one. */
     static int64_t now_us;
     now_us = (int64_t)hal_time_now_us();
 
@@ -680,6 +712,9 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
          * itself, no UART round trip, no log line. See safety_ceiling_
          * policy.h's safety_ceiling_reconcile_backoff_t comment for the
          * full rationale and the window this leaves open. */
+        if (s_reconcile_lock) {
+            xSemaphoreGive(s_reconcile_lock);
+        }
         return;
     }
 
@@ -704,6 +739,9 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
         } else {
             s_suppressed_log_count++;
         }
+        if (s_reconcile_lock) {
+            xSemaphoreGive(s_reconcile_lock);
+        }
         return;
     }
     if (result == SAFETY_CEILING_SYNC_RAISED) {
@@ -714,4 +752,7 @@ void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link)
     /* SAFETY_CEILING_SYNC_NONE: already wide enough (the ordinary case on a
      * healthy reconnect where nothing changed while the link was down) --
      * nothing worth logging. */
+    if (s_reconcile_lock) {
+        xSemaphoreGive(s_reconcile_lock);
+    }
 }

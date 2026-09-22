@@ -323,12 +323,20 @@ typedef struct {
 } safety_cfg_param_t;
 
 static bool s_refetch_should_fail = false;
+static uint16_t s_cached_crc = 1; // 1 == "configured"; see safety_cfg_store_refetch() below for how it changes
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
 {
-    (void)config_crc;
     if (!link || s_refetch_should_fail) {
         return false;
     }
+    /* Honour the real contract (safety_cfg_store.c:1524/1674): a successful
+     * refetch tags the cache with whatever config_crc the caller passed,
+     * including 0 -- which is exactly what kiln_cfg_swap.c's
+     * push_and_verify_pico() deliberately passes to force an unconditional
+     * refetch. A stub that discarded this argument (as this one used to)
+     * hid the real defect audited in
+     * docs/audits/kiln_config_self_apply_diverged_2026-09-22.md. */
+    s_cached_crc = config_crc;
     return true;
 }
 bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **out_name)
@@ -369,7 +377,6 @@ bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
     memcpy(&out->value, &e->value_bits, sizeof(out->value));
     return true;
 }
-static uint16_t s_cached_crc = 1; // non-zero = "configured", see kiln_cfg_swap.c's item-16 approximation
 uint16_t safety_cfg_store_cached_crc(void) { return s_cached_crc; }
 
 // -- safety_ceiling_sync.h --
@@ -540,6 +547,32 @@ static void test_clean_swap_applies_both_halves(void)
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
                "pending record cleared after a successful swap");
     TEST_CHECK(s_lock_depth == 0, "store lock is balanced (never left held)");
+}
+
+static void test_successful_apply_not_diverged_despite_zeroed_cache_crc(void)
+{
+    // docs/audits/kiln_config_self_apply_diverged_2026-09-22.md: push_and_
+    // verify_pico() deliberately calls safety_cfg_store_refetch(link, 0) to
+    // force an unconditional refetch, which (per that function's real
+    // contract, now honoured by this test's stub -- see
+    // safety_cfg_store_refetch() above) tags the cache with 0. A clean
+    // swap must not read that 0 back as "the Pico never reported a
+    // config_crc" and report a false divergence. Ceiling identity is
+    // intentionally left non-diverged (s_diverged stays false from
+    // reset_state()) so this isolates the deleted clause specifically --
+    // against the pre-fix source this fails with reason containing "Pico
+    // reports no config_crc after the swap".
+    TEST_SECTION("a successful apply is not diverged even though the cache's config_crc reads 0 post-swap");
+    reset_state();
+    TEST_CHECK(safety_cfg_store_cached_crc() != 0, "sanity: cache starts non-zero before the swap");
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(ok, "swap reports success");
+    TEST_CHECK(!diverged, "not reported as diverged");
+    TEST_CHECK(safety_cfg_store_cached_crc() == 0,
+               "sanity: the cache really is 0 after the swap (proves this test exercises the real coupling, "
+               "not a stub that dodges it)");
 }
 
 static void test_apply_autosave_targets_incoming_slot_not_outgoing(void)
@@ -1194,6 +1227,7 @@ static void test_boot_recover_latches_unreadable_when_malloc_fails(void)
 int main(void)
 {
     test_clean_swap_applies_both_halves();
+    test_successful_apply_not_diverged_despite_zeroed_cache_crc();
     test_apply_autosave_targets_incoming_slot_not_outgoing();
     test_pico_failure_leaves_esp_untouched();
     test_half_package_refused();

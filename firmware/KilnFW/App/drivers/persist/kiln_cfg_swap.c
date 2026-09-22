@@ -739,22 +739,17 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
     char div_reason[KILN_CFG_SWAP_REASON_MAX];
     div_reason[0] = '\0';
     bool diverged = safety_ceiling_sync_is_diverged(div_reason, sizeof(div_reason));
-    /* Approximation pending item 16 (the UNCONFIGURED flag is not on the
-     * wire yet): a Pico that has never reported ANY config_crc this boot
-     * cannot have just accepted 60+ params, so this is defensive, not the
-     * primary signal -- the field-by-field readback above is what actually
-     * proves the Pico is configured with P. */
-    if (!diverged && safety_cfg_store_cached_crc() == 0) {
-        diverged = true;
-        snprintf(div_reason, sizeof(div_reason), "Pico reports no config_crc after the swap");
-    }
     if (diverged) {
         if (out_diverged) {
             *out_diverged = true;
         }
         /* active_id was already moved to target_id above, right after
          * readback proved the content match -- this alarm is reported
-         * against a store that already correctly reflects what's live. */
+         * against a store that already correctly reflects what's live.
+         * This is the ONLY branch that disables heat: it means
+         * safety_ceiling_sync_is_diverged() found the ceiling/arming latch
+         * set by enforce_ceiling_divergence(), which is what actually calls
+         * the disable-relays/halt-run hooks. */
         snprintf(reason_out, reason_cap,
                  "both halves committed and matched, but the post-swap ceiling/arming check failed (%s) -- "
                  "heaters disabled and alarmed, config left pending for retry",
