@@ -187,10 +187,13 @@ var PASSTHROUGH = [
   ['k', 'model_k_dc', false], ['tau', 'model_tau_s', false], ['deadtime', 'model_dead_time_s', false],
 ];
 
-function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-                  .replace(/"/g, '&quot;');
-}
+// esc() used to be a local copy of this escape (missing the single-quote
+// replacement app.js's kcEscapeHtml has always had -- see
+// docs/audits/web_code_duplication_drift_2026-09-18.md section 2.4). app.js
+// is loaded on this page (see the <script defer src="/app.js"> above), so
+// this now aliases the one shared, five-character-correct implementation
+// instead of keeping a second copy that can drift again.
+var esc = window.kcEscapeHtml;
 
 function renderProfiles() {
   var host = document.getElementById('profiles');

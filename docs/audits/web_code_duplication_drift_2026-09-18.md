@@ -286,6 +286,13 @@ prevailing style in the surrounding JS string concatenation — gets an escaping
 in the page that configures safety limits, and the weakened helper looks exactly like
 the three correct ones at a glance.
 
+**Fixed 2026-09-22.** `safety_config_page.html`'s local `esc()` now aliases
+`window.kcEscapeHtml` directly (app.js is already loaded on this page) instead of
+keeping a second, driftable copy. `tools/check_html_escape_helpers.ps1` was added to
+catch this class mechanically going forward: it finds every HTML-escape-shaped helper
+under `firmware/KilnFW/App/drivers/http/**/*.html` and `app.js` and fails if one is
+missing a replacement for any of the five characters `& < > " '`.
+
 ### 2.5 Three temperature-delta formatters, two of which are wrong for Fahrenheit
 
 - `http/app.js:230-234` — `kcUnit.toDisplay`, `return get() === 'f' ? (c * 9 / 5 + 32) : c;`
