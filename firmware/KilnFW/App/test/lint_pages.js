@@ -384,10 +384,16 @@ function extract_js_var_string(src, varName) {
   //      the signed-in-wrong-role case) -- without this, a 403 from an
   //      unrelated route (ota_http.c's verify failure, etc.) would wrongly
   //      pop the admin-login modal.
-  //   3. exactly one retry call follows that check (nativeFetch(input,
-  //      init)) -- the SAME request, once, on a successful login. A retry
-  //      count of zero silently drops the operator's action after they log
-  //      in.
+  //   3. exactly one retry call follows that check, guarded by a one-shot
+  //      "already retried" marker (`__kcAuthRetried`) so a second
+  //      insufficient_role 403 on the retry itself does not loop into a
+  //      second modal -- the retry re-enters `window.fetch` (not
+  //      `nativeFetch`) so kcFetchWithSafetyAck/kcOtaAuthedFetch's 428-ack
+  //      and OTA-signing handling still apply to the retried request
+  //      (review fix, 2026-09-21 (b)).
+  //   4. the login modal is a real dialog: role="dialog" (+ aria-modal) so
+  //      assistive tech announces it as one, and Escape cancels it the same
+  //      as the Cancel button (review fix, 2026-09-21 (a)).
   const appJsPath = find_file(dir, 'app.js');
   if (appJsPath) {
     checked++;
@@ -403,17 +409,41 @@ function extract_js_var_string(src, varName) {
                    `every 403 (including unrelated ones from ota_http.c/diagnostics_http.c/` +
                    `profiles_live_http.c) as "wrong role" and pop the admin-login modal on all of them.`);
     } else {
-      // Matches only the retry-after-login call site (`ok ? nativeFetch(...) :
-      // resp`), not the wrapper's other, unrelated nativeFetch(input, init)
+      // Matches only the retry-after-login call site (`window.fetch(inputForRetry,
+      // retryInit)`), not the wrapper's other, unrelated nativeFetch(input, init)
       // call sites (the auth-exempt pass-through, the initial request) --
       // those are expected to appear exactly once each and are not what
       // this guard is protecting.
-      const retryCount = (src.match(/ok\s*\?\s*nativeFetch\(input,\s*init\)\s*:\s*resp/g) || []).length;
+      const retryCount = (src.match(/window\.fetch\(inputForRetry,\s*retryInit\)/g) || []).length;
       if (retryCount !== 1) {
         bad++;
         console.log(`app.js: expected exactly one retry-after-login call in the fetch wrapper ` +
                      `(the single retry the owner's plan requires), found ${retryCount}.`);
       }
+      // Both halves of the one-shot guard, matched separately: a READ
+      // (init.__kcAuthRetried, checked before treating a 403 as
+      // insufficient_role) and a SET (retryInit.__kcAuthRetried = true,
+      // stamped onto the retried request) -- a sabotage that removes only
+      // the set (leaving the string in a comment or the read behind) would
+      // pass a bare substring count, so each half needs its own pattern.
+      const hasGuardRead = /init\s*&&\s*init\.__kcAuthRetried/.test(src);
+      const hasGuardSet = /\.__kcAuthRetried\s*=\s*true\s*;/.test(src);
+      if (!hasGuardRead || !hasGuardSet) {
+        bad++;
+        console.log(`app.js: the retry-after-login call is missing its one-shot __kcAuthRetried ` +
+                     `guard (needs both a check and a set) -- without it a second insufficient_role ` +
+                     `403 on the retry itself would loop into a second modal.`);
+      }
+    }
+    if (!/setAttribute\(\s*['"]role['"]\s*,\s*['"]dialog['"]\s*\)/.test(src) || !/aria-modal/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal is missing role="dialog"/aria-modal -- assistive tech ` +
+                   `would not announce it as a dialog.`);
+    }
+    if (!/(evt\.key\s*===\s*['"]Escape['"]|evt\.keyCode\s*===\s*27)/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal does not appear to handle Escape -- it should cancel the ` +
+                   `same way the Cancel button does.`);
     }
   }
 }

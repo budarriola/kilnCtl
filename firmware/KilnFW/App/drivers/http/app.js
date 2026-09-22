@@ -154,8 +154,16 @@
     overlay.setAttribute('hidden', '');
     var panel = document.createElement('form');
     panel.className = 'kc-login-panel';
+    // Accessibility (opus review, 2026-09-21): role="dialog" + aria-modal
+    // tell a screen reader this is a modal, not decoration; aria-labelledby
+    // points at the <h2> so its text is announced as the dialog's name.
+    // Focus handling (open/Escape/Tab-trap/restore) is wired up in
+    // openLoginModal() below, which is the single place the modal is shown.
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'kc-login-title');
     panel.innerHTML =
-      '<h2 class="kc-login-title">Administrator login required</h2>' +
+      '<h2 class="kc-login-title" id="kc-login-title">Administrator login required</h2>' +
       '<label for="kc-login-username">Username</label>' +
       '<input id="kc-login-username" type="text" autocomplete="username" required>' +
       '<label for="kc-login-password">Password</label>' +
@@ -188,17 +196,60 @@
     loginErrorEl.textContent = '';
     loginUserEl.value = '';
     loginPassEl.value = '';
+    // Focus restoration (opus review, 2026-09-21): whatever had focus
+    // before this modal opened -- the button/link that triggered the
+    // denied action -- gets it back on close, so keyboard/screen-reader
+    // users land where they were rather than at the top of the page.
+    var previouslyFocused = document.activeElement;
     loginModalEl.removeAttribute('hidden');
     loginUserEl.focus();
 
     return new Promise(function (resolve) {
       var settled = false;
+      function focusableEls() {
+        // Order matches the DOM/tab order inside the panel: username,
+        // password, cancel, submit.
+        return [loginUserEl, loginPassEl, loginCancelEl,
+                loginFormEl.querySelector('button[type="submit"]')].filter(Boolean);
+      }
+      function onKeydown(evt) {
+        if (evt.key === 'Escape' || evt.keyCode === 27) {
+          // Same outcome as the Cancel button.
+          evt.preventDefault();
+          finish(false);
+          return;
+        }
+        if (evt.key !== 'Tab' && evt.keyCode !== 9) return;
+        // Focus trap: Tab/Shift+Tab cycles within the panel instead of
+        // escaping to the page behind the overlay.
+        var els = focusableEls();
+        if (!els.length) return;
+        var first = els[0], last = els[els.length - 1];
+        if (evt.shiftKey) {
+          if (document.activeElement === first || !panelContains(document.activeElement)) {
+            evt.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last || !panelContains(document.activeElement)) {
+            evt.preventDefault();
+            first.focus();
+          }
+        }
+      }
+      function panelContains(el) {
+        return !!el && loginFormEl.contains(el);
+      }
       function finish(ok) {
         if (settled) return;
         settled = true;
         loginFormEl.removeEventListener('submit', onSubmit);
         loginCancelEl.removeEventListener('click', onCancel);
+        loginFormEl.removeEventListener('keydown', onKeydown);
         loginModalEl.setAttribute('hidden', '');
+        if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+          previouslyFocused.focus();
+        }
         resolve(ok);
       }
       function onCancel(evt) {
@@ -241,6 +292,7 @@
       }
       loginFormEl.addEventListener('submit', onSubmit);
       loginCancelEl.addEventListener('click', onCancel);
+      loginFormEl.addEventListener('keydown', onKeydown);
     });
   }
 
@@ -263,6 +315,24 @@
     if (isAuthExemptUrl(url)) {
       return nativeFetch(input, init);
     }
+    // Review fix, 2026-09-21 (b): a Request object's body is a one-shot
+    // stream -- reading it (sending the request) consumes it, so a retry
+    // built from the same Request would send an empty body. clone() it
+    // before the first send so the retry-after-login below still has one.
+    // When `input` is a plain URL string, the body lives in `init.body`
+    // instead, which nativeFetch does not consume (only the underlying
+    // stream implementation would, and a plain string/FormData/URLSearchParams
+    // body is not a stream), so no cloning is needed for that shape.
+    var inputForRetry = input;
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      inputForRetry = input.clone();
+    }
+    // One-shot guard (b): a request built by re-entering window.fetch below
+    // carries this marker so a SECOND insufficient_role 403 (e.g. the
+    // freshly-logged-in account still lacks the role, or the session
+    // dropped again immediately) is handed back raw instead of opening a
+    // second modal and looping.
+    var alreadyRetried = !!(init && init.__kcAuthRetried);
     return nativeFetch(input, init).then(function (resp) {
       if (resp.status === 401) {
         // No session at all -- per the owner's refinement this is never
@@ -278,14 +348,29 @@
         window.location.href = '/login?return=' + encodeURIComponent(here);
         return resp;
       }
-      if (resp.status === 403 && resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
+      if (!alreadyRetried && resp.status === 403 &&
+          resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
         // Signed in, wrong role -- offer to elevate in place and retry the
         // SAME request once on success. On cancel (or a second failed
         // login), hand back the original 403 unchanged so whatever this
         // page already does with a failed action (an inline error message,
         // its own .catch()) still runs exactly as before this change.
+        //
+        // Review fix, 2026-09-21 (b): the retry goes back through
+        // window.fetch (this same wrapper), not nativeFetch, so a caller
+        // built on kcFetchWithSafetyAck/kcOtaAuthedFetch (both call the
+        // bare `fetch` identifier, which resolves to window.fetch) still
+        // gets its 428-ack / OTA-signing handling applied to the retried
+        // request instead of that retry reaching the page raw.
         return ensureAdminLogin('Administrator login required').then(function (ok) {
-          return ok ? nativeFetch(input, init) : resp;
+          if (!ok) return resp;
+          var retryInit = {};
+          var src = init || {};
+          for (var k in src) {
+            if (Object.prototype.hasOwnProperty.call(src, k)) retryInit[k] = src[k];
+          }
+          retryInit.__kcAuthRetried = true;
+          return window.fetch(inputForRetry, retryInit);
         });
       }
       return resp;
