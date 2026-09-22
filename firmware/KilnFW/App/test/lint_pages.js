@@ -472,6 +472,37 @@ function extract_js_var_string(src, varName) {
       console.log(`app.js: the login modal's Cancel handler does not check the 'submitting' guard -- ` +
                    `Cancel during an in-flight login POST could cancel a login that is about to succeed.`);
     }
+    // Login POST timeout (opus review, 2026-09-21): a stalled board would
+    // otherwise leave the modal stuck (Escape/Cancel ignored while
+    // `submitting`) until the browser's own timeout. Matched as an
+    // AbortController wired into the login fetch's `signal`, not just an
+    // AbortController appearing anywhere in the file.
+    if (!/new AbortController\(\)/.test(src) ||
+        !/signal:\s*controller\.signal/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's POST has no AbortController/signal wired up -- a stalled ` +
+                   `board would leave the modal stuck until the browser's own timeout.`);
+    }
+    if (!/setTimeout\(function \(\) \{\s*\n\s*timedOut = true;\s*\n\s*controller\.abort\(\);/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's AbortController does not appear to be driven by a timer -- ` +
+                   `it must abort the POST after a bounded timeout, not just be constructible.`);
+    }
+    // Buttons must actually be disabled while submitting, not merely have
+    // `submitting` read elsewhere -- matched on the disabled= assignment
+    // itself, gated by `on` (the setSubmitting(on) parameter), so a stray
+    // `.disabled = true` elsewhere in the file cannot pass this vacuously.
+    if (!/loginCancelEl\.disabled = on;/.test(src) ||
+        !/loginSubmitEl\.disabled = on;/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's Cancel/Submit buttons are not disabled while a login POST ` +
+                   `is in flight.`);
+    }
+    if (!/loginSubmitEl\.textContent = on \? 'Signing in/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's Submit button does not show a "Signing in..." label while ` +
+                   `a login POST is in flight.`);
+    }
   }
 }
 

@@ -146,7 +146,7 @@
   }
 
   var loginModalEl = null, loginTitleEl = null, loginUserEl = null, loginPassEl = null,
-      loginErrorEl = null, loginFormEl = null, loginCancelEl = null;
+      loginErrorEl = null, loginFormEl = null, loginCancelEl = null, loginSubmitEl = null;
 
   function buildLoginModal() {
     var overlay = document.createElement('div');
@@ -182,6 +182,7 @@
     loginPassEl = panel.querySelector('#kc-login-password');
     loginErrorEl = panel.querySelector('#kc-login-error');
     loginCancelEl = panel.querySelector('.kc-login-cancel');
+    loginSubmitEl = panel.querySelector('button[type="submit"]');
     return overlay;
   }
 
@@ -267,26 +268,47 @@
         evt.preventDefault();
         finish(false);
       }
+      function setSubmitting(on) {
+        submitting = on;
+        if (loginCancelEl) loginCancelEl.disabled = on;
+        if (loginSubmitEl) {
+          loginSubmitEl.disabled = on;
+          loginSubmitEl.textContent = on ? 'Signing in…' : 'Log in';
+        }
+      }
       function onSubmit(evt) {
         evt.preventDefault();
         if (submitting) return;
-        submitting = true;
+        setSubmitting(true);
         loginErrorEl.textContent = '';
         var body = 'username=' + encodeURIComponent(loginUserEl.value) +
                    '&password=' + encodeURIComponent(loginPassEl.value);
+        // Login-POST timeout (opus review, 2026-09-21): measured ~0.9s on
+        // hardware, but a stalled board would otherwise leave the modal
+        // stuck (Escape/Cancel ignored while `submitting`) until the
+        // browser's own timeout. 15s covers a 429 lockout ladder's
+        // Retry-After without racing it.
+        var controller = new AbortController();
+        var timedOut = false;
+        var timer = setTimeout(function () {
+          timedOut = true;
+          controller.abort();
+        }, 15000);
         // nativeFetch, not window.fetch -- this request must never itself
         // be re-intercepted by the wrapper installed below (it already IS
         // the login attempt).
         nativeFetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: body
+          body: body,
+          signal: controller.signal
         }).then(function (resp) {
+          clearTimeout(timer);
           if (resp.ok) {
             finish(true);
             return;
           }
-          submitting = false;
+          setSubmitting(false);
           if (resp.status === 429) {
             // Login lockout ladder: never auto-retry, just surface the
             // server's own Retry-After seconds (same wording as
@@ -301,8 +323,9 @@
             loginErrorEl.textContent = text || 'Login failed.';
           });
         }).catch(function () {
-          submitting = false;
-          loginErrorEl.textContent = 'Network error.';
+          clearTimeout(timer);
+          setSubmitting(false);
+          loginErrorEl.textContent = timedOut ? 'Login timed out.' : 'Network error.';
         });
       }
       loginFormEl.addEventListener('submit', onSubmit);
