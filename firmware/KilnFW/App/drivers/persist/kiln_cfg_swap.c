@@ -510,17 +510,29 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
 
     /* step 1 (H17): a single call, pico_out non-NULL, so a half-package
      * (pico_populated==0) is refused right here before anything is
-     * snapshotted or touched. */
-    uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+     * snapshotted or touched.
+     *
+     * STATIC, not stack: docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md.
+     * target_blob/target_pico/p/readback_blob below summed to ~4.25 kB on
+     * this function's own frame alone -- over half the worker's 8192 B
+     * stack before counting the reason-string locals or the safety-link UART
+     * call chain beneath push_and_verify_pico()/rollback(). Safe as static:
+     * kiln_cfg_swap_apply() runs ONLY on the dedicated kiln_cfg_swap_worker
+     * task (kiln_cfg_swap_worker.c), which serializes every call through a
+     * depth-1 queue plus an is_busy() interlock -- at most one call is ever
+     * in flight, so a single static instance can never be shared between two
+     * concurrent callers the way it could be if e.g. an HTTP handler also
+     * called this directly. */
+    static uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
     uint16_t target_blob_len = 0;
-    kiln_pkg_safety_t target_pico;
+    static kiln_pkg_safety_t target_pico;
     if (!kiln_cfg_store_get_full_package(target_id, target_blob, sizeof(target_blob), &target_blob_len,
                                          &target_pico, reason_out, reason_cap)) {
         return false;
     }
 
-    /* step 2: snapshot R and persist it, marker=STAGED */
-    kiln_cfg_swap_pending_t p;
+    /* step 2: snapshot R and persist it, marker=STAGED. static -- see above. */
+    static kiln_cfg_swap_pending_t p;
     memset(&p, 0, sizeof(p));
     p.target_id = target_id;
     kiln_cfg_store_lock();
@@ -654,7 +666,7 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     persist_marker(&p, KILN_CFG_SWAP_MARKER_ESP_DONE);
 
     kiln_cfg_store_lock();
-    uint8_t readback_blob[sizeof(target_blob)];
+    static uint8_t readback_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
     bool readback_ok = zones_config_export_blob(readback_blob, sizeof(readback_blob)) &&
                        memcmp(readback_blob, target_blob, target_blob_len) == 0;
     kiln_cfg_store_unlock();
@@ -789,9 +801,15 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const 
     /* The one case where FINISHING is correct (section 4.4): both sides
      * already claim P. Re-verify both independently (never either side's
      * cache) and only then finish. */
-    uint8_t target_blob[sizeof(p->rollback_blob)];
+    /* static -- see kiln_cfg_swap_apply()'s identical comment and
+     * docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md. Safe for the
+     * same reason: finish_esp_done() is reachable only from
+     * kiln_cfg_swap_boot_recover(), itself only ever called from the
+     * dedicated kiln_cfg_swap_worker task before its job queue loop starts
+     * -- never concurrent with kiln_cfg_swap_apply() on that same task. */
+    static uint8_t target_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
     uint16_t target_blob_len = 0;
-    kiln_pkg_safety_t target_pico;
+    static kiln_pkg_safety_t target_pico;
     char sub[KILN_CFG_SWAP_REASON_MAX];
     sub[0] = '\0';
     if (!kiln_cfg_store_get_full_package(p->target_id, target_blob, sizeof(target_blob), &target_blob_len,
@@ -813,7 +831,7 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const 
         return;
     }
     kiln_cfg_store_lock();
-    uint8_t live_blob[sizeof(target_blob)];
+    static uint8_t live_blob[ZONES_CONFIG_BLOB_MAX_SIZE];
     bool esp_matches = zones_config_export_blob(live_blob, sizeof(live_blob)) &&
                        memcmp(live_blob, target_blob, target_blob_len) == 0;
     kiln_cfg_store_unlock();
@@ -856,7 +874,12 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done(SafetyLinkClass *link, const 
 
 void kiln_cfg_swap_boot_recover(void)
 {
-    kiln_cfg_swap_pending_t p;
+    /* static -- see kiln_cfg_swap_apply()'s identical comment and
+     * docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md. Runs once, as
+     * the kiln_cfg_swap_worker task's first act, before its job queue loop
+     * (and thus before kiln_cfg_swap_apply()) ever starts -- never
+     * concurrent with it. */
+    static kiln_cfg_swap_pending_t p;
     bool existed_but_unreadable = false;
     if (!load_pending_ex(&p, &existed_but_unreadable)) {
         if (!existed_but_unreadable) {

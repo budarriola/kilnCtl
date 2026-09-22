@@ -696,6 +696,19 @@ TASKS = [
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
              r'uart_protocol_init\(&ctx->uart_proto,.*?UART_PROTOCOL_STACK_SIZE',
              "CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE")),
+    dict(name="kiln_cfg_swap", root="swap_worker_task",
+         # Added 2026-09-22 after a REAL hardware stack overflow
+         # (docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md):
+         # "A stack overflow in task kiln_cfg_swap has been detected", coredump
+         # confirmed via espcoredump against a matching archived ELF. This task
+         # had `stack_margin_register()` (registration only, no depth ceiling)
+         # since it was created, but no entry in this table -- swap_worker_task
+         # directly calls kiln_cfg_swap_apply() and kiln_cfg_swap_boot_recover()
+         # (both in persist/kiln_cfg_swap.c), so the plain root below already
+         # reaches the whole deep path with no indirect-dispatch gap to model.
+         stack=lambda: extract_local_macro("drivers/persist/kiln_cfg_swap_worker.c",
+             r'#define SWAP_WORKER_STACK_BYTES\s+(\d+)',
+             r'xTaskCreate\(swap_worker_task,\s*"kiln_cfg_swap",\s*SWAP_WORKER_STACK_BYTES')),
 ]
 
 # Measured 2026-09-09 against KilnCtrl.elf as built that day (the run that
@@ -734,6 +747,21 @@ CEILING_BYTES = {
     "safety_uart_bridge": 2912,
     "thermo_uart_bridge": 2160,
     "touch_uart_bridge": 2176,
+    # Measured 2026-09-22 against a KilnCtrl.elf freshly built by
+    # check_00_kilnfw_target_build.ps1 in a clean worktree, AFTER the fix in
+    # docs/audits/kiln_cfg_swap_stack_overflow_2026-09-22.md: the large
+    # per-call aggregates in kiln_cfg_swap_apply()/finish_esp_done()/
+    # kiln_cfg_swap_boot_recover() (target_blob[896], readback_blob/
+    # live_blob[896], kiln_pkg_safety_t target_pico[~772],
+    # kiln_cfg_swap_pending_t p[~1688] -- ~4.25 kB in kiln_cfg_swap_apply()
+    # alone) moved from stack locals to `static`, safe because this task's
+    # own worker (kiln_cfg_swap_worker.c) guarantees at most one of those
+    # three functions is ever executing at a time. 4608 B ceiling against the
+    # unchanged 8192 B declared stack -- 3584 B of honest headroom before
+    # even subtracting UNMODELED_OVERHEAD_BYTES, a wide margin over the
+    # razor-thin "112 B to spare" this same file's finish_esp_done() comment
+    # records for the PRE-fix combined-frame measurement.
+    "kiln_cfg_swap": 4608,
     "autotune_engine": 2944,
     # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
     # regression tripwire -- NOT a measured worst case. The task's deep path
