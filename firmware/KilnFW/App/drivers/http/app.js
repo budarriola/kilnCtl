@@ -102,6 +102,228 @@
     return window.confirm(message);
   };
 
+  // ---- Login-escalation modal + global 401/403 handling -----------------
+  //
+  // Owner report, 2026-09-21: "When I click something on the site that
+  // requires a password it should ask me for one, not just show an
+  // authentication required page" -- refined the same day to: a request
+  // with NO session at all must never render a bare auth-error body,
+  // ever, page load or click; a request with a REAL session but the wrong
+  // role (a `user`/viewer hitting an admin-only action) should instead pop
+  // an in-place modal offering to log into an admin account, retrying the
+  // one action on success. The no-session case is handled almost entirely
+  // in http_auth_http.c now (it 302s a bare page GET straight to
+  // /login?return=<uri> before any JS here ever runs) -- what is left for
+  // this file is (a) the same redirect for a fetch()/XHR call, since a
+  // page already loaded and a session that then expires mid-use both still
+  // answer with a plain 401 body rather than a redirect the browser would
+  // follow automatically, and (b) the admin-escalation modal for the
+  // wrong-role case, both for an AJAX 403 and for the admin_required=<uri>
+  // query param http_auth_http.c's page-route redirect leaves on "/" when
+  // a signed-in viewer's own page navigation was the thing denied.
+  //
+  // The 401-vs-403-insufficient-role distinction is exactly what the
+  // firmware's two decisions already send: HTTP_AUTH_DECISION_DENY_NO_SESSION
+  // is always 401, and HTTP_AUTH_DECISION_DENY_INSUFFICIENT is always 403
+  // WITH an X-Kiln-Auth-Reason: insufficient_role header (http_auth_http.c)
+  // -- that header exists because a bare 403 is NOT unique to this gate
+  // (ota_http.c's verify failure, ota_http_recovery.c's "not in recovery
+  // mode", diagnostics_http.c's kiln_auth-namespace refusal,
+  // profiles_live_http.c's builtin-origin refusal all also answer 403), so
+  // this file checks the header, never the status code alone, before
+  // treating a 403 as "wrong role -- offer to elevate".
+  var nativeFetch = window.fetch.bind(window);
+
+  // Routes this file must never intercept: the login/bootstrap POSTs
+  // themselves (so a wrong password typed INTO the modal, or into
+  // login_page.html's own form, reports back to that same form instead of
+  // opening a second modal on top of itself) and the passive session
+  // routes (ROUTE_TIER_OPEN, never 401/403 -- listed defensively only).
+  function isAuthExemptUrl(url) {
+    var path = String(url).replace(/^[a-zA-Z][\w+.-]*:\/\/[^/]+/, '').split('?')[0];
+    return path === '/api/auth/login' || path === '/api/auth/bootstrap_password' ||
+           path === '/api/auth/session' || path === '/api/auth/session/extend';
+  }
+
+  var loginModalEl = null, loginTitleEl = null, loginUserEl = null, loginPassEl = null,
+      loginErrorEl = null, loginFormEl = null, loginCancelEl = null;
+
+  function buildLoginModal() {
+    var overlay = document.createElement('div');
+    overlay.className = 'kc-login-overlay';
+    overlay.setAttribute('hidden', '');
+    var panel = document.createElement('form');
+    panel.className = 'kc-login-panel';
+    panel.innerHTML =
+      '<h2 class="kc-login-title">Administrator login required</h2>' +
+      '<label for="kc-login-username">Username</label>' +
+      '<input id="kc-login-username" type="text" autocomplete="username" required>' +
+      '<label for="kc-login-password">Password</label>' +
+      '<input id="kc-login-password" type="password" autocomplete="current-password" required>' +
+      '<div class="kc-login-error" id="kc-login-error"></div>' +
+      '<div class="kc-login-actions">' +
+      '<button type="button" class="kc-login-cancel">Cancel</button>' +
+      '<button type="submit">Log in</button>' +
+      '</div>';
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    loginModalEl = overlay;
+    loginFormEl = panel;
+    loginTitleEl = panel.querySelector('.kc-login-title');
+    loginUserEl = panel.querySelector('#kc-login-username');
+    loginPassEl = panel.querySelector('#kc-login-password');
+    loginErrorEl = panel.querySelector('#kc-login-error');
+    loginCancelEl = panel.querySelector('.kc-login-cancel');
+    return overlay;
+  }
+
+  // Shows the modal and resolves `true` (logged in) or `false` (cancelled)
+  // -- this never rejects, so a caller's `.then()` never needs its own
+  // `.catch()` just to handle a decline. `titleText` distinguishes the two
+  // callers' wording (an AJAX 403 vs the admin_required=<uri> page-load
+  // case) without needing two separate modals.
+  function openLoginModal(titleText) {
+    if (!loginModalEl) buildLoginModal();
+    loginTitleEl.textContent = titleText;
+    loginErrorEl.textContent = '';
+    loginUserEl.value = '';
+    loginPassEl.value = '';
+    loginModalEl.removeAttribute('hidden');
+    loginUserEl.focus();
+
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish(ok) {
+        if (settled) return;
+        settled = true;
+        loginFormEl.removeEventListener('submit', onSubmit);
+        loginCancelEl.removeEventListener('click', onCancel);
+        loginModalEl.setAttribute('hidden', '');
+        resolve(ok);
+      }
+      function onCancel(evt) {
+        evt.preventDefault();
+        finish(false);
+      }
+      function onSubmit(evt) {
+        evt.preventDefault();
+        loginErrorEl.textContent = '';
+        var body = 'username=' + encodeURIComponent(loginUserEl.value) +
+                   '&password=' + encodeURIComponent(loginPassEl.value);
+        // nativeFetch, not window.fetch -- this request must never itself
+        // be re-intercepted by the wrapper installed below (it already IS
+        // the login attempt).
+        nativeFetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body
+        }).then(function (resp) {
+          if (resp.ok) {
+            finish(true);
+            return;
+          }
+          if (resp.status === 429) {
+            // Login lockout ladder: never auto-retry, just surface the
+            // server's own Retry-After seconds (same wording as
+            // login_page.html's own copy of this).
+            var retryAfter = resp.headers.get('Retry-After');
+            loginErrorEl.textContent = retryAfter ?
+              ('Too many attempts -- try again in ' + retryAfter + 's.') :
+              'Too many attempts -- try again later.';
+            return;
+          }
+          return resp.text().then(function (text) {
+            loginErrorEl.textContent = text || 'Login failed.';
+          });
+        }).catch(function () {
+          loginErrorEl.textContent = 'Network error.';
+        });
+      }
+      loginFormEl.addEventListener('submit', onSubmit);
+      loginCancelEl.addEventListener('click', onCancel);
+    });
+  }
+
+  // Only one modal in flight at a time -- if a second 403 arrives while the
+  // operator is still typing into the first prompt, it waits on the SAME
+  // login instead of stacking a second overlay on top.
+  var pendingLogin = null;
+  function ensureAdminLogin(titleText) {
+    if (!pendingLogin) {
+      pendingLogin = openLoginModal(titleText).then(function (ok) {
+        pendingLogin = null;
+        return ok;
+      });
+    }
+    return pendingLogin;
+  }
+
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (isAuthExemptUrl(url)) {
+      return nativeFetch(input, init);
+    }
+    return nativeFetch(input, init).then(function (resp) {
+      if (resp.status === 401) {
+        // No session at all -- per the owner's refinement this is never
+        // shown in place; the whole tab goes to the login page, carrying
+        // the current location back as ?return= exactly the way
+        // http_auth_http.c's own page-route redirect does, so a session
+        // that expires mid-click lands the operator back where they were
+        // after logging in again. The in-flight action itself is not
+        // retried (there is nothing left to retry into -- the page is
+        // navigating away), matching the plan's "returning to the right
+        // page is required, retrying the click is optional."
+        var here = window.location.pathname + window.location.search;
+        window.location.href = '/login?return=' + encodeURIComponent(here);
+        return resp;
+      }
+      if (resp.status === 403 && resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
+        // Signed in, wrong role -- offer to elevate in place and retry the
+        // SAME request once on success. On cancel (or a second failed
+        // login), hand back the original 403 unchanged so whatever this
+        // page already does with a failed action (an inline error message,
+        // its own .catch()) still runs exactly as before this change.
+        return ensureAdminLogin('Administrator login required').then(function (ok) {
+          return ok ? nativeFetch(input, init) : resp;
+        });
+      }
+      return resp;
+    });
+  };
+
+  // admin_required=<uri>: left on "/" by http_auth_http.c's page-route
+  // redirect when a signed-in non-admin session tried to navigate straight
+  // to an ADMIN-tier page (a bookmark, a typed URL). Offers the same modal
+  // and, on success, continues on to the page the operator actually
+  // wanted; on cancel, just drops the query param so a reload doesn't
+  // re-offer it.
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var target = params.get('admin_required');
+    if (!target || target.charAt(0) !== '/' || target.charAt(1) === '/') {
+      // Missing, or not a same-page-relative path (a "//host" value would
+      // be browser-interpreted as protocol-relative to an attacker's
+      // host) -- same open-redirect guard as login_page.html's
+      // loginReturnPath(). Never acted on.
+      return;
+    }
+    function offer() {
+      ensureAdminLogin('Administrator login required to open this page').then(function (ok) {
+        var clean = window.location.pathname; // drop the query param either way
+        window.history.replaceState(null, '', clean);
+        if (ok) {
+          window.location.href = target;
+        }
+      });
+    }
+    if (document.body) {
+      offer();
+    } else {
+      document.addEventListener('DOMContentLoaded', offer);
+    }
+  })();
+
   // ---- kcFetchWithSafetyAck ------------------------------------------
   //
   // One wrapper for every action the board will perform without a working

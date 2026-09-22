@@ -43,6 +43,27 @@
   <button type="submit">Set password</button>
 </form>
 <script>
+// Where to send the operator after a successful login. http_auth_http.c's
+// page-route redirect (owner report, 2026-09-21: "just show a login page
+// no matter where they come from") lands here with ?return=<the page they
+// asked for>, e.g. /login?return=/settings -- read it back so login sends
+// them on to where they actually wanted to go instead of always landing on
+// the Dashboard. Only a same-page-relative path ("/..." with no scheme or
+// "//" host part, which browsers would otherwise treat as protocol-
+// relative to an ATTACKER'S host) is honoured -- anything else, or a
+// missing/empty param, falls back to "/". This is an open-redirect guard:
+// the query string is attacker-controllable (anyone can hand a person a
+// crafted /login?return=... link) even though today's only producer
+// (http_auth_http.c) always writes one of its own known route strings.
+function loginReturnPath() {
+  var params = new URLSearchParams(window.location.search);
+  var ret = params.get('return');
+  if (ret && ret.charAt(0) === '/' && ret.charAt(1) !== '/') {
+    return ret;
+  }
+  return '/';
+}
+
 function submitLogin(evt) {
   evt.preventDefault();
   var errorEl = document.getElementById('error');
@@ -55,11 +76,21 @@ function submitLogin(evt) {
     body: body
   }).then(function (resp) {
     if (resp.ok) {
-      window.location.href = '/';
+      window.location.href = loginReturnPath();
+      return;
+    }
+    if (resp.status === 429) {
+      // Login lockout ladder (owner decision 2026-09-21): never auto-retry,
+      // just surface the server's own Retry-After seconds so the operator
+      // knows when trying again is worth it.
+      var retryAfter = resp.headers.get('Retry-After');
+      errorEl.textContent = retryAfter ?
+        ('Too many attempts -- try again in ' + retryAfter + 's.') :
+        'Too many attempts -- try again later.';
       return;
     }
     return resp.text().then(function (text) {
-      errorEl.textContent = (resp.status === 429) ? 'Too many attempts -- try again later.' : (text || 'Login failed.');
+      errorEl.textContent = text || 'Login failed.';
     });
   }).catch(function () {
     errorEl.textContent = 'Network error.';

@@ -455,6 +455,30 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
 .kc-lock-prompt button { align-self: flex-end; padding: 0.3em 0.8em; background: var(--ui-accent-1);
                           color: #fff; border: none; border-radius: var(--ui-radius);
                           cursor: pointer; min-height: 32px; }
+/* app.js's login-escalation modal (owner report, 2026-09-21: offer to log
+   into an admin account in place rather than showing a bare auth-error
+   body). Full-screen blocking overlay -- same pattern as .kc-menu-overlay
+   above, not the small non-blocking corner card .kc-lock-prompt is -- this
+   one genuinely must be answered (or cancelled) before the page underneath
+   is usable, since the action that triggered it is paused waiting on it. */
+.kc-login-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 1100;
+                     display: flex; align-items: center; justify-content: center; }
+.kc-login-overlay[hidden] { display: none; }
+.kc-login-panel { background: var(--ui-card); color: var(--ui-text-primary);
+                   border-radius: var(--ui-radius); padding: 1.2em 1.4em; width: 18rem;
+                   max-width: calc(100vw - 2em); box-sizing: border-box; display: flex;
+                   flex-direction: column; gap: 0.6em; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+.kc-login-title { margin: 0 0 0.2em 0; font-size: 1.05em; }
+.kc-login-panel label { font-size: 0.85em; color: var(--ui-text-secondary); }
+.kc-login-panel input { padding: 0.5em; font-size: 1rem; border-radius: var(--ui-radius);
+                         border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.kc-login-error { color: var(--ui-accent-5); min-height: 1.1em; font-size: 0.85em; }
+.kc-login-actions { display: flex; justify-content: flex-end; gap: 0.6em; }
+.kc-login-actions button { padding: 0.5em 0.9em; border-radius: var(--ui-radius); border: none;
+                            cursor: pointer; min-height: var(--ui-touch, 40px); }
+.kc-login-actions button[type="submit"] { background: var(--ui-accent-1); color: #fff; }
+.kc-login-actions button.kc-login-cancel { background: transparent; color: var(--fg);
+                                             border: 1px solid var(--border); }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
    item 4's "dim its values" wording. Every *_page.html now annotates its
    live device-reading elements with .kc-live-value (temperatures, relay/

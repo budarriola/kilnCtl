@@ -363,5 +363,55 @@ function extract_js_var_string(src, varName) {
   }
 }
 
+{
+  // The global 401/403 login-escalation wrapper in app.js (owner report,
+  // 2026-09-21: "ask me for [a password], not just show a page"). This is
+  // a narrow, mechanical guard against silently losing the wrapping or the
+  // single retry in a future edit -- it does not exercise the browser
+  // behaviour itself (that needs check_ui_responsive_sweep.ps1 / a live
+  // click), only that the source still has the shape it must have:
+  //   1. window.fetch is reassigned (the interception point for every
+  //      caller in every page, including app.js's own kcFetchWithSafetyAck/
+  //      kcOtaAuthedFetch, which call the bare `fetch` identifier and so
+  //      pick up whatever window.fetch currently is).
+  //   2. the reassigned function checks X-Kiln-Auth-Reason (the header
+  //      http_auth_http.c sets ONLY on HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
+  //      the signed-in-wrong-role case) -- without this, a 403 from an
+  //      unrelated route (ota_http.c's verify failure, etc.) would wrongly
+  //      pop the admin-login modal.
+  //   3. exactly one retry call follows that check (nativeFetch(input,
+  //      init)) -- the SAME request, once, on a successful login. A retry
+  //      count of zero silently drops the operator's action after they log
+  //      in.
+  const appJsPath = find_file(dir, 'app.js');
+  if (appJsPath) {
+    checked++;
+    const src = fs.readFileSync(appJsPath, 'utf8');
+    if (!/window\.fetch\s*=\s*function/.test(src)) {
+      bad++;
+      console.log(`app.js: window.fetch is not reassigned -- the global 401/403 login-escalation ` +
+                   `wrapper (owner report, 2026-09-21) is missing or was refactored away from the ` +
+                   `one interception point every page's fetch() calls rely on.`);
+    } else if (!/X-Kiln-Auth-Reason/.test(src)) {
+      bad++;
+      console.log(`app.js: the fetch wrapper no longer checks X-Kiln-Auth-Reason -- it would treat ` +
+                   `every 403 (including unrelated ones from ota_http.c/diagnostics_http.c/` +
+                   `profiles_live_http.c) as "wrong role" and pop the admin-login modal on all of them.`);
+    } else {
+      // Matches only the retry-after-login call site (`ok ? nativeFetch(...) :
+      // resp`), not the wrapper's other, unrelated nativeFetch(input, init)
+      // call sites (the auth-exempt pass-through, the initial request) --
+      // those are expected to appear exactly once each and are not what
+      // this guard is protecting.
+      const retryCount = (src.match(/ok\s*\?\s*nativeFetch\(input,\s*init\)\s*:\s*resp/g) || []).length;
+      if (retryCount !== 1) {
+        bad++;
+        console.log(`app.js: expected exactly one retry-after-login call in the fetch wrapper ` +
+                     `(the single retry the owner's plan requires), found ${retryCount}.`);
+      }
+    }
+  }
+}
+
 console.log(`\nchecked ${checked} script/style blocks, ${bad} problem(s)`);
 process.exit(bad ? 1 : 0);
