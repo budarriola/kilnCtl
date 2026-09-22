@@ -979,6 +979,13 @@ user_pin_set=false`.
   cookie: **401 Unauthorized** (`authentication required`). Board
   `uptime_s` before/after: 7295 -> 7885 (delta consistent with elapsed
   wall time, no reboot, `reset_reason` unchanged, no crash banner).
+  **Needs live re-verify after flash**: this run predates `ed88d47b`/
+  `87d3017b` (login redirect / admin-login modal replacing the
+  "authentication required" page); an unauthenticated page GET now 302s
+  to `/login?return=` instead of showing that page, and a session
+  timeout is expected to surface the same way once the board is running
+  that build. The raw API 401 body checked here may be unaffected, but
+  has not been re-checked against the new build.
 - **10 s stay-unlocked prompt window**: **PASS**. Fresh login, polled
   `GET /api/auth/session` at t+52 s (60 s timeout, window opens at
   t+50 s): `{"role":"admin","prompt":true,"seconds_left":7,

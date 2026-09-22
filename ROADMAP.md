@@ -3110,16 +3110,25 @@ Owner instruction, 2026-09-21.
   `kiln_config_apply` MCP tool (`2b9752ff`, kilnctrl facade now 180 tools,
   distinguishes the interlock 428 from the hardware-differs 428) and
   OT-P05 unreadable-vs-absent trip state (`4499314f`).
-- **Owner requests 2026-09-22 (in flight)**: (1) no "authentication
-  required" page anywhere on the web UI: with no session, any gated page
-  or action goes to the login page with a return URL; with a non-admin
-  session, an admin-tier action opens a pop-up offering to log into an
-  admin account and retries once on success. (2) Web session idle and
-  absolute timeouts and LCD inactivity re-lock, configurable, enforced.
+- **Owner requests 2026-09-22**: (1) 401 UX -- landed `87d3017b`: no
+  "authentication required" page; an unauthenticated page GET 302s to
+  `/login?return=` (open-redirect guard covers backslash); insufficient
+  role on a page 302s to `/?admin_required=`, an API call gets 403 with
+  `X-Kiln-Auth-Reason: insufficient_role`; `app.js` shows an admin-login
+  modal and retries once on success; a 429 shows `Retry-After`. Follow-up
+  in flight: modal accessibility and retrying through the safety-ack
+  wrapper. (2) Session/LCD timeouts -- already implemented
+  (`web_auth_session.c`, `lcd_auth_state.c`); web timeout verified live
+  PASS 2026-09-22, LCD timeout SKIP (no PIN set on bench); see `b3426467`.
   (3) `kiln_configs` apply reported `diverged=true` on a successful
   no-op self-apply: the post-swap clause read the ESP's own zeroed crc
   cache tag (`docs/audits/kiln_config_self_apply_diverged_2026-09-22.md`,
-  `c3639d07`); fix in flight, then flash and re-apply on the bench.
+  `c3639d07`); fix in review with two required fixes being applied (a
+  mutex creation race, and a "heaters disabled" log overclaim), then flash
+  and re-apply on the bench.
+- **check_kiln_auth_config_isolation.ps1 false positive, fixed `4a07a4ef`**:
+  the check misread `diagnostics_http.c`'s refusal lines as a violation;
+  suite was red at origin/main from `f564bf03` until this fix landed.
 - **Bench reflash, 2026-09-22 ~04:00Z**: ESP reflashed to `63a48ab3` (flash
   verified, ELF archived as `KilnCtrl-da119321dcbb.elf`); Pico unchanged at
   `05f1ab1f` build.

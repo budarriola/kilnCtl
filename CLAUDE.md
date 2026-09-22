@@ -22,9 +22,13 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (179 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-21, when `nvs_list_keys` was
-added -- an MCP tool wrapping the new `GET /api/nvs/keys` route
+the rest behind a search facade (180 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `kiln_config_apply` was
+added -- an MCP tool wrapping `POST /api/kiln_configs/apply` plus a status
+poll (`tools/PcTools/src/kilnctrl/kiln_configs_apply_http_client.py`),
+refusing to POST unless `confirm=True` and distinguishing the interlock 428
+from the hardware-differs 428 by response header name. The one before it was
+`nvs_list_keys`, 2026-09-21 -- an MCP tool wrapping the new `GET /api/nvs/keys` route
 (`diagnostics_http.c`'s `nvs_keys_get_handler()`, ROUTE_TIER_ADMIN) that
 lists NVS key NAMES AND TYPES ONLY (never a value, never a blob body) for
 one partition/namespace via `nvs_entry_find()`/`nvs_entry_info()`, refusing
