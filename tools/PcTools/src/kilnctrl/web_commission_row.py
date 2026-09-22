@@ -108,11 +108,11 @@ class Row:
     guard_fields: "Optional[tuple[str, ...]]" = None
 
 
-# 26 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
+# 27 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
 # (W1-W7, W15, W16, W21-W23, W25, W28-W31, W37-W39, W41-W43, W46, W48,
-# W49) -- enough to cover both selector kinds ("id" and "page") and both
-# the read-only and write classes. The remaining rows are documented in the
-# runbook but do not yet have a Row() entry; adding one for each is
+# W49, W50) -- enough to cover both selector kinds ("id" and "page") and
+# both the read-only and write classes. The remaining rows are documented
+# in the runbook but do not yet have a Row() entry; adding one for each is
 # straightforward follow-up work, not a gap in this module's own logic.
 # Kept in sync by hand; a mismatch here is a doc bug, not a code bug, and
 # should be fixed in both places together.
@@ -143,7 +143,7 @@ class Row:
 # restore is "delete what was just created", not "write back an old
 # value" -- see _run_kiln_config_create_delete() below.
 #
-# Left unwired, and why:
+# Left unwired, and why (re-verified 2026-09-21, still true):
 #   - W8/W9/W10 (profile create / delete / favorite toggle): creating a
 #     profile safely needs the segment-builder UI (dynamically added
 #     segment rows, a zone selector, per-segment temp/hold/rate fields --
@@ -153,16 +153,25 @@ class Row:
 #     button, which only exists after the list renders with the new
 #     profile in it and has no stable id (`modeDeleteBtn` arms bulk-delete
 #     mode for whichever rows get checked afterward -- a second, unmodeled
-#     interaction). Getting this wrong risks leaving a stray profile or,
-#     worse, deleting/favoriting the wrong row. Not attempted this pass.
-#   - W50 (setup wizard step save, /api/unit_pref or /api/settings/tz):
-#     the runbook's own read-back column says the field only appears after
-#     client-side-only Next/Back navigation through the wizard's steps,
-#     which (like W8-W10) is a second interaction this driver has no
-#     model for -- the fills primitive fills fields already in the DOM,
-#     it does not navigate between wizard steps first. Not attempted this
-#     pass (not a Wi-Fi row, so not skipped for that reason -- skipped for
-#     the same "needs multi-step navigation first" reason as W8-W10).
+#     interaction; the favorite star's own per-row button has no id either,
+#     only an aria-label built from the profile's name, which the CDP
+#     driver's "id"/"text" selector kinds cannot target). Getting this
+#     wrong risks leaving a stray profile or, worse, deleting/favoriting
+#     the wrong row. Not attempted this pass.
+#
+# W50 (setup wizard step save, /api/unit_pref and /api/settings/tz) turned
+# out to be automatable despite the note that used to sit here: the
+# wizard's own Resume button already deep-links via `#step=N` in the URL
+# (gGoto()/gRenderTarget(), read back out of location.hash by loadAll() on
+# page load), so navigating straight to `/setup#step=1` renders step 1's
+# real form (`#wTz`, `#wUnit`, `#step1Save`) without clicking through the
+# overview and stepper first -- the same one-shot navigation every other
+# route-based row already relies on, not a second modeled interaction.
+# It still needs its own function rather than the generic fills+restore
+# path: `#step1Save` posts to TWO endpoints in one click
+# (`/api/settings/tz` then `/api/unit_pref`), so no single verify_endpoint
+# holds every restored field the way W22/W38 assume. See
+# _run_setup_wizard_step1() below.
 ROWS: "dict[str, Row]" = {
     "W1": Row("W1", "/login", "firmware/KilnFW/App/drivers/http/login_page.html",
               "login-form", "id", "submit the login form",
@@ -332,6 +341,19 @@ ROWS: "dict[str, Row]" = {
                # step change, hence no verify_endpoint.
                "wizard start step renders; step navigation is client-side",
                "read-only", "none -- step navigation is client-side, no route to read back"),
+    "W50": Row("W50", "/setup#step=1", "firmware/KilnFW/App/drivers/http/setup_wizard_page.html",
+               "step1Save", "id",
+               "deep-link straight to setup wizard step 1 (time zone/unit), toggle the "
+               "displayed temperature unit, click Save",
+               "step confirms; temp_unit flips, time_tz is re-submitted unchanged",
+               "write", "GET /api/status shows temp_unit changed then restored; time_tz "
+               "unchanged throughout (posts to /api/settings/tz then /api/unit_pref)",
+               verify_endpoint="/api/status", expect_post="/api/unit_pref",
+               # Placeholder values -- only used by validate_selector() to confirm
+               # #wTz/#wUnit exist in source. _run_setup_wizard_step1() builds its
+               # own fills at runtime from the board's actual current values.
+               fills=(("#wTz", "EST5EDT,M3.2.0,M11.1.0"), ("#wUnit", "C")),
+               special="setup_wizard_step1"),
 }
 
 
@@ -717,6 +739,87 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     )
 
 
+def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W50's shape: the setup wizard's step-1 screen (time zone + displayed
+    unit) is built entirely by client-side JS after an async fetch
+    (renderStep1() in setup_wizard_page.html) -- unlike a static-markup
+    page whose form fields exist immediately and are merely updated later
+    (kcDpBrightness on W38, say), #wTz/#wUnit do not exist in the DOM until
+    that fetch resolves, on top of the two fetches loadAll() already makes
+    before it renders any step at all. `_run_cdp()`'s fixed post-navigate
+    settle delay predates this row and was tuned against pages with
+    static markup; a live run of this row that FAILs with "not found on
+    page" most likely means that chain didn't finish in time, not that the
+    selectors are wrong -- re-run before assuming a real defect.
+
+    Only the displayed temperature unit is actually toggled and restored;
+    the time-zone field is always re-submitted with its OWN current value,
+    never a distinct test string, since #step1Save posts both fields in
+    one click (`/api/settings/tz` then `/api/unit_pref`) and there is no
+    reason to touch a real timezone rule -- which also firing logs are
+    timestamped with, per the page's own hint text -- just to prove this
+    control works. Needs its own function rather than the generic
+    fills+restore_from_field path (W22/W38) because those two fields live
+    behind two different POST routes, not one verify_endpoint holding
+    both."""
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, dict):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    orig_tz = pre_body.get("time_tz")
+    orig_unit = pre_body.get("temp_unit")
+    if not orig_tz or orig_unit not in ("C", "F"):
+        return False, (f"{row.row_id} FAIL: {row.verify_endpoint} body missing usable "
+                        f"time_tz/temp_unit ({json.dumps(pre_body)[:300]}) -- refusing to guess "
+                        f"a value to restore to")
+    test_unit = "F" if orig_unit == "C" else "C"
+
+    set_fills = (("#wTz", orig_tz), ("#wUnit", test_unit))
+    proc = _run_cdp(row, host, screenshot_dir, cookie, fills=set_fills, shot_suffix="_set")
+    if proc.returncode != 0:
+        return False, f"{row.row_id} FAIL: CDP driver (set) exited {proc.returncode}: {proc.stderr.strip()[-500:]}"
+
+    mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if mid_status != 200 or not isinstance(mid_body, dict):
+        return False, (f"{row.row_id} FAIL: post-set read-back GET {row.verify_endpoint} -> "
+                        f"{mid_status}: {json.dumps(mid_body)[:300]}")
+    if str(mid_body.get("time_tz")) != str(orig_tz):
+        return False, (f"{row.row_id} FAIL: this row's Save also CHANGED time_tz (now "
+                        f"{mid_body.get('time_tz')!r}, was {orig_tz!r}) -- collateral write, LEFT "
+                        f"ON BOARD, restore by hand")
+    if mid_body.get("temp_unit") != test_unit:
+        return False, (f"{row.row_id} FAIL: temp_unit did not change (still "
+                        f"{mid_body.get('temp_unit')!r}, expected {test_unit!r}) -- write likely "
+                        f"did not land")
+
+    restore_fills = (("#wTz", orig_tz), ("#wUnit", orig_unit))
+    restore_proc = _run_cdp(row, host, screenshot_dir, cookie, fills=restore_fills, shot_suffix="_restore")
+    if restore_proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver (restore) exited {restore_proc.returncode}: "
+                        f"{restore_proc.stderr.strip()[-500:]} -- board may be LEFT with "
+                        f"temp_unit={test_unit!r}, restore by hand (originally {orig_unit!r})")
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, dict):
+        return False, (f"{row.row_id} FAIL: post-restore read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]} -- restore POST landed, "
+                        f"but read-back could not confirm it")
+    if str(final_body.get("time_tz")) != str(orig_tz):
+        return False, (f"{row.row_id} FAIL: the restore Save CHANGED time_tz (now "
+                        f"{final_body.get('time_tz')!r}, expected {orig_tz!r}) -- LEFT ON BOARD, "
+                        f"restore by hand")
+    if final_body.get("temp_unit") != orig_unit:
+        return False, (f"{row.row_id} FAIL: restore did not take -- temp_unit still "
+                        f"{final_body.get('temp_unit')!r}, expected original {orig_unit!r}")
+
+    return True, (
+        f"{row.row_id} PASS: toggled temp_unit {orig_unit!r} -> {test_unit!r} via setup wizard "
+        f"step 1 Save (time_tz re-submitted unchanged at {orig_tz!r}), confirmed via GET "
+        f"{row.verify_endpoint}, restored to {orig_unit!r} via a second Save, confirmed restored "
+        f"| expected: {row.expected_outcome}"
+    )
+
+
 def run_row_live(row_id: str, host: str, screenshot_dir: str,
                   find_chrome: Optional[Callable[[], str]] = None,
                   cookie: Optional[str] = None) -> "tuple[bool, str]":
@@ -758,6 +861,8 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
     # below.
     if row.special == "kiln_config_create_delete":
         return _run_kiln_config_create_delete(row, host, screenshot_dir, cookie)
+    if row.special == "setup_wizard_step1":
+        return _run_setup_wizard_step1(row, host, screenshot_dir, cookie)
 
     # A row with both `fills` and `restore_from_field` set (W22, W38) is the
     # generic "edit a field, Save, confirm, restore, confirm" shape -- also

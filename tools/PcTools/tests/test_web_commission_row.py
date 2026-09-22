@@ -827,3 +827,107 @@ def test_cdp_driver_fill_reads_back_the_assigned_value():
     # ...and the comparison must come BEFORE the events are dispatched, so a
     # rejected value never reaches the page's own listeners.
     assert text.index("if (String(el.value) !== ") < text.index("new Event('input'")
+
+
+def test_w50_declares_special_setup_wizard_step1_shape():
+    row = wcr.ROWS["W50"]
+    assert row.special == "setup_wizard_step1"
+    assert row.verify_endpoint == "/api/status"
+    assert row.expect_post == "/api/unit_pref"
+    assert row.route == "/setup#step=1"
+
+
+def test_setup_wizard_step1_full_flow_passes(monkeypatch):
+    # Pre-read shows the original tz/unit, post-set read-back shows the unit
+    # flipped with tz unchanged, post-restore read-back shows the unit back
+    # to original -- three distinct GETs against ONE endpoint (/api/status)
+    # covering TWO fields written by two different POST routes in one click.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert "restored" in msg
+
+
+def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
+    # The write silently didn't land -- must FAIL, not report PASS with a
+    # restore of a value that was never actually different (same shape as
+    # W22/W38's "did not change" negative case).
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "did not change" in msg
+
+
+def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
+    # The Save also changed time_tz, which this row never asked to touch --
+    # must fail loud and say LEFT ON BOARD, never silently accept a
+    # collateral write to a real timezone rule.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "UTC0", "temp_unit": "F"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "collateral write" in msg
+    assert "LEFT ON BOARD" in msg
+
+
+def test_setup_wizard_step1_fails_loud_if_restore_does_not_take(monkeypatch):
+    # Restore POST "succeeded" (CDP exit 0) but the read-back after it still
+    # shows the test unit -- must fail loud rather than report PASS, since
+    # this is exactly the "board left with the test value" hazard.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "restore did not take" in msg
+
+
+def test_setup_wizard_step1_refuses_when_status_body_unusable(monkeypatch):
+    # No usable temp_unit/time_tz means no known-good value to restore to --
+    # refuse before touching the board, same "refuse to guess" posture as
+    # W22's guard-field check.
+    ran = []
+    monkeypatch.setattr(wcr, "_get_json_with_cookie",
+                        lambda host, path, cookie: (200, {"time_tz": None, "temp_unit": "K"}))
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: ran.append(1) or _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "refusing to guess" in msg
+    assert ran == []
