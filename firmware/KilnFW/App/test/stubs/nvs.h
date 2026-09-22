@@ -261,4 +261,61 @@ static inline esp_err_t nvs_erase_key(nvs_handle_t h, const char *key)
     return ESP_OK;
 }
 
+/* Added 2026-09-22 for factory_reset.c's log_net80211_key_count() (introduced
+ * by 0edfb313, the esp_wifi_restore() self-check), which iterates the
+ * `nvs`/`net80211` namespace with nvs_entry_find()/nvs_entry_next()/
+ * nvs_release_iterator() before and after esp_wifi_restore(). This stub
+ * never models real NVS enumeration -- it only needs to satisfy the linker
+ * and behave like an always-empty partition, matching the "every open fails
+ * closed" default the rest of this file uses, so log_net80211_key_count()'s
+ * loop body never runs and always reports a count of 0. Signatures match
+ * esp-idf v6.0.2's components/nvs_flash/include/nvs.h (4-arg
+ * nvs_entry_find()). */
+typedef struct nvs_opaque_iterator_t *nvs_iterator_t;
+
+typedef enum {
+    NVS_TYPE_U8    = 0x01,
+    NVS_TYPE_I8    = 0x11,
+    NVS_TYPE_U16   = 0x02,
+    NVS_TYPE_I16   = 0x12,
+    NVS_TYPE_U32   = 0x04,
+    NVS_TYPE_I32   = 0x14,
+    NVS_TYPE_U64   = 0x08,
+    NVS_TYPE_I64   = 0x18,
+    NVS_TYPE_STR   = 0x21,
+    NVS_TYPE_BLOB  = 0x42,
+    NVS_TYPE_ANY   = 0xff
+} nvs_type_t;
+
+typedef struct {
+    char namespace_name[16];
+    char key[16];
+    nvs_type_t type;
+} nvs_entry_info_t;
+
+static inline esp_err_t nvs_entry_find(const char *part_name, const char *namespace_name,
+                                        nvs_type_t type, nvs_iterator_t *output_iterator)
+{
+    (void)part_name;
+    (void)namespace_name;
+    (void)type;
+    if (output_iterator) {
+        *output_iterator = NULL;
+    }
+    return ESP_ERR_NVS_NOT_FOUND;
+}
+
+static inline esp_err_t nvs_entry_next(nvs_iterator_t *iterator)
+{
+    if (iterator) {
+        *iterator = NULL;
+    }
+    return ESP_ERR_NVS_NOT_FOUND;
+}
+
+static inline void nvs_release_iterator(nvs_iterator_t iterator)
+{
+    (void)iterator;
+}
+
 #endif // TEST_STUB_NVS_H
