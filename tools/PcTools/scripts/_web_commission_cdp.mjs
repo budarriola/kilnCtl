@@ -482,11 +482,16 @@ function elementExpr(kind, selector) {
 async function clickWithRetry(cdp, kind, selector, label, timeoutMs = CLICK_WAIT_TIMEOUT_MS) {
   const expr = `(() => { const el = ${elementExpr(kind, selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
   const deadline = Date.now() + timeoutMs;
+  // At least one attempt always runs, even for an explicit timeoutMs: 0 --
+  // this is a do/while, not a while, specifically so 0 means "try once,
+  // immediately" rather than "never try."
   for (;;) {
     const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
     if (res.result.value === 'CLICKED') return;
     if (Date.now() >= deadline) {
-      throw new Error(`${label}: selector ${JSON.stringify(selector)} (kind=${kind}) not found within ${timeoutMs}ms`);
+      throw new Error(
+        `${label}: selector ${JSON.stringify(selector)} (kind=${kind}) not found after waiting ${timeoutMs}ms`
+      );
     }
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -499,7 +504,7 @@ async function clickWithRetry(cdp, kind, selector, label, timeoutMs = CLICK_WAIT
 async function runStep(cdp, step, idx) {
   const label = `step[${idx}] ${step.action}`;
   if (step.action === 'click') {
-    await clickWithRetry(cdp, step.kind, step.selector, label, step.timeoutMs || CLICK_WAIT_TIMEOUT_MS);
+    await clickWithRetry(cdp, step.kind, step.selector, label, step.timeoutMs ?? CLICK_WAIT_TIMEOUT_MS);
     return;
   }
   if (step.action === 'fill') {

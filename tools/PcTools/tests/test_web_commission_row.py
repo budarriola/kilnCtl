@@ -1316,6 +1316,32 @@ def test_cdp_driver_click_retries_before_giving_up():
     assert "NOT_FOUND" not in top_click
 
 
+def test_cdp_driver_click_timeout_zero_means_one_attempt_not_default():
+    # Opus review advisory: `step.timeoutMs || CLICK_WAIT_TIMEOUT_MS` treats an
+    # explicit `timeoutMs: 0` the same as "unset", silently promoting it to the
+    # 5000ms default -- a caller that deliberately asks for a single immediate
+    # attempt (0ms) instead waits the full default. `??` (nullish coalescing)
+    # is required so only actually-missing (undefined/null) falls back; `0` is
+    # a legitimate, distinct value that must survive.
+    src = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
+    with open(src, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert "step.timeoutMs || CLICK_WAIT_TIMEOUT_MS" not in text
+    assert "step.timeoutMs ?? CLICK_WAIT_TIMEOUT_MS" in text
+    # A NOT_FOUND miss must fail loud with the timeout actually waited and the
+    # selector that was never found, not a bare generic error -- otherwise a
+    # miss is undiagnosable from the tool's own output.
+    click_with_retry = text[text.index("async function clickWithRetry("):]
+    click_with_retry = click_with_retry[:click_with_retry.index("\n}\n")]
+    assert "${label}" in click_with_retry
+    assert "${JSON.stringify(selector)}" in click_with_retry
+    assert "${timeoutMs}ms" in click_with_retry
+    # The retry loop must still make at least one attempt when timeoutMs is 0
+    # (a do-at-least-once shape): the deadline check comes strictly after the
+    # first Runtime.evaluate call in loop order, not before it.
+    assert click_with_retry.index("cdp.send('Runtime.evaluate'") < click_with_retry.index("Date.now() >= deadline")
+
+
 def test_w50_declares_special_setup_wizard_step1_shape():
     row = wcr.ROWS["W50"]
     assert row.special == "setup_wizard_step1"
