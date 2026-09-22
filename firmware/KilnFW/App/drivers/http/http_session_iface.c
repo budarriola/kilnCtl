@@ -264,3 +264,19 @@ void http_auth_session_touch(const char *token, const char *client_ip) {
     }
     web_auth_table_touch(t, (size_t)idx, now);
 }
+
+void http_auth_session_logout(const char *token) {
+    if (!token || token[0] == '\0') {
+        return;
+    }
+
+    uint8_t token_hash[32];
+    sha256((const uint8_t *)token, strlen(token), token_hash);
+
+    web_auth_table_t *t = http_session_table();
+    int idx = web_auth_table_find_by_token(t, token_hash);
+    if (idx < 0) {
+        return;
+    }
+    web_auth_table_destroy_session(t, (size_t)idx);
+}

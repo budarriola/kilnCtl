@@ -66,6 +66,11 @@ PASSWORD_ENV = "KILNCTL_WEB_PASSWORD"
 LOGIN_PATH = "/api/auth/login"
 SESSION_COOKIE_NAME = "kiln_sid"
 
+#: Mirrored from the same file's POST /api/auth/logout (ROUTE_TIER_USER --
+#: any authenticated session, so this module only ever calls it after a
+#: successful urlopen() login has actually happened).
+LOGOUT_PATH = "/api/auth/logout"
+
 #: Seconds allowed for the login round trip itself when the caller's own
 #: request carried no timeout.
 LOGIN_TIMEOUT_S = 10.0
@@ -184,6 +189,42 @@ def _login(origin: str, timeout: Optional[float]) -> str:
                 return value
     raise HttpAuthError(
         f"POST {origin}{LOGIN_PATH} succeeded but returned no {SESSION_COOKIE_NAME} cookie")
+
+
+def logout(origin: str, timeout: Optional[float] = None) -> bool:
+    """Ends this process's own remembered session at ``origin``, if any.
+
+    Calls POST /api/auth/logout with whatever cookie :func:`urlopen` last
+    remembered for ``origin`` (never a bare unauthenticated request -- the
+    board's route is ROUTE_TIER_USER and would just answer 401), then
+    forgets that session regardless of the board's response: this side of
+    the seam is done with the credential either way, matching the route's
+    own idempotent, best-effort logout stance (see http_session_iface.h's
+    http_auth_session_logout() comment).
+
+    Returns ``True`` if a remembered session existed and the POST was sent
+    (regardless of the board's status code), ``False`` if this process had
+    no remembered session for ``origin`` to begin with -- there is then
+    nothing to revoke, and no request is made.
+    """
+    cookie = _SESSIONS.pop(origin, None)
+    if not cookie:
+        return False
+    req = urllib.request.Request(
+        origin + LOGOUT_PATH, data=b"", method="POST",
+        headers={"Cookie": f"{SESSION_COOKIE_NAME}={cookie}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or LOGIN_TIMEOUT_S) as resp:
+            resp.read()
+    except urllib.error.HTTPError:
+        # The board refused or errored -- this process has already forgotten
+        # the cookie above, so the next request through urlopen() will log in
+        # fresh rather than keep presenting a credential we no longer trust.
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+    return True
 
 
 def urlopen(req, timeout=None):

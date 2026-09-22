@@ -570,5 +570,70 @@ function extract_js_var_string(src, varName) {
   }
 }
 
+{
+  // Logout control: nav.js must build a Log out button that starts hidden
+  // (it must not appear before app.js's session poll confirms a live
+  // session -- see setAuthState()'s own comment) and POST /api/auth/logout
+  // before navigating away, and app.js's session poll must be the thing
+  // that reveals it. Matched narrowly against each file's own real shape,
+  // not a loose substring test, so a button that merely EXISTS somewhere
+  // (e.g. left permanently visible, or wired to the wrong route) cannot
+  // pass vacuously -- same discipline as the login-modal checks above.
+  const navJsPath = find_file(dir, 'nav.js');
+  if (navJsPath) {
+    checked++;
+    const src = fs.readFileSync(navJsPath, 'utf8');
+    if (!/logoutBtn\.hidden = true;/.test(src)) {
+      bad++;
+      console.log(`nav.js: the Log out button does not start hidden -- it must only appear once a live ` +
+                   `session is confirmed, never by default (web auth may be off entirely, or the caller ` +
+                   `may not be logged in).`);
+    }
+    if (!/fetch\('\/api\/auth\/logout',\s*\{\s*method:\s*'POST'\s*\}\)/.test(src)) {
+      bad++;
+      console.log(`nav.js: the Log out button's click handler does not POST /api/auth/logout.`);
+    }
+    if (!/window\.location\.href = '\/login';/.test(src)) {
+      bad++;
+      console.log(`nav.js: the Log out button's click handler does not navigate to /login afterward.`);
+    }
+    if (!/function setAuthState\(role\)/.test(src) ||
+        !/logoutBtnEl\.hidden = !role \|\| role === 'none';/.test(src)) {
+      bad++;
+      console.log(`nav.js: no setAuthState(role) function that shows/hides the Log out button by role -- ` +
+                   `app.js's session poll has nothing to toggle it with.`);
+    }
+    if (!/window\.kcNav = \{ updateBodyPadding: updateBodyPadding, setAuthState: setAuthState \};/.test(src)) {
+      bad++;
+      console.log(`nav.js: window.kcNav does not expose setAuthState -- app.js cannot reach nav.js's Log ` +
+                   `out button toggle at all.`);
+    }
+  }
+
+  const appJsPath2 = find_file(dir, 'app.js');
+  if (appJsPath2) {
+    checked++;
+    const src = fs.readFileSync(appJsPath2, 'utf8');
+    // Scoped to pollSession()'s own body (same reasoning as the
+    // kcOtaAuthedFetch scoping above): a bare substring match for
+    // "kcNav.setAuthState" could pass even if it were called from some
+    // unrelated, non-session-poll code path that never actually reflects
+    // the server's own view of the session.
+    const startIdx = src.indexOf('function pollSession()');
+    const endIdx = startIdx >= 0 ? src.indexOf('\n  function init()', startIdx) : -1;
+    if (startIdx < 0 || endIdx < 0) {
+      bad++;
+      console.log(`app.js: could not locate pollSession()'s function body to check the logout button wiring.`);
+    } else {
+      const body = src.slice(startIdx, endIdx);
+      if (!/window\.kcNav\.setAuthState\(role\)/.test(body)) {
+        bad++;
+        console.log(`app.js: pollSession() does not call window.kcNav.setAuthState(role) -- the Log out ` +
+                     `button would never reflect the server's own session state.`);
+      }
+    }
+  }
+}
+
 console.log(`\nchecked ${checked} script/style blocks, ${bad} problem(s)`);
 process.exit(bad ? 1 : 0);

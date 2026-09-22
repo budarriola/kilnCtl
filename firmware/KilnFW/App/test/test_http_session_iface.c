@@ -308,6 +308,83 @@ static void test_status_and_touch_deny_mismatched_client_ip(void)
                "a touch with no determinable peer address must not extend the session either");
 }
 
+// New for the logout route (docs/agent task, 2026-09-22): http_auth_session_logout()
+// must actually destroy the slot (a subsequent resolve() denies it, not just
+// leaves it stale), must be idempotent (a second logout, or a logout of a
+// token that was never issued, is a silent no-op rather than a crash), and
+// must not require the timeout/IP-binding checks touch() enforces -- logging
+// out an already-expired or foreign-IP session must still succeed at making
+// the cookie useless.
+static void test_logout_destroys_the_session(void)
+{
+    TEST_SECTION("http_auth_session_logout -- destroys the slot so a later resolve() denies it");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-logout-1", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+
+    TEST_CHECK(http_auth_session_resolve("tok-logout-1", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN,
+               "sanity: the session resolves before logout");
+
+    http_auth_session_logout("tok-logout-1");
+
+    TEST_CHECK(http_auth_session_resolve("tok-logout-1", "10.0.0.5") == HTTP_AUTH_ROLE_NONE,
+               "the session is gone after logout -- the exact token/IP that used to resolve "
+               "ADMIN now resolves to no session at all");
+}
+
+static void test_logout_is_idempotent_and_tolerates_unknown_tokens(void)
+{
+    TEST_SECTION("http_auth_session_logout -- idempotent, and a no-op on tokens that never existed");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-logout-2", WEB_AUTH_SESSION_ROLE_USER, 0);
+
+    // Never issued -- must not crash, must not disturb the real session.
+    http_auth_session_logout("never-issued-logout");
+    http_auth_session_logout(NULL);
+    http_auth_session_logout("");
+    TEST_CHECK(http_auth_session_resolve("tok-logout-2", "10.0.0.5") == HTTP_AUTH_ROLE_USER,
+               "logging out unrelated/absent tokens left the real session untouched");
+
+    // Logging the real one out twice must not crash the second time.
+    http_auth_session_logout("tok-logout-2");
+    http_auth_session_logout("tok-logout-2");
+    TEST_CHECK(http_auth_session_resolve("tok-logout-2", "10.0.0.5") == HTTP_AUTH_ROLE_NONE,
+               "the session stays gone after a repeated logout call");
+}
+
+static void test_logout_does_not_require_a_still_valid_session(void)
+{
+    TEST_SECTION("http_auth_session_logout -- succeeds on an already-expired or foreign-IP session, "
+                 "unlike touch()");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-logout-3", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    fake_time_advance_ms(60001); // 1ms past expiry -- resolve() already denies this
+
+    TEST_CHECK(http_auth_session_resolve("tok-logout-3", "10.0.0.5") == HTTP_AUTH_ROLE_NONE,
+               "sanity: the session is already expired before logout is even called");
+
+    // An expired session's find-by-token lookup must still locate the slot
+    // (only resolve()'s validity/IP gate denies it, not the table lookup
+    // itself) -- logout must still tear it down rather than silently no-op
+    // because it "looked" already gone.
+    http_auth_session_logout("tok-logout-3");
+
+    make_session("tok-logout-4", WEB_AUTH_SESSION_ROLE_ADMIN, 0); // client_ip "10.0.0.5"
+    // A logout call carries no client_ip parameter at all -- there is nothing
+    // to mismatch. This test exists to document that http_auth_session_logout()'s
+    // signature deliberately has no IP parameter (unlike touch()/status()),
+    // so it can never be refused on IP-binding grounds the way touch() is
+    // (see test_status_and_touch_deny_mismatched_client_ip above).
+    http_auth_session_logout("tok-logout-4");
+    TEST_CHECK(http_auth_session_resolve("tok-logout-4", "10.0.0.5") == HTTP_AUTH_ROLE_NONE,
+               "logout tore the session down with no IP check to satisfy");
+}
+
 void run_test_http_session_iface(void) {
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
@@ -317,4 +394,7 @@ void run_test_http_session_iface(void) {
     test_touch_unknown_token_and_never_timeout();
     test_resolve_denies_mismatched_client_ip();
     test_status_and_touch_deny_mismatched_client_ip();
+    test_logout_destroys_the_session();
+    test_logout_is_idempotent_and_tolerates_unknown_tokens();
+    test_logout_does_not_require_a_still_valid_session();
 }

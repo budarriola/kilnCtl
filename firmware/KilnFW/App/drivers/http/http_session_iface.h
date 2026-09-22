@@ -144,6 +144,18 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
 // not after.
 void http_auth_session_touch(const char *token, const char *client_ip);
 
+// Explicit logout: hashes `token`, looks it up against the SAME table
+// http_session_table() owns, and destroys that slot via
+// web_auth_table_destroy_session() (web_auth_session.h's own explicit-
+// teardown primitive, documented there as "(logout)"). Deliberately does
+// NOT apply the timeout/IP-binding checks http_auth_session_touch() does --
+// a caller logging out an already-expired or already-foreign-IP session is
+// harmless and should still succeed at making the cookie unusable, rather
+// than being told there was nothing to do. A missing token, or a token that
+// matches no live slot, is a silent no-op (idempotent: logging out twice,
+// or logging out a session that already expired, is not an error).
+void http_auth_session_logout(const char *token);
+
 #ifdef __cplusplus
 }
 #endif

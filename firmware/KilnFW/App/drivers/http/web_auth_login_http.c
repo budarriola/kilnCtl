@@ -603,6 +603,39 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+// POST /api/auth/logout -- ROUTE_TIER_USER (route_tier_table.h), so an
+// unauthenticated caller never reaches this handler body at all (the shared
+// pre-handler answers 401 first). Revokes the caller's OWN session (never
+// takes a target token/id from the request body -- there is no "log out
+// someone else" surface) via http_auth_session_logout() (http_session_iface.h),
+// which acts against the SAME table http_auth_session_resolve() reads, then
+// clears the cookie with the SAME name/path/flags login_post_handler() sets
+// it with above, plus Max-Age=0 so the browser discards it immediately
+// rather than waiting for it to merely stop matching a live session.
+// Idempotent: a caller with no cookie, an already-expired session, or a
+// cookie that never matched anything still gets a clean 204 -- logging out
+// is "make sure I'm logged out", not "prove I was logged in".
+static esp_err_t logout_post_handler(httpd_req_t *req)
+{
+    char token[128] = { 0 };
+    (void)http_auth_extract_session_token(req, token, sizeof(token));
+    if (token[0] != '\0') {
+        http_auth_session_logout(token);
+    }
+
+    char cookie[128];
+    int cookie_len = snprintf(cookie, sizeof(cookie),
+                               HTTP_SESSION_COOKIE_NAME "=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    if (cookie_len < 0 || (size_t)cookie_len >= sizeof(cookie)) {
+        ESP_LOGE(TAG, "logout Set-Cookie formatting failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
+        return ESP_OK;
+    }
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 esp_err_t web_auth_login_http_start(void)
 {
     if (s_login_lock == NULL) {
@@ -641,6 +674,17 @@ esp_err_t web_auth_login_http_start(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "web login routes up: GET /login, POST /api/auth/login");
+    static const httpd_uri_t logout_post_uri = {
+        .uri = "/api/auth/logout",
+        .method = HTTP_POST,
+        .handler = logout_post_handler,
+    };
+    err = kiln_http_register(server, &logout_post_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/auth/logout) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "web login routes up: GET /login, POST /api/auth/login, POST /api/auth/logout");
     return ESP_OK;
 }

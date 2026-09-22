@@ -174,6 +174,12 @@
     // gate and auto-exit timer, which the removed page did not.
   ];
 
+  // Module-scope so setAuthState() (called from app.js's session poll,
+  // outside buildTopbar()'s own closure) can reach the same element
+  // buildTopbar() created -- one owner, one element, same discipline as
+  // http_session_table() in the firmware half of this feature.
+  var logoutBtnEl = null;
+
   function currentPath() {
     // Compare by pathname only -- query strings / hashes never appear on
     // these routes today, but stripping them costs nothing and avoids a
@@ -418,6 +424,39 @@
       homeBtn.textContent = '⌂ Home';
       actions.appendChild(homeBtn);
     }
+
+    // WEB_AUTH_PLAN.md logout: hidden until app.js's session poll confirms a
+    // live session exists (setAuthState() below) -- there is no point
+    // offering "Log out" to a caller who is not logged in, and web auth may
+    // be off entirely (docs/WEB_AUTH_PLAN.md section 11), in which case no
+    // session ever exists and this button must never appear. The button
+    // itself only fires the request and navigates; it does not decide
+    // whether a session exists (app.js's own /api/auth/session poll, which
+    // already runs on every page, is the one place that decision is made --
+    // see this file's own reset-one-side-of-a-pair discipline elsewhere).
+    var logoutBtn = document.createElement('button');
+    logoutBtn.type = 'button';
+    logoutBtn.className = 'kc-logout-btn';
+    logoutBtn.setAttribute('aria-label', 'Log out');
+    logoutBtn.textContent = 'Log out';
+    logoutBtn.hidden = true;
+    logoutBtn.addEventListener('click', function () {
+      logoutBtn.disabled = true;
+      fetch('/api/auth/logout', { method: 'POST' })
+        .catch(function () {
+          // Best-effort: whether the server-side revoke succeeded or the
+          // request itself failed (e.g. board unreachable), the caller's own
+          // intent was to stop being logged in here -- navigating to /login
+          // either way matches http_auth.py's own "logout is idempotent"
+          // stance server-side, and a truly dead session cookie is harmless
+          // sent to an OPEN route.
+        })
+        .then(function () {
+          window.location.href = '/login';
+        });
+    });
+    logoutBtnEl = logoutBtn;
+    actions.appendChild(logoutBtn);
     actions.appendChild(menuBtn);
     bar.appendChild(title);
     bar.appendChild(actions);
@@ -474,7 +513,20 @@
   // detach the bar, then call updateBodyPadding so content reflows around
   // it) without nav.js and app.js needing to agree on load order beyond
   // "both are deferred, both run before DOMContentLoaded".
-  window.kcNav = { updateBodyPadding: updateBodyPadding };
+  // Called by app.js's pollSession() on every poll with the role string
+  // /api/auth/session's JSON reports ('none', 'user', 'admin'). Shows the
+  // Log out button for any role other than 'none' -- exactly the "any
+  // authenticated session" USER-tier rule the logout route itself enforces
+  // server-side (route_tier_table.h), so the button's visibility and the
+  // route's own gate agree without a second copy of that rule living here.
+  function setAuthState(role) {
+    if (!logoutBtnEl) {
+      return;
+    }
+    logoutBtnEl.hidden = !role || role === 'none';
+  }
+
+  window.kcNav = { updateBodyPadding: updateBodyPadding, setAuthState: setAuthState };
 
   if (document.body) {
     init();

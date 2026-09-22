@@ -125,6 +125,12 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * the rest of that tier so its activity-touch behaviour is the ordinary
      * one every other USER route already gets. */
     ROUTE_TIER("/api/auth/session", HTTP_GET, ROUTE_TIER_OPEN),
+    /* Any authenticated session may end its own session -- USER covers
+     * both roles (this header's own USER doc comment: "user OR
+     * administrator"). Unauthenticated callers get the ordinary 401 the
+     * shared pre-handler already produces for USER-tier routes; there is no
+     * reason to log out a session that does not exist. */
+    ROUTE_TIER("/api/auth/logout", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),

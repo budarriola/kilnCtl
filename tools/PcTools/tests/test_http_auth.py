@@ -265,6 +265,51 @@ class HttpAuthTest(unittest.TestCase):
             with self.assertRaises(http_auth.HttpAuthError):
                 http_auth.urlopen(urllib.request.Request(URL), timeout=2.0)
 
+    # --- 5. logout ---------------------------------------------------------
+    def test_logout_with_no_remembered_session_makes_no_request(self):
+        """Nothing to revoke -- returns False, and urlopen is never called."""
+        recorder = _Recorder()
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            self.assertFalse(http_auth.logout(HOST))
+        self.assertEqual(recorder.urls, [])
+
+    def test_logout_posts_the_remembered_cookie_and_forgets_it(self):
+        self._with_credentials()
+        recorder = _Recorder(
+            _unauthorized(),
+            _response(b'{"ok":true}', set_cookie=f"{http_auth.SESSION_COOKIE_NAME}={TOKEN}"),
+            _response(b"{}"),
+        )
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            http_auth.urlopen(urllib.request.Request(URL), timeout=2.0)
+        self.assertIn(HOST, http_auth._SESSIONS)
+
+        logout_recorder = _Recorder(_response(b""))
+        with unittest.mock.patch.object(urllib.request, "urlopen", logout_recorder):
+            self.assertTrue(http_auth.logout(HOST))
+        self.assertEqual(logout_recorder.urls, [HOST + http_auth.LOGOUT_PATH])
+        self.assertEqual(logout_recorder.requests[0].get_method(), "POST")
+        self.assertEqual(logout_recorder.cookie(0), f"{http_auth.SESSION_COOKIE_NAME}={TOKEN}")
+        self.assertNotIn(HOST, http_auth._SESSIONS, "logout must forget the session immediately")
+
+    def test_logout_forgets_the_session_even_if_the_post_itself_fails(self):
+        """The board being unreachable, or refusing the POST, must not leave
+        a stale cookie behind -- this process is done with that credential
+        either way."""
+        self._with_credentials()
+        recorder = _Recorder(
+            _unauthorized(),
+            _response(b'{"ok":true}', set_cookie=f"{http_auth.SESSION_COOKIE_NAME}={TOKEN}"),
+            _response(b"{}"),
+        )
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            http_auth.urlopen(urllib.request.Request(URL), timeout=2.0)
+
+        logout_recorder = _Recorder(urllib.error.URLError("no route to host"))
+        with unittest.mock.patch.object(urllib.request, "urlopen", logout_recorder):
+            self.assertTrue(http_auth.logout(HOST))
+        self.assertNotIn(HOST, http_auth._SESSIONS)
+
 
 class ClientsUseTheSeamTest(unittest.TestCase):
     """The seam is only worth having if the clients actually go through it.

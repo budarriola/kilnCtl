@@ -1594,6 +1594,14 @@
         }
         lastKnownRole = role;
 
+        // Shows/hides nav.js's Log out control for the role this poll just
+        // reported -- the SAME poll response, not a second fetch, so the
+        // button can never disagree with lastKnownRole above about whether a
+        // session exists.
+        if (window.kcNav && window.kcNav.setAuthState) {
+          window.kcNav.setAuthState(role);
+        }
+
         if (lockPromptEl) {
           if (st && st.prompt) {
             lockPromptEl.removeAttribute('hidden');
