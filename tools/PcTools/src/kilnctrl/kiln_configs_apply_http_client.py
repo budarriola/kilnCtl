@@ -130,6 +130,13 @@ def post_apply(
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise KilnConfigsApplyHttpError(f"POST {_APPLY_PATH} unreachable: {detail}") from exc
+    except (http_auth.HttpAuthError, OSError) as exc:
+        # http_auth.urlopen() can also raise HttpAuthError (login refused, or
+        # no credential in the environment) or a bare OSError/socket.timeout
+        # that never got wrapped in URLError -- neither is an HTTPError or a
+        # URLError, so without this they escaped past every except here and
+        # past the tool's own `except ac.KilnConfigsApplyHttpError` above it.
+        raise KilnConfigsApplyHttpError(f"POST {_APPLY_PATH} failed: {exc}") from exc
 
 
 def get_apply_status(host: str, timeout: float = KILN_CONFIGS_APPLY_HTTP_TIMEOUT_S) -> dict:
@@ -146,6 +153,10 @@ def get_apply_status(host: str, timeout: float = KILN_CONFIGS_APPLY_HTTP_TIMEOUT
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise KilnConfigsApplyHttpError(f"GET {_APPLY_STATUS_PATH} unreachable: {detail}") from exc
+    except (http_auth.HttpAuthError, OSError) as exc:
+        # Same gap as post_apply(): http_auth.urlopen() can raise HttpAuthError
+        # or a bare OSError/socket.timeout never wrapped in URLError.
+        raise KilnConfigsApplyHttpError(f"GET {_APPLY_STATUS_PATH} failed: {exc}") from exc
     try:
         return json.loads(text)
     except Exception as exc:
@@ -164,19 +175,36 @@ def poll_apply_status(
     (done_ok/done_failed), same shape as cases_ota.py's `_poll_pico_phase`.
     `now`/`sleep` are injectable for tests. Returns the last status dict
     read, even if the deadline was hit before a terminal state (state will
-    then read "running" or "idle")."""
+    then read "running" or "idle").
+
+    A poll that raises :class:`KilnConfigsApplyHttpError` is tolerated and
+    retried -- a transient 5xx or dropped connection mid-poll should not
+    abort a swap that may still finish. But if EVERY poll in the deadline
+    fails this way, the real outcome was never actually read even once, so
+    this re-raises the last error rather than returning an empty/default
+    dict that would read identically to "polled fine, board just never
+    reached a terminal state" to the caller."""
     import time as _time
     now = now or _time.monotonic
     sleep = sleep or _time.sleep
 
     status: dict = {}
+    any_success = False
+    last_error: Optional[KilnConfigsApplyHttpError] = None
     deadline = now() + deadline_s
     while now() < deadline:
         try:
             status = get_apply_status(host, timeout=timeout)
-        except KilnConfigsApplyHttpError:
+        except KilnConfigsApplyHttpError as exc:
+            last_error = exc
             status = {}
-        if status.get("state") in ("done_ok", "done_failed"):
-            break
+        else:
+            any_success = True
+            if status.get("state") in ("done_ok", "done_failed"):
+                break
         sleep(2.0)
+    if not any_success and last_error is not None:
+        raise KilnConfigsApplyHttpError(
+            f"{_APPLY_STATUS_PATH}: status unreadable, every poll failed -- last error: {last_error}",
+            last_error.status, last_error.detail) from last_error
     return status

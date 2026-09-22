@@ -150,13 +150,88 @@ class TransportFailureTest(_Base):
         self.assertIn("error", result.lower())
 
     def test_status_poll_failure_after_accepted_post_is_unknown_not_ok(self):
+        """Exercises the REAL poll_apply_status() loop (not a mock of the
+        function itself), so this test actually proves the tool's `except
+        ac.KilnConfigsApplyHttpError` around the poll is reachable, rather
+        than only passing because a mock of poll_apply_status was told to
+        raise. Every GET /api/kiln_configs/apply_status attempt fails, so
+        poll_apply_status() must raise (see
+        test_every_poll_failing_raises_named_error_instead_of_unknown in
+        test_kiln_configs_apply_http_client.py) and the tool must surface
+        that as an error rather than reporting "ok"."""
+        import urllib.error
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        clock = {"t": 0.0}
+
+        def now():
+            return clock["t"]
+
+        def sleep(s):
+            clock["t"] += s
+
+        real_poll = ac.poll_apply_status
+
+        def poll_with_test_clock(host, **kw):
+            return real_poll(host, deadline_s=5.0, now=now, sleep=sleep)
+
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(ac, "post_apply", return_value=(202, '{"ok":true}')), \
-             unittest.mock.patch.object(ac, "poll_apply_status",
-                                         side_effect=ac.KilnConfigsApplyHttpError("timed out")):
+             unittest.mock.patch("urllib.request.urlopen", fake_urlopen), \
+             unittest.mock.patch.object(ac, "poll_apply_status", side_effect=poll_with_test_clock):
             result = msi.kiln_config_apply(id=3, confirm=True)
         self.assertIn("error", result.lower())
         self.assertNotIn("ok - applied", result)
+        self.assertIn("connection refused", result)
+
+    def test_one_transient_poll_failure_then_done_ok_still_reports_ok(self):
+        """A single mid-poll transient failure must not sink an apply that
+        otherwise finished cleanly -- only every poll failing should."""
+        import urllib.error
+
+        seq = iter([
+            urllib.error.URLError("transient reset"),
+            '{"state":"done_ok","id":3,"diverged":false,"reason":""}'.encode("utf-8"),
+        ])
+
+        def fake_urlopen(req, timeout=None):
+            item = next(seq)
+            if isinstance(item, Exception):
+                raise item
+            import io
+            resp = io.BytesIO(item)
+            resp.status = 200
+
+            class _Ctx:
+                def __enter__(self_inner):
+                    return resp
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Ctx()
+
+        clock = {"t": 0.0}
+
+        def now():
+            return clock["t"]
+
+        def sleep(s):
+            clock["t"] += s
+
+        real_poll = ac.poll_apply_status
+
+        def poll_with_test_clock(host, **kw):
+            return real_poll(host, deadline_s=30.0, now=now, sleep=sleep)
+
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(ac, "post_apply", return_value=(202, '{"ok":true}')), \
+             unittest.mock.patch("urllib.request.urlopen", fake_urlopen), \
+             unittest.mock.patch.object(ac, "poll_apply_status", side_effect=poll_with_test_clock):
+            result = msi.kiln_config_apply(id=3, confirm=True)
+        self.assertIn("ok - applied", result)
 
 
 if __name__ == "__main__":

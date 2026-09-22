@@ -99,6 +99,33 @@ class PostApplyRequestShapeTest(unittest.TestCase):
             with self.assertRaises(ac.KilnConfigsApplyHttpError):
                 ac.post_apply("host", 3)
 
+    def test_bare_socket_timeout_is_wrapped_not_escaped(self):
+        """http_auth.urlopen() calls urllib.request.urlopen() directly, which
+        can raise a bare socket.timeout/OSError that is NOT a URLError
+        subclass in every Python build path exercised here -- only
+        HTTPError/URLError were caught before this test, so this exact class
+        of failure escaped past post_apply()'s except clauses and past the
+        MCP tool's own `except ac.KilnConfigsApplyHttpError` around it."""
+        def fake_urlopen(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(ac.KilnConfigsApplyHttpError):
+                ac.post_apply("host", 3)
+
+    def test_http_auth_error_is_wrapped_not_escaped(self):
+        """A 401 with no credential in the environment makes http_auth.urlopen()
+        raise HttpAuthError, a RuntimeError subclass -- not an HTTPError/URLError
+        -- so it also escaped uncaught before this test."""
+        from kilnctrl import http_auth
+
+        def fake_urlopen(req, timeout=None):
+            raise http_auth.HttpAuthError("no credential available")
+
+        with unittest.mock.patch.object(ac.http_auth, "urlopen", fake_urlopen):
+            with self.assertRaises(ac.KilnConfigsApplyHttpError):
+                ac.post_apply("host", 3)
+
 
 class GetApplyStatusTest(unittest.TestCase):
     def test_parses_json(self):
@@ -128,6 +155,24 @@ class GetApplyStatusTest(unittest.TestCase):
             with self.assertRaises(ac.KilnConfigsApplyHttpError) as ctx:
                 ac.get_apply_status("host")
         self.assertEqual(ctx.exception.status, 500)
+
+    def test_bare_socket_timeout_is_wrapped_not_escaped(self):
+        def fake_urlopen(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(ac.KilnConfigsApplyHttpError):
+                ac.get_apply_status("host")
+
+    def test_http_auth_error_is_wrapped_not_escaped(self):
+        from kilnctrl import http_auth
+
+        def fake_urlopen(req, timeout=None):
+            raise http_auth.HttpAuthError("no credential available")
+
+        with unittest.mock.patch.object(ac.http_auth, "urlopen", fake_urlopen):
+            with self.assertRaises(ac.KilnConfigsApplyHttpError):
+                ac.get_apply_status("host")
 
 
 class PollApplyStatusTest(unittest.TestCase):
@@ -180,6 +225,27 @@ class PollApplyStatusTest(unittest.TestCase):
         with unittest.mock.patch.object(ac, "get_apply_status", side_effect=fake_get):
             result = ac.poll_apply_status("host", deadline_s=30.0, now=now, sleep=sleep)
         self.assertEqual(result["state"], "done_failed")
+
+    def test_every_poll_failing_raises_named_error_instead_of_unknown(self):
+        """If GET /api/kiln_configs/apply_status never once succeeds in the
+        whole deadline, the caller must be told the status was unreadable --
+        not handed back an empty/default dict that looks exactly like "polled
+        fine, board just never finished" (state=None)."""
+        clock = {"t": 0.0}
+
+        def now():
+            return clock["t"]
+
+        def sleep(s):
+            clock["t"] += s
+
+        def fake_get(host, timeout=8.0):
+            raise ac.KilnConfigsApplyHttpError("board unreachable mid-poll")
+
+        with unittest.mock.patch.object(ac, "get_apply_status", side_effect=fake_get):
+            with self.assertRaises(ac.KilnConfigsApplyHttpError) as ctx:
+                ac.poll_apply_status("host", deadline_s=5.0, now=now, sleep=sleep)
+        self.assertIn("board unreachable mid-poll", str(ctx.exception))
 
 
 class IsHardwareDiffersBodyTest(unittest.TestCase):
