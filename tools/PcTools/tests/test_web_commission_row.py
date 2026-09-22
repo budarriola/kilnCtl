@@ -1360,6 +1360,40 @@ def test_cdp_driver_click_timeout_zero_means_one_attempt_not_default():
     assert wait_for_post_method.index("this.completed.findIndex(") < wait_for_post_method.index("Date.now() >= deadline")
 
 
+def test_cdp_driver_bounds_and_trims_the_emitted_network_list():
+    # Opus advisory on 63b62945: cdp.completed is unbounded for the whole
+    # driver run and used to be emitted whole as the `network` field, which
+    # could bloat the final JSON without limit (and a `data:` URL bloats a
+    # single record on its own). Cap the emitted copy and trim long URLs
+    # without severing the path component that _cdp_post_statuses() matches
+    # on (urlsplit(url).path) -- see NETWORK_RECORD_CAP/NETWORK_URL_MAX_LEN
+    # and trimUrl() above.
+    src = os.path.join(_repo_root(), "tools", "PcTools", "scripts", "_web_commission_cdp.mjs")
+    with open(src, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert "const NETWORK_RECORD_CAP = 500;" in text
+    assert "const NETWORK_URL_MAX_LEN = 512;" in text
+    assert "function trimUrl(url, maxLen)" in text
+    # trimUrl must drop query/fragment before falling back to a blunt slice,
+    # so the path component survives a trim whenever possible.
+    trim_url = text[text.index("function trimUrl(url, maxLen)"):]
+    trim_url = trim_url[:trim_url.index("\n}\n")]
+    assert "u.search = ''" in trim_url
+    assert "u.hash = ''" in trim_url
+    # The cap/trim must apply ONLY to the copy built for the emitted JSON,
+    # never to cdp.completed itself -- waitForPost()'s postCursor indexes
+    # into cdp.completed BY POSITION, so trimming that live list would shift
+    # every later --expect-post/wait-for-post onto the wrong record. This is
+    # the "switch the cap to only apply to the emitted copy" option named in
+    # the advisory, chosen over shifting the cursor as the simpler safe fix.
+    emit_block = text[text.index("const networkDropped ="):]
+    emit_block = emit_block[:emit_block.index("main().catch(")]
+    assert "cdp.completed.slice(cdp.completed.length - NETWORK_RECORD_CAP)" in emit_block
+    assert "network_truncated: true, network_dropped: networkDropped" in emit_block
+    # waitForPost's own scan/consume logic must be untouched by this change.
+    assert "this.postCursor = idx + 1;" in text
+
+
 def test_w50_declares_special_setup_wizard_step1_shape():
     row = wcr.ROWS["W50"]
     assert row.special == "setup_wizard_step1"
@@ -1503,6 +1537,23 @@ def test_cdp_stdout_summary_drops_the_unbounded_network_list():
     assert "/settings/zones" in summary, summary
     assert "/api/pad/" not in summary, summary
     assert "network_count" in summary
+
+
+def test_cdp_stdout_summary_keeps_network_truncated_marker():
+    # A capped/truncated run's extra top-level keys (network_truncated,
+    # network_dropped -- see the JS driver's emission code) must survive
+    # _cdp_stdout_summary()'s network-list drop like any other field; only
+    # `network` itself is stripped.
+    proc = _FakeProc()
+    proc.stdout = json.dumps({
+        "ok": True, "route": "/settings/zones", "post": {"status": 204},
+        "network": [{"method": "POST", "url": "http://192.0.2.1/api/x", "status": 200, "failed": False}],
+        "network_truncated": True, "network_dropped": 37,
+    })
+    summary = wcr._cdp_stdout_summary(proc)
+    assert "network_truncated" in summary, summary
+    assert "network_dropped" in summary, summary
+    assert '"network":' not in summary, summary
 
 
 def test_cdp_stdout_summary_falls_back_on_non_json_stdout():

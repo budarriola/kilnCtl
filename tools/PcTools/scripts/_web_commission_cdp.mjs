@@ -134,6 +134,20 @@ const QUIET_TIMEOUT_MS = 5000;
 // W8's live run found the profiles list still mid-fetch/render when the
 // delete click fired -- see clickWithRetry()'s own comment below).
 const CLICK_WAIT_TIMEOUT_MS = 5000;
+// Cap on the `network` field of the final JSON (see main()'s emission code).
+// CdpSession.completed itself stays UNBOUNDED and is never trimmed -- it is
+// what waitForPost()'s postCursor indexes into by position, and dropping
+// entries from that live list would silently shift every later
+// --expect-post/wait-for-post's cursor onto the wrong record. Only the
+// COPY built for the emitted JSON is capped, oldest records dropped, with
+// `network_truncated`/`network_dropped` set when that happens.
+const NETWORK_RECORD_CAP = 500;
+// Longest URL kept verbatim in an emitted network record. A `data:` URL (an
+// inlined image/font) can run to tens of KB; trimming preserves the
+// scheme/host/PATH portion (dropping query/fragment first) so
+// web_commission_row.py's `_cdp_post_statuses()` -- which matches on
+// `urlsplit(url).path` alone -- still resolves correctly on a trimmed record.
+const NETWORK_URL_MAX_LEN = 512;
 
 function findChrome() {
   const candidates = [
@@ -215,6 +229,25 @@ async function pickPort(preferred) {
       return tryListen(0);
     }
     throw err;
+  }
+}
+
+// Shortens a recorded URL to at most `maxLen` characters without severing
+// its path component, which `_cdp_post_statuses()` matches on. Drops the
+// query/fragment first (a cache-busting query string is the common case and
+// carries no grading information); only falls back to a blunt slice() if the
+// scheme+host+path alone still exceeds maxLen (an oversized `data:` URL, or
+// a pathological path) or the string does not parse as a URL at all.
+function trimUrl(url, maxLen) {
+  if (typeof url !== 'string' || url.length <= maxLen) return url;
+  try {
+    const u = new URL(url);
+    u.search = '';
+    u.hash = '';
+    const stripped = u.toString();
+    return stripped.length <= maxLen ? stripped : stripped.slice(0, maxLen);
+  } catch {
+    return url.slice(0, maxLen);
   }
 }
 
@@ -646,6 +679,15 @@ async function main() {
       await writeFile(args.screenshot, Buffer.from(shot.data, 'base64'));
     }
 
+    // Cap and trim ONLY this emitted copy -- cdp.completed itself is left
+    // untouched so waitForPost()'s postCursor keeps indexing correctly (see
+    // NETWORK_RECORD_CAP's own comment above).
+    const networkDropped = Math.max(0, cdp.completed.length - NETWORK_RECORD_CAP);
+    const networkOut = (networkDropped > 0
+      ? cdp.completed.slice(cdp.completed.length - NETWORK_RECORD_CAP)
+      : cdp.completed
+    ).map((rec) => ({ ...rec, url: trimUrl(rec.url, NETWORK_URL_MAX_LEN) }));
+
     console.log(JSON.stringify({
       ok: true, route: args.route, selector: args.selector || null,
       fills: args.fills, dialogs: cdp.dialogs, post: postResult,
@@ -655,8 +697,11 @@ async function main() {
       // whole list rather than one cursor-tracked match, for a caller (e.g.
       // web_commission_row.py's setup-wizard row) whose one click fires
       // MULTIPLE POSTs it needs to grade individually rather than just the
-      // last one `--expect-post` waited for.
-      network: cdp.completed,
+      // last one `--expect-post` waited for. Bounded to NETWORK_RECORD_CAP
+      // entries (oldest dropped) with URLs trimmed to NETWORK_URL_MAX_LEN --
+      // see network_truncated/network_dropped below when either applies.
+      network: networkOut,
+      ...(networkDropped > 0 ? { network_truncated: true, network_dropped: networkDropped } : {}),
     }));
   } finally {
     try { chrome.kill(); } catch { /* already gone */ }
