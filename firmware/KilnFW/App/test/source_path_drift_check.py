@@ -111,8 +111,16 @@ BARE_FILENAME_LINE_RE = re.compile(r'^\s*"([\w][\w.\-]*\.(?:c|h))"\s*,?\s*$')
 PY_TRIPLE_STRING_RE = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\')')
 PS_BLOCK_COMMENT_RE = re.compile(r'<#[\s\S]*?#>')
 PY_CHAIN_RE = re.compile(
-    r'(?:[A-Za-z_][\w.]*|\)|\])\s*(?:/\s*"([^"/\\]+)"\s*)+'
+    r'([A-Za-z_][\w.]*|\)|\])\s*(?:/\s*"([^"/\\]+)"\s*)+'
 )
+# pytest's own ephemeral-directory fixtures (tmp_path, tmp_path_factory,
+# tmpdir) are the standard idiom for a synthetic filename in a test body
+# (e.g. `tmp_path / "a.c"` in test_binary_provenance.py) -- these never name
+# a real, checked-in source file, so a chain rooted at one of them is not a
+# source-path reference at all. Matched as the base identifier's last
+# dotted component so `self.tmp_path / "a.c"` is caught too, not just
+# bare `tmp_path / "a.c"`.
+TMP_FIXTURE_BASENAMES = {"tmp_path", "tmp_path_factory", "tmpdir"}
 PY_CHAIN_LITERALS_RE = re.compile(r'"([^"/\\]+)"')
 PS_JOIN_PATH_RE = re.compile(r'Join-Path\s+\S+\s+"([^"]+)"')
 SKIP_GUARD_RE = re.compile(
@@ -222,6 +230,10 @@ def scan_python_file(repo_root: Path, path: Path, filename_index: dict, refs_cou
     any_missing = False
 
     for m in PY_CHAIN_RE.finditer(text):
+        base = m.group(1)
+        base_last_component = base.rsplit(".", 1)[-1] if base else ""
+        if base_last_component in TMP_FIXTURE_BASENAMES:
+            continue
         literals = PY_CHAIN_LITERALS_RE.findall(m.group(0))
         if not literals:
             continue
