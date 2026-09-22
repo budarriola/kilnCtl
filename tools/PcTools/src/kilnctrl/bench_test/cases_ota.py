@@ -993,6 +993,8 @@ def _case_otp01(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
     trip_pending = _pico_trip_pending(ctx)
+    if trip_pending is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="Pico trip status unreadable (diag unparseable); refusing to push for OT-P01 rather than assuming no trip")
     if trip_pending:
         return CaseResult(Verdict.SKIP, reason="a trip is currently pending, refusing to start OT-P01")
 
@@ -1116,6 +1118,8 @@ def _case_otp03(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
     trip_pending = _pico_trip_pending(ctx)
+    if trip_pending is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="Pico trip status unreadable (diag unparseable); refusing to push for OT-P03 rather than assuming no trip")
     if trip_pending:
         return CaseResult(Verdict.SKIP, reason="a trip is currently pending, refusing to start OT-P03")
 
