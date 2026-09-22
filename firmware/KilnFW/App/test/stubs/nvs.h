@@ -318,8 +318,10 @@ static inline void nvs_release_iterator(nvs_iterator_t iterator)
     (void)iterator;
 }
 
-/* Added 2026-09-21: not yet used by any firmware source, but the next caller
- * of either will silently break this ungated host-test build the same way
+/* Added 2026-09-22: not used by any source that links into the host-test
+ * build (diagnostics_http.c uses nvs_entry_info for the nvs_list_keys route,
+ * but that file is target-build only), so the next caller that DOES link
+ * into this build will silently break it the same way
  * nvs_entry_find/nvs_entry_next/nvs_release_iterator would have before they
  * were added above. Same always-empty-partition behavior as those three.
  * Signatures match esp-idf v6.0.2's components/nvs_flash/include/nvs.h. */
