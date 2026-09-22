@@ -1380,8 +1380,8 @@ static bool apply_hardware_differs(const kiln_pkg_safety_t *pico, char *msg, siz
             if (msg && msg_cap) {
                 snprintf(msg, msg_cap,
                          "this saved config's '%s' differs from what this controller currently reports "
-                         "-- confirm the hardware shape matches before applying"
-                         " Resend with X-Kiln-Ack-Hardware-Differs: 1.",
+                         "-- confirm the hardware shape matches before applying. Resend with "
+                         "X-Kiln-Ack-Hardware-Differs: 1.",
                          kFields[f].label);
             }
             return true;
@@ -1463,7 +1463,7 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_har
      * completes the slot with an ordinary Save once the safety settings are
      * checked/re-entered. */
     if (!s_store.entries[idx].pico_populated) {
-        char msg[192];
+        char msg[256];
         snprintf(msg, sizeof(msg),
                  "'%s' was saved before this firmware stored the safety processor's settings. Select it, "
                  "check the safety settings, then press Save to complete it.",

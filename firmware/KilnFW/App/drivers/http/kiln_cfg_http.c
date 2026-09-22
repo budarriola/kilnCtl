@@ -358,7 +358,7 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
      * with the ack header -- which is exactly what the page's
      * "hardware differs" checkbox does. */
     if (!req_ack_hardware_differs(req)) {
-        char hw_msg[192];
+        char hw_msg[256];
         if (kiln_cfg_store_slot_hardware_differs(id, hw_msg, sizeof(hw_msg))) {
             ESP_LOGW(TAG, "kiln config apply id=%ld refused, hardware shape differs: %s", (long)id, hw_msg);
             httpd_resp_set_status(req, "428 Precondition Required");

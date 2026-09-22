@@ -2936,6 +2936,63 @@ static void test_apply_refuses_hardware_mismatch_without_ack(void)
     kiln_board_identity_set_test_override(false, 0);
 }
 
+static void test_hardware_differs_message_fits_longest_label(void)
+{
+    TEST_SECTION("apply_hardware_differs() -- the formatted 428 message for the longest kFields[] label "
+                 "('safety_tc_installed', the ct_installed/ct_topology/safety_tc_installed set apply_"
+                 "hardware_differs() compares) fits with the sentence separator present, and no caller's "
+                 "buffer truncates it (kiln_cfg_http.c's hw_msg and this file's own msg are both 256 "
+                 "bytes). kFields[] itself is a local static inside apply_hardware_differs(), not file-"
+                 "scope, so this asserts against the same three literal labels that array holds rather "
+                 "than iterating it -- if a label is ever added or lengthened there, update this list too.");
+
+    static const char *const kKnownLabels[] = { "ct_installed", "ct_topology", "safety_tc_installed" };
+    size_t longest_label_len = 0;
+    for (size_t f = 0; f < sizeof(kKnownLabels) / sizeof(kKnownLabels[0]); f++) {
+        size_t l = strlen(kKnownLabels[f]);
+        if (l > longest_label_len) {
+            longest_label_len = l;
+        }
+    }
+    TEST_CHECK(longest_label_len == strlen("safety_tc_installed"),
+               "the longest known label is still 'safety_tc_installed' -- if this fails, a longer label "
+               "was added to kFields[] and the 256-byte buffers may need re-checking");
+
+    /* Drive the REAL apply_hardware_differs() (via its public wrapper) with a genuine
+     * safety_tc_installed mismatch, rather than reformatting the same literal locally --
+     * a self-contained reformat would pass even if the real source regressed. */
+    reset_state();
+    kiln_board_identity_set_test_override(true, 0xFFFFFFF2u);
+    uint16_t seed_ids[] = { 0x0109u, 0x031Fu, 0x0211u };
+    uint16_t seed_vals[] = { 1u, 0u, 1u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals, 3);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00F0u), "test setup: initial live seed refetch "
+                                                               "succeeds");
+
+    int32_t id1 = -1;
+    char reason[200] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("HW Longest Label", -1, &id1, reason, sizeof(reason)),
+               "test setup: save succeeds");
+
+    /* Change the live safety_tc_installed value so the saved slot now differs from live. */
+    uint16_t seed_vals2[] = { 1u, 0u, 0u };
+    test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(0, false, seed_ids, seed_vals2, 3);
+    TEST_CHECK(safety_cfg_store_refetch(&fake_link, 0x00F0u), "test setup: second live refetch succeeds");
+
+    char msg[256] = {0};
+    bool differs = kiln_cfg_store_slot_hardware_differs(id1, msg, sizeof(msg));
+    TEST_CHECK(differs, "test setup: the real apply_hardware_differs() reports a mismatch for this slot");
+    TEST_CHECK(strlen(msg) < sizeof(msg), "the real formatted message (with the separator) fits inside a "
+                                          "256-byte buffer with room to spare");
+    TEST_CHECK(strstr(msg, "applying. Resend") != NULL, "the sentence separator is present in the REAL "
+                                                         "message -- 'applying' and 'Resend' are not "
+                                                         "concatenated into 'applyingResend'/'applying "
+                                                         "Resend'");
+    TEST_CHECK(strstr(msg, "safety_tc_installed") != NULL, "the real message names the longest label");
+}
+
 static void test_apply_allows_hardware_mismatch_with_ack(void)
 {
     TEST_SECTION("kiln_cfg_store_apply -- section 5.3 table row 4: the SAME real mismatch as the refuse-"
@@ -3721,6 +3778,7 @@ void run_test_kiln_cfg_store(void)
     test_import_matching_board_preserves_calibration();
     test_import_absent_source_board_id_forces_calibration_reset();
     test_apply_refuses_hardware_mismatch_without_ack();
+    test_hardware_differs_message_fits_longest_label();
     test_apply_allows_hardware_mismatch_with_ack();
     test_apply_refuses_live_ceiling_tighter_than_zone_max();
     test_apply_skips_live_ceiling_check_when_live_unset();
