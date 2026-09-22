@@ -311,8 +311,10 @@ provenance the board's LIVE config, which is what `apply` rewrites: relay
 wiring, thermocouple assignment, PID gains, guard thresholds); if the only
 other slots are leftovers it refuses. `apply_status`'s `diverged` and
 `reason` fields are read, not just `state`: a swap that ends DIVERGED
-(`kiln_cfg_swap.c`'s alarmed exit -- heaters disabled, config left pending
-for retry) or that is still `running` when the ~60 s budget runs out is
+(`kiln_cfg_swap.c`'s alarmed exit -- config left pending for retry; heat is
+disabled only on the ceiling-latch branch of that exit, not on the four
+rollback-failure branches, so the board's own `reason` text is what says
+which occurred) or that is still `running` when the ~60 s budget runs out is
 reported as such, and NO further write is issued against a board in either
 state. Otherwise, on a failure after create it still attempts the re-select
 and delete as best-effort cleanup and reports exactly what, if anything, is

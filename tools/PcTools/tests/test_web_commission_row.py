@@ -820,7 +820,8 @@ def test_kiln_config_create_delete_refuses_leftover_as_fallback(monkeypatch):
 
 def test_kiln_config_create_delete_reports_diverged_and_writes_nothing_further(monkeypatch):
     # The restore-apply ends DIVERGED (kiln_cfg_swap.c's alarmed exit:
-    # heaters disabled, config left pending for retry). That must be named
+    # config left pending for retry; heat off only on the ceiling-latch
+    # branch, which is the `reason` used below). That must be named
     # in the failure, and NO further write (no delete) may be issued.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",

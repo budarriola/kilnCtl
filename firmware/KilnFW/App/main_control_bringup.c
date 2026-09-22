@@ -56,6 +56,22 @@ static void main_control_bringup_all_relays_off_void(void)
 
 void main_control_bringup(main_boot_ctx_t *ctx)
 {
+    /* 2026-09-22 fix: creates safety_ceiling_sync.c's two internal mutexes
+     * once, statically, single-threaded, replacing a lazy-create TOCTOU
+     * race -- see safety_ceiling_sync_init()'s own doc comment.
+     *
+     * 2026-09-22 review fix: this MUST come before safety_link_start()
+     * immediately below, not later in this function. safety_link_start()
+     * creates safety_poll_task, which calls
+     * safety_ceiling_sync_reconcile_on_link_up_nonblocking() the instant
+     * the link comes up (see the heat-hook comment further down this file,
+     * which makes the same point about that window) -- so an init placed
+     * after it would leave those first ticks running with both handles
+     * still NULL, i.e. unlocked, exactly the serialization gap this fix
+     * exists to close. Nothing here depends on the link or on any other
+     * bring-up step; it only creates two static mutexes. */
+    safety_ceiling_sync_init();
+
     // --- Safety processor link (isolated UART1 + the opto-isolated fault line) ------
     // Comes up whether or not an RP2040 is answering; a silent far side is
     // link_up = 0, not a startup failure.
@@ -142,14 +158,6 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // reason it must run before anything that can start a firing or an
     // autotune (profile_executor_start()/autotune_engine_start(), below).
     heat_enable_init(&ctx->safety);
-
-    /* 2026-09-22 fix: creates safety_ceiling_sync.c's two internal mutexes
-     * once, statically, single-threaded, before anything below can start a
-     * task that reaches its reconcile entry points (profile_executor_
-     * start()/kiln_cfg_swap_boot_recover() further down this function) --
-     * see safety_ceiling_sync_init()'s own doc comment for the TOCTOU race
-     * this replaces. */
-    safety_ceiling_sync_init();
 
     safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void, profile_executor_halt);
     /* 2026-09-15 audit fix, Defect 2: broadens the standing divergence check

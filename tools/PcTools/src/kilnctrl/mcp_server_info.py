@@ -496,9 +496,14 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
     if state == "done_ok" and not diverged:
         return f"ok - applied id={id}, confirmed by apply_status (host={resolved})"
     if diverged:
+        # 2026-09-22 review fix: `diverged` alone does not mean heat was
+        # disabled -- only kiln_cfg_swap.c's ceiling-latch branch does that,
+        # not its four rollback-failure branches. `reason` is the honest
+        # source (docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
+        # sec 4).
         return (f"FAILED: apply for id={id} left the board DIVERGED (state={state!r}, "
-                f"reason={reason!r}) -- heaters should be disabled, do not trust config state "
-                f"(host={resolved})")
+                f"reason={reason!r}) -- board alarmed, do not trust config state; see reason "
+                f"for whether heat was also disabled (host={resolved})")
     if state == "done_failed":
         return f"FAILED: apply for id={id} refused/failed: {reason!r} (host={resolved})"
     return (f"UNKNOWN: apply for id={id} did not reach a terminal state within the poll window "

@@ -167,9 +167,10 @@ void safety_ceiling_sync_set_expected_pico_fields_source(safety_ceiling_expected
  * separate SemaphoreHandle_t, so the two tasks end up serialized against
  * DIFFERENT mutexes -- i.e. not serialized at all. Statically allocated and
  * created once, deterministically, from safety_ceiling_sync_init(), which
- * main_control_bringup.c calls single-threaded before either
- * safety_poll_task or kiln_cfg_swap_worker can be running (see that call
- * site's own comment). A host test that never calls
+ * main_control_bringup.c calls as its FIRST statement, single-threaded,
+ * ahead of safety_link_start() (which creates safety_poll_task) and of
+ * everything that can start kiln_cfg_swap_worker (see that call site's own
+ * comment). A host test that never calls
  * safety_ceiling_sync_init() (every existing one) leaves this NULL, exactly
  * the same safe no-lock behavior the lazy form gave a single-threaded host
  * test -- the `if (lock)` guards below are kept for that reason, not to
@@ -824,10 +825,11 @@ void safety_ceiling_sync_reconcile_on_link_up_nonblocking(SafetyLinkClass *link)
  * TOCTOU races (s_divergence_state_lock and s_reconcile_lock above) --
  * see either lock's own doc comment for the hazard. Must be called exactly
  * once, single-threaded, before either safety_poll_task or
- * kiln_cfg_swap_worker can be running; main_control_bringup.c is that call
- * site (single-threaded bring-up, ahead of profile_executor_start()/
- * kiln_cfg_swap_boot_recover(), both of which can reach this file's
- * reconcile entry points). A build that never calls this (every existing
+ * kiln_cfg_swap_worker can be running; main_control_bringup.c's first
+ * statement is that call site -- deliberately ahead of safety_link_start(),
+ * which creates safety_poll_task and can reach this file's non-blocking
+ * reconcile entry point on its very first tick, as well as ahead of
+ * profile_executor_start()/kiln_cfg_swap_boot_recover(). A build that never calls this (every existing
  * host test) leaves both handles NULL, which every take/give site above
  * already treats as "no lock, single-threaded caller" -- the same safe
  * default the old lazy form gave those tests. */

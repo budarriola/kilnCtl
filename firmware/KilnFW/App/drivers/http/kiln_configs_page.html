@@ -347,11 +347,14 @@ function pollApplyStatus(cfg) {
         }
         if (st.state === 'done_failed') {
           // diverged is the materially worse outcome: the two processors are
-          // now holding DIFFERENT configs and the heaters are disabled until
-          // that is resolved. Must not read the same as a clean refusal that
-          // changed nothing.
+          // now holding DIFFERENT configs until that is resolved. Must not
+          // read the same as a clean refusal that changed nothing.
+          // 2026-09-22 review fix: do NOT claim heat was disabled from this
+          // flag alone -- only kiln_cfg_swap.c's ceiling-latch branch
+          // disables heat; its four rollback-failure branches set the same
+          // flag and disable nothing. The reason text above says which.
           kcSetMsg((st.reason || 'Apply failed.') +
-                   (st.diverged ? ' The safety processor is now out of sync and heating is disabled.'
+                   (st.diverged ? ' The safety processor is now out of sync; see the reason above.'
                                 : ' Nothing was changed.'), true);
           refreshDivergence();
           loadKilnConfigs();

@@ -133,7 +133,8 @@ void safety_ceiling_sync_reconcile_on_link_up_nonblocking(SafetyLinkClass *link)
  * lazy-create TOCTOU race that let safety_poll_task and
  * kiln_cfg_swap_worker each install a different mutex for the same lock on
  * dual-core ESP32-S3. Call exactly once, single-threaded, before either
- * task can be running -- main_control_bringup.c is the real call site. Safe
+ * task can be running -- main_control_bringup.c's first statement is the
+ * real call site, ahead of safety_link_start(). Safe
  * to skip entirely in a host test (leaves both locks NULL, the same
  * no-lock/single-threaded default every existing host test already relied
  * on under the old lazy form). */

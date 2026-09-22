@@ -115,8 +115,10 @@ static void swap_worker_task(void *arg)
         } else {
             /* ESP_LOGE, not ESP_LOGW, for the diverged case specifically:
              * that is the outcome where the swap partly landed and the
-             * board is now alarmed with heaters disabled, not merely
-             * refused with nothing changed. */
+             * board is now alarmed, not merely refused with nothing
+             * changed. (Whether heat was also disabled depends on WHICH of
+             * the five out_diverged sites fired -- see the log line's own
+             * comment just below.) */
             if (diverged) {
                 /* 2026-09-22 fix (docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
                  * sec 4 "Fix the message"): *out_diverged is set at five
