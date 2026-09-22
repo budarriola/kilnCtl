@@ -346,3 +346,17 @@ read_flash` + an NVS parser) taken in that same window, independent of the
 app's own HTTP stack entirely. Until one of those runs, `1319e051`'s effect
 on hardware remains unverified by this audit -- the source-level reasoning in
 section 3 still stands on its own.
+
+**Update 2026-09-22 (0edfb313).** A third path landed: `factory_reset.c` now logs
+`factory_reset: nvs/net80211 key count before|after esp_wifi_restore(): N` on
+the UART log stream (count only, never a key name or value), so a bench run can
+catch the pair over serial while Wi-Fi is down. Research ruled out the other
+two paths on this PC: there is exactly one Wi-Fi adapter (cannot join the AP and
+stay on the LAN), and OpenOCD `read_memory` cannot reach flash offsets, so a
+raw NVS read is a dead end without new probe capability. Caveat: the ESP-IDF
+Wi-Fi driver ships as a prebuilt library, so whether `esp_wifi_restore()`
+completes its NVS erase before returning could not be determined from source.
+An after-count of 0 is a positive verdict; a nonzero after-count is INCONCLUSIVE
+(erase may still be in flight), not proof the erase failed. Recipe: start
+`get_device_log` polling over serial before `POST /api/factory_reset` scope=wifi;
+the RAM log ring does not survive the reboot that follows.
