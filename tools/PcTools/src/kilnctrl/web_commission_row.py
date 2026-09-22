@@ -110,9 +110,10 @@ class Row:
     guard_fields: "Optional[tuple[str, ...]]" = None
 
 
-# 30 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
-# (W1-W10, W15, W16, W21-W23, W25, W28-W31, W37-W39, W41-W43, W46, W48,
-# W49, W50) -- enough to cover both selector kinds ("id" and "page") and
+# 34 of docs/COMMISSIONING_WEB_RUNBOOK.md's 51 rows are wired here so far
+# (W1-W11, W15, W16, W18, W20, W21-W23, W25, W28-W31, W33, W37-W39, W41-W43,
+# W46, W48, W49, W50) -- enough to cover both selector kinds ("id" and
+# "page") and
 # both the read-only and write classes. The remaining rows are documented
 # in the runbook but do not yet have a Row() entry; adding one for each is
 # straightforward follow-up work, not a gap in this module's own logic.
@@ -404,7 +405,74 @@ ROWS: "dict[str, Row]" = {
                verify_endpoint="/api/profiles/favorites", expect_post="/api/profile/favorite",
                special="profile_favorite_toggle",
                special_selectors=("pname",)),
+    # W11, W18, W20, W33 -- wired 2026-09-21 (see the header comment above
+    # this dict for the general 30-row baseline this adds to). W11 is a bare
+    # page load, same shape as W7/W49. W18/W20/W33 are the three "abort/exit
+    # only" controls the runbook itself classifies read-only because they
+    # can only cancel, never start, an operation -- but clicking one for
+    # real still needs a precondition: if the corresponding status route
+    # already shows an operation genuinely in progress (a real sweep,
+    # autotune run, or danger-mode session another operator started),
+    # clicking abort/exit would disrupt THEIR work, not just probe the
+    # control. Each is guarded by _run_guarded_click(): refuse before
+    # touching the board unless the status read-back already shows idle/
+    # inactive, then click and confirm it stays idle/inactive -- a no-op by
+    # construction, so there is nothing to restore. See
+    # _run_sweep_abort_guarded()/_run_autotune_abort_guarded()/
+    # _run_danger_exit_guarded() below.
+    "W11": Row("W11", "/live_profile", "firmware/KilnFW/App/drivers/http/live_profile_page.html",
+               "", "page", "load the live_profile page",
+               "working-copy status/content renders (empty/no-working-copy state outside a firing)",
+               "read-only", "GET /api/profile/live matches",
+               verify_endpoint="/api/profile/live"),
+    "W18": Row("W18", "/settings/zones", "firmware/KilnFW/App/drivers/http/zones_page.html",
+               "sweepAbortBtn", "id", "click Abort sweep, guarded",
+               "sweep UI stays/returns to idle",
+               "read-only", "GET /api/zones/current_sweep/status state remains not-running",
+               verify_endpoint="/api/zones/current_sweep/status",
+               expect_post="/api/zones/current_sweep/abort",
+               special="sweep_abort_guarded"),
+    "W20": Row("W20", "/settings/zones", "firmware/KilnFW/App/drivers/http/zones_page.html",
+               "atAbortBtn", "id", "click Abort autotune, guarded",
+               "autotune UI stays/returns to idle",
+               "read-only", "GET /api/autotune state remains idle",
+               verify_endpoint="/api/autotune", expect_post="/api/autotune/abort",
+               special="autotune_abort_guarded"),
+    "W33": Row("W33", "/diagnostics", "firmware/KilnFW/App/drivers/http/diagnostics_page.html",
+               "dangerExitBtn", "id", "click Exit Danger Mode, guarded",
+               "danger banner stays/returns cleared",
+               "read-only", "GET /api/diagnostics/danger active remains false",
+               verify_endpoint="/api/diagnostics/danger", expect_post="/api/diagnostics/danger/stop",
+               special="danger_exit_guarded"),
 }
+
+# Rows left unwired after this pass, and why (each is also noted in its own
+# runbook row): W12/W13/W14 (live_profile fork/edit/discard) need an actual
+# firing running to mean anything -- starting heat is out of scope for this
+# driver. W17 (current-sweep Start) and W19 (autotune Start) actively drive
+# every zone's relays/heaters -- owner-gated, out of scope. W24 (safety page
+# Clear Trip) needs the board already latched into a specific S6a-only trip
+# state; creating or safely verifying that precondition is out of scope, and
+# W4 (already wired) exercises the same clear-trip shape on a different
+# page, so this duplicate control adds no new coverage worth the risk. W26
+# (commissioning wizard commit) and W27 (CT auto-zero) are owner-gated
+# safety-configuration writes (W26 also needs a deliberate Pico reset/GRACE
+# window). W32 (Enter Danger Mode) drives relays outside the normal
+# safety-gated path -- owner-gated. W34 (E-stop verify) needs the bench
+# E-stop jumper physically pulled, which no CDP driver can do. W35 (relay-
+# cycle reset) has a known restore anomaly (B12: relays 1/2's restore can
+# clamp to an internal count not shown on /api/status) that would make a
+# mechanical PASS/FAIL unreliable. W36 (reboot both processors) has no
+# meaningful "restore" for a reboot and needs a subsequent trip-clear per
+# CLAUDE.md's S6a note -- an attended, not mechanically-swept, action. W40
+# (set web password/policy) changes auth credentials -- explicitly out of
+# scope. W44 (backup Export download) needs CDP download interception this
+# driver doesn't have, and has no read-back distinct from W43's. W45
+# (backup Import) is a destructive overwrite -- owner-gated. W47 (OTA
+# update/rollback) is flash/OTA -- explicitly out of scope, use
+# flash_firmware()/ota_rollback_esp() instead. W51 (Wi-Fi scan/connect/
+# forget) can change Wi-Fi credentials/reachability -- explicitly out of
+# scope.
 
 
 class SelectorNotFoundError(RuntimeError):
@@ -1010,6 +1078,15 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     assert len(unique_name) <= _KILN_CFG_NAME_MAX_LEN, (
         f"generated kiln_config test name {unique_name!r} ({len(unique_name)} chars) "
         f"exceeds _KILN_CFG_NAME_MAX_LEN ({_KILN_CFG_NAME_MAX_LEN})")
+    # Advisory carried from an earlier review: the leftover sweep above only
+    # matches by PREFIX (_is_leftover_config_name()), so a same-second re-run
+    # after a partial failure -- or any other reason `unique_name` is already
+    # taken -- would otherwise only be caught by the board's own "a saved
+    # kiln config already has that name" 400 well after the CDP click. Fail
+    # here instead, before touching the board at all, naming the collision.
+    if unique_name in [c.get("name") for c in configs if isinstance(c, dict)]:
+        return False, (f"{row.row_id} FAIL: generated name {unique_name!r} is already listed in "
+                        f"{row.verify_endpoint} -- refusing to create before touching the board")
     create_fills = (("#kcSaveNewName", unique_name),)
 
     proc = _run_cdp(row, host, screenshot_dir, cookie, fills=create_fills, shot_suffix="_create")
@@ -1704,6 +1781,78 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
     )
 
 
+def _run_guarded_click(row: Row, host: str, screenshot_dir: str, cookie: str, *,
+                        is_busy: "Callable[[dict], bool]", busy_desc: str) -> "tuple[bool, str]":
+    """Shared shape for W18/W20/W33: a control that only ever cancels or
+    exits an operation, never starts one, so the runbook itself classifies
+    it read-only -- but a live click still needs a precondition, because
+    clicking it while a REAL operation is in progress would cancel another
+    session's work, not merely probe the control. Refuses before touching
+    the board unless `row.verify_endpoint`'s read-back already shows idle/
+    inactive per `is_busy`; then clicks, then re-reads and fails loud if the
+    status somehow reads busy afterward (which would mean this click
+    started something, the opposite of what it's supposed to do). There is
+    nothing to restore: the click is a no-op by construction on this path."""
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, dict):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    if is_busy(pre_body):
+        return False, (f"{row.row_id} FAIL: refusing -- {row.verify_endpoint} shows {busy_desc} "
+                        f"already in progress ({json.dumps(pre_body)[:200]}); clicking this row's "
+                        f"abort/exit control would cancel a real operation, not just probe it")
+    try:
+        proc = _run_cdp(row, host, screenshot_dir, cookie)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{row.row_id} FAIL: CDP driver raised {type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        return False, (f"{row.row_id} FAIL: CDP driver exited {proc.returncode}: "
+                        f"{proc.stderr.strip()[-500:]}")
+    post_status, post_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if post_status != 200 or not isinstance(post_body, dict):
+        return False, (f"{row.row_id} FAIL: post-click read-back GET {row.verify_endpoint} -> "
+                        f"{post_status}: {json.dumps(post_body)[:300]}")
+    if is_busy(post_body):
+        return False, (f"{row.row_id} FAIL: {row.verify_endpoint} shows {busy_desc} after clicking "
+                        f"the abort/exit control ({json.dumps(post_body)[:200]}) -- unexpected, "
+                        f"check the board by hand")
+    return True, (
+        f"{row.row_id} PASS: confirmed {row.verify_endpoint} was idle/inactive before the click, "
+        f"clicked {row.selector}, confirmed it remains idle/inactive afterward "
+        f"| expected: {row.expected_outcome}"
+    )
+
+
+def _run_sweep_abort_guarded(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W18: refuses unless /api/zones/current_sweep/status already reads
+    something other than 'running' (zones_page.html's own
+    `renderSweepStatus()` derives `running = st.state === 'running'`)."""
+    return _run_guarded_click(row, host, screenshot_dir, cookie,
+                               is_busy=lambda body: body.get("state") == "running",
+                               busy_desc="a current-sweep run")
+
+
+def _run_autotune_abort_guarded(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W20: refuses unless /api/autotune already reads state 'idle'
+    (zones_page.html's `AT_STATE_NAMES` lists 'idle' as the only non-running
+    state -- every other value, including 'aborted'/'done', means a run
+    happened and its result is still on screen, so treating anything but
+    'idle' as busy is the conservative choice: this row must never abort a
+    run whose result an operator hasn't looked at yet, not just one still
+    in flight)."""
+    return _run_guarded_click(row, host, screenshot_dir, cookie,
+                               is_busy=lambda body: body.get("state") != "idle",
+                               busy_desc="an autotune run (or an unreviewed prior result)")
+
+
+def _run_danger_exit_guarded(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
+    """W33: refuses unless /api/diagnostics/danger already reads
+    active=false (diagnostics_page.html's `dangerPoll()`/`renderDangerLive()`)."""
+    return _run_guarded_click(row, host, screenshot_dir, cookie,
+                               is_busy=lambda body: bool(body.get("active")),
+                               busy_desc="an active Danger Mode session")
+
+
 def run_row_live(row_id: str, host: str, screenshot_dir: str,
                   find_chrome: Optional[Callable[[], str]] = None,
                   cookie: Optional[str] = None) -> "tuple[bool, str]":
@@ -1753,6 +1902,12 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         return _run_profile_multi_delete(row, host, screenshot_dir, cookie)
     if row.special == "profile_favorite_toggle":
         return _run_profile_favorite_toggle(row, host, screenshot_dir, cookie)
+    if row.special == "sweep_abort_guarded":
+        return _run_sweep_abort_guarded(row, host, screenshot_dir, cookie)
+    if row.special == "autotune_abort_guarded":
+        return _run_autotune_abort_guarded(row, host, screenshot_dir, cookie)
+    if row.special == "danger_exit_guarded":
+        return _run_danger_exit_guarded(row, host, screenshot_dir, cookie)
 
     # A row with both `fills` and `restore_from_field` set (W22, W38) is the
     # generic "edit a field, Save, confirm, restore, confirm" shape -- also

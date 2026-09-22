@@ -549,6 +549,45 @@ def test_kiln_config_create_delete_fails_if_left_on_board(monkeypatch):
     assert "LEFT ON BOARD" in msg
 
 
+def test_kiln_config_create_delete_refuses_upfront_if_generated_name_already_listed(monkeypatch):
+    # Advisory carried from an earlier review: the leftover sweep only
+    # cleans up leftovers[0] -- a SECOND leftover-shaped name that happens to
+    # equal the generated unique_name ("kc_test_123" when time.time() is
+    # mocked to 123) survives that sweep and must still be caught before the
+    # create click, not left to the board's own duplicate-name 400. Two
+    # subprocess.run calls are allowed (the one cleanup delete of
+    # leftovers[0]); a third call would mean the create was attempted
+    # despite the collision.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "1", "configs": [
+                {"id": "1", "name": "existing"},
+                {"id": "5", "name": "kc_test_100"},   # leftovers[0]: gets cleaned up
+                {"id": "9", "name": "kc_test_123"},   # collides with the generated name
+            ]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    calls = {"n": 0}
+
+    def fake_run(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeProc()  # cleanup delete of leftovers[0] ("kc_test_100")
+        raise AssertionError("must not touch the board again once the name collision is found")
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "already listed" in msg
+    assert "kc_test_123" in msg
+    assert calls["n"] == 1
+
+
 def test_kiln_config_create_delete_cleans_up_inactive_leftover_first(monkeypatch):
     # A leftover from a previous incomplete run (not the active config) is
     # deleted before the real run starts, and reported as having done so.
@@ -1914,3 +1953,142 @@ def test_w9_cleans_up_the_second_profile_even_when_its_own_create_reports_failur
         f"n1={n1!r} was never passed to a cleanup delete -- only {deleted_names} were; "
         f"message was: {msg}"
     )
+
+
+# ---------------------------------------------------------------------------
+# W18/W20/W33 -- guarded no-op click rows (sweep abort / autotune abort /
+# danger-mode exit). Each refuses before touching the board if the status
+# route already shows a real operation in progress, and otherwise clicks and
+# confirms the state stays idle/inactive. Nothing to restore: the click is a
+# no-op by construction on this path.
+# ---------------------------------------------------------------------------
+
+
+def test_w18_refuses_when_sweep_already_running(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([(200, {"state": "running"})]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    def _no_subprocess(*a, **k):
+        raise AssertionError("must not click abort while a real sweep is running")
+
+    monkeypatch.setattr(wcr.subprocess, "run", _no_subprocess)
+
+    ok, msg = wcr._run_sweep_abort_guarded(wcr.ROWS["W18"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "refusing" in msg
+    assert "current-sweep run" in msg
+
+
+def test_w18_passes_when_idle_before_and_after(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"state": "idle"}),
+            (200, {"state": "idle"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_sweep_abort_guarded(wcr.ROWS["W18"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+
+
+def test_w18_fails_loud_if_running_after_click(monkeypatch):
+    # Pre-read is idle (click proceeds), but the read-back afterward
+    # unexpectedly shows running -- must fail loud, never PASS.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"state": "idle"}),
+            (200, {"state": "running"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_sweep_abort_guarded(wcr.ROWS["W18"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "check the board by hand" in msg
+
+
+def test_w20_refuses_when_autotune_not_idle(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([(200, {"state": "settling"})]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    def _no_subprocess(*a, **k):
+        raise AssertionError("must not click abort while autotune is not idle")
+
+    monkeypatch.setattr(wcr.subprocess, "run", _no_subprocess)
+
+    ok, msg = wcr._run_autotune_abort_guarded(wcr.ROWS["W20"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "refusing" in msg
+    assert "autotune run" in msg
+
+
+def test_w20_passes_when_idle_before_and_after(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"state": "idle"}),
+            (200, {"state": "idle"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_autotune_abort_guarded(wcr.ROWS["W20"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+
+
+def test_w33_refuses_when_danger_mode_active(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([(200, {"active": True})]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    def _no_subprocess(*a, **k):
+        raise AssertionError("must not click exit while another operator's Danger Mode session is active")
+
+    monkeypatch.setattr(wcr.subprocess, "run", _no_subprocess)
+
+    ok, msg = wcr._run_danger_exit_guarded(wcr.ROWS["W33"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "refusing" in msg
+    assert "Danger Mode" in msg
+
+
+def test_w33_passes_when_inactive_before_and_after(monkeypatch):
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active": False}),
+            (200, {"active": False}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    ok, msg = wcr._run_danger_exit_guarded(wcr.ROWS["W33"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+
+
+def test_run_row_live_dispatches_to_guarded_click_for_w18_w20_w33(monkeypatch):
+    monkeypatch.setattr(wcr, "validate_selector", lambda *a, **k: None)
+    monkeypatch.setattr(wcr, "_read_credentials", lambda: ("user", "pass"))
+    monkeypatch.setattr(wcr, "_login_once", lambda *a, **k: "fake-cookie")
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+
+    for row_id, body in (("W18", {"state": "idle"}), ("W20", {"state": "idle"}), ("W33", {"active": False})):
+        monkeypatch.setattr(wcr, "_get_json_with_cookie", _sequential_get_json([(200, body), (200, body)]))
+        ok, msg = wcr.run_row_live(row_id, "192.0.2.1", "/tmp/whatever")
+        assert ok, f"{row_id}: {msg}"
