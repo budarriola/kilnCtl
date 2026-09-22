@@ -1092,7 +1092,9 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     # would otherwise cause a spurious refusal here for a name that no
     # longer exists on the board.
     if unique_name in [c.get("name") for c in configs
-                       if isinstance(c, dict) and c.get("id") != deleted_leftover_id]:
+                       if isinstance(c, dict)
+                       and not (deleted_leftover_id is not None
+                                and str(c.get("id")) == str(deleted_leftover_id))]:
         return False, (f"{row.row_id} FAIL: generated name {unique_name!r} is already listed in "
                         f"{row.verify_endpoint} -- refusing to create before touching the board")
     create_fills = (("#kcSaveNewName", unique_name),)
