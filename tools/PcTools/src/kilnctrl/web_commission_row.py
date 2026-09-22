@@ -681,7 +681,7 @@ def _is_leftover_config_name(name: "Optional[str]") -> bool:
 
 
 def _apply_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
-                        target_id: object, shot_suffix: str) -> "tuple[bool, str]":
+                        target_id: object, shot_suffix: str) -> "tuple[bool, str, bool]":
     """Selects `target_id` in `#kilnConfigSelect` and clicks `#kcApplyBtn` --
     the page's own select/apply control; there is no separate "select"
     endpoint, POST /api/kiln_configs/apply both selects AND makes a config
@@ -691,7 +691,17 @@ def _apply_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
     until the job leaves 'running', then confirms via GET
     `row.verify_endpoint` that `active_id` really is `target_id` -- never
     trusting the POST status alone, the same rule every other row here
-    follows."""
+    follows.
+
+    Returns (ok, detail, board_quiet). `board_quiet` is False when this
+    function cannot prove the board is settled again: the swap is still
+    reporting `running` when the poll budget runs out, or apply_status
+    reported `diverged` (kiln_cfg_swap.c's alarmed exit -- heaters disabled,
+    config left pending for retry). A caller MUST NOT issue any further
+    write (a delete, another apply) while `board_quiet` is False: a
+    kiln-config swap is a 60+ round-trip two-processor transaction, and
+    kiln_cfg_swap.c's own H6 generation check exists precisely because a
+    concurrent store write during one is a real hazard."""
     proc = _run_cdp(row, host, screenshot_dir, cookie,
                      selector="kcApplyBtn", selector_kind="id",
                      fills=(("#kilnConfigSelect", str(target_id)),),
@@ -699,33 +709,54 @@ def _apply_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
                      accept_dialogs=True, shot_suffix=shot_suffix)
     if proc.returncode != 0:
         return False, (f"CDP driver (apply id={target_id}) exited {proc.returncode}: "
-                        f"{proc.stderr.strip()[-500:]}")
+                        f"{proc.stderr.strip()[-500:]}"), True
     post = _cdp_post_status(proc)
     if post is not None and (post.get("failed") or post.get("status") not in (200, 202, None)):
+        # The POST itself was refused (409 interlock, 428 hardware-differs,
+        # 404, ...) -- nothing was dispatched, so the board is untouched.
         return False, (f"apply POST {post.get('url')} -> {post.get('status')} "
-                        f"(failed={post.get('failed')}) for id={target_id}")
+                        f"(failed={post.get('failed')}) for id={target_id}"), True
 
     last_state = None
+    last_diverged = False
+    last_reason = ""
     for _ in range(60):  # ~60s at 1s cadence, same budget as the page's own pollApplyStatus()
         st_status, st_body = _get_json_with_cookie(host, "/api/kiln_configs/apply_status", cookie)
         if st_status == 200 and isinstance(st_body, dict):
             last_state = st_body.get("state")
+            last_diverged = bool(st_body.get("diverged"))
+            last_reason = str(st_body.get("reason") or "")
             if last_state != "running":
                 break
         else:
             last_state = None
         time.sleep(1.0)
+
+    # DIVERGED first: it is the single most consequential outcome this row
+    # can produce and the operator has to be told about it before anything
+    # else. kiln_cfg_swap.c sets it on the paths that leave the two halves
+    # (or the Pico ceiling/arming cross-check) unreconciled -- heaters
+    # disabled, alarm raised, config left pending for retry.
+    if last_diverged:
+        return False, (f"apply id={target_id} left the board DIVERGED (heaters disabled and "
+                        f"alarmed, config left pending for retry): "
+                        f"{last_reason or 'no reason reported by apply_status'}"), False
+    if last_state == "running":
+        return False, (f"apply id={target_id} still reports state=running after the ~60 s "
+                        f"apply_status budget -- the two-processor kiln-config swap may still "
+                        f"be in flight"), False
     if last_state == "done_failed":
-        return False, f"apply id={target_id} reported done_failed (apply_status)"
+        return False, (f"apply id={target_id} reported done_failed (apply_status): "
+                        f"{last_reason or 'no reason reported by apply_status'}"), True
 
     final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
     if final_status != 200 or not isinstance(final_body, dict):
         return False, (f"post-apply read-back GET {row.verify_endpoint} -> "
-                        f"{final_status}: {json.dumps(final_body)[:300]}")
+                        f"{final_status}: {json.dumps(final_body)[:300]}"), last_state is not None
     if str(final_body.get("active_id")) != str(target_id):
         return False, (f"apply id={target_id} did not take -- active_id now "
-                        f"{final_body.get('active_id')!r}")
-    return True, f"applied id={target_id}, confirmed active_id={target_id}"
+                        f"{final_body.get('active_id')!r}"), last_state is not None
+    return True, f"applied id={target_id}, confirmed active_id={target_id}", True
 
 
 def _delete_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
@@ -793,14 +824,25 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
         stale_id = stale.get("id")
         stale_name = stale.get("name")
         if str(stale_id) == str(original_active_id):
-            others = [c for c in configs if isinstance(c, dict) and c.get("id") != stale_id]
+            # The fallback becomes the board's LIVE kiln config (apply
+            # rewrites relay wiring, thermocouple assignment, PID gains and
+            # guard thresholds -- kiln_configs_page.html's own confirm()
+            # text). So it must never be another `kc_test_*` leftover: those
+            # are this row's own throwaways, of unknown provenance, and
+            # making one live would be exactly the "changed live gains"
+            # outcome this row must never produce. Only a non-leftover,
+            # operator-created config qualifies.
+            others = [c for c in configs
+                      if isinstance(c, dict) and str(c.get("id")) != str(stale_id)
+                      and not _is_leftover_config_name(c.get("name"))]
             if not others:
                 return False, (f"{row.row_id} FAIL: pre-existing leftover config {stale_name!r} "
                                 f"(id={stale_id}) is active and no other config exists to select "
-                                f"before deleting it -- refusing, needs owner review")
+                                f"before deleting it that is not itself a test leftover -- "
+                                f"refusing, needs owner review")
             fallback_id = others[0].get("id")
-            ok, detail = _apply_kiln_config(row, host, screenshot_dir, cookie, fallback_id,
-                                             "_cleanup_apply")
+            ok, detail, _quiet = _apply_kiln_config(row, host, screenshot_dir, cookie, fallback_id,
+                                                     "_cleanup_apply")
             if not ok:
                 return False, (f"{row.row_id} FAIL: cleanup of pre-existing leftover "
                                 f"{stale_name!r} (id={stale_id}) could not select it away first: "
@@ -857,12 +899,25 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     # active config (H5 backstop) -- select the ORIGINAL active id back
     # before the delete below. The saved blob is byte-identical to the
     # config that was already running, so this is a restore, not a change.
-    restore_ok, restore_detail = _apply_kiln_config(row, host, screenshot_dir, cookie,
-                                                     original_active_id, "_restore_apply")
+    restore_ok, restore_detail, board_quiet = _apply_kiln_config(
+        row, host, screenshot_dir, cookie, original_active_id, "_restore_apply")
     if not restore_ok:
-        # Best-effort: still try to delete the throwaway slot even though
-        # re-selecting the original failed, so at least one half of the
-        # cleanup lands, and say exactly what (if anything) is left.
+        if not board_quiet:
+            # A swap that is still in flight, or one that ended DIVERGED, is
+            # not a board to issue another write at: kiln_cfg_swap.c's H6
+            # generation check treats a concurrent store write during a swap
+            # as a hazard, and a diverged board is already alarmed with
+            # heaters disabled. Stop here and say exactly what is left.
+            return False, (f"{row.row_id} FAIL: re-select of original active "
+                            f"id={original_active_id} after create failed: {restore_detail}; "
+                            f"NO further write attempted (board not confirmed settled). "
+                            f"LEFT ON BOARD: throwaway config {unique_name!r} (id={new_id}), and "
+                            f"the active kiln config may NOT be the original "
+                            f"{original_active_id!r} -- check GET /api/kiln_configs and "
+                            f"GET /api/kiln_configs/apply_status by hand before any further use")
+        # Best-effort: the apply was refused with nothing dispatched, so the
+        # board is settled -- still try to delete the throwaway slot so at
+        # least one half of the cleanup lands, and say exactly what is left.
         del_ok, del_detail = _delete_kiln_config(row, host, screenshot_dir, cookie, new_id,
                                                   "_delete_after_restore_fail")
         remaining = "nothing (throwaway config was still deleted)" if del_ok else \

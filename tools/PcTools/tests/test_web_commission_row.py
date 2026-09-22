@@ -689,6 +689,112 @@ def test_kiln_config_create_delete_reports_delete_400(monkeypatch):
     assert "LEFT ON BOARD" in msg
 
 
+def test_kiln_config_create_delete_refuses_leftover_as_fallback(monkeypatch):
+    # The active leftover's only companion is ANOTHER kc_test_* leftover.
+    # Applying that one would make a throwaway of unknown provenance the
+    # board's LIVE kiln config (apply rewrites relay wiring, thermocouple
+    # assignment, PID gains and guard thresholds) -- must refuse instead.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "5", "configs": [{"id": "5", "name": "kc_test_999"},
+                                                  {"id": "6", "name": "kc_test_998"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        raise AssertionError("no CDP action may run: there is no safe fallback to apply")
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "not itself a test leftover" in msg
+    assert calls == []
+
+
+def test_kiln_config_create_delete_reports_diverged_and_writes_nothing_further(monkeypatch):
+    # The restore-apply ends DIVERGED (kiln_cfg_swap.c's alarmed exit:
+    # heaters disabled, config left pending for retry). That must be named
+    # in the failure, and NO further write (no delete) may be issued.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"active_id": "7", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_failed", "diverged": True,
+                   "reason": "post-swap ceiling/arming check failed"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    seen = []
+
+    class _OkProc:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "post": None})
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen.append("kcDeleteBtn" if "kcDeleteBtn" in cmd else "other")
+        return _OkProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "DIVERGED" in msg
+    assert "post-swap ceiling/arming check failed" in msg
+    assert "NO further write attempted" in msg
+    assert "LEFT ON BOARD" in msg
+    assert "kcDeleteBtn" not in seen
+
+
+def test_kiln_config_create_delete_reports_apply_still_running(monkeypatch):
+    # apply_status never leaves "running" inside the ~60 s budget: the
+    # two-processor swap may still be in flight, so no further write may be
+    # issued and the message must say the active config is not confirmed.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json(
+            [(200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+             (200, {"active_id": "7", "configs": [{"id": "1", "name": "existing"},
+                                                   {"id": "7", "name": "kc_test_123"}]})]
+            + [(200, {"state": "running", "diverged": False, "reason": ""})] * 60
+        ),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    seen = []
+
+    class _OkProc:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "post": None})
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen.append("kcDeleteBtn" if "kcDeleteBtn" in cmd else "other")
+        return _OkProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "still reports state=running" in msg
+    assert "NO further write attempted" in msg
+    assert "kcDeleteBtn" not in seen
+
+
 def test_kiln_config_create_delete_fails_if_create_never_landed(monkeypatch):
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",

@@ -305,14 +305,24 @@ active id via the page's own `#kilnConfigSelect` + `#kcApplyBtn` control
 since the saved blob is byte-identical to what was already running and this
 is a restore, not a behavior change; and now checks the delete POST's own
 status/failed fields too (closing the "delete-POST-status gap" noted above).
-On any failure after create, it still attempts the re-select and delete as
-best-effort cleanup and reports exactly what, if anything, is left on the
-board. Covered by 12 new/updated unit tests in
-`tools/PcTools/tests/test_web_commission_row.py` (happy path, inactive-
-leftover cleanup, active-leftover-via-fallback cleanup, refusal when an
-active leftover has no fallback, best-effort delete when the restore-apply
-fails, and a rejected delete POST reported by URL/status) -- all mocked, no
-board contact. **This row stays FAIL until re-run live**, both to confirm
+The fallback it selects when the leftover itself is active is never another
+`kc_test_*` leftover (applying one would make a throwaway of unknown
+provenance the board's LIVE config, which is what `apply` rewrites: relay
+wiring, thermocouple assignment, PID gains, guard thresholds); if the only
+other slots are leftovers it refuses. `apply_status`'s `diverged` and
+`reason` fields are read, not just `state`: a swap that ends DIVERGED
+(`kiln_cfg_swap.c`'s alarmed exit -- heaters disabled, config left pending
+for retry) or that is still `running` when the ~60 s budget runs out is
+reported as such, and NO further write is issued against a board in either
+state. Otherwise, on a failure after create it still attempts the re-select
+and delete as best-effort cleanup and reports exactly what, if anything, is
+left on the board. Covered by 8 new and 2 rewritten unit tests in
+`tools/PcTools/tests/test_web_commission_row.py` -- 100 -> 108 tests in that
+file (happy path, inactive-leftover cleanup, active-leftover-via-fallback
+cleanup, refusal when an active leftover has no fallback, refusal when the
+only fallback is itself a leftover, DIVERGED and still-running apply results,
+best-effort delete when the restore-apply is refused outright, and a rejected
+delete POST reported by URL/status) -- all mocked, no board contact. **This row stays FAIL until re-run live**, both to confirm
 the new flow actually passes against real firmware and to clean up the
 `kc_test_1790034646` (id=4) leftover the previous live run left active.
 
