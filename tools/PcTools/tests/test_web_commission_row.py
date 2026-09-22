@@ -466,33 +466,127 @@ def test_fill_and_restore_fails_loud_if_restore_does_not_take(monkeypatch):
 
 
 def test_kiln_config_create_delete_full_flow_passes(monkeypatch):
+    # New (2026-09-21/22) shape: pre-read, create, re-select (Apply) the
+    # ORIGINAL active id back (firmware marks the new slot active, and
+    # refuses to delete the active one), poll apply_status, delete the
+    # throwaway, final read confirms both "gone" and "active_id restored".
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
-            (200, {"configs": [{"id": "1", "name": "existing"}]}),
-            (200, {"configs": [{"id": "1", "name": "existing"},
-                                {"id": "7", "name": "kc_test_123"}]}),
-            (200, {"configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"active_id": "7", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
     assert "deleted" in msg
+    assert "re-selected original active id=1" in msg
 
 
 def test_kiln_config_create_delete_fails_if_left_on_board(monkeypatch):
-    # The delete step's own read-back still lists the throwaway config --
-    # must fail loud and say so, never silently report success.
+    # The final read-back after a "successful" delete POST still lists the
+    # throwaway config -- must fail loud and say so, never silently report
+    # success.
     monkeypatch.setattr(
         wcr, "_get_json_with_cookie",
         _sequential_get_json([
-            (200, {"configs": []}),
-            (200, {"configs": [{"id": "7", "name": "kc_test_123"}]}),
-            (200, {"configs": [{"id": "7", "name": "kc_test_123"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"active_id": "7", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "LEFT ON BOARD" in msg
+
+
+def test_kiln_config_create_delete_cleans_up_inactive_leftover_first(monkeypatch):
+    # A leftover from a previous incomplete run (not the active config) is
+    # deleted before the real run starts, and reported as having done so.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "5", "name": "kc_test_999"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert "deleted pre-existing leftover 'kc_test_999'" in msg
+
+
+def test_kiln_config_create_delete_cleans_up_active_leftover_via_fallback(monkeypatch):
+    # The leftover itself is the currently-active config (a previous run
+    # died between create and its own restore step). There is no recorded
+    # "original" to go back to, so this selects some OTHER existing config
+    # first (fallback), then deletes the leftover, then proceeds with the
+    # real run using the fallback as this run's "original active id".
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "5", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "5", "name": "kc_test_999"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "5", "name": "kc_test_999"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert ok, msg
+    assert "selected id=1 instead" in msg
+    assert "deleted pre-existing leftover 'kc_test_999'" in msg
+    assert "re-selected original active id=1" in msg
+
+
+def test_kiln_config_create_delete_refuses_when_active_leftover_has_no_fallback(monkeypatch):
+    # The leftover is active AND is the only config on the board -- nothing
+    # exists to select instead, so this must refuse rather than guess.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "5", "configs": [{"id": "5", "name": "kc_test_999"}]}),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -501,6 +595,97 @@ def test_kiln_config_create_delete_fails_if_left_on_board(monkeypatch):
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
+    assert "no other config exists" in msg
+
+
+def test_kiln_config_create_delete_attempts_best_effort_delete_when_restore_apply_fails(monkeypatch):
+    # The re-select (Apply) of the original active id after create comes
+    # back a clean 500 -- this must still attempt to delete the throwaway
+    # slot (best effort) and report exactly what, if anything, is left.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"active_id": "7", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+
+    class _OkProc:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "post": None})
+        stderr = ""
+
+    class _RejectedApplyProc:
+        returncode = 0
+        stdout = json.dumps({
+            "ok": True,
+            "post": {"method": "POST", "url": "http://x/api/kiln_configs/apply",
+                      "status": 500, "failed": False},
+        })
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        if "kcApplyBtn" in cmd:
+            return _RejectedApplyProc()
+        return _OkProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "re-select of original active id=1" in msg
+    assert "500" in msg
+    assert "/api/kiln_configs/apply" in msg
+    assert "nothing (throwaway config was still deleted)" in msg
+
+
+def test_kiln_config_create_delete_reports_delete_400(monkeypatch):
+    # The delete POST (of the throwaway, after a successful restore-apply)
+    # comes back a clean 400 -- must be reported by URL/status, and the
+    # throwaway must be reported LEFT ON BOARD, never silently swallowed.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"}]}),
+            (200, {"active_id": "7", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+            (200, {"state": "done_ok"}),
+            (200, {"active_id": "1", "configs": [{"id": "1", "name": "existing"},
+                                                  {"id": "7", "name": "kc_test_123"}]}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(wcr.time, "time", lambda: 123)
+    monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
+
+    class _OkProc:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "post": None})
+        stderr = ""
+
+    class _RejectedDeleteProc:
+        returncode = 0
+        stdout = json.dumps({
+            "ok": True,
+            "post": {"method": "POST", "url": "http://x/api/kiln_configs/delete",
+                      "status": 400, "failed": False},
+        })
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        if "kcDeleteBtn" in cmd:
+            return _RejectedDeleteProc()
+        return _OkProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "400" in msg
+    assert "/api/kiln_configs/delete" in msg
     assert "LEFT ON BOARD" in msg
 
 

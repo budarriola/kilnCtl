@@ -310,14 +310,18 @@ ROWS: "dict[str, Row]" = {
     "W42": Row("W42", "/settings/kiln_configs", "firmware/KilnFW/App/drivers/http/kiln_configs_page.html",
                "kcSaveNewBtn", "id",
                "fill `#kcSaveNewName` with a unique throwaway name, click Save as new "
-               "(`#kcSaveNewBtn`), then select the new slot in `#kilnConfigSelect` and "
-               "click Delete selected (`#kcDeleteBtn`)",
-               "new slot appears in #kilnConfigSelect, then is removed",
+               "(`#kcSaveNewBtn`) -- firmware marks the new slot ACTIVE -- then re-select the "
+               "original active slot in `#kilnConfigSelect` and click Apply (`#kcApplyBtn`) to "
+               "restore it, then select the throwaway slot and click Delete selected "
+               "(`#kcDeleteBtn`)",
+               "new slot appears in #kilnConfigSelect, active id returns to the original after "
+               "Apply, then the throwaway slot is removed",
                "write", "GET /api/kiln_configs lists the throwaway slot after create, "
-               "then no longer does after delete",
+               "active_id equals the original after Apply, and the throwaway slot is gone "
+               "with active_id still the original after delete",
                verify_endpoint="/api/kiln_configs", expect_post="/api/kiln_configs/save",
                fills=(("#kcSaveNewName", "__kc_web_commission_test__"),),
-               special_selectors=("kilnConfigSelect", "kcDeleteBtn"),
+               special_selectors=("kilnConfigSelect", "kcApplyBtn", "kcDeleteBtn"),
                special="kiln_config_create_delete"),
     "W43": Row("W43", "/settings/backup", "firmware/KilnFW/App/drivers/http/backup_page.html",
                "", "page", "load the settings/backup page",
@@ -665,13 +669,152 @@ def _cdp_post_status(proc: "subprocess.CompletedProcess") -> "Optional[dict]":
     return post if isinstance(post, dict) else None
 
 
+def _is_leftover_config_name(name: "Optional[str]") -> bool:
+    """True for a name this row's own generator could have produced, or the
+    older fixed literal name a previous version of this function used
+    (``__kc_web_commission_test__`` -- still checked so a slot left behind by
+    that older code is also cleaned up). A leftover of either shape means a
+    previous run of this row did not finish its own cleanup."""
+    if not name:
+        return False
+    return name == "__kc_web_commission_test__" or str(name).startswith("kc_test_")
+
+
+def _apply_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
+                        target_id: object, shot_suffix: str) -> "tuple[bool, str]":
+    """Selects `target_id` in `#kilnConfigSelect` and clicks `#kcApplyBtn` --
+    the page's own select/apply control; there is no separate "select"
+    endpoint, POST /api/kiln_configs/apply both selects AND makes a config
+    active in one step (kiln_configs_page.html). The apply job runs async
+    (202, then /api/kiln_configs/apply_status) exactly like the page's own
+    pollApplyStatus(), so this polls that route (bounded, same ~60s budget)
+    until the job leaves 'running', then confirms via GET
+    `row.verify_endpoint` that `active_id` really is `target_id` -- never
+    trusting the POST status alone, the same rule every other row here
+    follows."""
+    proc = _run_cdp(row, host, screenshot_dir, cookie,
+                     selector="kcApplyBtn", selector_kind="id",
+                     fills=(("#kilnConfigSelect", str(target_id)),),
+                     expect_post="/api/kiln_configs/apply",
+                     accept_dialogs=True, shot_suffix=shot_suffix)
+    if proc.returncode != 0:
+        return False, (f"CDP driver (apply id={target_id}) exited {proc.returncode}: "
+                        f"{proc.stderr.strip()[-500:]}")
+    post = _cdp_post_status(proc)
+    if post is not None and (post.get("failed") or post.get("status") not in (200, 202, None)):
+        return False, (f"apply POST {post.get('url')} -> {post.get('status')} "
+                        f"(failed={post.get('failed')}) for id={target_id}")
+
+    last_state = None
+    for _ in range(60):  # ~60s at 1s cadence, same budget as the page's own pollApplyStatus()
+        st_status, st_body = _get_json_with_cookie(host, "/api/kiln_configs/apply_status", cookie)
+        if st_status == 200 and isinstance(st_body, dict):
+            last_state = st_body.get("state")
+            if last_state != "running":
+                break
+        else:
+            last_state = None
+        time.sleep(1.0)
+    if last_state == "done_failed":
+        return False, f"apply id={target_id} reported done_failed (apply_status)"
+
+    final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if final_status != 200 or not isinstance(final_body, dict):
+        return False, (f"post-apply read-back GET {row.verify_endpoint} -> "
+                        f"{final_status}: {json.dumps(final_body)[:300]}")
+    if str(final_body.get("active_id")) != str(target_id):
+        return False, (f"apply id={target_id} did not take -- active_id now "
+                        f"{final_body.get('active_id')!r}")
+    return True, f"applied id={target_id}, confirmed active_id={target_id}"
+
+
+def _delete_kiln_config(row: Row, host: str, screenshot_dir: str, cookie: str,
+                         target_id: object, shot_suffix: str) -> "tuple[bool, str]":
+    """Selects `target_id` in `#kilnConfigSelect` and clicks `#kcDeleteBtn`,
+    checking the delete POST's own status (closing the "delete-POST-status
+    gap" the 2026-09-21 W42 record noted -- the old code checked CDP exit
+    code but never the POST's own status/failed fields)."""
+    proc = _run_cdp(row, host, screenshot_dir, cookie,
+                     selector="kcDeleteBtn", selector_kind="id",
+                     fills=(("#kilnConfigSelect", str(target_id)),),
+                     expect_post="/api/kiln_configs/delete",
+                     accept_dialogs=True, shot_suffix=shot_suffix)
+    if proc.returncode != 0:
+        return False, (f"CDP driver (delete id={target_id}) exited {proc.returncode}: "
+                        f"{proc.stderr.strip()[-500:]}")
+    post = _cdp_post_status(proc)
+    if post is not None and (post.get("failed") or post.get("status") not in (200, None)):
+        return False, (f"delete POST {post.get('url')} -> {post.get('status')} "
+                        f"(failed={post.get('failed')}) for id={target_id}")
+    return True, f"deleted id={target_id}"
+
+
 def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":
-    """W42's shape: save the board's CURRENT setup as a new, uniquely-named
-    kiln_configs slot, confirm it appears, select that exact slot (matched
-    by the unique name this function chose, never whatever the dropdown
-    happens to have selected) and delete it, confirm it's gone. Never
-    touches any other slot -- the active one or a builtin -- since it only
-    ever selects the id it just read back for its own generated name."""
+    """W42's real shape, redesigned 2026-09-21/22 after the live FAIL
+    (docs/COMMISSIONING_TEST_MATRIX.md's W42 record): firmware's
+    kiln_cfg_store_save_current_ex() deliberately marks a freshly saved slot
+    ACTIVE (kiln_cfg_store.c), and kiln_cfg_store_delete()'s H5 backstop
+    correctly refuses to delete the currently-active config 400 ("... is the
+    kiln config this controller is running; select another kiln config
+    first ..."). The old runner tried to delete the just-created (and thus
+    active) slot directly and got that 400 -- a runner defect, not a
+    firmware one. This version:
+
+      1. reads GET /api/kiln_configs first and records the original active
+         id and the full list; a stale `kc_test_*`/
+         `__kc_web_commission_test__` leftover from a previous incomplete
+         run is treated as a pre-existing fixture problem and cleaned up
+         (selecting away from it first, if it happens to be active, before
+         deleting it) BEFORE the real run, and reported as having done so;
+      2. creates `kc_test_<epoch>` via Save as new, as before;
+      3. re-selects the ORIGINAL active id via the page's own select+Apply
+         control (#kilnConfigSelect + #kcApplyBtn -- there is no separate
+         "select" endpoint) -- this is a restore, not a behavior change: the
+         saved blob is byte-identical to what was already running;
+      4. deletes the new (now inactive) config via Delete selected;
+      5. reads back: the new config is gone and active_id is back to the
+         original.
+
+    On any failure after step 2 (create), this still attempts steps 3 and 4
+    as a best-effort restore and reports exactly what, if anything, remained
+    on the board -- never silently reports FAIL without saying so.
+    """
+    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
+    if pre_status != 200 or not isinstance(pre_body, dict):
+        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
+                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
+    configs = pre_body.get("configs") or []
+    original_active_id = pre_body.get("active_id")
+    notes: "list[str]" = []
+
+    leftovers = [c for c in configs if isinstance(c, dict) and _is_leftover_config_name(c.get("name"))]
+    if leftovers:
+        stale = leftovers[0]
+        stale_id = stale.get("id")
+        stale_name = stale.get("name")
+        if str(stale_id) == str(original_active_id):
+            others = [c for c in configs if isinstance(c, dict) and c.get("id") != stale_id]
+            if not others:
+                return False, (f"{row.row_id} FAIL: pre-existing leftover config {stale_name!r} "
+                                f"(id={stale_id}) is active and no other config exists to select "
+                                f"before deleting it -- refusing, needs owner review")
+            fallback_id = others[0].get("id")
+            ok, detail = _apply_kiln_config(row, host, screenshot_dir, cookie, fallback_id,
+                                             "_cleanup_apply")
+            if not ok:
+                return False, (f"{row.row_id} FAIL: cleanup of pre-existing leftover "
+                                f"{stale_name!r} (id={stale_id}) could not select it away first: "
+                                f"{detail}")
+            original_active_id = fallback_id
+            notes.append(f"leftover {stale_name!r} (id={stale_id}) was active with no other "
+                         f"record of an original -- selected id={fallback_id} instead before "
+                         f"deleting the leftover")
+        ok, detail = _delete_kiln_config(row, host, screenshot_dir, cookie, stale_id, "_cleanup_delete")
+        if not ok:
+            return False, (f"{row.row_id} FAIL: cleanup of pre-existing leftover "
+                            f"{stale_name!r} (id={stale_id}) failed: {detail}")
+        notes.append(f"deleted pre-existing leftover {stale_name!r} (id={stale_id}) before the real run")
+
     # Short and clearly a test artifact, but well under _KILN_CFG_NAME_MAX_LEN
     # (root cause of the 2026-09-21 W42 FAIL: the old 37-char name overflowed
     # the firmware's 23-char limit and was correctly rejected 400). The FULL
@@ -685,11 +828,6 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
         f"generated kiln_config test name {unique_name!r} ({len(unique_name)} chars) "
         f"exceeds _KILN_CFG_NAME_MAX_LEN ({_KILN_CFG_NAME_MAX_LEN})")
     create_fills = (("#kcSaveNewName", unique_name),)
-
-    pre_status, pre_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
-    if pre_status != 200 or not isinstance(pre_body, dict):
-        return False, (f"{row.row_id} FAIL: pre-read GET {row.verify_endpoint} -> "
-                        f"{pre_status}: {json.dumps(pre_body)[:300]}")
 
     proc = _run_cdp(row, host, screenshot_dir, cookie, fills=create_fills, shot_suffix="_create")
     if proc.returncode != 0:
@@ -708,22 +846,35 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     if mid_status != 200 or not isinstance(mid_body, dict):
         return False, (f"{row.row_id} FAIL: post-create read-back GET {row.verify_endpoint} -> "
                         f"{mid_status}: {json.dumps(mid_body)[:300]}")
-    configs = mid_body.get("configs") or []
-    match = [c for c in configs if isinstance(c, dict) and c.get("name") == unique_name]
+    match = [c for c in (mid_body.get("configs") or [])
+             if isinstance(c, dict) and c.get("name") == unique_name]
     if not match:
         return False, (f"{row.row_id} FAIL: no config named {unique_name!r} found in "
                         f"{row.verify_endpoint} after create -- write did not land")
-    new_id = str(match[0].get("id"))
+    new_id = match[0].get("id")
 
-    delete_fills = (("#kilnConfigSelect", new_id),)
-    delete_proc = _run_cdp(row, host, screenshot_dir, cookie,
-                            selector="kcDeleteBtn", selector_kind="id",
-                            fills=delete_fills, expect_post="/api/kiln_configs/delete",
-                            accept_dialogs=True, shot_suffix="_delete")
-    if delete_proc.returncode != 0:
-        return False, (f"{row.row_id} FAIL: CDP driver (delete) exited {delete_proc.returncode}: "
-                        f"{delete_proc.stderr.strip()[-500:]} -- board may be LEFT with throwaway "
-                        f"config id={new_id} name={unique_name!r}, delete by hand")
+    # Firmware marks the just-created slot ACTIVE, and refuses to delete the
+    # active config (H5 backstop) -- select the ORIGINAL active id back
+    # before the delete below. The saved blob is byte-identical to the
+    # config that was already running, so this is a restore, not a change.
+    restore_ok, restore_detail = _apply_kiln_config(row, host, screenshot_dir, cookie,
+                                                     original_active_id, "_restore_apply")
+    if not restore_ok:
+        # Best-effort: still try to delete the throwaway slot even though
+        # re-selecting the original failed, so at least one half of the
+        # cleanup lands, and say exactly what (if anything) is left.
+        del_ok, del_detail = _delete_kiln_config(row, host, screenshot_dir, cookie, new_id,
+                                                  "_delete_after_restore_fail")
+        remaining = "nothing (throwaway config was still deleted)" if del_ok else \
+            f"throwaway config {unique_name!r} (id={new_id}) -- delete ALSO failed: {del_detail}"
+        return False, (f"{row.row_id} FAIL: re-select of original active id={original_active_id} "
+                        f"after create failed: {restore_detail}; best-effort delete attempted, "
+                        f"LEFT ON BOARD: {remaining}")
+
+    delete_ok, delete_detail = _delete_kiln_config(row, host, screenshot_dir, cookie, new_id, "_delete")
+    if not delete_ok:
+        return False, (f"{row.row_id} FAIL: delete of throwaway config {unique_name!r} "
+                        f"(id={new_id}) failed: {delete_detail} -- LEFT ON BOARD, delete by hand")
 
     final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
     if final_status != 200 or not isinstance(final_body, dict):
@@ -735,11 +886,17 @@ def _run_kiln_config_create_delete(row: Row, host: str, screenshot_dir: str, coo
     if still_present:
         return False, (f"{row.row_id} FAIL: config {unique_name!r} (id={new_id}) still present "
                         f"after delete -- LEFT ON BOARD, delete by hand")
+    if str(final_body.get("active_id")) != str(original_active_id):
+        return False, (f"{row.row_id} FAIL: active_id is {final_body.get('active_id')!r} after "
+                        f"cleanup, expected original {original_active_id!r} -- board state changed")
 
+    prefix = (("; ".join(notes)) + " | ") if notes else ""
     return True, (
-        f"{row.row_id} PASS: created {unique_name!r} (id={new_id}) via Save as new, confirmed via "
-        f"GET {row.verify_endpoint}, deleted it via Delete selected, confirmed removed | "
-        f"expected: {row.expected_outcome}"
+        f"{row.row_id} PASS: {prefix}created {unique_name!r} (id={new_id}) via Save as new "
+        f"(POST /api/kiln_configs/save), confirmed via GET {row.verify_endpoint}, re-selected "
+        f"original active id={original_active_id} via Apply (POST /api/kiln_configs/apply), "
+        f"deleted the throwaway via Delete selected (POST /api/kiln_configs/delete), confirmed "
+        f"removed and active_id restored | expected: {row.expected_outcome}"
     )
 
 
