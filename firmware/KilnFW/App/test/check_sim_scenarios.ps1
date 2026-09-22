@@ -13,6 +13,18 @@
 # or in the (scenario, arm) determinism guarantee could land with the
 # standard 104-check baseline still fully green.
 #
+# SUPERSEDED IN PART, 2026-09-21: check_00_kilnfw_host_tests.ps1 (same
+# directory) now builds and runs the WHOLE build_host_tests.ps1 suite --
+# sim_scenarios.exe included -- as its own phase-1 check_*.ps1, so a broken
+# BUILD of sim_scenarios.exe (or any of its 55 siblings) can no longer land
+# with every discovered check_*.ps1 green the way this file's header
+# originally described. This file's OWN, separate value is unchanged and
+# still not covered by that check: it exercises sim_scenarios.exe with the
+# additional WI-7 sharded-determinism (--of 4) argument
+# build_host_tests.ps1's own canonical (--of 1) invocation never passes, and
+# it wires the standalone WI-7 proof script (run_sim_scenarios.ps1) that
+# build_host_tests.ps1 does not invoke at all. Keep both checks.
+#
 # Follows check_sim_iter_tune_bars.ps1's exact three-status convention (see
 # that file's long header for the full rationale, repeated only in brief
 # here): exit 0 PASS, exit 1 FAIL (a real regression against this checkout's

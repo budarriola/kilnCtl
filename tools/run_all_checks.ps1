@@ -456,7 +456,14 @@ if ($Fast) {
     $checks = $checks | Where-Object {
         $_.FullName -notmatch 'check_00_kilnfw_target_build\.ps1$' -and
         $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$' -and
-        $_.FullName -notmatch 'check_00_kilnfw_recovery_target_build\.ps1$'
+        $_.FullName -notmatch 'check_00_kilnfw_recovery_target_build\.ps1$' -and
+        # check_00_kilnfw_host_tests.ps1 (2026-09-21): builds and runs all of
+        # build_host_tests.ps1's KilnFW host-test executables from a clean,
+        # isolated -OutDir -- same multi-minute cost class as the three
+        # target builds above. A caller who already ran build_host_tests.ps1
+        # (or an equivalent) itself gets to skip redoing it here too, same as
+        # -Fast already does for the target builds.
+        $_.FullName -notmatch 'check_00_kilnfw_host_tests\.ps1$'
     }
 }
 
