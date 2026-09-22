@@ -2991,6 +2991,21 @@ static void test_hardware_differs_message_fits_longest_label(void)
                                                          "concatenated into 'applyingResend'/'applying "
                                                          "Resend'");
     TEST_CHECK(strstr(msg, "safety_tc_installed") != NULL, "the real message names the longest label");
+
+    /* Review follow-up: the WRAPPER is not the only caller. kiln_cfg_store_apply()
+     * has its own hw_msg buffer for the same message; drive that path too and
+     * assert the message survives to the caller's reason intact, trailing period
+     * included -- a too-small buffer there truncates the final '.' silently. */
+    char apply_reason[256] = {0};
+    bool refused = kiln_cfg_store_apply(id1, /*ack_no_safety_processor=*/true,
+                                        /*ack_hardware_differs=*/false, apply_reason,
+                                        sizeof(apply_reason));
+    TEST_CHECK(!refused, "kiln_cfg_store_apply() refuses the same mismatch without the ack");
+    TEST_CHECK(strstr(apply_reason, "X-Kiln-Ack-Hardware-Differs: 1.") != NULL,
+               "kiln_cfg_store_apply()'s own hw_msg buffer holds the WHOLE message for the longest "
+               "label, trailing period included -- not truncated at 192 bytes");
+
+    kiln_board_identity_set_test_override(false, 0);
 }
 
 static void test_apply_allows_hardware_mismatch_with_ack(void)

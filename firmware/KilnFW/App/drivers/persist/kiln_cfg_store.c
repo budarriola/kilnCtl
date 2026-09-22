@@ -1477,7 +1477,11 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_har
      * -- same "refuse before mutating anything" discipline as every other
      * gate in this function. */
     if (!ack_hardware_differs) {
-        char hw_msg[192];
+        /* 256, not 192: apply_hardware_differs()'s formatted message is 192
+         * chars for its longest kFields[] label ('safety_tc_installed'), so a
+         * 192-byte buffer truncated the trailing '.' -- same reason
+         * kiln_cfg_http.c's own hw_msg was raised. */
+        char hw_msg[256];
         if (apply_hardware_differs(&s_store.entries[idx].pico, hw_msg, sizeof(hw_msg))) {
             return set_reason(reason_out, reason_cap, hw_msg);
         }
