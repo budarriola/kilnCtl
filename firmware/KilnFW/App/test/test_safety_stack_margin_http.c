@@ -63,6 +63,7 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 // reached by these tests, but must resolve at link time, same convention
 // as the rest of this stub block.
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
+esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value) { (void)r; (void)field; (void)value; return ESP_OK; }
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r; (void)error; (void)msg; return ESP_OK;
