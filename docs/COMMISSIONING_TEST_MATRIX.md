@@ -950,3 +950,60 @@ reboot across the three rows), `reset_reason` unchanged, no crash banner;
 back to only `#0 'M18C_TEST'` plus built-ins, no scratch profiles left on
 board. No flash, no reset, no heating, no crash ack, W9/W10 not run, MCP
 servers not restarted.
+
+## 2026-09-22 web + LCD auth timeout live verification
+
+Owner ask: confirm the web and LCD inactivity timeouts (WEB_AUTH_PLAN.md
+section 8, `auth_policy.web_timeout_s`/`lcd_timeout_s`) actually work on
+the bench, not just in source. Precheck: `get_heap_status` showed
+`reset_reason='software (esp_restart)'`, `uptime_s=7295`, no
+unacknowledged-crash banner; `safety_get_status` showed link up, armed,
+not tripped, no firing in progress. `kilnctrl` MCP server reported STALE
+(1 file changed since it started at commit `ec836434`); read-only board
+queries still went through the facade, all HTTP for this test was raw
+(`curl.exe`, cookie `kiln_sid`) since no MCP tool exposes login/session
+cookies. Credentials from `KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD`
+(User-scope), never printed. Original policy read via `GET
+/api/auth/config`: `web_enabled=true, lcd_enabled=false,
+web_timeout_min=30, lcd_timeout_min=10, admin_pin_set=false,
+user_pin_set=false`.
+
+- **Web timeout**: **PASS**. Set `web_timeout_min=1` (the 1-60 min range's
+  minimum) via `POST /api/auth/security cmd=set_policy`, kept
+  `lcd_enabled`/`lcd_timeout_min` unchanged, confirmed via `GET
+  /api/auth/config`. Logged in fresh, `GET /api/boot_guard` with the
+  session cookie returned 200. Waited past the 60 s timeout with no
+  activity-counting requests (only `GET /api/auth/session`, `ROUTE_TIER_OPEN`,
+  polled -- WEB_AUTH_PLAN.md section 8 says this never counts as
+  activity). Re-issued the identical `GET /api/boot_guard` with the same
+  cookie: **401 Unauthorized** (`authentication required`). Board
+  `uptime_s` before/after: 7295 -> 7885 (delta consistent with elapsed
+  wall time, no reboot, `reset_reason` unchanged, no crash banner).
+- **10 s stay-unlocked prompt window**: **PASS**. Fresh login, polled
+  `GET /api/auth/session` at t+52 s (60 s timeout, window opens at
+  t+50 s): `{"role":"admin","prompt":true,"seconds_left":7,
+  "bootstrap_needed":false}` -- inside the window as expected.
+- **LCD timeout**: **SKIP**. `GET /api/auth/config` showed
+  `lcd_enabled=false` and, decisively, `admin_pin_set=false` and
+  `user_pin_set=false` -- no PIN has ever been provisioned on this board,
+  so there is no credential to unlock the LCD lock page with.
+  `docs/COMMISSIONING_LCD_RUNBOOK.md` names no PIN source either. Turning
+  `lcd_enabled` on for this test would arm a lock screen with no known way
+  to pass it -- risking the physical panel getting stuck locked -- and
+  provisioning a fresh PIN is a credential change beyond this
+  verification's scope, so the LCD half was not exercised live. Source
+  inspection only (`lcd_auth_state.c`/`ui_lcd_lock.c`, same
+  `web_auth_session_in_prompt_window()` helper the web path uses) --
+  unverified on hardware.
+
+Policy restored and read back via `GET /api/auth/config`:
+`web_enabled=true, lcd_enabled=false, web_timeout_min=30,
+lcd_timeout_min=10` -- matches the original exactly. No `/api/auth/logout`
+route exists in this firmware (checked); the last test session was left to
+expire under the restored 30-minute policy rather than explicitly logged
+out. Four logins total across the run (policy read, web-timeout test,
+prompt-window probe, restore), each a correct-credential login (no
+failures, no lockout ladder engaged); the first two (policy read) were
+under 30 s apart before this run's pacing was locked in, all others were
+well over 30 s apart. No flash, no reset, no heating, no crash ack,
+`get_board_state`/W9/W10 not run, MCP servers not restarted.
