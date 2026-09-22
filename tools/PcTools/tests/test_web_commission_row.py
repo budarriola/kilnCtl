@@ -1475,6 +1475,42 @@ def test_setup_wizard_step1_fails_loud_on_a_non_2xx_tz_post(monkeypatch):
     assert "restored" in msg
 
 
+def test_cdp_post_statuses_does_not_match_a_longer_route(monkeypatch):
+    # `/api/unit_prefs` is NOT `/api/unit_pref`: a substring test would grade
+    # the wrong request's status as this row's write. A query string on the
+    # real route must still match.
+    proc = _FakeProcWithNetwork([
+        {"method": "POST", "url": "http://192.0.2.1/api/unit_prefs", "status": 500, "failed": False},
+        {"method": "POST", "url": "http://192.0.2.1/api/settings/tz?cb=1", "status": 200, "failed": False},
+    ])
+    found = wcr._cdp_post_statuses(proc, ("/api/settings/tz", "/api/unit_pref"))
+    assert "/api/unit_pref" not in found, found
+    assert len(found["/api/settings/tz"]) == 1
+    assert wcr._non2xx_post_failures(found) == []
+
+
+def test_cdp_stdout_summary_drops_the_unbounded_network_list():
+    # `network` sits last in the driver's JSON, so a raw stdout[-300:] would
+    # be nothing but request records and would hide route/post from the PASS
+    # message of every row.
+    proc = _FakeProcWithNetwork([
+        {"method": "POST", "url": "http://192.0.2.1/api/pad/%d" % i, "status": 200, "failed": False}
+        for i in range(40)
+    ])
+    proc.stdout = json.dumps({"ok": True, "route": "/settings/zones", "post": {"status": 204},
+                              "network": json.loads(proc.stdout)["network"]})
+    summary = wcr._cdp_stdout_summary(proc)
+    assert "/settings/zones" in summary, summary
+    assert "/api/pad/" not in summary, summary
+    assert "network_count" in summary
+
+
+def test_cdp_stdout_summary_falls_back_on_non_json_stdout():
+    class _P:
+        stdout = "not json at all"
+    assert wcr._cdp_stdout_summary(_P()) == "not json at all"
+
+
 def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
     # The write silently didn't land -- must FAIL, not report PASS with a
     # restore of a value that was never actually different (same shape as

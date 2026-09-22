@@ -905,12 +905,41 @@ def _cdp_post_statuses(proc: "subprocess.CompletedProcess", paths: "tuple[str, .
         return {}
     out: "dict[str, list[dict]]" = {}
     for path in paths:
+        # Compare the URL's PATH COMPONENT for equality rather than asking
+        # `path in url`: a substring test would also match a longer route
+        # that merely starts with (or contains) this one -- a hypothetical
+        # `/api/unit_prefs` would satisfy `"/api/unit_pref" in url`, and
+        # grading THAT request's status as if it were this row's write is
+        # exactly the silent wrong-route confusion this function exists to
+        # avoid. urlsplit() also strips any query/fragment, so a URL the
+        # page happens to cache-bust is still matched on its real route.
         matches = [rec for rec in network
                    if isinstance(rec, dict) and rec.get("method") == "POST"
-                   and path in str(rec.get("url") or "")]
+                   and urllib.parse.urlsplit(str(rec.get("url") or "")).path == path]
         if matches:
             out[path] = matches
     return out
+
+
+def _cdp_stdout_summary(proc: "subprocess.CompletedProcess", limit: int = 300) -> str:
+    """The tail of the CDP driver's stdout for a PASS message, with the
+    `network` field (every completed request of the whole run -- see
+    `_cdp_post_statuses()`) dropped first. That list is unbounded and sits
+    last in the driver's JSON object, so a raw `stdout[-limit:]` would show
+    nothing but request records and push the fields a reader actually wants
+    (route, selector, fills, dialogs, post) off the front for EVERY row,
+    not just the one that asked for `network`. Falls back to the raw tail
+    if stdout isn't the expected JSON shape."""
+    raw = (proc.stdout or "").strip()
+    try:
+        parsed = json.loads(raw.splitlines()[-1])
+    except (ValueError, IndexError):
+        return raw[-limit:]
+    if not isinstance(parsed, dict) or "network" not in parsed:
+        return raw[-limit:]
+    trimmed = {k: v for k, v in parsed.items() if k != "network"}
+    trimmed["network_count"] = len(parsed["network"]) if isinstance(parsed["network"], list) else None
+    return json.dumps(trimmed)[-limit:]
 
 
 def _non2xx_post_failures(post_statuses: "dict[str, list[dict]]") -> "list[str]":
@@ -2036,7 +2065,7 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         readback = "no verify_endpoint for this row -- read-back is client-side only, not automated"
 
     return True, (
-        f"{row_id} PASS: {proc.stdout.strip()[-300:]} | expected: {row.expected_outcome} | "
+        f"{row_id} PASS: {_cdp_stdout_summary(proc)} | expected: {row.expected_outcome} | "
         f"read-back ({row.readback_desc}): {readback}"
     )
 
