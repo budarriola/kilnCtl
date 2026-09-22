@@ -1738,8 +1738,8 @@ static esp_err_t nvs_keys_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing/invalid \"partition\" or \"namespace\"");
         return ESP_OK;
     }
-    if (strcmp(ns_raw, "kiln_auth") == 0) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "kiln_auth namespace is never listed by this route");
+    if (strcmp(ns_raw, "kiln_auth") == 0) { /* kiln_auth-isolation: refusal */
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "kiln_auth namespace is never listed by this route"); /* kiln_auth-isolation: refusal */
         return ESP_OK;
     }
 

@@ -84,6 +84,21 @@ $forbiddenIdentifiers = @("kiln_auth", "web_auth", "lcd_auth", "auth_policy")
 # reference them; this file is the one place that legitimately does.
 $Allowlist = @("web_auth_store.c", "web_auth_store.h")
 
+# Per-line escape hatch for a REFUSAL, not a real reference: a line carrying
+# this exact marker comment is read as "this line names the identifier only
+# to reject/deny it" -- e.g. nvs_keys_get_handler()'s deliberate 403 on the
+# kiln_auth namespace in diagnostics_http.c (`if (strcmp(ns_raw, "kiln_auth")
+# == 0) { /* kiln_auth-isolation: refusal */`). This is narrower than
+# allowlisting the whole file (which would blind the check to a real future
+# leak anywhere else in that same file) and smaller/less gameable than
+# parsing the strcmp/httpd_resp_send_err call shape structurally. The marker
+# is matched against the RAW source line, not the comment-stripped code
+# line below (comments are stripped before the identifier scan runs, so the
+# marker itself has to be read from the original text) -- moving or
+# duplicating a refusal without carrying the marker across the copy is
+# exactly what turns it back into an ordinary finding.
+$RefusalMarker = "kiln_auth-isolation: refusal"
+
 # Same comment-stripping helper as check_uri_handler_cap.ps1 /
 # check_bridge_reject_reason.ps1 / check_uart_version_independence.ps1
 # (duplicated rather than imported -- this project has no shared PowerShell
@@ -142,7 +157,11 @@ foreach ($f in $sourceFiles) {
         continue
     }
     $codeLines = Get-CodeOnlyLines -Path $f.FullName
+    $rawLines = Get-Content -Path $f.FullName
     for ($i = 0; $i -lt $codeLines.Count; $i++) {
+        if ($rawLines[$i] -match [regex]::Escape($RefusalMarker)) {
+            continue
+        }
         foreach ($id in $forbiddenIdentifiers) {
             # Word-boundary match so e.g. a hypothetical "kiln_auth_test"
             # symbol still counts (it is still naming the identifier), but
