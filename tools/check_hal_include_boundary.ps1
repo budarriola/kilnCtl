@@ -281,6 +281,15 @@ $EspTimerAllowlist = @(
 # single named constant with no nvs_*()/nvs_flash_*() function call.
 $NvsAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/persist/ota_record.c"; Header = "nvs.h"; Reason = "ESP_ERR_NVS_NOT_FOUND only, per ota_record.h's doc contract -- no nvs_*()/nvs_flash_*() function call in this file, actual NVS access goes through hal_kv"; ExpiresAtPhase = "n/a (constant-only holdout, see plan)" }
+    # 2026-09-21: nvs_entry_find()/nvs_entry_next()/nvs_entry_info() -- raw NVS
+    # entry-iteration/introspection. hal_kv.h (firmware/hwAbstraction/esp/kv/hal_kv_esp.c)
+    # wraps get/set/commit/erase for a single known key but has no key-enumeration
+    # or entry-metadata API, so neither site below can go through it today.
+    # Follow-up: add a hal_kv iteration primitive (e.g. hal_kv_iterate_partition())
+    # and migrate both call sites off nvs.h once it exists -- out of scope for this
+    # change (see docs/HW_ABSTRACTION.md Phase 4).
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/diagnostics_http.c"; Header = "nvs.h"; Reason = "nvs_entry_find()/nvs_entry_info() to enumerate NVS key names/types for GET /api/nvs/keys (nvs_keys_get_handler(), f564bf03) -- hal_kv has no entry-iteration wrapper, see follow-up note above"; ExpiresAtPhase = "n/a (missing hal_kv iteration primitive, see follow-up note above)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/factory_reset.c"; Header = "nvs.h"; Reason = "nvs_entry_find()/nvs_entry_next() to count nvs/net80211 keys before/after esp_wifi_restore() (log_net80211_key_count(), 0edfb313) -- hal_kv has no entry-iteration wrapper, see follow-up note above"; ExpiresAtPhase = "n/a (missing hal_kv iteration primitive, see follow-up note above)" }
 )
 
 $NvsFlashAllowlist = @(
