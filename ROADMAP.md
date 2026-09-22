@@ -3097,11 +3097,34 @@ Owner instruction, 2026-09-21.
   W26, W27, W32, W34, W35, W36, W40, W44, W45, W47, W51 are the
   remaining owner-gated/destructive/no-stable-selector set. Full detail:
   `docs/COMMISSIONING_TEST_MATRIX.md`'s 2026-09-22 entry.
+- **M18 web class update, 2026-09-22 ~04:00Z**: W8 root cause was the CDP
+  driver clicking before the page's async `refreshAll()` had rendered, not
+  a firmware defect; fixed with `clickWithRetry`. Re-run live against ESP
+  `63a48ab3`: W8 **PASS**. Web class now 35/51 PASS wired. W9/W10 (profile
+  delete rows) still never run live: a permission classifier refused the
+  previous agent's retry, waiting on the owner's explicit go-ahead.
+- **Bench reflash, 2026-09-22 ~04:00Z**: ESP reflashed to `63a48ab3` (flash
+  verified, ELF archived as `KilnCtrl-da119321dcbb.elf`); Pico unchanged at
+  `05f1ab1f` build.
+- **C6 Wi-Fi factory-reset driver-storage self-check, 2026-09-22**: ran on
+  hardware at `63a48ab3` -- serial log showed `nvs`/`net80211` key count 0
+  before `esp_wifi_restore()` and 0 after. Verdict PASS for the leak, with
+  the caveat that before=0 means the erase path was not exercised (RAM
+  storage mode in `wifi_prov.c`). Detail:
+  `docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md`. Do not
+  re-dispatch.
+- **Silent host-test build regression, 2026-09-22**: `0edfb313` dropped
+  `nvs_entry_find`/`next`/`release_iterator` stubs, breaking the KilnFW
+  host-test build silently; fixed in `032651c0`. A `run_all_checks` gate
+  for the KilnFW host-test build is in flight.
 - **Process note, 2026-09-21/22 evening:** every code review this window
   was done by a sonnet reviewer because opus returned HTTP 500 on every
-  attempt. An opus re-review pass of `978a5a2a`/`3db48d8a`, `bea1d8b1`,
-  `acb1f970`/`0f96c570`, `17a4dff0`, and the kiln_cfg_swap fix chain above
-  is still owed once opus is reachable again.
+  attempt. **Opus re-review complete, 2026-09-22**: `978a5a2a`/`3db48d8a`,
+  `bea1d8b1`, `acb1f970`/`0f96c570`, `17a4dff0`, and the kiln_cfg_swap fix
+  chain above are all clean except one real defect -- the 428
+  hardware-differs message lacked a sentence separator and filled its
+  192-byte buffer exactly -- fixed with 256-byte buffers in all three
+  callers, pushed as the `81a95b03` range.
 - Tooling: `d473811a`..`502e69a5` centralized the default HTTP host
   (`KILNCTL_HOST` env var, opt-in last-seen cache, guaranteed AP fallback,
   atomic settings writes); the kilnctrl MCP server was restarted at
