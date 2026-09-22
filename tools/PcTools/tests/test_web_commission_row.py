@@ -867,14 +867,20 @@ def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
         _sequential_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            # ...and the restoring Save still runs and is still read back,
+            # even though the flip itself never landed.
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    runs = []
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
     assert "did not change" in msg
+    assert len(runs) == 2, "restore Save must run even when the mid-state check fails"
+    assert "restored" in msg
 
 
 def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
@@ -886,6 +892,94 @@ def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
         _sequential_get_json([
             (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
             (200, {"time_tz": "UTC0", "temp_unit": "F"}),
+            # The restoring Save re-submits the ORIGINAL tz alongside the
+            # original unit, so it repairs the collateral write instead of
+            # only reporting it.
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    runs = []
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "collateral write" in msg
+    assert len(runs) == 2, "restore Save must run after a collateral-write failure"
+    assert "restored" in msg
+
+
+class _FailProc:
+    returncode = 3
+    stdout = ""
+    stderr = "boom"
+
+
+def test_setup_wizard_step1_restores_even_when_the_set_driver_fails(monkeypatch):
+    # The CDP driver can die AFTER the click's POSTs landed (screenshot or
+    # teardown error, 60 s timeout on a page that already saved), so a
+    # non-zero exit is not proof nothing was written -- the restoring Save
+    # must run anyway, and its outcome must be reported.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        return _FailProc() if len(calls) == 1 else _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "CDP driver (set) exited 3" in msg
+    assert len(calls) == 2, "restore Save must run even when the set driver exits non-zero"
+    assert "restored" in msg
+
+
+def test_setup_wizard_step1_restores_when_the_set_driver_raises(monkeypatch):
+    # Same, for a subprocess that raises (TimeoutExpired/OSError) rather
+    # than returning a non-zero code.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise wcr.subprocess.TimeoutExpired(cmd="node", timeout=60)
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "raised TimeoutExpired" in msg
+    assert len(calls) == 2, "restore Save must run even when the set driver raises"
+    assert "restored" in msg
+
+
+def test_setup_wizard_step1_reports_a_failed_restore_after_a_failed_set(monkeypatch):
+    # Both halves broken: the failure message must carry BOTH the original
+    # failure and the fact the board may still hold the test unit.
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+            (500, None),
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -893,8 +987,7 @@ def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
-    assert "collateral write" in msg
-    assert "LEFT ON BOARD" in msg
+    assert "RESTORE UNCONFIRMED" in msg
 
 
 def test_setup_wizard_step1_fails_loud_if_restore_does_not_take(monkeypatch):
@@ -914,7 +1007,9 @@ def test_setup_wizard_step1_fails_loud_if_restore_does_not_take(monkeypatch):
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
-    assert "restore did not take" in msg
+    assert "RESTORE FAILED" in msg
+    assert "temp_unit still 'F'" in msg
+    assert "LEFT ON BOARD" in msg
 
 
 def test_setup_wizard_step1_refuses_when_status_body_unusable(monkeypatch):
