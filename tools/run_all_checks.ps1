@@ -667,11 +667,19 @@ $restChecks = $checks | Where-Object {
     $_.FullName -notmatch 'check_00_saftyfw_target_build\.ps1$' -and
     $_.FullName -notmatch 'check_00_kilnfw_recovery_target_build\.ps1$'
 }
+# check_web_commission_cdp_driver.ps1 (2026-09-21) joins it: same reason,
+# same mechanism -- it runs four real headless-Chrome driver invocations
+# over CDP, each with its own internal wall-clock timeouts, so it belongs
+# on the serial side of this split rather than competing with up to seven
+# other checks for the machine. Matched by an alternation here, not by two
+# separate Where-Object passes, so a third Chrome-driving check is one
+# pattern to add rather than another copy of this block.
+$serialOnlyPattern = 'check_ui_responsive_sweep\.ps1$|check_web_commission_cdp_driver\.ps1$'
 $uiSweepChecks = $restChecks | Where-Object {
-    $_.FullName -match 'check_ui_responsive_sweep\.ps1$'
+    $_.FullName -match $serialOnlyPattern
 }
 $restChecks = $restChecks | Where-Object {
-    $_.FullName -notmatch 'check_ui_responsive_sweep\.ps1$'
+    $_.FullName -notmatch $serialOnlyPattern
 }
 
 $results = @()

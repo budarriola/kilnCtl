@@ -160,14 +160,22 @@ Concrete step lists a Row() entry for each could pass (not implemented here
     {"action": "click", "kind": "id", "selector": "addSegBtn"},
     {"action": "wait-for-selector", "selector": "#segments .seg"},
     {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) select.seg-kind", "value": "0"},
-    {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) input.target-c", "value": "950"},
+    {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) input.s-target", "value": "950"},
+    {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) input.s-ramp", "value": "120"},
+    {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) input.s-dwell", "value": "10"},
     {"action": "click", "kind": "id", "selector": "saveBtn"},
     {"action": "wait-for-post", "path": "/api/profile"}
   ]
   ```
-  (field class names for the ramp/dwell inputs need one more grep of
-  `renderSegFields()` before this is run for real; the shape above is the
-  reachability proof, not a verified-exact selector list).
+  Field classes verified against `rampFieldsHtml()`
+  (`firmware/KilnFW/App/drivers/http/profiles_page.html`, which
+  `renderSegFields()` calls for any kind other than 1): the ramp/dwell
+  row's three inputs are `.s-target`, `.s-ramp` and `.s-dwell` -- there is
+  no `.target-c`. A `seg-kind` of `1` renders `ioFieldsHtml()` instead,
+  whose fields (`.io-blocking`, `.io-state`) are a different set entirely,
+  and switching kind rebuilds that row's fields from scratch, so the
+  `seg-kind` fill must always come FIRST -- a field filled before it is
+  destroyed by the rebuild.
 
 End-to-end coverage of the three new primitives (aria-label click, css
 click, and a click -> wait-for-selector -> fill -> click -> wait-for-post
@@ -175,7 +183,18 @@ chain against a local fixture, plus a negative case for a `--steps` fill
 against a missing selector) is in
 `tools/PcTools/tests/web_commission_cdp_driver.test.mjs`
 (`node tools/PcTools/tests/web_commission_cdp_driver.test.mjs`, real headless
-Chrome, no board contacted).
+Chrome, no board contacted). It also covers the two things a driver bug
+would otherwise hide from every row that uses these primitives: that a
+`fill` really dispatches a bubbling `change` (the event
+`profiles_page.html`'s `segmentRow()` rebuilds its fields from), and that
+a mid-sequence `wait-for-post` followed by a final `--expect-post` on the
+SAME path reports the second request rather than re-reporting the first.
+
+It runs in the standing suite via
+`tools/PcTools/tests/check_web_commission_cdp_driver.ps1`, in
+`run_all_checks.ps1`'s serial phase 3 alongside
+`check_ui_responsive_sweep.ps1` (both drive real headless Chrome), and
+SKIPs -- never fails -- when `node` or a Chrome/Edge binary is absent.
 
 ## Selectors not found
 

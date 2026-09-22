@@ -103,7 +103,13 @@
 //                                        middle of a sequence (e.g. a
 //                                        profile create must finish before
 //                                        the new row's delete checkbox
-//                                        exists).
+//                                        exists). Each wait CONSUMES the
+//                                        request it matched, so a later
+//                                        wait-for-post -- or the final
+//                                        --expect-post -- on the same path
+//                                        names the NEXT such POST instead
+//                                        of re-reporting the first; see
+//                                        CdpSession's postCursor.
 //                   When --steps is given, --selector-kind/--selector (the
 //                   single click below) are optional -- a run can be
 //                   steps-only. The existing single-shot --fills + one
@@ -155,6 +161,12 @@ function parseArgs(argv) {
     else if (a === '--steps') out.stepsJson = argv[++i];
   }
   out.steps = out.stepsJson ? JSON.parse(out.stepsJson) : [];
+  // A --steps payload that parses but is not an array (an object, a bare
+  // string) would otherwise leave `.length` undefined: selectorKind would
+  // silently go back to being required and the runner loop would execute
+  // ZERO steps while still exiting 0 -- a silent no-op, which is exactly
+  // the failure shape applyFills()/runStep() refuse everywhere else.
+  if (!Array.isArray(out.steps)) throw new Error('--steps must be a JSON array of step objects');
   // --selector-kind stays required for the original single-click path, but
   // a --steps run names its own selector kind per step and may have no
   // top-level click at all (e.g. W9's delete flow is entirely steps).
@@ -240,6 +252,18 @@ class CdpSession {
     // In-flight request bookkeeping for waitForQuiet()/waitForPost() below.
     this.inFlight = new Map();   // requestId -> {method, url}
     this.completed = [];         // {method, url, status|null, failed}
+    // Index into `completed` that the NEXT waitForPost() starts scanning
+    // from. Without it every waitForPost() rescans from 0 and keeps
+    // returning the FIRST matching POST of the whole run -- harmless when
+    // there is exactly one such call (the legacy single-click
+    // --expect-post path, where this stays 0 and behaviour is byte-for-byte
+    // unchanged), wrong as soon as --steps puts a "wait-for-post" step
+    // before a later wait on the same path: the second wait would resolve
+    // instantly against the first POST's record, and settle()'s returned
+    // `post` -- which web_commission_row.py's _cdp_post_status() grades the
+    // row on -- would report the EARLIER request's status/url while
+    // claiming to describe the one under test.
+    this.postCursor = 0;
     const failPending = (why) => {
       const err = new Error(`CDP connection closed: ${why}`);
       for (const { reject } of this.pending.values()) reject(err);
@@ -336,8 +360,14 @@ class CdpSession {
     const deadline = Date.now() + timeoutMs;
     const matches = (r) => r.method === 'POST' && r.url.includes(pathFragment);
     for (;;) {
-      const hit = this.completed.find(matches);
-      if (hit) return hit;
+      // Scan only from postCursor forward, and consume up to and including
+      // the hit, so each waitForPost() names a DIFFERENT request than the
+      // one the previous call already reported (see postCursor's comment).
+      const idx = this.completed.findIndex((r, i) => i >= this.postCursor && matches(r));
+      if (idx >= 0) {
+        this.postCursor = idx + 1;
+        return this.completed[idx];
+      }
       if (Date.now() >= deadline) {
         const inflight = [...this.inFlight.values()].filter(matches).length;
         throw new Error(

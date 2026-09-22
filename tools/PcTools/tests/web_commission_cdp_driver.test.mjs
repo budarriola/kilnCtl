@@ -161,6 +161,46 @@ async function main() {
       ok(r.code === 0, 'steps: driver exits 0');
       if (r.code !== 0) console.error(r.stderr);
       ok(posts.some((u) => u.includes('kind=1')), 'steps: fill value reached the POST (kind=1, not the default 0)');
+      // A fill that assigns .value without dispatching a bubbling 'change'
+      // would satisfy the assertion above and still be inert on
+      // profiles_page.html, whose segmentRow() rebuilds the row's fields
+      // from that event alone. chg=1 is the fixture's own change-listener
+      // count, i.e. what the SERVER observed.
+      ok(posts.some((u) => u.includes('chg=1')),
+         'steps: fill dispatched a bubbling change event on the <select>');
+    }
+
+    // 5. Two POSTs to the SAME path in one run: a mid-sequence
+    //    "wait-for-post" followed by a final --expect-post must report the
+    //    SECOND request, not re-report the first. Before the postCursor
+    //    fix, CdpSession.waitForPost() rescanned `completed` from index 0
+    //    on every call, so settle()'s `post` -- what
+    //    web_commission_row.py's _cdp_post_status() grades a row on --
+    //    described the earlier POST: a create's status passed off as the
+    //    delete's.
+    {
+      posts.length = 0;
+      const steps = JSON.stringify([
+        { action: 'click', kind: 'id', selector: 'addSegBtn' },
+        { action: 'wait-for-selector', selector: '#segments .seg:nth-child(1)', timeoutMs: 3000 },
+        { action: 'click', kind: 'css', selector: '#segments .seg:nth-child(1) .save' },
+        { action: 'wait-for-post', path: '/api/segment_save', timeoutMs: 3000 },
+        { action: 'click', kind: 'id', selector: 'addSegBtn' },
+        { action: 'wait-for-selector', selector: '#segments .seg:nth-child(2)', timeoutMs: 3000 },
+        { action: 'fill', kind: 'css', selector: '#segments .seg:nth-child(2) select.seg-kind', value: '1' },
+      ]);
+      const r = await runDriver(host, [
+        '--route', '/', '--steps', steps,
+        '--selector-kind', 'css', '--selector', '#segments .seg:nth-child(2) .save',
+        '--expect-post', '/api/segment_save',
+      ]);
+      ok(r.code === 0, 'post cursor: steps + trailing click run exits 0');
+      if (r.code !== 0) console.error(r.stderr);
+      ok(posts.filter((u) => u.startsWith('/api/segment_save')).length === 2,
+         'post cursor: server saw both segment_save POSTs');
+      const j = r.code === 0 ? lastJsonLine(r.stdout) : null;
+      ok(!!(j && j.post && typeof j.post.url === 'string' && j.post.url.includes('kind=1')),
+         `post cursor: --expect-post reports the SECOND POST, not the first (got ${j && j.post && j.post.url})`);
     }
 
     // 4. Negative case: a --steps fill against a selector that does not
