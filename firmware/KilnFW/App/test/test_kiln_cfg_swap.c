@@ -1101,6 +1101,96 @@ static void test_boot_recovery_esp_done_pico_mismatch_stays_alarmed(void)
                "fault kind names the ESP_DONE could-not-confirm case");
 }
 
+static void test_apply_refuses_when_scratch_malloc_fails(void)
+{
+    TEST_SECTION("F4: kiln_cfg_swap_apply() -- when the heap_caps_malloc() for its scratch struct fails, "
+                 "refuse with a reason set and *out_diverged left false, never touching either processor");
+    reset_state();
+    char reason[KILN_CFG_SWAP_REASON_MAX] = {0};
+    bool diverged = true; /* deliberately wrong-signed so a real write is observable */
+
+    heap_caps_malloc_test_set_fail(true);
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    heap_caps_malloc_test_set_fail(false);
+
+    TEST_CHECK(!ok, "apply refuses when its scratch allocation fails");
+    TEST_CHECK(strlen(reason) > 0, "a reason is reported, not a silent refusal");
+    TEST_CHECK(!diverged, "*out_diverged is left false -- an allocation failure is not a divergence");
+    TEST_CHECK(s_active_id != 7, "active_id never advanced -- nothing was attempted on either processor");
+}
+
+static void test_finish_esp_done_latches_fault_when_malloc_fails(void)
+{
+    TEST_SECTION("F4: finish_esp_done() -- when its heap_caps_malloc() fails, latch "
+                 "KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED and leave the pending record in place "
+                 "(never clear it, since neither processor was actually confirmed)");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    // Set up the same "both sides genuinely match" state as
+    // test_boot_recovery_esp_done_both_match_finishes() -- proving this is a
+    // pure allocation-failure refusal, not a masked real mismatch.
+    memcpy(s_live_blob, s_slot_blob, sizeof(s_live_blob));
+    s_live_blob_len = s_slot_blob_len;
+    s_pico_committed = s_slot_pico;
+
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_ESP_DONE;
+    p.target_id = 7;
+    p.previous_active_id = 3;
+    p.rollback_blob_len = 32;
+    memset(p.rollback_blob, 0xEE, sizeof(p.rollback_blob));
+    p.rollback_pico = s_current_pico_snapshot;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+
+    // Calls kiln_cfg_swap_boot_recover_impl() directly (visible in this TU --
+    // kiln_cfg_swap.c is #included above) with a stack-allocated `p`, rather
+    // than going through the public kiln_cfg_swap_boot_recover() wrapper:
+    // that wrapper does its OWN heap_caps_malloc() for `p` first (see
+    // test_boot_recover_latches_unreadable_when_malloc_fails() below, which
+    // exercises exactly that outer allocation), and the fail-flag has no
+    // per-call resolution -- enabling it around the wrapper call would fail
+    // the outer allocation too and never reach finish_esp_done() at all.
+    kiln_cfg_swap_pending_t p_local = p;
+    heap_caps_malloc_test_set_fail(true);
+    kiln_cfg_swap_boot_recover_impl(&p_local);
+    heap_caps_malloc_test_set_fail(false);
+
+    TEST_CHECK(s_active_id != 7, "active_id did not advance -- the swap was never confirmed finished");
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault), "boot fault latched on the allocation failure");
+    TEST_CHECK(fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED,
+               "fault kind is the same ESP_DONE-unconfirmed case a real mismatch would report");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) != KILN_CFG_SWAP_MARKER_NONE,
+               "the pending record was NOT cleared -- finish_esp_done() never got to confirm anything");
+}
+
+static void test_boot_recover_latches_unreadable_when_malloc_fails(void)
+{
+    TEST_SECTION("F4: kiln_cfg_swap_boot_recover() -- when its own top-level heap_caps_malloc() fails, "
+                 "latch KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE rather than silently doing nothing");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = KILN_CFG_SWAP_MARKER_STAGED;
+    p.target_id = 7;
+    p.previous_active_id = KILN_CFG_NO_ACTIVE_ID;
+    p.crc32 = pending_crc(&p);
+    TEST_CHECK(save_pending(&p), "a real, readable pending record exists -- proves this is purely the "
+                                  "allocation failure, not a genuinely unreadable record");
+
+    heap_caps_malloc_test_set_fail(true);
+    kiln_cfg_swap_boot_recover();
+    heap_caps_malloc_test_set_fail(false);
+
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault), "boot fault latched on the allocation failure");
+    TEST_CHECK(fault.kind == KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE,
+               "fault kind names the unreadable/could-not-recover case");
+}
+
 int main(void)
 {
     test_clean_swap_applies_both_halves();
@@ -1125,6 +1215,9 @@ int main(void)
     test_boot_recovery_fault_latches_first_only();
     test_negative_generation_check_is_load_bearing();
     test_credential_survives_a_slot_swap();
+    test_apply_refuses_when_scratch_malloc_fails();
+    test_finish_esp_done_latches_fault_when_malloc_fails();
+    test_boot_recover_latches_unreadable_when_malloc_fails();
 
     if (g_test_failures == 0) {
         printf("ALL TESTS PASSED\n");
