@@ -206,6 +206,15 @@
 
     return new Promise(function (resolve) {
       var settled = false;
+      // A2 (opus review, 2026-09-21): once the login POST is dispatched,
+      // Escape/Cancel are ignored until it settles (success, failure, or
+      // network error) -- otherwise a slow request racing an impatient
+      // Escape press can finish(false) the modal a moment before the POST's
+      // own .then() would have finish(true)'d it, so a login that actually
+      // SUCCEEDED never retries the original action. There is nothing to
+      // cancel once the request is already in flight; the operator can
+      // still close the modal after it resolves, same as before.
+      var submitting = false;
       function focusableEls() {
         // Order matches the DOM/tab order inside the panel: username,
         // password, cancel, submit.
@@ -214,6 +223,7 @@
       }
       function onKeydown(evt) {
         if (evt.key === 'Escape' || evt.keyCode === 27) {
+          if (submitting) return;
           // Same outcome as the Cancel button.
           evt.preventDefault();
           finish(false);
@@ -253,11 +263,14 @@
         resolve(ok);
       }
       function onCancel(evt) {
+        if (submitting) return;
         evt.preventDefault();
         finish(false);
       }
       function onSubmit(evt) {
         evt.preventDefault();
+        if (submitting) return;
+        submitting = true;
         loginErrorEl.textContent = '';
         var body = 'username=' + encodeURIComponent(loginUserEl.value) +
                    '&password=' + encodeURIComponent(loginPassEl.value);
@@ -273,6 +286,7 @@
             finish(true);
             return;
           }
+          submitting = false;
           if (resp.status === 429) {
             // Login lockout ladder: never auto-retry, just surface the
             // server's own Retry-After seconds (same wording as
@@ -287,6 +301,7 @@
             loginErrorEl.textContent = text || 'Login failed.';
           });
         }).catch(function () {
+          submitting = false;
           loginErrorEl.textContent = 'Network error.';
         });
       }
@@ -340,6 +355,17 @@
     // dropped again immediately) is handed back raw instead of opening a
     // second modal and looping.
     var alreadyRetried = !!(init && init.__kcAuthRetried);
+    // Opt-out (2026-09-21, opus review A1): kcOtaAuthedFetch signs its
+    // request with a single-use nonce (X-Ota-Mac), so replaying the SAME
+    // signed request after this wrapper's own login modal -- as the retry
+    // below does for every other caller -- fails the board's nonce check
+    // once OTA_AUTH_NONCE_EXPIRY_MS (30 s) has passed, which a human typing
+    // a password routinely exceeds. kcOtaAuthedFetch instead owns its own
+    // login+re-sign retry (fetches a fresh challenge and re-derives the MAC
+    // before resending) and sets this marker on its first send so this
+    // generic wrapper stands down and hands the 403 straight back to it,
+    // rather than both layers opening a modal for the same failure.
+    var callerHandlesAuth = !!(init && init.__kcCallerHandlesAuth);
     return nativeFetch(input, init).then(function (resp) {
       if (resp.status === 401) {
         // No session at all -- per the owner's refinement this is never
@@ -355,7 +381,7 @@
         window.location.href = '/login?return=' + encodeURIComponent(here);
         return resp;
       }
-      if (!alreadyRetried && resp.status === 403 &&
+      if (!alreadyRetried && !callerHandlesAuth && resp.status === 403 &&
           resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
         // Signed in, wrong role -- offer to elevate in place and retry the
         // SAME request once on success. On cancel (or a second failed
@@ -373,17 +399,21 @@
         // it did: kcFetchWithSafetyAck and kcOtaAuthedFetch sit ABOVE this
         // wrapper (they CALL fetch; this wrapper is the innermost layer),
         // so re-entering window.fetch cannot re-run either of them. The
-        // retried request carries whatever headers the original init had,
-        // including an already-sent X-Ota-Mac -- it is a replay, not a
-        // re-signing. That replay is accepted by the board only because
-        // http_auth_http.c denies an insufficient_role request BEFORE the
-        // route handler runs, so ota_http_verify_request() never consumed
-        // the nonce -- and only while that nonce is still inside its 30 s
-        // OTA_AUTH_NONCE_EXPIRY_MS window, which a human typing into this
-        // modal can easily exceed. An OTA-family action retried after a
-        // slow login therefore fails with the board's own stale-nonce 403,
-        // which the page reports the way it reports any other failure;
-        // re-signing would have to happen in kcOtaAuthedFetch, not here.
+        // retried request carries whatever headers the original init had --
+        // for an ordinary (non-OTA) caller that is fine, it is the same
+        // request, unsigned, and the board only cares about the session
+        // cookie. An OTA-family request signed by kcOtaAuthedFetch never
+        // reaches this branch at all any more (opus review A1, 2026-09-21):
+        // it sets __kcCallerHandlesAuth on its own first send, which the
+        // `callerHandlesAuth` check above hands straight back to it instead
+        // of retrying here, because replaying that same signed request
+        // would carry an already-sent X-Ota-Mac -- accepted by the board
+        // only because http_auth_http.c denies an insufficient_role request
+        // BEFORE the route handler runs (so ota_http_verify_request() never
+        // consumed the nonce), and only within OTA_AUTH_NONCE_EXPIRY_MS
+        // (30 s), which a human typing into this modal easily exceeds.
+        // kcOtaAuthedFetch's own retry (below, in this file) fetches a
+        // fresh challenge and re-derives the MAC instead of replaying.
         // The 428/no-safety-ack path is unaffected either way:
         // kcFetchWithSafetyAck inspects whatever response this wrapper's
         // promise resolves to, retry included.
@@ -663,25 +693,55 @@
   // authenticated. Merges (never clobbers) any caller-supplied `init.headers`
   // -- a caller setting Content-Type (pushImage's octet-stream upload,
   // settings_page.html's form-encoded factory-reset body) keeps it.
+  //
+  // Own insufficient_role retry (opus review A1, 2026-09-21): a signed OTA
+  // request that comes back 403/insufficient_role cannot be handled by the
+  // generic window.fetch wrapper's replay-after-login the way every other
+  // caller's request is -- the prehandler denies before the route consumes
+  // the nonce, so a replayed X-Ota-Mac is only accepted within the 30 s
+  // OTA_AUTH_NONCE_EXPIRY_MS window, which a human typing a password into
+  // the login modal routinely exceeds (a stale-nonce 403 after a successful
+  // login, reported as a mysterious second failure). So this function marks
+  // its own request `__kcCallerHandlesAuth` (the wrapper stands down for
+  // that marker -- see window.fetch's own comment) and, on that specific
+  // 403, does its own single login-then-retry: `ensureAdminLogin` is the
+  // same modal/promise the wrapper uses (defined earlier in this closure),
+  // then a brand-new challenge is fetched and the MAC re-derived before
+  // resending -- a re-signing, not a replay. Exactly one retry: `attempt()`
+  // is called at most twice total, and a second insufficient_role 403 (the
+  // freshly-logged-in account still lacking the role) is handed back as-is.
   window.kcOtaAuthedFetch = function (url, context, apPassword, init) {
     init = init || {};
-    return window.kcOtaGetChallenge().then(function (nonce) {
-      var mac = window.kcOtaDeriveMac(apPassword, nonce, context);
-      var merged = {};
-      for (var k in init) { if (Object.prototype.hasOwnProperty.call(init, k)) merged[k] = init[k]; }
-      merged.headers = {};
-      var src = init.headers || {};
-      // Same Headers-instance-or-plain-object normalisation as
-      // kcFetchWithSafetyAck's own retry path above.
-      if (typeof src.forEach === 'function' && !(src instanceof Array)) {
-        src.forEach(function (v, k2) { merged.headers[k2] = v; });
-      } else {
-        for (var k3 in src) {
-          if (Object.prototype.hasOwnProperty.call(src, k3)) merged.headers[k3] = src[k3];
+    function attempt() {
+      return window.kcOtaGetChallenge().then(function (nonce) {
+        var mac = window.kcOtaDeriveMac(apPassword, nonce, context);
+        var merged = {};
+        for (var k in init) { if (Object.prototype.hasOwnProperty.call(init, k)) merged[k] = init[k]; }
+        merged.headers = {};
+        var src = init.headers || {};
+        // Same Headers-instance-or-plain-object normalisation as
+        // kcFetchWithSafetyAck's own retry path above.
+        if (typeof src.forEach === 'function' && !(src instanceof Array)) {
+          src.forEach(function (v, k2) { merged.headers[k2] = v; });
+        } else {
+          for (var k3 in src) {
+            if (Object.prototype.hasOwnProperty.call(src, k3)) merged.headers[k3] = src[k3];
+          }
         }
+        merged.headers['X-Ota-Mac'] = bytesToHex(mac);
+        merged.__kcCallerHandlesAuth = true;
+        return window.kcFetchWithSafetyAck(url, merged);
+      });
+    }
+    return attempt().then(function (resp) {
+      if (resp.status === 403 &&
+          resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
+        return ensureAdminLogin('Administrator login required').then(function (ok) {
+          if (!ok) return resp;
+          return attempt();
+        });
       }
-      merged.headers['X-Ota-Mac'] = bytesToHex(mac);
-      return window.kcFetchWithSafetyAck(url, merged);
+      return resp;
     });
   };
 

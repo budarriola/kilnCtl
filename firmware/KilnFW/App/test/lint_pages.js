@@ -453,6 +453,79 @@ function extract_js_var_string(src, varName) {
       console.log(`app.js: the login modal does not appear to handle Escape -- it should cancel the ` +
                    `same way the Cancel button does.`);
     }
+    // A2 (opus review, 2026-09-21): once the login POST is dispatched,
+    // Escape and Cancel must be ignored until it settles -- otherwise a
+    // slow login racing an impatient Escape/Cancel press can finish(false)
+    // the modal moments before a successful login would have finish(true)'d
+    // it, silently turning a login that DID succeed into one the caller
+    // (and kcOtaAuthedFetch's own retry, see below) treats as declined.
+    // Matched as a `submitting` guard read inside onKeydown/onCancel, not
+    // just anywhere in the file (a stray `if (submitting)` in an unrelated
+    // function would pass a bare substring test vacuously).
+    if (!/function onKeydown\(evt\) \{\s*\n\s*if \(evt\.key === 'Escape'[^}]*\{\s*\n\s*if \(submitting\) return;/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's Escape handler does not check the 'submitting' guard -- ` +
+                   `Escape during an in-flight login POST could cancel a login that is about to succeed.`);
+    }
+    if (!/function onCancel\(evt\) \{\s*\n\s*if \(submitting\) return;/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's Cancel handler does not check the 'submitting' guard -- ` +
+                   `Cancel during an in-flight login POST could cancel a login that is about to succeed.`);
+    }
+  }
+}
+
+{
+  // kcOtaAuthedFetch's own insufficient_role retry (opus review A1,
+  // 2026-09-21): the generic window.fetch wrapper above cannot safely
+  // replay a signed OTA request after its login modal -- the prehandler
+  // denies before the route consumes the single-use nonce, so a replayed
+  // X-Ota-Mac is only accepted inside the 30 s OTA_AUTH_NONCE_EXPIRY_MS
+  // window, which a human typing a password routinely exceeds. So
+  // kcOtaAuthedFetch (a) opts its own request out of the wrapper's retry
+  // via the `__kcCallerHandlesAuth` marker, and (b) owns a single
+  // login-then-RE-SIGN retry of its own (a fresh challenge + a freshly
+  // derived MAC, not a replay of the old one).
+  //
+  // Scoped to just the kcOtaAuthedFetch function body (from its own
+  // assignment to the next top-level section header) so these patterns
+  // cannot accidentally match the unrelated window.fetch wrapper above,
+  // which has its own, differently-shaped retry.
+  const appJsPath = find_file(dir, 'app.js');
+  if (appJsPath) {
+    checked++;
+    const src = fs.readFileSync(appJsPath, 'utf8');
+    const startIdx = src.indexOf('window.kcOtaAuthedFetch = function');
+    const endIdx = startIdx >= 0 ? src.indexOf('\n  // ----', startIdx) : -1;
+    if (startIdx < 0 || endIdx < 0) {
+      bad++;
+      console.log(`app.js: could not locate window.kcOtaAuthedFetch's function body to check its ` +
+                   `insufficient_role retry.`);
+    } else {
+      const body = src.slice(startIdx, endIdx);
+      if (!/__kcCallerHandlesAuth\s*=\s*true\s*;/.test(body)) {
+        bad++;
+        console.log(`app.js: kcOtaAuthedFetch no longer sets __kcCallerHandlesAuth -- the generic ` +
+                     `window.fetch wrapper would try to replay its signed request after login, which ` +
+                     `fails once the OTA nonce has expired.`);
+      }
+      if (!/ensureAdminLogin\(/.test(body)) {
+        bad++;
+        console.log(`app.js: kcOtaAuthedFetch no longer calls ensureAdminLogin -- a signed OTA request ` +
+                     `denied for insufficient_role would surface the stale 403 with no way to elevate.`);
+      }
+      // "attempt()" is the re-signing call (fetches a fresh challenge, derives
+      // a fresh MAC); it must be CALLED exactly twice -- the first send and
+      // the one retry -- never looped and never dropped. The negative
+      // lookbehind excludes the "function attempt() {" declaration itself,
+      // which also matches a bare /attempt\(\)/ substring test.
+      const attemptCallCount = (body.match(/(?<!function )attempt\(\)/g) || []).length;
+      if (attemptCallCount !== 2) {
+        bad++;
+        console.log(`app.js: expected kcOtaAuthedFetch to call its re-signing attempt() exactly twice ` +
+                     `(the first send and the one retry), found ${attemptCallCount}.`);
+      }
+    }
   }
 }
 
