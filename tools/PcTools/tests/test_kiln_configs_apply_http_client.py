@@ -182,5 +182,23 @@ class PollApplyStatusTest(unittest.TestCase):
         self.assertEqual(result["state"], "done_failed")
 
 
+class IsHardwareDiffersBodyTest(unittest.TestCase):
+    """The discriminator between the route's two different 428s."""
+
+    def test_real_firmware_hardware_differs_body_is_recognised(self):
+        body = ("this saved config's 'ct_installed' differs from what this controller currently "
+                "reports -- confirm the hardware shape matches before applying. Resend with "
+                "X-Kiln-Ack-Hardware-Differs: 1.")
+        self.assertTrue(ac.is_hardware_differs_body(body))
+
+    def test_interlock_reason_is_not_mistaken_for_it(self):
+        self.assertFalse(ac.is_hardware_differs_body("no safety processor is connected"))
+        self.assertFalse(ac.is_hardware_differs_body("a firing is running"))
+
+    def test_empty_and_none_are_not_hardware_differs(self):
+        self.assertFalse(ac.is_hardware_differs_body(""))
+        self.assertFalse(ac.is_hardware_differs_body(None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,17 @@ through a raw web session for its own W42/commissioning purposes and is not
 this module -- this is the general-purpose ADMIN-tier client, following
 kiln_configs_quarantine_http_client.py's shape.
 
+Note that a 428 from this route is NOT unambiguously the hardware-differs
+refusal. apply_post_handler() runs ota_http_check_interlocks() FIRST, and
+ota_http_send_interlock_refusal() (ota_http.c) also answers 428 for
+OTA_INTERLOCK_REFUSED_NEEDS_ACK (no safety processor) -- a refusal the
+hardware-differs header cannot answer at all; it wants
+``X-Ota-Ack-No-Safety``, which this client deliberately never sends. The
+only reliable discriminator is the body: the hardware-differs message
+apply_hardware_differs() builds (kiln_cfg_store.c) always names the header
+it wants, so ``ACK_HARDWARE_DIFFERS_HEADER in body`` is the test --
+``is_hardware_differs_body()`` below.
+
 The apply itself is asynchronous: a successful POST returns 202 with the
 swap "running", not "done" -- kiln_cfg_swap_apply() is a 60+ round-trip UART
 transaction plus a flash write, deliberately dispatched to a worker rather
@@ -50,6 +61,16 @@ _APPLY_STATUS_PATH = "/api/kiln_configs/apply_status"
 # X-Ota-Ack-No-Safety: this only relaxes a LOCAL policy check, never a
 # safety-link/authentication decision.
 ACK_HARDWARE_DIFFERS_HEADER = "X-Kiln-Ack-Hardware-Differs"
+
+
+def is_hardware_differs_body(body: str) -> bool:
+    """True when a 428 body is the hardware-shape refusal rather than the
+    interlock's own 428 (no safety processor). apply_hardware_differs() in
+    kiln_cfg_store.c ends its message with "Resend with
+    X-Kiln-Ack-Hardware-Differs: 1."; no interlock reason string names that
+    header. Naming the wrong one sends the operator to re-send with a flag
+    that cannot possibly help, forever."""
+    return ACK_HARDWARE_DIFFERS_HEADER.lower() in (body or "").lower()
 
 
 class KilnConfigsApplyHttpError(Exception):

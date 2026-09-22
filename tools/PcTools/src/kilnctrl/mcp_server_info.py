@@ -434,7 +434,10 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
     line 361/kiln_cfg_store.c around line 1466/1480): a stored config whose
     hardware shape (channel count, CT topology, etc.) differs from the
     board's own is refused with 428 "Precondition Required" and the board's
-    own explanation UNLESS this header is set. It defaults to False so a
+    own explanation UNLESS this header is set. (A 428 is not always that
+    refusal -- the interlock's own "no safety processor" refusal uses 428
+    too, and this tool tells the two apart by the body rather than assuming.)
+    It defaults to False so a
     hardware mismatch is never silently masked -- on a 428 without it, this
     tool returns the board's message verbatim plus a hint to retry with
     ``ack_hardware_differs=True`` once that message has actually been read
@@ -460,8 +463,21 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
         return f"error: could not reach {resolved} for POST /api/kiln_configs/apply: {exc}"
 
     if status == 428:
-        return (f"refused (428, hardware differs) for id={id}: {body} -- retry with "
-                f"ack_hardware_differs=True only after reading and understanding this message "
+        # Two different firmware paths answer 428 here, and only ONE of them
+        # is answerable by ack_hardware_differs: apply_post_handler() runs
+        # ota_http_check_interlocks() first, and ota_http_send_interlock_
+        # refusal() returns 428 for OTA_INTERLOCK_REFUSED_NEEDS_ACK (no
+        # safety processor), which wants X-Ota-Ack-No-Safety instead -- a
+        # header this tool deliberately never sends. Naming the wrong one
+        # would send the operator into an endless identical retry.
+        if ac.is_hardware_differs_body(body):
+            return (f"refused (428, hardware differs) for id={id}: {body} -- retry with "
+                    f"ack_hardware_differs=True only after reading and understanding this message "
+                    f"(host={resolved})")
+        return (f"refused (428, interlock precondition) for id={id}: {body} -- this is NOT the "
+                f"hardware-differs refusal and ack_hardware_differs=True will not clear it; it "
+                f"needs the safety-processor acknowledgement (X-Ota-Ack-No-Safety), which this "
+                f"tool does not send. Resolve the named precondition on the board first "
                 f"(host={resolved})")
     if status == 404:
         return f"error: no such kiln config id={id} (404): {body} (host={resolved})"

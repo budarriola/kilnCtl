@@ -91,14 +91,40 @@ class HardwareDiffersRefusalTest(_Base):
     def test_428_without_ack_names_hint_and_never_polls(self):
         """The whole point of this tool: a 428 must surface the board's own
         message verbatim, and must never be silently retried with the ack
-        header on the caller's behalf."""
+        header on the caller's behalf. The body is the real one
+        apply_hardware_differs() (kiln_cfg_store.c) builds, verbatim -- an
+        invented body that does not name the header would not exercise the
+        discriminator this path now depends on."""
+        body = ("this saved config's 'ct_topology' differs from what this controller currently "
+                "reports -- confirm the hardware shape matches before applying. Resend with "
+                "X-Kiln-Ack-Hardware-Differs: 1.")
         with self._resolve_host_patch(), \
-             unittest.mock.patch.object(ac, "post_apply", return_value=(428, "hardware shape differs: ct_topology")), \
+             unittest.mock.patch.object(ac, "post_apply", return_value=(428, body)), \
              unittest.mock.patch.object(ac, "poll_apply_status") as poll_mock:
             result = msi.kiln_config_apply(id=3, confirm=True)
         self.assertIn("428", result)
-        self.assertIn("hardware shape differs: ct_topology", result)
+        self.assertIn("hardware differs", result)
+        self.assertIn("'ct_topology' differs", result)
         self.assertIn("ack_hardware_differs=True", result)
+        poll_mock.assert_not_called()
+
+    def test_428_from_the_interlock_is_not_called_hardware_differs(self):
+        """apply_post_handler() runs ota_http_check_interlocks() BEFORE the
+        hardware-differs gate, and ota_http_send_interlock_refusal()
+        (ota_http.c) also answers 428 for OTA_INTERLOCK_REFUSED_NEEDS_ACK.
+        That 428 wants X-Ota-Ack-No-Safety, which this tool never sends, so
+        telling the operator to retry with ack_hardware_differs=True would
+        loop them through an identical refusal forever."""
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 ac, "post_apply",
+                 return_value=(428, "no safety processor is connected")), \
+             unittest.mock.patch.object(ac, "poll_apply_status") as poll_mock:
+            result = msi.kiln_config_apply(id=3, confirm=True)
+        self.assertIn("428", result)
+        self.assertIn("no safety processor is connected", result)
+        self.assertNotIn("retry with ack_hardware_differs=True", result)
+        self.assertIn("will not clear it", result)
         poll_mock.assert_not_called()
 
     def test_404_no_such_config(self):
