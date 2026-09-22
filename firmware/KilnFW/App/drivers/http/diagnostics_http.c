@@ -354,9 +354,11 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     char task_esc[sizeof(rec.exc_task) * 2 + 1];
     char cause_str_esc[sizeof(rec.exc_cause_str) * 2 + 1];
     char reset_reason_esc[sizeof(rec.reset_reason) * 2 + 1];
+    char fw_build_esc[sizeof(rec.fw_build) * 2 + 1];
     json_escape(rec.exc_task, task_esc, sizeof(task_esc));
     json_escape(rec.exc_cause_str, cause_str_esc, sizeof(cause_str_esc));
     json_escape(rec.reset_reason, reset_reason_esc, sizeof(reset_reason_esc));
+    json_escape(rec.fw_build, fw_build_esc, sizeof(fw_build_esc));
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
@@ -372,11 +374,17 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
           "\"exc_a1_sp\":\"0x%08lx\",\"exc_task\":\"%s\","
           "\"found_on_boot_reset_reason\":\"%s\","
           "\"frame_trustworthy\":%s,"
+          "\"dump_id\":%lu,"
+          "\"fw_build\":\"%s\","
+          "\"crash_uptime_s\":%lu,"
+          "\"crash_uptime_known\":%s,"
           "\"backtrace\":[",
           rec.acknowledged ? "true" : "false", (unsigned long)rec.exc_cause, cause_str_esc,
           (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, (unsigned long)rec.exc_a0,
           (unsigned long)rec.exc_a1, task_esc, reset_reason_esc,
-          crash_report_frame_trustworthy(&rec) ? "true" : "false");
+          crash_report_frame_trustworthy(&rec) ? "true" : "false",
+          (unsigned long)rec.dump_id, fw_build_esc,
+          (unsigned long)rec.crash_uptime_s, rec.crash_uptime_known ? "true" : "false");
     for (uint8_t i = 0; i < rec.bt_count && i < CRASH_REPORT_BT_MAX; i++) {
         /* Hex strings, not JSON numbers: these are code addresses, and the
          * only thing anyone does with them is paste them into addr2line.

@@ -337,6 +337,13 @@
 >   2026-09-21 login attempt above did not reboot the board; the
 >   crash-report JSON carries no timestamp, build hash or dump_id so this
 >   cannot be dated from outside, which is a follow-up candidate, not a task.
+>   **Fixed 2026-09-22:** `GET /api/crash_report` now also reports `dump_id`
+>   (already existed internally, just unexposed), `fw_build` (the running
+>   image's build date+time at capture time), and a best-effort
+>   `crash_uptime_s`/`crash_uptime_known` pair fed by a new RTC-memory beacon
+>   (`crash_report_note_alive()`, called from `monitor_task.c`'s heartbeat,
+>   accurate to within one heartbeat period). Record layout bumped to v3
+>   (`CRASH_REPORT_RECORD_VERSION`), old records are refused, not misparsed.
 >   **Done:** the owner-decided login latency fix (fast login plus an
 >   escalating per-IP wrong-password backoff, remote/local IP scope) has
 >   landed, review-passed (six required fixes plus a docs/comment follow-up

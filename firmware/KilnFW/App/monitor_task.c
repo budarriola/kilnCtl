@@ -6,6 +6,9 @@
 #include "freertos/idf_additions.h"
 #include "hal_gpio.h"
 #include "rtc_watchdog.h"
+#include "crash_report.h" /* crash_report_note_alive() -- same "prove the scheduler ran this
+                             * cycle" write as rtc_watchdog_feed() below, RTC memory only, no
+                             * NVS/flash touch, safe from this task's PSRAM stack. */
 
 static const char *TAG = "monitor_task";
 
@@ -73,6 +76,7 @@ static void monitor_task_entry(void *arg)
          * on+off, ~300 ms with the default heartbeat timing), comfortably
          * inside RTC_WATCHDOG_TIMEOUT_MS's 20 s margin. */
         rtc_watchdog_feed();
+        crash_report_note_alive();
 
         if (have_led) {
             hal_gpio_set(monitor->config.led_gpio, true);

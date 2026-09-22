@@ -157,10 +157,16 @@ def get_heap_status(host: Optional[str] = None) -> str:
     lines = [f"host={resolved}"]
     crash = heap.get("unacknowledged_crash")
     if crash:
+        uptime_bit = (
+            f"crash_uptime_s={crash.get('crash_uptime_s')}"
+            if crash.get("crash_uptime_known")
+            else "crash_uptime_s=unknown"
+        )
         lines.append(
             "!!! UNACKNOWLEDGED CRASH REPORT !!! exc_task="
             f"{crash.get('exc_task')!r} exc_cause_str={crash.get('exc_cause_str')!r} "
-            f"reset_reason={crash.get('found_on_boot_reset_reason')!r} -- "
+            f"reset_reason={crash.get('found_on_boot_reset_reason')!r} "
+            f"fw_build={crash.get('fw_build')!r} {uptime_bit} dump_id={crash.get('dump_id')} -- "
             "this board panicked and nobody has reviewed it yet "
             "(GET /api/crash_report). Do not assume this run/board is healthy."
         )
@@ -224,10 +230,16 @@ def _describe_crash_report(rec: dict) -> str:
     UNACKNOWLEDGED CRASH REPORT banner surfaces, plus exc_pc, since this is
     the point where an operator/agent decides whether the record is safe to
     dismiss."""
+    uptime_bit = (
+        f"crash_uptime_s={rec.get('crash_uptime_s')}"
+        if rec.get("crash_uptime_known")
+        else "crash_uptime_s=unknown"
+    )
     return (
         f"reset_reason={rec.get('found_on_boot_reset_reason')!r} "
         f"exc_task={rec.get('exc_task')!r} exc_cause_str={rec.get('exc_cause_str')!r} "
         f"exc_pc={rec.get('exc_pc')!r} exc_addr={rec.get('exc_addr')!r} "
+        f"fw_build={rec.get('fw_build')!r} {uptime_bit} dump_id={rec.get('dump_id')} "
         f"already_acknowledged={rec.get('acknowledged')}"
     )
 

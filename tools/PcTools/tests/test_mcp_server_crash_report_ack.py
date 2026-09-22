@@ -32,6 +32,10 @@ _PRESENT_UNACKED = {
     "frame_trustworthy": True,
     "backtrace": ["0x4200abcd"],
     "backtrace_corrupted": False,
+    "dump_id": 305419896,
+    "fw_build": "Sep 22 2026 09:00:00",
+    "crash_uptime_s": 17,
+    "crash_uptime_known": True,
 }
 
 _PRESENT_ACKED = dict(_PRESENT_UNACKED, acknowledged=True)
@@ -77,6 +81,9 @@ class DryRunTest(_Base):
         self.assertIn("DRY RUN", result)
         self.assertIn("safety_poll", result)
         self.assertIn("IllegalInstruction", result)
+        self.assertIn("Sep 22 2026 09:00:00", result)
+        self.assertIn("dump_id=305419896", result)
+        self.assertIn("crash_uptime_s=17", result)
         post_mock.assert_not_called()
 
 

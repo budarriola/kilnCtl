@@ -49,7 +49,19 @@ extern "C" {
 // discarded rather than migrated -- same "one lost breadcrumb costs nothing,
 // mis-parsing an old layout would print a confidently wrong answer" argument
 // as run_state.h's own RUN_STATE_RECORD_VERSION.
-#define CRASH_REPORT_RECORD_VERSION 2u
+//
+// v2 -> v3 (ROADMAP.md follow-up, 2026-09-22): a pending crash record could
+// not be dated from outside -- no build identity, no approximate time, no
+// stable per-crash id an operator could quote. v3 adds fw_build (the
+// firmware build string of the image that was RUNNING when this record was
+// captured -- see fw_build's own field comment for why that is a proxy for
+// "the image that crashed", not always identical to it) and
+// crash_uptime_s/crash_uptime_known (a best-effort seconds-since-boot
+// reading, see crash_uptime_beacon_t below). dump_id already existed in v2
+// (used internally to dedupe recapture of the same coredump) but was never
+// surfaced in the JSON response -- diagnostics_http.c now reports it too, no
+// record-layout change needed for that part.
+#define CRASH_REPORT_RECORD_VERSION 3u
 
 // esp_core_dump_bt_info_t.bt[] (port/xtensa/esp_core_dump_summary_port.h) is
 // itself capped at 16 entries -- this just mirrors that cap, not an
@@ -59,6 +71,7 @@ extern "C" {
 #define CRASH_REPORT_TASK_NAME_MAX   16  // matches esp_core_dump_summary_t.exc_task's own size
 #define CRASH_REPORT_CAUSE_STR_MAX   32  // holds every xtensa exception-cause mnemonic with room to spare
 #define CRASH_REPORT_RESET_STR_MAX   16  // matches main.c's own reset-reason name strings ("BROWNOUT", etc.)
+#define CRASH_REPORT_FW_BUILD_MAX    40  // matches dashboard_http.h's own fw_build[40] ("Aug 20 2026 14:03:11")
 
 // The record persisted to NVS. Explicit reserved padding, same discipline
 // run_state.c's header comment insists on for its own record -- a silent
@@ -92,7 +105,45 @@ typedef struct {
     char     exc_task[CRASH_REPORT_TASK_NAME_MAX];      // faulting task's name
     char     exc_cause_str[CRASH_REPORT_CAUSE_STR_MAX]; // decoded EXCCAUSE mnemonic, "" if unknown
     char     reset_reason[CRASH_REPORT_RESET_STR_MAX];  // esp_reset_reason() name, e.g. "PANIC"
+
+    // v3 additions (see CRASH_REPORT_RECORD_VERSION's comment above) --------
+    uint32_t crash_uptime_s;     // best-effort seconds-since-boot near the crash, read from the
+                                  // crash_uptime_beacon_t in RTC memory (see crash_report.c) at
+                                  // capture time -- NOT the exact crash instant (the beacon is only
+                                  // refreshed on monitor_task's heartbeat cadence, ~300 ms), and NOT
+                                  // a wall-clock time (this board has no RTC/SNTP, same as every
+                                  // other "NO WALL CLOCK" module -- see this header's top comment).
+                                  // 0 if crash_uptime_known is 0.
+    uint8_t  crash_uptime_known; // 1 if crash_uptime_s came from a beacon that survived the reset
+                                  // with its magic intact; 0 on a power-on reset (RTC memory lost)
+                                  // or if the beacon was never written this boot cycle (e.g. the
+                                  // very first crash after a cold boot, before monitor_task's first
+                                  // heartbeat) -- crash_uptime_s must not be read as 0 seconds in
+                                  // that case, only as "unknown".
+    char     fw_build[CRASH_REPORT_FW_BUILD_MAX]; // hal_sysinfo_get_build_info()'s date+time,
+                                  // formatted the same way dashboard_http.c's own fw_build field is
+                                  // ("Aug 20 2026 14:03:11") -- read from the RUNNING image at
+                                  // capture time (crash_report_init() runs on the very next boot
+                                  // after the crash). This is the build that CRASHED unless an OTA
+                                  // or reflash happened between the crash and this boot -- the one
+                                  // scenario that can make it stale is exactly the same one
+                                  // ota_rollback_esp()'s hazard note (CLAUDE.md) already warns
+                                  // about elsewhere, and is called out again here rather than
+                                  // silently assumed.
 } crash_report_record_t;
+
+// Records "the scheduler was alive at approximately this many seconds since
+// boot" into RTC memory (survives a software reset/panic/watchdog reset,
+// lost only on a power cycle -- same storage class boot_guard.c's own RTC
+// record uses, see that file's header comment for the full rationale on why
+// RTC memory and not NVS). crash_report_init() reads this back on the NEXT
+// boot as a best-effort stand-in for "uptime at the crash", since neither
+// esp_core_dump_summary_t nor this board's NVS store anything of the kind
+// today. Intended caller: monitor_task.c's existing heartbeat loop (already
+// runs on a fixed, frequent cadence with no NVS/flash touch of its own) --
+// no new task, no new periodic writer. Cheap (two RTC-memory word writes,
+// no I/O); safe to call from any task, any frequency.
+void crash_report_note_alive(void);
 
 // Called ONCE at boot, early, AFTER kiln_nvs (KILN_NVS_PARTITION) is
 // reachable -- see main.c's call site next to its esp_core_dump_image_check()

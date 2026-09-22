@@ -128,6 +128,8 @@ _CRASH_UNACK_BODY = json.dumps({
     "present": True, "acknowledged": False, "exc_cause": 6, "exc_cause_str": "IllegalInstruction",
     "exc_task": "safety_poll", "found_on_boot_reset_reason": "panic/exception",
     "backtrace": [], "backtrace_corrupted": False,
+    "dump_id": 3735928559, "fw_build": "Sep 22 2026 09:00:00",
+    "crash_uptime_s": 42, "crash_uptime_known": True,
 }).encode("utf-8")
 
 _CRASH_NONE_BODY = json.dumps({"present": False}).encode("utf-8")
@@ -167,6 +169,9 @@ class UnacknowledgedCrashSurfacingTest(unittest.TestCase):
         self.assertIn("UNACKNOWLEDGED CRASH REPORT", result)
         self.assertIn("safety_poll", result)
         self.assertIn("panic/exception", result)
+        self.assertIn("Sep 22 2026 09:00:00", result)
+        self.assertIn("crash_uptime_s=42", result)
+        self.assertIn("dump_id=3735928559", result)
 
     def test_clean_board_reports_no_crash(self):
         """PROOF a clean board passes: reset_reason is a normal boot reason

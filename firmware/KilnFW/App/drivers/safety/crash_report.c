@@ -1,14 +1,19 @@
 #include "crash_report.h"
 
+#include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h" /* RTC_NOINIT_ATTR -- s_uptime_beacon below, same storage class as
+                         * boot_guard.c's s_bg_rtc (see that file's header comment) */
 #include "esp_crc.h"
 #include "esp_core_dump.h" /* esp_core_dump_summary_t/esp_core_dump_get_summary() -- full-summary parsing stays above hal_sysinfo, see that header's top comment */
 #include "esp_log.h"
 
 #include "hal_kv.h"
+#include "hal_time.h" /* hal_time_now_us() -- crash_report_note_alive()'s RTC-memory beacon */
 #include "nvs_key_check.h"
-#include "hal_sysinfo.h" /* hal_sysinfo_coredump_present()/_erase(), hal_sysinfo_reset_reason() */
+#include "hal_sysinfo.h" /* hal_sysinfo_coredump_present()/_erase(), hal_sysinfo_reset_reason(),
+                           * hal_sysinfo_get_build_info() (fw_build, v3) */
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t from
                               * hal_sysinfo_coredump_erase()/hal_kv failures rather than collapsing
                               * to ESP_FAIL */
@@ -82,7 +87,45 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
  * C11 alike and checks exactly the same thing. Update this literal whenever
  * crash_report_record_t's layout changes, alongside bumping
  * CRASH_REPORT_RECORD_VERSION. */
-typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 160) ? 1 : -1];
+typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 208) ? 1 : -1];
+
+/* ---------------------------------------------------------------------------
+ * Uptime beacon (v3, ROADMAP.md follow-up) -- RTC memory, NOT NVS. Same
+ * storage class and same magic-guarded-against-power-on-garbage pattern as
+ * boot_guard.c's s_bg_rtc (see that file's header comment for the full
+ * "why RTC memory, not NVS" rationale: it survives a software reset/panic/
+ * watchdog reset and is only lost on a power cycle, and unlike NVS it can be
+ * written at a frequent, fixed cadence with zero flash wear and zero risk to
+ * a task with a non-internal-SRAM stack, since RTC_NOINIT_ATTR storage is
+ * ordinary memory, not a flash write path).
+ *
+ * WHY THIS IS ONLY "APPROXIMATE": monitor_task.c's heartbeat calls
+ * crash_report_note_alive() once per heartbeat cycle (~300 ms by default,
+ * see monitor_task.c), not from the panic handler itself -- a genuine
+ * lockup/panic can occur up to one heartbeat period after the last update.
+ * That is still far more informative than "unknown", which is what every
+ * crash record reported before this field existed.
+ * ------------------------------------------------------------------------- */
+#define CRASH_UPTIME_BEACON_MAGIC 0x43554231u /* "CUB1" */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t uptime_s;
+} crash_uptime_beacon_t;
+
+/* Deliberately NOT zeroed by startup code (RTC_NOINIT_ATTR), so it carries
+ * across a software reset/panic -- garbage after a genuine power-on is
+ * rejected by the magic check in crash_report_init() below. */
+RTC_NOINIT_ATTR static crash_uptime_beacon_t s_uptime_beacon;
+
+void crash_report_note_alive(void)
+{
+    s_uptime_beacon.uptime_s = (uint32_t)(hal_time_now_us() / 1000000ull);
+    s_uptime_beacon.magic = CRASH_UPTIME_BEACON_MAGIC; /* written last, after uptime_s -- a reset
+                                                          * landing between these two writes leaves
+                                                          * a bad magic, correctly read as "unknown"
+                                                          * rather than a half-updated uptime_s. */
+}
 
 /* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
  * are unusable -- identical to run_state.c's/ota_record.c's own
@@ -233,6 +276,33 @@ static void fill_from_summary(crash_report_record_t *out, const esp_core_dump_su
     copy_str(out->reset_reason, sizeof(out->reset_reason), reset_reason_name);
 }
 
+/* v3 fields -- pure, no ESP-IDF I/O, exercised directly by host tests (same
+ * "pure helper, no live IDF types" convention as compute_crc/record_valid
+ * above, unlike fill_from_summary() which takes the live esp_core_dump_
+ * summary_t and is therefore NOT host-testable -- see this file's own
+ * comment on fill_from_summary()).
+ *
+ * `beacon`/`build_info` are read-only inputs, not this module's globals
+ * directly, so a test can construct both by hand without touching
+ * s_uptime_beacon or a real hal_sysinfo backend. */
+static void fill_v3_fields(crash_report_record_t *out, const crash_uptime_beacon_t *beacon,
+                            const hal_sysinfo_build_info_t *build_info)
+{
+    if (beacon->magic == CRASH_UPTIME_BEACON_MAGIC) {
+        out->crash_uptime_s = beacon->uptime_s;
+        out->crash_uptime_known = 1u;
+    } else {
+        out->crash_uptime_s = 0u;
+        out->crash_uptime_known = 0u;
+    }
+
+    if (build_info->valid) {
+        snprintf(out->fw_build, sizeof(out->fw_build), "%s %s", build_info->date, build_info->time);
+    } else {
+        out->fw_build[0] = '\0';
+    }
+}
+
 /* Identity hash for "which coredump is this" (crash_report_record_t.dump_id).
  *
  * Deliberately NOT a CRC over the raw esp_core_dump_summary_t: that struct is
@@ -323,6 +393,7 @@ static bool load(crash_report_record_t *out)
     rec.exc_task[sizeof(rec.exc_task) - 1] = '\0';
     rec.exc_cause_str[sizeof(rec.exc_cause_str) - 1] = '\0';
     rec.reset_reason[sizeof(rec.reset_reason) - 1] = '\0';
+    rec.fw_build[sizeof(rec.fw_build) - 1] = '\0';
 
     if (!record_valid(&rec)) {
         ESP_LOGW(TAG, "stored crash record failed version/CRC check -- treating as no record");
@@ -417,6 +488,11 @@ void crash_report_init(void)
     memset(&rec, 0, sizeof(rec));
     fill_from_summary(&rec, &summary, rr_name);
     rec.dump_id = dump_id;
+
+    hal_sysinfo_build_info_t build_info;
+    hal_sysinfo_get_build_info(&build_info);
+    fill_v3_fields(&rec, &s_uptime_beacon, &build_info);
+
     seal_crc(&rec);
 
     esp_err_t err = persist(&rec);

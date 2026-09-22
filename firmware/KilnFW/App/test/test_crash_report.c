@@ -727,6 +727,82 @@ static void test_frame_trustworthy_rejects_pc_of_zero(void)
     TEST_CHECK(crash_report_frame_trustworthy(NULL) == false, "NULL record is not trustworthy");
 }
 
+// fill_v3_fields() -- pure helper, ROADMAP.md follow-up (v3 record fields:
+// dump_id was already exposed internally, this covers the two NEW pieces,
+// crash_uptime_s/crash_uptime_known and fw_build).
+static void test_fill_v3_fields_valid_beacon_and_build_info(void)
+{
+    TEST_SECTION("fill_v3_fields -- a valid beacon and valid build_info populate both fields");
+
+    crash_report_record_t out;
+    memset(&out, 0, sizeof(out));
+
+    crash_uptime_beacon_t beacon;
+    beacon.magic = CRASH_UPTIME_BEACON_MAGIC;
+    beacon.uptime_s = 12345u;
+
+    hal_sysinfo_build_info_t build_info;
+    memset(&build_info, 0, sizeof(build_info));
+    strncpy(build_info.date, "Sep 22 2026", sizeof(build_info.date) - 1);
+    strncpy(build_info.time, "10:00:00", sizeof(build_info.time) - 1);
+    build_info.valid = true;
+
+    fill_v3_fields(&out, &beacon, &build_info);
+
+    TEST_CHECK(out.crash_uptime_s == 12345u, "a valid beacon's uptime_s is copied through");
+    TEST_CHECK(out.crash_uptime_known == 1u, "a valid beacon marks crash_uptime_known");
+    TEST_CHECK(strcmp(out.fw_build, "Sep 22 2026 10:00:00") == 0,
+               "valid build_info is formatted as \"date time\", matching dashboard_http.c's own "
+               "fw_build convention");
+}
+
+static void test_fill_v3_fields_bad_magic_reads_as_unknown(void)
+{
+    TEST_SECTION("fill_v3_fields -- a beacon with the wrong magic (power-on garbage, or a beacon "
+                 "never written this boot) is reported as unknown, not a stale/garbage number");
+
+    crash_report_record_t out;
+    memset(&out, 0, sizeof(out));
+
+    crash_uptime_beacon_t beacon;
+    beacon.magic = 0xDEADBEEFu; // anything but CRASH_UPTIME_BEACON_MAGIC
+    beacon.uptime_s = 999999u;  // garbage value that must NOT leak through
+
+    hal_sysinfo_build_info_t build_info;
+    memset(&build_info, 0, sizeof(build_info));
+    build_info.valid = false;
+
+    fill_v3_fields(&out, &beacon, &build_info);
+
+    TEST_CHECK(out.crash_uptime_known == 0u, "a bad-magic beacon is reported as unknown");
+    TEST_CHECK(out.crash_uptime_s == 0u,
+               "a bad-magic beacon's garbage uptime_s is not copied through when unknown");
+    TEST_CHECK(out.fw_build[0] == '\0', "invalid build_info leaves fw_build empty, not garbage");
+}
+
+static void test_crash_report_note_alive_writes_a_valid_beacon(void)
+{
+    TEST_SECTION("crash_report_note_alive -- writes a beacon fill_v3_fields() then reads as known");
+
+    memset(&s_uptime_beacon, 0xAA, sizeof(s_uptime_beacon)); // simulate power-on garbage first
+    TEST_CHECK(s_uptime_beacon.magic != CRASH_UPTIME_BEACON_MAGIC,
+               "sanity: the pre-fill garbage does not already look like a valid beacon");
+
+    crash_report_note_alive();
+
+    TEST_CHECK(s_uptime_beacon.magic == CRASH_UPTIME_BEACON_MAGIC,
+               "crash_report_note_alive() stamps the magic");
+
+    crash_report_record_t out;
+    memset(&out, 0, sizeof(out));
+    hal_sysinfo_build_info_t build_info;
+    memset(&build_info, 0, sizeof(build_info));
+    build_info.valid = false;
+    fill_v3_fields(&out, &s_uptime_beacon, &build_info);
+    TEST_CHECK(out.crash_uptime_known == 1u,
+               "a beacon written by crash_report_note_alive() reads back as known");
+}
+
 void run_test_crash_report(void)
 {
     test_crc_round_trip();
@@ -746,6 +822,9 @@ void run_test_crash_report(void)
     test_clear_erases_coredump_via_hal_sysinfo();
     test_exception_registers_round_trip();
     test_frame_trustworthy_rejects_pc_of_zero();
+    test_fill_v3_fields_valid_beacon_and_build_info();
+    test_fill_v3_fields_bad_magic_reads_as_unknown();
+    test_crash_report_note_alive_writes_a_valid_beacon();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }
