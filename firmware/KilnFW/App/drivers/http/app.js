@@ -254,6 +254,15 @@
       function finish(ok) {
         if (settled) return;
         settled = true;
+        // The modal's DOM is built ONCE (openLoginModal reuses loginModalEl),
+        // so the disabled/"Signing in..." state set by setSubmitting(true)
+        // outlives this promise unless it is cleared here. finish(true) --
+        // the success path -- returns without any other settle step, so
+        // without this the NEXT time the modal opens both buttons are still
+        // disabled: Cancel is unclickable and a disabled default submit
+        // button also blocks implicit (Enter-key) form submission, leaving
+        // the operator unable to log in again without reloading the page.
+        setSubmitting(false);
         loginFormEl.removeEventListener('submit', onSubmit);
         loginCancelEl.removeEventListener('click', onCancel);
         document.removeEventListener('keydown', onKeydown, true);

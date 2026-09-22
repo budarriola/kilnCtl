@@ -498,6 +498,16 @@ function extract_js_var_string(src, varName) {
       console.log(`app.js: the login modal's Cancel/Submit buttons are not disabled while a login POST ` +
                    `is in flight.`);
     }
+    // The modal DOM is built once and reused, so finish() MUST clear the
+    // disabled/"Signing in..." state -- finish(true) (success) has no other
+    // settle step, and a leftover disabled default submit button blocks even
+    // implicit (Enter-key) submission the next time the modal opens. Matched
+    // inside finish() specifically, not just anywhere in the file.
+    if (!/function finish\(ok\) \{[\s\S]{0,800}?setSubmitting\(false\);/.test(src)) {
+      bad++;
+      console.log(`app.js: the login modal's finish() does not clear the submitting state -- the ` +
+                   `reused modal would reopen with Cancel/Submit still disabled after a successful login.`);
+    }
     if (!/loginSubmitEl\.textContent = on \? 'Signing in/.test(src)) {
       bad++;
       console.log(`app.js: the login modal's Submit button does not show a "Signing in..." label while ` +
