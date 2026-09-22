@@ -878,6 +878,56 @@ def _cdp_post_status(proc: "subprocess.CompletedProcess") -> "Optional[dict]":
     return post if isinstance(post, dict) else None
 
 
+def _cdp_post_statuses(proc: "subprocess.CompletedProcess", paths: "tuple[str, ...]") -> "dict[str, list[dict]]":
+    """Best-effort parse of the CDP driver's final JSON line to pull out
+    EVERY completed POST whose URL contains one of `paths`, from the
+    `network` field (`cdp.completed` in _web_commission_cdp.mjs -- the same
+    request/response bookkeeping `--expect-post`/`_cdp_post_status()`
+    already reads from, just the whole list instead of one cursor-tracked
+    match). Needed for a row whose single click fires more than one POST it
+    must grade individually (W50: `/api/settings/tz` then `/api/unit_pref`,
+    both ahead of the `/api/setup/progress` POST `--expect-post` already
+    waits for and that `_cdp_post_status()` reports). Returns a dict keyed
+    by the matched path with a list of {method,url,status,failed} records
+    (usually one; a list because nothing prevents more than one match), or
+    an empty dict per path with no match at all -- distinguish "no record"
+    from "recorded and it answered 2xx" the same way callers of
+    `_cdp_post_status()` already do (a status of None means "couldn't
+    observe it", not "it failed"). Returns {} entirely if stdout wasn't the
+    expected JSON shape (e.g. `_FakeProc`'s `{"ok": true}` in tests, or
+    firmware/driver output that predates this field)."""
+    try:
+        parsed = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+    network = parsed.get("network") if isinstance(parsed, dict) else None
+    if not isinstance(network, list):
+        return {}
+    out: "dict[str, list[dict]]" = {}
+    for path in paths:
+        matches = [rec for rec in network
+                   if isinstance(rec, dict) and rec.get("method") == "POST"
+                   and path in str(rec.get("url") or "")]
+        if matches:
+            out[path] = matches
+    return out
+
+
+def _non2xx_post_failures(post_statuses: "dict[str, list[dict]]") -> "list[str]":
+    """Given `_cdp_post_statuses()`'s output, names each recorded POST that
+    did not answer 2xx (or was flagged `failed`), one entry per bad record.
+    A path this run never observed a POST for is silently skipped here --
+    that is "couldn't observe it", graded elsewhere, not a failure of this
+    check."""
+    bad: "list[str]" = []
+    for path, records in post_statuses.items():
+        for rec in records:
+            status = rec.get("status")
+            if rec.get("failed") or not isinstance(status, int) or not (200 <= status < 300):
+                bad.append(f"{path} -> {status!r}{' (failed)' if rec.get('failed') else ''}")
+    return bad
+
+
 def _is_leftover_config_name(name: "Optional[str]") -> bool:
     """True for a name this row's own generator could have produced, or the
     older fixed literal name a previous version of this function used
@@ -1733,6 +1783,13 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
             return False, (f" -- RESTORE FAILED: CDP driver (restore) exited {restore_proc.returncode}: "
                             f"{restore_proc.stderr.strip()[-500:]}; board may be LEFT with "
                             f"temp_unit={test_unit!r}, restore by hand (originally {orig_unit!r}){prog_note}")
+        bad_restore_posts = _non2xx_post_failures(
+            _cdp_post_statuses(restore_proc, ("/api/settings/tz", "/api/unit_pref")))
+        if bad_restore_posts:
+            _, prog_note = _restore_progress()
+            return False, (f" -- RESTORE FAILED: POST(s) did not answer 2xx during the restoring Save "
+                            f"click: {'; '.join(bad_restore_posts)}; board may be LEFT with "
+                            f"temp_unit={test_unit!r}, restore by hand (originally {orig_unit!r}){prog_note}")
         final_status, final_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
         prog_ok, prog_note = _restore_progress()
         if final_status != 200 or not isinstance(final_body, dict):
@@ -1762,6 +1819,21 @@ def _run_setup_wizard_step1(row: Row, host: str, screenshot_dir: str, cookie: st
         if proc.returncode != 0:
             failure = (f"{row.row_id} FAIL: CDP driver (set) exited {proc.returncode}: "
                         f"{proc.stderr.strip()[-500:]}")
+        else:
+            # #step1Save's click fires THREE chained POSTs (tz, then
+            # unit_pref, then setup/progress); `expect_post` above only
+            # waits for and reports the LAST of the three
+            # (`_cdp_post_status()`), so a non-2xx on either of the first
+            # two would previously go unnoticed by this row entirely --
+            # only the GET /api/status read-back afterward could catch it,
+            # and only indirectly (a field failing to change). Check the
+            # first two explicitly, from the same driver-recorded network
+            # list `expect_post`/`_cdp_post_status()` already reads from.
+            bad_posts = _non2xx_post_failures(
+                _cdp_post_statuses(proc, ("/api/settings/tz", "/api/unit_pref")))
+            if bad_posts:
+                failure = (f"{row.row_id} FAIL: POST(s) did not answer 2xx during the Save click: "
+                            f"{'; '.join(bad_posts)}")
 
     if failure is None:
         mid_status, mid_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)

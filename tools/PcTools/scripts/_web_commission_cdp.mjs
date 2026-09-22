@@ -649,6 +649,14 @@ async function main() {
     console.log(JSON.stringify({
       ok: true, route: args.route, selector: args.selector || null,
       fills: args.fills, dialogs: cdp.dialogs, post: postResult,
+      // Every completed request/response this run observed (method, url,
+      // status, failed) -- see the CDPSession `completed` field above. This
+      // is the SAME data `post`/--expect-post already reads from, just the
+      // whole list rather than one cursor-tracked match, for a caller (e.g.
+      // web_commission_row.py's setup-wizard row) whose one click fires
+      // MULTIPLE POSTs it needs to grade individually rather than just the
+      // last one `--expect-post` waited for.
+      network: cdp.completed,
     }));
   } finally {
     try { chrome.kill(); } catch { /* already gone */ }

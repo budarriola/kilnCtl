@@ -1424,6 +1424,57 @@ def test_setup_wizard_step1_full_flow_passes(monkeypatch):
     assert post_calls == [("/api/setup/progress", {"step": "1", "state": "pending"})]
 
 
+class _FakeProcWithNetwork:
+    """Like `_FakeProc`, but its stdout carries a `network` list the way
+    the real CDP driver's `--expect-post`-independent request/response
+    bookkeeping does (`cdp.completed` in _web_commission_cdp.mjs), so a
+    test can exercise `_cdp_post_statuses()`/`_non2xx_post_failures()`
+    against W50's own two extra POSTs (tz, unit_pref) rather than just the
+    one `--expect-post` waits for (setup/progress)."""
+
+    def __init__(self, records):
+        self.returncode = 0
+        self.stdout = json.dumps({"ok": True, "network": records})
+        self.stderr = ""
+
+
+def test_setup_wizard_step1_fails_loud_on_a_non_2xx_tz_post(monkeypatch):
+    # #step1Save's click fires THREE chained POSTs; the row's `expect_post`
+    # only waits for and reports the LAST one (/api/setup/progress). A
+    # non-2xx on /api/settings/tz (the FIRST) must fail this row loud even
+    # though the GET /api/status read-back afterward would otherwise still
+    # show temp_unit flipped (unit_pref can succeed independently of tz).
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _w50_get_json([
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "F"}),
+            (200, {"time_tz": "EST5EDT,M3.2.0,M11.1.0", "temp_unit": "C"}),
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+    set_records = [
+        {"method": "POST", "url": "http://192.0.2.1/api/settings/tz", "status": 500, "failed": False},
+        {"method": "POST", "url": "http://192.0.2.1/api/unit_pref", "status": 200, "failed": False},
+        {"method": "POST", "url": "http://192.0.2.1/api/setup/progress", "status": 200, "failed": False},
+    ]
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        return _FakeProcWithNetwork(set_records) if len(calls) == 1 else _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    _w50_post_form(monkeypatch)
+
+    ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "did not answer 2xx" in msg
+    assert "/api/settings/tz -> 500" in msg
+    assert len(calls) == 2, "restore Save must still run after a bad tz POST status"
+    assert "restored" in msg
+
+
 def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
     # The write silently didn't land -- must FAIL, not report PASS with a
     # restore of a value that was never actually different (same shape as
