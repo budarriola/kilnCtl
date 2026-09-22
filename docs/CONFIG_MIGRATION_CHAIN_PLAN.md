@@ -242,7 +242,16 @@ This is inert on boards with no `cfg` partition, which is all of them today,
 and must be settled before `cfg` goes live rather than after. **Superseded
 2026-09-21:** the bench board now has `cfg` mounted and populated (per
 `GET /api/cfgfs`), so this requirement is now live there, not purely
-theoretical.
+theoretical. **CLOSED, same day:** `nvs_load()` (`zones_config_store.c`) now
+compares the NVS candidate it decoded against whatever
+`zones_config_cfg_fs_resolve()` resolved to *before* overwriting `s_zones.cfg`
+with the winner; if the `cfg` file won the tie-break (a migration or a
+divergence resync) and its content differs from the NVS candidate, the same
+read-back-verified persist helper §1.6 already uses (`zones_config_persist_
+migrated_blob_verified()`) runs once more, which write-backs to NVS directly
+and to the `cfg` file via `nvs_save()`'s existing dual-write. This closes the
+gap for both directions: an NVS-side migration was already write-back'd by
+§1.6; this adds the file-side case §1.6 explicitly deferred.
 
 ### 1.6 Migration must persist — the blocking defect (CLOSED 2026-09-17)
 

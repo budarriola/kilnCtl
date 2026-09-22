@@ -575,6 +575,116 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
                "the losing file was resynced from NVS, so the divergence does not persist across boots");
 }
 
+// ---------------------------------------------------------------------
+// 8. The gap this pass closes: the `cfg` file wins the tie-break (here,
+//    simplest case -- NVS has nothing trustworthy at all) carrying an
+//    OLD-VERSION blob that only migrates in RAM during decode. Before this
+//    fix, nvs_load() discarded the NVS side unconditionally whenever the
+//    file won (CLAUDE.md/CONFIG_MIGRATION_CHAIN_PLAN.md section 1.5's
+//    "used_file is unreachable in practice" gap) and never wrote the
+//    migrated struct back anywhere -- both NVS (still empty/stale) and the
+//    file (still holding the old-version bytes) would diverge from what
+//    this boot is actually running on, and a future firmware's one-step
+//    migration policy would be unable to consume either of them. This test
+//    proves NVS now ends up holding the fully-migrated, current-version
+//    blob, read-back verified, after a file-sourced migration -- the same
+//    guarantee §1.6 already gave the NVS-sourced case.
+// ---------------------------------------------------------------------
+static void test_file_wins_after_migration_writes_back_to_nvs(void)
+{
+    TEST_SECTION("zones cfg_fs: cfg file wins with an old-version blob (NVS empty) -- the migrated result "
+                 "must be written back to NVS too, not left RAM-only");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    // Stage an old-version (v21, immediately pre-progress_band_c) blob
+    // directly into the file at rev 7 -- same staging technique test 5
+    // above uses, bypassing zones_config_cfg_fs_save() (which always writes
+    // CURRENT version) because this test wants an old on-disk file version.
+    zones_cfg_v21_t v21;
+    memset(&v21, 0, sizeof(v21));
+    v21.version = 21;
+    v21.thermo_count = 1;
+    v21.relay_count = 1;
+    v21.max_simultaneous_relays = 1;
+    v21.safety_tc_type = 3;
+    v21.timing_profile_count = 1;
+    strncpy(v21.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    v21.timing_profiles[0].guard_progress_duty_min = 0.1f;
+    v21.timing_profiles[0].ramp_lock_band_c = 3.0f;
+    v21.zones[0].relay_mask = 1;
+    v21.zones[0].thermo_mask = 1;
+    snprintf(v21.zones[0].name, sizeof(v21.zones[0].name), "FileMigrated");
+    v21.zones[0].pid_kp = 6.25f;
+    v21.zones[0].max_temp_c = 1150.0f;
+    v21.zones[0].model_k_dc = 15.0f;
+    v21.crc32 = 0;
+
+    uint8_t filebuf[4 + sizeof(v21)];
+    filebuf[0] = 7;
+    filebuf[1] = 0;
+    filebuf[2] = 0;
+    filebuf[3] = 0;
+    memcpy(filebuf + 4, &v21, sizeof(v21));
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, filebuf, sizeof(filebuf)) == ESP_OK,
+               "test setup: old-version (v21) blob staged directly into the file at rev 7");
+
+    // NVS side is genuinely empty (reset_all()/fake_kv_reset_all(), and no
+    // nvs_save() has run this test) -- nvs_load_from() must report
+    // found=false, valid=false, so the file wins the tie-break outright
+    // (zones_config_cfg_fs_resolve()'s `!nvs_valid` branch).
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid,
+               "load adopts the file-sourced, migrated config");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "FileMigrated") == 0 && s_zones.cfg.zones[0].pid_kp == 6.25f,
+               "in-RAM config is the migrated file content");
+    TEST_CHECK(s_zones.cfg.version == ZONES_CFG_VERSION, "in-RAM version is CURRENT, not the staged v21 byte");
+
+    // THE FIX: NVS must now actually hold the migrated, current-version
+    // blob -- read back from flash, never trust an in-RAM assertion alone
+    // (same discipline zones_config_persist_migrated_blob_verified() itself
+    // uses).
+    hal_kv_handle_t h;
+    hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    TEST_CHECK(open_err == HAL_OK, "NVS opened read-only for verification");
+    uint8_t readback[sizeof(zones_cfg_t)];
+    size_t readback_len = sizeof(readback);
+    hal_status_t rb_err = HAL_IO;
+    uint32_t nvs_rev_after = 0;
+    if (open_err == HAL_OK) {
+        rb_err = hal_kv_get_blob(&h, NVS_KEY_ZONES, readback, &readback_len);
+        (void)hal_kv_get_u32(&h, "zones_rev", &nvs_rev_after);
+        hal_kv_close(&h);
+    }
+    TEST_CHECK(rb_err == HAL_OK, "THE FIX: the migrated blob must now be readable back from NVS -- before this "
+                                 "pass, a file-sourced migration was never persisted to NVS at all");
+    TEST_CHECK(readback_len == sizeof(zones_cfg_t), "the persisted NVS blob is full current-version size");
+    TEST_CHECK(readback_len == sizeof(zones_cfg_t) && readback[0] == ZONES_CFG_VERSION,
+               "THE FIX: NVS holds the migrated CURRENT version, not left empty/stale for a future one-step "
+               "migration to choke on");
+    TEST_CHECK(nvs_rev_after > 7, "the dual-write rev counter advanced past the file's staged rev 7 once the "
+                                 "write-back ran");
+
+    // Both copies must now agree: the file itself (already migrated, so
+    // this also confirms the write-back's nvs_save() call re-wrote the file
+    // at the new rev rather than leaving it at the old rev-7/v21 bytes).
+    zones_cfg_t file_raw;
+    uint32_t file_rev_after = 0;
+    bool file_raw_valid = false;
+    zones_config_cfg_fs_load_raw(&file_raw, &file_rev_after, &file_raw_valid);
+    TEST_CHECK(file_raw_valid && file_rev_after == nvs_rev_after,
+               "file and NVS report the SAME rev after the write-back -- no lingering divergence");
+    zones_cfg_t nvs_readback_cfg;
+    memcpy(&nvs_readback_cfg, readback, sizeof(nvs_readback_cfg)); /* properly aligned copy, never a cast of
+                                                                     * the raw byte buffer -- see
+                                                                     * zones_config_cfg_fs.c's own alignment
+                                                                     * comment on why that matters. */
+    TEST_CHECK(memcmp(&file_raw, &nvs_readback_cfg, sizeof(file_raw)) == 0,
+               "file and NVS hold byte-identical content after the write-back");
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
     test_partition_absent_falls_through_to_nvs_only();
@@ -585,6 +695,7 @@ void run_test_zones_config_cfg_fs(void)
     test_file_migration_matches_direct_blob_decode_v21();
     test_interrupted_file_write_leaves_old_or_new();
     test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
+    test_file_wins_after_migration_writes_back_to_nvs();
 
     reset_all();
 }

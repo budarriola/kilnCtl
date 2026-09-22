@@ -467,16 +467,25 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, &resolved, &resolved_rev,
                                                     &used_file);
     s_zones_cfg_rev = resolved_rev;
+    /* cfg is MOUNTED on the bench board as of 2026-09-21 (7 files, confirmed
+     * via GET /api/cfgfs -- CLAUDE.md's "512K LittleFS cfg partition"), so
+     * used_file below is reachable in practice now, not the theoretical case
+     * the comment here used to describe. zones_config_cfg_fs_resolve() (and
+     * zones_config_json_decode_blob() underneath it) migrates an old-version
+     * `cfg` file exactly like it migrates an old NVS blob, entirely in RAM --
+     * nothing on the file-read path writes anything back. Compare against
+     * the NVS candidate BEFORE it is overwritten below: `s_zones.cfg` still
+     * holds whatever nvs_load_from_with_migration_info() just decoded (or
+     * the zeroed default, if !nvs_valid), and `resolved` is a struct this
+     * function already owns on the stack -- no new large local needed. If
+     * the two don't already agree, NVS (and, redundantly but harmlessly,
+     * the file itself, since zones_config_cfg_fs_save() re-stamps a fresh
+     * CRC) needs a write-back once this boot's winner is adopted, same as
+     * the migrated-from-NVS case below -- otherwise a from-file schema
+     * migration would diverge the two stores across the very next boot. */
+    bool file_side_needs_writeback = false;
     if (used_file) {
-        /* The `cfg` LittleFS file won the tie-break, so whatever was just
-         * decoded/migrated from NVS above is discarded in favor of it --
-         * persisting the NVS-side migration here would be writing back data
-         * this boot isn't even using. The `cfg` side's own version currency
-         * is zones_config_cfg_fs_resolve()'s concern, not this fix's: on
-         * every board today there is no `cfg` partition mounted at boot
-         * (CLAUDE.md's "cfg partition ... not yet mounted at boot, so this
-         * is inert today"), so used_file is unreachable in practice and this
-         * gap is deliberately left for whoever wires that partition up. */
+        file_side_needs_writeback = !nvs_valid || memcmp(&s_zones.cfg, &resolved, sizeof(resolved)) != 0;
         migrated_from_nvs = false;
         s_zones.cfg = resolved;
         if (out_found) {
@@ -517,9 +526,23 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * (the migrated in-RAM copy is still usable this boot, same as
      * migrate_from_default_partition()'s own error handling below) -- it is
      * logged loudly and will simply retry on the next boot that reaches
-     * this migration branch again. */
+     * this migration branch again. Reused verbatim for the file-won case
+     * (`file_side_needs_writeback`) above: zones_config_persist_migrated_
+     * blob_verified() only stamps/writes/read-back-verifies whatever is
+     * currently in `s_zones.cfg` against NVS -- it does not care which
+     * source produced it, and nvs_save() underneath it already dual-writes
+     * the `cfg` file first (zones_config_cfg_fs_save()), so one call closes
+     * both sides. `on_disk_version_before` is only used for the log line;
+     * the file-won case has no single "on-disk NVS version" to name (NVS may
+     * have been invalid, or a different, now-overwritten version), so it is
+     * logged as 0 with an explicit "file source" note instead of reusing
+     * nvs_load_from_with_migration_info()'s (unrelated) value. */
     if (err == ESP_OK && trustworthy && migrated_from_nvs) {
         (void)zones_config_persist_migrated_blob_verified(on_disk_version_before);
+    } else if (err == ESP_OK && trustworthy && file_side_needs_writeback) {
+        ESP_LOGI(ZONES_HTTP_TAG, "zones_cfg: `cfg` file source won this boot's load and diverged from NVS -- "
+                      "writing the resolved config back to both NVS and the file");
+        (void)zones_config_persist_migrated_blob_verified(0);
     }
     return err;
 }
