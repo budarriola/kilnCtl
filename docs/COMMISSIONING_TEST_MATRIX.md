@@ -441,6 +441,59 @@ profile and the original kiln config selection remain -- byte-for-byte the
 same profile/config baseline as before this pass, modulo the crash ack
 (intentional) and the flash itself (intentional).
 
+**2026-09-22 W8 re-run with fixed runner (`63a48ab3`), ESP flashed to
+`63a48ab3` (carries `0edfb313`'s factory_reset nvs/net80211 self-check), C6
+self-check re-run.** Shared tree confirmed at `63a48ab3` before starting.
+Preconditions: no crash banner, safety link up/armed/not tripped, no firing,
+`profiles_list` showed only `#0 M18C_TEST` plus built-ins.
+
+W8 re-run (`python -m kilnctrl.web_commission_row W8 --host 192.168.1.156`,
+fix `63a48ab3` for the CDP click race): **PASS** -- "created
+`wc_test_0438920` via the segment builder (`POST /api/profile`), confirmed
+via `GET /api/profiles`, deleted via its own Delete icon (`POST
+/api/profile/delete`), confirmed removed." `profiles_list` afterward showed
+no scratch profile remaining.
+
+ESP flashed to `63a48ab3` from a clean worktree (`C:\wt\flash63a_zw9974`,
+kept for ELF provenance): SaftyFW built first for slot bins, KilnFW via
+`idf.py build` (sdkconfig copied byte-identical from the main tree).
+Pre-flash: `get_fw_version` commit `7dcde0dd`; `get_heap_status` no crash
+banner; `safety_get_status` link up/armed/not tripped. `flash_firmware
+(kiln_fw_root=".../flash63a_zw9974/firmware/KilnFW", verify=true)`: flashed
+and verified OK, board reset and running, provenance HEAD `63a48ab3` tree
+clean, ELF archived as `KilnCtrl-da119321dcbb.elf` (confirmed to contain the
+string "nvs/net80211 key count"), `boot_guard_reset` cleared and verified.
+Only the ESP was reset (Pico untouched), so no S6a trip was expected or
+seen -- none occurred. Post-flash: `get_fw_version` commit `63a48ab3`,
+"board is running HEAD"; `heap_internal` free=35031 B, min_free=17807 B;
+`safety_get_status` link up/armed/not tripped, unchanged.
+
+C6 self-check (`docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md`
+"Update 2026-09-22 (0edfb313)" recipe): `get_device_log` polling started
+before triggering an authenticated `POST /api/factory_reset` scope=wifi
+(challenge/HMAC signed with `KILNCTL_AP_PASSWORD`, "factory-reset" context,
+value never printed). Captured both self-check log lines verbatim:
+
+```
+factory_reset: nvs/net80211 key count before esp_wifi_restore(): 0
+factory_reset: nvs/net80211 key count after esp_wifi_restore(): 0
+```
+
+Before=0, after=0 -- **PASS** (an after-count of 0 is the positive verdict
+per the audit doc's recipe). STA re-provisioned from
+`KILNCTL_STA_SSID`/`KILNCTL_STA_PASSWORD` (env vars, never printed) over the
+shared UART hub via `WifiUartClient.add_network()`; board rejoined the LAN
+at `192.168.1.156` within ~18 s (well inside the 3-minute limit), confirmed
+by `wifi_get_status()` showing `sta_connected=True`. Web auth confirmed
+still ON: unauthenticated `GET /api/status` returned `fw_build: null`
+(redacted), matching the enabled-web-auth house gate.
+
+Board state at the end of this pass: firmware `63a48ab3`, no unacknowledged
+crash, no firing, no scratch profiles, safety link up/armed/not tripped, Wi-Fi
+STA reconnected, web auth ON. Worktrees kept for provenance:
+`C:\wt\flash63a_zw9974` (flash build) and `C:\wt\m18rec2_pkkk5a` (this
+record).
+
 ---
 
 ## Page-by-page inventory

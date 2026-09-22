@@ -360,3 +360,26 @@ An after-count of 0 is a positive verdict; a nonzero after-count is INCONCLUSIVE
 (erase may still be in flight), not proof the erase failed. Recipe: start
 `get_device_log` polling over serial before `POST /api/factory_reset` scope=wifi;
 the RAM log ring does not survive the reboot that follows.
+
+**Update 2026-09-22, self-check run at `63a48ab3`.** Recipe executed on the
+bench board after flashing it to `63a48ab3` (carries `0edfb313`). `get_device_log`
+polling was started before an authenticated `POST /api/factory_reset` scope=wifi
+(challenge/HMAC signed with `KILNCTL_AP_PASSWORD`, "factory-reset" context, same
+as `1319e051`'s run; value never printed). Both self-check lines were captured
+verbatim, cleanly, before the log ring froze at reboot:
+
+```
+factory_reset: nvs/net80211 key count before esp_wifi_restore(): 0
+factory_reset: nvs/net80211 key count after esp_wifi_restore(): 0
+```
+
+Before=0, after=0 -- **PASS** per this doc's own verdict rule (after-count of 0
+is the positive verdict). STA was re-provisioned afterward from
+`KILNCTL_STA_SSID`/`KILNCTL_STA_PASSWORD` over the shared UART hub (values never
+printed); the board rejoined the LAN at `192.168.1.156` within ~18 s, web auth
+still enforced (unauthenticated `GET /api/status` returned `fw_build: null`).
+This settles the open question from the previous update for this specific
+partition/namespace on this board: the driver's own `nvs.net80211` namespace in
+the default `nvs` partition read empty both immediately before and immediately
+after `esp_wifi_restore()` in this run. Full run detail:
+`docs/COMMISSIONING_TEST_MATRIX.md`'s 2026-09-22 W8/flash/C6 entry.
