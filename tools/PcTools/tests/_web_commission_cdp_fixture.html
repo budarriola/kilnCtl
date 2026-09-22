@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!-- _web_commission_cdp_fixture.html -- static page used only by
+     web_commission_cdp_driver.test.mjs to exercise the CDP driver's
+     aria-label/css selector kinds and its --steps runner end to end,
+     against a throwaway local HTTP server, never the live board. Shapes
+     of the controls below are deliberately modelled on the two profiles_page.html
+     patterns that motivated those features: a per-item aria-label with no
+     id (favToggleBtn()) and a control that is created only after an
+     earlier click (segmentRow()/addSegBtn), including a fake POST so
+     wait-for-post has something real to observe. -->
+<html>
+<head><title>fixture</title></head>
+<body>
+  <button id="favBtn" aria-label='Add "Bisque Fast" to favorites'>&#9734;</button>
+  <button id="addSegBtn">+ Add segment</button>
+  <div id="segments"></div>
+  <div id="result"></div>
+  <script>
+    document.getElementById('favBtn').addEventListener('click', function () {
+      fetch('/api/fav_toggle', { method: 'POST' });
+    });
+    document.getElementById('addSegBtn').addEventListener('click', function () {
+      // Mirrors segmentRow()'s async-then-append shape (loadZones().then(...))
+      // so wait-for-selector has something genuine to wait on, not an
+      // instantly-present element.
+      setTimeout(function () {
+        var div = document.createElement('div');
+        div.className = 'seg';
+        div.innerHTML = '<select class="seg-kind"><option value="0">a</option><option value="1">b</option></select>' +
+                         '<button type="button" class="save">Save segment</button>';
+        div.querySelector('.save').addEventListener('click', function () {
+          var kind = div.querySelector('.seg-kind').value;
+          fetch('/api/segment_save?kind=' + kind, { method: 'POST' });
+        });
+        document.getElementById('segments').appendChild(div);
+      }, 150);
+    });
+  </script>
+</body>
+</html>

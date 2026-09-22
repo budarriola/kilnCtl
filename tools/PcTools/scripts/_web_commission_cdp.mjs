@@ -48,6 +48,70 @@
 //                           off-step range value), since clicking on with a
 //                           value nobody asked for is how a delete lands on
 //                           the wrong row.
+//
+// --selector-kind also accepts two additions (2026-09-21) alongside the
+// original "id"/"text"/"page":
+//   "aria-label"            exact match against the element's aria-label
+//                           attribute, e.g. profiles_page.html's favourite
+//                           star (favToggleBtn()), whose accessible name is
+//                           built per-profile ('Add "<name>" to favorites')
+//                           and has no stable id at all.
+//   "css"                   --selector is a raw CSS selector, resolved with
+//                           document.querySelector(). For a control with no
+//                           id and no useful aria-label -- a per-row delete
+//                           checkbox, or a segment builder row's kind
+//                           <select> that only exists after #addSegBtn is
+//                           clicked -- a positional selector such as
+//                           "#segments .seg:nth-child(1) select.seg-kind"
+//                           is the only way to name it.
+// Both are exact/CSS matches, never a substring match, for the same reason
+// "id" and "text" already refuse ambiguity: a wrong match here is a click or
+// fill on the wrong row.
+//
+//   --steps <json>          an ORDERED list of {"action", "kind",
+//                           "selector", "value", "timeoutMs", "path"}
+//                           objects, run in sequence after navigation and
+//                           after the single-shot --fills/click below would
+//                           otherwise run. Added for rows where one
+//                           fills-then-click cannot reach the target because
+//                           the target is created by an EARLIER click (the
+//                           segment builder's #addSegBtn; the profile list's
+//                           #modeDeleteBtn, which reveals per-row delete
+//                           checkboxes that do not exist until it is
+//                           clicked). Each step's "kind" is one of "id",
+//                           "css", "aria-label", "text" (same resolution as
+//                           --selector-kind/--selector above). Actions:
+//                     click              click the resolved element.
+//                     fill               set .value on the resolved element
+//                                        to "value" and dispatch
+//                                        input/change (same read-back-or-
+//                                        fail behaviour as --fills; see
+//                                        applyFills()/resolveElementExpr()).
+//                     wait-for-selector  poll (bounded by "timeoutMs",
+//                                        default 5000) for a "css" selector
+//                                        to appear in the DOM -- needed
+//                                        after a click that renders new
+//                                        markup asynchronously
+//                                        (segmentRow()'s
+//                                        loadZones().then(...)) before the
+//                                        next step can address it.
+//                     wait-for-post      wait (bounded by "timeoutMs",
+//                                        default POST_WAIT_TIMEOUT_MS) for a
+//                                        POST whose URL contains "path" to
+//                                        complete -- an inline version of
+//                                        --expect-post for a step in the
+//                                        middle of a sequence (e.g. a
+//                                        profile create must finish before
+//                                        the new row's delete checkbox
+//                                        exists).
+//                   When --steps is given, --selector-kind/--selector (the
+//                   single click below) are optional -- a run can be
+//                   steps-only. The existing single-shot --fills + one
+//                   click path is otherwise completely UNCHANGED: --steps
+//                   only adds more actions before the final
+//                   settle()/screenshot, it never alters that path's own
+//                   behaviour when --steps is absent, and the JSON result
+//                   shape gains no new top-level key for it.
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -88,8 +152,14 @@ function parseArgs(argv) {
     else if (a === '--expect-post') out.expectPost = argv[++i];
     else if (a === '--accept-dialogs') out.acceptDialogs = true;
     else if (a === '--fills') out.fillsJson = argv[++i];
+    else if (a === '--steps') out.stepsJson = argv[++i];
   }
-  for (const req of ['host', 'route', 'selectorKind']) {
+  out.steps = out.stepsJson ? JSON.parse(out.stepsJson) : [];
+  // --selector-kind stays required for the original single-click path, but
+  // a --steps run names its own selector kind per step and may have no
+  // top-level click at all (e.g. W9's delete flow is entirely steps).
+  const required = out.steps.length ? ['host', 'route'] : ['host', 'route', 'selectorKind'];
+  for (const req of required) {
     if (!out[req]) throw new Error(`--${req} is required`);
   }
   out.fills = out.fillsJson ? JSON.parse(out.fillsJson) : [];
@@ -332,6 +402,86 @@ async function applyFills(cdp, fills) {
   }
 }
 
+// One JS expression, shared by the single-click path, the --steps runner,
+// and step-level fills, that resolves a selector of a given "kind" to an
+// element (or null). Kept in one place so "id"/"text"/"aria-label"/"css"
+// mean the same thing everywhere they can appear, rather than drifting
+// between the legacy click branches and the newer steps runner.
+function elementExpr(kind, selector) {
+  const sel = JSON.stringify(selector);
+  if (kind === 'id') return `document.getElementById(${sel})`;
+  if (kind === 'css') return `document.querySelector(${sel})`;
+  if (kind === 'aria-label') {
+    // Exact string comparison in JS, not a CSS attribute selector -- a
+    // profile name containing a double quote (a real possibility: nothing
+    // in profiles_page.html's create flow forbids it) would otherwise need
+    // fragile escaping into a CSS string literal. Never a substring match,
+    // for the same reason "id" is exact.
+    return `[...document.querySelectorAll('[aria-label]')].find(e => e.getAttribute('aria-label') === ${sel})`;
+  }
+  if (kind === 'text') {
+    return `[...document.querySelectorAll('button')].find(b => b.textContent.includes(${sel}))`;
+  }
+  throw new Error(`unknown selector kind ${JSON.stringify(kind)}`);
+}
+
+// Executes one --steps entry. Mirrors applyFills()'s read-back-or-fail rule
+// for "fill" (a value the element silently rejects is a hard failure, never
+// a silent continue -- see that function's own comment for why), and
+// reuses CdpSession.waitForPost/a DOM poll for the two wait actions.
+async function runStep(cdp, step, idx) {
+  const label = `step[${idx}] ${step.action}`;
+  if (step.action === 'click') {
+    const expr = `(() => { const el = ${elementExpr(step.kind, step.selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
+    const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
+    if (res.result.value !== 'CLICKED') {
+      throw new Error(`${label}: selector ${JSON.stringify(step.selector)} (kind=${step.kind}) not found`);
+    }
+    return;
+  }
+  if (step.action === 'fill') {
+    const REJECTED = 'VALUE_REJECTED:';
+    const expr = `(() => {
+      const el = ${elementExpr(step.kind, step.selector)};
+      if (!el) return 'NOT_FOUND';
+      el.value = ${JSON.stringify(step.value)};
+      if (String(el.value) !== ${JSON.stringify(String(step.value))}) {
+        return ${JSON.stringify(REJECTED)} + String(el.value);
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'OK';
+    })()`;
+    const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
+    const verdict = res.result.value;
+    if (verdict === 'OK') return;
+    if (typeof verdict === 'string' && verdict.startsWith(REJECTED)) {
+      throw new Error(`${label}: selector ${JSON.stringify(step.selector)} did not accept value ` +
+        `${JSON.stringify(String(step.value))} -- element reads ${JSON.stringify(verdict.slice(REJECTED.length))} ` +
+        `instead. Refusing to continue with an unintended value.`);
+    }
+    throw new Error(`${label}: selector ${JSON.stringify(step.selector)} (kind=${step.kind}) not found`);
+  }
+  if (step.action === 'wait-for-selector') {
+    const timeoutMs = step.timeoutMs || 5000;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const expr = `document.querySelector(${JSON.stringify(step.selector)}) ? 'FOUND' : 'NOT_FOUND'`;
+      const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
+      if (res.result.value === 'FOUND') return;
+      if (Date.now() >= deadline) {
+        throw new Error(`${label}: selector ${JSON.stringify(step.selector)} did not appear within ${timeoutMs}ms`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  if (step.action === 'wait-for-post') {
+    await cdp.waitForPost(step.path, step.timeoutMs || POST_WAIT_TIMEOUT_MS);
+    return;
+  }
+  throw new Error(`${label}: unknown step action ${JSON.stringify(step.action)}`);
+}
+
 // Post-click settle. The dialog (if any) has already been answered by the
 // CdpSession message handler by the time the click's Runtime.evaluate
 // returns; what is still outstanding is the handler's own fetch(). Give the
@@ -400,11 +550,21 @@ async function main() {
       await applyFills(cdp, args.fills);
     }
 
-    if (args.selectorKind === 'id') {
-      const expr = `(() => { const el = document.getElementById(${JSON.stringify(args.selector)}); if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
+    // --steps runs BEFORE the single-shot selector-kind/selector click
+    // below, in the order given on the command line (fills, then steps,
+    // then the legacy single click) -- a row that needs both a step
+    // sequence and a final settle()-covered click (e.g. steps to reveal a
+    // row, then --selector-kind css to click that row's own button) is not
+    // forced to fold the last click into "steps" too.
+    for (let i = 0; i < args.steps.length; i++) {
+      await runStep(cdp, args.steps[i], i);
+    }
+
+    if (args.selectorKind === 'id' || args.selectorKind === 'css' || args.selectorKind === 'aria-label') {
+      const expr = `(() => { const el = ${elementExpr(args.selectorKind, args.selector)}; if (!el) return 'NOT_FOUND'; el.click(); return 'CLICKED'; })()`;
       const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
       if (res.result.value !== 'CLICKED') {
-        throw new Error(`selector #${args.selector} not found on ${args.route} at runtime`);
+        throw new Error(`selector ${JSON.stringify(args.selector)} (kind=${args.selectorKind}) not found on ${args.route} at runtime`);
       }
       postResult = await settle(cdp, args);
     } else if (args.selectorKind === 'text') {
@@ -413,6 +573,10 @@ async function main() {
       if (res.result.value !== 'CLICKED') {
         throw new Error(`button text "${args.selector}" not found on ${args.route} at runtime`);
       }
+      postResult = await settle(cdp, args);
+    } else if (args.selectorKind === undefined && args.steps.length) {
+      // steps-only run (no top-level click): still settle so --expect-post
+      // and the final screenshot behave the same as every other path.
       postResult = await settle(cdp, args);
     } // "page": no click, load only
 

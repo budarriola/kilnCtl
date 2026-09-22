@@ -101,6 +101,82 @@ client-side-only navigation repeated per step, static asset loads) follow
 the same read-only classification as their first occurrence above (W6/W49)
 and are not worth a separate row.
 
+## CDP driver capability note (2026-09-21)
+
+`tools/PcTools/scripts/_web_commission_cdp.mjs` (the live-mode driver behind
+`web_commission_row.py`'s `run_row_live()`) previously could only match a
+click target by `id` or by button text, and could only run one `--fills` +
+one click per invocation. That is what left W8/W9/W10 above unwired (see
+`web_commission_row.py`'s `ROWS` dict header comment, "Left unwired, and
+why"): W10's favourite star has no id at all, only a per-profile
+`aria-label`; W9's per-row delete checkbox is created only after
+`#modeDeleteBtn` is clicked and likewise has no id; and W8's segment fields
+(`profiles_page.html`'s `segmentRow()`) are created only after `#addSegBtn`
+is clicked and have no id, only classes.
+
+The driver now has three additions that remove those specific blockers (see
+the driver's own header comment for full option syntax):
+
+- `--selector-kind aria-label` -- exact-match click on an element's
+  `aria-label` attribute. Reaches W10's star directly:
+  `--selector-kind aria-label --selector 'Add "<profile name>" to favorites'`
+  (or `Remove "..." from favorites` if already a favourite -- read the
+  current state via `profiles_list`'s `favorite` field first, since the
+  label itself flips).
+- `--selector-kind css` -- click on a raw CSS selector. Reaches a per-row
+  control that has neither an id nor a useful aria-label, e.g. a specific
+  saved profile's delete checkbox once the list is in delete mode:
+  `[aria-label="Select \"<profile name>\" for delete"]` (this could also be
+  reached directly via `--selector-kind aria-label`, since that checkbox
+  does carry one -- `css` is for the cases that don't, like an
+  `nth-child()`-addressed segment row).
+- `--steps <json>` -- an ordered click/fill/wait-for-selector/wait-for-post
+  sequence, run after navigation and after the original single-shot
+  `--fills` + click path (which is unchanged). This is what actually
+  removes the "created by an earlier click" blocker common to all three
+  rows.
+
+Concrete step lists a Row() entry for each could pass (not implemented here
+-- wiring `web_commission_row.py` itself is out of scope for this change):
+
+- **W10** (favourite toggle) needs no `--steps` at all -- a single
+  `--selector-kind aria-label` click plus `--expect-post /api/profile/favorite`
+  is sufficient, same shape as every other single-click write row.
+- **W9** (per-row delete):
+  ```json
+  [
+    {"action": "click", "kind": "id", "selector": "modeDeleteBtn"},
+    {"action": "wait-for-selector", "selector": "input[aria-label='Select \"<throwaway name>\" for delete']"},
+    {"action": "click", "kind": "aria-label", "selector": "Select \"<throwaway name>\" for delete"},
+    {"action": "click", "kind": "id", "selector": "bulkActionBtn"}
+  ]
+  ```
+  run with `--accept-dialogs` (bulk delete confirms via `kcConfirm()`) and
+  `--expect-post /api/profile/delete`.
+- **W8** (segment builder), after `#newBtn`/name fill create the profile
+  shell:
+  ```json
+  [
+    {"action": "click", "kind": "id", "selector": "addSegBtn"},
+    {"action": "wait-for-selector", "selector": "#segments .seg"},
+    {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) select.seg-kind", "value": "0"},
+    {"action": "fill", "kind": "css", "selector": "#segments .seg:nth-child(1) input.target-c", "value": "950"},
+    {"action": "click", "kind": "id", "selector": "saveBtn"},
+    {"action": "wait-for-post", "path": "/api/profile"}
+  ]
+  ```
+  (field class names for the ramp/dwell inputs need one more grep of
+  `renderSegFields()` before this is run for real; the shape above is the
+  reachability proof, not a verified-exact selector list).
+
+End-to-end coverage of the three new primitives (aria-label click, css
+click, and a click -> wait-for-selector -> fill -> click -> wait-for-post
+chain against a local fixture, plus a negative case for a `--steps` fill
+against a missing selector) is in
+`tools/PcTools/tests/web_commission_cdp_driver.test.mjs`
+(`node tools/PcTools/tests/web_commission_cdp_driver.test.mjs`, real headless
+Chrome, no board contacted).
+
 ## Selectors not found
 
 `#kilnConfigCard`'s per-slot Apply action (`#kcApplyBtn`) exists and was
