@@ -381,6 +381,66 @@ instructions, no crash ack and no firmware fix were made. Full request/
 response detail and the coredump/ELF paths are in `docs/BENCH_TEST_LOG.md`'s
 2026-09-22 entry.
 
+**2026-09-22 ESP flashed to `origin/main` 7dcde0dd (fix chain
+`7e659e55`/`faae8492`/`987b84a6` for the `kiln_cfg_swap` stack overflow
+above), crash acked, W42 re-run, plus first live runs of W50/W8/W9/W10/W11/
+W18/W20/W33.** Built from a clean worktree (`C:\wt\flash7dc_hs69ym`, kept for
+ELF provenance): SaftyFW configured/built first (`cmake -G Ninja -B build .`
+with `PICO_SDK_PATH=C:\pico-tools\pico-sdk`, producing
+`SaftyFW_slotA.bin`/`SaftyFW_slotB.bin`) then KilnFW via `idf.py build`
+(sdkconfig copied from the main tree, byte-identical, board-tuned config).
+`KilnCtrl.bin` was 0x25b1b0 (2,470,320 B) against the `app` partition's
+0x800000 (8 MB) -- comfortable fit; the build's own "1/2 app partitions too
+small" warning refers to the unrelated, much smaller `recovery` partition,
+expected and harmless. Pre-flash: `get_fw_version` commit `08f1c451` (32
+commits behind HEAD), `get_heap_status` showed the same unacknowledged
+`kiln_cfg_swap`/`IllegalInstruction` crash banner as before
+(`heap_internal` free=25187 B, min_free=12523 B), `safety_get_status` link
+up/armed/not tripped, `get_readiness` 16 ok / 2 not_done / 3 other -- no
+firing, safe to flash. `flash_firmware(kiln_fw_root=".../flash7dc_hs69ym/
+firmware/KilnFW", verify=true)`: **"flashed and verified OK (bootloader +
+partition table + app), board reset and running"**, provenance HEAD
+`7dcde0dd` tree clean, ELF archived as `KilnCtrl-7e07b8fb64f7.elf`,
+`boot_guard_reset` cleared and verified (boot_count before=1, after=1). Only
+the ESP was reset (Pico untouched), so no S6a trip was expected or seen.
+Post-flash: `get_fw_version` commit `7dcde0dd`, "board is running HEAD";
+`heap_internal` free=35487 B, min_free=20043 B (both higher than pre-flash,
+consistent with the fix moving large locals off the task stack rather than
+onto `.bss`); `safety_get_status` link up/armed/not tripped, unchanged. The
+same pending crash record was still shown (persisted across the reboot, not
+yet acked) -- confirmed it names `exc_task='kiln_cfg_swap'
+exc_cause_str='IllegalInstruction'` before acking: `crash_report_ack(confirm=
+true)` returned "ok - acknowledged and confirmed by read-back" with the same
+fields plus `exc_pc='0x00043d2e' exc_addr='0x00000000'`.
+
+W42 re-run live (`python -m kilnctrl.web_commission_row W42 --host
+192.168.1.156`): **PASS**, see the runbook entry above for the full
+transcript; the leftover `kc_test_1790034646` (id=4) from the panicked run
+was cleaned up as part of it. `get_heap_status` immediately after: no fresh
+crash banner, `uptime_s` advanced 18 -> 98 with `reset_reason='software
+(esp_restart)'` unchanged -- no reboot, confirming the fix holds under the
+same apply-then-delete path that previously panicked the board.
+
+W50, W11, W18, W20, W33 (first live runs): all **PASS** -- see their
+runbook rows above for each one's exact request/response. W8 (first live
+run): **FAIL** -- create step passed, delete step's CDP driver could not
+find the `Delete "<name>"` aria-label selector at runtime and left
+`wc_test_0427400` on the board; cleaned up out-of-band via the
+`profiles_delete` MCP tool (not the UI) immediately afterward, confirmed via
+`profiles_list`. This is a selector-mismatch defect in the runner/page, not
+a firmware defect. W9 and W10 (first live attempts): both refused to start,
+correctly detecting W8's leftover before touching anything -- board state
+unaffected by either. A retry of W9/W10 after the W8 leftover was cleaned up
+was blocked by the local permission classifier (irreversible-deletion
+class) and was not attempted again; they remain first-live-attempt REFUSED,
+not FAIL, and not yet PASS.
+
+Board state at the end of this pass: firmware `7dcde0dd`, no
+unacknowledged crash, no firing, only the pre-existing `#0 M18C_TEST`
+profile and the original kiln config selection remain -- byte-for-byte the
+same profile/config baseline as before this pass, modulo the crash ack
+(intentional) and the flash itself (intentional).
+
 ---
 
 ## Page-by-page inventory
