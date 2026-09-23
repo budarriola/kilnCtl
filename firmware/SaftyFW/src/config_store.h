@@ -1443,8 +1443,10 @@ bool config_store_only_ct_cal_differs(const config_store_record_t *current,
 // surfaced as plain strings rather than caller-decoded enums.
 const char *config_store_write_decision_reason(config_store_write_decision_t decision);
 
-// --- Real flash glue (config_store_flash.c -- NOT host-tested, see that
-// file's header comment) -------------------------------------------------
+// --- Real flash glue (config_store_flash.c -- most of it IS host-tested
+// against a fake flash backend, including the ram_integrity repair path and
+// its RAM-corruption CRC checks below; see that file's header comment for
+// which specific pieces still are not) ------------------------------------
 
 // Reads the config store's flash sector once and caches the result. Must be
 // called early in main()'s boot sequence, before any of the getters below
@@ -1741,6 +1743,16 @@ void config_store_test_reset_fallback_state(void);
 // the fallback-race hooks above -- compiled out of target firmware entirely.
 #ifdef SAFTYFW_HOST_TEST_BUILD
 void config_store_test_corrupt_cached_record(void);
+
+// TEST-ONLY (2026-09-23, s_persisted_record CRC hardening): sibling of
+// config_store_test_corrupt_cached_record() above, but flips a byte of
+// s_persisted_record (the RAM mirror of flash truth, the repair's own
+// "known-good" source) WITHOUT touching s_persisted_record_crc -- lets a
+// host test manufacture the "no known-good copy left" case: call this AND
+// config_store_test_corrupt_cached_record() to make both CRCs fail, or call
+// this alone with a healthy cache to confirm a quietly-corrupted persisted
+// copy that is never needed as a repair source causes no trip and no repair.
+void config_store_test_corrupt_persisted_record(void);
 #endif
 
 // The cached record's `seq`, mapped through config_store_seq_to_version()
@@ -1849,11 +1861,13 @@ uint32_t config_store_record_crc(const config_store_record_t *rec);
 // moment it was last legitimately installed (boot load, a committed write,
 // or a volatile install) -- NOT a re-read of flash. This deliberately
 // checks the RAM record's own self-consistency, not RAM-against-flash:
-// origin/main has no "this RAM copy intentionally diverges from flash right
-// now" signal (a volatile install, config_store_write_volatile(), is
-// exactly that divergence, and it is legitimate, not corruption), so a raw
-// RAM-vs-flash byte comparison would flag every live volatile install as a
-// false positive. Comparing against a CRC captured at the same moment the
+// config_store_is_volatile_dirty() already exists and correctly tells a
+// live, legitimate volatile divergence (config_store_write_volatile()) apart
+// from corruption -- the reason this check is still CRC-at-install rather
+// than a raw RAM-vs-flash comparison is that a raw byte comparison would
+// flag every live volatile install as a false positive regardless of
+// is_volatile_dirty()'s value; CRC-at-install works uniformly whether or not
+// a volatile install is outstanding. Comparing against a CRC captured at the same moment the
 // record was last written closes that gap: every legitimate updater
 // (config_store_write(), config_store_write_volatile(), boot load) goes
 // through the single seqlock-write choke point that keeps the record and

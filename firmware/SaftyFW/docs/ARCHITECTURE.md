@@ -584,7 +584,7 @@ typedef enum {
     SAFETY_TRIP_FROZEN_SENSOR   = 12, /* S11 */
     SAFETY_TRIP_ENCLOSURE_TEMP  = 13, /* S12 */
     SAFETY_TRIP_BORROWED_STALE  = 14, /* S13 */
-    SAFETY_TRIP_CONFIG_CORRUPT  = 15,
+    SAFETY_TRIP_CONFIG_CORRUPT  = 15, /* S16 -- config_store RAM-integrity recurrence */
     SAFETY_TRIP_SELF_TEST       = 16, /* a task failed to check in */
 } safety_trip_t;
 ```

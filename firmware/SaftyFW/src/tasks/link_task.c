@@ -1790,11 +1790,12 @@ static void link_task_config_check_poll(TickType_t now)
     }
     s_config_check_elapsed_s = 0u;
 
-    if (!config_store_check_ram_integrity()) {
-        log_task_log(LOG_LEVEL_ERROR, "config_check",
-                     "periodic RAM integrity check FAILED -- reset to compiled defaults, "
-                     "calibration_missing set");
-    }
+    // config_store_check_ram_integrity() already logs its own WARN (first
+    // detection this boot) / ERROR (recurrence) line with the correct
+    // "restored from persisted record" wording -- an unconditional caller-
+    // side log here would both duplicate it and carry the stale "reset to
+    // compiled defaults" claim the repair no longer does.
+    (void)config_store_check_ram_integrity();
 }
 
 static void link_task_handle_set_config(const kilnlink_frame_t *frame)

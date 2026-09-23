@@ -899,6 +899,27 @@ This is cheap paranoia and it is warranted here specifically because a
 corrupted `abs_max_temp_c` fails silent: a threshold that has quietly become
 `0x7FFFFFFF` never trips, and nothing else in the system would ever notice.
 
+This is the first periodic RAM-integrity mechanism in SaftyFW: nothing else
+in this firmware re-checks a live RAM structure against a CRC captured at
+its last legitimate write, on a timer, independent of any trip evaluation.
+
+`s_persisted_record` is RAM too, and carries its own CRC
+(`s_persisted_record_crc`) for the same reason: it is the repair's only
+fallback source, and RAM corruption is not guaranteed to land on
+`s_cached_record` specifically. Before restoring from it, the check verifies
+`s_persisted_record`'s own CRC first. If BOTH copies fail their CRC, there is
+no known-good record left in RAM at all — the repair is skipped entirely and
+S16 is requested immediately on that same tick, logged distinctly from the
+ordinary single-copy repair path. This deliberately never re-reads flash
+from `link_task`: the boot-time flash read uses two full-sector static
+buffers that are not affordable on a periodic tick.
+
+A repair while ARMED changes the enforced record and rolls its `seq` back to
+`s_persisted_record`'s own `seq` (discarding any live, not-yet-flashed
+volatile install along with the corruption) — the ESP-side effect is
+`config_version` appearing to go backwards, the same class of surprise as
+the D4 note elsewhere in this document.
+
 ---
 
 ## 5. Context from the main controller
@@ -1150,7 +1171,7 @@ Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 | S11 | Frozen safety reading | TRIP | [x] | [x] | [x] | [ ] |
 | S12 | Cold junction / enclosure over-temp | WARN→TRIP | [x] | [x] | [x] | [ ] |
 | S13 | Borrowed channel not updating | WARN→TRIP | [x] | [x] | [x] `sample_counter_advancing` now has a real producer (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`, called from `safety_core_build_input()`) -- `tc_source` may be commissioned to BORROWED_ZONE/BOTH once `borrowed_zone_index` is also set | [ ] |
-| — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] | [ ] |
+| S16 | Runtime config RAM-integrity recurrence | TRIP | [x] | [x] | [x] | [ ] |
 
 S2/S3/S4/S6/S9/S10/S13 built and host-tested 2026-08-18: `src/safety_guards.c`
 now implements 12 of 13 guards (everything but S8, which ships disabled by

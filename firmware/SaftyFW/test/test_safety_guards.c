@@ -2438,6 +2438,80 @@ static void test_s6(void)
     }
 }
 
+/* S16 -- config_store RAM integrity corrupted twice this boot
+ * (config_integrity_trip, safety_guards.c ~459-475). Coordinator-required
+ * (Opus re-review of d5386e91, fix #6): unconditional like S6a/S7, refused
+ * by try_clear while the flag stays set, and a false flag trips nothing. */
+static void test_s16(void)
+{
+    TEST_SECTION("S16 -- config_store RAM integrity corrupted twice this boot");
+
+    /* Nuisance: flag false, otherwise healthy input, never trips S16. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.config_integrity_trip = false;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "config_integrity_trip=false never trips S16");
+    }
+
+    /* Trip: flag true trips SAFETY_TRIP_CONFIG_CORRUPT on the first tick. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.config_integrity_trip = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true,
+                   "config_integrity_trip=true trips S16 on the first tick");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT, "reason is SAFETY_TRIP_CONFIG_CORRUPT");
+    }
+
+    /* Trip: unconditional, like S6a/S7 -- still trips with context_valid
+     * false, since "RAM is being actively corrupted" must not wait on any
+     * other gate to be believed (safety_guards.c's own comment on this
+     * check). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.config_integrity_trip = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true,
+                   "config_integrity_trip=true trips S16 even while context_valid is false");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT,
+                   "reason is SAFETY_TRIP_CONFIG_CORRUPT with an invalid context too");
+    }
+
+    /* try_clear() must refuse while the flag is still set: no special-case
+     * exists for SAFETY_TRIP_CONFIG_CORRUPT in the immediate-recheck switch
+     * (guard_condition_still_immediate()), so the generic clear-then-retick
+     * mechanism re-trips on the very next tick, same as S6a/S7 -- only a
+     * fresh boot (which clears the flag at its source, config_store_flash.c)
+     * ever makes this trip clearable. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t tripping = base_input();
+        tripping.config_integrity_trip = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &tripping) == true, "sanity: S16 trips first");
+
+        safety_guard_input_t still_bad = base_input();
+        still_bad.config_integrity_trip = true;
+        bool cleared = safety_guards_try_clear(&s, &cfg, &still_bad);
+        TEST_CHECK(!cleared, "try_clear refuses while config_integrity_trip is still set");
+        TEST_CHECK(s.is_tripped, "still latched after the refused clear");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT, "reason stays SAFETY_TRIP_CONFIG_CORRUPT");
+    }
+}
+
 static void test_s6b_reboot_grace(void)
 {
     TEST_SECTION("S6b -- ANNOUNCE_REBOOT grace window suppression");
@@ -4108,6 +4182,7 @@ void run_test_safety_guards(void)
     test_s14_s15_two_ct_split();
     test_s14_s15_wrong_membership_negative();
     test_s6();
+    test_s16();
     test_s6b_reboot_grace();
     test_s9();
     test_s10();

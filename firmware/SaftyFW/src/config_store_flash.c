@@ -201,6 +201,20 @@ static config_store_record_t s_cached_record;
 // either -- nothing on SAFTYFW_CORE_TRIP_PATH ever reads this.
 static config_store_record_t s_persisted_record;
 
+// CRC of s_persisted_record as of its last write, same lockstep contract as
+// s_cached_record_crc below: written at both of s_persisted_record's own two
+// write sites (config_store_boot_load() and a confirmed successful
+// config_store_write_ex()), using the same config_store_record_crc() pure
+// helper. This is the RAM-integrity check's *last resort*: when
+// s_cached_record's own CRC fails, the repair reads s_persisted_record as
+// the known-good copy, but that copy lives in ordinary RAM too and can be
+// corrupted by the exact same class of fault (stray write, overrun) that
+// corrupted s_cached_record. Without this CRC, that corruption would go
+// undetected and get restored INTO s_cached_record as if it were good.
+// Read and written only from link_task (core 0), same as s_persisted_record
+// itself; config_store_check_ram_integrity() below is the only reader.
+static uint32_t s_persisted_record_crc;
+
 // CRC of s_cached_record as of its last legitimate install (boot load, a
 // committed write, or a volatile install) -- see config_store_seqlock_
 // write()'s own comment on why that single function is the one place this
@@ -230,10 +244,13 @@ static bool s_ram_integrity_fault_seen_this_boot;
 // seqlock): single writer (link_task, core 0), single reader (safety_core,
 // core 1), plain aligned byte, matching s_fallback_active's own precedent
 // for a simple cross-core flag in this file. Cleared only by a fresh boot
-// (config_store_boot_load()) -- deliberately not auto-cleared by this file,
-// since only an explicit CLEAR_TRIP (safety_core.c) should be able to make
-// the resulting trip clearable, and re-corrupting after a clear must be able
-// to trip again immediately (see config_store_boot_load() below).
+// (config_store_boot_load()) -- deliberately NOT clearable by an explicit
+// CLEAR_TRIP: safety_guards_try_clear() refuses to clear
+// SAFETY_TRIP_CONFIG_CORRUPT while this flag is still set (config_store.h's
+// own doc comment on this function: "only a reboot, never a CLEAR_TRIP, can
+// make a config_store this untrustworthy trustworthy again"), so a
+// CLEAR_TRIP against a live S16 trip is a no-op and the very next tick
+// re-trips. Only a power cycle can make this trip clearable again.
 static volatile bool s_ram_integrity_recurrence_pending;
 
 // --- Seqlock for s_cached_record (2026-09-09) -------------------------------
@@ -449,6 +466,16 @@ void config_store_test_force_fallback_path(bool force)
 void config_store_test_corrupt_cached_record(void)
 {
     uint8_t *raw = (uint8_t *)&s_cached_record;
+    raw[0] ^= 0xFFu;
+}
+
+// TEST-ONLY (2026-09-23, s_persisted_record CRC hardening): see
+// config_store.h's declaration for intent. Same shape as the cached-record
+// hook above, just against s_persisted_record and leaving
+// s_persisted_record_crc untouched.
+void config_store_test_corrupt_persisted_record(void)
+{
+    uint8_t *raw = (uint8_t *)&s_persisted_record;
     raw[0] ^= 0xFFu;
 }
 
@@ -764,6 +791,10 @@ void config_store_boot_load(void)
     // read as a mismatch the first time config_store_check_ram_integrity()
     // ever runs.
     s_cached_record_crc = config_store_record_crc(&s_cached_record);
+    // Same seeding for s_persisted_record's own CRC -- see its declaration's
+    // comment for why the "known-good copy" also needs its own integrity
+    // check, not just s_cached_record.
+    s_persisted_record_crc = config_store_record_crc(&s_persisted_record);
 
     // A fresh boot is exactly what clears the ram_integrity first/second-
     // detection bookkeeping and the recurrence-trip request -- see their own
@@ -1062,15 +1093,47 @@ bool config_store_check_ram_integrity(void)
     // record can no longer be trusted enough to keep running on."
     s_ram_integrity_fail_count++;
 
+    // 2026-09-23 (s_persisted_record CRC hardening, coordinator-required
+    // follow-up to the above): s_persisted_record is RAM too, and RAM is
+    // exactly what just got proven untrustworthy this tick -- restoring FROM
+    // a corrupted "known-good" copy would silently install the corruption
+    // instead of catching it. Check it the same way, with the same pure
+    // helper, before trusting it as a repair source. Do NOT re-read flash
+    // here: read_latest_or_default() uses two full-sector static buffers
+    // scoped to boot only, too much DRAM to reserve for a periodic link_task
+    // tick.
+    if (!config_store_ram_integrity_ok(&s_persisted_record, s_persisted_record_crc)) {
+        // No known-good copy exists: s_cached_record just failed, and the
+        // only fallback RAM copy has also failed. A WARN-and-repair here
+        // would repair FROM corruption. Skip straight to requesting the
+        // trip -- this boot's config_store can no longer be trusted at all,
+        // regardless of first/second-detection bookkeeping.
+        s_ram_integrity_recurrence_pending = true;
+        char both_failed_line[160]; // worst-case count digits: 149 bytes formatted
+        snprintf(both_failed_line, sizeof(both_failed_line),
+                 "ram_integrity: BOTH cached and persisted copies failed CRC (count %lu) -- "
+                 "no known-good copy, requesting trip immediately, no repair attempted",
+                 (unsigned long)s_ram_integrity_fail_count);
+        log_task_log(LOG_LEVEL_ERROR, "config", both_failed_line);
+        return false;
+    }
+
     config_store_record_t repaired = s_persisted_record;
     repaired.calibration_missing = true;
 
     bool discarded_volatile_install = (snap.seq != s_persisted_record.seq);
 
+    // config_store_seqlock_write() already updates s_cached_record_crc
+    // itself (its own comment above explains why every legitimate updater
+    // goes through it for exactly this reason) -- a second assignment here
+    // was redundant (2026-09-23 Opus review advisory).
     config_store_seqlock_write(&repaired);
-    s_cached_record_crc = config_store_record_crc(&repaired);
 
-    char line[96];
+    // 128, not 96: the longest formatted message below (the "repaired from
+    // persisted RAM mirror" wording, worst-case count digits) needs 113
+    // bytes -- the old 96-byte buffer silently truncated at count >= 10
+    // (2026-09-23 Opus review advisory).
+    char line[128];
     if (discarded_volatile_install) {
         snprintf(line, sizeof(line),
                  "ram_integrity repair discarded a live volatile install (seq %lu != persisted %lu)",
@@ -1087,7 +1150,7 @@ bool config_store_check_ram_integrity(void)
     } else {
         s_ram_integrity_fault_seen_this_boot = true;
         snprintf(line, sizeof(line),
-                 "ram_integrity corruption detected, repaired from flash copy (count %lu), calibration_missing set",
+                 "ram_integrity corruption detected, repaired from persisted RAM mirror (count %lu), calibration_missing set",
                  (unsigned long)s_ram_integrity_fail_count);
         log_task_log(LOG_LEVEL_WARN, "config", line);
     }
@@ -1470,6 +1533,7 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     s_cached_slot = plan.slot_index;
     s_cached_sector = plan.sector_index;
     s_persisted_record = to_write; // opus review item 4: this landed in flash -- update flash-truth
+    s_persisted_record_crc = config_store_record_crc(&s_persisted_record);
     if (out_reason != NULL) {
         *out_reason = "ok";
     }

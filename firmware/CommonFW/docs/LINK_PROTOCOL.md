@@ -1086,12 +1086,22 @@ warn bit and trip bit line up. S4 and S10 are WARN-only and were given
 reserved trip-code gaps (4 and 11) for exactly this reason, so they already
 had a collision-free slot (bits 3 and 10). S14 and S15
 (`CT_COMMISSIONING_PLAN.md`) were added after `safety_trip_t` was written and
-never got a reserved code — codes 15/16 went to the unrelated, not-yet-built
-CONFIG_CORRUPT/SELF_TEST guards — so they take bits 14/15 directly; both bits
-were always 0 on every frame sent before this (the mask was previously a
-single aggregate bit, bit 0, set whenever any WARN-capable guard was active),
-so this is a first use, not a reuse, of live wire bits — no
-`KILNLINK_PROTOCOL_VERSION` bump needed.
+never got a reserved code — codes 15/16 went to the CONFIG_CORRUPT/SELF_TEST
+guards (trip codes, not warn_mask users at the time this was written) — so
+S14/S15 take bits 14/15 directly; both bits were always 0 on every frame sent
+before this (the mask was previously a single aggregate bit, bit 0, set
+whenever any WARN-capable guard was active), so this was a first use, not a
+reuse, of live wire bits — no `KILNLINK_PROTOCOL_VERSION` bump needed at the
+time.
+
+**2026-09-23 update: CONFIG_CORRUPT (S16, trip code 15) is now built**
+(`config_store_flash.c`'s RAM-integrity recurrence check, `safety_guards.c`).
+It is trip-only — it has no separate WARN state, and nothing sets a warn_mask
+bit for it — so it does not itself reuse S14's bit 14 today. But the "warn
+bit = trip code - 1" rule stated above no longer holds in general: `(15 - 1)
+= 14` is the same bit S14 already occupies by the exception above. Any future
+WARN precursor added for S16 needs its bit assignment reviewed against this
+collision, not a mechanical `(code - 1)`.
 
 | Bit | Guard | Field |
 |---|---|---|

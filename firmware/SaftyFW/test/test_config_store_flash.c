@@ -1646,6 +1646,77 @@ static void test_ram_integrity_repair_discards_live_volatile_install(void)
                "the repair also clears the (now-discarded) volatile-dirty state");
 }
 
+// 2026-09-23 (s_persisted_record CRC hardening, coordinator-required
+// follow-up): s_persisted_record is the repair's only known-good fallback,
+// and it lives in RAM too -- corrupt it too and there is nothing left to
+// restore from.
+static void test_ram_integrity_both_copies_corrupted_requests_trip_no_repair(void)
+{
+    TEST_SECTION("config_store_flash: both cached AND persisted copies corrupted -- no known-good copy, immediate trip, no repair");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    rec.abs_max_temp_c = 950.0f;
+    rec.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: durable commit accepted");
+    TEST_CHECK(config_store_ram_integrity_recurrence_pending() == false, "fixture: no trip requested yet");
+
+    config_store_test_corrupt_cached_record();
+    config_store_test_corrupt_persisted_record();
+    TEST_CHECK(config_store_check_ram_integrity() == false,
+               "still reports a failure (nothing to report success about)");
+    TEST_CHECK(config_store_ram_integrity_recurrence_pending() == true,
+               "no known-good copy exists -- S16 is requested on this very first detection, "
+               "not deferred to a second corruption");
+
+    // No repair was attempted: config_store_check_ram_integrity()'s repair
+    // path unconditionally forces calibration_missing=true on the record it
+    // installs (see the other ram_integrity tests above) -- this call
+    // returned before ever reaching that install, so calibration_missing
+    // must still read whatever the (corrupted) cache already had, false
+    // here, never flipped true by a skipped repair.
+    config_store_record_t after;
+    TEST_CHECK(config_store_get_full_record(&after) == true, "record still readable (seqlock unaffected)");
+    TEST_CHECK(after.calibration_missing == false,
+               "no repair ran -- calibration_missing was never forced true by the (skipped) install");
+}
+
+// A persisted-copy-only corruption is never itself examined by the periodic
+// check -- s_persisted_record's CRC is only consulted as a would-be repair
+// source, and with a healthy cache no repair is ever attempted. This must
+// stay silent: nothing should trip or "repair" anything just because the
+// fallback copy alone went bad while nothing needs it.
+static void test_ram_integrity_persisted_only_corruption_with_healthy_cache_is_a_no_op(void)
+{
+    TEST_SECTION("config_store_flash: persisted-copy-only corruption with a healthy cache trips and repairs nothing");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.calibration_missing = false;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: durable commit accepted");
+
+    config_store_test_corrupt_persisted_record();
+    TEST_CHECK(config_store_check_ram_integrity() == true,
+               "cached record's own CRC is still fine -- the periodic check only examines "
+               "s_cached_record's CRC as its trigger, so this reports healthy");
+    TEST_CHECK(config_store_get_ram_integrity_fail_count() == 0u, "no failure counted");
+    TEST_CHECK(config_store_ram_integrity_recurrence_pending() == false, "no trip requested");
+
+    config_store_record_t after;
+    TEST_CHECK(config_store_get_full_record(&after) == true, "record still readable");
+    TEST_CHECK(after.calibration_missing == false,
+               "cache is untouched -- a quietly corrupted persisted copy that is never needed "
+               "as a repair source must not itself change anything");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -1677,6 +1748,8 @@ int main(void)
     test_ram_integrity_repair_restores_persisted_not_defaults();
     test_ram_integrity_second_corruption_this_boot_requests_trip();
     test_ram_integrity_repair_discards_live_volatile_install();
+    test_ram_integrity_both_copies_corrupted_requests_trip_no_repair();
+    test_ram_integrity_persisted_only_corruption_with_healthy_cache_is_a_no_op();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

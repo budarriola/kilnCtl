@@ -75,7 +75,9 @@ static inline const char *safety_trip_words_cause(uint8_t reason)
     case 12: return "A safety sensor reading stopped changing (frozen), not tracking a moving load";
     case 13: return "Enclosure/cold-junction temperature exceeded its limit";
     case 14: return "A borrowed zone's thermocouple reading stopped updating";
-    case 15: return "Safety config failed its integrity check on load";
+    case 15: return "Safety processor's in-RAM configuration was found corrupted twice in the "
+                     "same boot (periodic self-check) -- restored from its last confirmed "
+                     "flash write both times";
     case 16: return "Safety processor self-test failed at boot";
     default: return "Unrecognised guard code";
     }
@@ -248,7 +250,8 @@ static inline const char *safety_trip_words_remedy(uint8_t reason)
     case 12: return "Power-cycle or replace the frozen sensor, then press Clear Trip.";
     case 13: return "Let the enclosure cool below its limit, then press Clear Trip.";
     case 14: return "Check the borrowed zone's thermocouple and its wiring, then press Clear Trip.";
-    case 15: return "Recommission the safety config from the commissioning page, then press Clear Trip.";
+    case 15: return "NOT clearable from here. Power-cycle the safety processor -- only a fresh "
+                     "boot resets this guard; pressing Clear Trip is a no-op while it is latched.";
     case 16: return "Power-cycle the safety processor; if it recurs, the board needs service.";
     default: return "See firmware/SaftyFW/docs/SAFETY_MODEL.md for this guard.";
     }
