@@ -124,11 +124,27 @@ def _redact_credentials(text: str, username: str, password: str) -> str:
     into an error message on a path that holds a real credential -- an
     underlying exception (e.g. from a proxy or an HTTP library) that happens
     to echo the request body back verbatim must never leak the value through
-    this module's own error message."""
-    scrubbed = text
+    this module's own error message.
+
+    The request body is ``application/x-www-form-urlencoded``, so an echo of
+    it carries the ``quote_plus`` form of the credential, not the raw one --
+    both that and the ``quote`` form (which differs for a secret holding a
+    space or a ``+``) are scrubbed too. An empty or ``None`` secret is
+    skipped: ``str.replace("")`` would otherwise splice ``<redacted>``
+    between every character of the text.
+    """
+    variants = set()
     for secret in (password, username):
-        if secret:
-            scrubbed = scrubbed.replace(secret, "<redacted>")
+        if not secret:
+            continue
+        variants.add(secret)
+        variants.add(urllib.parse.quote_plus(secret))
+        variants.add(urllib.parse.quote(secret))
+    scrubbed = text
+    # Longest first, so a variant containing a shorter one cannot be left
+    # half-replaced.
+    for variant in sorted(variants, key=len, reverse=True):
+        scrubbed = scrubbed.replace(variant, "<redacted>")
     return scrubbed
 
 
@@ -197,7 +213,12 @@ def _login(origin: str, timeout: Optional[float]) -> str:
         # message, rather than trusting the underlying exception to have
         # been polite about it.
         detail = _redact_credentials(f"{type(exc).__name__}: {exc}", username, password)
-        raise HttpAuthError(f"POST {origin}{LOGIN_PATH} failed: {detail}") from exc
+        # ``from None``, deliberately: chaining would attach the UNSCRUBBED
+        # original as ``__cause__``, so any traceback print of this error
+        # would render its raw text right above ours and defeat the scrub.
+        # ``detail`` already carries the original's type and scrubbed
+        # message, so nothing diagnostic is lost.
+        raise HttpAuthError(f"POST {origin}{LOGIN_PATH} failed: {detail}") from None
 
     for raw in cookies:
         name, _, rest = raw.partition("=")

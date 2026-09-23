@@ -17,9 +17,11 @@ import email.message
 import io
 import os
 import sys
+import traceback
 import unittest
 import unittest.mock
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -418,6 +420,42 @@ class LoginTest(unittest.TestCase):
                 with self.assertRaises(http_auth.HttpAuthError) as caught:
                     http_auth.login("http://192.0.2.10")
         self.assertNotIn(fake_password, str(caught.exception))
+        # And the chained original must not carry it back in via a
+        # traceback print: ``from None`` suppresses the context.
+        self.assertIsNone(caught.exception.__cause__)
+        rendered = "".join(traceback.format_exception(
+            type(caught.exception), caught.exception, caught.exception.__traceback__))
+        self.assertNotIn(fake_password, rendered)
+
+    def test_login_generic_failure_scrubs_the_url_encoded_password(self):
+        """The login body is form-encoded, so an underlying error that echoes
+        it back carries the ``quote_plus`` form of the password, not the raw
+        one. The fake password here contains characters that encoding
+        changes, so the raw-form replacement alone cannot pass this."""
+        self._with_credentials()
+        fake_password = "p @ss+w/ord-not-real"
+        encoded = urllib.parse.quote_plus(fake_password)
+        self.assertNotEqual(encoded, fake_password)
+        with unittest.mock.patch.dict(os.environ, {http_auth.PASSWORD_ENV: fake_password}):
+            failure = OSError(f"proxy rejected body username=admin&password={encoded}")
+            recorder = _Recorder(failure)
+            with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+                with self.assertRaises(http_auth.HttpAuthError) as caught:
+                    http_auth.login("http://192.0.2.10")
+        self.assertNotIn(encoded, str(caught.exception))
+        self.assertNotIn(fake_password, str(caught.exception))
+
+    def test_redact_credentials_tolerates_empty_and_none_secrets(self):
+        """An empty needle in ``str.replace`` splices the replacement between
+        every character, and a ``None`` needle raises -- neither may happen."""
+        text = "connection reset by peer"
+        for username, password in (("", ""), (None, None), ("admin", ""), ("", None)):
+            with self.subTest(username=username, password=password):
+                self.assertEqual(
+                    http_auth._redact_credentials(text, username, password), text)
+        self.assertEqual(
+            http_auth._redact_credentials("peer admin reset", "admin", ""),
+            "peer <redacted> reset")
 
     def test_login_raises_without_a_credential(self):
         with unittest.mock.patch.dict(os.environ, {}, clear=False):
