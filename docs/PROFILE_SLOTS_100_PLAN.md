@@ -596,8 +596,7 @@ same-slot self-overwrite still allowed). Full host-test suite (56/56) and
 
 ## 8. Open owner questions
 
-1. **Consume the entire 1.81 MiB tail, or stop at 2 MiB and keep 320 KiB spare?** Section 1
-   recommends taking all of it: the 2 MiB option falls just under the partition's own 2x
-   GC-headroom rule. The cost is that no further `app`-type partition can ever be added
-   above `logs` without a restructure. If a second application image is ever contemplated,
-   say so now -- it is much cheaper to decide here than after a flash.
+1. **RESOLVED, 2026-09-19: consume the entire 1.81 MiB tail.** Decided as Section 1
+   recommended -- `firmware/KilnFW/partitions.csv` has `cfg, data, littlefs, 0xDB0000,
+   0x250000`, grown in place (offset unchanged). Landed and flashed to the bench at
+   `5f58ba09` on 2026-09-20 (ROADMAP.md row L).
