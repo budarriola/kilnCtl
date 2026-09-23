@@ -679,9 +679,9 @@ esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link)
  * comment already documents as "several hundred ms" on top of a slower
  * rollback-specific flash write this path never does. Poll granularity
  * matches the rollback path's (200ms) for the same "cheap, two short
- * state_lock sections, no I/O" reasoning. */
-#define SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS 3000u
-#define SAFETY_LINK_REBOOT_BOOT_ID_WATCH_POLL_MS 200u
+ * state_lock sections, no I/O" reasoning. SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS/
+ * _POLL_MS moved to safety_link.h 2026-09-23 so sw_reset_http.c's own
+ * arm-wait can derive from the same constant instead of duplicating it. */
 
 typedef struct {
     SafetyLinkClass *link;

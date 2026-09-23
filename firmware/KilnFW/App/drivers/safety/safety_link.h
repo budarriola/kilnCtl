@@ -2217,6 +2217,18 @@ esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollba
  * that has already begun. */
 esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link);
 
+/* Public (moved out of safety_link_commands.c 2026-09-23) so callers that
+ * must size a bound AROUND safety_link_send_reboot()'s own worst case --
+ * today, sw_reset_http.c's delayed-reboot task arm-wait -- derive it from
+ * this constant instead of a second, independently hardcoded number that
+ * can silently drift out of sync with it (exactly what happened the first
+ * time: the arm-wait was sized only for the ~345 ms ordinary reply window,
+ * before this fallback watch existed, and was never revisited when it was
+ * added). See safety_link_send_reboot()'s own doc comment below for what
+ * this bounds and why. */
+#define SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS 3000u
+#define SAFETY_LINK_REBOOT_BOOT_ID_WATCH_POLL_MS 200u
+
 /* The honest outcome of safety_link_send_reboot() below. Deliberately
  * distinguishes "the Pico said yes" from "nobody answered" -- silence is
  * NEVER folded into success here, the same discipline
@@ -2325,9 +2337,10 @@ typedef enum {
  * `*out_outcome` -- an unreachable or refusing peer is not an error of this
  * function, it is an outcome. Blocks the calling task for up to roughly
  * SAFETY_LINK_REPLY_TIMEOUT_MS plus, only on the no-reply path,
- * SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS more -- see sw_reset_http.c's own
- * comment on why that total is still comfortably inside what an httpd
- * handler task may spend. */
+ * SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS more -- see sw_reset_http.c's
+ * sw_reset_post_handler() comment at its call site (starting "Pico half
+ * next") for the real worst-case total, why it occupies the single httpd
+ * worker for that long, and why that is accepted. */
 esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
                                    uint8_t *out_reason_code, uint8_t *out_boot_id_before,
                                    uint8_t *out_boot_id_after);

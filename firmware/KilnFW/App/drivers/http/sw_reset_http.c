@@ -176,13 +176,25 @@ static void sw_reset_reboot_task(void *arg)
     // delay. Without this wait, such a client could hold the send past that
     // delay and this task would reboot the board mid-response -- the very
     // divergence (no response actually delivered, a report nobody reads)
-    // this ordering exists to prevent. 5 s is chosen as generously longer
-    // than the Pico exchange (~345 ms worst case) plus any ordinary response
-    // write; expiring the wait reboots anyway rather than leaking a task
-    // that never dies, on the theory that a client stalled 5 s past a 345 ms
-    // exchange is not coming back for the response either way.
+    // this ordering exists to prevent. 2026-09-23: this task's wait starts
+    // (via the fixed 500 ms delay above) BEFORE the handler even begins its
+    // Pico exchange, so the real worst case this window must cover is that
+    // WHOLE exchange, not just the historical ~345 ms reply wait --
+    // safety_link_send_reboot() can now also run the NO_REPLY boot_id
+    // fallback watch on top of it (see sw_reset_post_handler()'s own comment
+    // on the call site for the full ~345 ms + up to
+    // SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS worst case), plus any ordinary
+    // response write after that. A flat 5 s left only ~1.65 s of margin over
+    // that combined worst case -- on expiry this task reboots the ESP
+    // mid-response, the very defect this wait exists to prevent. Widened to
+    // 5 s plus SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS (8 s total today),
+    // DERIVED from that constant rather than a second hardcoded number, so
+    // the pair cannot drift apart again the way it just did. Expiring the
+    // wait still reboots anyway rather than leaking a task that never dies,
+    // on the theory that a client stalled this long past the exchange is not
+    // coming back for the response either way.
     const int kArmPollMs = 20;
-    const int kArmWaitMs = 5000;
+    const int kArmWaitMs = 5000 + SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS;
     for (int waited = 0; !ctx->armed && waited < kArmWaitMs; waited += kArmPollMs) {
         vTaskDelay(pdMS_TO_TICKS(kArmPollMs));
     }
@@ -442,12 +454,26 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     }
 
     // Pico half next, on this task, while there is still an HTTP response
-    // to put the answer in. safety_link_send_reboot() is bounded (one send
-    // plus SAFETY_LINK_REPLY_TIMEOUT_MS, ~345 ms at 230400 baud), well
-    // inside what an httpd handler may spend, and doing it here is the only
-    // way this route can report honestly on BOTH processors: run from the
-    // delayed reboot task instead and the answer arrives after the response
-    // has already been written, so nobody ever learns it.
+    // to put the answer in. safety_link_send_reboot() is bounded, but as of
+    // 2026-09-23 that bound is TWO-PART, not the historical single ~345 ms
+    // reply window: the ordinary send-plus-SAFETY_LINK_REPLY_TIMEOUT_MS wait
+    // (~345 ms at 230400 baud), and, ONLY on NO_REPLY, a further bounded
+    // fallback watch of up to SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS
+    // (safety_link.h) polling the peer's boot_id for a change. Worst case is
+    // therefore ~345 ms + SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS (today, ~3.3 s
+    // total), during which this call occupies the single httpd worker task --
+    // there is only one, so no other request can be served meanwhile. That is
+    // accepted, not merely tolerated: the wait is hard-bounded (never
+    // unbounded blocking), this route always ends in a reboot moments later
+    // regardless of outcome, and the alternative (answering before the Pico
+    // exchange finishes) is exactly the dishonest-report defect the ordering
+    // comment above exists to prevent -- see sw_reset_reboot_task()'s
+    // kArmWaitMs comment for how the delayed-reboot task's own wait was
+    // widened to stay comfortably longer than this total. Doing the exchange
+    // here is the only way this route can report honestly on BOTH
+    // processors: run it from the delayed reboot task instead and the answer
+    // arrives after the response has already been written, so nobody ever
+    // learns it.
     sw_reset_pico_report_t pico_report = SW_RESET_PICO_NO_LINK;
     // Only meaningful when pico_report == SW_RESET_PICO_CONFIRMED_BY_BOOT_ID
     // (safety_link_send_reboot() only fills these on that outcome); a short

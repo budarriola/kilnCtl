@@ -1792,7 +1792,8 @@ static void test_sw_reset_pico_sentences_are_honest(void)
 
     // Every outcome must have its own distinct sentence -- a duplicate would
     // mean two genuinely different results read identically to the operator.
-    const char *all[] = {accepted, refused_armed, refused_transfer, refused_other, unconfirmed, no_link};
+    const char *all[] = {accepted,     refused_armed, refused_transfer,    refused_other,
+                         unconfirmed, no_link,       confirmed_by_boot_id};
     const size_t n = sizeof(all) / sizeof(all[0]);
     bool all_distinct = true;
     for (size_t i = 0; i < n && all_distinct; i++) {
@@ -1803,7 +1804,10 @@ static void test_sw_reset_pico_sentences_are_honest(void)
             }
         }
     }
-    TEST_CHECK(all_distinct, "all six outcome sentences are distinct");
+    // 2026-09-23: was "all six" -- confirmed_by_boot_id is a seventh outcome
+    // that Opus review of 5719982c found missing from this distinctness
+    // check entirely, so a collision with it would have gone undetected.
+    TEST_CHECK(all_distinct, "all seven outcome sentences are distinct");
 }
 
 // ---------------------------------------------------------------------------
