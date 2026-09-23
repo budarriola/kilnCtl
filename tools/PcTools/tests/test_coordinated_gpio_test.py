@@ -169,12 +169,16 @@ def test_refuses_when_safety_armed():
     assert result.refused
     assert any("ARMED" in r for r in result.refusal_reasons)
     assert result.steps == ()
-    # No pin was ever touched.
+    # No pin was ever touched or detached from firmware...
     assert not boards.halted
     assert boards.detached == []
-    assert not boards.closed
-    assert not boards.pico_reset
-    assert not boards.esp_reset
+    # ...but the client is still closed/restored on this refusal path, since
+    # by the time run_coordinated_gpio_test's own preflight check runs, a
+    # caller may have already built a real (side-effectful) client (Opus
+    # re-review of 430ba634).
+    assert boards.closed
+    assert boards.pico_reset
+    assert boards.esp_reset
 
 
 def test_refuses_without_confirm():
@@ -256,6 +260,32 @@ def test_lazy_happy_path_builds_and_runs():
     assert not result.refused
     assert result.all_passed is True
     assert boards.closed  # built, run, and cleaned up
+
+
+def test_second_preflight_read_refusal_still_closes_client():
+    """Opus re-review of 430ba634: run_coordinated_gpio_test's own internal
+    clients.get_preflight() call (used when no `preflight=` snapshot is
+    passed in) can refuse in a narrower window than a caller's own check --
+    that refusal must still close/restore the already-built client, not
+    just the happy-path finally block."""
+    boards = FakeBoards()
+    armed_preflight = GpioTestPreflight(
+        safety_armed=True,
+        profile_running_or_paused=False,
+        profile_state_name="idle",
+        ota_interlock_ok=True,
+        ota_interlock_reason="ok",
+        link_up=True,
+    )
+    result = run_coordinated_gpio_test(_clients(boards, armed_preflight), confirm=True)
+
+    assert result.refused
+    assert boards.closed
+    assert boards.pico_reset
+    assert boards.esp_reset
+    # Never actually touched a pin though.
+    assert not boards.halted
+    assert boards.detached == []
 
 
 def test_unknown_preflight_state_refuses_fail_safe():

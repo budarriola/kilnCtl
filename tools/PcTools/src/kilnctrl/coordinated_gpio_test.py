@@ -243,7 +243,10 @@ def check_preflight_refusal(preflight: GpioTestPreflight, confirm: bool) -> "tup
     return tuple(reasons)
 
 
-def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -> GpioTestResult:
+def run_coordinated_gpio_test(
+    clients: GpioTestClients, confirm: bool = False,
+    preflight: "Optional[GpioTestPreflight]" = None,
+) -> GpioTestResult:
     """Run Steps A and B, after checking preconditions. Never touches a pin
     if `confirm` is not `True`, or if any precondition in
     :meth:`GpioTestPreflight.refusal_reasons` fails. Restores both boards
@@ -258,10 +261,26 @@ def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -
     :func:`check_preflight_refusal` itself first and skip building clients
     entirely on refusal -- see :func:`run_coordinated_gpio_test_lazy`, which
     both the CLI and the MCP tool use for exactly this reason (Opus review of
-    bdd06947 found the eager-construction leak this guards against)."""
-    preflight = clients.get_preflight()
+    bdd06947 found the eager-construction leak this guards against).
+
+    `preflight`: pass the already-read snapshot through (as
+    `run_coordinated_gpio_test_lazy` does) rather than letting this function
+    call `clients.get_preflight()` a second time -- a second, independent
+    read can itself refuse in a narrower window than the caller's own check,
+    which is the same leak shape the note above describes, just smaller
+    (Opus re-review of 430ba634)."""
+    if preflight is None:
+        preflight = clients.get_preflight()
     reasons = check_preflight_refusal(preflight, confirm)
     if reasons:
+        # `clients` (and, for build_real_clients, the real ProbeClient) may
+        # already exist by this point -- close/restore it here too, not just
+        # in the `finally` below, so this refusal path never leaks either
+        # (Opus re-review of 430ba634: this second preflight read, narrower
+        # than the caller's own, was the same leak shape).
+        clients.esp_close()
+        clients.pico_reset_run()
+        clients.esp_reset_run()
         return GpioTestResult(refused=True, refusal_reasons=reasons)
 
     steps: "list[StepMeasurement]" = []
@@ -279,8 +298,11 @@ def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -
             guard_pin(4)
             clients.esp_drive(4, level)
             clients.settle()
+            guard_pin(5)
             pico5 = clients.pico_read(5)
+            guard_pin(10)
             pico10 = clients.pico_read(10)  # baseline read, not asserted on
+            guard_pin(5)
             esp5_ownrx = clients.esp_read(5)
             diagnostics.append(
                 f"stepA esp4={level!r}: pico_gpio10={pico10!r} esp5(own_rx)={esp5_ownrx!r}")
@@ -297,7 +319,9 @@ def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -
             guard_pin(4)
             clients.pico_set_output(4, level)
             clients.settle()
+            guard_pin(4)
             esp4 = clients.esp_read(4)
+            guard_pin(5)
             esp5 = clients.esp_read(5)
             diagnostics.append(f"stepB pico4={level!r}: esp_gpio4={esp4!r}")
             steps.append(StepMeasurement(
@@ -336,7 +360,12 @@ def run_coordinated_gpio_test_lazy(
         return GpioTestResult(refused=True, refusal_reasons=reasons)
 
     clients = build_clients()
-    return run_coordinated_gpio_test(clients, confirm=confirm)
+    # Pass the already-read snapshot through instead of letting
+    # run_coordinated_gpio_test call clients.get_preflight() again -- a
+    # second, independent read could itself refuse in the narrow window
+    # between here and there, leaking the client we just built for exactly
+    # the same reason this function exists (Opus re-review of 430ba634).
+    return run_coordinated_gpio_test(clients, confirm=confirm, preflight=preflight)
 
 
 # ---------------------------------------------------------------------------
