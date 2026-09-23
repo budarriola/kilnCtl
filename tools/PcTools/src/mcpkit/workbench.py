@@ -226,22 +226,51 @@ def build_saftyfw_host_tests() -> str:
         _powershell(os.path.join(root, "firmware", "SaftyFW", "test", "build_host_tests.ps1")))
 
 
-def build_saftyfw(jobs: int = 0) -> str:
+def build_saftyfw(jobs: int = 0, saftyfw_root: Optional[str] = None) -> str:
     """Build the SaftyFW safety-processor firmware (``firmware/SaftyFW/build``).
 
     Produces the ELF that ``debug_program(peer="pico")`` flashes over SWD.
+
+    ``saftyfw_root`` is an optional absolute path to a ``firmware/SaftyFW``-
+    shaped directory (mirroring ``flash_firmware``'s ``kiln_fw_root``), for
+    building from a clean git worktree instead of the main tree. Defaults to
+    this repo's own ``firmware/SaftyFW``.
+
+    If that root has no configured ``build/CMakeCache.txt`` yet, this
+    configures it first (``cmake -S <root> -B <root>/build -G Ninja``),
+    resolving ``PICO_SDK_PATH`` via :func:`mcpkit.pico_sdk.resolve_pico_sdk_path`
+    and injecting it into only that subprocess's environment -- never this
+    process's, and never persisted.
     """
-    return _cmake_build("saftyfw", os.path.join(repo_root(), "firmware", "SaftyFW", "build"), jobs)
+    root = saftyfw_root or os.path.join(repo_root(), "firmware", "SaftyFW")
+    build_dir = os.path.join(root, "build")
+    return _cmake_build("saftyfw", build_dir, jobs, source_dir=root)
 
 
-def _cmake_build(tag: str, build_dir: str, jobs: int) -> str:
-    if not os.path.isdir(build_dir):
-        return (f"{tag}: error: {build_dir} does not exist -- configure it once with "
-                f"`cmake -S {os.path.dirname(build_dir)} -B {build_dir} -G Ninja` first")
+def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: Optional[str] = None) -> str:
+    configure_note = ""
+    if not os.path.isdir(build_dir) or not os.path.isfile(os.path.join(build_dir, "CMakeCache.txt")):
+        src = source_dir or os.path.dirname(build_dir)
+        if source_dir is None:
+            return (f"{tag}: error: {build_dir} does not exist -- configure it once with "
+                    f"`cmake -S {src} -B {build_dir} -G Ninja` first")
+        from mcpkit.pico_sdk import PicoSdkNotFoundError, resolve_pico_sdk_path
+        try:
+            sdk_path = resolve_pico_sdk_path()
+        except PicoSdkNotFoundError as exc:
+            return f"{tag}: error: {exc}"
+        configure_env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+        configure_env["PICO_SDK_PATH"] = sdk_path
+        configure_argv = ["cmake", "-S", src, "-B", build_dir, "-G", "Ninja"]
+        result = _run_locked(f"{tag}-configure", build_dir, configure_argv, cwd=src, env=configure_env)
+        first_line = result.splitlines()[0] if result else ""
+        if "FAILED" in first_line or "TIMEOUT" in first_line:
+            return result
+        configure_note = f" (configured from scratch, PICO_SDK_PATH={sdk_path})\n"
     argv = ["cmake", "--build", build_dir]
     if jobs > 0:
         argv += ["--parallel", str(jobs)]
-    return _run_locked(tag, build_dir, argv, cwd=build_dir)
+    return configure_note + _run_locked(tag, build_dir, argv, cwd=build_dir)
 
 
 #: Puts idf.py, cmake, ninja and the Xtensa toolchain on PATH in one step.

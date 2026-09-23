@@ -224,7 +224,7 @@ KiCad server has no equivalent -- there is nothing to compile there:
 | tool | server | notes |
 |------|--------|-------|
 | `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE_PLAN.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
-| `build_saftyfw(jobs)` | kilnctrl | ninja in `firmware/SaftyFW/build` |
+| `build_saftyfw(jobs, saftyfw_root)` | kilnctrl | ninja in `firmware/SaftyFW/build` (or `<saftyfw_root>/build`); auto-configures from scratch via `mcpkit.pico_sdk.resolve_pico_sdk_path()` if no `CMakeCache.txt` exists yet -- see "Building from a clean worktree" below |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
 | `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
 | `bench_test_run(suite, cases, dry_run, allow_heat, ap_password, tag, host)` | kilnctrl | standardized bench regression testing (docs/BENCH_TEST_SYSTEM_PLAN.md); Wave 0 only runs read-only cases -- calls existing tool functions in-process, never a second MCP server or hardware directly |
@@ -470,21 +470,41 @@ would ride along or trip the sensitive-dirty guard above). A fresh
    set-target esp32s3` explicitly before `build` -- do not rely on a stale
    `sdkconfig` or the tool's own default.
 
-Note that the MCP build tools (`build_kilnfw()`/`build_saftyfw()`,
-`tools/PcTools/src/mcpkit/workbench.py`) always build the MAIN tree's
-`firmware/KilnFW`/`firmware/SaftyFW` and take no root/worktree parameter --
-they cannot be pointed at a clean worktree the way `flash_firmware
+`build_kilnfw()` (`tools/PcTools/src/mcpkit/workbench.py`) always builds the
+MAIN tree's `firmware/KilnFW` and takes no root/worktree parameter -- it
+cannot be pointed at a clean worktree the way `flash_firmware
 (kiln_fw_root=...)` can. Building the worktree itself for that workflow means
 invoking the toolchain directly, the same way
-`check_00_kilnfw_target_build.ps1` and `check_00_saftyfw_target_build.ps1` do
-against their own private checkbuild worktrees: `idf.py -C
-<worktree>\firmware\KilnFW build` for KilnFW (after `set-target esp32s3` on a
-from-scratch or fullclean'd build dir, per above), and, for SaftyFW, a
-first-time configure with `cmake -G Ninja -B build .` run from
-`<worktree>\firmware\SaftyFW` followed by a `ninja` build in that `build`
-directory (equivalently, `cmake -S <worktree>\firmware\SaftyFW -B
-<worktree>\firmware\SaftyFW\build -G Ninja` then `cmake --build
-<worktree>\firmware\SaftyFW\build`).
+`check_00_kilnfw_target_build.ps1` does against its own private checkbuild
+worktree: `idf.py -C <worktree>\firmware\KilnFW build` (after `set-target
+esp32s3` on a from-scratch or fullclean'd build dir, per above).
+
+`build_saftyfw()` is different: it now takes an optional `saftyfw_root`
+(absolute path to a `firmware/SaftyFW`-shaped directory, mirroring
+`flash_firmware`'s `kiln_fw_root`) and, when that root's `build/` has no
+`CMakeCache.txt` yet, configures it itself (`cmake -S <root> -B <root>/build
+-G Ninja`) before building -- including resolving `PICO_SDK_PATH` on its own
+(see below), so a caller building SaftyFW from a fresh worktree no longer
+needs to configure by hand first. The equivalent by-hand invocation, if ever
+needed outside the tool, is the same as `check_00_saftyfw_target_build.ps1`
+uses against its own private checkbuild worktree: a first-time configure with
+`cmake -G Ninja -B build .` run from `<worktree>\firmware\SaftyFW` followed by
+a `ninja` build in that `build` directory (equivalently, `cmake -S
+<worktree>\firmware\SaftyFW -B <worktree>\firmware\SaftyFW\build -G Ninja`
+then `cmake --build <worktree>\firmware\SaftyFW\build`).
+
+**`PICO_SDK_PATH` resolution.** The Pico SDK is unvendored on this bench
+machine, at `C:\pico-tools\pico-sdk` -- nothing in `tools/` used to know that
+path except `check_00_saftyfw_target_build.ps1`'s own hardcoded fallback, so
+any SaftyFW build from a fresh worktree failed unless a human set the
+environment variable by hand first. `tools/PcTools/src/mcpkit/pico_sdk.py`'s
+`resolve_pico_sdk_path()` is now the single source of truth both
+`build_saftyfw()`'s configure-from-scratch step and that PowerShell check's
+fallback comment point at: `PICO_SDK_PATH` from the environment if set, else
+`C:\pico-tools\pico-sdk` if it contains `pico_sdk_init.cmake`, else a clear
+error naming both. `build_saftyfw()` injects the resolved value into only its
+own configure subprocess's environment -- it is never written into this
+process's environment or persisted anywhere.
 
 There is also no bare `factory_reset` MCP tool: the ESP-side factory-reset
 request (`devices.system_factory_reset(scope)`) is only ever sent as part of

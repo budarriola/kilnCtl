@@ -16,6 +16,10 @@
 # C:\pico-tools:
 #   $env:PICO_SDK_PATH = "C:\pico-tools\pico-sdk"
 #   $env:FREERTOS_KERNEL_PATH = "C:\pico-tools\FreeRTOS-Kernel"
+# (the MCP build_saftyfw() tool resolves PICO_SDK_PATH on its own when it has
+# to configure a build directory from scratch -- see
+# tools/PcTools/src/mcpkit/pico_sdk.py -- so this env var only needs setting
+# by hand for a manual, outside-the-tool build)
 #   cmake -G Ninja -B build -DPICO_BOARD=pico ^
 #     "-DPICO_TOOLCHAIN_PATH=C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\14.2 rel1\bin"
 #   cmake --build build

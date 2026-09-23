@@ -103,6 +103,10 @@ try {
             New-Item -ItemType Directory -Path $buildDir | Out-Null
         }
         if (-not $env:PICO_SDK_PATH) {
+            # Mirrors tools/PcTools/src/mcpkit/pico_sdk.py's
+            # DEFAULT_PICO_SDK_PATH -- that module is the single source of
+            # truth for build_saftyfw()'s own configure-from-scratch path;
+            # keep both in sync if this default ever moves.
             $env:PICO_SDK_PATH = "C:\pico-tools\pico-sdk"
             Write-Host "PICO_SDK_PATH not set -- defaulting to $env:PICO_SDK_PATH (see CMakeLists.txt header comment)"
         }
