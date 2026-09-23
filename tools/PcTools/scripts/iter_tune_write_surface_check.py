@@ -63,7 +63,55 @@ PRODUCTION_ROOT = "firmware/KilnFW/App"
 EXCLUDED_DIRS = {"test", "build"}
 EXCLUDED_FILES = set(ITER_TUNE_FILES)
 
-ITER_TUNE_CALL_RE = re.compile(r"\biter_tune_\w+\s*\(")
+# The decision core's actual, closed function set (iter_tune.h) -- matched
+# by exact name, NOT by the "iter_tune_" prefix alone. A prefix-only match
+# would also trip on this same file's own iter_tune_store_*() persistence
+# functions (iter_tune_store.c/.h), which are a separate module that merely
+# shares the plan's naming convention and must be freely callable from
+# production (that IS this store's job). Keep this list in sync with
+# iter_tune.h if a function is ever added or renamed there.
+ITER_TUNE_DECISION_CORE_FUNCS = (
+    "iter_tune_enable",
+    "iter_tune_reanchor",
+    "iter_tune_restore_commissioned",
+    "iter_tune_fault",
+    "iter_tune_active_gains",
+    "iter_tune_clamp_to_cage",
+    "iter_tune_propose_perturbation",
+    "iter_tune_process_comparison",
+    "iter_tune_status_str",
+    "iter_tune_stop_reason_str",
+    "iter_tune_result_str",
+)
+ITER_TUNE_CALL_RE = re.compile(
+    r"\b(" + "|".join(ITER_TUNE_DECISION_CORE_FUNCS) + r")\s*\("
+)
+
+# Plan step 7 (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7) deliberately adds
+# ONE production caller: the persistence + HTTP surface, which needs to call
+# a narrow, non-proposing subset of iter_tune_* to implement the "restore
+# commissioned gains" control and status reporting. It must NOT be able to
+# call the two trial-proposing functions -- those stay reachable only from
+# iter_tune.c itself and the host tests, per sec 9.3 ("bench fixture only").
+ALLOWED_CALLER_FILES = {
+    "firmware/KilnFW/App/drivers/http/iter_tune_http.c",
+}
+ALLOWED_CALLS_FOR_ALLOWED_CALLERS = {
+    "iter_tune_restore_commissioned",
+    "iter_tune_active_gains",
+    "iter_tune_status_str",
+    "iter_tune_stop_reason_str",
+    "iter_tune_clamp_to_cage",
+}
+# Still forbidden everywhere outside iter_tune.c/.h, allowed caller or not --
+# these are the only two functions that actually PROPOSE or SCORE a trial.
+FORBIDDEN_EVERYWHERE = {
+    "iter_tune_propose_perturbation",
+    "iter_tune_process_comparison",
+    "iter_tune_enable",
+    "iter_tune_reanchor",
+    "iter_tune_fault",
+}
 
 
 def _strip_c_comments(text: str) -> str:
@@ -146,13 +194,29 @@ def check_unwired(repo_root: Path) -> list[str]:
         if rel in EXCLUDED_FILES:
             continue
         stripped = _strip_c_comments(path.read_text(encoding="utf-8"))
+        is_allowed_caller = rel in ALLOWED_CALLER_FILES
         for lineno, line in enumerate(stripped.splitlines(), start=1):
-            if ITER_TUNE_CALL_RE.search(line):
-                failures.append(
-                    f"{rel}:{lineno}: calls an iter_tune_* function -- iter_tune is bench-fixture-"
-                    "only and not yet owner-approved to be wired into production (sec 9.3); "
-                    "if this is the deliberate wiring commit, update this check's scope alongside it"
-                )
+            for m in ITER_TUNE_CALL_RE.finditer(line):
+                name = m.group(0).split("(")[0].strip()
+                if name in FORBIDDEN_EVERYWHERE:
+                    failures.append(
+                        f"{rel}:{lineno}: calls {name}() -- this function proposes/scores/arms a "
+                        "trial and must never be called outside iter_tune.c/.h or the host tests "
+                        "(ITER_TUNE_REDESIGN_PLAN.md sec 9.3)"
+                    )
+                    continue
+                if not is_allowed_caller:
+                    failures.append(
+                        f"{rel}:{lineno}: calls an iter_tune_* function -- iter_tune is bench-fixture-"
+                        "only and not yet owner-approved to be wired into production (sec 9.3); "
+                        "if this is the deliberate wiring commit, update this check's scope alongside it"
+                    )
+                elif name not in ALLOWED_CALLS_FOR_ALLOWED_CALLERS:
+                    failures.append(
+                        f"{rel}:{lineno}: calls {name}() -- not in the plan step 7 safe subset "
+                        "(ALLOWED_CALLS_FOR_ALLOWED_CALLERS); only status/restore-commissioned "
+                        "reads may be called from the persistence+HTTP surface"
+                    )
     return failures
 
 

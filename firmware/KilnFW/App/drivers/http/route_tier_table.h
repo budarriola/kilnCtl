@@ -327,6 +327,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/backup/export", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/crash_report", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/boot_guard", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/iter_tune/status", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/iter_tune/restore_commissioned", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/coredump/info", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/coredump/chunk", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/debug/lwip_stats", HTTP_GET, ROUTE_TIER_ADMIN),

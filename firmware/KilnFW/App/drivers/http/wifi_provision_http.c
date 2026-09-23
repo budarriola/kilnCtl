@@ -1131,8 +1131,14 @@ esp_err_t wifi_provision_http_start(void)
      * routes against this cap (4 spare) before this change; the new
      * GET /api/nvs/keys route (diagnostics_http.c's nvs_keys_get_handler())
      * would have left only 3, below the check's own 4-slot warning
-     * threshold. Set to 165 for the same ~9-slot headroom convention. */
-    config.max_uri_handlers = 165;
+     * threshold. Set to 165 for the same ~9-slot headroom convention.
+     *
+     * Bumped 165 -> 170, 2026-09-23: iter_tune_http.c added two routes
+     * (GET /api/iter_tune/status, POST /api/iter_tune/restore_commissioned,
+     * ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7), which would have left only 5
+     * spare against the 165 cap. Set to 170 for the same ~9-slot headroom
+     * convention as every bump above. */
+    config.max_uri_handlers = 170;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

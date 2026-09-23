@@ -491,6 +491,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # CONFIG_PARAM_TABLE via an injected accessor pair,
                        # never a curated field list -- see kiln_package.h).
                        "persist/kiln_cfg_store_cfg_fs.c"
+                       "persist/iter_tune_store.c"
+                       # iter_tune redesign plan step 7 persistence
+                       # (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7): own
+                       # NVS namespace + cfg LittleFS dual-write.
+                       "http/iter_tune_http.c"
                        # kiln config slots filesystem move, 2026-09-07
                        # (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln
                        # config slots" item) -- read-through/dual-write

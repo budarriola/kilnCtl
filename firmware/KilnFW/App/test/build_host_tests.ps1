@@ -87,6 +87,7 @@ try {
         (Join-Path $testDir "test_dashboard_safety_ready.c"),
         (Join-Path $testDir "test_readiness_commissioning.c"),
         (Join-Path $testDir "test_kiln_cfg_store.c"),
+        (Join-Path $testDir "test_iter_tune_store.c"),
         (Join-Path $testDir "test_safety_cfg_store.c"),
         (Join-Path $testDir "test_boot_guard.c"),
         # docs/PICO_AUTO_UPDATE_PLAN.md -- pure decision logic (header-only,

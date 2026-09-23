@@ -28,6 +28,7 @@
 #include "board_temps.h"
 #include "board_temps_http.h"
 #include "diagnostics_http.h"
+#include "iter_tune_http.h"
 #include "partition_info_http.h"
 #include "dualwrite_window_http.h"
 #include "backup_http.h"
@@ -536,6 +537,18 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // flash read at 0x8000, which does not work on this chip). No hardware
     // pointers needed, registered right after diagnostics for the same
     // "no ordering dependency" reason as everything else in this block.
+    // ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7: persistence + read/restore
+    // surface for the iter_tune decision core. Same "no ordering
+    // dependency" placement as everything else in this block -- iter_tune
+    // itself stays unwired from profile_executor.c pending owner sign-off
+    // (sec 9.3), so this route pair is the only production caller and only
+    // ever reads a persisted anchor/baseline back into zones_config_set_pid().
+    esp_err_t iter_tune_http_err = iter_tune_http_start();
+    if (iter_tune_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "iter_tune_http_start failed: %s -- no /api/iter_tune/* this boot",
+                 esp_err_to_name(iter_tune_http_err));
+    }
+
     esp_err_t partition_info_err = partition_info_http_start();
     if (partition_info_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "partition_info_http_start failed: %s -- no /api/partitions this boot",

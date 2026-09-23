@@ -1474,8 +1474,10 @@
 > unexplained; `safety_poll` (3104/3104 B) and `autotune_engine` (2944/2944
 > B) both still sit at exactly zero stack margin; the Pico fault-hook
 > diagnostics (malloc/assert latching, `boot_reason` bits) have never been
-> verified on hardware; iter_tune persistence, HTTP surface and shadow mode
-> remain unbuilt, deliberately behind the credibility gate. Full detail for
+> verified on hardware; iter_tune persistence + HTTP surface (plan step 7)
+> landed (own NVS namespace, cfg_fs dual-write, restore-commissioned route),
+> shadow mode (step 8) remains unbuilt, deliberately behind the credibility
+> gate and hardware-gated. Full detail for
 > closed items before this sweep lives in `docs/COMPLETED_2026-09.md`.
 > **Reviewed before that:** 2026-09-10, roadmap-upkeep audit
 > (tenth sweep) — 53 commits landed since the ninth sweep (`fa424d74`).
