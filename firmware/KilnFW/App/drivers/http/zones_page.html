@@ -1372,7 +1372,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '</label>' +
       '<input type="number" step="0.01" min="0" max="5000" class="couplingdiag" value="' + (z.coupling_diag_k_dc || 0) + '">' +
     '</details>' +
-    /* Four controller bands/shaping fields, none of them guards despite
+    /* Five controller bands/shaping fields, none of them guards despite
        sitting near the guards group in the C source's ZONES_CFG_VERSION
        history -- ease_off_window_mult/approach_rate_cap_c_per_hr shape the
        ramp/ease-off behaviour and error_band_c/rate_band_c_per_s/
@@ -2694,7 +2694,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
        docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs
        ("tc_type yes, cal offset no"). */
     params.push('z' + i + '_cal=' + ownStack.querySelector('.cal').value);
-    /* coupling_diag_k_dc and the four controller-bands/shaping fields: same
+    /* coupling_diag_k_dc and the five controller-bands/shaping fields: same
        "no inheritance group, always this zone's own" treatment as cal offset
        just above -- read off ownStack, matching zones_http_post_parse.c's
        z%u_coupling_diag_k_dc/z%u_easeoffmult/z%u_approachratecap/

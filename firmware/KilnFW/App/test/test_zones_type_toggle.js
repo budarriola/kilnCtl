@@ -176,7 +176,7 @@ function isVisible(node) {
 // settingsStackHtml/zoneTypeHtml), for zone_type=0 (Heater) and zone_type=1
 // (On/off device), then run the real toggleZoneTypeUi() against each.
 // ---------------------------------------------------------------------------
-function renderZoneFragment(zoneType) {
+function renderZoneFragment(zoneType, overrides) {
   // zoneBlock() itself does a lot (relay bitmaps, thermo bitmaps, CT probes,
   // inheritance dropdown) unrelated to this gating and requires more of the
   // page's surrounding state than this test needs. The gating logic this
@@ -219,6 +219,7 @@ function renderZoneFragment(zoneType) {
       coupling_diag_k_dc: 12.5, ease_off_window_mult: 2.5,
       approach_rate_cap_c_per_hr: 300, error_band_c: 15,
       rate_band_c_per_s: 0.25, progress_band_c: 3.5,
+      ...(overrides || {}),
     },
     current: {},
     i: 0,
@@ -242,8 +243,8 @@ function renderZoneFragment(zoneType) {
   return sandbox.result;
 }
 
-function buildZoneDiv(zoneType) {
-  const html = renderZoneFragment(zoneType);
+function buildZoneDiv(zoneType, overrides) {
+  const html = renderZoneFragment(zoneType, overrides);
   // Wrap in a zonetype select (real page renders it as a <select>, so
   // simulate the "currently selected" option the same way).
   const wrapped =
@@ -360,21 +361,60 @@ assert(typeof toggleZoneTypeUi === 'function', 'sanity: toggleZoneTypeUi extract
   // calls construct, read off ownStack (this zone's own stack, matching the
   // cal-offset field's "no inheritance group" precedent just above it) --
   // not off a group-terminal stack, since none of these six is part of any
-  // settings_source inheritance group on the C side.
+  // settings_source inheritance group on the C side. Extracted verbatim out
+  // of saveBtn's click handler (it is inline there, not its own named
+  // function, same as test_zones_inheritance.js's channel-type fan-out
+  // block) and driven against the REAL rendered .customStack from the same
+  // `div` used for the render assertions above -- not a hand-built stand-in
+  // -- so this exercises the actual collection code, not a regex belief
+  // about it.
+  const SIX_FIELD_ROUND_TRIP_SRC = extractRange(
+    "    params.push('z' + i + '_coupling_diag_k_dc=' + ownStack.querySelector('.couplingdiag').value);",
+    "    params.push('z' + i + '_progressband=' + ownStack.querySelector('.progressband').value);"
+  );
+  assert(SIX_FIELD_ROUND_TRIP_SRC.indexOf('easeoffmult') !== -1,
+    'sanity: extracted range is the six-field round-trip block');
+
+  function runSixFieldRoundTrip(i, ownStack) {
+    const ctx = vm.createContext({ i, ownStack, params: [] });
+    new vm.Script('(function(){\n' + SIX_FIELD_ROUND_TRIP_SRC + '\n})();',
+      { filename: 'zones_page.html (six-field round-trip slice)' }).runInContext(ctx);
+    return ctx.params;
+  }
+
   const postKeyMap = [
-    ['couplingdiag', 'coupling_diag_k_dc'],
-    ['easeoffmult', 'easeoffmult'],
-    ['approachratecap', 'approachratecap'],
-    ['errorband', 'errorband'],
-    ['rateband', 'rateband'],
-    ['progressband', 'progressband'],
+    ['.couplingdiag', 'coupling_diag_k_dc', 'coupling_diag_k_dc'],
+    ['.easeoffmult', 'ease_off_window_mult', 'easeoffmult'],
+    ['.approachratecap', 'approach_rate_cap_c_per_hr', 'approachratecap'],
+    ['.errorband', 'error_band_c', 'errorband'],
+    ['.rateband', 'rate_band_c_per_s', 'rateband'],
+    ['.progressband', 'progress_band_c', 'progressband'],
   ];
-  postKeyMap.forEach(([cls, wireKey]) => {
-    const re = new RegExp(
-      "params\\.push\\('z' \\+ i \\+ '_" + wireKey + "=' \\+ ownStack\\.querySelector\\('\\." + cls + "'\\)\\.value\\)"
-    );
-    assert(re.test(SRC), 'round trip: saveAll() sends z<i>_' + wireKey + ' from ownStack.' + cls);
+  // The fragment under test (settingsStackHtml + zoneTypeHtml) is rendered
+  // without zoneBlock()'s outer bodyHtml wrapper that supplies the literal
+  // ".customStack" class (zones_page.html:1598) -- these six fields are
+  // querySelector'd from wherever they render either way (there is only one
+  // of each per zone), so `div` itself stands in for ownStack here, same as
+  // fieldMap's render assertions above already query `div` directly.
+  const postedParams = runSixFieldRoundTrip(0, div);
+  postKeyMap.forEach(([cls, fieldName, wireKey]) => {
+    const expected = fieldMap.find((f) => f[0] === cls)[2];
+    const want = 'z0_' + wireKey + '=' + expected;
+    assert(postedParams.indexOf(want) !== -1,
+      'round trip: saveAll() posts ' + want + ' for ' + fieldName + ' (got: ' + postedParams.join(', ') + ')');
   });
+
+  // Zero is the documented "firmware default"/"uncapped" sentinel for
+  // approach_rate_cap_c_per_hr, not "no value entered" -- it must still be
+  // POSTED as the literal string "0", never dropped from params entirely
+  // (a dropped key would fall through to the server's OPTIONAL-field
+  // omit-preserves fallback and silently keep whatever cap was previously
+  // stored, defeating an operator's deliberate "uncap this zone" edit).
+  const zeroDiv = buildZoneDiv(0, { approach_rate_cap_c_per_hr: 0 });
+  const zeroParams = runSixFieldRoundTrip(0, zeroDiv);
+  assert(zeroParams.indexOf('z0_approachratecap=0') !== -1,
+    'round trip: approach_rate_cap_c_per_hr=0 (uncapped sentinel) posts as z0_approachratecap=0, not dropped ' +
+    '(got: ' + zeroParams.join(', ') + ')');
 }
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
