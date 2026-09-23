@@ -168,12 +168,36 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
     return (int)n;
 }
 
-// Cookie header is never read by this route -- fixed "not present" stubs.
-size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field) { (void)r; (void)field; return 0; }
+// Cookie header stub -- extended 2026-09-22 for POST /api/auth/logout host
+// coverage (docs/audits' review of 678da66e named this gap: logout_post_
+// handler()'s cookie-extraction -> http_auth_session_logout() ->
+// Set-Cookie-clear wrapper had no HTTP-level test because this file's
+// header stubs were hardcoded to "cookie never present", shared with every
+// login test above). s_stub_cookie_header defaults to NULL ("no Cookie
+// header at all"), the exact behavior the old hardcoded stub always
+// returned, so every pre-existing login test above is unaffected. A test
+// stages a header via stage_cookie_header() below; reset_all() restores the
+// NULL default.
+static const char *s_stub_cookie_header = NULL;
+static void stage_cookie_header(const char *raw_cookie_header) { s_stub_cookie_header = raw_cookie_header; }
+size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field)
+{
+    (void)r;
+    if (field && s_stub_cookie_header != NULL && strcmp(field, "Cookie") == 0) {
+        return strlen(s_stub_cookie_header);
+    }
+    return 0;
+}
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size)
 {
     (void)r;
-    (void)field;
+    if (field && s_stub_cookie_header != NULL && strcmp(field, "Cookie") == 0) {
+        if (val && val_size) {
+            strncpy(val, s_stub_cookie_header, val_size - 1);
+            val[val_size - 1] = '\0';
+        }
+        return ESP_OK;
+    }
     if (val && val_size) { val[0] = '\0'; }
     return ESP_FAIL;
 }
@@ -281,6 +305,7 @@ static void reset_all(void)
     s_last_sendstr[0] = '\0';
     s_last_set_cookie[0] = '\0';
     s_last_retry_after[0] = '\0';
+    s_stub_cookie_header = NULL; // no Cookie header presented, by default (existing behavior)
     strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
     s_stub_ip_known = true;
     // Default STA lease covers the whole 10.0.0.0/8 range, which is where
@@ -1005,6 +1030,86 @@ static void test_429_response_is_logged(void)
                "the 429 log line's retry_after=<N>s token matches the Retry-After header, not just a bare digit");
 }
 
+// ---------------------------------------------------------------------------
+// POST /api/auth/logout -- 2026-09-22 follow-up to 678da66e's review, which
+// named this gap: logout_post_handler()'s wrapper (cookie extraction ->
+// http_auth_session_logout() -> Set-Cookie clear -> 204) had no HTTP-level
+// coverage of its own, only http_auth_session_logout() exercised in
+// isolation elsewhere. Uses the real session table (http_session_table(),
+// already linked into this executable -- reset_all() above already calls
+// web_auth_table_destroy_all() against it) and the real
+// http_session_hash_token()/web_auth_table_create_session() seam, exactly
+// the path login_post_handler() itself uses to mint a session, so these
+// tests exercise the actual production wiring end to end rather than a
+// second, hand-rolled session fixture.
+// ---------------------------------------------------------------------------
+
+// Exact clear header logout_post_handler() sends -- same cookie name login_post_handler()
+// mints with, plus Max-Age=0 so the browser discards it immediately.
+static const char *LOGOUT_CLEAR_COOKIE = HTTP_SESSION_COOKIE_NAME "=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+
+static esp_err_t do_logout(void)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 0;
+    return logout_post_handler(&req);
+}
+
+static void test_logout_with_valid_cookie_clears_session(void)
+{
+    TEST_SECTION("POST /api/auth/logout -- a presented session cookie is revoked and the "
+                 "cookie cleared (204)");
+    reset_all();
+
+    uint8_t token_hash[32];
+    http_session_hash_token("logout-test-token", strlen("logout-test-token"), token_hash);
+    size_t slot_idx =
+        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.5", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+    TEST_CHECK(slot_idx < WEB_AUTH_WEB_SLOT_COUNT, "test setup: session was created");
+    TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
+               "test setup: the session resolves before logout");
+
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=logout-test-token");
+    s_last_status_line = 0;
+    s_last_set_cookie[0] = '\0';
+    esp_err_t err = do_logout();
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_last_status_line == 204, "a logout with a valid session cookie responds 204");
+    TEST_CHECK(strcmp(s_last_set_cookie, LOGOUT_CLEAR_COOKIE) == 0,
+               "the exact kiln_sid clear header (HttpOnly, SameSite=Strict, Path=/, Max-Age=0) is sent");
+    TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) < 0,
+               "the session slot is destroyed -- no longer resolvable by its token");
+}
+
+static void test_logout_with_no_cookie_leaves_session_untouched(void)
+{
+    TEST_SECTION("POST /api/auth/logout -- no cookie presented: still 204 with the same clear "
+                 "header, but the session table is untouched");
+    reset_all();
+
+    uint8_t token_hash[32];
+    http_session_hash_token("untouched-token", strlen("untouched-token"), token_hash);
+    size_t slot_idx =
+        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.6", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+    TEST_CHECK(slot_idx < WEB_AUTH_WEB_SLOT_COUNT, "test setup: an unrelated session was created");
+    TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
+               "test setup: the unrelated session resolves before the no-cookie logout");
+
+    stage_cookie_header(NULL); // no Cookie header at all
+    s_last_status_line = 0;
+    s_last_set_cookie[0] = '\0';
+    esp_err_t err = do_logout();
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK even with no cookie presented");
+    TEST_CHECK(s_last_status_line == 204, "a logout with no cookie still responds 204");
+    TEST_CHECK(strcmp(s_last_set_cookie, LOGOUT_CLEAR_COOKIE) == 0,
+               "the same clear header is sent whether or not a cookie was presented");
+    TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
+               "the unrelated session is left in place -- no token was presented to revoke");
+}
+
 void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
@@ -1028,6 +1133,8 @@ void run_test_web_auth_login_http(void)
     test_refused_login_makes_no_extra_sta_ip_netmask_calls();
     test_mapped_ipv6_dotted_quad_tail_classifies_local();
     test_429_response_is_logged();
+    test_logout_with_valid_cookie_clears_session();
+    test_logout_with_no_cookie_leaves_session_untouched();
 }
 
 int main(void)
