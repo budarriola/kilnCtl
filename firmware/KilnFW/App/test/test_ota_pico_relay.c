@@ -612,18 +612,29 @@ static void test_retransmit_exhausted_rounds(void)
     test_reset_relay_state();
     fake_status_push(SAFETY_LINK_UPDATE_STATE_RECEIVING, 0, 0, NULL); // BEGIN reply
     uint16_t gaps[1] = { 0 };
-    for (uint32_t r = 0; r < RELAY_MAX_RETRANSMIT_ROUNDS; r++) {
+    // Push one extra gap entry beyond RELAY_MAX_RETRANSMIT_ROUNDS. With a
+    // correct loop bound (`round < RELAY_MAX_RETRANSMIT_ROUNDS`) the loop
+    // runs exactly RELAY_MAX_RETRANSMIT_ROUNDS times and this extra entry is
+    // left over for UPDATE_END's own wait to consume (and reject, since it
+    // only accepts COMPLETE) -- no extra resend results. An off-by-one-high
+    // loop bound (e.g. `round <= RELAY_MAX_RETRANSMIT_ROUNDS`) instead
+    // consumes this entry as one more retransmit round, resending chunk 0
+    // again and changing the resend count asserted below -- without this
+    // extra entry, that mutation was indistinguishable, since the extra
+    // round would just find the queue empty and `continue` without
+    // resending (the gap this test used to have).
+    for (uint32_t r = 0; r < RELAY_MAX_RETRANSMIT_ROUNDS + 1u; r++) {
         fake_status_push(SAFETY_LINK_UPDATE_STATE_RECEIVING, 0, 1, gaps); // never reaches 0
     }
     // After RELAY_MAX_RETRANSMIT_ROUNDS rounds, the loop falls through to
     // UPDATE_END regardless of outcome. UPDATE_END's own wait only accepts
     // COMPLETE (RECEIVING/VERIFYING are neither in its accept mask nor one of
     // relay_wait_for_states()'s terminal states), so an image still-incomplete
-    // after every round is observed here as UPDATE_END simply never getting an
-    // accepted reply -- the queue is exhausted at this point, so that wait
-    // times out for real ("no reply to UPDATE_END"), not the separate
-    // "gave up" message (which is reachable only if relay_wait_for_states()
-    // could return RECEIVING/VERIFYING as a match, which it cannot).
+    // after every round is observed here as UPDATE_END consuming the one
+    // leftover queue entry above and still timing out for real ("no reply to
+    // UPDATE_END"), not the separate "gave up" message (which is reachable
+    // only if relay_wait_for_states() could return RECEIVING/VERIFYING as a
+    // match, which it cannot).
 
     int sent_before = fake_sent_frames_count_cmd(SAFETY_CMD_UPDATE_DATA);
     run_relay(500); // 500 / UPDATE_CHUNK_LEN(248) => ceil = 3 chunks in the sequential pass
@@ -641,10 +652,12 @@ static void test_retransmit_exhausted_rounds(void)
     // the final phase/message stay identical either way -- that insensitivity
     // is exactly what made this test vacuous before this assertion existed.
     CHECK((sent_after - sent_before) == (int)(3 + RELAY_MAX_RETRANSMIT_ROUNDS));
-    // All BEGIN + per-round entries were consumed by the retransmit loop
-    // itself, none left over for UPDATE_END to accidentally match against.
+    // BEGIN + RELAY_MAX_RETRANSMIT_ROUNDS per-round entries were consumed by
+    // the retransmit loop itself, and the one extra entry pushed above was
+    // consumed by UPDATE_END's own wait (and rejected there) -- nothing is
+    // left unconsumed.
     CHECK(g_status_queue_pos == g_status_queue_len);
-    CHECK(g_status_queue_len == (int)(1 + RELAY_MAX_RETRANSMIT_ROUNDS));
+    CHECK(g_status_queue_len == (int)(2 + RELAY_MAX_RETRANSMIT_ROUNDS));
 }
 
 // --- UPDATE_END failure transitions -----------------------------------
