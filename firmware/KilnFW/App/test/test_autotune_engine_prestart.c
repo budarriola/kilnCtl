@@ -6398,8 +6398,8 @@ static void test_reserve_blocks_a_fresh_start_and_names_the_reason(void)
     char err[128] = {0};
     bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
     TEST_CHECK(!ok, "autotune_engine_run() must be refused while the zone is reserved");
-    TEST_CHECK(strstr(err, "iter_tune restore is in progress") != NULL,
-               "refusal message must name the iter_tune restore reservation");
+    TEST_CHECK(strstr(err, "gain write is in progress") != NULL,
+               "refusal message must name the external-write reservation");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a refused start must leave state at IDLE");
 
     autotune_engine_release_zone_for_external_write(0);

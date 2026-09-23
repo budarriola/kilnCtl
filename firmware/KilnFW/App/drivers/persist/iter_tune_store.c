@@ -120,7 +120,7 @@ static bool migrate_v1_to_current(iter_tune_store_blob_t *blob) {
     if (blob->version != ITER_TUNE_STORE_VERSION_V1) {
         return false;
     }
-    ESP_LOGW(TAG, "iter_tune store migrating v%u -> v%u (byte-compatible, no field shuffling needed)",
+    ESP_LOGI(TAG, "iter_tune store v%u on disk, migrated in RAM to v%u until the next real write",
              (unsigned)ITER_TUNE_STORE_VERSION_V1, (unsigned)ITER_TUNE_STORE_VERSION);
     blob->version = ITER_TUNE_STORE_VERSION;
     return true;

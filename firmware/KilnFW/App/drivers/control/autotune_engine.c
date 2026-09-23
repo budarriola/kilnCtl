@@ -1154,7 +1154,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
     if (s_at.external_write_reserved && s_at.external_write_reserved_zone == zone_index) {
         xSemaphoreGive(s_at.lock);
         if (err_msg) {
-            snprintf(err_msg, err_cap, "an iter_tune restore is in progress on zone %u", (unsigned)zone_index);
+            snprintf(err_msg, err_cap, "a gain write is in progress on zone %u", (unsigned)zone_index);
         }
         return false;
     }

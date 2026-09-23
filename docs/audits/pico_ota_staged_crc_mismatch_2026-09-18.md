@@ -134,9 +134,9 @@ The staged CRC is not recomputed anywhere downstream — it is carried verbatim
 into the wire protocol. `ota_pico_do_stage()` passes it to
 `ota_pico_relay_start(ota_http_safety, (uint32_t)written, crc, ...)`
 (`ota_http_pico.c:224`); that stores it as `s_relay_args.image_crc32`
-(`firmware/KilnFW/App/drivers/net/ota_pico_relay.c:691`, field declared at
-`:341`), and the relay writes it into the UPDATE_BEGIN header at
-`ota_pico_relay.c:407` and repeats it in the UPDATE_END frame at `:573`. The
+(`firmware/KilnFW/App/drivers/net/ota_pico_relay.c:739`, field declared at
+`:369`), and the relay writes it into the UPDATE_BEGIN header at
+`ota_pico_relay.c:435` and repeats it in the UPDATE_END frame at `:616`. The
 same wrong number also reaches the operator through the 202 response body
 (`ota_http_pico.c:213-215`), which is the string the MCP tool surfaces
 (`tools/PcTools/src/kilnctrl/mcp_server_ota.py:378-379`).

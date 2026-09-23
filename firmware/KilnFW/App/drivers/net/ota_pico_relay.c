@@ -295,9 +295,10 @@ static void format_update_error(uint8_t err, char *out, size_t cap)
 // Polls safety_link_get_update_status() until it observes a FRESH frame
 // (one that arrived after `since_ms`, per the age_ms/elapsed comparison
 // below) whose state is in `accept_state_mask` (bit N = 1 << state) OR is
-// one of the three terminal-but-not-explicitly-accepted states
-// (REFUSED/FAILED/ABORTED, which always end the wait so the caller can
-// react to them rather than spin until its own timeout), or until
+// one of the five terminal-but-not-explicitly-accepted states
+// (REFUSED/FAILED/ABORTED/REJECTED_SLOT_LINKAGE/REFUSED_RUNNING_IMAGE_OVERLAP,
+// which always end the wait so the caller can react to them rather than
+// spin until its own timeout), or until
 // `timeout_ms` (measured from `since_ms`) elapses.
 //
 // "Fresh" matters because the cache holds whatever the last UPDATE_STATUS
@@ -643,8 +644,11 @@ static void relay_task_fn(void *arg)
             goto abort_and_fail;
         } else {
             format_update_error(st.last_error, err_str, sizeof(err_str));
+            const char *state_name = (st.state == SAFETY_LINK_UPDATE_STATE_FAILED) ? "FAILED"
+                                    : (st.state == SAFETY_LINK_UPDATE_STATE_REFUSED) ? "REFUSED"
+                                    : "ABORTED";
             format_reason(reason, sizeof(reason), "Pico reported %s after UPDATE_END: %s",
-                     st.state == SAFETY_LINK_UPDATE_STATE_FAILED ? "FAILED" : "ABORTED", err_str);
+                     state_name, err_str);
             goto abort_and_fail;
         }
     }

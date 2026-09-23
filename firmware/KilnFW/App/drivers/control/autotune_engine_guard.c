@@ -386,7 +386,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * called, and both success returns), never left held past this call. */
     if (s_at.external_write_reserved && s_at.external_write_reserved_zone == s_at.zone_index) {
         xSemaphoreGive(s_at.lock);
-        ESP_LOGW(AT_TAG, "autotune zone %u: accept refused -- an iter_tune restore is in progress on "
+        ESP_LOGW(AT_TAG, "autotune zone %u: accept refused -- a gain write is in progress on "
                           "this zone",
                  s_at.zone_index);
         return false;
