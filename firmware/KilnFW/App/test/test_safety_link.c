@@ -433,6 +433,21 @@ static void test_reboot_confirmed_requires_both_boot_id_and_build_identity(void)
     TEST_CHECK(safety_link_rollback_reboot_confirmed(false, false) == false, "neither changed -- not confirmed");
 }
 
+// 2026-09-23: the plain-reboot fallback watch (SAFETY_CMD_REBOOT, 0x29) has a
+// simpler bar than rollback's -- a reboot-in-place targets the same firmware
+// image, so there is no "which slot" ambiguity to resolve with a second,
+// build-identity signal. boot_id evidence alone is enough.
+static void test_reboot_infer_boot_id_outcome(void)
+{
+    TEST_SECTION("safety_link_reboot_infer_boot_id_outcome -- boot_id evidence alone decides the "
+                 "plain-reboot fallback outcome, unlike rollback's two-signal requirement");
+
+    TEST_CHECK(safety_link_reboot_infer_boot_id_outcome(true) == SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID,
+               "boot_id changed -- CONFIRMED_BY_BOOT_ID");
+    TEST_CHECK(safety_link_reboot_infer_boot_id_outcome(false) == SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY,
+               "boot_id did not change -- stays the conservative NO_REPLY, not a new claim");
+}
+
 // --------------------------------------------------------------------------
 // safety_link_status_push_gap_observed() -- 2026-09-10 fix, round 2, for the
 // dead GET_STATUS request/reply accounting (docs/audits/
@@ -500,6 +515,7 @@ void run_test_safety_link(void)
     test_build_identity_unknown_before_or_after_is_not_evidence();
     test_build_identity_real_change_is_evidence();
     test_reboot_confirmed_requires_both_boot_id_and_build_identity();
+    test_reboot_infer_boot_id_outcome();
     test_push_gap_frames_received_advanced_is_not_a_gap();
     test_push_gap_frames_received_unchanged_is_a_gap();
 }

@@ -399,10 +399,13 @@ esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link) { (void)link; 
 // test_sw_reset_pico_outcome_mapping(). Same "must resolve, never called"
 // role as the safety_link_get_status() stub above.
 esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
-                                   uint8_t *out_reason_code)
+                                   uint8_t *out_reason_code, uint8_t *out_boot_id_before,
+                                   uint8_t *out_boot_id_after)
 {
     (void)link;
     (void)out_reason_code;
+    (void)out_boot_id_before;
+    (void)out_boot_id_after;
     if (out_outcome) *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
     return ESP_OK;
 }
@@ -1705,11 +1708,28 @@ static void test_sw_reset_pico_outcome_mapping(void)
     // Any future enumerator this switch has not been taught about must fall
     // through to UNCONFIRMED, not to accepted. Cast a value past the end of
     // the enum to stand in for one.
+    // 2026-09-23: NO_REPLY + 1 is now CONFIRMED_BY_BOOT_ID, a real, named
+    // value with its own explicit case -- use the next slot past that
+    // instead to stand in for a genuinely future/unrecognized enumerator.
     TEST_CHECK(sw_reset_classify_pico_outcome(
-                   ESP_OK, (safety_link_reboot_outcome_t)(SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY + 1), 0) ==
-                   SW_RESET_PICO_UNCONFIRMED,
+                   ESP_OK, (safety_link_reboot_outcome_t)(SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID + 1),
+                   0) == SW_RESET_PICO_UNCONFIRMED,
                "an unrecognized outcome value reads as UNCONFIRMED, so a future outcome cannot "
                "silently become success");
+
+    // 2026-09-23: no REBOOT_RESULT arrived, but the bounded fallback watch
+    // saw the peer's boot_id actually change -- this is positive evidence,
+    // distinct from both plain silence (UNCONFIRMED) and a wire-visible
+    // accepted=1 (ACCEPTED), and must get its own report value.
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID, 0) ==
+                   SW_RESET_PICO_CONFIRMED_BY_BOOT_ID,
+               "a boot_id change observed within the fallback watch is CONFIRMED_BY_BOOT_ID, "
+               "not UNCONFIRMED and not ACCEPTED");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_ERR_INVALID_STATE,
+                                              SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID, 0) ==
+                   SW_RESET_PICO_UNCONFIRMED,
+               "a non-ESP_OK return is UNCONFIRMED even when the outcome argument says "
+               "CONFIRMED_BY_BOOT_ID");
 }
 
 // The operator-facing half of the same property: the text this route puts in
@@ -1726,6 +1746,7 @@ static void test_sw_reset_pico_sentences_are_honest(void)
     const char *refused_other = sw_reset_pico_sentence(SW_RESET_PICO_REFUSED_OTHER);
     const char *unconfirmed = sw_reset_pico_sentence(SW_RESET_PICO_UNCONFIRMED);
     const char *no_link = sw_reset_pico_sentence(SW_RESET_PICO_NO_LINK);
+    const char *confirmed_by_boot_id = sw_reset_pico_sentence(SW_RESET_PICO_CONFIRMED_BY_BOOT_ID);
 
     TEST_CHECK(strstr(accepted, "accepted") != NULL,
                "the accepted sentence says the safety processor accepted");
@@ -1761,6 +1782,13 @@ static void test_sw_reset_pico_sentences_are_honest(void)
                "the unconfirmed sentence must never contain the word accepted");
     TEST_CHECK(strstr(no_link, "accepted") == NULL,
                "the no-safety-processor sentence must never contain the word accepted");
+
+    // 2026-09-23: the fallback-generic sentence must not claim an explicit
+    // accepted=1 was ever seen -- it is inferred from a boot_id change, not
+    // wire-visible acceptance.
+    TEST_CHECK(strstr(confirmed_by_boot_id, "accepted") == NULL,
+               "the boot_id-fallback sentence must never contain the word accepted -- no "
+               "accepted=1 was ever observed on the wire");
 
     // Every outcome must have its own distinct sentence -- a duplicate would
     // mean two genuinely different results read identically to the operator.

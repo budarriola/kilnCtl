@@ -666,8 +666,54 @@ esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link)
  * acceptance from silence). Structured like safety_link_get_ct_auto_zero_
  * status(): one round trip, xact_lock held across it, the reply read from
  * the unconditional stash safety_drain_inbox_ex() fills. */
+/* Bounded fallback watch for safety_link_send_reboot()'s NO_REPLY case --
+ * see SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID's doc comment
+ * (safety_link.h) for why this exists (bench evidence, 2026-09-23: the
+ * Pico's link task drains its TX ring for only 10ms before rebooting, so a
+ * queued REBOOT_RESULT reply is routinely lost to the reset itself even
+ * though the Pico genuinely did reboot). Sized as "a few seconds", well
+ * under any httpd send timeout, and far shorter than the rollback path's own
+ * 5s watch (SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS above) because a reboot-in-
+ * place has no flash-metadata write ahead of the Pico's own watchdog reset --
+ * only the ANNOUNCE/dispatch/reboot sequence itself, which the rollback
+ * comment already documents as "several hundred ms" on top of a slower
+ * rollback-specific flash write this path never does. Poll granularity
+ * matches the rollback path's (200ms) for the same "cheap, two short
+ * state_lock sections, no I/O" reasoning. */
+#define SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS 3000u
+#define SAFETY_LINK_REBOOT_BOOT_ID_WATCH_POLL_MS 200u
+
+typedef struct {
+    SafetyLinkClass *link;
+    bool had_boot_id;
+    uint8_t boot_id_before;
+    uint8_t boot_id_after; /* filled only once ACKED is returned */
+} reboot_boot_watch_ctx_t;
+
+static safety_link_await_poll_t reboot_boot_watch_poll(void *ctx_v)
+{
+    reboot_boot_watch_ctx_t *ctx = (reboot_boot_watch_ctx_t *)ctx_v;
+    SafetyLinkClass *link = ctx->link;
+
+    bool known_now = false;
+    uint8_t boot_id_now = 0;
+    if (safety_lock(link)) {
+        known_now = link->pico_boot_id_known;
+        boot_id_now = link->pico_boot_id;
+        safety_unlock(link);
+    }
+    bool changed = safety_link_rollback_boot_id_changed(ctx->had_boot_id, ctx->boot_id_before, known_now,
+                                                          boot_id_now);
+    if (changed) {
+        ctx->boot_id_after = boot_id_now;
+        return SAFETY_LINK_AWAIT_ACKED;
+    }
+    return SAFETY_LINK_AWAIT_PENDING;
+}
+
 esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
-                                   uint8_t *out_reason_code)
+                                   uint8_t *out_reason_code, uint8_t *out_boot_id_before,
+                                   uint8_t *out_boot_id_after)
 {
     safety_link_reboot_outcome_t local_outcome = SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN;
     if (!out_outcome) {
@@ -692,6 +738,20 @@ esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outc
         ESP_LOGW(TAG, "reboot: refused locally, the safety link is down -- not sending");
         *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN;
         return ESP_OK;
+    }
+
+    /* Snapshot the peer's boot_id BEFORE anything is sent -- the same
+     * "baseline first, never manufacture evidence from an unknown-before"
+     * discipline safety_link_send_rollback_ex() uses (safety_link_
+     * rollback_boot_id_changed()'s own doc comment), reused here for the
+     * NO_REPLY fallback watch below. Cheap even on the ordinary ACCEPTED/
+     * REFUSED paths that never look at it. */
+    bool had_boot_id = false;
+    uint8_t boot_id_before = 0;
+    if (safety_lock(link)) {
+        had_boot_id = link->pico_boot_id_known;
+        boot_id_before = link->pico_boot_id;
+        safety_unlock(link);
     }
 
     kilnlink_reboot_t msg = {0};
@@ -742,14 +802,50 @@ esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outc
     xSemaphoreGive(link->xact_lock);
 
     if (!got_reply) {
-        /* Silence. Either a Pico too old to have a dispatch case for 0x29,
-         * a lost reply, or a link that died mid-request. All three are
-         * UNKNOWN, and none of them may be reported as a reboot that
-         * happened -- see safety_link_reboot_outcome_t's own comment. */
-        ESP_LOGW(TAG, "reboot: no REBOOT_RESULT within %ums -- outcome NOT confirmed, never reported "
-                      "as accepted (a safety processor predating this command answers exactly like this)",
-                 (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS);
-        *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
+        /* Silence within the ordinary reply window. Either a Pico too old to
+         * have a dispatch case for 0x29, a lost reply, a link that died
+         * mid-request, or (bench evidence, 2026-09-23) a Pico that DID
+         * accept and IS rebooting but only drains its TX ring for 10ms
+         * before hal_wdt_reboot() (firmware/SaftyFW/src/tasks/link_task.c,
+         * LINK_TASK_REBOOT_TX_DRAIN_MS) -- routinely too short for a queued
+         * reply to actually leave before the reset. xact_lock was already
+         * released above, same as safety_link_send_rollback_ex()'s own
+         * release before its boot_id watch, so the GET_STATUS poll that
+         * keeps pico_boot_id current keeps running throughout this bounded
+         * fallback. A change here is the one and only positive evidence this
+         * function accepts for CONFIRMED_BY_BOOT_ID -- see that outcome's
+         * doc comment (safety_link.h) for what it does and does not prove.
+         * No change within the watch falls through to plain NO_REPLY. */
+        reboot_boot_watch_ctx_t watch_ctx = {
+            .link = link,
+            .had_boot_id = had_boot_id,
+            .boot_id_before = boot_id_before,
+            .boot_id_after = boot_id_before,
+        };
+        safety_link_await_result_t watch_result = safety_link_await_or_unknown(
+            SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS, SAFETY_LINK_REBOOT_BOOT_ID_WATCH_POLL_MS,
+            reboot_boot_watch_poll, &watch_ctx);
+        bool boot_id_confirmed = (watch_result == SAFETY_LINK_AWAIT_ACKED);
+        *out_outcome = safety_link_reboot_infer_boot_id_outcome(boot_id_confirmed);
+        if (*out_outcome == SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID) {
+            if (out_boot_id_before) {
+                *out_boot_id_before = boot_id_before;
+            }
+            if (out_boot_id_after) {
+                *out_boot_id_after = watch_ctx.boot_id_after;
+            }
+            ESP_LOGW(TAG, "reboot: no REBOOT_RESULT within %ums, but the peer's boot_id changed "
+                          "(%u -> %u) within the %ums fallback watch -- CONFIRMED_BY_BOOT_ID, not "
+                          "reported as UNCONFIRMED even though the ACK itself was never seen",
+                     (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS, (unsigned)boot_id_before,
+                     (unsigned)watch_ctx.boot_id_after, (unsigned)SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS);
+        } else {
+            ESP_LOGW(TAG, "reboot: no REBOOT_RESULT within %ums and no boot_id change within the "
+                          "further %ums fallback watch -- outcome NOT confirmed, never reported as "
+                          "accepted (a safety processor predating this command answers exactly like "
+                          "this)",
+                     (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS, (unsigned)SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS);
+        }
         return ESP_OK;
     }
 

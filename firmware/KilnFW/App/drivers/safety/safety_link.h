@@ -2238,12 +2238,43 @@ typedef enum {
     SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN,
     /* The request could not be encoded, or the UART refused it locally. */
     SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED,
-    /* The request went out and nothing came back within the reply window.
-     * The honest reading: UNKNOWN. Either the Pico predates this command
-     * (its dispatch has no case for 0x29 and it silently dropped it), or
-     * the reply was lost, or the link died in between. Callers must report
-     * this as "not confirmed", never as a reboot that happened. */
+    /* The request went out and nothing came back within the reply window,
+     * AND the bounded boot_id fallback watch below (safety_link_send_
+     * reboot()'s doc comment) never observed the peer's boot_id change
+     * either. The honest reading: UNKNOWN. Either the Pico predates this
+     * command (its dispatch has no case for 0x29 and it silently dropped
+     * it), or the reply was lost, or the link died in between. Callers must
+     * report this as "not confirmed", never as a reboot that happened. */
     SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY,
+    /* 2026-09-23 fallback: the request went out, no SAFETY_CMD_REBOOT_RESULT
+     * (0x2A) ever arrived (bench evidence, 2026-09-23: the Pico's link task
+     * only drains its TX ring for LINK_TASK_REBOOT_TX_DRAIN_MS = 10ms before
+     * calling hal_wdt_reboot() -- firmware/SaftyFW/src/tasks/link_task.c, not
+     * edited here -- so the reply frame is routinely still queued, not yet on
+     * the wire, when the reboot actually happens; the Pico DOES reboot in
+     * this case, this driver simply never hears about it), BUT the peer's
+     * boot_id (safety_apply_fw_version()'s pico_boot_id, the SAME tracking
+     * safety_link_send_rollback_ex() already trusts) changed within
+     * safety_link_send_reboot()'s bounded fallback watch after the ordinary
+     * reply window closed. Unlike the rollback path this does NOT also
+     * require the peer's build identity to change: a reboot-in-place command
+     * requests the SAME firmware image back, so there is no "which slot"
+     * ambiguity for a build-identity check to resolve here, and a boot_id
+     * change alone is the one and only observable consequence a genuine
+     * accepted-but-unacknowledged reboot leaves behind. `out_reason_code` is
+     * meaningless for this outcome (no refusal was ever decoded). `out_
+     * boot_id_before`/`out_boot_id_after`, if non-NULL, are filled with the
+     * peer's boot_id immediately before the request and at the moment the
+     * change was observed, so the caller can name both values rather than
+     * asserting the change happened. NOTE this is still not proof the
+     * REQUESTED reboot specifically is what changed the boot_id -- an
+     * unrelated Pico crash/watchdog/power-glitch reboot inside the same
+     * bounded watch window would look identical, exactly the ambiguity
+     * safety_link_rollback_outcome_t's ACCEPTED discusses at length for the
+     * rollback path. Accepted here anyway, per this outcome's own use case
+     * (an operator-triggered reboot the Pico was already expected to take),
+     * rather than left unreported. */
+    SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID,
 } safety_link_reboot_outcome_t;
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_REBOOT (0x29) / its reply
@@ -2261,19 +2292,62 @@ typedef enum {
  *
  * One round trip, structured like safety_link_get_ct_auto_zero_status():
  * take xact_lock, clear any stale stash, send the 1-byte BROADCAST, wait up
- * to SAFETY_LINK_REPLY_TIMEOUT_MS, then read the stash. Unlike the rollback
- * path there is NO boot_id watch and no inference from silence: this frame
- * is ACKed on acceptance (kilnlink_reboot_result.h's "SYMMETRIC" comment),
- * so a positive answer is either on the wire or it did not happen.
+ * to SAFETY_LINK_REPLY_TIMEOUT_MS, then read the stash. This frame is ACKed
+ * on acceptance (kilnlink_reboot_result.h's "SYMMETRIC" comment), so a
+ * positive answer normally is either on the wire or it did not happen --
+ * unlike the rollback path there is no PROTOCOL reason to ever infer
+ * acceptance from silence here.
+ *
+ * 2026-09-23 bench fallback: bench evidence the same day showed the Pico
+ * DOES reboot even when this driver never sees 0x2A -- SaftyFW's link task
+ * only drains its TX ring for 10ms before calling hal_wdt_reboot()
+ * (firmware/SaftyFW/src/tasks/link_task.c, LINK_TASK_REBOOT_TX_DRAIN_MS, not
+ * edited by this change), so a queued-but-not-yet-transmitted reply is
+ * routinely lost to the reset itself. xact_lock is released after the
+ * ordinary reply window (same reasoning as safety_link_send_rollback_ex()'s
+ * own release before its boot_id watch -- holding it here would block the
+ * GET_STATUS poll that is the only thing keeping pico_boot_id current), and
+ * ONLY on NO_REPLY, this function then watches the peer's boot_id (already
+ * snapshotted before the request was sent) for up to
+ * SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS for a change, polling every
+ * SAFETY_LINK_REBOOT_BOOT_ID_WATCH_POLL_MS -- see safety_link_reboot_
+ * outcome_t's SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID for what a
+ * change during that watch means and does not mean. A timeout of that watch
+ * with no change falls through to plain NO_REPLY, same as before this
+ * fallback existed.
  *
  * `out_outcome` is required and always written. `out_reason_code`, if
  * non-NULL, is filled with the peer's kilnlink_reboot_result_reason_t on
- * REFUSED only. Returns ESP_ERR_INVALID_ARG/ESP_ERR_INVALID_STATE for the
- * usual local misuse, otherwise ESP_OK with the real answer in
+ * REFUSED only. `out_boot_id_before`/`out_boot_id_after`, if non-NULL, are
+ * filled only on CONFIRMED_BY_BOOT_ID (see that outcome's own doc comment);
+ * left untouched otherwise. Returns ESP_ERR_INVALID_ARG/ESP_ERR_INVALID_STATE
+ * for the usual local misuse, otherwise ESP_OK with the real answer in
  * `*out_outcome` -- an unreachable or refusing peer is not an error of this
- * function, it is an outcome. */
+ * function, it is an outcome. Blocks the calling task for up to roughly
+ * SAFETY_LINK_REPLY_TIMEOUT_MS plus, only on the no-reply path,
+ * SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS more -- see sw_reset_http.c's own
+ * comment on why that total is still comfortably inside what an httpd
+ * handler task may spend. */
 esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outcome_t *out_outcome,
-                                   uint8_t *out_reason_code);
+                                   uint8_t *out_reason_code, uint8_t *out_boot_id_before,
+                                   uint8_t *out_boot_id_after);
+
+/* Pure decision at the heart of safety_link_send_reboot()'s NO_REPLY boot_id
+ * fallback watch -- extracted the same way safety_link_rollback_infer_
+ * outcome() is, so it is host-testable (test_safety_link.c) independent of
+ * the FreeRTOS polling loop that feeds it. `boot_id_changed` must already
+ * have been computed by safety_link_rollback_boot_id_changed() (reused
+ * as-is: it is a pure had-baseline/before/known-now/now comparison with
+ * nothing rollback-specific about its logic, only its name) against the
+ * boot_id snapshotted immediately before the reboot request was sent. See
+ * SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID's own doc comment for why
+ * no build-identity check is needed here the way the rollback path needs
+ * one. */
+static inline safety_link_reboot_outcome_t safety_link_reboot_infer_boot_id_outcome(bool boot_id_changed)
+{
+    return boot_id_changed ? SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID
+                            : SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
+}
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CT_CAL (0x19) -- the
  * GUI/bench-tool's path to commissioning one channel of SaftyFW's

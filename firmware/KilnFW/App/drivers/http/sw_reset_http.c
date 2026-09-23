@@ -114,6 +114,15 @@ typedef enum {
                                        * an older or newer peer; NEVER render this as a specific
                                        * claim about relay state */
     SW_RESET_PICO_UNCONFIRMED, /* sent but unanswered -- or link down, or send failed */
+    SW_RESET_PICO_CONFIRMED_BY_BOOT_ID, /* no REBOOT_RESULT ever arrived, but the Pico's
+                                          * boot_id changed within safety_link_send_reboot()'s
+                                          * bounded fallback watch -- see that function's own
+                                          * SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID doc
+                                          * comment (safety_link.h) for the 2026-09-23 bench
+                                          * evidence this exists for (the Pico's link task
+                                          * drains its TX ring for only 10ms before rebooting,
+                                          * so a queued REBOOT_RESULT reply is routinely lost to
+                                          * the reset itself even on a genuine accept) */
     SW_RESET_PICO_NO_LINK,     /* no safety processor configured on this boot at all */
 } sw_reset_pico_report_t;
 
@@ -245,6 +254,13 @@ sw_reset_pico_report_t sw_reset_classify_pico_outcome(esp_err_t err,
             // newer peer. Never render as a specific claim.
             return SW_RESET_PICO_REFUSED_OTHER;
         }
+    case SAFETY_LINK_REBOOT_OUTCOME_CONFIRMED_BY_BOOT_ID:
+        // 2026-09-23: no REBOOT_RESULT arrived, but the bounded fallback
+        // watch observed the peer's boot_id actually change. Distinct from
+        // ACCEPTED (no wire-visible accepted=1 was ever seen) and distinct
+        // from UNCONFIRMED (this is positive evidence, not silence) -- gets
+        // its own report value and its own dynamic sentence.
+        return SW_RESET_PICO_CONFIRMED_BY_BOOT_ID;
     case SAFETY_LINK_REBOOT_OUTCOME_LINK_DOWN:
     case SAFETY_LINK_REBOOT_OUTCOME_SEND_FAILED:
     case SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY:
@@ -276,6 +292,17 @@ const char *sw_reset_pico_sentence(sw_reset_pico_report_t report)
         return "The safety processor REFUSED to reboot for a reason this controller's firmware "
                "does not recognize (it may be running older or newer firmware). It stays running; "
                "only this controller is rebooting.";
+    case SW_RESET_PICO_CONFIRMED_BY_BOOT_ID:
+        // Generic fallback text only -- the handler below always overrides this
+        // with sw_reset_pico_boot_id_sentence()'s dynamic version, which names
+        // both boot_id values. This case exists so the enum-to-sentence mapping
+        // stays total (this file's own "kept next to the enum" comment above),
+        // and so a caller that forgets to build the dynamic sentence still gets
+        // an honest, non-generic-UNCONFIRMED answer rather than a silently wrong
+        // one.
+        return "The safety processor's reboot acknowledgement reply never arrived, but its boot id "
+               "changed shortly afterward during a bounded follow-up check, so its reboot IS "
+               "confirmed by that -- only the acknowledgement frame itself was lost.";
     case SW_RESET_PICO_NO_LINK:
         return "No safety processor is configured on this boot, so nothing was sent to one. Only "
                "this controller is rebooting.";
@@ -285,6 +312,35 @@ const char *sw_reset_pico_sentence(sw_reset_pico_report_t report)
                "is NOT confirmed -- it may be running firmware that predates this command, or the "
                "link dropped. Only this controller's reboot is certain.";
     }
+}
+
+// Dynamic sentence for SW_RESET_PICO_CONFIRMED_BY_BOOT_ID, naming both
+// boot_id values the way sw_reset_pico_sentence()'s fixed strings never can.
+// Writes into `buf` (caller-owned, `cap` bytes) and returns `buf` on success;
+// on a truncation/format failure (should not happen with today's fixed
+// format string and two single-byte values) falls back to
+// sw_reset_pico_sentence()'s generic text instead, same "never send half a
+// sentence" discipline the response-body truncation checks below already
+// apply. `buf` is meant to be a short stack local at the call site (well
+// under the "large locals on the httpd stack" class this file's SW_RESET_
+// BODY_CAP comment already guards against -- this one is two bytes of state
+// rendered as decimal, not a JSON/response body).
+static const char *sw_reset_pico_boot_id_sentence(uint8_t boot_id_before, uint8_t boot_id_after, char *buf,
+                                                   size_t cap)
+{
+    // %hhu (not %u) so gcc's -Wformat-truncation sees the true 0-255 range of
+    // a uint8_t argument instead of assuming a full unsigned int's worst case
+    // (~10 digits), which otherwise makes it (wrongly) flag this fixed-length
+    // sentence as possibly truncating.
+    int n = snprintf(buf, cap,
+                     "The safety processor's REBOOT_RESULT reply never arrived, but its boot id "
+                     "changed (%hhu -> %hhu) within a short bounded follow-up check, so its reboot IS "
+                     "confirmed by that -- only the acknowledgement frame itself was lost.",
+                     boot_id_before, boot_id_after);
+    if (n < 0 || (size_t)n >= cap) {
+        return sw_reset_pico_sentence(SW_RESET_PICO_CONFIRMED_BY_BOOT_ID);
+    }
+    return buf;
 }
 
 static esp_err_t sw_reset_post_handler(httpd_req_t *req)
@@ -393,16 +449,32 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     // delayed reboot task instead and the answer arrives after the response
     // has already been written, so nobody ever learns it.
     sw_reset_pico_report_t pico_report = SW_RESET_PICO_NO_LINK;
+    // Only meaningful when pico_report == SW_RESET_PICO_CONFIRMED_BY_BOOT_ID
+    // (safety_link_send_reboot() only fills these on that outcome); a short
+    // stack scratch buffer, same size class as ip[]/interlock_reason[] above,
+    // not the "large locals" class SW_RESET_BODY_CAP's own comment guards
+    // against.
+    uint8_t pico_boot_id_before = 0;
+    uint8_t pico_boot_id_after = 0;
+    char boot_id_sentence_buf[224]; // fixed sentence text is 220 bytes incl. NUL at worst case (both
+                                     // boot_id values 3 digits); sized with a few bytes of margin, still
+                                     // a small fixed local, nowhere near the 8 KB httpd stack budget
+    const char *pico_sentence = NULL;
     if (s_safety) {
         safety_link_reboot_outcome_t outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
         uint8_t reason_code = 0;
-        esp_err_t reboot_err = safety_link_send_reboot(s_safety, &outcome, &reason_code);
+        esp_err_t reboot_err = safety_link_send_reboot(s_safety, &outcome, &reason_code,
+                                                        &pico_boot_id_before, &pico_boot_id_after);
         pico_report = sw_reset_classify_pico_outcome(reboot_err, outcome, reason_code);
+        pico_sentence = (pico_report == SW_RESET_PICO_CONFIRMED_BY_BOOT_ID)
+                            ? sw_reset_pico_boot_id_sentence(pico_boot_id_before, pico_boot_id_after,
+                                                             boot_id_sentence_buf, sizeof(boot_id_sentence_buf))
+                            : sw_reset_pico_sentence(pico_report);
         ESP_LOGW(TAG, "sw_reset: safety processor reboot -> outcome=%d err=%s reason=%u: %s",
-                 (int)outcome, esp_err_to_name(reboot_err), (unsigned)reason_code,
-                 sw_reset_pico_sentence(pico_report));
+                 (int)outcome, esp_err_to_name(reboot_err), (unsigned)reason_code, pico_sentence);
     } else {
         ESP_LOGW(TAG, "sw_reset: no safety link configured this boot -- ESP half only");
+        pico_sentence = sw_reset_pico_sentence(pico_report);
     }
 
     // Reported per-processor, never as one undifferentiated "ok": the two
@@ -447,7 +519,7 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
                      "trip with POST /api/safety/clear_trip -- the \"Clear latched trip\" button on "
                      "the Safety page, or the dashboard's Clear Trip button. Heat stays blocked "
                      "until you do.",
-                     sw_reset_pico_sentence(pico_report));
+                     pico_sentence);
     if (n < 0 || (size_t)n >= SW_RESET_BODY_CAP) {
         /* Truncated (cannot happen with today's strings, but never send half
          * a sentence about which processors rebooted -- and never drop the
