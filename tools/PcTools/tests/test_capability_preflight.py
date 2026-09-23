@@ -368,5 +368,117 @@ class ManifestMatchesApplyPresetTest(unittest.TestCase):
         )
 
 
+class TaskLivenessGatingTest(unittest.TestCase):
+    """MANDATORY negative test (task instructions): a task_liveness result
+    with a dead or absent required task must fail the preflight regardless
+    of whether the preset needs any HTTP capability at all, unless
+    allow_missing_tasks=True -- same shape as
+    UnacknowledgedCrashReportTest above. task_liveness.py has no board/link
+    access of its own, so it is handed to run_preflight() pre-computed,
+    exactly as mcp_server_capability_preflight.py's tool does."""
+
+    def _tl_report(self, dead=(), absent=()):
+        from kilnctrl import task_liveness
+        from kilnctrl.devices_info import StackMarginEntry
+        from kilnctrl.protocol import StackMarginLevel
+
+        expected = ("kiln_io_owner", "profile_executor", "httpd_worker")
+        entries = []
+        for name in expected:
+            if name in dead:
+                entries.append(StackMarginEntry(name=name, configured_stack_bytes=4096,
+                                                 hwm_bytes=0, alive=False,
+                                                 level=StackMarginLevel.OK))
+            elif name in absent:
+                continue
+            else:
+                entries.append(StackMarginEntry(name=name, configured_stack_bytes=4096,
+                                                 hwm_bytes=2000, alive=True,
+                                                 level=StackMarginLevel.OK))
+        return task_liveness.check_task_liveness(entries, expected)
+
+    def test_dead_task_blocks_a_run_that_needs_no_capability(self):
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        tl = self._tl_report(dead=("profile_executor",))
+        self.assertFalse(tl.ok)
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset", task_liveness=tl)
+        self.assertFalse(report.ok, "a dead required task must fail the preflight")
+        text = report.describe()
+        self.assertIn("DEAD", text)
+        self.assertIn("profile_executor", text)
+        self.assertIn("do not start this run", text)
+
+    def test_absent_task_blocks_a_run(self):
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        tl = self._tl_report(absent=("httpd_worker",))
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset", task_liveness=tl)
+        self.assertFalse(report.ok)
+        self.assertIn("ABSENT", report.describe())
+        self.assertIn("httpd_worker", report.describe())
+
+    def test_allow_missing_tasks_overrides_the_refusal(self):
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        tl = self._tl_report(dead=("profile_executor",))
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset", task_liveness=tl,
+                                       allow_missing_tasks=True)
+        self.assertTrue(report.ok, "allow_missing_tasks=True must override the refusal")
+        self.assertIn("[allowed]", report.describe())
+
+    def test_all_alive_task_liveness_does_not_block(self):
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        tl = self._tl_report()
+        self.assertTrue(tl.ok)
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset", task_liveness=tl)
+        self.assertTrue(report.ok)
+        self.assertIn("all 3 expected task(s) alive", report.describe())
+
+    def test_no_task_liveness_supplied_does_not_block(self):
+        """None (not checked) must never itself fail a preflight -- e.g. no
+        live link available for this host."""
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
+        self.assertTrue(report.ok)
+
+
 if __name__ == "__main__":
     unittest.main()

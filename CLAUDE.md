@@ -22,9 +22,25 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (183 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `boot_guard_get` was
-added -- a READ-ONLY MCP tool wrapping `GET /api/boot_guard`
+the rest behind a search facade (184 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `check_task_liveness`
+was added -- a READ-ONLY MCP tool cross-checking a live `GET_STACK_MARGIN`
+reading (same path as `get_stack_margin`) against the `$requiredNames` list
+`tools/check_stack_margin_registration.ps1` enforces at the source level:
+that check only proves every required task HAS a `stack_margin_register()`
+call site, never that `xTaskCreate*()` actually succeeded for it on a given
+boot, and every task-creation failure is log-only (`ESP_LOGE`, non-fatal,
+nothing HTTP-visible), so a board that silently failed to start a required
+task looks perfectly healthy everywhere else. It reports expected-and-alive,
+expected-but-DEAD (registered, not running), expected-but-ABSENT (never
+registered), and extra (alive, unexpected -- informational), parsing the
+required-task list live out of the `.ps1` script rather than a second
+hand-copied one (`tools/PcTools/src/kilnctrl/task_liveness.py`, unit-tested
+with no board). `capability_preflight` now also runs this cross-check and
+refuses a run with a dead or absent required task, same as an
+unacknowledged crash report, unless `allow_missing_tasks=True`. The one
+before it was `boot_guard_get`, 2026-09-22 -- a READ-ONLY MCP tool wrapping
+`GET /api/boot_guard`
 (`ota_http_recovery.c`'s `ota_boot_guard_status_get_handler()`), reusing
 `ota_http_client.get_boot_guard_status()` (already called internally by
 `flash_firmware()`'s post-flash reset step) so the recovery-mode counter can

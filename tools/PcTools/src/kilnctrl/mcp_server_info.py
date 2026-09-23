@@ -123,6 +123,53 @@ def get_stack_margin() -> str:
 
 
 @_srv._tool()
+def check_task_liveness() -> str:
+    """READ-ONLY: cross-check the board's live GET_STACK_MARGIN reading
+    against the required-task list `tools/check_stack_margin_registration.ps1`
+    enforces at the source level.
+
+    That .ps1 check only proves every required task HAS a
+    `stack_margin_register()` call site in the firmware source -- it says
+    nothing about whether `xTaskCreate*()` actually succeeded for each one
+    on a given boot. Every KilnFW task-creation failure is log-only
+    (`ESP_LOGE`, non-fatal, no counter, nothing HTTP-visible), so a board
+    that silently failed to start a required task at boot looks perfectly
+    healthy everywhere else. `stack_margin_read()` is the one place that
+    failure stays visible: the task's registry slot is present (registered
+    by name) but its handle is NULL, so `alive` reads false.
+
+    Reports:
+      - expected-and-alive: registered and running, as expected.
+      - expected-but-DEAD: registered (a call site exists and fired) but
+        `alive=False` -- task creation failed THIS boot. FATAL.
+      - expected-but-ABSENT: never appeared in the reply at all -- older
+        firmware, or a code regression dropped its registration. FATAL.
+      - extra: alive tasks not in the expected list -- informational only.
+
+    The expected-task list is parsed live from
+    `tools/check_stack_margin_registration.ps1`'s own `$requiredNames`
+    array, not copied into a second, driftable list -- see
+    `task_liveness.py`'s module docstring.
+    """
+    try:
+        entries = _srv._info.get_stack_margin()
+    except InfoQueryError as exc:
+        return f"error: {exc}"
+    from . import task_liveness
+
+    repo_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    )
+    script_path = task_liveness.default_check_script_path(repo_root)
+    try:
+        expected = task_liveness.load_required_task_names(script_path)
+    except (task_liveness.TaskLivenessParseError, OSError) as exc:
+        return f"error: could not load required-task list from {script_path}: {exc}"
+    report = task_liveness.check_task_liveness(entries, expected)
+    return report.describe()
+
+
+@_srv._tool()
 def get_heap_status(host: Optional[str] = None) -> str:
     """Report internal-DRAM, PSRAM, and DMA-capable-internal-memory heap
     figures, live, over HTTP GET /api/status.

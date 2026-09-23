@@ -263,24 +263,42 @@ class PreflightReport:
     host: str
     board: BoardInfo
     checks: "list[CapabilityCheck]" = field(default_factory=list)
+    # Task-liveness cross-check (task_liveness.py's check_task_liveness()
+    # result), supplied by the caller -- this module has no link/serial
+    # access of its own, only HTTP, so it cannot compute this itself. None
+    # means the caller did not check (e.g. no link available); an empty-
+    # but-present TaskLivenessReport with dead/absent tasks blocks the run
+    # exactly like an unacknowledged crash report does, unless
+    # ``allow_missing_tasks`` is set.
+    task_liveness: "object" = None
+    allow_missing_tasks: bool = False
 
     @property
     def ok(self) -> bool:
         """False if the board never answered at all, if any required
-        capability is FATALLY missing, or if the board is carrying an
-        unacknowledged crash report, or if any of the four blocking
-        /api/readiness items is red. The last two are deliberately checked
-        regardless of what the preset needs -- a panic five hours ago, or an
-        unverified E-stop interlock, is a reason to not start ANY unattended
-        run, not just ones that happen to probe a capability. The readiness
-        items are also what the BOARD itself will refuse on
-        (readiness_gate.h), so a run that skipped this check would simply be
-        refused a few steps later with less context."""
+        capability is FATALLY missing, if the board is carrying an
+        unacknowledged crash report, if any of the four blocking
+        /api/readiness items is red, or (unless ``allow_missing_tasks``) if
+        the task-liveness cross-check found a required task dead or absent.
+        The crash/readiness/task-liveness checks are deliberately checked
+        regardless of what the preset needs -- a panic five hours ago, an
+        unverified E-stop interlock, or a task that silently failed to
+        start at boot is a reason to not start ANY unattended run, not just
+        ones that happen to probe a capability. The readiness items are
+        also what the BOARD itself will refuse on (readiness_gate.h), so a
+        run that skipped this check would simply be refused a few steps
+        later with less context."""
         if not self.board.reachable:
             return False
         if self.board.crash_unacknowledged:
             return False
         if self.board.readiness_blocked:
+            return False
+        if (
+            self.task_liveness is not None
+            and not self.task_liveness.ok
+            and not self.allow_missing_tasks
+        ):
             return False
         return not any(c.fatal for c in self.checks)
 
@@ -324,6 +342,22 @@ class PreflightReport:
                 "override. REMEDY: clear this item (see /readiness on the board), then "
                 "start again."
             )
+        if self.task_liveness is not None:
+            tl = self.task_liveness
+            if tl.dead or tl.absent:
+                severity = "[FATAL]" if not self.allow_missing_tasks else "[allowed]"
+                if tl.dead:
+                    lines.append(
+                        f"  {severity} TASK(S) DEAD (registered, not running -- task "
+                        f"creation failed this boot): {', '.join(sorted(tl.dead))}"
+                    )
+                if tl.absent:
+                    lines.append(
+                        f"  {severity} TASK(S) ABSENT (never registered on this board -- "
+                        f"older firmware or a code regression): {', '.join(sorted(tl.absent))}"
+                    )
+            else:
+                lines.append(f"  [ok]     task liveness: all {len(tl.expected)} expected task(s) alive")
         if not self.checks:
             lines.append("  no HTTP-gated capabilities required by this preset/apply plan.")
         for c in self.checks:
@@ -344,11 +378,21 @@ class PreflightReport:
                     f"preset pins {c.preset_value!r}, which is what firmware lacking "
                     f"{c.capability.description} already does. No action needed."
                 )
+        task_liveness_blocks = (
+            self.task_liveness is not None
+            and not self.task_liveness.ok
+            and not self.allow_missing_tasks
+        )
         if self.board.readiness_blocked:
             names = ", ".join(k for k, _l, _d in self.board.readiness_blocked)
             lines.append(
                 f"  RESULT: the board's firing interlock blocks on {names} -- "
                 "this run would be refused; do not start it."
+            )
+        elif task_liveness_blocks:
+            lines.append(
+                "  RESULT: required task(s) dead or absent -- do not start this run. "
+                "Pass allow_missing_tasks=True to override once reviewed."
             )
         elif self.board.crash_unacknowledged and self.fatal_checks:
             lines.append(
@@ -478,13 +522,21 @@ def run_preflight(
     safety_host: Optional[str] = None,
     preset_name: str = "(unnamed)",
     timeout: float = PREFLIGHT_HTTP_TIMEOUT_S,
+    task_liveness: "object" = None,
+    allow_missing_tasks: bool = False,
 ) -> PreflightReport:
     """The main entry point. Probes ``host`` once for board identity and
     once per required capability, and returns a :class:`PreflightReport`.
     Never raises for a board-side "capability absent" or "unreachable"
     result -- those are reported, not exceptions; see
     :func:`preflight_or_raise` for the fail-fast wrapper a caller like
-    run_queue.py wants."""
+    run_queue.py wants.
+
+    ``task_liveness``: an optional ``task_liveness.TaskLivenessReport``
+    (this module never computes one itself -- it has no link/serial access,
+    only HTTP). Pass one to also refuse the run when a required task is
+    dead or absent on this boot, exactly like an unacknowledged crash
+    report, unless ``allow_missing_tasks=True``."""
     board = get_board_info(host, timeout=timeout)
     required = derive_required_capabilities(preset, zones_host, safety_host)
     checks: "list[CapabilityCheck]" = []
@@ -496,7 +548,9 @@ def run_preflight(
                 message="board unreachable, capability could not be checked",
             ))
         return PreflightReport(preset_name=preset.get("name", preset_name), host=host,
-                                board=board, checks=checks)
+                                board=board, checks=checks,
+                                task_liveness=task_liveness,
+                                allow_missing_tasks=allow_missing_tasks)
 
     for capability, preset_value in required:
         try:
@@ -526,7 +580,9 @@ def run_preflight(
             message="present" if present else ("benign" if not fatal else "FATAL"),
         ))
     return PreflightReport(preset_name=preset.get("name", preset_name), host=host,
-                            board=board, checks=checks)
+                            board=board, checks=checks,
+                            task_liveness=task_liveness,
+                            allow_missing_tasks=allow_missing_tasks)
 
 
 class PreflightFailed(Exception):
@@ -548,6 +604,8 @@ def preflight_or_raise(
     safety_host: Optional[str] = None,
     preset_name: str = "(unnamed)",
     timeout: float = PREFLIGHT_HTTP_TIMEOUT_S,
+    task_liveness: "object" = None,
+    allow_missing_tasks: bool = False,
 ) -> PreflightReport:
     """Same as :func:`run_preflight`, but raises :class:`PreflightFailed`
     when ``report.ok`` is False (board unreachable, or any fatal capability
@@ -555,7 +613,9 @@ def preflight_or_raise(
     unattended queue starts -- see this module's docstring for the exact
     one-line wiring recommended for run_queue.py."""
     report = run_preflight(preset, host, zones_host=zones_host, safety_host=safety_host,
-                            preset_name=preset_name, timeout=timeout)
+                            preset_name=preset_name, timeout=timeout,
+                            task_liveness=task_liveness,
+                            allow_missing_tasks=allow_missing_tasks)
     if not report.ok:
         _module_log.error("capability preflight failed:\n%s", report.describe())
         raise PreflightFailed(report)

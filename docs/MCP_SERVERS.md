@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 183 tools and `kicad` 86. Published as MCP
+`kilnctrl` registers 184 tools and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
@@ -654,3 +654,30 @@ That is the whole change; the facade picks it up at import.
 A useful check after adding one: call `<p>find` with the question a person would
 actually ask, and confirm the new tool comes back first. If it does not, that is
 a missing keyword, not a search bug.
+
+### `check_task_liveness` (READ-ONLY)
+
+`check_stack_margin_registration.ps1` only proves every required KilnFW task
+has a `stack_margin_register()` call site in the firmware source -- it says
+nothing about whether `xTaskCreate*()` actually succeeded for each one on a
+given boot. Every task-creation failure is log-only (`ESP_LOGE`, non-fatal,
+no counter, nothing HTTP-visible), so a board that silently failed to start a
+required task at boot looks perfectly healthy everywhere else in `/api/
+status`. `stack_margin_read()` (`App/drivers/common/stack_margin.c`) is the
+one place that failure stays visible: the task's registry slot is present
+(registered by name at compile time) but its handle is NULL, so `alive`
+reads false.
+
+`check_task_liveness` calls the same `GET_STACK_MARGIN` path as
+`get_stack_margin`, then diffs the reply against the `$requiredNames` list
+parsed live out of `tools/check_stack_margin_registration.ps1` (via
+`tools/PcTools/src/kilnctrl/task_liveness.py`, unit-tested in isolation with
+no board involved) -- one expected-task list, in one place, rather than a
+second hand-copied one that can drift. It reports expected-and-alive,
+expected-but-DEAD (registered, `alive=False` -- creation failed this boot),
+expected-but-ABSENT (never registered -- older firmware or a code
+regression), and extra (alive, not in the expected list -- informational).
+`capability_preflight_check` runs this same cross-check over the link before
+every preflight and refuses the run (same as an unacknowledged crash report)
+if any expected task is dead or absent, unless `allow_missing_tasks=True` is
+passed.
