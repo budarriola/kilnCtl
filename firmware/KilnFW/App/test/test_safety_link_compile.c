@@ -56,6 +56,8 @@
 #include <math.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -288,6 +290,20 @@ static uart_proto_message_t s_fake_inbox_delayed_msg;
 // so it explicitly arms it, and every reset function turns it back off.
 static bool s_fake_inbox_advance_time_on_empty = false;
 
+// Spin guard: counts consecutive empty uart_protocol_receive() polls. With
+// s_fake_inbox_advance_time_on_empty left at its default (off), the fake
+// clock never moves, so a call-site loop that re-derives its remaining
+// budget from hal_time_now_us() (safety_link_get_param()/safety_link_
+// get_stack_margin()) spins forever instead of ever observing
+// remaining_ms == 0 -- and build_host_tests.ps1 has no per-executable
+// timeout, so that hang would silently hold a build-gate slot rather than
+// failing fast. Reset whenever the queue produces a message (by index or by
+// push) or on fake_inbox_reset(); once consecutive empty polls pass
+// SPIN_GUARD_LIMIT, print one line naming the problem and abort() so the
+// hang surfaces as a fast, loud test failure instead.
+#define SPIN_GUARD_LIMIT 100000
+static uint32_t s_fake_inbox_empty_poll_count = 0;
+
 static void fake_inbox_reset(void)
 {
     s_fake_inbox_count = 0;
@@ -295,12 +311,14 @@ static void fake_inbox_reset(void)
     s_fake_inbox_auto_push_armed = false;
     s_fake_inbox_auto_push_done = false;
     s_fake_inbox_advance_time_on_empty = false;
+    s_fake_inbox_empty_poll_count = 0;
 }
 
 static void fake_inbox_push(const uart_proto_message_t *msg)
 {
     assert(s_fake_inbox_count < FAKE_INBOX_CAP && "grow FAKE_INBOX_CAP");
     s_fake_inbox[s_fake_inbox_count++] = *msg;
+    s_fake_inbox_empty_poll_count = 0;
 }
 
 esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_msg, TickType_t wait_ticks)
@@ -308,7 +326,15 @@ esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_m
     (void)inbox;
     if (s_fake_inbox_pos < s_fake_inbox_count) {
         *out_msg = s_fake_inbox[s_fake_inbox_pos++];
+        s_fake_inbox_empty_poll_count = 0;
         return ESP_OK;
+    }
+    if (++s_fake_inbox_empty_poll_count > SPIN_GUARD_LIMIT) {
+        fprintf(stderr,
+                "uart_protocol_receive stub: queue empty for %u polls with fake clock frozen"
+                " -- a no-reply test must set s_fake_inbox_advance_time_on_empty\n",
+                (unsigned)s_fake_inbox_empty_poll_count);
+        abort();
     }
     if (s_fake_inbox_auto_push_armed && !s_fake_inbox_auto_push_done) {
         s_fake_inbox_auto_push_done = true;
