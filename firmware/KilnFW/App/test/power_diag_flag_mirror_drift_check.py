@@ -63,6 +63,19 @@ MIRROR_MAP = [
      "safety_link.h", "SAFETY_LINK_DIAG_FLAG_CALIBRATION_MISSING"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT",
      "safety_link.h", "SAFETY_LINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT"),
+    # Bit 3 (CLEAR_TRIP_DIAG_PRESENT) has no #define mirror in safety_link.h
+    # at all (its own comment: "no consumer here yet -- not this pass's
+    # scope, left as found") -- correctly excluded from this map, not a gap.
+    # Bit 4 (TC_RECONFIG_GAVE_UP) IS mirrored there but was never added to
+    # this map -- pre-existing gap, backfilled 2026-09-22 alongside adding
+    # bits 5/6 below for the same class of field.
+    ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP",
+     "safety_link.h", "SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP"),
+    # 2026-09-22: S1/S8 ship disabled-by-zero, new bits 5/6.
+    ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED",
+     "safety_link.h", "SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED"),
+    ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED",
+     "safety_link.h", "SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_POWERON", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_POWERON"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_WATCHDOG", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_WATCHDOG"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_BROWNOUT", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_BROWNOUT"),

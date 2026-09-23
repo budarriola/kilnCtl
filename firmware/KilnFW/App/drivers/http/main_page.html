@@ -359,6 +359,7 @@
 <div id="zonesConfigMigrationPersistFaultBanner"></div>
 <div id="kilnCfgSwapBootFaultBanner"></div>
 <div id="safetyTcReconfigGaveUpBanner"></div>
+<div id="safetyGuardDisabledByZeroBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -2019,6 +2020,36 @@ function renderSafetyTcReconfigGaveUp(data) {
     '<div class="row"><span>To clear</span><span>Power-cycle the safety processor, or check the ' +
     'safety thermocouple\'s wiring/connector, then confirm via the safety status panel that the ' +
     'reading is valid again.</span></div>' +
+    '</div>';
+}
+
+// 2026-09-22: S1 (abs_max_temp_c) and S8 (max_rate_c_per_min) ship
+// disabled-by-zero on the Pico by design (no defensible default until
+// commissioned) -- SAFETY_MODEL.md's "guards with no defensible default
+// ship disabled, and say so in telemetry" line. Before this pass neither
+// bit had a distinct wire signal (only the bundled, less specific
+// commissioning summary elsewhere on this page). Informational, not a
+// fault -- "info" (not "interrupted"/red) treatment, since an
+// uncommissioned board reporting these is expected, not a problem to fix
+// urgently on its own. Reuses .banner.lag's --ok "working as designed"
+// treatment (see that class's own comment above) rather than inventing a
+// new "info" class.
+function renderSafetyGuardDisabledByZero(data) {
+  var el = document.getElementById('safetyGuardDisabledByZeroBanner');
+  if (!el) return;
+  var s1 = !!data.safety_s1_abs_max_disabled;
+  var s8 = !!data.safety_s8_rate_guard_disabled;
+  if (!s1 && !s8) { el.innerHTML = ''; return; }
+  var names = [];
+  if (s1) { names.push('S1 (absolute temperature ceiling)'); }
+  if (s8) { names.push('S8 (implausible rate of rise)'); }
+  el.innerHTML = '<div class="banner lag">' +
+    '<h3>SAFETY GUARD(S) DISABLED -- NOT COMMISSIONED</h3>' +
+    '<div class="row"><span>' + names.join(', ') + ' ' +
+    (names.length > 1 ? 'are' : 'is') + ' shipped disabled because the required threshold has ' +
+    'never been set to a nonzero value. Never trips while disabled.</span></div>' +
+    '<div class="row"><span>To arm</span><span>Set the corresponding threshold (abs_max_temp_c ' +
+    'for S1, max_rate_c_per_min for S8) via the safety config panel.</span></div>' +
     '</div>';
 }
 
@@ -3952,6 +3983,7 @@ function poll() {
       renderZonesConfigMigrationPersistFault(data);
       renderKilnCfgSwapBootFault(data);
       renderSafetyTcReconfigGaveUp(data);
+      renderSafetyGuardDisabledByZero(data);
       renderSafetyTrip(data);
       // Client-side multi-zone autotune trace sampling (see
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no

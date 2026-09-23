@@ -144,8 +144,18 @@
  * digit). Worst-case sum: 25+32+30 = 87B. Grown 5120 -> 5248 (+128, same
  * step convention as the two bumps above) for real headroom rather than
  * shaving the existing margin -- see test_dashboard_json.c's
- * render_worst_case_status_json() for the measured total. */
-#define DASHBOARD_JSON_STATUS_BUF_SIZE 5248
+ * render_worst_case_status_json() for the measured total.
+ *
+ * 2026-09-22: two new unconditional fields on this same endpoint,
+ * ",\"safety_s1_abs_max_disabled\":false" (34B) and
+ * ",\"safety_s8_rate_guard_disabled\":false" (37B) -- S1/S8 shipping
+ * disabled-by-zero, surfaced next to safety_tc_reconfig_gave_up (see
+ * dashboard_status_http.c). Measured worst case grew to 5273B, over this
+ * buffer's old 5248B size by 25B alone -- not enough headroom left for this
+ * file's own required 50B minimum margin. Grown 5248 -> 5376 (+128, same
+ * step convention as every prior bump here) rather than shaving margin to
+ * the bone again. */
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 5376
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
  * past out_cap, always NUL-terminates) rather than overflow -- src is

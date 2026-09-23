@@ -290,6 +290,13 @@ extern "C" {
  * a configuration/verification failure, not necessarily a bad temperature
  * reading (CLAUDE.md's "safety TC invalid is one CR1 byte" note). */
 #define SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP   0x10u
+/* bit5/bit6, mirrored 2026-09-22: S1 (abs_max_temp_c) and S8
+ * (max_rate_c_per_min) ship disabled-by-zero on the Pico -- see
+ * kilnlink_diag.h's bit5/bit6 comments. Distinct from the bundled
+ * CALIBRATION_MISSING (bit1) commissioning summary above: that bit does not
+ * by itself say whether S1/S8 specifically are armed. */
+#define SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED 0x20u
+#define SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED   0x40u
 
 /* DIAG boot_reason byte (offset 10), kilnlink_diag.h's
  * kilnlink_diag_boot_flag_t mirrored here, same reasoning as above. */

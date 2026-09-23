@@ -1203,7 +1203,7 @@ on a later tick). 378/378 host checks pass.
       processor's guards by itself. When it is honoured, S2/S3/S4 go *inactive*
       with their accumulators held at zero -- the same treatment stale context
       gets -- and S1 and S5-S15 are untouched.
-- [ ] Guards with no defensible default ship **disabled**, and say so in telemetry
+- [x] Guards with no defensible default ship **disabled**, and say so in telemetry (2026-09-22: S1/S8 shipped disabled-by-zero -- `abs_max_temp_c <= 0.0f` / `max_rate_c_per_min <= 0.0f` -- with no distinct telemetry signal, only the bundled `CALIBRATION_MISSING` commissioning summary; fixed by two new `kilnlink_diag_flag_t` bits, `KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED`/`KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED`, `firmware/CommonFW/include/kilnlink/kilnlink_diag.h`, wired through `link_diag_flags_compute()`/`link_task.c`, mirrored on the ESP side in `safety_link.h`/`dashboard_http.c`/`dashboard_status_http.c`/`main_page.html`, and covered by `test_link_diag_flags.c`/`test_dashboard_json.c`/`power_diag_flag_mirror_drift_check.py`)
 - [x] `tc_placement_mode` and `tc_source` required at commissioning, no defaults (`config_store_default()`, `config_store.c:960-971`: both set to 0 and documented "IRRELEVANT ... never mistaken for a real default", gated by `fields_set`)
 
 ### Honest-gaps register (§7)

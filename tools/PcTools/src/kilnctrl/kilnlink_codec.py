@@ -173,6 +173,14 @@ _DIAG_FLAG = {
     "KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN": 0x01,
     "KILNLINK_DIAG_FLAG_CALIBRATION_MISSING": 0x02,
     "KILNLINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT": 0x04,
+    # Backfilled 2026-09-22: bits 3/4 were already live on the wire
+    # (kilnlink_diag.h) but missing from this table -- pre-existing gap,
+    # found while adding the two bits below for S1/S8 shipping
+    # disabled-by-zero. Bits 5/6 are new in this change.
+    "KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT": 0x08,
+    "KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP": 0x10,
+    "KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED": 0x20,
+    "KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED": 0x40,
 }
 
 

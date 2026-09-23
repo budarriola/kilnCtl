@@ -348,6 +348,17 @@ typedef struct {
      * verification failure, not necessarily a bad temperature reading --
      * see that flag's own doc comment before wording any UI around it. */
     bool     safety_tc_reconfig_gave_up;
+    /* 2026-09-22: S1 (abs_max_temp_c) and S8 (max_rate_c_per_min) ship
+     * disabled-by-zero (SaftyFW's safety_guards.c) and previously had no
+     * distinct wire signal at all -- SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_
+     * DISABLED/SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED, safety_link.h.
+     * Meaningless (stays false) until diag_ever_received is true, same
+     * convention as safety_tc_reconfig_gave_up above. Distinct from the
+     * bundled CALIBRATION_MISSING commissioning summary decoded via
+     * safety_cfg_http.c: that bit does not by itself say whether S1/S8
+     * specifically are armed. */
+    bool     safety_s1_abs_max_disabled;
+    bool     safety_s8_rate_guard_disabled;
 
     bool     trip_event_ever_received;
     uint8_t  trip_reason;

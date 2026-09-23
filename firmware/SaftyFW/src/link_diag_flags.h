@@ -91,8 +91,41 @@ extern "C" {
 //                                                          this bit" shape as
 //                                                          bit3, no protocol
 //                                                          version bump.
+//   bit5 S1_ABS_MAX_TEMP_DISABLED <- abs_max_temp_disabled (link_task.c's
+//                                                          caller sources
+//                                                          this from
+//                                                          config_store_is_
+//                                                          abs_max_temp_
+//                                                          disabled() --
+//                                                          see kilnlink_
+//                                                          diag.h's bit5
+//                                                          comment. SAFETY_
+//                                                          MODEL.md "guards
+//                                                          with no
+//                                                          defensible
+//                                                          default ship
+//                                                          disabled, and say
+//                                                          so in telemetry"
+//                                                          -- this is the
+//                                                          fix for S1. Same
+//                                                          "wire format
+//                                                          already reserved
+//                                                          this bit" shape
+//                                                          as bits 3/4, no
+//                                                          protocol version
+//                                                          bump.
+//   bit6 S8_RATE_GUARD_DISABLED <- rate_guard_disabled    (link_task.c's
+//                                                          caller sources
+//                                                          this from
+//                                                          config_store_is_
+//                                                          rate_guard_
+//                                                          disabled() --
+//                                                          same rationale as
+//                                                          bit5 above, for
+//                                                          S8 instead of S1.
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
-                                 bool clear_trip_diag_present, bool tc_reconfig_gave_up);
+                                 bool clear_trip_diag_present, bool tc_reconfig_gave_up,
+                                 bool abs_max_temp_disabled, bool rate_guard_disabled);
 
 #ifdef __cplusplus
 }

@@ -1102,10 +1102,19 @@ static void link_task_send_diag(void)
     // above -- thermo_task_reconfig_gave_up() reads thermo_task.c's
     // s_reconfig_gave_up (a plain volatile bool, safe to read from this
     // task's own context the same way thermo_task_injection_active() is).
+    // bit5/bit6 abs_max_temp_disabled/rate_guard_disabled: WIRED 2026-09-22
+    // -- SAFETY_MODEL.md "guards with no defensible default ship disabled,
+    // and say so in telemetry" had no distinct signal for S1/S8's
+    // disabled-by-zero config before this (the bundled CALIBRATION_MISSING
+    // bit does not answer "is S1/S8 itself armed"). See kilnlink_diag.h's
+    // bit5/bit6 comments and config_store.h's config_store_is_abs_max_temp_
+    // disabled()/config_store_is_rate_guard_disabled() for the distinction.
     uint8_t diag_flags =
         link_diag_flags_compute(config_store_is_calibration_missing(), s_context_sim_seen,
                                  clear_trip_diag_get_cached().magic_ok,
-                                 thermo_task_reconfig_gave_up());
+                                 thermo_task_reconfig_gave_up(),
+                                 config_store_is_abs_max_temp_disabled(),
+                                 config_store_is_rate_guard_disabled());
     //
     // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
     // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own

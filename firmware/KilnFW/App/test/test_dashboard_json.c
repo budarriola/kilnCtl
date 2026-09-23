@@ -686,6 +686,20 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     STATUS_APPEND(",\"safety_ready\":%s", "false");
     STATUS_APPEND(",\"zones_config_valid\":%s", "false");
 
+    /* Pre-existing gap found 2026-09-22 while adding the two S1/S8 fields
+     * below: safety_tc_reconfig_gave_up (2026-09-16) is emitted UNCONDITIONALLY
+     * on the main status endpoint (dashboard_status_http.c) right here but was
+     * never added to this mirror -- backfilled now rather than left short next
+     * to the two new fields immediately below it. */
+    STATUS_APPEND(",\"safety_tc_reconfig_gave_up\":%s", "false");
+    /* 2026-09-22: S1/S8 ship disabled-by-zero, surfaced on the main status
+     * endpoint too (dashboard_status_http.c, same site as
+     * safety_tc_reconfig_gave_up just above). "true" is the same length as
+     * "false" minus one char either way is fine here -- these are plain
+     * booleans, worst case is "false" (5 bytes, one longer than "true"). */
+    STATUS_APPEND(",\"safety_s1_abs_max_disabled\":%s", "false");
+    STATUS_APPEND(",\"safety_s8_rate_guard_disabled\":%s", "false");
+
     STATUS_APPEND(",\"safety_temp_c\":%.2f", -1234.56);
     /* Emitted UNCONDITIONALLY by dashboard_status_http.c and missing from this
      * mirror entirely until the 2026-09-16 review -- "false" is the wider of
@@ -1051,6 +1065,7 @@ static bool render_diag_json(char *json, size_t cap, bool ever_received,
                              unsigned boot_reason, unsigned long frames_ok,
                              unsigned long frames_bad, unsigned long tx_dropped,
                              unsigned long log_dropped, bool tc_reconfig_gave_up,
+                             bool s1_abs_max_disabled, bool s8_rate_guard_disabled,
                              bool extra_field, size_t *out_len)
 {
     size_t o = 0;
@@ -1071,6 +1086,13 @@ static bool render_diag_json(char *json, size_t cap, bool ever_received,
         DIAG_APPEND(",\"diag_log_frames_dropped\":%lu", log_dropped);
         DIAG_APPEND(",\"safety_tc_reconfig_gave_up\":%s",
                     tc_reconfig_gave_up ? "true" : "false");
+        /* 2026-09-22: same drift risk as above -- keep step with
+         * dashboard_status_http.c's ?diag=1 block's own two new appends
+         * for S1/S8 shipping disabled-by-zero. */
+        DIAG_APPEND(",\"safety_s1_abs_max_disabled\":%s",
+                    s1_abs_max_disabled ? "true" : "false");
+        DIAG_APPEND(",\"safety_s8_rate_guard_disabled\":%s",
+                    s8_rate_guard_disabled ? "true" : "false");
     }
     /* Not emitted by the handler -- the mutation test's stand-in for a field
      * added to the diag document without checking that it still fits. */
@@ -1095,7 +1117,9 @@ static bool render_worst_case_diag_json(char *json, size_t cap, bool extra_field
 {
     return render_diag_json(json, cap, /*ever_received=*/true, 255u,
                             4294967295UL, 4294967295UL, 4294967295UL, 4294967295UL,
-                            /*tc_reconfig_gave_up=*/false, extra_field, out_len);
+                            /*tc_reconfig_gave_up=*/false,
+                            /*s1_abs_max_disabled=*/false, /*s8_rate_guard_disabled=*/false,
+                            extra_field, out_len);
 }
 
 static void test_diag_json_worst_case_render_fits_documented_buffer(void)
@@ -1115,6 +1139,8 @@ static void test_diag_json_worst_case_render_fits_documented_buffer(void)
     bool ok_false = render_diag_json(json, sizeof(json), /*ever_received=*/false,
                                      255u, 4294967295UL, 4294967295UL, 4294967295UL,
                                      4294967295UL, /*tc_reconfig_gave_up=*/false,
+                                     /*s1_abs_max_disabled=*/false,
+                                     /*s8_rate_guard_disabled=*/false,
                                      /*extra_field=*/false, &gate_false_len);
     TEST_CHECK(ok_false, "the diag_ever_received=false ?diag=1 render must also fit");
     TEST_CHECK(gate_false_len < worst_len,
@@ -1147,6 +1173,8 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
                                /*tx_dropped=*/4294967295UL,
                                /*log_dropped=*/6543UL,
                                /*tc_reconfig_gave_up=*/true,
+                               /*s1_abs_max_disabled=*/true,
+                               /*s8_rate_guard_disabled=*/true,
                                /*extra_field=*/false, &len);
     TEST_CHECK(ok, "the populated ?diag=1 document must render");
     TEST_CHECK(len == strlen(json), "the reported length must match the rendered string");
@@ -1174,6 +1202,10 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
               "Pico's log_task.c drop counter, KILNLINK_PROTOCOL_VERSION 15 -> 16");
     TEST_CHECK(strstr(json, "\"safety_tc_reconfig_gave_up\":true") != NULL,
               "safety_tc_reconfig_gave_up must be present and correctly valued");
+    TEST_CHECK(strstr(json, "\"safety_s1_abs_max_disabled\":true") != NULL,
+              "safety_s1_abs_max_disabled must be present and correctly valued");
+    TEST_CHECK(strstr(json, "\"safety_s8_rate_guard_disabled\":true") != NULL,
+              "safety_s8_rate_guard_disabled must be present and correctly valued");
 
     /* The removed decodes must not silently come back as re-added bytes. */
     TEST_CHECK(strstr(json, "diag_boot_stack_overflow") == NULL,
@@ -1193,6 +1225,8 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
     bool gated_ok = render_diag_json(json, sizeof(json), /*ever_received=*/false,
                                      37u, 123456789UL, 7UL, 4294967295UL, 6543UL,
                                      /*tc_reconfig_gave_up=*/true,
+                                     /*s1_abs_max_disabled=*/true,
+                                     /*s8_rate_guard_disabled=*/true,
                                      /*extra_field=*/false, &gated_len);
     TEST_CHECK(gated_ok, "the gated ?diag=1 document must render");
     TEST_CHECK(strstr(json, "\"diag_ever_received\":false") != NULL,
@@ -1209,6 +1243,10 @@ static void test_diag_json_content_is_complete_and_correctly_valued(void)
               "diag_log_frames_dropped must be absent when the gate is false");
     TEST_CHECK(strstr(json, "safety_tc_reconfig_gave_up") == NULL,
               "safety_tc_reconfig_gave_up must be absent when the gate is false");
+    TEST_CHECK(strstr(json, "safety_s1_abs_max_disabled") == NULL,
+              "safety_s1_abs_max_disabled must be absent when the gate is false");
+    TEST_CHECK(strstr(json, "safety_s8_rate_guard_disabled") == NULL,
+              "safety_s8_rate_guard_disabled must be absent when the gate is false");
 }
 
 /* Proves the size assertion above is load-bearing: a field added to the diag

@@ -352,6 +352,15 @@ void dashboard_get_status(dashboard_status_t *out)
              * live cause) is unaffected either way. */
             out->safety_tc_reconfig_gave_up =
                 (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP) != 0u;
+            /* 2026-09-22: surfaces S1/S8 shipping disabled-by-zero
+             * (SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED/_S8_RATE_
+             * GUARD_DISABLED, safety_link.h) -- SAFETY_MODEL.md's "guards
+             * with no defensible default ship disabled, and say so in
+             * telemetry" line. */
+            out->safety_s1_abs_max_disabled =
+                (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED) != 0u;
+            out->safety_s8_rate_guard_disabled =
+                (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED) != 0u;
 
             out->trip_event_ever_received = sl.trip_event_ever_received;
             out->trip_reason = sl.trip_reason;

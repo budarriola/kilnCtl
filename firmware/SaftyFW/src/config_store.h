@@ -1502,6 +1502,22 @@ uint8_t config_store_get_estop_active_level(void);
 // called before config_store_boot_load().
 bool config_store_is_calibration_missing(void);
 
+// True iff the cached record's abs_max_temp_c is <= 0, i.e. S1 (absolute
+// ceiling) ships disabled per safety_guards.c's own "abs_max_temp_c == 0
+// means not commissioned -- never trip" comment. Returns true (the safe
+// default: report disabled) if called before config_store_boot_load().
+// This is a DISTINCT signal from config_store_is_calibration_missing()
+// above: that bit is a bundled "board not fully commissioned" summary
+// across many fields and does not by itself tell an operator whether S1
+// specifically is armed or silently inert.
+bool config_store_is_abs_max_temp_disabled(void);
+
+// True iff the cached record's max_rate_c_per_min is <= 0, i.e. S8
+// (implausible rate of rise) ships disabled per safety_guards.c's own
+// "max_rate_c_per_min == 0" comment -- same distinct-signal rationale as
+// config_store_is_abs_max_temp_disabled() above, for S8 instead of S1.
+bool config_store_is_rate_guard_disabled(void);
+
 // True iff config_store_boot_load() found NO valid slot in the sector AND at
 // least one slot it scanned was structurally intact but refused by
 // config_params_validate_ranges() -- case 2 of this file's "Load-time

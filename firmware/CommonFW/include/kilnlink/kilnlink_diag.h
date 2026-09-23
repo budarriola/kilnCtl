@@ -95,6 +95,23 @@ typedef enum {
      * mismatch), not necessarily an out-of-range or noisy temperature; see
      * CLAUDE.md's "safety TC invalid is one CR1 byte" note. */
     KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP = 0x10u,
+    /* bit5, added 2026-09-22: S1 (abs_max_temp_c, absolute ceiling) ships
+     * disabled-by-zero (safety_guards.c: "abs_max_temp_c == 0 means not
+     * commissioned -- never trip") with no distinct wire signal before this
+     * -- SAFETY_MODEL.md's "guards with no defensible default ship
+     * disabled, and say so in telemetry" line was unchecked for S1/S8 until
+     * now. config_store_is_calibration_missing()/KILNLINK_DIAG_FLAG_
+     * CALIBRATION_MISSING is a bundled "board not fully commissioned"
+     * summary across many fields and does not distinguish "S1 specifically
+     * is inert" from any other missing field -- see config_store.h's
+     * comment on config_store_is_abs_max_temp_disabled(). Purely
+     * additive, same spare-bit-in-an-already-transmitted-byte precedent as
+     * bits 1-4 above -- no KILNLINK_PROTOCOL_VERSION bump. */
+    KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED = 0x20u,
+    /* bit6, added 2026-09-22: S8 (max_rate_c_per_min, implausible rate of
+     * rise) ships disabled-by-zero, same rationale and same "distinct from
+     * CALIBRATION_MISSING" reasoning as bit5 above, for S8 instead of S1. */
+    KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED = 0x40u,
 } kilnlink_diag_flag_t;
 
 /* state byte (offset 24) -- LINK_PROTOCOL.md sec 6, Frame B: 0 init,

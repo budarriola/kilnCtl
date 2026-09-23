@@ -812,6 +812,30 @@ bool config_store_is_calibration_missing(void)
     return snap.calibration_missing;
 }
 
+bool config_store_is_abs_max_temp_disabled(void)
+{
+    if (!s_loaded) {
+        return true; // safe default: report disabled until proven otherwise
+    }
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return true;
+    }
+    return snap.abs_max_temp_c <= 0.0f; // safety_guards.c's own "ships disabled" test, S1
+}
+
+bool config_store_is_rate_guard_disabled(void)
+{
+    if (!s_loaded) {
+        return true; // safe default: report disabled until proven otherwise
+    }
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return true;
+    }
+    return snap.max_rate_c_per_min <= 0.0f; // safety_guards.c's own "ships disabled" test, S8
+}
+
 bool config_store_is_tc_type_set(void)
 {
     if (!s_loaded) {

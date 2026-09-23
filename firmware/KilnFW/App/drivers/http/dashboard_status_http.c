@@ -344,6 +344,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
             APPEND(",\"diag_log_frames_dropped\":%lu", (unsigned long)ds->diag_log_frames_dropped);
             APPEND(",\"safety_tc_reconfig_gave_up\":%s",
                    ds->safety_tc_reconfig_gave_up ? "true" : "false");
+            APPEND(",\"safety_s1_abs_max_disabled\":%s",
+                   ds->safety_s1_abs_max_disabled ? "true" : "false");
+            APPEND(",\"safety_s8_rate_guard_disabled\":%s",
+                   ds->safety_s8_rate_guard_disabled ? "true" : "false");
         }
         APPEND("}");
         free(ds);
@@ -518,6 +522,14 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * this: it means "configuration/verification failed", not "bad
      * reading". */
     APPEND(",\"safety_tc_reconfig_gave_up\":%s", ds->safety_tc_reconfig_gave_up ? "true" : "false");
+
+    /* 2026-09-22: same "main status endpoint too" reasoning as
+     * safety_tc_reconfig_gave_up just above, for S1/S8 shipping
+     * disabled-by-zero (dashboard_http.h's field comment). */
+    APPEND(",\"safety_s1_abs_max_disabled\":%s",
+           ds->safety_s1_abs_max_disabled ? "true" : "false");
+    APPEND(",\"safety_s8_rate_guard_disabled\":%s",
+           ds->safety_s8_rate_guard_disabled ? "true" : "false");
 
     /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
      * GET /api/board_temps already established (TODO.md 10.7): a JSON null
