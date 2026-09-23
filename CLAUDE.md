@@ -22,9 +22,19 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (180 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `kiln_config_apply` was
-added -- an MCP tool wrapping `POST /api/kiln_configs/apply` plus a status
+the rest behind a search facade (181 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `crash_report_clear` was
+added -- an MCP tool wrapping `POST /api/crash_report/clear`
+(`diagnostics_http.c`'s `crash_report_clear_post_handler()`, ROUTE_TIER_ADMIN),
+which acknowledges the board's last-crash record AND erases the coredump
+image so an old coredump is never re-captured after a reflash -- a strictly
+more destructive action than `crash_report_ack`, which never touches the
+coredump. It fetches `GET /api/crash_report` first and reports the pending
+record's summary before doing anything, refuses to clear a present-but-
+unacknowledged record unless `allow_unacknowledged=True` is also passed,
+refuses to POST unless `confirm=True`, and fails loud if a read-back after
+the POST still shows the record present. The one before it was
+`kiln_config_apply` -- an MCP tool wrapping `POST /api/kiln_configs/apply` plus a status
 poll (`tools/PcTools/src/kilnctrl/kiln_configs_apply_http_client.py`),
 refusing to POST unless `confirm=True` and distinguishing the interlock 428
 from the hardware-differs 428 by response header name. The one before it was

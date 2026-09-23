@@ -343,6 +343,106 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False,
+                        host: Optional[str] = None) -> str:
+    """Acknowledge AND erase the board's last-crash record (POST
+    /api/crash_report/clear, diagnostics_http.c's crash_report_clear_post_
+    handler(), ROUTE_TIER_ADMIN) -- the same action crash_report_clear()
+    performs on the board: crash_report_acknowledge() followed by
+    hal_sysinfo_coredump_erase(), freeing the `coredump` partition slot so
+    an OLD coredump is never re-captured/re-reported after a reflash. This
+    is a strictly more destructive action than crash_report_ack(), which
+    never touches the coredump image -- use crash_report_ack() when only
+    dismissing the banner is wanted.
+
+    Always fetches the CURRENT report first (GET /api/crash_report). If no
+    crash is on record (``present: false``), this returns that and does
+    nothing else -- no POST is ever sent for a record that is not present.
+
+    Otherwise the report's summary is put in the result FIRST, before
+    anything is cleared, so a caller sees what it is about to erase.
+
+    REFUSES to clear an UNACKNOWLEDGED record unless
+    ``allow_unacknowledged=True`` is ALSO passed, regardless of
+    ``confirm`` -- a bench agent must not erase a crash nobody has
+    actually reviewed. This is stricter than crash_report_ack(), which has
+    no such gate since acknowledging is non-destructive.
+
+    REFUSES UNLESS ``confirm=True`` -- without it, this is a dry run: it
+    reports the pending record (or "nothing pending") and says what it
+    WOULD clear, but sends no POST. Same rule crash_report_ack()/safety_
+    set_rate_guard() use.
+
+    With ``confirm=True`` (and, if needed, ``allow_unacknowledged=True``),
+    POSTs the clear (crash_report_clear_http_client.py, over the same
+    web-auth seam every other ADMIN-tier write tool in this package uses),
+    then re-fetches GET /api/crash_report and FAILS LOUDLY (does not
+    report success) if the record still reads ``present: true``
+    afterward -- an ``{"ok":true}`` POST reply is not trusted alone, same
+    rule crash_report_ack()'s own docstring gives (see CLAUDE.md's
+    boot_guard write-lies section for why an unverified success report is
+    exactly the failure class this project has been bitten by before).
+
+    A 500 ("erase failed") from the board is reported as a failure,
+    distinguished by crash_report_clear_http_client's
+    CrashReportClearHttpError.status -- never collapsed into a single
+    generic error string. Unlike /ack, this route has no separate 409
+    "nothing to do" status -- crash_report_clear() always attempts the
+    erase, so a POST is only ever sent here when the pre-fetch already
+    confirmed a record is present.
+
+    Host is auto-resolved the same way get_heap_status()/crash_report_ack()
+    do; pass `host` explicitly for kilnctl.local or a board reachable only
+    from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as crash_report_ack()
+    from . import crash_report_clear_http_client
+
+    resolved = _ota_resolve_host(host)
+    try:
+        before = dashboard_http_client.get_crash_report(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return f"error: could not read GET /api/crash_report (host={resolved}): {exc}"
+
+    if not before.get("present"):
+        return f"nothing pending -- GET /api/crash_report reports present=false (host={resolved})"
+
+    summary = _describe_crash_report(before)
+
+    if not before.get("acknowledged") and not allow_unacknowledged:
+        return (
+            f"REFUSED: record is present but NOT acknowledged -- pass allow_unacknowledged=True "
+            f"to clear an unreviewed crash anyway -- {summary} (host={resolved})"
+        )
+
+    if not confirm:
+        return (
+            f"DRY RUN (pass confirm=True to actually clear) -- pending crash: {summary} "
+            f"(host={resolved})"
+        )
+
+    try:
+        crash_report_clear_http_client.post_crash_report_clear(resolved)
+    except crash_report_clear_http_client.CrashReportClearHttpError as exc:
+        if exc.status == 500:
+            return (f"failed: board could not erase the record/coredump (500) -- {summary} "
+                     f"(host={resolved}): {exc}")
+        return f"error clearing crash report over HTTP (host={resolved}): {exc}"
+
+    try:
+        after = dashboard_http_client.get_crash_report(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return (f"error: POST /api/crash_report/clear returned ok, but the confirming re-fetch "
+                f"failed (host={resolved}): {exc} -- clear state UNKNOWN, re-check before "
+                f"trusting this")
+
+    if not after.get("present"):
+        return f"ok - cleared and confirmed by read-back: {summary} (host={resolved})"
+    return (f"FAILED: POST /api/crash_report/clear returned ok, but the re-fetched record still "
+            f"reads present=true -- {summary} (host={resolved}). Do not trust this as cleared.")
+
+
+@_srv._tool()
 def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = None) -> str:
     """Clear a quarantined kiln_configs store (POST
     /api/kiln_configs/quarantine_clear, kiln_cfg_http.c's quarantine_clear_
