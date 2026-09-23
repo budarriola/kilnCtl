@@ -519,7 +519,14 @@ def safety_get_param(param_id: int) -> str:
     except SafetyQueryError as exc:
         return f"error: {exc}"
     if isinstance(result, devices.OkReason):
-        return f"param_id={param_id}: refused - {result.describe()}"
+        if result.ok:
+            # An OkReason with ok=True is not a refusal -- describe() would
+            # say "ok" here, which read as "refused - ok" before this fix.
+            # Nothing today produces this branch (every GET_PARAM reply is
+            # either a SafetyGetParam or an ok=False refusal), but report it
+            # plainly rather than mislabeling it a refusal if that changes.
+            return f"param_id={param_id}: ok, no value ({result.describe()})"
+        return f"param_id={param_id}: refused - {result.reason or 'unsupported'}"
     if not result.found:
         return f"param_id={param_id}: not found"
     return f"param_id={param_id}: found, type={result.type}, value={result.value!r}"

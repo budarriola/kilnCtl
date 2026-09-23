@@ -423,5 +423,12 @@ def decode_param(payload: bytes) -> dict:
             f"kilnlink param payload length mismatch: type={type_} implies {5 + value_len} bytes, got {len(payload)}"
         )
     (raw_value,) = struct.unpack_from(value_fmt, payload, 5)
-    value = bool(raw_value) if type_ == 0x00 else raw_value
+    if type_ == 0x00:
+        if raw_value not in (0, 1):
+            raise ValueError(
+                f"kilnlink param payload has out-of-range bool value byte: {raw_value:#04x}, expected 0x00 or 0x01"
+            )
+        value = bool(raw_value)
+    else:
+        value = raw_value
     return {"param_id": param_id, "found": 1, "type": type_, "value": value}

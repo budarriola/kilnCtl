@@ -440,10 +440,17 @@ class SafetyClient:
         return value  # type: ignore[return-value]
 
     def get_param(
-        self, param_id: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S
+        self, param_id: int, timeout: float = CT_CAL_REPLY_TIMEOUT_S
     ) -> "SafetyGetParam | OkReason":
         """Ask the Pico for one CONFIG_REFERENCE.md field by its opaque u16
         wire id (GET_PARAM, 0x23) and return whatever it actually said.
+
+        Uses :data:`CT_CAL_REPLY_TIMEOUT_S` (5.0), not
+        :data:`DEFAULT_REPLY_TIMEOUT_S` (2.0), for the same reason
+        :meth:`get_ct_cal` does: once wired up, GET_PARAM is a live round
+        trip to the Pico through the ESP's SAFETY_XACT_LOCK_TIMEOUT_MS
+        (5000 ms) transaction lock, not an ESP-cached reply, so it needs
+        headroom for that lock rather than the shorter cached-reply timeout.
 
         UNLIKE :meth:`get_ct_cal`, a refusal here is not folded into a raised
         exception -- as of this writing uart_bridge_safety.c's
@@ -461,6 +468,11 @@ class SafetyClient:
         -- see :meth:`_query`.
         """
         value = self._query(SAFETY_CMD_GET_PARAM, devices.safety_get_param(param_id), timeout)
+        if isinstance(value, devices.SafetyGetParam) and value.param_id != param_id:
+            raise SafetyQueryError(
+                f"GET_PARAM reply param_id mismatch: requested {param_id:#06x}, "
+                f"reply carried {value.param_id:#06x}"
+            )
         return value  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

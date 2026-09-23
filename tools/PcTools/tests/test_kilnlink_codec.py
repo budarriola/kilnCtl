@@ -27,6 +27,15 @@ def test_encode_get_param_max_id():
     assert encode_get_param({"param_id": 0xFFFF}) == bytes([0x23, 0xFF, 0xFF])
 
 
+def test_encode_get_param_golden_vector_non_palindromic():
+    # 0x0505/0x0000/0xFFFF above are byte-palindromic -- LE and BE encode
+    # them identically, so those tests alone would still pass a codec that
+    # silently used ">BH" (big-endian) instead of "<BH". This is the C
+    # golden vector from firmware/CommonFW/test/test_get_param.c's
+    # test_vector(): param_id=0x1234 -> {0x23, 0x34, 0x12}, LE-only.
+    assert encode_get_param({"param_id": 0x1234}) == bytes([0x23, 0x34, 0x12])
+
+
 def test_decode_param_not_found():
     # cmd(1)=0x1E, param_id(2)=0x0505 LE, found(1)=0, type(1)=0 -- exactly 5 bytes
     payload = bytes([0x1E, 0x05, 0x05, 0x00, 0x00])
@@ -34,11 +43,27 @@ def test_decode_param_not_found():
     assert result == {"param_id": 0x0505, "found": 0, "type": 0, "value": None}
 
 
+def test_decode_param_not_found_golden_vector():
+    # firmware/CommonFW/test/test_param.c's test_vector_not_found():
+    # {0x1e, 0xff, 0xff, 0x00, 0x00} -- param_id=0xFFFF, found=0.
+    payload = bytes([0x1E, 0xFF, 0xFF, 0x00, 0x00])
+    result = decode_param(payload)
+    assert result == {"param_id": 0xFFFF, "found": 0, "type": 0, "value": None}
+
+
 def test_decode_param_found_bool():
     # type 0x00 = bool, 1 value byte
     payload = bytes([0x1E, 0x01, 0x00, 0x01, 0x00, 0x01])
     result = decode_param(payload)
     assert result == {"param_id": 1, "found": 1, "type": 0x00, "value": True}
+
+
+def test_decode_param_bool_out_of_range_value_rejected():
+    # A bool value byte other than 0/1 is a malformed reply, not a truthy
+    # value -- bool(2) == True would otherwise silently accept it.
+    payload = bytes([0x1E, 0x01, 0x00, 0x01, 0x00, 0x02])
+    with pytest.raises(ValueError, match="out-of-range bool value"):
+        decode_param(payload)
 
 
 def test_decode_param_found_u8():

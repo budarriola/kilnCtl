@@ -23,8 +23,10 @@ links to the per-area plans that own the detail.
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
 the rest behind a search facade (186 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `coordinated_gpio_test`
-was added -- registers `tools/PcTools/scripts/coordinated_gpio_test.py`
+per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `safety_get_param` was
+added -- a READ-ONLY GET_PARAM (0x23) wrapper that reports a Pico refusal as a
+refusal, never as "not found". The one before it was `coordinated_gpio_test`,
+same day -- registers `tools/PcTools/scripts/coordinated_gpio_test.py`
 (HARDWARE.md section 1 Steps A/B, the ESP4/5<->Pico4/5 crossing test) through
 the facade for the first time, with preconditions (safety not ARMED, no
 profile running, OTA interlock idle, link up, `confirm=True`) a bare script
