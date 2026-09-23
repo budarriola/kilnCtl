@@ -453,25 +453,23 @@ class SafetyClient:
         headroom for that lock rather than the shorter cached-reply timeout.
 
         UNLIKE :meth:`get_ct_cal`, a refusal here is not folded into a raised
-        exception -- as of this writing uart_bridge_safety.c's
-        safety_bridge_task() has no case for SAFETY_CMD_GET_PARAM at all, so
-        every call today gets an "unsupported" refusal
-        (:class:`~kilnctrl.devices.OkReason`, ``ok=False``), not a live Pico
-        round trip. That is the EXPECTED, honest outcome right now, not a
-        communication failure, so this method returns the
+        exception. As of KilnFW commit a3c3d825, uart_bridge_safety.c's
+        safety_bridge_task() has a live SAFETY_CMD_GET_PARAM case relaying a
+        real Pico round trip, so a refusal now means something the peer
+        actually said (e.g. an old Pico predating KILNLINK_PROTOCOL_VERSION
+        7) rather than an unwired bridge. This method still returns the
         :class:`~kilnctrl.devices.OkReason` object to the caller rather than
         raising :class:`SafetyQueryError` over it -- a caller (e.g.
         ``safety_get_param()`` in mcp_server_safety.py) can then report
-        "refused: <reason>" plainly instead of treating today's only
-        possible outcome as an error. :class:`SafetyQueryError` is still
-        raised for a genuine timeout (no reply of either id arrives at all)
-        -- see :meth:`_query`.
+        "refused: <reason>" plainly instead of treating a real refusal as an
+        error. :class:`SafetyQueryError` is still raised for a genuine
+        timeout (no reply of either id arrives at all) -- see :meth:`_query`.
         """
         value = self._query(SAFETY_CMD_GET_PARAM, devices.safety_get_param(param_id), timeout)
-        if isinstance(value, devices.SafetyGetParam) and value.param_id != param_id:
+        if isinstance(value, devices.SafetyGetParam) and int(value.param_id) != int(param_id):
             raise SafetyQueryError(
-                f"GET_PARAM reply param_id mismatch: requested {param_id:#06x}, "
-                f"reply carried {value.param_id:#06x}"
+                f"GET_PARAM reply param_id mismatch: requested {int(param_id):#06x}, "
+                f"reply carried {int(value.param_id):#06x}"
             )
         return value  # type: ignore[return-value]
 

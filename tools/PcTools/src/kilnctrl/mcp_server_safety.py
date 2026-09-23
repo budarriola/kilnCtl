@@ -500,19 +500,18 @@ def safety_get_param(param_id: int) -> str:
     future 0x0505 (config RAM-integrity fail count, landing separately)
     rather than anything already reachable in bulk via GET_CONFIG_PAGE.
 
-    NOT WIRED INTO FIRMWARE YET: as of this writing
-    uart_bridge_safety.c's safety_bridge_task() has no case for
-    SAFETY_CMD_GET_PARAM at all, so every call today gets an "unsupported"
-    refusal, not a live Pico round trip -- this is the correct, expected
-    result right now, not a bug in this tool. This tool and its underlying
-    codec/decoder exist so a real request/reply pair is ready for whichever
-    diagnostic id needs it first once that firmware wiring lands.
+    WIRED END TO END as of KilnFW commit a3c3d825: uart_bridge_safety.c's
+    safety_bridge_task() now has a SAFETY_CMD_GET_PARAM case that relays a
+    live Pico round trip (safety_link_get_param() -- CommonFW's
+    kilnlink_get_param.c/kilnlink_param.c), so a real request reaches the
+    safety processor and this call reports its actual answer: the decoded
+    value if found, "not found" if the Pico doesn't recognize the id, or a
+    genuine refusal (e.g. an old Pico predating KILNLINK_PROTOCOL_VERSION 7).
 
     UNLIKE safety_get_ct_cal, a refusal is reported as plain text here
-    rather than raised as an error -- "unsupported" is today's only possible
-    outcome, so treating it as a normal, non-exceptional result is the
-    honest thing to do. A genuine communication failure (timeout, no reply
-    of either id at all) still raises.
+    rather than raised as an error, so a version-skewed or unrecognized id
+    reads as a normal, non-exceptional result rather than an exception. A
+    genuine communication failure (timeout, no reply at all) still raises.
     """
     try:
         result = _srv._safety.get_param(param_id)

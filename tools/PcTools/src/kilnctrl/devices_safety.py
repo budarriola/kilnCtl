@@ -209,12 +209,11 @@ def safety_get_param(param_id: int) -> bytes:
     future 0x0505 (config RAM-integrity fail count) rather than anything
     already reachable in bulk via GET_CONFIG_PAGE.
 
-    NOT wired into uart_bridge_safety.c's dispatch as of this writing (see
-    protocol.py's SAFETY_CMD_GET_PARAM doc comment): sending this today
-    gets an honest "unsupported" refusal, not a live Pico round trip. This
-    encoder and :func:`~kilnctrl.devices.parse_safety_response`'s matching
-    decode branch exist so there is a real request/reply pair ready for
-    whichever caller reaches for it first once that wiring lands.
+    Wired into uart_bridge_safety.c's dispatch as of KilnFW commit a3c3d825
+    (see protocol.py's SAFETY_CMD_GET_PARAM doc comment): sending this now
+    reaches safety_link_get_param() for a live Pico round trip. This encoder
+    and :func:`~kilnctrl.devices.parse_safety_response`'s matching decode
+    branch are the request/reply pair that wiring relays.
     """
     return kilnlink_codec.encode_get_param({"param_id": _check_u16(param_id, "param_id")})
 
@@ -1206,10 +1205,11 @@ def parse_safety_response(
     if subcommand == SAFETY_CMD_GET_PARAM:
         # This is the REQUEST's id echoed back -- only ever seen when
         # uart_bridge_safety.c's safety_bridge_task() refused the command
-        # outright. As of this writing the firmware switch statement has no
-        # case for SAFETY_CMD_GET_PARAM at all, so it always falls to
-        # default: bridge_reply_unsupported() -- an "unsupported" refusal is
-        # today's ONLY possible outcome for this id, not a rare edge case.
+        # outright. As of KilnFW commit a3c3d825 the switch statement has a
+        # real case for SAFETY_CMD_GET_PARAM (safety_link_get_param(), a live
+        # Pico round trip), so this is now a genuine but rare refusal path
+        # (e.g. a param_id mismatch guard trip or a Pico too old for
+        # KILNLINK_PROTOCOL_VERSION 7) rather than the only possible outcome.
         # A successful reply always carries SAFETY_CMD_PARAM's id instead,
         # handled above. See protocol.py's SAFETY_CMD_GET_PARAM doc comment.
         return subcommand, _decode_ok_reason(payload, SafetyResponseError, "GET_PARAM")

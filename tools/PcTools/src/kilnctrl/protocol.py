@@ -436,14 +436,13 @@ SAFETY_CT_CAL_NUM_CHANNELS = 3
 #: (kilnlink_get_param.h's own doc comment says the same of the codec this
 #: mirrors).
 #:
-#: NOT wired into uart_bridge_safety.c's SAFETY_CMD_* switch as of this
-#: writing -- unlike SAFETY_CMD_GET_CT_CAL, sending this today gets
-#: bridge_reply_unsupported()'s refusal ({0x23, ok=0, "unsupported"}), not a
-#: live round trip to the Pico. This id and its codec exist so a caller has
-#: a real request to send once that wiring lands; SafetyClient.get_param()
-#: reports the refusal honestly rather than pretending success.
+#: Wired into uart_bridge_safety.c's SAFETY_CMD_* switch as of KilnFW commit
+#: a3c3d825: sending this now reaches safety_link_get_param() and relays a
+#: real Pico round trip, same as SAFETY_CMD_GET_CT_CAL. SafetyClient.get_param()
+#: still reports a genuine refusal (e.g. a Pico predating KILNLINK_PROTOCOL_
+#: VERSION 7) honestly rather than raising over it.
 SAFETY_CMD_GET_PARAM = 0x23
-#: Pico -> ESP -> PC, relayed verbatim once the bridge wiring above exists.
+#: Pico -> ESP -> PC, relayed verbatim through the bridge wiring above.
 #: The successful PARAM reply's own id -- unchanged across the version 6 -> 7
 #: split, same as SAFETY_CMD_CT_CAL keeping 0x1A. A reply carrying THIS id is
 #: always the real answer (found=0 header-only, or found=1 header+value); a
