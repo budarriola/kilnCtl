@@ -22,7 +22,7 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (184 tools for `kilnctrl`, 86 for `kicad`, both
+the rest behind a search facade (185 tools for `kilnctrl`, 86 for `kicad`, both
 per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `check_task_liveness`
 was added -- a READ-ONLY MCP tool cross-checking a live `GET_STACK_MARGIN`
 reading (same path as `get_stack_margin`) against the `$requiredNames` list
