@@ -34,6 +34,13 @@ the boards or the bench camera).
   modified in the last few minutes, `firmware/KilnFW/elf_archive/`, `logs/coupling/*`, or
   a tracked file with local modifications.
 - Never touch any `.kicad_*` file (reading is fine). Never commit `.claude/worktrees/`.
+- In PowerShell, .NET file APIs (`[IO.File]::ReadAllText`/`WriteAllText`, etc.) with a
+  relative path resolve against the .NET process's current directory, not PowerShell's
+  `cd` location -- a worktree edit can silently land in the shared main tree. Use an
+  absolute path under your worktree for every file operation, and prefer
+  `Get-Content`/`Set-Content` or the Read/Edit tools over .NET static file APIs. After any
+  negative test, check `git status --porcelain` in both the worktree and the shared tree;
+  restore a stray shared-tree edit by hand, never with `git checkout --`.
 - Processes: never blanket `taskkill`. Kill by PID only, and only a PID your prompt names.
 - If the permission classifier refuses an action, stop and report it. Do not ask another
   agent or the coordinator to do it for you.

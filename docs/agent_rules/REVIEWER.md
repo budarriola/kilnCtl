@@ -13,7 +13,10 @@ pushes it. You are read-only: do not edit, commit, or push. Do not touch the boa
    state" for every reset.
 3. Tests are real. A test that cannot fail (gated out before reaching its code, asserting a
    constant, reading a prebuilt binary) is a required fix. Confirm the negative test the
-   implementer reports actually exercised the new code.
+   implementer reports actually exercised the new code. If you run a negative test
+   yourself, check `git status --porcelain` in both the worktree and the shared tree
+   afterward (see COMMON.md's .NET-relative-path footgun) and restore by hand, never with
+   `git checkout --`.
 4. Yield and priority semantics on FreeRTOS: `taskYIELD()` never lets a lower-priority task
    run; blocking needs `vTaskDelay`. Check any "yield" added to a long loop.
 5. Docs: no credential values, hostnames, or SSIDs; no backticked hex that
