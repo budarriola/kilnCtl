@@ -3109,6 +3109,7 @@ Owner instruction, 2026-09-21.
   refuses with 429.
 - `KILNCTL_AP_PASSWORD` is still unset, so `flash_firmware()` cannot clear
   `boot_guard` (count sits at 2).
+- **2026-09-22 correction:** `KILNCTL_AP_PASSWORD` is set in User scope (verified via `[bool][Environment]::GetEnvironmentVariable(...)`); the "still unset" line above is stale. Log evidence: the `7dcde0dd` reflash this same day reported `boot_guard_reset` verified (see the kiln_cfg_swap entry above), so the counter has cleared at least once; whether it is clear as of the latest reflash (to `63a48ab3`, which did not report a boot_guard result) is not yet observed.
 
 **Owner decisions open, 2026-09-21:**
 
@@ -3120,10 +3121,7 @@ Owner instruction, 2026-09-21.
 2. **Decided 2026-09-21:** readiness status for the auto-update gate while
    it is compiled off stays `ok` with the existing "deliberately_off" text
    — owner kept it as is.
-3. Set `KILNCTL_AP_PASSWORD` so `flash_firmware()` can clear `boot_guard`
-   (count sits at 2; skipped every reflash without it). Owner directed a
-   dedicated bench AP test password be created and set in User scope; that
-   is being done in parallel and is **not yet done** as of this entry.
+3. **Moot as of 2026-09-22:** `KILNCTL_AP_PASSWORD` is now set in User scope. Owner directed a dedicated bench AP test password be created and set in User scope; that has been done. Whether `boot_guard` is clear as of the most recent reflash is not yet observed (see the 2026-09-22 correction above).
 4. Whether the next commission reflash should reset NVS more broadly than
    just the `web_auth`-recovery erase already done 2026-09-21, given the
    `zones_cfg`/config-schema rollback hazards documented in CLAUDE.md. Still
