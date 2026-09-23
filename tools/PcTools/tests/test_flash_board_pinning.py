@@ -365,6 +365,20 @@ class FixtureFlashPartitionTableOffsetTest(unittest.TestCase):
         _openocd_exe, _board_cfg, tcl = self.run_mock.call_args.args[:3]
         self.assertIn('partition-table.bin" 0x8000 verify', tcl)
 
+    def test_resolver_note_is_surfaced_in_the_result(self) -> None:
+        """Opus advisory 2: fixture_flash() used to discard the resolver's
+        note entirely -- an operator had no way to see whether the default
+        was used because no sdkconfig existed, or because it genuinely set
+        0x8000. It must appear in the result the same way flash_firmware()
+        appends it to its own provenance_note."""
+        with unittest.mock.patch.object(
+            mf, "_resolve_partition_table_offset",
+            return_value=(mf.DEFAULT_PARTITION_TABLE_OFFSET, "note: no sdkconfig found anywhere"),
+        ):
+            result = mf.fixture_flash(partition_table_bin="fake/partition-table.bin")
+        self.assertIn("flashed and verified OK", result)
+        self.assertIn("note: no sdkconfig found anywhere", result)
+
     def test_unparsable_offset_refuses_before_openocd(self) -> None:
         with unittest.mock.patch.object(
             mf, "_resolve_partition_table_offset",

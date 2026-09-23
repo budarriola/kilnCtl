@@ -174,61 +174,90 @@ DEFAULT_PARTITION_TABLE_OFFSET = 0x8000
 
 
 def _resolve_partition_table_offset(kiln_fw_root: str) -> "tuple[int, str]":
-    """Reads `<kiln_fw_root>/sdkconfig` for `CONFIG_PARTITION_TABLE_OFFSET=0x....`
-    and returns `(offset, note)`.
+    """Reads `CONFIG_PARTITION_TABLE_OFFSET=0x....` out of sdkconfig and
+    returns `(offset, note)`.
 
-    Falls back to `DEFAULT_PARTITION_TABLE_OFFSET` (IDF's own default) ONLY
-    when the key is absent from sdkconfig (or sdkconfig itself is missing) --
-    `note` says so explicitly in that case. If the key IS present but its
-    value cannot be parsed as an integer, this raises `ValueError` rather
-    than silently falling back: a present-but-garbled value is far more
-    likely to mean the offset actually differs from the default than that
-    the file is merely malformed, and guessing wrong here writes the
-    partition table image over live flash at the wrong address -- the same
-    class of incident `_resolve_app_flash_target()` exists to prevent for
-    the app image."""
-    sdkconfig_path = os.path.join(kiln_fw_root, "sdkconfig")
-    try:
-        f = open(sdkconfig_path, "r", encoding="utf-8", errors="replace")
-    except OSError:
-        # Covers both "does not exist" and any other unreadable-file case --
-        # os.path.isfile() is deliberately not used as a separate pre-check
-        # since some callers (unit tests faking build-output presence with a
-        # blanket os.path.isfile patch) would otherwise report a stale True
-        # here and then fail on the open() below anyway.
+    Tries `<kiln_fw_root>/sdkconfig` first, then `<kiln_fw_root>/build/sdkconfig`
+    (the copy `build_kilnfw`/`idf.py` publishes as a sibling of the root
+    config) ONLY if the first is genuinely absent -- a present-but-unreadable
+    root sdkconfig is reported as-is, not silently overridden by the build
+    copy. Falls back to `DEFAULT_PARTITION_TABLE_OFFSET` (IDF's own default)
+    when neither file exists, when a file exists but has no such key, or
+    when a found file cannot be read for some other reason (permissions,
+    etc.) -- `note` always says which path was actually used, or why none
+    was. If the key IS present but its value cannot be parsed as an integer,
+    this raises `ValueError` rather than silently falling back: a
+    present-but-garbled value is far more likely to mean the offset actually
+    differs from the default than that the file is merely malformed, and
+    guessing wrong here writes the partition table image over live flash at
+    the wrong address -- the same class of incident
+    `_resolve_app_flash_target()` exists to prevent for the app image."""
+    candidates = [
+        os.path.join(kiln_fw_root, "sdkconfig"),
+        os.path.join(kiln_fw_root, "build", "sdkconfig"),
+    ]
+    tried_missing: "list[str]" = []
+    for i, sdkconfig_path in enumerate(candidates):
+        is_last = i == len(candidates) - 1
+        try:
+            f = open(sdkconfig_path, "r", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            tried_missing.append(sdkconfig_path)
+            if is_last:
+                return (
+                    DEFAULT_PARTITION_TABLE_OFFSET,
+                    "note: none of " + ", ".join(tried_missing) + " were found -- "
+                    f"using IDF's default CONFIG_PARTITION_TABLE_OFFSET "
+                    f"(0x{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
+                )
+            continue  # try the next candidate
+        except OSError as exc:
+            # Present but unreadable for some other reason (permissions,
+            # etc.) -- fall back and say exactly why, rather than silently
+            # trying the next candidate (which would mask a real problem
+            # with the file the caller actually meant to use).
+            return (
+                DEFAULT_PARTITION_TABLE_OFFSET,
+                f"note: {sdkconfig_path} could not be read ({exc}) -- using IDF's "
+                f"default CONFIG_PARTITION_TABLE_OFFSET (0x"
+                f"{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
+            )
+        with f:
+            for line in f:
+                line = line.strip()
+                if not line.startswith("CONFIG_PARTITION_TABLE_OFFSET="):
+                    continue
+                raw = line.split("=", 1)[1].strip()
+                if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+                    raw = raw[1:-1]
+                try:
+                    offset = int(raw, 0)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{sdkconfig_path} has CONFIG_PARTITION_TABLE_OFFSET={raw!r}, "
+                        f"which could not be parsed as an integer -- refusing to guess "
+                        f"the partition-table flash offset rather than risk writing it "
+                        f"to the wrong address."
+                    ) from exc
+                note = f"note: using CONFIG_PARTITION_TABLE_OFFSET from {sdkconfig_path}"
+                if offset != DEFAULT_PARTITION_TABLE_OFFSET:
+                    note += (
+                        f": 0x{offset:x}, overriding IDF's default (0x"
+                        f"{DEFAULT_PARTITION_TABLE_OFFSET:x})."
+                    )
+                else:
+                    note += f" (0x{offset:x}, same as IDF's default)."
+                return offset, note
+        # File exists but has no such key -- fall back without trying the
+        # next candidate: an explicit sdkconfig that simply doesn't set this
+        # key means "use the default", not "keep looking elsewhere".
         return (
             DEFAULT_PARTITION_TABLE_OFFSET,
-            f"note: {sdkconfig_path} not found -- using IDF's default "
-            f"CONFIG_PARTITION_TABLE_OFFSET (0x{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
+            f"note: {sdkconfig_path} has no CONFIG_PARTITION_TABLE_OFFSET key -- using "
+            f"IDF's default (0x{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
         )
-    with f:
-        for line in f:
-            line = line.strip()
-            if not line.startswith("CONFIG_PARTITION_TABLE_OFFSET="):
-                continue
-            raw = line.split("=", 1)[1].strip()
-            try:
-                offset = int(raw, 0)
-            except ValueError as exc:
-                raise ValueError(
-                    f"{sdkconfig_path} has CONFIG_PARTITION_TABLE_OFFSET={raw!r}, "
-                    f"which could not be parsed as an integer -- refusing to guess "
-                    f"the partition-table flash offset rather than risk writing it "
-                    f"to the wrong address."
-                ) from exc
-            note = ""
-            if offset != DEFAULT_PARTITION_TABLE_OFFSET:
-                note = (
-                    f"note: {sdkconfig_path} sets CONFIG_PARTITION_TABLE_OFFSET="
-                    f"0x{offset:x}, overriding IDF's default (0x"
-                    f"{DEFAULT_PARTITION_TABLE_OFFSET:x})."
-                )
-            return offset, note
-    return (
-        DEFAULT_PARTITION_TABLE_OFFSET,
-        f"note: {sdkconfig_path} has no CONFIG_PARTITION_TABLE_OFFSET key -- using "
-        f"IDF's default (0x{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
-    )
+    # Unreachable (the loop above always returns), but keeps type checkers happy.
+    return DEFAULT_PARTITION_TABLE_OFFSET, ""
 
 
 def _chip_app_target_partition(
@@ -910,7 +939,10 @@ def flash_firmware(
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
     board (never esptool/`idf.py flash`, per CLAUDE.md). Always writes all
-    three images (bootloader @0x0, partition table @0x8000, and the app image
+    three images (bootloader @0x0, partition table at the offset resolved
+    fresh per flash from sdkconfig's `CONFIG_PARTITION_TABLE_OFFSET`
+    -- default 0x8000 when that key/file is absent, see
+    `_resolve_partition_table_offset()` -- and the app image
     at the offset/size of the `APP_PARTITION_NAME` ("app") partition, resolved
     fresh per flash from `<kiln_fw_root>/partitions.csv` -- see
     `_resolve_app_flash_target()`), each with `program_esp ... verify` (which
@@ -1530,13 +1562,14 @@ def fixture_flash(
     images: "list[tuple[str, str]]" = []  # (path, flash offset)
     if bootloader_bin:
         images.append((bootloader_bin, "0x0"))
+    partition_table_offset_note = ""
     if partition_table_bin:
         # Same _resolve_partition_table_offset() helper flash_firmware() uses
         # for the main board, so the two can never drift independently --
         # both used to hardcode 0x8000 (IDF's default) regardless of what
         # this project's own sdkconfig actually says.
         try:
-            fixture_partition_table_offset, _note = _resolve_partition_table_offset(fixture_root)
+            fixture_partition_table_offset, partition_table_offset_note = _resolve_partition_table_offset(fixture_root)
         except ValueError as exc:
             return f"error: {exc}"
         images.append((partition_table_bin, f"0x{fixture_partition_table_offset:x}"))
@@ -1572,15 +1605,17 @@ def fixture_flash(
     parts[-1] += " reset exit"
     tcl = "; ".join(parts)
 
+    note_suffix = f"\n{partition_table_offset_note}" if partition_table_offset_note else ""
+
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=fixture_root, timeout_s=90)
     if ok:
-        return "flashed and verified OK (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset"
+        return "flashed and verified OK (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset" + note_suffix
 
     if retry_once:
         _srv._session_log.warning("fixture_flash: first attempt failed, retrying once (known benign quirk)")
         ok2, output2 = _run_openocd(openocd_exe, board_cfg, tcl, cwd=fixture_root, timeout_s=90)
         if ok2:
-            return "flashed and verified OK on retry (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset"
+            return "flashed and verified OK on retry (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset" + note_suffix
         output = output2
 
     tail = "\n".join(output.strip().splitlines()[-25:])

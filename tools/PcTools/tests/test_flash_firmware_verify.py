@@ -990,6 +990,91 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self.assertIn("CONFIG_PARTITION_TABLE_OFFSET", result)
         self.run_mock.assert_not_called()
 
+    def test_partition_table_offset_quoted_value_is_honored(self):
+        """Opus advisory 1: a hand-edited sdkconfig with the value quoted
+        (as some Kconfig editors write, e.g. `="0x10000"`) must still parse,
+        not be treated as garbage and refused."""
+        self._write_sdkconfig('CONFIG_PARTITION_TABLE_OFFSET="0x10000"\n')
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("partition_table/partition-table.bin 0x10000 verify", tcl)
+
+    def test_partition_table_offset_falls_back_to_build_sdkconfig(self):
+        """Opus advisory 5: build_kilnfw publishes a sibling
+        <root>/build/sdkconfig -- when the root sdkconfig is absent, that
+        copy must be tried before giving up and using the bare default, and
+        the result must say which file was actually used."""
+        build_sdkconfig = os.path.join(self.build_dir, "sdkconfig")
+        with open(build_sdkconfig, "w", encoding="utf-8") as f:
+            f.write("CONFIG_PARTITION_TABLE_OFFSET=0x20000\n")
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("partition_table/partition-table.bin 0x20000 verify", tcl)
+        self.assertIn(build_sdkconfig, result)
+
+    def test_partition_table_offset_unreadable_file_falls_back_with_note(self):
+        """Opus advisory 3: a root sdkconfig that exists but can't be read
+        for some OTHER reason than 'missing' (permissions, etc.) must fall
+        back to the default with a note naming the error -- not be treated
+        identically to 'not found' (which would silently try the build/
+        sibling instead) and not crash the flash attempt."""
+        self._write_sdkconfig("CONFIG_PARTITION_TABLE_OFFSET=0x30000\n")
+        import builtins
+        real_open = builtins.open
+        sdkconfig_path = os.path.join(self.override_kiln_fw_root, "sdkconfig")
+
+        def _raise_permission_error(path, *a, **kw):
+            if path == sdkconfig_path:
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, *a, **kw)
+
+        with unittest.mock.patch.object(mf, "open", side_effect=_raise_permission_error, create=True):
+            result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        tcl = self.run_mock.call_args.args[2]
+        # Must fall back to the plain default (0x8000), not read the value
+        # that actually IS in the file (proves the PermissionError path was
+        # taken, not silently swallowed and re-read).
+        self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("could not be read", result)
+        self.assertIn("Permission denied", result)
+
+
+class PartitionTableOffsetResolverUnitTest(unittest.TestCase):
+    """Direct unit coverage of _resolve_partition_table_offset(), independent
+    of the flash_firmware() end-to-end wiring above."""
+
+    def setUp(self):
+        self.tmp_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_root, ignore_errors=True)
+
+    def test_no_sdkconfig_anywhere_reports_default_and_names_both_paths(self):
+        offset, note = mf._resolve_partition_table_offset(self.tmp_root)
+        self.assertEqual(offset, mf.DEFAULT_PARTITION_TABLE_OFFSET)
+        self.assertIn(os.path.join(self.tmp_root, "sdkconfig"), note)
+        self.assertIn(os.path.join(self.tmp_root, "build", "sdkconfig"), note)
+
+    def test_build_sdkconfig_used_only_when_root_one_is_absent(self):
+        build_dir = os.path.join(self.tmp_root, "build")
+        os.makedirs(build_dir)
+        with open(os.path.join(build_dir, "sdkconfig"), "w", encoding="utf-8") as f:
+            f.write("CONFIG_PARTITION_TABLE_OFFSET=0x40000\n")
+        offset, note = mf._resolve_partition_table_offset(self.tmp_root)
+        self.assertEqual(offset, 0x40000)
+        self.assertIn(os.path.join(build_dir, "sdkconfig"), note)
+
+    def test_root_sdkconfig_wins_over_build_sdkconfig_when_both_present(self):
+        build_dir = os.path.join(self.tmp_root, "build")
+        os.makedirs(build_dir)
+        with open(os.path.join(build_dir, "sdkconfig"), "w", encoding="utf-8") as f:
+            f.write("CONFIG_PARTITION_TABLE_OFFSET=0x40000\n")
+        with open(os.path.join(self.tmp_root, "sdkconfig"), "w", encoding="utf-8") as f:
+            f.write("CONFIG_PARTITION_TABLE_OFFSET=0x50000\n")
+        offset, note = mf._resolve_partition_table_offset(self.tmp_root)
+        self.assertEqual(offset, 0x50000)
+
 
 if __name__ == "__main__":
     unittest.main()
