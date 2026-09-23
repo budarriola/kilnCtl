@@ -371,8 +371,21 @@ static void test_logout_does_not_require_a_still_valid_session(void)
     // An expired session's find-by-token lookup must still locate the slot
     // (only resolve()'s validity/IP gate denies it, not the table lookup
     // itself) -- logout must still tear it down rather than silently no-op
-    // because it "looked" already gone.
+    // because it "looked" already gone. resolve() cannot witness that: it
+    // already denied this token BEFORE the logout call, so asserting on it
+    // again afterwards would pass whether or not the slot was really
+    // destroyed. Inspect the table's own in_use flags instead -- the only
+    // observation that can actually fail if logout skipped an expired slot.
     http_auth_session_logout("tok-logout-3");
+    size_t live_slots = 0;
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        if (http_session_table()->slots[i].in_use) {
+            live_slots++;
+        }
+    }
+    TEST_CHECK(live_slots == 0,
+               "logout freed the already-expired slot itself -- an expired session must be "
+               "destroyed, not merely left un-resolvable");
 
     make_session("tok-logout-4", WEB_AUTH_SESSION_ROLE_ADMIN, 0); // client_ip "10.0.0.5"
     // A logout call carries no client_ip parameter at all -- there is nothing

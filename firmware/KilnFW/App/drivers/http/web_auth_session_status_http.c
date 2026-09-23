@@ -53,7 +53,7 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req,
                                    "{\"role\":\"admin\",\"prompt\":false,\"seconds_left\":-1,"
-                                   "\"bootstrap_needed\":false}");
+                                   "\"bootstrap_needed\":false,\"auth_enabled\":false}");
     }
 
     char token[128];
@@ -102,18 +102,28 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
     // http_auth_policy_web_enabled()'s ABSENT/OK/UNREADABLE handling changes.
     bool bootstrap_needed = http_auth_policy_admin_bootstrap_needed();
 
-    // Deliberately still 128 B, unchanged by the bootstrap_needed field:
-    // this repo's rule against enlarging httpd-stack locals is categorical,
-    // and no growth is needed here. Worst case is 90 bytes -- the longest
-    // role_name() is "admin" (5), prompt/bootstrap_needed are at most
-    // "false" (5 each), and seconds_left is a long, at most 20 characters
-    // even at LONG_MIN -- so the fixed scaffolding (55 B) plus 5 + 5 + 5 +
-    // 20 stays under 91. snprintf's return is checked below, so a future
-    // field that does overflow fails loud (500) rather than truncating the
-    // JSON silently.
+    // Deliberately still 128 B, unchanged by the bootstrap_needed and
+    // auth_enabled fields: this repo's rule against enlarging httpd-stack
+    // locals is categorical, and no growth is needed here. Worst case is
+    // 112 bytes -- the longest role_name() is "admin" (5),
+    // prompt/bootstrap_needed are at most "false" (5 each), and
+    // seconds_left is a long, at most 20 characters even at LONG_MIN -- so
+    // the fixed scaffolding (77 B, auth_enabled's literal "true" included)
+    // plus 5 + 5 + 5 + 20 stays under 113. snprintf's return is checked
+    // below, so a future field that does overflow fails loud (500) rather
+    // than truncating the JSON silently.
+    //
+    // auth_enabled: whether web authentication is enabled at all. The auth-off
+    // branch above reports role "admin" (section 11's collapse), which a
+    // page cannot otherwise tell apart from a real administrator session --
+    // so a page that must only offer a session-scoped control (nav.js's
+    // "Log out" button) needs this flag, not just the role, to avoid
+    // offering it on a board that has no sessions at all. Always true here:
+    // the !http_auth_policy_web_enabled() case returned above.
     char body[128];
     int n = snprintf(body, sizeof(body),
-                      "{\"role\":\"%s\",\"prompt\":%s,\"seconds_left\":%ld,\"bootstrap_needed\":%s}",
+                      "{\"role\":\"%s\",\"prompt\":%s,\"seconds_left\":%ld,\"bootstrap_needed\":%s,"
+                      "\"auth_enabled\":true}",
                       role_name(valid ? role : WEB_AUTH_SESSION_ROLE_NONE), prompt ? "true" : "false",
                       seconds_left, bootstrap_needed ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof(body)) {

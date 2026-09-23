@@ -612,9 +612,15 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 // clears the cookie with the SAME name/path/flags login_post_handler() sets
 // it with above, plus Max-Age=0 so the browser discards it immediately
 // rather than waiting for it to merely stop matching a live session.
-// Idempotent: a caller with no cookie, an already-expired session, or a
-// cookie that never matched anything still gets a clean 204 -- logging out
-// is "make sure I'm logged out", not "prove I was logged in".
+// Idempotent within what the tier admits: any caller that reaches this
+// body at all gets a clean 204, whether or not the cookie still matched a
+// live slot. It is NOT true that "a caller with no cookie or an expired
+// session still gets a 204" -- ROUTE_TIER_USER means the pre-handler's
+// http_auth_session_resolve() (expiry AND exact client_ip binding) has
+// already answered 401 for both of those, so the cookie-clearing Set-Cookie
+// below is never sent to them. That is deliberate and harmless: a session
+// the server has already expired is unusable anyway, and app.js's own
+// 401 handling navigates such a caller to /login regardless.
 static esp_err_t logout_post_handler(httpd_req_t *req)
 {
     char token[128] = { 0 };

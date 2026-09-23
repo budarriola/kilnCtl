@@ -1597,9 +1597,12 @@
         // Shows/hides nav.js's Log out control for the role this poll just
         // reported -- the SAME poll response, not a second fetch, so the
         // button can never disagree with lastKnownRole above about whether a
-        // session exists.
+        // session exists. auth_enabled is passed through because role alone
+        // cannot distinguish a real admin session from section 11's
+        // auth-off collapse (which also reports "admin"); see
+        // setAuthState()'s own comment in nav.js.
         if (window.kcNav && window.kcNav.setAuthState) {
-          window.kcNav.setAuthState(role);
+          window.kcNav.setAuthState(role, !!(st && st.auth_enabled));
         }
 
         if (lockPromptEl) {

@@ -149,11 +149,24 @@ void http_auth_session_touch(const char *token, const char *client_ip);
 // web_auth_table_destroy_session() (web_auth_session.h's own explicit-
 // teardown primitive, documented there as "(logout)"). Deliberately does
 // NOT apply the timeout/IP-binding checks http_auth_session_touch() does --
-// a caller logging out an already-expired or already-foreign-IP session is
-// harmless and should still succeed at making the cookie unusable, rather
-// than being told there was nothing to do. A missing token, or a token that
-// matches no live slot, is a silent no-op (idempotent: logging out twice,
-// or logging out a session that already expired, is not an error).
+// tearing down a slot is never a capability grant, so there is nothing for
+// those checks to protect here, and a caller that already got this far
+// should not be told there was nothing to do. A missing token, or a token
+// that matches no live slot, is a silent no-op (idempotent: logging out
+// twice, or logging out a session that already expired, is not an error).
+//
+// NOTE, and this is the whole reason that skip is not a hole: this
+// function is NOT itself an authorization boundary. Its only caller today,
+// POST /api/auth/logout (web_auth_login_http.c), is ROUTE_TIER_USER, and
+// the shared pre-handler (kiln_http_prehandler(), http_auth_http.c)
+// resolves that tier's role through http_auth_session_resolve(), which DOES
+// enforce both expiry and the exact client_ip binding. So a request whose
+// cookie is expired, or presented from an address the session was not
+// issued to, is answered 401 before this function is ever reached -- the
+// route cannot be used as a cross-IP "log the victim out" oracle, and it
+// equally cannot clear an expired caller's cookie. Any FUTURE caller added
+// on a looser tier (OPEN, or an unauthenticated path) would be adding that
+// oracle itself, because this function will not refuse anything.
 void http_auth_session_logout(const char *token);
 
 #ifdef __cplusplus

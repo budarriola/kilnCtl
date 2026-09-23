@@ -514,16 +514,24 @@
   // it) without nav.js and app.js needing to agree on load order beyond
   // "both are deferred, both run before DOMContentLoaded".
   // Called by app.js's pollSession() on every poll with the role string
-  // /api/auth/session's JSON reports ('none', 'user', 'admin'). Shows the
-  // Log out button for any role other than 'none' -- exactly the "any
-  // authenticated session" USER-tier rule the logout route itself enforces
-  // server-side (route_tier_table.h), so the button's visibility and the
-  // route's own gate agree without a second copy of that rule living here.
-  function setAuthState(role) {
+  // /api/auth/session's JSON reports ('none', 'user', 'admin') and that
+  // same response's auth_enabled flag. Shows the Log out button for any role
+  // other than 'none' -- exactly the "any authenticated session" USER-tier
+  // rule the logout route itself enforces server-side (route_tier_table.h),
+  // so the button's visibility and the route's own gate agree without a
+  // second copy of that rule living here.
+  //
+  // webAuthEnabled is NOT redundant with the role: with web auth off
+  // (WEB_AUTH_PLAN.md section 11) GET /api/auth/session reports role
+  // "admin" unconditionally -- that is section 11's deliberate collapse,
+  // not a session -- so role alone would reveal a "Log out" button on every
+  // board that has never turned auth on, and clicking it would strand the
+  // operator on /login with nothing to log out of.
+  function setAuthState(role, webAuthEnabled) {
     if (!logoutBtnEl) {
       return;
     }
-    logoutBtnEl.hidden = !role || role === 'none';
+    logoutBtnEl.hidden = !webAuthEnabled || !role || role === 'none';
   }
 
   window.kcNav = { updateBodyPadding: updateBodyPadding, setAuthState: setAuthState };

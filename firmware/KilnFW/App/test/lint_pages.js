@@ -597,11 +597,13 @@ function extract_js_var_string(src, varName) {
       bad++;
       console.log(`nav.js: the Log out button's click handler does not navigate to /login afterward.`);
     }
-    if (!/function setAuthState\(role\)/.test(src) ||
-        !/logoutBtnEl\.hidden = !role \|\| role === 'none';/.test(src)) {
+    if (!/function setAuthState\(role, webAuthEnabled\)/.test(src) ||
+        !/logoutBtnEl\.hidden = !webAuthEnabled \|\| !role \|\| role === 'none';/.test(src)) {
       bad++;
-      console.log(`nav.js: no setAuthState(role) function that shows/hides the Log out button by role -- ` +
-                   `app.js's session poll has nothing to toggle it with.`);
+      console.log(`nav.js: no setAuthState(role, webAuthEnabled) function that hides the Log out button ` +
+                   `unless web auth is on AND a role is reported -- with auth off, ` +
+                   `GET /api/auth/session reports role "admin" and the button would show on a board ` +
+                   `that has no sessions at all.`);
     }
     if (!/window\.kcNav = \{ updateBodyPadding: updateBodyPadding, setAuthState: setAuthState \};/.test(src)) {
       bad++;
@@ -626,10 +628,11 @@ function extract_js_var_string(src, varName) {
       console.log(`app.js: could not locate pollSession()'s function body to check the logout button wiring.`);
     } else {
       const body = src.slice(startIdx, endIdx);
-      if (!/window\.kcNav\.setAuthState\(role\)/.test(body)) {
+      if (!/window\.kcNav\.setAuthState\(role, !!\(st && st\.auth_enabled\)\)/.test(body)) {
         bad++;
-        console.log(`app.js: pollSession() does not call window.kcNav.setAuthState(role) -- the Log out ` +
-                     `button would never reflect the server's own session state.`);
+        console.log(`app.js: pollSession() does not call ` +
+                     `window.kcNav.setAuthState(role, !!(st && st.auth_enabled)) -- the Log out button would ` +
+                     `never reflect the server's own session state, or would show with web auth off.`);
       }
     }
   }
