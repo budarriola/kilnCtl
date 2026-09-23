@@ -124,9 +124,8 @@ def _find_required_names_block_lines(script_text: str) -> "tuple[int, int]":
     """Return ``(start_idx, end_idx)`` (inclusive, 0-based) into
     ``script_text.splitlines()`` spanning the ``$requiredNames = @( ... )``
     block, found on the RAW (comment-intact) text -- callers need the raw
-    lines to recover each entry's trailing ``# liveness: ...`` tag, which
-    :func:`_strip_ps1_comment_lines` would otherwise erase before it's
-    ever seen.
+    lines to recover each entry's trailing ``# liveness: ...`` tag, which a
+    whole-file comment strip would otherwise erase before it is ever seen.
 
     The closing paren is found by comment-stripping each candidate line
     individually (never the whole file) and looking for the first ``)`` at

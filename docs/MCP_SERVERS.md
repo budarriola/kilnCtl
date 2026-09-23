@@ -693,6 +693,10 @@ fault: its `stack_margin_register()` call site never fired at all). This
 was added after the first live run reported six false positives that were
 all by design; the tag lives on the same source line as the name, one
 source of truth, same discipline as the required-name list itself.
+`pico_auto_update` is also gated on not-recovery-mode and a healthy safety
+link (`App/main_control_bringup.c:240`), so ABSENT there in recovery mode is
+expected and `capability_preflight` already refuses that run for other
+reasons.
 
 `capability_preflight_check` runs this same cross-check over the link before
 every preflight and refuses the run (same as an unacknowledged crash report)
