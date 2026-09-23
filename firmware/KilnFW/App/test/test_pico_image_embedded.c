@@ -198,4 +198,53 @@ void run_test_pico_image_embedded(void)
 
     /* NULL-safety. */
     TEST_CHECK(!pico_image_embedded_should_use(NULL), "NULL -- should_use is false");
+
+    /* ---- reviewer advisory (a), 2026-09-22: pico_image_embedded_protocol_ok()
+     * / should_use() must refuse an embedded pair whose agreeing
+     * link_protocol_version is non-zero and DISAGREES with this ESP binary's
+     * own KILNLINK_PROTOCOL_VERSION -- the gap ota_http_pico.c's manual-
+     * upload path already closes for a staged image but the boot-time
+     * embedded path did not. Both slots agree with each other here (so
+     * describe_from() itself reports usable), but at a version this build
+     * does not speak. */
+    saftyfw_image_identity_t rec_other_protocol = rec;
+    rec_other_protocol.link_protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION + 1u;
+    memset(buf_a, 0xA5, sizeof(buf_a));
+    memset(buf_b, 0xA5, sizeof(buf_b));
+    memcpy(buf_a + 64, &rec_other_protocol, sizeof(rec_other_protocol));
+    memcpy(buf_b + 64, &rec_other_protocol, sizeof(rec_other_protocol));
+    memset(&out, 0, sizeof(out));
+    pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), &out);
+    TEST_CHECK(out.usable && !out.dirty,
+               "sanity: the two slots agree with EACH OTHER, just not with this ESP binary");
+    TEST_CHECK(!pico_image_embedded_protocol_ok(&out),
+               "a link_protocol_version this ESP binary does not speak is not protocol-ok");
+    TEST_CHECK(!pico_image_embedded_should_use(&out),
+               "-- and should_use() folds that refusal in, same as the dirty-flag case above");
+
+    /* A zero link_protocol_version (pre-field build) is "unknown", never a
+     * mismatch -- same rule ota_http_pico.c's staged-image gate uses. */
+    saftyfw_image_identity_t rec_unknown_protocol = rec;
+    rec_unknown_protocol.link_protocol_version = 0u;
+    memset(buf_a, 0xA5, sizeof(buf_a));
+    memset(buf_b, 0xA5, sizeof(buf_b));
+    memcpy(buf_a + 64, &rec_unknown_protocol, sizeof(rec_unknown_protocol));
+    memcpy(buf_b + 64, &rec_unknown_protocol, sizeof(rec_unknown_protocol));
+    memset(&out, 0, sizeof(out));
+    pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), &out);
+    TEST_CHECK(out.usable && out.link_protocol_version == 0u,
+               "sanity: this pair agrees on an unknown (zero) protocol version");
+    TEST_CHECK(pico_image_embedded_protocol_ok(&out),
+               "an unknown (zero) link_protocol_version is never treated as a mismatch");
+    TEST_CHECK(pico_image_embedded_should_use(&out),
+               "-- so should_use() still allows it, same as the matching-version case above");
+
+    /* NULL-safety and not-usable-for-other-reasons both read as protocol-ok
+     * (they are refused elsewhere, not by this gate). */
+    TEST_CHECK(pico_image_embedded_protocol_ok(NULL), "NULL -- protocol_ok is (trivially) true");
+    memset(&out, 0, sizeof(out));
+    out.usable = false;
+    out.link_protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION + 1u;
+    TEST_CHECK(pico_image_embedded_protocol_ok(&out),
+               "not usable for another reason -- protocol_ok does not pile on a second refusal");
 }

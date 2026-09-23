@@ -1,5 +1,6 @@
 #include "pico_auto_update_boot.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -7,6 +8,9 @@
 
 #include "esp_log.h"
 
+#include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- reviewer advisory (a): the
+                                        * embedded-image path had no equivalent of
+                                        * ota_http_pico.c's protocol-version-mismatch gate. */
 #include "ota_http.h" /* ota_http_update_try_begin() -- the single cross-processor update mutex.
                        * ota_state.h beside it declares only the _end() half. */
 #include "ota_interlock.h"
@@ -309,6 +313,41 @@ static void pico_auto_update_task(void *arg)
     int use_slot = 0;
     pico_image_source_info_t img;
     bool have_manifest = false;
+
+    /* Reviewer advisory (a), 2026-09-22: ota_http_pico.c's manual-upload path
+     * (see its own comment around OTA_FORCE_VERSION_HEADER) refuses to relay
+     * an image whose declared link_protocol_version disagrees with what this
+     * ESP binary speaks -- but that comment also asserts the embedded path
+     * "never reaches this function ... there is also no version skew to warn
+     * about there, since the embedded slot images are built from the same
+     * commit as this ESP binary." That assumption does not hold for a
+     * flash_firmware() invocation using a `kiln_fw_root` override (a separate
+     * clean worktree), nor for a stale SaftyFW build directory embedded into
+     * an otherwise-fresh KilnFW build -- both leave the embedded pair's
+     * declared protocol version free to disagree with this ESP binary's own
+     * KILNLINK_PROTOCOL_VERSION despite matching each other. Same
+     * "0 means unknown, never a mismatch" rule as the staged path: an image
+     * built before this field existed must not be refused on it.
+     * pico_image_embedded_protocol_ok() (pico_image_embedded.h) is the shared,
+     * host-tested comparison; pico_image_embedded_should_use() below already
+     * folds it in, so this local flag exists only to drive the ESP_LOGE below
+     * and to name the two numbers -- it is not a second, independent gate. */
+    bool emb_protocol_mismatch = emb.usable && !pico_image_embedded_protocol_ok(&emb);
+    if (emb_protocol_mismatch) {
+        /* emb.reason is normally only set by pico_image_embedded_describe_from()
+         * when !usable; overwrite it here too so the "no usable SaftyFW image"
+         * WARN log a few lines below (which prints emb.reason verbatim) does
+         * not misreport this as "none embedded" when an image IS embedded but
+         * refused on protocol grounds. */
+        (void)snprintf(emb.reason, sizeof(emb.reason),
+                       "embedded image declares link protocol %u, this ESP binary speaks %u",
+                       (unsigned)emb.link_protocol_version, (unsigned)KILNLINK_PROTOCOL_VERSION);
+        ESP_LOGE(TAG, "%s -- refusing to use it as an automatic Pico update source (a relay would "
+                      "only be rejected by the Pico's own UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE "
+                      "check, or worse, accepted by a Pico that cannot actually speak it)",
+                 emb.reason);
+    }
+
     bool use_embedded = pico_image_embedded_should_use(&emb);
 
     if (emb.usable && emb.dirty) {

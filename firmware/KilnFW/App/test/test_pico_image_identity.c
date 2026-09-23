@@ -16,11 +16,22 @@
 // not a re-implementation.
 #include <string.h>
 
+#include "kilnlink/kilnlink_version.h"
 #include "test_common.h"
 
 #include "../../../CommonFW/src/saftyfw_image_identity.c"
 
-/* Builds a well-formed record with the given commit text. */
+/* Builds a well-formed record with the given commit text.
+ *
+ * Reviewer advisory (b), 2026-09-22: link_protocol_version used to be
+ * hardcoded to 0u here -- a zero fixture that reads identically whether
+ * saftyfw_image_identity.c actually copies the field or a caller's
+ * zero-initialised struct was never touched at all, so a regression that
+ * dropped the field entirely would not be caught by this file. It now
+ * defaults to KILNLINK_PROTOCOL_VERSION (guaranteed non-zero -- see that
+ * constant's own header), matching test_pico_image_embedded.c's
+ * make_record(), which takes this same field as an explicit parameter for
+ * exactly this reason. */
 static void make_record(saftyfw_image_identity_t *r, const char *commit, uint8_t dirty)
 {
     memset(r, 0, sizeof(*r));
@@ -31,7 +42,7 @@ static void make_record(saftyfw_image_identity_t *r, const char *commit, uint8_t
     r->commit_len = (uint8_t)strlen(commit);
     memcpy(r->commit, commit, strlen(commit));
     r->config_format_version = 2u;
-    r->link_protocol_version = 0u;
+    r->link_protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION;
     r->magic_end = SAFTYFW_IMAGE_IDENTITY_MAGIC_END;
 }
 
@@ -44,6 +55,11 @@ void run_test_pico_image_identity(void)
     saftyfw_image_identity_t rec;
     make_record(&rec, "0123456789abcdef0123456789abcdef01234567", 0u);
     TEST_CHECK(saftyfw_image_identity_is_valid(&rec), "a well-formed record validates");
+    /* Reviewer advisory (b): a non-zero fixture, not the old hardcoded 0u --
+     * see make_record()'s own comment for why a zero value here would mask a
+     * regression that dropped this field entirely. */
+    TEST_CHECK(rec.link_protocol_version == (uint16_t)KILNLINK_PROTOCOL_VERSION,
+               "make_record() actually sets link_protocol_version, not a leftover zero");
 
     /* Each independent witness, broken one at a time. Three witnesses is the
      * whole reason this record needs no CRC of its own (a CRC over a string

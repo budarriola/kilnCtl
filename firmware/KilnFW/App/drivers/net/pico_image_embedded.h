@@ -70,6 +70,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION, for
+                                        * pico_image_embedded_protocol_ok() below */
 #include "kilnlink/saftyfw_image_identity.h"
 
 #ifdef __cplusplus
@@ -131,9 +133,36 @@ bool pico_image_embedded_describe(pico_image_embedded_info_t *out);
  * rather than merely tolerating). Pure and NULL-safe (NULL reads as not
  * usable) so it is host-testable without pulling in the ESP-IDF task in
  * pico_auto_update_boot.c. */
+/* Reviewer advisory (a), 2026-09-22: ota_http_pico.c's manual-upload path
+ * refuses to relay a staged Pico image whose declared link_protocol_version
+ * disagrees with this ESP binary's own KILNLINK_PROTOCOL_VERSION (that
+ * file's own comment has the "0 means unknown, never a mismatch" rule this
+ * mirrors). The equivalent gate did not exist on this, the embedded/boot-time
+ * path -- that gap rested on an assumption (stated in ota_http_pico.c's own
+ * comment) that the embedded pair is always built from the same commit as
+ * this ESP binary, so no version skew is possible there. That assumption
+ * does not hold for a `flash_firmware(kiln_fw_root=...)` build from a
+ * separate worktree, nor for a stale SaftyFW build directory embedded into
+ * an otherwise-fresh KilnFW build: both can leave the embedded pair's
+ * declared protocol version disagreeing with this ESP binary's own, despite
+ * the two slots agreeing with EACH OTHER (idents_agree(), which this
+ * function does not duplicate -- it runs first, inside describe_from()).
+ * Pure and NULL-safe, same convention as pico_image_embedded_should_use()
+ * below, so it is host-testable without ESP-IDF. */
+static inline bool pico_image_embedded_protocol_ok(const pico_image_embedded_info_t *emb)
+{
+    if (emb == NULL || !emb->usable) {
+        return true; /* not usable for other reasons -- should_use() already refuses it */
+    }
+    if (emb->link_protocol_version == 0u) {
+        return true; /* unknown (pre-field build); never treated as a mismatch */
+    }
+    return emb->link_protocol_version == (uint16_t)KILNLINK_PROTOCOL_VERSION;
+}
+
 static inline bool pico_image_embedded_should_use(const pico_image_embedded_info_t *emb)
 {
-    return emb != NULL && emb->usable && !emb->dirty;
+    return emb != NULL && emb->usable && !emb->dirty && pico_image_embedded_protocol_ok(emb);
 }
 
 /* The pure, freestanding-C11 core of pico_image_embedded_describe(): does the
