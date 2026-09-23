@@ -423,12 +423,12 @@ def _refresh_build_sdkconfig(
     sibling = os.path.join(build_dir, "sdkconfig")
     if not os.path.isfile(live):
         return f"sdkconfig-refresh: SKIPPED -- no live config at {live}"
+    sibling_exists = os.path.isfile(sibling)
     live_matches_sibling = (
-        os.path.isfile(sibling)
-        and _read_bytes(live) == _read_bytes(sibling)
+        sibling_exists and _config_lines(live) == _config_lines(sibling)
     )
     elf_changed = elf_before != elf_after
-    if not live_matches_sibling and not elf_changed:
+    if sibling_exists and not live_matches_sibling and not elf_changed:
         return (
             f"sdkconfig-refresh: SKIPPED -- {live} differs from {sibling} but "
             f"{elf_path} did not change during this build, so the sibling may "
@@ -436,19 +436,39 @@ def _refresh_build_sdkconfig(
             f"refreshed to avoid silencing check_all_task_stack_budgets.py's "
             f"sibling-agreement guard"
         )
+    if live_matches_sibling:
+        return f"sdkconfig-refresh: OK -- {sibling} already matches {live}"
     try:
         shutil.copyfile(live, sibling)
     except OSError as exc:
         return f"sdkconfig-refresh: FAILED -- could not copy {live} -> {sibling}: {exc}"
-    return f"sdkconfig-refresh: OK -- {sibling} now matches {live}"
+    verb = "created" if not sibling_exists else "now matches"
+    return f"sdkconfig-refresh: OK -- {sibling} {verb} {live}"
 
 
-def _read_bytes(path: str) -> Optional[bytes]:
-    try:
-        with open(path, "rb") as f:
-            return f.read()
-    except OSError:
-        return None
+def _config_lines(path: str) -> dict:
+    """{CONFIG_KEY: value} for every non-comment ``CONFIG_*=value`` line.
+
+    Mirrors ``_config_lines`` in
+    ``firmware/KilnFW/App/test/check_all_task_stack_budgets.py`` exactly --
+    that script's ``_check_sibling_pair_agreement`` is the guard this refresh
+    exists to keep from tripping, and it compares parsed CONFIG_ lines, not
+    raw bytes, so a comment-only or line-ending-only difference between the
+    live config and the published sibling must not be reported here as a
+    genuine disagreement. Not imported directly: that module pulls in the
+    ELF/objdump stack-analysis machinery, which is far heavier than this
+    build helper needs. Keep this in sync by hand if the source changes.
+    """
+    parsed: dict = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            if "=" in line:
+                k, _, v = line.strip().partition("=")
+                if k.startswith("CONFIG_"):
+                    parsed[k] = v
+    return parsed
 
 
 def run_pctools_tests(pattern: Optional[str] = None) -> str:

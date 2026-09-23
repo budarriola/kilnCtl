@@ -176,3 +176,70 @@ def test_live_identical_and_elf_unchanged_is_a_harmless_noop(monkeypatch, tmp_pa
 
     assert "SKIPPED -- " not in result or "did not change during this build" not in result
     assert sibling.read_text(encoding="utf-8") == same_text
+
+
+def test_missing_sibling_and_elf_unchanged_creates_it(monkeypatch, tmp_path):
+    """Opus review advisory 1: with no published sibling yet, there is nothing
+    for a "differs from <sibling>" message to name -- this must be reported
+    as a plain first-time copy, never a SKIP naming a nonexistent file.
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"unchanged-elf-bytes")
+    live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    assert not sibling.exists()
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "sdkconfig-refresh: OK" in result
+    assert "SKIPPED" not in result
+    assert sibling.read_text(encoding="utf-8") == live.read_text(encoding="utf-8")
+
+
+def test_comment_only_difference_and_elf_unchanged_still_refreshes(monkeypatch, tmp_path):
+    """Opus review advisory 2: the sibling comparison must match
+    check_all_task_stack_budgets.py's `_check_sibling_pair_agreement`, which
+    compares parsed CONFIG_ lines, not raw bytes. A comment-only (or
+    line-ending-only) difference is not a real disagreement and must not
+    produce an alarming SKIP.
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"unchanged-elf-bytes")
+    live.write_text(
+        "# a harmless comment that was not here before\n"
+        "CONFIG_KILNCTL_GPIO_PROBE=y\n",
+        encoding="utf-8",
+    )
+    sibling.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "sdkconfig-refresh: OK" in result
+    assert "SKIPPED" not in result
+
+
+def test_real_config_line_difference_and_elf_unchanged_still_skips(monkeypatch, tmp_path):
+    """Guard against overcorrecting: a genuine CONFIG_ symbol disagreement
+    with an unchanged ELF must still SKIP -- this is the same case
+    `test_live_differs_and_elf_unchanged_skips_refresh` covers, re-asserted
+    here after switching the comparison from raw bytes to parsed CONFIG_
+    lines, to prove that switch didn't quietly widen what counts as "same".
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"unchanged-elf-bytes")
+    live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    sibling.write_text("CONFIG_KILNCTL_GPIO_PROBE=n\n", encoding="utf-8")
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "sdkconfig-refresh: SKIPPED" in result
+    assert "did not change during this build" in result
+    assert sibling.read_text(encoding="utf-8") == "CONFIG_KILNCTL_GPIO_PROBE=n\n"
