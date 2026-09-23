@@ -20,7 +20,10 @@ What counts as an offense: inside any `firmware/KilnFW/App/drivers/http/*.c`
 file, a call to `MAX31856_read_all()`, `MAX31856_read()`,
 `MAX31856_start_all()`, `MAX31856_configure()`, `kiln_io_read()`,
 `kiln_io_set_relay()`, `kiln_io_set_relay_mask()`, `kiln_io_all_relays_off()`,
-`kiln_io_set_io()`, or any `esp_wifi_*()` function. The plan is explicit that
+`kiln_io_set_io()`, or any `esp_wifi_*()` function -- or a bare *reference* to
+one of those names (a function-pointer assignment or a `#define` alias), which
+reaches the driver the same way one indirection later; see `REF_RE` below.
+The plan is explicit that
 there is no legitimate-bypass exception for an HTTP handler the way
 `main.c`'s panic path and `profile_executor.c`'s watchdog are legitimate for
 relay-off writes (`check_relay_authority_paths.py`'s FW_ALL_OFF_ALLOWLIST) --
@@ -62,11 +65,25 @@ from pathlib import Path
 
 SCAN_DIR = "firmware/KilnFW/App/drivers/http"
 
-CALL_RE = re.compile(
-    r"\b(MAX31856_read_all|MAX31856_read|MAX31856_start_all|MAX31856_configure|"
+_NAMES = (
+    r"MAX31856_read_all|MAX31856_read|MAX31856_start_all|MAX31856_configure|"
     r"kiln_io_read|kiln_io_set_relay_mask|kiln_io_set_relay|kiln_io_all_relays_off|"
-    r"kiln_io_set_io|esp_wifi_\w+)\s*\("
+    r"kiln_io_set_io|esp_wifi_\w+"
 )
+
+CALL_RE = re.compile(r"\b(" + _NAMES + r")\s*\(")
+
+#: A direct call is the obvious bypass; taking the function's ADDRESS is the
+#: same bypass one indirection later. Neither
+#: `static read_all_fn_t f = MAX31856_read_all;` nor
+#: `#define RAW_READ_ALL MAX31856_read_all` ever writes `MAX31856_read_all(`
+#: on any line, so CALL_RE alone passes both (confirmed by negative test
+#: 2026-09-22). This second pattern matches the bare name NOT followed by
+#: `(` -- verified to produce zero hits across all 54 current
+#: firmware/KilnFW/App/drivers/http/*.c files, so it costs no false positives
+#: today. Comments and string literals are stripped before either pattern
+#: runs, so a prose or log-message mention still never trips it.
+REF_RE = re.compile(r"\b(" + _NAMES + r")\b(?!\s*\()")
 
 # (filename, function-name substring) -- a direct esp_wifi_restore()/
 # esp_wifi_set_storage() call is allowed only inside one of these functions in
@@ -134,16 +151,24 @@ def check_file(path: Path) -> list[str]:
     violations: list[str] = []
     for i, line in enumerate(stripped_lines):
         m = CALL_RE.search(line)
+        by_reference = False
+        if not m:
+            m = REF_RE.search(line)
+            by_reference = m is not None
         if not m:
             continue
         fn = m.group(1)
+        how = "reference to" if by_reference else "direct"
+        indirect = (" (taken by reference -- reaching the driver through a"
+                    " function pointer or macro is the same bypass)"
+                    if by_reference else " call")
         source_line = raw_lines[i].strip() if i < len(raw_lines) else line.strip()
         if fn.startswith("esp_wifi_"):
             enclosing = _enclosing_function(stripped_lines, i)
             if (path.name, enclosing) in FW_WIFI_ALLOWLIST:
                 continue
             violations.append(
-                f"{path}:{i + 1}: direct {fn}() call in an HTTP handler file "
+                f"{path}:{i + 1}: {how} {fn}(){indirect} in an HTTP handler file "
                 f"(in {enclosing or '<unknown function>'}()) -- no wifi_prov_*() "
                 f"wrapper exists for this, and it is not one of the narrowly "
                 f"allowlisted factory-reset driver-storage-reset call sites; "
@@ -152,7 +177,7 @@ def check_file(path: Path) -> list[str]:
             )
         else:
             violations.append(
-                f"{path}:{i + 1}: direct {fn}() call in an HTTP handler file -- "
+                f"{path}:{i + 1}: {how} {fn}(){indirect} in an HTTP handler file -- "
                 f"route through thermo_owner_command_read_all()/"
                 f"kiln_io_owner_command_read() (or the matching owner accessor) "
                 f"instead, per docs/HTTP_HANDLER_OWNERSHIP.md: {source_line}"
