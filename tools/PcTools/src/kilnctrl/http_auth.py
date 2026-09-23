@@ -266,8 +266,13 @@ def urlopen(req, timeout=None, no_relogin: bool = False):
         # No session lookup, no 401 handling at all -- a 401 propagates to
         # the caller exactly as urllib.request.urlopen would raise it, and
         # this process's own remembered session (if any) is neither read
-        # nor written by this path.
-        return urllib.request.urlopen(req, timeout=timeout)
+        # nor written by this path. A genuine success is still worth
+        # recording as the default host, same as the default path below --
+        # the only behavioural difference from that path is "no session
+        # lookup, no login, no retry on 401".
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        host_resolve.record_host_seen(_origin(_as_request(req).full_url))
+        return resp
     original = _as_request(req)
     origin = _origin(original.full_url)
 

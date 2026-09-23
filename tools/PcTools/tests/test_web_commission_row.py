@@ -2372,7 +2372,6 @@ def test_run_row_live_dispatches_to_guarded_click_for_w18_w20_w33(monkeypatch):
 # ---------------------------------------------------------------------------
 
 import urllib.error  # noqa: E402
-import unittest.mock  # noqa: E402
 
 from kilnctrl import http_auth  # noqa: E402
 

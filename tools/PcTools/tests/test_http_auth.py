@@ -314,6 +314,19 @@ class HttpAuthTest(unittest.TestCase):
                 self.assertEqual(resp.read(), b'{"ok":true}')
         self.assertEqual(recorder.urls, [URL])
 
+    def test_no_relogin_success_still_records_the_host_seen(self):
+        """The only behavioural difference from the default path is meant to
+        be "no session lookup, no login, no retry on 401" -- a genuine
+        success must still update host_resolve the same way the default path
+        does, so a caller using no_relogin doesn't silently stop being a
+        candidate default host."""
+        recorder = _Recorder(_response(b'{"ok":true}'))
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder), \
+                unittest.mock.patch.object(http_auth.host_resolve, "record_host_seen") as recorded:
+            with http_auth.urlopen(urllib.request.Request(URL), timeout=2.0, no_relogin=True) as resp:
+                resp.read()
+        recorded.assert_called_once_with(HOST)
+
     def test_logout_forgets_the_session_even_if_the_post_itself_fails(self):
         """The board being unreachable, or refusing the POST, must not leave
         a stale cookie behind -- this process is done with that credential
@@ -358,7 +371,6 @@ class LoginTest(unittest.TestCase):
         with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
             result = http_auth.login("http://192.0.2.10")
         self.assertEqual(result, TOKEN)
-        self.assertNotIn("not-a-real-password", result)
         self.assertEqual(recorder.urls, ["http://192.0.2.10" + http_auth.LOGIN_PATH])
         login_req = recorder.requests[0]
         self.assertEqual(login_req.get_method(), "POST")
@@ -386,6 +398,24 @@ class LoginTest(unittest.TestCase):
             with self.assertRaises(http_auth.HttpAuthError) as caught:
                 http_auth.login("http://192.0.2.10")
         self.assertNotIn("not-a-real-password", str(caught.exception))
+
+    def test_login_generic_failure_does_not_leak_the_password(self):
+        """The login POST's ``except Exception`` branch (a non-HTTPError
+        failure, e.g. a connection reset) formats the exception straight into
+        the raised HttpAuthError's message. If that underlying exception's
+        own text ever echoed the credential, this message would too -- so
+        this proves the generic path stays clean even when the exception
+        text is attacker/environment-controlled, not just that this module
+        never assembles the message from the password itself."""
+        self._with_credentials()
+        fake_password = "sw0rdfish-not-a-real-password"
+        with unittest.mock.patch.dict(os.environ, {http_auth.PASSWORD_ENV: fake_password}):
+            failure = OSError("connection reset by peer")
+            recorder = _Recorder(failure)
+            with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+                with self.assertRaises(http_auth.HttpAuthError) as caught:
+                    http_auth.login("http://192.0.2.10")
+        self.assertNotIn(fake_password, str(caught.exception))
 
     def test_login_raises_without_a_credential(self):
         with unittest.mock.patch.dict(os.environ, {}, clear=False):
