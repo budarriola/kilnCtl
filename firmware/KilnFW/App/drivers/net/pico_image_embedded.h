@@ -27,7 +27,8 @@
 // FLASH_BUDGET.md / build instructions describe), so their embedded
 // saftyfw_image_identity_t records must agree byte-for-byte on everything
 // except the two placeholders the identity record predates position
-// (commit, commit_len, dirty, config_format_version). A mismatch here is not
+// (commit, commit_len, dirty, config_format_version, link_protocol_version).
+// A mismatch here is not
 // a "which one do we trust" question -- it means the two .bin files landed
 // in this build from two DIFFERENT SaftyFW builds (a stale artifact left
 // over from an earlier build, a build system race, a hand-copied file from
@@ -77,7 +78,8 @@ extern "C" {
 
 typedef struct {
     /* True only when BOTH embedded slot images carry a readable identity
-     * record AND the two records agree on commit/dirty/config_format_version.
+     * record AND the two records agree on commit/dirty/config_format_version/
+     * link_protocol_version.
      * This is the sole gate for "may this be used as an update source" --
      * see this header's top comment for why disagreement is treated as
      * unusable rather than "trust slot A". */
