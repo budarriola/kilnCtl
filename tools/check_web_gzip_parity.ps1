@@ -1,0 +1,29 @@
+# check_web_gzip_parity.ps1 -- thin wrapper so run_all_checks.ps1's check_*.ps1
+# glob discovers the gzip content-parity check (tools/check_web_gzip_parity.py)
+# automatically, the same convention every other guard script in this repo
+# follows (see check_no_doubled_apostrophes.ps1). The actual logic lives in
+# the Python script -- see that file's own top comment before editing
+# behaviour here.
+#
+# WHY THIS EXISTS. TODO.md 10.6a pre-gzips the embedded KilnFW web pages at
+# CMake configure time but nothing verified an embedded .gz actually
+# decompresses back to byte-identical content of its source. This makes a
+# stale or hand-edited .gz a build-time failure instead of a silent content
+# defect (see TODO.md 10.6a's open item).
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$pyScript = Join-Path $PSScriptRoot "check_web_gzip_parity.py"
+
+if (-not (Test-Path $pyScript)) {
+    throw "check_web_gzip_parity.ps1: expected $pyScript not found -- has it moved?"
+}
+
+$python = "python"
+if (Get-Command python3 -ErrorAction SilentlyContinue) {
+    $python = "python3"
+}
+
+& $python $pyScript
+$code = $LASTEXITCODE
+exit $code

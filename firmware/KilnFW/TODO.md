@@ -1778,9 +1778,12 @@ explicitly excludes gzip (`identity`, `q=0` forms). The "compile CSS/JS to
 native code for the LCD" half of the suggestion that prompted this was
 evaluated and **rejected** — LVGL stays the LCD rendering backend.
 
-- [ ] **Re-verify byte-for-byte that nothing about the page *content*
+- [x] **Re-verify byte-for-byte that nothing about the page *content*
       changed** — this was a transport-encoding-only change; verify by
-      comparison rather than trust.
+      comparison rather than trust. DONE, see `tools/check_web_gzip_parity.py`
+      (standing check, decompresses each embedded `.gz` and byte-compares it
+      against its source; SKIPs when the KilnFW build hasn't produced the
+      `.gz` files yet).
 
 ### 10.7 Onboard IC temperature sensors
 
