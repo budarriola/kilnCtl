@@ -976,17 +976,19 @@ static void refresh_cb(lv_timer_t *timer)
                                                    td_cause_num_buf, sizeof(td_cause_num_buf)));
         lv_label_set_text(s_td_cause_label, td_cause_buf);
 
-        /* 144, not 112: the longest safety_fault_source_remedy_one() string
-         * is 131 bytes and the longest safety_trip_words_remedy() is 127
-         * (S5, 2026-09-07 wording pass), so "To clear: " + either overflows 112 and the target build refuses it
-         * (-Werror=format-truncation). Sized against the tables rather than
-         * rounded up by eye -- if a remedy sentence grows past this the build
-         * fails again, which is the desired outcome: a silently truncated
-         * remedy is a half-instruction to an operator standing at a kiln,
-         * and this whole page exists to stop faults being under-explained.
-         * The MSVC host tests do NOT run -Wformat-truncation; only the
-         * xtensa/arm target builds catch this class. */
-        char td_remedy_buf[144];
+        /* 160, not 144: 9abc5c4e's new case-15 (S16) remedy sentence in
+         * safety_trip_words.h is 149 bytes, the longest of either table
+         * (safety_fault_source_remedy_one()'s longest is still 131), so
+         * "To clear: " (10) + 149 + NUL overflows the old 144-byte buffer
+         * and the target build refuses it (-Werror=format-truncation).
+         * Sized against the tables rather than rounded up by eye -- if a
+         * remedy sentence grows past this the build fails again, which is
+         * the desired outcome: a silently truncated remedy is a
+         * half-instruction to an operator standing at a kiln, and this whole
+         * page exists to stop faults being under-explained. The MSVC host
+         * tests do NOT run -Wformat-truncation; only the xtensa/arm target
+         * builds catch this class. */
+        char td_remedy_buf[160];
         /* trip_fault_sources_valid is checked here as well as on the "Fault
          * source (at trip)" line below, and it has to be: without it, an
          * unwitnessed reboot resend carrying a non-zero but untrustworthy
