@@ -214,6 +214,15 @@
 // human-noticeable timescale. Matches Frame B's period rather than inventing
 // a third cadence.
 #define LINK_POWER_TX_PERIOD_MS    2000
+// Periodic in-RAM config re-CRC (config_check_period_s, CONFIG_REFERENCE.md
+// section 6). The actual period is operator-configured seconds, not a
+// compile-time cadence like the frames above -- this is just how often
+// link_task looks at the clock to decide whether that many seconds have
+// elapsed. 1s is coarse enough that reading config_check_period_s here is
+// cheap relative to LINK_TASK_POLL_MS's own per-iteration cost, and fine
+// enough that a period of "10s" (the compiled default) is not itself
+// perceptibly delayed by this polling granularity.
+#define LINK_CONFIG_CHECK_POLL_MS  1000
 // Frame D (SAFETY_CMD_TRIP_EVENT) repeat burst: LINK_PROTOCOL.md sec 6,
 // "pushed immediately... and repeated a few times over the next second in
 // case the first copy is lost (there is no ACK)". Mirrors the exact burst
@@ -1735,6 +1744,59 @@ static void link_task_retry_pending_tc_type_reapply(void)
     s_tc_type_reapply_pending = false;
 }
 
+// Ticks CONFIG_REFERENCE.md's config_check_period_s: every LINK_CONFIG_
+// CHECK_POLL_MS (1s), read the live config_check_period_s field and, once
+// that many seconds have actually elapsed, run config_store_check_ram_
+// integrity(). link_task is config_store's sole writer/owner on this
+// processor (every config_store_write()/config_store_write_volatile() call
+// is already reached only from this task, per config_store_seqlock_write()'s
+// own comment), so ticking the re-CRC from here needs no new task and no new
+// lock.
+//
+// config_check_period_s == 0 disables the check -- CONFIG_REFERENCE.md's
+// documented behavior -- by simply never accumulating toward it below.
+// s_config_check_elapsed_s is this function's only state and its only
+// owner; nothing else reads or resets it (the "reset one side of a pair"
+// class this codebase watches for doesn't apply -- there is exactly one
+// side here, and it owns both halves of its own reset).
+static void link_task_config_check_poll(TickType_t now)
+{
+    static TickType_t s_last_poll = 0;
+    static uint32_t s_config_check_elapsed_s = 0u;
+    static bool s_initialized = false;
+
+    if (!s_initialized) {
+        s_last_poll = now;
+        s_initialized = true;
+        return;
+    }
+    if ((now - s_last_poll) < pdMS_TO_TICKS(LINK_CONFIG_CHECK_POLL_MS)) {
+        return;
+    }
+    s_last_poll = now;
+
+    config_store_record_t snap;
+    if (!config_store_get_full_record(&snap) || snap.config_check_period_s == 0u) {
+        // Not loaded yet, no stable snapshot this poll, or the check is
+        // disabled -- keep the accumulator at rest rather than let it carry
+        // stale progress into a later period that might be reconfigured.
+        s_config_check_elapsed_s = 0u;
+        return;
+    }
+
+    s_config_check_elapsed_s++;
+    if (s_config_check_elapsed_s < snap.config_check_period_s) {
+        return;
+    }
+    s_config_check_elapsed_s = 0u;
+
+    if (!config_store_check_ram_integrity()) {
+        log_task_log(LOG_LEVEL_ERROR, "config_check",
+                     "periodic RAM integrity check FAILED -- reset to compiled defaults, "
+                     "calibration_missing set");
+    }
+}
+
 static void link_task_handle_set_config(const kilnlink_frame_t *frame)
 {
     kilnlink_set_config_t msg;
@@ -3149,6 +3211,7 @@ static void link_task_fn(void *arg)
         }
         link_task_poll_trip_event(now);
         link_task_retry_pending_tc_type_reapply();
+        link_task_config_check_poll(now);
 
         if (s_boot_fw_version_repeats_pending > 0 &&
             (now - s_last_boot_fw_version_tx_tick) >= pdMS_TO_TICKS(LINK_BOOT_FW_VERSION_REPEAT_PERIOD_MS)) {

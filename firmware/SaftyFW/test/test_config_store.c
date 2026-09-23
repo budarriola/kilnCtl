@@ -813,6 +813,53 @@ static void test_confirm_crc_ok(void)
                "any other non-zero version: gate can open");
 }
 
+static void test_config_store_ram_integrity_ok(void)
+{
+    TEST_SECTION("config_store_ram_integrity_ok -- periodic in-RAM re-CRC (config_check_period_s)");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 42;
+    rec.tc_type = 0x05u;
+    rec.calibration_missing = false;
+    rec.config_check_period_s = 10u;
+
+    uint32_t good_crc = config_store_record_crc(&rec);
+
+    TEST_CHECK(config_store_ram_integrity_ok(&rec, good_crc),
+               "unmodified record still matches the CRC captured at its last install");
+
+    // Corrupt a single RAM byte (simulating bit rot / an overrun landing on
+    // this record, not a legitimate config_store_write()/write_volatile()
+    // update) and confirm it is detected against the ORIGINAL tracked CRC.
+    config_store_record_t corrupted = rec;
+    uint8_t *raw = (uint8_t *)&corrupted;
+    raw[10] ^= 0xFFu; // flip a byte inside the struct; exact field doesn't matter for this test
+    TEST_CHECK(!config_store_ram_integrity_ok(&corrupted, good_crc),
+               "a single corrupted byte is detected against the tracked CRC");
+
+    // The corrupted record's OWN freshly computed CRC naturally still
+    // matches itself -- this function is a self-consistency check against a
+    // CRC captured at an earlier, trusted moment, not a magic corruption
+    // detector on the bytes alone. Confirms the test is actually exercising
+    // config_store_ram_integrity_ok()'s comparison, not some other check.
+    uint32_t corrupted_crc = config_store_record_crc(&corrupted);
+    TEST_CHECK(config_store_ram_integrity_ok(&corrupted, corrupted_crc),
+               "a corrupted record matches its OWN freshly computed CRC (sanity: not a tautology)");
+
+    // A legitimate change (what config_store_write()/write_volatile() do,
+    // via config_store_seqlock_write() recomputing the tracked CRC in the
+    // same step) must not be flagged once compared against ITS OWN new CRC
+    // -- this is what keeps a live volatile install from reading as
+    // corruption, per config_store.h's header comment.
+    config_store_record_t updated = rec;
+    updated.config_check_period_s = 30u; // a real config change, e.g. a volatile install
+    uint32_t updated_crc = config_store_record_crc(&updated);
+    TEST_CHECK(config_store_ram_integrity_ok(&updated, updated_crc),
+               "a legitimate field change matches the CRC captured at that same update");
+}
+
 static void test_flash_rc_reason(void)
 {
     TEST_SECTION("config_store_flash_rc_reason -- flash_safe_execute() failure surfacing");
@@ -3041,6 +3088,7 @@ void run_test_config_store(void)
     test_ct_cal_corrupt_or_unknown_version();
     test_ct_cal_round_trip_and_independence();
     test_confirm_crc_ok();
+    test_config_store_ram_integrity_ok();
     test_flash_rc_reason();
     test_v2_full_roundtrip();
     test_v1_migration();

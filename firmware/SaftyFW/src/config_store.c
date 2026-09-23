@@ -1486,6 +1486,17 @@ uint32_t config_store_record_crc(const config_store_record_t *rec)
     return get_u32_le(&packed[REC_OFF_CRC]);
 }
 
+bool config_store_ram_integrity_ok(const config_store_record_t *rec, uint32_t expected_crc)
+{
+    // See config_store.h's header comment for why this compares against a
+    // CRC captured at the record's last legitimate install, not against
+    // flash: a live volatile install (config_store_write_volatile()) is a
+    // deliberate, legitimate RAM/flash divergence, not corruption, and this
+    // codebase has no separate "intentionally diverged" signal to tell the
+    // two apart from a raw byte comparison.
+    return config_store_record_crc(rec) == expected_crc;
+}
+
 const char *config_store_write_decision_reason(config_store_write_decision_t decision)
 {
     switch (decision) {

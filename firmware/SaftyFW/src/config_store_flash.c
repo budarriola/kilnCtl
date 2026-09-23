@@ -200,6 +200,18 @@ static config_store_record_t s_cached_record;
 // either -- nothing on SAFTYFW_CORE_TRIP_PATH ever reads this.
 static config_store_record_t s_persisted_record;
 
+// CRC of s_cached_record as of its last legitimate install (boot load, a
+// committed write, or a volatile install) -- see config_store_seqlock_
+// write()'s own comment on why that single function is the one place this
+// is kept in lockstep with s_cached_record. Read and written only from
+// link_task (core 0); config_store_check_ram_integrity() below is the only
+// reader.
+static uint32_t s_cached_record_crc;
+
+// How many times config_store_check_ram_integrity() has found and repaired
+// a mismatch. Monotonic; see config_store.h's getter comment.
+static uint32_t s_ram_integrity_fail_count;
+
 // --- Seqlock for s_cached_record (2026-09-09) -------------------------------
 //
 // Why: config_store_write() (called only from link_task, pinned to
@@ -564,6 +576,19 @@ static void config_store_seqlock_write(const config_store_record_t *rec)
     // partially-updated struct bytes.
     HAL_DMB();
     s_cached_record = *rec;
+    // Tracks the CRC of s_cached_record as of THIS write, for config_store_
+    // check_ram_integrity()'s periodic re-CRC (config_check_period_s). This
+    // is the one function every legitimate updater of s_cached_record goes
+    // through (config_store_write(), config_store_write_volatile(), and
+    // config_store_boot_load()'s own equivalent plain assignment before the
+    // scheduler starts) -- keeping the record and its tracked CRC updated
+    // together here, in one place, is deliberate: see CLAUDE.md's "reset
+    // one side of a pair" bug class for what goes wrong when a value and a
+    // derived expectation of it are updated from two different call sites
+    // instead of one. Only ever read back from link_task (core 0), the same
+    // single-writer/single-reader context as this whole function, so it
+    // needs no seqlock of its own.
+    s_cached_record_crc = config_store_record_crc(rec);
     // Barrier: the struct write above must be complete, as observed by
     // another core, before the counter is published as even again --
     // otherwise a reader could see "even" and trust a struct that has not
@@ -693,6 +718,15 @@ void config_store_boot_load(void)
     s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
     s_persisted_record = s_cached_record; // opus review item 4: seed flash-truth from what boot found
+    // Seed the periodic RAM-integrity check's tracked CRC from the same
+    // boot-loaded record -- config_store_seqlock_write() is not the path
+    // taken here (this runs pre-scheduler, single core, same "plain
+    // assignment is correct" reasoning as s_fallback_buf[0] just below), so
+    // it has to be set explicitly, in the same place s_cached_record itself
+    // is seeded, rather than left to default-initialise to 0 and falsely
+    // read as a mismatch the first time config_store_check_ram_integrity()
+    // ever runs.
+    s_cached_record_crc = config_store_record_crc(&s_cached_record);
 
     // Opus review finding B (2026-09-09): seed the writer-owned fallback
     // buffer from the boot-time record instead of leaving s_fallback_valid
@@ -914,6 +948,48 @@ bool config_store_get_full_record(config_store_record_t *out)
         return false;
     }
     return true;
+}
+
+// See config_store.h's header comment. Meant to be ticked from link_task at
+// config_check_period_s cadence (config_check_period_s == 0 disables it --
+// link_task.c's own gate, not this function's).
+bool config_store_check_ram_integrity(void)
+{
+    config_store_record_t snap;
+    if (!config_store_get_full_record(&snap)) {
+        // Not loaded yet, or a transient seqlock-retry exhaustion -- not a
+        // corruption finding either way. config_store_get_full_record()
+        // already filled *snap* with config_store_default() in this branch,
+        // which is NOT what s_cached_record_crc was computed against, so
+        // comparing here would be comparing the wrong thing, not merely a
+        // stale one. Try again next period.
+        return true;
+    }
+    if (config_store_ram_integrity_ok(&snap, s_cached_record_crc)) {
+        return true;
+    }
+
+    // Mismatch: the cached record no longer hashes to the CRC it was given
+    // at its last legitimate install, i.e. it changed underneath this check
+    // without going through config_store_seqlock_write() -- RAM corruption,
+    // not a legitimate update (every legitimate update path keeps the pair
+    // in lockstep, per that function's own comment). Same posture a boot-
+    // time CRC failure takes: compiled defaults, calibration_missing forced
+    // true, no-safe-default guards stay disabled (config_store_default()
+    // already encodes all three). Routed through config_store_seqlock_write()
+    // so the repaired record and its freshly recomputed tracked CRC land
+    // together, not as two separate writes to the pair this function itself
+    // exists to keep from drifting apart.
+    s_ram_integrity_fail_count++;
+    config_store_record_t safe;
+    config_store_default(&safe);
+    config_store_seqlock_write(&safe);
+    return false;
+}
+
+uint32_t config_store_get_ram_integrity_fail_count(void)
+{
+    return s_ram_integrity_fail_count;
 }
 
 uint8_t config_store_get_config_version(void)

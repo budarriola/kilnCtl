@@ -1831,6 +1831,53 @@ uint16_t config_store_get_config_crc(void);
 // like the rest of this file's pure logic.
 uint32_t config_store_record_crc(const config_store_record_t *rec);
 
+// --- Periodic in-RAM re-CRC (CONFIG_REFERENCE.md's config_check_period_s) --
+//
+// Pure decision: does `rec` still hash to `expected_crc`? `expected_crc` is
+// whatever config_store_record_crc() computed for the cached record at the
+// moment it was last legitimately installed (boot load, a committed write,
+// or a volatile install) -- NOT a re-read of flash. This deliberately
+// checks the RAM record's own self-consistency, not RAM-against-flash:
+// origin/main has no "this RAM copy intentionally diverges from flash right
+// now" signal (a volatile install, config_store_write_volatile(), is
+// exactly that divergence, and it is legitimate, not corruption), so a raw
+// RAM-vs-flash byte comparison would flag every live volatile install as a
+// false positive. Comparing against a CRC captured at the same moment the
+// record was last written closes that gap: every legitimate updater
+// (config_store_write(), config_store_write_volatile(), boot load) goes
+// through the single seqlock-write choke point that keeps the record and
+// its tracked CRC in lockstep, so only a corruption that happens AFTER that
+// point -- bit rot, an overrun, a wild write -- can make this return false.
+// Host-testable: build a record, take its CRC, flip one byte in a copy, and
+// confirm this returns false against the original CRC and true against the
+// copy's own freshly computed one.
+bool config_store_ram_integrity_ok(const config_store_record_t *rec, uint32_t expected_crc);
+
+// Glue: snapshots the live cached record (config_store_get_full_record()),
+// checks it against the CRC captured at its last legitimate install via
+// config_store_ram_integrity_ok(), and on a mismatch repairs the cache to
+// config_store_default() (compiled defaults + calibration_missing = true --
+// the same posture a boot-time CRC failure takes, per CONFIG_REFERENCE.md's
+// "the safe fallback is not the permissive one") through the same seqlock-
+// write choke point, so the repaired record and its tracked CRC land in
+// lockstep together. Returns true if the record was fine (or no stable
+// snapshot was available this poll -- a transient seqlock-retry exhaustion
+// is not treated as corruption; the next period tries again), false if a
+// mismatch was found and repaired. Increments the counter
+// config_store_get_ram_integrity_fail_count() reports on a mismatch. Meant
+// to be ticked at config_check_period_s cadence by link_task, the sole
+// owner of config_store writes -- see link_task.c's call site. NOT flash
+// I/O and NOT host-tested (config_store_flash.c, like the rest of its
+// seqlock-backed state, is exercised on hardware only); the decision logic
+// above is what the negative test targets.
+bool config_store_check_ram_integrity(void);
+
+// How many times config_store_check_ram_integrity() has found and repaired
+// a RAM integrity mismatch since boot. Monotonic, never reset by anything
+// other than a reboot -- there is no "acknowledge" path for this counter,
+// unlike calibration_missing.
+uint32_t config_store_get_ram_integrity_fail_count(void);
+
 // --- update_task's PENDING_VERIFY -> VALID gate (TODO.md Phase 10.8) -------
 
 // Pure decision for src/update/confirm.h's `config_crc_ok` checklist bit.
