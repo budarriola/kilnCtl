@@ -489,6 +489,43 @@ def safety_get_ct_cal() -> str:
 
 
 @_srv._tool()
+def safety_get_param(param_id: int) -> str:
+    """READ-ONLY: ask the safety processor for one CONFIG_REFERENCE.md field
+    by its opaque u16 wire id (SAFETY_CMD_GET_PARAM / 0x23), and report
+    exactly what came back -- the decoded value if found, "not found" if the
+    Pico doesn't recognize the id, or a refusal, honestly, with no outcome
+    disguised as another.
+
+    GET-ONLY diagnostics ids are the intended use of this call -- e.g. a
+    future 0x0505 (config RAM-integrity fail count, landing separately)
+    rather than anything already reachable in bulk via GET_CONFIG_PAGE.
+
+    NOT WIRED INTO FIRMWARE YET: as of this writing
+    uart_bridge_safety.c's safety_bridge_task() has no case for
+    SAFETY_CMD_GET_PARAM at all, so every call today gets an "unsupported"
+    refusal, not a live Pico round trip -- this is the correct, expected
+    result right now, not a bug in this tool. This tool and its underlying
+    codec/decoder exist so a real request/reply pair is ready for whichever
+    diagnostic id needs it first once that firmware wiring lands.
+
+    UNLIKE safety_get_ct_cal, a refusal is reported as plain text here
+    rather than raised as an error -- "unsupported" is today's only possible
+    outcome, so treating it as a normal, non-exceptional result is the
+    honest thing to do. A genuine communication failure (timeout, no reply
+    of either id at all) still raises.
+    """
+    try:
+        result = _srv._safety.get_param(param_id)
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    if isinstance(result, devices.OkReason):
+        return f"param_id={param_id}: refused - {result.describe()}"
+    if not result.found:
+        return f"param_id={param_id}: not found"
+    return f"param_id={param_id}: found, type={result.type}, value={result.value!r}"
+
+
+@_srv._tool()
 def safety_get_ct_cal_raw(host: Optional[str] = None) -> str:
     """READ-ONLY: the REAL, LIVE per-channel CT commissioning record, raw and
     unrounded, as a JSON object -- ``k_ct_v_per_a[0..2]``, ``zero_counts[0..2]``,

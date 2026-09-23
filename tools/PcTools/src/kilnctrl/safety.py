@@ -45,6 +45,7 @@ from .devices import (
     SafetyCtCal,
     SafetyDiag,
     SafetyFwVersion,
+    SafetyGetParam,
     SafetyLinkStats,
     SafetyResponseError,
     SafetyStatus,
@@ -56,8 +57,10 @@ from .protocol import (
     SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_GET_FW_VERSION,
     SAFETY_CMD_GET_LINK_STATS,
+    SAFETY_CMD_GET_PARAM,
     SAFETY_CMD_GET_STATUS,
     SAFETY_CMD_GET_TRIP_EVENT,
+    SAFETY_CMD_PARAM,
     SAFETY_CMD_REQUEST_ENABLE,
     SAFETY_CMD_SET_CONFIG,
     SAFETY_CMD_SET_FAULT_OUT,
@@ -110,6 +113,7 @@ CT_CAL_REPLY_TIMEOUT_S = 5.0
 #: query added here does not have to rediscover this same fix.
 _REPLY_ID_FOR_REQUEST: dict[int, int] = {
     SAFETY_CMD_GET_CT_CAL: SAFETY_CMD_CT_CAL,
+    SAFETY_CMD_GET_PARAM: SAFETY_CMD_PARAM,
 }
 
 
@@ -433,6 +437,30 @@ class SafetyClient:
         value = self._query(SAFETY_CMD_GET_CT_CAL, devices.safety_get_ct_cal(), timeout)
         if isinstance(value, OkReason):
             raise SafetyQueryError(f"GET_CT_CAL {value.describe()}")
+        return value  # type: ignore[return-value]
+
+    def get_param(
+        self, param_id: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S
+    ) -> "SafetyGetParam | OkReason":
+        """Ask the Pico for one CONFIG_REFERENCE.md field by its opaque u16
+        wire id (GET_PARAM, 0x23) and return whatever it actually said.
+
+        UNLIKE :meth:`get_ct_cal`, a refusal here is not folded into a raised
+        exception -- as of this writing uart_bridge_safety.c's
+        safety_bridge_task() has no case for SAFETY_CMD_GET_PARAM at all, so
+        every call today gets an "unsupported" refusal
+        (:class:`~kilnctrl.devices.OkReason`, ``ok=False``), not a live Pico
+        round trip. That is the EXPECTED, honest outcome right now, not a
+        communication failure, so this method returns the
+        :class:`~kilnctrl.devices.OkReason` object to the caller rather than
+        raising :class:`SafetyQueryError` over it -- a caller (e.g.
+        ``safety_get_param()`` in mcp_server_safety.py) can then report
+        "refused: <reason>" plainly instead of treating today's only
+        possible outcome as an error. :class:`SafetyQueryError` is still
+        raised for a genuine timeout (no reply of either id arrives at all)
+        -- see :meth:`_query`.
+        """
+        value = self._query(SAFETY_CMD_GET_PARAM, devices.safety_get_param(param_id), timeout)
         return value  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

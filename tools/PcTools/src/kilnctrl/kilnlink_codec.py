@@ -43,6 +43,8 @@ __all__ = [
     "encode_clear_trip",
     "encode_get_fw_version",
     "encode_set_clock",
+    "encode_get_param",
+    "decode_param",
 ]
 
 
@@ -366,3 +368,60 @@ def encode_get_fw_version(f: dict) -> bytes:
 
 def encode_set_clock(f: dict) -> bytes:
     return struct.pack("<BQ", 0x0C, f["epoch_ms"])
+
+
+# -- SAFETY_CMD_GET_PARAM = 0x23 (ESP -> Pico) -------------------------------
+# kilnlink_get_param.c: cmd(1) param_id(u16 LE) = 3 bytes.
+
+def encode_get_param(f: dict) -> bytes:
+    """Mirrors firmware/CommonFW/src/kilnlink_get_param.c's
+    kilnlink_get_param_encode() -- cmd(1)=0x23, param_id u16 LE(2), 3 bytes
+    total. `param_id` is opaque here, same as the C codec's own doc comment:
+    this encoder does not know the id table, only that one is being asked
+    for."""
+    return struct.pack("<BH", 0x23, f["param_id"])
+
+
+# -- SAFETY_CMD_PARAM = 0x1E (Pico -> ESP) -----------------------------------
+# kilnlink_param.c: cmd(1) param_id(u16 LE) found(1) type(1) [value(N)] =
+# 5 bytes header, +1/1/2/4 value bytes when found=1 (type 0=bool,1=u8,2=u16,
+# LE; 3=f32 LE). found=0 means header-only, exactly 5 bytes, no value bytes
+# at all -- type is then meaningless and firmware always sends 0 for it.
+
+_PARAM_VALUE_FMT = {0x00: "<B", 0x01: "<B", 0x02: "<H", 0x03: "<f"}
+
+
+def decode_param(payload: bytes) -> dict:
+    """Mirrors kilnlink_param.c's kilnlink_param_decode(). Returns a plain
+    dict: {"param_id", "found", "type", "value"} -- `value` is None and
+    `type` is 0 when `found` is False, matching the C decoder leaving those
+    fields untouched (never garbage from an unset region) for a "not found"
+    reply.
+
+    Raises ValueError (this module has no decode error taxonomy yet, same as
+    decode_power()) on a wrong command byte, a too-short payload, a bad
+    found byte, an unknown type tag, or a length that doesn't match what
+    found/type imply.
+    """
+    if len(payload) < 5:
+        raise ValueError(f"kilnlink param payload too short: {len(payload)} bytes, need >= 5")
+    cmd, param_id, found, type_ = struct.unpack_from("<BHBB", payload, 0)
+    if cmd != 0x1E:
+        raise ValueError(f"kilnlink param payload has wrong cmd byte: {cmd:#04x}, expected 0x1e")
+    if found not in (0, 1):
+        raise ValueError(f"kilnlink param payload has bad found byte: {found}")
+    if not found:
+        if len(payload) != 5:
+            raise ValueError(f"kilnlink param 'not found' payload must be 5 bytes, got {len(payload)}")
+        return {"param_id": param_id, "found": 0, "type": 0, "value": None}
+    value_fmt = _PARAM_VALUE_FMT.get(type_)
+    if value_fmt is None:
+        raise ValueError(f"kilnlink param payload has unknown type tag: {type_:#04x}")
+    value_len = struct.calcsize(value_fmt)
+    if len(payload) != 5 + value_len:
+        raise ValueError(
+            f"kilnlink param payload length mismatch: type={type_} implies {5 + value_len} bytes, got {len(payload)}"
+        )
+    (raw_value,) = struct.unpack_from(value_fmt, payload, 5)
+    value = bool(raw_value) if type_ == 0x00 else raw_value
+    return {"param_id": param_id, "found": 1, "type": type_, "value": value}

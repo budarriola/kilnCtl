@@ -424,6 +424,33 @@ SAFETY_CMD_CT_CAL = 0x1A
 #: in CommonFW.
 SAFETY_CT_CAL_NUM_CHANNELS = 3
 
+#: PC -> ESP query. Same request/reply-id split reasoning as
+#: SAFETY_CMD_GET_CT_CAL above (uart_task_ids.h's "0x1E/0x23 GET_PARAM /
+#: PARAM" doc comment, KILNLINK_PROTOCOL_VERSION 6 -> 7): through version 6
+#: this shared id 0x1E with its own reply, request-vs-reply distinguished
+#: only by length; version 7 split the request onto its own id (0x23,
+#: kilnlink_get_param.h's KILNLINK_GET_PARAM_CMD) so a length-different
+#: driver-error refusal can never be misread as a malformed PARAM reply.
+#: Asks the Pico for one CONFIG_REFERENCE.md field by its opaque u16 id --
+#: this client does not know the id table, only that one is being asked for
+#: (kilnlink_get_param.h's own doc comment says the same of the codec this
+#: mirrors).
+#:
+#: NOT wired into uart_bridge_safety.c's SAFETY_CMD_* switch as of this
+#: writing -- unlike SAFETY_CMD_GET_CT_CAL, sending this today gets
+#: bridge_reply_unsupported()'s refusal ({0x23, ok=0, "unsupported"}), not a
+#: live round trip to the Pico. This id and its codec exist so a caller has
+#: a real request to send once that wiring lands; SafetyClient.get_param()
+#: reports the refusal honestly rather than pretending success.
+SAFETY_CMD_GET_PARAM = 0x23
+#: Pico -> ESP -> PC, relayed verbatim once the bridge wiring above exists.
+#: The successful PARAM reply's own id -- unchanged across the version 6 -> 7
+#: split, same as SAFETY_CMD_CT_CAL keeping 0x1A. A reply carrying THIS id is
+#: always the real answer (found=0 header-only, or found=1 header+value); a
+#: reply carrying SAFETY_CMD_GET_PARAM's id instead is the request's own id
+#: echoed back by a refusal. See devices_safety.py's parse_safety_response().
+SAFETY_CMD_PARAM = 0x1E
+
 #: PC -> ESP queries, CommonFW/docs/LINK_PROTOCOL.md sec 7: "Mirror all of it
 #: on the PC-link SAFETY task as well" -- the same DIAG (Frame B) / TRIP_EVENT
 #: (Frame D) telemetry dashboard_http.c and ui_page_safety.c already read,

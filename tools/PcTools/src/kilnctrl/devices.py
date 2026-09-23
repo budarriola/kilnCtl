@@ -358,6 +358,8 @@ __all__ = [
     "safety_get_ct_cal",
     "SafetyCtCal",
     "SafetyCtCalChannel",
+    "safety_get_param",
+    "SafetyGetParam",
     "parse_safety_response",
     # INFO / LOG
     "PinFunction",

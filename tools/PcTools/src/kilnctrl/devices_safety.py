@@ -8,6 +8,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from . import kilnlink_codec
 from .protocol import *  # noqa: F401,F403
 from .devices_thermo import thermo_fault_labels  # noqa: F401
 from .devices_common import (  # noqa: F401
@@ -191,6 +192,31 @@ def safety_get_ct_cal() -> bytes:
     answers, not just if the ESP itself is unreachable.
     """
     return struct.pack("<B", SAFETY_CMD_GET_CT_CAL)
+
+
+def safety_get_param(param_id: int) -> bytes:
+    """0x23 GET_PARAM request: ask the safety processor for one
+    CONFIG_REFERENCE.md field by its opaque u16 wire id.
+
+    Byte-identical to CommonFW's own encoder for this request
+    (kilnlink_get_param.c's kilnlink_get_param_encode(), CommonFW/include/
+    kilnlink/kilnlink_get_param.h) -- cmd(1)=0x23, param_id u16 LE(2), 3
+    bytes total. `param_id` is opaque here, same as the C codec's own doc
+    comment: this encoder does not know the id table, only that one is
+    being asked for.
+
+    GET-ONLY diagnostics ids are the intended use of this call -- e.g. a
+    future 0x0505 (config RAM-integrity fail count) rather than anything
+    already reachable in bulk via GET_CONFIG_PAGE.
+
+    NOT wired into uart_bridge_safety.c's dispatch as of this writing (see
+    protocol.py's SAFETY_CMD_GET_PARAM doc comment): sending this today
+    gets an honest "unsupported" refusal, not a live Pico round trip. This
+    encoder and :func:`~kilnctrl.devices.parse_safety_response`'s matching
+    decode branch exist so there is a real request/reply pair ready for
+    whichever caller reaches for it first once that wiring lands.
+    """
+    return kilnlink_codec.encode_get_param({"param_id": _check_u16(param_id, "param_id")})
 
 
 #: Human-readable thermocouple type names -> the MAX31856 CR1 TC[3:0] wire
@@ -775,9 +801,28 @@ class SafetyCtCal:
     channels: "tuple[SafetyCtCalChannel, ...]"
 
 
+@dataclass(frozen=True)
+class SafetyGetParam:
+    """Decoded PARAM (0x1E) reply -- one CONFIG_REFERENCE.md field by its
+    opaque u16 wire id, read live from the Pico (never cached on the ESP;
+    see :func:`safety_get_param`).
+
+    ``found`` False means the Pico did not recognize ``param_id`` --
+    ``type``/``value`` are then meaningless (``type`` is 0, ``value`` is
+    ``None``) and must not be displayed as a real reading. ``type`` is the
+    raw kilnlink_param_value.h tag (0=bool, 1=u8, 2=u16, 3=f32); ``value``
+    is the decoded Python value (bool/int/int/float respectively).
+    """
+
+    param_id: int
+    found: bool
+    type: int
+    value: object
+
+
 def parse_safety_response(
     payload: bytes,
-) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion | SafetyCtCal | OkReason]":
+) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion | SafetyCtCal | SafetyGetParam | OkReason]":
     """Decode a SAFETY query reply into ``(subcommand, value)``.
 
     Layouts (uart_task_ids.h)::
@@ -1139,6 +1184,35 @@ def parse_safety_response(
         # from a truncated/malformed success reply in the first place -- see
         # protocol.py's SAFETY_CMD_GET_CT_CAL doc comment.
         return subcommand, _decode_ok_reason(payload, SafetyResponseError, "GET_CT_CAL")
+
+    if subcommand == SAFETY_CMD_PARAM:
+        # The reply's OWN id (0x1E) -- different from SAFETY_CMD_GET_PARAM
+        # (0x23, the request's id) since firmware protocol version 7, same
+        # split as GET_CT_CAL/CT_CAL above. Header is cmd(1)+param_id
+        # u16LE(2)+found(1)+type(1) = 5 bytes; found=0 stops there (no value
+        # bytes at all), found=1 appends the type's value bytes
+        # (kilnlink_param_value.h: bool/u8=1B, u16=2B LE, f32=4B LE).
+        try:
+            decoded = kilnlink_codec.decode_param(payload)
+        except ValueError as exc:
+            raise SafetyResponseError(f"PARAM response: {exc}") from exc
+        return subcommand, SafetyGetParam(
+            param_id=decoded["param_id"],
+            found=bool(decoded["found"]),
+            type=decoded["type"],
+            value=decoded["value"],
+        )
+
+    if subcommand == SAFETY_CMD_GET_PARAM:
+        # This is the REQUEST's id echoed back -- only ever seen when
+        # uart_bridge_safety.c's safety_bridge_task() refused the command
+        # outright. As of this writing the firmware switch statement has no
+        # case for SAFETY_CMD_GET_PARAM at all, so it always falls to
+        # default: bridge_reply_unsupported() -- an "unsupported" refusal is
+        # today's ONLY possible outcome for this id, not a rare edge case.
+        # A successful reply always carries SAFETY_CMD_PARAM's id instead,
+        # handled above. See protocol.py's SAFETY_CMD_GET_PARAM doc comment.
+        return subcommand, _decode_ok_reason(payload, SafetyResponseError, "GET_PARAM")
 
     if subcommand in (
         SAFETY_CMD_REQUEST_ENABLE,
