@@ -930,10 +930,32 @@ esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_mar
         return err;
     }
 
-    (void)safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS);
-
+    /* Loop the drain across the full budget rather than one wait_ms call:
+     * safety_drain_inbox_ex()'s want_ / got_ out-param plumbing (safety_drain_
+     * still_waiting() in safety_link.h) has no STACK_MARGIN case, so a single
+     * safety_drain_inbox() call degrades to a zero-wait drain the moment ANY
+     * other frame is dispatched first -- and the Pico's periodic STATUS/DIAG/
+     * POWER pushes share this same inbox. A push landing before our own
+     * STACK_MARGIN reply used to end the wait early and report ESP_ERR_TIMEOUT
+     * even though the reply was still in flight, the same shape as the
+     * CONFIG_PAGE/CT_CAL bug safety_drain_still_waiting()'s header comment
+     * documents. Re-checking the stash after every drained frame, until the
+     * declared budget (not a frame count) is spent, closes it. */
     uart_proto_message_t reply;
-    bool got_reply = safety_take_stashed_stack_margin(link, &reply);
+    bool got_reply = false;
+    int64_t sm_wait_started_us = (int64_t)hal_time_now_us();
+    for (;;) {
+        int64_t elapsed_ms = ((int64_t)hal_time_now_us() - sm_wait_started_us) / 1000;
+        int32_t remaining_ms = (int32_t)SAFETY_LINK_REPLY_TIMEOUT_MS - (int32_t)elapsed_ms;
+        if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        (void)safety_drain_inbox(link, (uint32_t)remaining_ms);
+        got_reply = safety_take_stashed_stack_margin(link, &reply);
+        if (got_reply || remaining_ms == 0) {
+            break;
+        }
+    }
     xSemaphoreGive(link->xact_lock);
 
     if (!got_reply) {
@@ -1016,10 +1038,27 @@ esp_err_t safety_link_get_param(SafetyLinkClass *link, uint16_t param_id, uint8_
         return err;
     }
 
-    (void)safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS);
-
+    /* Loop the drain across the full budget, same fix and same reason as
+     * safety_link_get_stack_margin() above: safety_drain_inbox_ex()'s want_ /
+     * got_ out-param plumbing has no PARAM case, so a single safety_drain_inbox() call
+     * degrades to a zero-wait drain the moment any other frame (a periodic
+     * STATUS/DIAG/POWER push) is dispatched first, which can end the wait
+     * before our own PARAM reply lands. */
     uart_proto_message_t reply;
-    bool got_reply = safety_take_stashed_param(link, &reply);
+    bool got_reply = false;
+    int64_t gp_wait_started_us = (int64_t)hal_time_now_us();
+    for (;;) {
+        int64_t elapsed_ms = ((int64_t)hal_time_now_us() - gp_wait_started_us) / 1000;
+        int32_t remaining_ms = (int32_t)SAFETY_LINK_REPLY_TIMEOUT_MS - (int32_t)elapsed_ms;
+        if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        (void)safety_drain_inbox(link, (uint32_t)remaining_ms);
+        got_reply = safety_take_stashed_param(link, &reply);
+        if (got_reply || remaining_ms == 0) {
+            break;
+        }
+    }
     xSemaphoreGive(link->xact_lock);
 
     if (!got_reply) {

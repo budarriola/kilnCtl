@@ -254,10 +254,34 @@ static uart_proto_message_t s_fake_inbox[FAKE_INBOX_CAP];
 static int s_fake_inbox_count = 0;
 static int s_fake_inbox_pos = 0;
 
+// Models a reply that genuinely has not arrived yet at the moment a drain
+// call's internal while loop first empties the queue -- e.g. a real
+// SAFETY_CMD_PARAM reply still in flight on the wire after an unrelated
+// frame (STATUS/DIAG/POWER) was dequeued first and degraded that call's own
+// wait to zero (safety_drain_still_waiting(), safety_link.h). When
+// s_fake_inbox_auto_push_after_first_timeout is set, the FIRST time this
+// stub's queue goes empty it still reports ESP_ERR_TIMEOUT for that call (it
+// really wasn't there yet) but then enqueues s_fake_inbox_delayed_msg so a
+// LATER call -- the retry a looped safety_drain_inbox() caller makes with
+// its own remaining budget -- finds it. Used by
+// test_get_param_survives_a_leading_unrelated_frame() to distinguish the
+// fixed call-site loop from the old single-call behavior it replaces.
+// NOT the same as "armed at test setup": this only goes true once
+// uart_protocol_send_broadcast()'s leading-push branch has actually run (see
+// below), so the unrelated pre-send stale-stash drain
+// (safety_link_get_param()'s own `safety_drain_inbox(link, 0)` before it
+// sends anything) never counts as the "first timeout" this models -- only a
+// timeout observed AFTER the leading frame was queued does.
+static bool s_fake_inbox_auto_push_armed = false;
+static bool s_fake_inbox_auto_push_done = false;
+static uart_proto_message_t s_fake_inbox_delayed_msg;
+
 static void fake_inbox_reset(void)
 {
     s_fake_inbox_count = 0;
     s_fake_inbox_pos = 0;
+    s_fake_inbox_auto_push_armed = false;
+    s_fake_inbox_auto_push_done = false;
 }
 
 static void fake_inbox_push(const uart_proto_message_t *msg)
@@ -273,6 +297,10 @@ esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_m
     if (s_fake_inbox_pos < s_fake_inbox_count) {
         *out_msg = s_fake_inbox[s_fake_inbox_pos++];
         return ESP_OK;
+    }
+    if (s_fake_inbox_auto_push_armed && !s_fake_inbox_auto_push_done) {
+        s_fake_inbox_auto_push_done = true;
+        fake_inbox_push(&s_fake_inbox_delayed_msg);
     }
     return ESP_ERR_TIMEOUT;
 }
@@ -302,12 +330,31 @@ static bool s_stub_broadcast_send_succeeds = false;
 static bool s_stub_broadcast_reply_push = false;
 static uint64_t s_stub_broadcast_advance_us = 0;
 static uart_proto_message_t s_stub_broadcast_reply_msg;
+// Enqueued (if set) immediately before s_stub_broadcast_reply_msg, on the
+// same send call -- models an unrelated frame (a periodic STATUS/DIAG/POWER
+// push) landing in the real inbox ahead of the reply this call actually
+// wants. Both land "at send time" from fake_inbox's point of view, same as
+// s_stub_broadcast_reply_msg alone always has -- there is no other point in
+// this synchronous stub to inject a second, earlier frame. Used by
+// test_get_param_survives_a_leading_unrelated_frame() to prove the drain
+// loop keeps waiting past it instead of giving up after the first frame.
+static bool s_stub_broadcast_leading_push = false;
+static uart_proto_message_t s_stub_broadcast_leading_msg;
 esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device_t dst_device,
                                         uint8_t dst_task, uint8_t src_task,
                                         const uint8_t *payload, size_t length)
 { (void)proto; (void)dst_device; (void)dst_task; (void)src_task; (void)payload; (void)length;
   if (!s_stub_broadcast_send_succeeds) {
       return ESP_FAIL;
+  }
+  if (s_stub_broadcast_leading_push) {
+      fake_inbox_push(&s_stub_broadcast_leading_msg);
+      /* Arm the delayed-reply auto-push only from here on -- the leading
+       * frame is now genuinely queued, so the NEXT time the fake receive()
+       * stub finds the queue empty is the drain call actually racing the
+       * real reply, not safety_link_get_param()'s own pre-send stale-stash
+       * clear (which runs before this send and must not count). */
+      s_fake_inbox_auto_push_armed = true;
   }
   if (s_stub_broadcast_reply_push) {
       fake_time_advance_us(s_stub_broadcast_advance_us);
@@ -1351,7 +1398,7 @@ static void test_get_param_drops_reply_with_mismatched_param_id(void)
     size_t out_len = 0;
     esp_err_t err = safety_link_get_param(&link, /*param_id=*/0x0505, out, sizeof(out), &out_len);
 
-    TEST_CHECK(err != ESP_OK, "a param_id mismatch must never be reported as success");
+    TEST_CHECK(err == ESP_FAIL, "a param_id mismatch must never be reported as success");
     TEST_CHECK(link.has_stashed_param == false, "the mismatched reply was consumed (taken), not left "
                                                  "sitting in the stash for a later caller to misread");
 }
@@ -1382,6 +1429,54 @@ static void test_get_param_succeeds_with_matching_param_id(void)
     TEST_CHECK(kilnlink_param_decode(out, out_len, &decoded) == KILNLINK_PARAM_OK,
                "the raw bytes handed back decode cleanly");
     TEST_CHECK(decoded.found == 1 && decoded.value.u8_val == 7, "the relayed value matches what the peer sent");
+}
+
+static void test_get_param_survives_a_leading_unrelated_frame(void)
+{
+    TEST_SECTION("safety_link_get_param -- an unrelated frame (a periodic STATUS/DIAG/POWER push) "
+                 "dequeued ahead of our own PARAM reply must not end the wait early; the reply, which "
+                 "genuinely has not arrived yet at that point, must still be picked up on a later drain "
+                 "within the same call's budget. Reproduces the safety_drain_still_waiting() bug class "
+                 "(safety_link.h) for STACK_MARGIN/PARAM, which had no want_*/got_* wiring.");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    fake_inbox_reset();
+    s_stub_broadcast_send_succeeds = true;
+    /* The reply is NOT pushed at send time -- it "arrives" only after the
+     * call's first internal drain empties the queue and times out once,
+     * exactly like the real bug this reproduces. */
+    s_stub_broadcast_reply_push = false;
+    s_stub_broadcast_advance_us = 500;
+
+    s_stub_broadcast_leading_push = true;
+    memset(&s_stub_broadcast_leading_msg, 0, sizeof(s_stub_broadcast_leading_msg));
+    s_stub_broadcast_leading_msg.length = 1;
+    s_stub_broadcast_leading_msg.payload[0] = SAFETY_CMD_GET_STATUS;
+
+    memset(&s_fake_inbox_delayed_msg, 0, sizeof(s_fake_inbox_delayed_msg));
+    s_fake_inbox_delayed_msg.length =
+        make_param_frame(s_fake_inbox_delayed_msg.payload, /*param_id=*/0x0505, /*found=*/1,
+                          KILNLINK_PARAM_TYPE_U8, (const uint8_t[]){ 9 }, 1);
+
+    uint8_t out[KILNLINK_PARAM_MAX_LEN];
+    size_t out_len = 0;
+    esp_err_t err = safety_link_get_param(&link, /*param_id=*/0x0505, out, sizeof(out), &out_len);
+
+    TEST_CHECK(err == ESP_OK, "a reply that arrives after a leading unrelated frame must still be "
+                              "picked up within the call's own timeout budget, not dropped as ESP_ERR_TIMEOUT");
+    kilnlink_param_t decoded;
+    TEST_CHECK(kilnlink_param_decode(out, out_len, &decoded) == KILNLINK_PARAM_OK,
+               "the delayed reply's raw bytes decode cleanly");
+    TEST_CHECK(decoded.found == 1 && decoded.value.u8_val == 9, "the relayed value matches the delayed reply, "
+                                                                 "not the leading unrelated frame");
+
+    /* Leave global stub state clean for every test after this one -- same
+     * "explicit per-test state, no leftover" convention this file's own
+     * comments call out elsewhere (fake_inbox_reset()'s doc comment above). */
+    s_stub_broadcast_leading_push = false;
+    fake_inbox_reset();
 }
 
 // --------------------------------------------------------------------------
@@ -2014,6 +2109,7 @@ int main(void)
     test_param_frame_10_byte_too_long_is_not_stashed();
     test_get_param_drops_reply_with_mismatched_param_id();
     test_get_param_succeeds_with_matching_param_id();
+    test_get_param_survives_a_leading_unrelated_frame();
     test_stale_reset_leaves_flags_alone_while_link_is_up();
     test_stale_reset_clears_flags_once_link_is_observed_down();
     test_stale_reset_never_received_is_also_down();
