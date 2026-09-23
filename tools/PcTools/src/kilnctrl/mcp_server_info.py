@@ -726,6 +726,51 @@ def get_readiness(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def boot_guard_get(host: Optional[str] = None) -> str:
+    """READ-ONLY: fetch boot_guard's recovery-mode counter (GET
+    /api/boot_guard, App/drivers/http/ota_http_recovery.c's
+    ota_boot_guard_status_get_handler()) -- the same data
+    flash_firmware()'s post-flash boot_guard_reset step reads internally,
+    now available as its own call so the counter can be checked without a
+    flash in flight (previously only observable "by hand", per the
+    2026-09-22 bench finding that led to this tool).
+
+    Unauthenticated when web auth is off; 401s and requires an admin
+    session once web auth is on -- this goes through the same
+    ota_http_client.get_boot_guard_status() helper flash_firmware() already
+    calls, which itself uses http_auth.urlopen(), the same ADMIN-session
+    seam every other admin-tier tool in this package uses. Pure GET, no
+    side effects, refuses nothing, and reports no credentials.
+
+    Returns ``{"boot_count": int, "recovery_mode": bool}`` rendered as one
+    short text block plus a one-line interpretation. See CLAUDE.md's
+    boot_guard section and docs/audits/boot_guard_post_flash_recovery_
+    footgun_2026-09-08.md for why this counter and this route exist.
+
+    Host is auto-resolved the same way get_heap_status()/the OTA/control
+    tools do; pass `host` explicitly for kilnctl.local or a board reachable
+    only from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_readiness()
+    from . import ota_http_client as ota_http
+
+    resolved = _ota_resolve_host(host)
+    try:
+        data = ota_http.get_boot_guard_status(resolved)
+    except ota_http.OtaHttpError as exc:
+        return f"error reading boot_guard over HTTP (host={resolved}): {exc}"
+
+    boot_count = data.get("boot_count")
+    recovery_mode = data.get("recovery_mode")
+    return (
+        f"host={resolved}\n"
+        f"boot_count={boot_count!r}\n"
+        f"recovery_mode={recovery_mode!r}\n"
+        f"summary: counter {boot_count!r}, recovery_mode {recovery_mode!r}"
+    )
+
+
+@_srv._tool()
 def nvs_list_keys(partition: str, namespace: str, host: Optional[str] = None) -> str:
     """READ-ONLY: list the key NAMES AND TYPES (never values, never blobs)
     in one NVS namespace, over GET /api/nvs/keys?partition=<partition>&

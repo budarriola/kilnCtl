@@ -22,9 +22,15 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (182 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `web_auth_logout` was
-added -- an MCP tool wrapping `POST /api/auth/logout` via `http_auth.logout()`,
+the rest behind a search facade (183 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `boot_guard_get` was
+added -- a READ-ONLY MCP tool wrapping `GET /api/boot_guard`
+(`ota_http_recovery.c`'s `ota_boot_guard_status_get_handler()`), reusing
+`ota_http_client.get_boot_guard_status()` (already called internally by
+`flash_firmware()`'s post-flash reset step) so the recovery-mode counter can
+be checked without a flash in flight -- a bench agent had found no tool
+exposed it that day. The one before it was `web_auth_logout`, same day --
+an MCP tool wrapping `POST /api/auth/logout` via `http_auth.logout()`,
 the PC-side session seam every other client already logs in through on a 401
 but that nothing previously called to give the session back; reports `[bool]`
 only (whether a remembered session existed and the logout POST was sent),
