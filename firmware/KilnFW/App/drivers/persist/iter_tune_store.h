@@ -75,6 +75,18 @@ extern "C" {
 // ZONES_CFG_VERSION bump (this store never participated in that chain, see
 // this file's top-of-file comment and CONFIG_MIGRATION_CHAIN_PLAN.md sec
 // 0.1), so it carries none of that chain's rollback hazard.
+//
+// The migration itself is IN-RAM ONLY on a bare load -- iter_tune_store_start()
+// does not re-persist a migrated blob to NVS/cfg_fs by itself (step 7 review,
+// 2026-09-23, finding 1). This is deliberate: re-tagging the on-disk copy to
+// v2 before any real v2 writer exists would make a rollback to v1 firmware
+// read the store as version-mismatched and treat every zone as
+// never-enabled. On-disk bytes stay at v1 until iter_tune_store_set_zone()
+// performs a real write (which always persists the current, in-RAM-migrated
+// blob, so it lands on disk as v2 from then on) -- a v1 rollback with no
+// intervening write is therefore fully lossless, and a v1 rollback losing a
+// write that happened after that first v2 write is expected/unavoidable,
+// same as any other store in this tree.
 #define ITER_TUNE_STORE_VERSION_V1 1u
 #define ITER_TUNE_STORE_VERSION 2u
 
@@ -109,6 +121,17 @@ typedef struct {
     uint8_t reserved[2]; // always 0
     iter_tune_store_zone_t zone[ITER_TUNE_STORE_MAX_ZONES];
 } iter_tune_store_blob_t;
+
+// Pinned sizes/offsets (step 7 review, 2026-09-23, advisory finding 6) -- a
+// silent size or layout change here would be exactly the kind of drift
+// note_schema_verdict()'s exact-length check (iter_tune_store.c) depends on,
+// and offsetof(carry_count)==5 is the byte v1's always-zero reserved[0]
+// occupied, which migrate_v1_to_current()'s byte-compatibility claim rests
+// on.
+_Static_assert(sizeof(iter_tune_store_zone_t) == 32, "iter_tune_store_zone_t size must stay pinned");
+_Static_assert(offsetof(iter_tune_store_zone_t, carry_count) == 5,
+               "carry_count must stay at v1's old reserved[0] byte offset");
+_Static_assert(sizeof(iter_tune_store_blob_t) == 100, "iter_tune_store_blob_t size must stay pinned");
 
 // PURE. Wrong size, unknown version, zone_count out of range, or any
 // out-of-range enum field -> false, i.e. treat as no stored state at all.

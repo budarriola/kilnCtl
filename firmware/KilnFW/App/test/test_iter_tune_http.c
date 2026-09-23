@@ -95,12 +95,20 @@ esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zon
 
 void iter_tune_store_reset_for_test(void) { fake_store_reset(); }
 
-// Fake: this file's http-surface tests never exercise a schema-version
-// refusal (that is test_iter_tune_store.c's job) -- always "not refused".
+// Fake, controllable (step 7 review, 2026-09-23, advisory finding 10): most
+// of this file's http-surface tests want "not refused" (schema-version
+// refusal itself is test_iter_tune_store.c's job), but
+// test_status_reports_schema_refused_version() below needs to drive the
+// status handler's schema_refused_version JSON branch.
+static bool s_fake_schema_refused = false;
+static uint8_t s_fake_schema_refused_version = 0;
+
 bool iter_tune_store_schema_refused(uint8_t *out_version)
 {
-    (void)out_version;
-    return false;
+    if (s_fake_schema_refused && out_version != NULL) {
+        *out_version = s_fake_schema_refused_version;
+    }
+    return s_fake_schema_refused;
 }
 
 // ---------------------------------------------------------------------
@@ -167,13 +175,25 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 
-// iter_tune_status_get_handler() (GET /api/iter_tune/status) is not
-// exercised by this file's tests (its own status_get_handler shape needs no
-// new coverage from this review round), but it lives in the same
-// translation unit and must still link.
-esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *r, const char *str) { (void)r; (void)str; return ESP_OK; }
-
 static char s_resp_body[512];
+
+// iter_tune_status_get_handler() (GET /api/iter_tune/status) chunks its body
+// via httpd_resp_sendstr_chunk() (the "httpd stack blob class" convention,
+// CLAUDE.md) -- appended into s_resp_body so
+// test_status_reports_schema_refused_version() (advisory finding 10) can
+// assert on the assembled JSON. A NULL str is httpd's end-of-chunked-response
+// marker, not a chunk to append.
+esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *r, const char *str)
+{
+    (void)r;
+    if (str == NULL) {
+        return ESP_OK;
+    }
+    size_t used = strlen(s_resp_body);
+    snprintf(s_resp_body + used, sizeof(s_resp_body) - used, "%s", str);
+    return ESP_OK;
+}
+
 static int s_resp_status = 200; // tracked as the numeric prefix of the last httpd_resp_set_status() string
 
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
@@ -202,6 +222,8 @@ static void reset_capture(void)
     s_set_pid_calls = 0;
     s_set_pid_result = true;
     s_autotune_active_zone_result = false;
+    s_fake_schema_refused = false;
+    s_fake_schema_refused_version = 0;
     fake_store_reset();
 }
 
@@ -326,6 +348,28 @@ static void test_never_commissioned_zone_refuses_409(void)
     TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid never called for a never-commissioned zone");
 }
 
+// Advisory finding 10 (step 7 review, 2026-09-23): GET /api/iter_tune/status
+// must surface a refused newer-than-known schema version as
+// "schema_refused_version" in its JSON preamble, not silently.
+static void test_status_reports_schema_refused_version(void)
+{
+    reset_capture();
+    s_fake_schema_refused = true;
+    s_fake_schema_refused_version = 3;
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "status handler returns ESP_OK even when a schema refusal is reported");
+    TEST_CHECK(strstr(s_resp_body, "\"schema_refused_version\":3") != NULL,
+               "status JSON reports the refused version number");
+
+    reset_capture(); // not refused: no such field at all
+    err = iter_tune_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "status handler returns ESP_OK when nothing was refused");
+    TEST_CHECK(strstr(s_resp_body, "schema_refused_version") == NULL,
+               "status JSON omits schema_refused_version entirely when nothing was refused");
+}
+
 int main(void)
 {
     TEST_SECTION("iter_tune_http");
@@ -335,6 +379,7 @@ int main(void)
     test_refuses_while_autotune_active_on_zone();
     test_missing_zone_query_refuses_400();
     test_never_commissioned_zone_refuses_409();
+    test_status_reports_schema_refused_version();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

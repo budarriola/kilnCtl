@@ -81,6 +81,21 @@ bool iter_tune_store_blob_validate(const void *bytes, size_t len) {
 // including a would-be version byte past the copied region, are never
 // examined) -- version and zone_count are the first two bytes of every
 // schema this file has ever shipped and must never move.
+//
+// KNOWN LIMITATION (step 7 review, 2026-09-23, finding 3): a future
+// size-CHANGING version (e.g. a v3 whose blob is a different length than
+// today's 100 bytes) is NEVER reported by this function -- the caller's own
+// length check (hal_kv_get_blob's `len` out-param for NVS, or the cfg_fs
+// file-length check) already rejects it before note_schema_verdict() is even
+// reached with a size that could match `sizeof(iter_tune_store_blob_t)`.
+// Such a boot instead falls silently into the ordinary "nothing persisted"
+// bucket, exactly like plain corruption, rather than getting the loud
+// newer-than-known banner. This is accepted for now (test_larger_blob_size_change_not_reported_current_limitation()
+// in test_iter_tune_store.c locks in and documents this exact gap) rather
+// than adding a NULL/small-buffer NVS size-probe read ahead of any real v3;
+// see docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1's iter_tune row and
+// docs/ITER_TUNE_REDESIGN_PLAN.md step 7 for the same note. Revisit this
+// when a size-changing version is actually designed.
 static void note_schema_verdict(const void *bytes, size_t len) {
     if (bytes == NULL || len != sizeof(iter_tune_store_blob_t)) {
         return;
@@ -208,6 +223,16 @@ esp_err_t iter_tune_store_start(void) {
                  (unsigned long)file_rev, (unsigned long)nvs_rev, (file_rev > nvs_rev) ? "FILE" : "NVS");
     }
 
+    // Note (step 7 review, 2026-09-23, advisory finding 5): `nvs_ok` is also
+    // false when NVS held a blob that validate() rejected as newer-than-known
+    // (note_schema_verdict() above already flagged s_schema_refused_newer in
+    // that case) -- this branch does not distinguish that from an ordinary
+    // missing/corrupt NVS entry, so a valid older FILE still wins here and
+    // gets written back into NVS via nvs_save_raw() below, clobbering the
+    // refused-newer NVS blob. No behavior change: this is the same
+    // file-wins-and-catches-NVS-up rule as any other disagreement, just
+    // worth naming since a "refused newer" NVS blob is otherwise a boot
+    // condition worth being deliberate about overwriting.
     if (file_ok && (!nvs_ok || file_rev > nvs_rev)) {
         s_blob = file_blob;
         s_rev = file_rev;
@@ -226,13 +251,23 @@ esp_err_t iter_tune_store_start(void) {
     }
     s_loaded = true;
 
-    // Forward-migrate an old (v1) blob now that a winner has been resolved,
-    // and persist the migrated form so the NEXT boot no longer has to.
-    if (migrate_v1_to_current(&s_blob)) {
-        s_rev++;
-        nvs_save_raw(&s_blob, s_rev);
-        cfg_fs_save_raw(&s_blob, s_rev);
-    }
+    // Forward-migrate an old (v1) blob now that a winner has been resolved --
+    // IN RAM ONLY. Deliberately does NOT re-persist here (step 7 review,
+    // 2026-09-23, finding 1): re-tagging the on-disk copy to v2 on a bare
+    // load, before any real v2 writer exists, would mean a rollback to v1
+    // firmware after this boot reads the store as version-mismatched (v1's
+    // validate() only accepts version==1) and treats every zone as
+    // never-enabled -- a real, if currently low-impact, regression, since no
+    // producer sets carry_count/anchor/baseline yet. Leaving the on-disk
+    // bytes at v1 until iter_tune_store_set_zone() performs a REAL write
+    // means a v1 rollback with no intervening write is fully lossless: NVS
+    // and cfg_fs still hold a v1 blob v1 firmware can read. The on-disk
+    // layout only becomes v2 the first time set_zone() persists (any write
+    // always stamps s_blob.version = ITER_TUNE_STORE_VERSION, since s_blob
+    // was migrated to v2 in RAM right here), at which point a v1 rollback
+    // losing that specific write is expected and unavoidable -- same as any
+    // other store in this tree.
+    migrate_v1_to_current(&s_blob);
     return ESP_OK;
 }
 
