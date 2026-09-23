@@ -108,6 +108,19 @@ void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool 
         memset(out_cfg, 0, sizeof(*out_cfg));
         return;
     }
+    /* Same normalize-not-reject discipline zones_config_store.c's own
+     * nvs_load_from_decode() applies to a decoded NVS blob -- see
+     * zones_config_json_normalize_settings_source_cycles()'s own comment.
+     * Without this, a settings_source cycle stored in the `cfg` file
+     * (however it got there) survives THIS decode un-normalized: if the file
+     * then wins zones_config_cfg_fs_resolve()'s tie-break, nvs_load()'s
+     * resolve/memcmp compares an un-normalized file struct against a
+     * normalized NVS one (nvs_load_from_decode() always normalizes), which
+     * can read as a spurious divergence, and write-back would persist the
+     * un-normalized cycle into NVS -- normalized only on THAT blob's own
+     * next decode, two boots later instead of one. Normalizing here keeps
+     * both stores' decode paths identical. */
+    zones_config_json_normalize_settings_source_cycles(out_cfg, ZONES_CFG_FILE_PATH);
 
     *out_rev = rev;
     *out_valid = true;

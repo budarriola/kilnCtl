@@ -404,13 +404,29 @@ void migrate_from_default_partition(void)
  * synchronous nvs_save() here is safe; nvs_save()'s own comment documents
  * why IT must never be called inline from arbitrary httpd/executor callers,
  * which does not apply to this one-time boot-load call site. */
-static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_before_migration)
+static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_before_migration,
+                                                          bool from_cfg_file)
 {
+    /* `from_cfg_file` names the actual winning source for the log lines
+     * below -- nvs_load()'s file-won call site has no single "on-disk NVS
+     * version" to report (NVS may have been invalid, or a different,
+     * now-overwritten version) and used to pass a hardcoded 0, which read
+     * as "was on-disk v0" -- meaningless to an operator, since v0 was never
+     * really on disk anywhere. This is report text only; the latched
+     * zones_cfg_migration_persist_fault_t::on_disk_version field is
+     * unaffected. */
+    char source_desc[24];
+    if (from_cfg_file) {
+        snprintf(source_desc, sizeof(source_desc), "cfg file source");
+    } else {
+        snprintf(source_desc, sizeof(source_desc), "on-disk v%u", (unsigned)on_disk_version_before_migration);
+    }
+
     for (int attempt = 0; attempt < 2; ++attempt) {
         esp_err_t save_err = nvs_save(); /* stamps version=ZONES_CFG_VERSION, a real crc32, and writes it */
         if (save_err != ESP_OK) {
-            ESP_LOGW(ZONES_HTTP_TAG, "migrated zones_cfg (was on-disk v%u) write-back attempt %d failed: %s",
-                     (unsigned)on_disk_version_before_migration, attempt, esp_err_to_name(save_err));
+            ESP_LOGW(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) write-back attempt %d failed: %s", source_desc,
+                     attempt, esp_err_to_name(save_err));
             continue;
         }
         uint8_t raw[sizeof(zones_cfg_t)];
@@ -425,9 +441,9 @@ static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_
         hal_status_t gerr = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len);
         hal_kv_close(&h);
         if (gerr == HAL_OK && len == sizeof(s_zones.cfg) && memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0) {
-            ESP_LOGI(ZONES_HTTP_TAG, "migrated zones_cfg (was on-disk v%u) persisted to '%s' and verified by "
+            ESP_LOGI(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) persisted to '%s' and verified by "
                           "read-back as v%u, crc32 0x%08x",
-                     (unsigned)on_disk_version_before_migration, KILN_NVS_PARTITION,
+                     source_desc, KILN_NVS_PARTITION,
                      (unsigned)ZONES_CFG_VERSION, (unsigned)s_zones.cfg.crc32);
             return true;
         }
@@ -435,11 +451,11 @@ static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_
                       "just written -- retrying",
                  attempt);
     }
-    ESP_LOGE(ZONES_HTTP_TAG, "migrated zones_cfg (was on-disk v%u) could NOT be verified as persisted to '%s' "
+    ESP_LOGE(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) could NOT be verified as persisted to '%s' "
                   "after retry -- this boot runs on the migrated in-RAM copy, but flash still holds the old "
                   "bytes; a second firmware install one step further (the one-step migration policy) will "
                   "be unable to read them and will treat this config as too old to consume",
-             (unsigned)on_disk_version_before_migration, KILN_NVS_PARTITION);
+             source_desc, KILN_NVS_PARTITION);
     /* M13 fix (2026-09-16): this used to be an ESP_LOGE only, invisible to
      * the operator -- see zones_cfg_migration_persist_fault_t's doc comment
      * (zones_config_accessors.h). Latch it so dashboard_http.c/LCD can name
@@ -569,11 +585,11 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * logged as 0 with an explicit "file source" note instead of reusing
      * nvs_load_from_with_migration_info()'s (unrelated) value. */
     if (err == ESP_OK && trustworthy && migrated_from_nvs) {
-        (void)zones_config_persist_migrated_blob_verified(on_disk_version_before);
+        (void)zones_config_persist_migrated_blob_verified(on_disk_version_before, false);
     } else if (err == ESP_OK && trustworthy && file_side_needs_writeback) {
         ESP_LOGI(ZONES_HTTP_TAG, "zones_cfg: `cfg` file source won this boot's load and diverged from NVS -- "
                       "writing the resolved config back to both NVS and the file");
-        (void)zones_config_persist_migrated_blob_verified(0);
+        (void)zones_config_persist_migrated_blob_verified(0, true);
     }
     return err;
 }

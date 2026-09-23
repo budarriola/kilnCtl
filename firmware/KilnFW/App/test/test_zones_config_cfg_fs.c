@@ -432,9 +432,20 @@ static void test_file_migration_matches_direct_blob_decode_v21(void)
                     * below since both call the exact same function. */
 
     // Direct decode, off the file wrapper entirely -- the reference vector.
+    // Both the NVS decode path (nvs_load_from_decode()) and, as of this fix,
+    // the file decode path (zones_config_cfg_fs_load_raw()) apply
+    // zones_config_json_normalize_settings_source_cycles() right after decode
+    // as one fixed two-step contract, not something either path invents on
+    // its own -- so the reference vector here must apply that same second
+    // step to stay a fair comparison. This v21 fixture's single zone (index
+    // 0) leaves settings_source[group] zero-initialized, which
+    // zone_settings_source_chain_has_cycle() treats as a self-reference
+    // cycle on the first hop by design (see that header's own doc comment),
+    // so normalize does mutate it -- on both sides identically.
     zones_cfg_t direct;
     const char *reason = "";
     zones_decode_result_t direct_result = zones_config_json_decode_blob(&v21, sizeof(v21), &direct, &reason);
+    zones_config_json_normalize_settings_source_cycles(&direct, "test:direct-v21");
 
     // Through the file: 4-byte rev prefix + the identical v21 bytes.
     uint8_t filebuf[4 + sizeof(v21)];
@@ -853,6 +864,99 @@ static void test_file_sourced_writeback_happens_once_not_every_boot(void)
                "the NVS blob is byte-identical across the second load -- nothing was rewritten");
 }
 
+// ---------------------------------------------------------------------
+// 11. Follow-up to cce21da0 (2026-09-22): the `cfg` file's own decode path
+//     (zones_config_cfg_fs_load_raw()) did not normalize a stored
+//     settings_source cycle before this pass -- only zones_config_store.c's
+//     NVS-side decode (nvs_load_from_decode()) called
+//     zones_config_json_normalize_settings_source_cycles(). A file holding a
+//     cycle (however it got there) that then WINS zones_config_cfg_fs_
+//     resolve()'s tie-break was adopted un-normalized into s_zones.cfg, and
+//     test 8's single-migration-step write-back would persist that
+//     un-normalized cycle into NVS too -- converging only two boots later,
+//     on NVS's own next decode, instead of immediately (an asymmetry, not a
+//     rejection: the config still loads and runs). Proves both the in-RAM
+//     struct and the NVS blob written back by the file-won path are
+//     normalized after ONE load.
+// ---------------------------------------------------------------------
+static void test_file_cycle_is_normalized_in_ram_and_on_writeback(void)
+{
+    TEST_SECTION("zones cfg_fs: a settings_source cycle stored in the `cfg` file is normalized on load, "
+                 "both in RAM and in the NVS blob the file-won migration path writes back");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    zones_cfg_t cyc;
+    fill_valid_cfg(&cyc, "z0", 5.0f);
+    cyc.version = ZONES_CFG_VERSION; /* fill_valid_cfg() leaves version 0 -- only nvs_save()/
+                                       * zones_config_cfg_fs_save() writing raw bytes as-is means
+                                       * this file's own decode must see the CURRENT version to
+                                       * accept it. */
+    cyc.thermo_count = 2;
+    cyc.relay_count = 2;
+    cyc.max_simultaneous_relays = 2;
+    snprintf(cyc.zones[1].name, sizeof(cyc.zones[1].name), "z1");
+    cyc.zones[1].relay_mask = 0x02;
+    cyc.zones[1].thermo_mask = 0x02;
+    cyc.zones[1].max_temp_c = 1200.0f;
+    cyc.zones[1].model_k_dc = 12.0f;
+    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+        cyc.zones[0].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        cyc.zones[1].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    // The 2-cycle the live setter refuses -- reachable here only because
+    // this bypasses zones_http.c's own write-time guard, writing directly
+    // via zones_config_cfg_fs_save() (which only re-stamps the CRC and never
+    // validates or normalizes settings_source), same as this file predating
+    // the normalize guard, or being tampered with directly, would look like.
+    cyc.zones[0].settings_source[SRC_GROUP_LIMITS] = 1;
+    cyc.zones[1].settings_source[SRC_GROUP_LIMITS] = 0;
+    cyc.zones[0].pid_kp = 5.0f; // must survive normalization, proving this is not a wipe
+
+    TEST_CHECK(zones_config_cfg_fs_save(&cyc, 5) == ESP_OK,
+               "test setup: a settings_source cycle staged directly into the file at rev 5");
+
+    // NVS side is genuinely empty (reset_all()/fake_kv_reset_all(), no
+    // nvs_save() run this test), so the file wins zones_config_cfg_fs_
+    // resolve()'s tie-break outright.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load adopts the file-sourced config");
+
+    uint8_t s0 = s_zones.cfg.zones[0].settings_source[SRC_GROUP_LIMITS];
+    uint8_t s1 = s_zones.cfg.zones[1].settings_source[SRC_GROUP_LIMITS];
+    TEST_CHECK(s0 != 1 || s1 != 0, "IN RAM: the stored 2-cycle no longer exists after load -- at least one "
+                                   "of the two links was broken by normalization");
+    TEST_CHECK(s0 == ZONE_SETTINGS_SOURCE_CUSTOM || s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "IN RAM: the break collapsed (at least) one cyclic zone to Custom, the same resolution the "
+              "NVS-side decode path already used before this fix");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].pid_kp, 5.0f, 1e-6,
+                    "normalization touched only settings_source -- zone 0's pid_kp survives intact");
+
+    // THE FIX: the write-back this file-won load triggers must persist the
+    // ALREADY-NORMALIZED struct, not the raw cyclic bytes -- read NVS back
+    // directly (never through nvs_load_from(), which would normalize AGAIN
+    // on ITS OWN decode and mask an unfixed bug in the file-side path).
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "NVS opened read-only for verification");
+    uint8_t readback[sizeof(zones_cfg_t)];
+    memset(readback, 0, sizeof(readback));
+    size_t readback_len = sizeof(readback);
+    hal_status_t rb_err = hal_kv_get_blob(&h, NVS_KEY_ZONES, readback, &readback_len);
+    hal_kv_close(&h);
+    TEST_CHECK(rb_err == HAL_OK && readback_len == sizeof(zones_cfg_t), "the write-back landed in NVS");
+    zones_cfg_t nvs_cfg;
+    memcpy(&nvs_cfg, readback, sizeof(nvs_cfg));
+    uint8_t nvs_s0 = nvs_cfg.zones[0].settings_source[SRC_GROUP_LIMITS];
+    uint8_t nvs_s1 = nvs_cfg.zones[1].settings_source[SRC_GROUP_LIMITS];
+    TEST_CHECK(nvs_s0 != 1 || nvs_s1 != 0,
+              "THE FIX: the NVS blob written back by the file-won migration path does NOT hold the "
+              "un-normalized cycle -- before this fix, the raw cyclic bytes were persisted verbatim and "
+              "only converged on NVS's own next decode, one boot later");
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
     test_partition_absent_falls_through_to_nvs_only();
@@ -866,6 +970,7 @@ void run_test_zones_config_cfg_fs(void)
     test_file_wins_after_migration_writes_back_to_nvs();
     test_newer_nvs_blob_is_not_overwritten_by_file_writeback();
     test_file_sourced_writeback_happens_once_not_every_boot();
+    test_file_cycle_is_normalized_in_ram_and_on_writeback();
 
     reset_all();
 }
