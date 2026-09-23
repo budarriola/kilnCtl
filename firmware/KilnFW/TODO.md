@@ -564,11 +564,24 @@ in the fewest taps (phone-screen constraint). Built as described.
   (2026-08-20)** — no manual setpoint override bypassing a running profile.
   `ui_page_temperature.c` (per-zone reading + manual relay toggles) stays.
 - Backup/restore, LCD tc-type page (`docs/ARCHITECTURE_DECISIONS.md`):
-  - [ ] Restore blocked here by the safety-link interlock (unverified
-        kind/version rejection); right gate for restore vs. firmware write
-        is open. Setters still needed for `zones_http.h`'s remaining fields.
-        No host-test harness reaches `backup_http.c`/`wifi_prov.c`; export's
-        `"_":0` sentinel is cosmetic junk to ignore.
+  - [x] **Stale as of 2026-09-22 — closed docs-only, no code gap found.**
+        Restore already gates through `ota_http_check_interlocks()`
+        (`backup_import.c:2671`, same wrapper `ota_http.c`'s OTA routes use).
+        Every `zones_http.h`-exposed field (via `zones_config_accessors.h`)
+        has a validating setter and round-trips through
+        `backup_import_apply()` — see
+        `test_backup_import.c`'s `test_export_round_trips_through_import_to_identical_config`
+        (line ~3145), which checks PID gains, tc_type, name, masks,
+        cal_offset_c, sanity_rate_c_per_min, control_mode, max/min_temp_c,
+        heater_window_ms, fuzzy_strength_pct, coupling_coeff[], the
+        coupling_diag_k_dc addition, settings_source and failsafe_state
+        individually. `test_wifi_prov.c` and `test_backup_import.c` both
+        exist and link `backup_http.c`'s split files
+        (`backup_json.c`/`backup_export.c`/`backup_import.c`) and
+        `wifi_prov.c` into host tests via the same `#include`-the-.c
+        convention used elsewhere in this suite. Matches
+        `project_backup_round_trip_coverage.md`'s "only the Wi-Fi password
+        is irreducible" note.
 
 **Web page structure rework — DONE (2026-08-20/21).** `settings_page.html`
 (now trimmed to just the danger zone), `manual_page.html`, `safety_page.html`,
