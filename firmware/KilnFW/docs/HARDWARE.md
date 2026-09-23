@@ -445,3 +445,26 @@ has its own 5 V switcher and 3.3 V rail; the two domains share no ground. Relay
 coils run from the 12 V rail of their own domain. D25/D28 (main) and D27/D29
 (safety) are rail indicator LEDs tied through 2.2k to 3.3V/5V — none of them is
 MCU-driven, which is why the firmware has no heartbeat LED by default.
+
+## Wanted for the next board revision
+
+Owner wishlist, collected here so it is not scattered across bench notes.
+Nothing in this section exists on the current board; firmware has no
+support for any of it yet.
+
+- **NTC temperature sensors on the solid-state relays.** One thermistor per
+  SSR heatsink so the controller can see SSR temperature directly, alarm on
+  an overheating relay, and drive the relay fan from a measurement rather
+  than an assumption. Needs ADC inputs (or an I2C ADC) plus the divider
+  network; the ESP32-S3's own ADC pins are mostly taken (see the pin table
+  above), so plan the channel budget before choosing the part.
+- **Two PWM outputs.** One for **relay (SSR) fan control**, one for **case fan
+  control**, each intended for a 4-wire PWM fan or a low-side MOSFET driver.
+  Should come straight off ESP32-S3 GPIO through LEDC, not through the SX1509
+  expander (its PWM is 8-bit and slow to update over I2C, and the expander's
+  channels are already committed above).
+
+Related next-revision notes already recorded elsewhere: the LCD SDA/SCL swap
+and the missing backlight control line (Display section above), and the
+second independent thermocouple and contactor feedback contact proposed in
+`firmware/SaftyFW/docs/SAFETY_MODEL.md`.
