@@ -144,6 +144,16 @@ esp_err_t iter_tune_store_start(void) {
     uint32_t file_rev = 0;
     bool file_ok = cfg_fs_load_raw(&file_blob, &file_rev);
 
+    // Log a rev disagreement the same way zones_config_cfg_fs.c/
+    // kiln_cfg_store_cfg_fs.c do (Opus review of 5f2acb7f, advisory A5) --
+    // both sides being present but not agreeing is worth a boot-time
+    // breadcrumb even though the tie-break below resolves it safely either
+    // way.
+    if (file_ok && nvs_ok && file_rev != nvs_rev) {
+        ESP_LOGW(TAG, "iter_tune file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting %s (strictly higher rev wins)",
+                 (unsigned long)file_rev, (unsigned long)nvs_rev, (file_rev > nvs_rev) ? "FILE" : "NVS");
+    }
+
     if (file_ok && (!nvs_ok || file_rev > nvs_rev)) {
         s_blob = file_blob;
         s_rev = file_rev;

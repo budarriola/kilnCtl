@@ -29,6 +29,7 @@ byte a future release can bump):
 | ESP saved kiln-config slots | `KILN_CFG_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/kiln_cfg_store_internal.h`) | 3; a real two-step chain — see §1.1 |
 | ESP fire profiles | `PROFILE_VERSION` (`firmware/KilnFW/App/drivers/http/profiles_http.c`) | 4; monolithic per-version branches |
 | RP2040 safety config | `CONFIG_STORE_FORMAT_VERSION` (`firmware/SaftyFW/src/config_store.h`) | 3 as of the CT-channel-mask pass — corrected from this table's earlier "2, one v1->v2 branch"; `config_store_unpack_ex()` now carries two inline branches (`CONFIG_STORE_FORMAT_VERSION_V1`, `_V2`), not one |
+| ESP iterative-tuning persistence | `ITER_TUNE_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/iter_tune_store.h`) | 1; no migration yet, single version since introduction (docs/ITER_TUNE_REDESIGN_PLAN.md step 7). Independent of ZONES_CFG_VERSION -- rollback behaviour: older firmware that predates this store simply never opens the "iter_tune" NVS namespace or reads iter_tune.bin, so both copies are silently ignored, not migrated or deleted. |
 
 Not governed, and why:
 

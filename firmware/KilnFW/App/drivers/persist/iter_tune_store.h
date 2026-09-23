@@ -22,11 +22,11 @@
 // sanctioned action (the restore-commissioned-gains control route).
 //
 // OWN SCHEMA VERSION, NOT A ZONES_CFG_VERSION BUMP: this is a brand-new,
-// independent store (same governance class as KILN_CFG_STORE_VERSION,
-// docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1's per-store table), not part
-// of the zones-config document. It owns ITER_TUNE_STORE_VERSION and is
-// listed in that table as its own row -- it does not participate in
-// ZONES_CFG_VERSION's migration chain at all.
+// independent store (same governance class as KILN_CFG_STORE_VERSION). It
+// owns ITER_TUNE_STORE_VERSION and has its own row ("ESP iterative-tuning
+// persistence") in docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1's per-store
+// table -- it does not participate in ZONES_CFG_VERSION's migration chain
+// at all.
 //
 // PER-ZONE OPT-IN, DEFAULT OFF: a zeroed blob (version set, everything else
 // zero) is a fully valid, fully-disabled starting state for every zone --
@@ -44,10 +44,12 @@
 extern "C" {
 #endif
 
-// Matches ZONE_COUNT elsewhere in this tree (3 zones on this board). Kept as
-// its own constant, not an #include of zones_config_accessors.h, so this
-// persistence module stays free of the zones-config header chain -- the
-// _Static_assert in iter_tune_store.c holds the two together.
+// Matches MAX31856_CHANNEL_COUNT elsewhere in this tree (3 zones on this
+// board). Kept as its own constant, not an #include of
+// zones_config_accessors.h, so this persistence module stays free of the
+// zones-config header chain -- the _Static_assert in iter_tune_http.c (the
+// one file that already includes both this header and
+// zones_config_accessors.h) holds the two together.
 #define ITER_TUNE_STORE_MAX_ZONES 3u
 
 // Bumped only if the stored layout changes. A blob whose version this build

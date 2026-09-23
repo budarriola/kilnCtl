@@ -54,6 +54,20 @@ if (-not (Test-Path $bridgeDir)) {
 $bridges = @(Get-ChildItem -Path $bridgeDir -Filter '*_cfg_fs.c' -File |
              Where-Object { $_.Name -ne 'cfg_fs.c' })
 
+# iter_tune_store.c (docs/ITER_TUNE_REDESIGN_PLAN.md step 7) dual-writes NVS
+# and the cfg LittleFS partition with the exact same file_rev/nvs_rev
+# tie-break every *_cfg_fs.c bridge uses, but keeps its plan-mandated name
+# (iter_tune_store.h's own header comment: "SAME shape kiln_cfg_store_cfg_fs.c/
+# zones_config_cfg_fs.c use"), not the *_cfg_fs.c suffix, so the glob above
+# never sees it (Opus review of 5f2acb7f, advisory A3). Added explicitly
+# rather than widening the glob, since a name-suffix-only match would also
+# start matching unrelated future files that happen to end in "_cfg_fs.c"
+# for other reasons.
+$iterTuneStore = Join-Path $bridgeDir 'iter_tune_store.c'
+if (Test-Path $iterTuneStore) {
+    $bridges += Get-Item -LiteralPath $iterTuneStore
+}
+
 # Positive presence assertion, so a rename/split that moves these modules
 # does not leave this check silently passing with zero coverage (the
 # `if not path.is_file(): skipTest(...)` failure mode CLAUDE.md calls out).
@@ -68,7 +82,8 @@ if ($bridges.Count -lt 1) {
 $tracked = @{}
 Push-Location $repoRoot
 try {
-    $lsOut = & git ls-files -- 'firmware/KilnFW/App/drivers/persist/*_cfg_fs.c' 2>$null
+    $lsOut = & git ls-files -- 'firmware/KilnFW/App/drivers/persist/*_cfg_fs.c' `
+                                'firmware/KilnFW/App/drivers/persist/iter_tune_store.c' 2>$null
     foreach ($line in $lsOut) {
         if ($line) { $tracked[[System.IO.Path]::GetFileName($line)] = $true }
     }

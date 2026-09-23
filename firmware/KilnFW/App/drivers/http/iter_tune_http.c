@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 
+#include "autotune_engine.h" // autotune_engine_is_active_on_zone()
 #include "iter_tune.h"
 #include "iter_tune_store.h"
 #include "zones_config_accessors.h" // zones_config_set_pid(), MAX31856_CHANNEL_COUNT
@@ -90,6 +91,17 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
+    // A1 (Opus review of 5f2acb7f): refuse while autotune owns this zone --
+    // autotune_engine_guard.c's accept path would silently overwrite
+    // whatever gains we are about to restore, and iter_tune has no way to
+    // find out its work was clobbered.
+    if (autotune_engine_is_active_on_zone((uint8_t)zone)) {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"autotune is running on this zone\"}");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    }
+
     iter_tune_zone_state_t transient = {0};
     transient.has_anchor = stored.has_anchor;
     if (stored.has_anchor) {
@@ -107,15 +119,33 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     iter_tune_gains_t restored = iter_tune_restore_commissioned(&transient);
     bool applied = zones_config_set_pid((uint8_t)zone, restored.kp, restored.ki, restored.kd);
 
+    if (!applied) {
+        // Opus review of 5f2acb7f, finding 2: a refused zones_config_set_pid
+        // must not be recorded as if the restore happened -- the persisted
+        // record is left completely untouched (not even the OFF/status
+        // fields), so a retried restore still sees the original anchor.
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"zones_config_set_pid refused\"}");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    }
+
+    // Opus review of 5f2acb7f, finding 2 (reset-one-side class):
+    // iter_tune_restore_commissioned() sets state->baseline = the restored
+    // gains (iter_tune.c:139-147) -- that is now what step 8's
+    // iter_tune_active_gains() would return for this zone, so the persisted
+    // record's baseline_* must be updated to match, not left holding the
+    // discarded pre-restore baseline.
+    stored.has_baseline = 1;
+    stored.baseline_kp = transient.baseline.kp;
+    stored.baseline_ki = transient.baseline.ki;
+    stored.baseline_kd = transient.baseline.kd;
     stored.enabled = 0;
     stored.status = transient.status;       // OFF, per iter_tune_restore_commissioned()
     stored.stop_reason = transient.stop_reason; // NONE
     esp_err_t persist_err = iter_tune_store_set_zone((uint8_t)zone, &stored);
 
-    if (!applied) {
-        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"zones_config_set_pid refused\"}");
-        httpd_resp_set_status(req, "500 Internal Server Error");
-    } else if (persist_err != ESP_OK) {
+    if (persist_err != ESP_OK) {
         n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"warning\":\"gains applied but persisting the OFF state failed\"}");
     } else {

@@ -124,16 +124,15 @@
 >   this gate to treat the simulator as evidence for anything dwell-entry-peak
 >   related until that bar closes.
 >
-> **Still NOT done, and NOT attempted in this pass either** (see the
+> **Still NOT done as of this status block's original pass** (see the
 > 2026-09-10 status update below sec 9 for why): the noise-floor artifact
-> (Bar 2, sec 3.1/4), persistence + HTTP surface (step 7's remaining parts),
-> and shadow mode (step 8). All three were assessed this pass, not skipped
-> unexamined — the noise-floor question turned out to be answerable from
-> existing local captures (see the new subsection after sec 3.1); persistence
-> and shadow mode remain blocked on net-new C engineering of the same
-> "dedicated pass" size as G1-G4 was, now compounded by the still-open
-> dwell-entry-peak credibility bar above. Nothing is wired into
-> `profile_executor.c` and the module proposes nothing on hardware.
+> (Bar 2, sec 3.1/4), and shadow mode (step 8). **Superseded for step 7:**
+> persistence + HTTP surface landed (`aad8d697`, see row 7 below
+> for exactly what its acceptance criteria still lack). Shadow mode remains
+> blocked on net-new C engineering of the same "dedicated pass" size as
+> G1-G4 was, now compounded by the still-open dwell-entry-peak credibility
+> bar above. Nothing is wired into `profile_executor.c` and the module
+> proposes nothing on hardware.
 >
 > **Regression found in this pass: `d63a5591`'s coupling-model fix moved A1's
 > false-accept rate off zero.** Re-running `sim_iter_tune.exe 220` (the exact
@@ -701,7 +700,7 @@ Riskiest last. No hardware exposure before step 8, no heat before step 9.
 | 4 | Null-experiment noise-floor estimation in the simulator; floors emitted as a **data artifact**, not compiled constants. | low | floors within 2× of `noise_floor.json` where the keys correspond |
 | 5 | Rewrite `control/iter_tune.c` decision core against the new comparator: cage anchored to persisted commissioned gains, adaptive step, stopping rule, carry limit. Keep the bit-exact revert posture verbatim. Replace `test_iter_tune.c`. | medium | host tests green; the old whole-firing path fully removed, not left dual |
 | 6 | Monte-Carlo acceptance run → §7 A1–A8. | medium | **all eight criteria met.** Any miss ends the plan at this line with a report, not a workaround |
-| 7 | **DONE.** Persistence + surface: new `iter_tune` NVS namespace + cfg LittleFS dual-write (`iter_tune_store.c/.h`, own `ITER_TUNE_STORE_VERSION`, never `adap_tune`'s namespace, per-zone opt-in default-off), status + "restore commissioned gains" HTTP control (`iter_tune_http.c/.h`, ROUTE_TIER_ADMIN), `check_iter_tune_write_surface.ps1`/`iter_tune_write_surface_check.py` extended (exact-name match, not prefix) to allow the HTTP surface to call only the non-proposing subset, negative-tested. Host tests green (round trip, wrong-version reject, truncated reject, cfg_fs tie-break). Still proposes nothing on hardware. **Target build blocked** by a pre-existing, unrelated `-Werror=format-truncation` in `ui_page_diagnostics.c:1009` already present at this worktree's base commit — not touched by this step, reported separately. | medium | full check suite green; schema migration tested both directions |
+| 7 | **Landed, acceptance PARTIALLY MET** (Opus review of `aad8d697` found two acceptance gaps; named exactly below, not glossed over). Persistence + surface: new `iter_tune` NVS namespace + cfg LittleFS dual-write (`iter_tune_store.c/.h`, own `ITER_TUNE_STORE_VERSION`, never `adap_tune`'s namespace), status + "restore commissioned gains" HTTP control (`iter_tune_http.c/.h`, ROUTE_TIER_ADMIN, refuses 409 while autotune owns the zone), `check_iter_tune_write_surface.ps1`/`iter_tune_write_surface_check.py` extended (parses `iter_tune.h`'s real function set rather than a hand-maintained list) to allow the HTTP surface to call only the non-proposing subset, negative-tested. Host tests green (round trip, wrong-version reject, truncated reject, cfg_fs tie-break). **Per-zone opt-in is only a stored field today — nothing in production can set it yet** (no caller flips `enabled`; that waits on step 8 wiring a real producer). **`restore_commissioned` returns 409 on real hardware today and will keep doing so until step 8 produces an anchor/baseline to restore** — there is no path yet that ever sets `has_anchor`/`has_baseline`. Still proposes nothing on hardware. **Acceptance NOT fully met:** (1) "full check suite green" — the target build has never actually run against this step's code, blocked by a pre-existing, unrelated `-Werror=format-truncation` in `ui_page_diagnostics.c:1009` already present at this worktree's base commit, not touched by this step; DRAM/.bss impact is therefore unmeasured. (2) "schema migration tested both directions" — only `ITER_TUNE_STORE_VERSION` 1 has ever existed; the host tests prove a wrong/unknown version is rejected and a same-version reboot round-trips, but there is no v1->v2 case to migrate yet, so no actual migration has been tested in either direction (`test_iter_tune_store.c`'s reboot-round-trip test is not a migration test and should not be read as one). | medium | full check suite green; schema migration tested both directions |
 | 8 | **Shadow mode on hardware.** Scores every real firing, computes what it *would* have proposed, writes nothing. ≥ 5 firings. Compare observed spread to the simulated floor (§3.1). | medium | observed floor ≤ 2× simulated, else Bar 2 stays disabled and the mechanism runs on Bar 1 alone |
 | 9 | **Enable trials on one zone, owner present, bench fixture kiln only** (§9.3), one parameter, cage active, with the operator able to stop and restore commissioned gains at any point. | highest | owner sign-off |
 

@@ -28,7 +28,26 @@
 // way test_kiln_cfg_store.c reaches kiln_cfg_store.c's.
 #include "../drivers/persist/iter_tune_store.c"
 
-#define TIT_SCRATCH_BASE "iter_tune_store_test_scratch"
+#define TIT_SCRATCH_BASE "cfg_fs_test_iter_tune_store"
+
+// Same "delete known filenames before rmdir" fix class as
+// test_kiln_cfg_store.c's reset_state_cfg_fs() -- TIT_RMDIR only succeeds
+// against an EMPTY directory, so a leftover iter_tune.bin (or its .tmp/
+// staging copy) from a prior run of this binary defeats it silently,
+// leaving a non-empty cfg_fs_test_iter_tune_store/ at the repo root
+// (Opus review of 5f2acb7f, finding 3).
+static void tit_scratch_clean(void)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/%s", TIT_SCRATCH_BASE, ITER_TUNE_CFG_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", TIT_SCRATCH_BASE, ITER_TUNE_CFG_FILE_PATH);
+    remove(path);
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", TIT_SCRATCH_BASE);
+    TIT_RMDIR(tmp);
+    TIT_RMDIR(TIT_SCRATCH_BASE);
+}
 
 static void tit_reset_all(void)
 {
@@ -89,8 +108,11 @@ static void test_nvs_round_trip(void)
     TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 10.0f, "zone 0 reads back after set");
 
     // Simulate a reboot: reset in-RAM state only, reload from the (fake) NVS
-    // backing store -- this is the actual round trip the plan step 7 gate
-    // ("schema migration tested both directions") cares about.
+    // backing store. NOTE (Opus review of 5f2acb7f, finding 4): this is a
+    // same-version persistence round trip, NOT a schema migration -- only
+    // ITER_TUNE_STORE_VERSION 1 exists today, so there is no v1->v2 case to
+    // migrate yet. See docs/ITER_TUNE_REDESIGN_PLAN.md row 7 for the honest
+    // acceptance-criteria status.
     iter_tune_store_reset_for_test();
     TEST_CHECK(iter_tune_store_start() == ESP_OK, "start reloads persisted store");
     TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 10.0f &&
@@ -145,7 +167,7 @@ static void test_nvs_wrong_version_and_truncated(void)
 
 static void test_cfg_fs_dual_write_tie_break(void)
 {
-    TIT_RMDIR(TIT_SCRATCH_BASE);
+    tit_scratch_clean(); // pre-clean: a prior run's crash/abort can leave files behind
     TIT_MKDIR(TIT_SCRATCH_BASE);
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs starts unmounted");
     TEST_CHECK(cfg_fs_init(TIT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
@@ -181,7 +203,7 @@ static void test_cfg_fs_dual_write_tie_break(void)
                "strictly-higher-rev file wins over NVS, per the documented tie-break");
 
     cfg_fs_deinit();
-    TIT_RMDIR(TIT_SCRATCH_BASE);
+    tit_scratch_clean();
 }
 
 void run_test_iter_tune_store(void)

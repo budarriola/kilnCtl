@@ -2332,6 +2332,33 @@ try {
             "`"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
     Invoke-HostTestExe -Name "fuzzy_nine_cell_probe" -ExePath $exeFuzzyCell -BuildCmd $cmdFuzzyCell
 
+    # ---- test_iter_tune_http.c: its own 59th, separate executable ------------
+    # Opus review of 5f2acb7f (docs/ITER_TUNE_REDESIGN_PLAN.md step 7), finding
+    # 2 + advisory A1: proves iter_tune_restore_post_handler() (POST
+    # /api/iter_tune/restore_commissioned) (a) persists the RESTORED baseline
+    # (not the stale pre-restore one) on a successful restore, (b) leaves the
+    # persisted record completely untouched when zones_config_set_pid()
+    # refuses, and (c) refuses with 409 -- touching neither
+    # zones_config_set_pid() nor the persisted record -- while autotune owns
+    # the zone. Own executable, same "#includes the driver .c directly to
+    # reach a static handler" reason as test_partition_info_http.c: it
+    # supplies its own fake iter_tune_store_*()/zones_config_set_pid()/
+    # autotune_engine_is_active_on_zone() bodies (in-RAM, no NVS/cfg_fs --
+    # the store's own persistence behaviour is test_iter_tune_store.c's job),
+    # and links the REAL iter_tune.c so iter_tune_restore_commissioned()'s
+    # actual baseline-mutation behaviour is exercised, not a stand-in for it.
+    # kiln_http_register()/wifi_provision_http_get_server() are faked locally
+    # (same lightweight pattern test_profiles_live_http.c uses), so no auth
+    # stack needs to be linked in.
+    $exeIth = Join-Path $outDir "kilnctl_host_tests_iter_tune_http.exe"
+    $ithObjDir = Join-Path $outDir "ith"
+    New-Item -ItemType Directory -Force -Path $ithObjDir | Out-Null
+    $cmdIth = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$ithObjDir\\`" /Fe:`"$exeIth`" `"$(Join-Path $testDir 'test_iter_tune_http.c')`" " +
+            "`"$(Join-Path $driversDir 'control/iter_tune.c')`""
+
+    Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -2474,7 +2501,12 @@ try {
     # test_profiles_live_http.c (56th) as its own Invoke-HostTestExe call --
     # profiles_live_http.c's five HTTP handlers (status/fork/accept/decide/
     # page), untested until now.
-    $totalExpected = 58
+    # 58 -> 59: Opus review of 5f2acb7f (finding 2 + advisory A1) added
+    # test_iter_tune_http.c as its own 59th Invoke-HostTestExe call --
+    # iter_tune_restore_post_handler()'s persist-on-success/refuse-on-
+    # rejected-apply/refuse-while-autotune-active behaviour, previously
+    # untested (see that file's own header comment).
+    $totalExpected = 59
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

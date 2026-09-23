@@ -63,29 +63,28 @@ PRODUCTION_ROOT = "firmware/KilnFW/App"
 EXCLUDED_DIRS = {"test", "build"}
 EXCLUDED_FILES = set(ITER_TUNE_FILES)
 
-# The decision core's actual, closed function set (iter_tune.h) -- matched
-# by exact name, NOT by the "iter_tune_" prefix alone. A prefix-only match
-# would also trip on this same file's own iter_tune_store_*() persistence
-# functions (iter_tune_store.c/.h), which are a separate module that merely
-# shares the plan's naming convention and must be freely callable from
-# production (that IS this store's job). Keep this list in sync with
-# iter_tune.h if a function is ever added or renamed there.
-ITER_TUNE_DECISION_CORE_FUNCS = (
-    "iter_tune_enable",
-    "iter_tune_reanchor",
-    "iter_tune_restore_commissioned",
-    "iter_tune_fault",
-    "iter_tune_active_gains",
-    "iter_tune_clamp_to_cage",
-    "iter_tune_propose_perturbation",
-    "iter_tune_process_comparison",
-    "iter_tune_status_str",
-    "iter_tune_stop_reason_str",
-    "iter_tune_result_str",
+# The decision core's actual, closed function set is read straight out of
+# iter_tune.h's own declarations (Opus review of 5f2acb7f, advisory A2) --
+# matched by exact name, NOT by the "iter_tune_" prefix alone. A prefix-only
+# match would also trip on this same file's own iter_tune_store_*()/
+# iter_tune_http_*() functions (iter_tune_store.c/.h, iter_tune_http.c/.h),
+# which are separate modules that merely share the plan's naming convention
+# and must be freely callable from production (that IS their job). A
+# hand-maintained name list used to live here and silently went stale the
+# moment a function was added or renamed in the header; parsing the header
+# directly means this can't happen again.
+_ITER_TUNE_DECL_RE = re.compile(
+    r"^[A-Za-z_][\w \*]*\b(iter_tune_(?!store_|http_)\w+)\s*\(", re.MULTILINE
 )
-ITER_TUNE_CALL_RE = re.compile(
-    r"\b(" + "|".join(ITER_TUNE_DECISION_CORE_FUNCS) + r")\s*\("
-)
+
+
+def _load_decision_core_funcs(repo_root: Path) -> tuple[str, ...]:
+    header = repo_root / ITER_TUNE_FILES[1]
+    if not header.is_file():
+        return ()
+    stripped = _strip_c_comments(header.read_text(encoding="utf-8"))
+    names = sorted(set(_ITER_TUNE_DECL_RE.findall(stripped)))
+    return tuple(names)
 
 # Plan step 7 (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7) deliberately adds
 # ONE production caller: the persistence + HTTP surface, which needs to call
@@ -104,7 +103,10 @@ ALLOWED_CALLS_FOR_ALLOWED_CALLERS = {
     "iter_tune_clamp_to_cage",
 }
 # Still forbidden everywhere outside iter_tune.c/.h, allowed caller or not --
-# these are the only two functions that actually PROPOSE or SCORE a trial.
+# these are the functions that PROPOSE/SCORE a trial (propose_perturbation,
+# process_comparison) or otherwise ARM/FAULT the state machine (enable,
+# reanchor, fault); only restore/read-only functions may reach the allowed
+# caller above.
 FORBIDDEN_EVERYWHERE = {
     "iter_tune_propose_perturbation",
     "iter_tune_process_comparison",
@@ -182,6 +184,10 @@ def check_no_write_surface(repo_root: Path) -> list[str]:
 
 def check_unwired(repo_root: Path) -> list[str]:
     failures: list[str] = []
+    decision_core_funcs = _load_decision_core_funcs(repo_root)
+    if not decision_core_funcs:
+        return [f"{ITER_TUNE_FILES[1]}: no iter_tune_* declarations found -- check is stale"]
+    call_re = re.compile(r"\b(" + "|".join(decision_core_funcs) + r")\s*\(")
     prod_root = repo_root / PRODUCTION_ROOT
     if not prod_root.is_dir():
         return [f"{PRODUCTION_ROOT}: directory not found -- check is stale"]
@@ -196,7 +202,7 @@ def check_unwired(repo_root: Path) -> list[str]:
         stripped = _strip_c_comments(path.read_text(encoding="utf-8"))
         is_allowed_caller = rel in ALLOWED_CALLER_FILES
         for lineno, line in enumerate(stripped.splitlines(), start=1):
-            for m in ITER_TUNE_CALL_RE.finditer(line):
+            for m in call_re.finditer(line):
                 name = m.group(0).split("(")[0].strip()
                 if name in FORBIDDEN_EVERYWHERE:
                     failures.append(
