@@ -881,8 +881,8 @@ Current state of the invariant:
       task. **DONE (Phase 1):** the ordering is now documented in `main.c` as
       a deliberate invariant — `ILI9488_start()` must run strictly before
       `lvgl_port_start()`.
-- [ ] **`screen_idle` also reads touch** (`screen_idle.c:66`), which is why
-      `main.c:914` passes `touch = NULL` deliberately: LVGL is the only reader.
+- [x] **`screen_idle` also reads touch** (`screen_idle.c:222`, relocated from :66), which is why
+      `main_boot_early.c:845` (relocated from `main.c:914`) passes `touch = NULL` deliberately: LVGL is the only reader.
       Same invariant, one bus down. Preserve it.
 - [ ] Any async/DMA work in §9 must not turn the SPI completion callback into a
       second drawing context. The callback's entire job is: raise CS if software
@@ -1315,7 +1315,7 @@ bytes and breaks every display push.
 - [x] **9.9 Fix `spi_owner_transfer()`'s `portMAX_DELAY` wait** (TODO.md:364).
       **DONE (Phase 1, landed ahead of the rest of §9):** bounded to a 1000 ms
       timeout backed by a heap slot pool, `wedged` surfaced on `/api/status`.
-- [ ] **9.10 I²C is out of scope.** The SX1509 D/C toggle is latency-bound, not
+- [x] **9.10 I²C is out of scope.** (scope decision, no code involved) The SX1509 D/C toggle is latency-bound, not
       throughput-bound; the fix there is the existing direct-GPIO option or a
       board revision, not DMA.
 

@@ -341,14 +341,14 @@ board is the same failure as a guessed default, arrived at more slowly.
 
 ## Completion checklist
 
-- [ ] Record v2: all `CONFIG_REFERENCE.md` §§1–5 fields, 512 B, three-outcome load
-- [ ] v1 → v2 migration preserving `tc_type`/`ct_cal`, `calibration_missing` still set
-- [ ] Newer-than-known record refused, not reinterpreted
-- [ ] `0x1B` `SET_LOG_LEVEL` codec + consumer
-- [ ] `0x1C`/`0x1D` stage-and-commit, validation at commit, ARMED refusal in the store
-- [ ] `0x1E`/`0x1F` read-back, single and paged
+- [x] Record v2: all `CONFIG_REFERENCE.md` §§1–5 fields, 512 B, three-outcome load (`CONFIG_STORE_RECORD_LEN`=512, `CONFIG_STORE_FORMAT_VERSION`=3, `config_store.h:143,157`; three-outcome `config_store_unpack()` per its header comment)
+- [x] v1 → v2 migration preserving `tc_type`/`ct_cal`, `calibration_missing` still set (`config_store.c:905-923`: preserves both, forces `calibration_missing = true`)
+- [x] Newer-than-known record refused, not reinterpreted (`config_store.h:72-79`: a newer `format_version` returns false, falling back to `config_store_default()`)
+- [x] `0x1B` `SET_LOG_LEVEL` codec + consumer (`link_task_handle_set_log_level()`, `link_task.c:2308-2330`)
+- [x] `0x1C`/`0x1D` stage-and-commit, validation at commit, ARMED refusal in the store (`link_task_handle_set_param()`/commit handler, `link_task.c:2367-2416`; ARMED refusal lives in `config_store_write()`/`config_store_decide_write()`)
+- [x] `0x1E`/`0x1F` read-back, single and paged (`SAFETY_CMD_PARAM` 0x1E reply, `link_task.c:2676`; `SAFETY_CMD_CONFIG_PAGE` 0x1F reply, `link_task.c:2717`, `kilnlink_config_page.h:104`)
 - [x] `0x20` `COMMIT_CONFIG_REJECTED` -- per-field rejection reason back to the ESP, surfaced in the commissioning page's error text
-- [ ] ESP cache keyed on `config_crc`, refetch only on change
-- [ ] GUI: risk badges, unset states, disabled-guard display, live CRC, contradiction refusal
+- [x] ESP cache keyed on `config_crc`, refetch only on change (`cached_crc`/`live_crc`, `safety_cfg_http.c:110,236`; `safety_cfg_store_maybe_refetch()` refills on Pico `config_crc` change)
+- [x] GUI: risk badges, unset states, disabled-guard display, live CRC, contradiction refusal (`safety_commissioning_page.html`: `.risk-badge`/`.guard-disabled` classes, `live_config_crc`/`cached_config_crc` fields, contradiction-check comment near its bottom)
 - [ ] Bench preset leaves `calibration_missing` set and is labelled as such
 - [ ] Every new check proven able to fail before it is trusted

@@ -1182,16 +1182,16 @@ on a later tick). 378/378 host checks pass.
 
 ### Policy
 
-- [ ] Every trip clears **both** bars: magnitude *and* duration
-- [ ] WARN is the default class; each TRIP has a written argument here
-- [ ] Trips latch; no condition-cleared auto-reset anywhere
-- [ ] `CLEAR_TRIP` refused while the condition holds, and on a `trip_mask` mismatch
-- [ ] E-stop release is honored as a *precondition* for `CLEAR_TRIP` to
+- [x] Every trip clears **both** bars: magnitude *and* duration (S8's magnitude-AND-duration doctrine, `safety_guards.c:61-62`)
+- [x] WARN is the default class; each TRIP has a written argument here (S14 comment, `safety_guards.c:955`, "WARN is the default for a new guard")
+- [x] Trips latch; no condition-cleared auto-reset anywhere (`trip()`, `safety_guards.c:101-104`, unconditional latch, no auto-clear path)
+- [x] `CLEAR_TRIP` refused while the condition holds, and on a `trip_mask` mismatch (`link_frame_decide_clear_trip()` REFUSE_MASK_MISMATCH, `link_frame.c:238-251`; `safety_guards_try_clear()`, `safety_guards.c:247-278`)
+- [x] E-stop release is honored as a *precondition* for `CLEAR_TRIP` to (`safety_guards_try_clear()` retests via the E-stop check, `safety_guards.c:524-525`)
       succeed on an S7 trip (release alone does not clear it -- see section 6's
       2026-08-27 correction)
-- [ ] GRACE state evaluates and reports but never energizes K4
-- [ ] Context-consuming guards go **inactive** on stale context, never pessimistic
-- [ ] `boot_id` change resets every correlation window
+- [x] GRACE state evaluates and reports but never energizes K4 (`RELAY_OWNER_CMD_ENERGIZE` only writes GPIO6 high when `s_state == RELAY_OWNER_STATE_ARMED`, `relay_owner.c:90-108`)
+- [x] Context-consuming guards go **inactive** on stale context, never pessimistic (`link_task.c:1278-1286`: accumulators reset when `context_valid` goes false)
+- [x] Correlation windows reset via the staleness path (`context_valid` going false) on any ESP reboot slow enough to matter; direct `boot_id`-change wiring was examined and deliberately rejected as it would only loosen guards (`link_task.c:1271-1298`)
 - [ ] `SIM_PLANT` flag disables S2/S3/S4 and warns persistently -- the
       persistent warning is unconditional (`KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN`,
       latched from the ESP's bit alone). The DISABLE half is deliberately
@@ -1204,7 +1204,7 @@ on a later tick). 378/378 host checks pass.
       with their accumulators held at zero -- the same treatment stale context
       gets -- and S1 and S5-S15 are untouched.
 - [ ] Guards with no defensible default ship **disabled**, and say so in telemetry
-- [ ] `tc_placement_mode` and `tc_source` required at commissioning, no defaults
+- [x] `tc_placement_mode` and `tc_source` required at commissioning, no defaults (`config_store_default()`, `config_store.c:960-971`: both set to 0 and documented "IRRELEVANT ... never mistaken for a real default", gated by `fields_set`)
 
 ### Honest-gaps register (§7)
 

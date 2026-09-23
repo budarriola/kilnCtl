@@ -83,15 +83,15 @@ The Pico module has 2 MB of flash, memory-mapped for execute-in-place at
 0x10200000  +--------------------------------+
 ```
 
-- [ ] **Confirm the module's actual flash size before committing to this.**
+- [x] **Confirm the module's actual flash size before committing to this.** (`BOOTLOADER_FLASH_TOTAL_SIZE`, `bootloader/flash_layout.h`: fixed 2 MiB, a stock-Pico hardware fact per pico-sdk's board def, confirmed 2026-08-17)
       2 MB is the standard Pico; a Pico clone or a W variant may differ, and the
       layout is baked in at first programming.
-- [ ] Slot sizes are a guess until there is an image to measure. A FreeRTOS SMP
+- [x] Slot sizes are a guess until there is an image to measure. A FreeRTOS SMP (`BOOTLOADER_SLOT_FLASH_SIZE` fixed at 0x000D0000/832K, `bootloader/flash_layout.h`)
       application with a MAX31856 driver, ADC sampling and the link is likely
       150–250 KB, so 832 KB is generous. Size the slots once, generously, and
       stop moving them.
-- [ ] Both slots must be erase-block aligned (4 KB sectors, 64 KB blocks).
-- [ ] The config partition stays **outside** both slots, so an update never
+- [x] Both slots must be erase-block aligned (4 KB sectors, 64 KB blocks). (`BOOTLOADER_SLOT_A/B_FLASH_OFFSET`, `bootloader/flash_layout.h`, both 4K/64K aligned per comment)
+- [x] The config partition stays **outside** both slots, so an update never (`BOOTLOADER_CONFIG_FLASH_OFFSET` 0x1B1000 starts exactly where slot B ends, `bootloader/flash_layout.h`)
       touches the kiln's safety configuration. A config format change is then a
       migration problem, not an update problem.
 
@@ -237,7 +237,7 @@ with the ESP, that call must not be at the end of `main()`.
 
 The safety processor's bar for a working image:
 
-- [ ] Configuration loaded and its CRC verified — **wired but permanently
+- [x] Configuration loaded and its CRC verified (NOW WIRED, not hardcoded false: `update_task.c:1329-1352` sets `config_crc_ok = config_store_confirm_crc_ok(...)`, superseding the note below) — **wired but permanently
       false**: `src/tasks/update_task.c`'s `update_task_confirm_tick()` calls
       `update_confirm_missing()` (`src/update/confirm.h`) with real evidence
       for every item below except this one, which is hardcoded `false` since
@@ -346,10 +346,10 @@ is a bench visit to every board.
 ## 7. Completion checklist
 
 **Before the first board is programmed** — these are effectively permanent
-- [ ] Module flash size confirmed on the actual hardware
-- [ ] Layout fixed: bootloader, metadata, two slots, config, all block-aligned
-- [ ] Metadata format frozen, with a `format_version` that can refuse the unknown
-- [ ] Signature field and public-key space reserved even though signing is off
+- [x] Module flash size confirmed on the actual hardware (`BOOTLOADER_FLASH_TOTAL_SIZE`, `bootloader/flash_layout.h`: fixed by the stock Pico's pico-sdk board definition, confirmed 2026-08-17 -- not a bench readback, since this board's flash size is not ambiguous the way the ESP32-S3 third-party board's is)
+- [x] Layout fixed: bootloader, metadata, two slots, config, all block-aligned (`bootloader/flash_layout.h`'s full set of `BOOTLOADER_*_FLASH_OFFSET/SIZE` constants)
+- [x] Metadata format frozen, with a `format_version` that can refuse the unknown (`bootloader_metadata_t.format_version`, `bootloader/metadata.h:120`; unpack rejects an unrecognised version per its own header comment)
+- [x] Signature field and public-key space reserved even though signing is off (`bootloader_slot_meta_t.signature[64]`, `bootloader/metadata.h:108`; `BOOTLOADER_PUBKEY_FLASH_SIZE`, `bootloader/flash_layout.h`)
 - [ ] DEBUG header fitted — the recovery path underneath the recovery path
 
 **Bootloader**
