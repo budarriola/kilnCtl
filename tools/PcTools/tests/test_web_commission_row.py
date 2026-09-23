@@ -2199,6 +2199,20 @@ def test_w9_cleans_up_the_second_profile_even_when_its_own_create_reports_failur
     )
 
 
+def test_unconfirmed_cleanup_note_contains_required_substrings():
+    # W8/W9/W10 share this helper for the "post-failure read-back didn't come
+    # back 200" sentence. Pin the substrings the W9/W10 tests above (and any
+    # future caller) rely on, plus that the endpoint/status/name actually
+    # appear -- not just fixed boilerplate.
+    msg = wcr._unconfirmed_cleanup_note("/api/profiles", 401, "wc_test_9999_0")
+    assert "cannot confirm board state" in msg
+    assert "LEFT ON BOARD" in msg
+    assert "check by hand" in msg
+    assert "/api/profiles" in msg
+    assert "401" in msg
+    assert "wc_test_9999_0" in msg
+
+
 def test_w9_create_fails_and_cleanup_probe_401s_reports_unconfirmed_not_nothing(monkeypatch):
     # _get_json_with_cookie() maps a rejected session cookie to
     # (None, {"error": "session cookie rejected (401)"}) rather than raising

@@ -1333,6 +1333,18 @@ def _profile_id_by_name(body, name: str) -> object:
     return None
 
 
+def _unconfirmed_cleanup_note(endpoint: str, status, name: str) -> str:
+    """W8/W9/W10 share this sentence: a post-failure cleanup read-back did
+    not come back 200, so whether `name` was actually created (and thus
+    still sits on the board) cannot be determined either way. Centralized so
+    the wording -- in particular "cannot confirm board state", "LEFT ON
+    BOARD" and "check by hand", which existing tests assert on -- stays
+    identical across all three call sites."""
+    return (f"cannot confirm board state -- post-failure read-back GET "
+            f"{endpoint} -> {status}; {name!r} may be LEFT ON BOARD "
+            f"unconfirmed, check by hand")
+
+
 def _create_scratch_profile(row: Row, host: str, screenshot_dir: str, cookie: str,
                              name: str, shot_suffix: str) -> "tuple[bool, str]":
     """Drives profiles_page.html's segment builder to create one scratch
@@ -1419,9 +1431,7 @@ def _run_profile_segment_create_delete(row: Row, host: str, screenshot_dir: str,
     def _cleanup_after_create_attempt() -> str:
         chk_status, chk_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
         if chk_status != 200 or not isinstance(chk_body, list):
-            return (f"cannot confirm board state -- post-failure read-back GET "
-                     f"{row.verify_endpoint} -> {chk_status}; if {name!r} was created it is "
-                     f"LEFT ON BOARD, check by hand")
+            return _unconfirmed_cleanup_note(row.verify_endpoint, chk_status, name)
         if name not in _profile_names(chk_body):
             return "nothing was created"
         del_ok, del_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name,
@@ -1536,9 +1546,7 @@ def _run_profile_multi_delete(row: Row, host: str, screenshot_dir: str, cookie: 
             # unconfirmed probe gets its own sentence regardless of what
             # happened to the earlier profiles.
             if not probe_confirmed:
-                extra += (f" -- cannot confirm board state for {name!r} (post-failure read-back "
-                          f"GET {row.verify_endpoint} -> {chk_status}); {name!r} may be LEFT ON "
-                          f"BOARD unconfirmed, check by hand")
+                extra += " -- " + _unconfirmed_cleanup_note(row.verify_endpoint, chk_status, name)
             return False, f"{row.row_id} FAIL: create of {name!r} failed: {detail}{extra}"
         created.append(name)
 
@@ -1630,8 +1638,7 @@ def _run_profile_favorite_toggle(row: Row, host: str, screenshot_dir: str, cooki
         elif chk_status == 200 and isinstance(chk_body, list):
             extra = " -- nothing was created"
         else:
-            extra = (f" -- cannot confirm board state (post-failure read-back GET /api/profiles "
-                     f"-> {chk_status}); {name!r} may be LEFT ON BOARD unconfirmed, check by hand")
+            extra = " -- " + _unconfirmed_cleanup_note("/api/profiles", chk_status, name)
         return False, f"{row.row_id} FAIL: create failed: {detail}{extra}"
 
     mid_status, mid_body = _get_json_with_cookie(host, "/api/profiles", cookie)
