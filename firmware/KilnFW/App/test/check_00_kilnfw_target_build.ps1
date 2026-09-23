@@ -1130,7 +1130,7 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     if (Test-Path -LiteralPath $bootloaderSdkconfigHeaderPath) {
         $bootloaderSdkconfigHeaderTime = (Get-Item -LiteralPath $bootloaderSdkconfigHeaderPath).LastWriteTime
         if ($bootloaderTime -lt $bootloaderSdkconfigHeaderTime.Subtract($tolerance)) {
-            Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) predates the bootloader subproject's own generated config ($bootloaderSdkconfigHeaderPath, mtime $bootloaderSdkconfigHeaderTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
+            Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) predates the bootloader subproject's own generated config ($bootloaderSdkconfigHeaderPath, mtime $bootloaderSdkconfigHeaderTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against). Remedy: delete the whole build\bootloader\ directory of this checkbuild worktree and rebuild -- a partial delete of bootloader.bin or bootloader-prefix alone leaves stale ninja/ExternalProject state and fails with a check_sizes missing-.bin error."
         }
     } else {
         Write-Host "NOTE: $bootloaderSdkconfigHeaderPath not found -- skipping bootloader.bin freshness-vs-config check (existence-only check above still applies)."

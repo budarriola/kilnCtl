@@ -1101,11 +1101,17 @@ def flash_firmware(
         override_note = " (kiln_fw_root override)" if kiln_fw_root else ""
         stale_publish_names = ("bootloader.bin", "partition_table" + os.sep + "partition-table.bin")
         stale_publish_hits = [p for p in missing if p.endswith(stale_publish_names)]
+        app_bin_missing = any(p.endswith("KilnCtrl.bin") for p in missing)
         stale_publish_note = ""
-        if stale_publish_hits:
+        if stale_publish_hits and not app_bin_missing:
+            # KilnCtrl.bin present means the tree WAS built; only then can a
+            # missing bootloader.bin/partition-table.bin be explained by the
+            # pre-2026-09-23 publish step. If KilnCtrl.bin is also missing the
+            # tree was never built at all, and this note would have no
+            # antecedent ("it") to refer to -- suppress it in that case.
             stale_publish_note = (
                 " A build published by check_00_kilnfw_target_build.ps1 before "
-                "2026-09-23 did not include it."
+                "2026-09-23 did not include bootloader.bin or partition-table.bin."
             )
         return (
             f"error: missing build output(s){override_note}, run `idf.py build` first: "
@@ -1267,6 +1273,11 @@ def flash_firmware(
     tcl_parts = [
         f"adapter serial {MAIN_BOARD_JTAG_SERIAL}",
         "program_esp build/bootloader/bootloader.bin 0x0 verify",
+        # 0x8000 here is IDF's default CONFIG_PARTITION_TABLE_OFFSET, hardcoded
+        # rather than resolved from sdkconfig -- unlike app_target.offset above,
+        # which IS read from partitions.csv. If this project ever changes the
+        # partition table offset, this literal needs updating too (follow-up,
+        # not done here).
         "program_esp build/partition_table/partition-table.bin 0x8000 verify",
         f"program_esp build/KilnCtrl.bin 0x{app_target.offset:x} verify",
     ]

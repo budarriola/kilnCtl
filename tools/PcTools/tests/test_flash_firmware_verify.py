@@ -876,7 +876,24 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self.assertTrue(result.startswith("error:"))
         self.assertIn("missing build output", result)
         self.assertIn("override", result)
+        # KilnCtrl.bin is also missing here (the tree was never built at all),
+        # so the "published before 2026-09-23" note -- which explains only a
+        # missing bootloader.bin/partition-table.bin against an otherwise-built
+        # tree -- must be suppressed; it would have no antecedent otherwise.
+        self.assertNotIn("before 2026-09-23", result)
+
+    def test_kiln_fw_root_missing_only_bootloader_and_partition_table_is_refused(self):
+        partial_root = os.path.join(self.tmp_root, "partial", "firmware", "KilnFW")
+        build_dir = os.path.join(partial_root, "build")
+        os.makedirs(build_dir)
+        with open(os.path.join(build_dir, "KilnCtrl.bin"), "wb") as f:
+            f.write(b"\x00" * 16)
+        result = mf.flash_firmware(kiln_fw_root=partial_root, verify=False)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("missing build output", result)
         self.assertIn("before 2026-09-23", result)
+        self.assertIn("bootloader.bin", result)
+        self.assertIn("partition-table.bin", result)
 
     def test_valid_override_flashes_from_that_tree(self):
         with unittest.mock.patch.object(
