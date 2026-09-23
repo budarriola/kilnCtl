@@ -20,15 +20,20 @@ guarantee.
 POST /api/crash_report/clear takes no request body and no form fields --
 crash_report_clear_post_handler() reads nothing off the request. It
 answers:
-  * ``{"ok":true}`` (200) -- acknowledged and erased.
-  * ``{"ok":false,"error":"<esp_err_to_name(...)>"}`` (500) -- either the
-    NVS erase of the crash record or the coredump erase failed (the
-    handler does not distinguish which, and does not distinguish "nothing
-    was present to clear" as a separate case the way the /ack route's 409
-    does -- crash_report_clear() unconditionally attempts the erase).
-Both non-2xx cases raise CrashReportClearHttpError (via urllib's own
-HTTPError-on-non-2xx behaviour) with `.status`/`.detail` carrying the
-board's own JSON body.
+  * ``{"ok":true}`` (200) -- the COREDUMP erase succeeded. Note this does
+    NOT promise the NVS crash record was erased: crash_report_clear()
+    (crash_report.c) only ESP_LOGWs a failed hal_kv_erase_key()/commit()
+    and still returns ESP_OK, so a caller must confirm by re-reading
+    GET /api/crash_report rather than trusting this body -- which is what
+    mcp_server_info.crash_report_clear()'s read-back is for.
+  * ``{"ok":false,"error":"<esp_err_to_name(...)>"}`` (500) -- the
+    hal_sysinfo_coredump_erase() call failed; that is the ONLY failure
+    crash_report_clear() propagates. The route has no "nothing was present
+    to clear" status of its own the way the /ack route's 409 does --
+    crash_report_clear() unconditionally attempts the erase.
+The 500 (like any other non-2xx) raises CrashReportClearHttpError (via
+urllib's own HTTPError-on-non-2xx behaviour) with `.status`/`.detail`
+carrying the board's own JSON body.
 """
 from __future__ import annotations
 

@@ -383,8 +383,11 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
     boot_guard write-lies section for why an unverified success report is
     exactly the failure class this project has been bitten by before).
 
-    A 500 ("erase failed") from the board is reported as a failure,
-    distinguished by crash_report_clear_http_client's
+    A 500 ("coredump erase failed" -- the ONLY failure the board's own
+    crash_report_clear() propagates; a failed NVS erase of the crash
+    record is merely logged there and still answers 200, which is the
+    second reason the read-back below is not optional) is reported as a
+    failure, distinguished by crash_report_clear_http_client's
     CrashReportClearHttpError.status -- never collapsed into a single
     generic error string. Unlike /ack, this route has no separate 409
     "nothing to do" status -- crash_report_clear() always attempts the
@@ -425,7 +428,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
         crash_report_clear_http_client.post_crash_report_clear(resolved)
     except crash_report_clear_http_client.CrashReportClearHttpError as exc:
         if exc.status == 500:
-            return (f"failed: board could not erase the record/coredump (500) -- {summary} "
+            return (f"failed: board could not erase the coredump image (500) -- {summary} "
                      f"(host={resolved}): {exc}")
         return f"error clearing crash report over HTTP (host={resolved}): {exc}"
 
