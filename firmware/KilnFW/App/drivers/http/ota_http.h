@@ -117,6 +117,23 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // item 9) -- non-httpd callers (factory_reset.c and friends) need it for the
 // accessors that moved there too. Included above via ota_state.h.
 
+// Longest context string literal used by the switch in
+// ota_http_verify_request() (ota_http.c) -- "boot-guard-reset", 16 chars.
+// Sizes that function's msg[] HMAC buffer AND test_ota_http.c's own
+// compute_mac() msg[] buffer (which recomputes the same HMAC independently
+// as its test oracle) -- declared here, rather than privately in ota_http.c,
+// specifically so both call sites share one definition instead of two
+// hand-copied literals drifting apart (exactly what happened before: the
+// test used 16 while ota_http.c used 13, so the 3-byte overflow in
+// ota_http.c's own buffer went uncaught). ota_http.c's _Static_assert table
+// still keeps the switch's literals in sync with this constant by hand,
+// since the strings are case labels' RHS, not a table either file can
+// iterate at compile time. tools/check_ota_http_context_mirror.ps1 also
+// reads this constant (parsed straight out of this header) to check the
+// same bound against tools/PcTools/src/kilnctrl/ota_http_client.py's
+// derive_mac() allow-list.
+#define OTA_HTTP_CONTEXT_STR_MAX 16
+
 typedef enum {
     OTA_HTTP_VERIFY_OK = 0,
     OTA_HTTP_VERIFY_LOCKED_OUT,

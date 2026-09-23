@@ -358,15 +358,15 @@ static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// Longest context string literal used by the switch in
-// ota_http_verify_request() below ("boot-guard-reset", 16 chars). Sizes the
-// msg[] HMAC buffer there. The switch below is the single source of truth
-// for which context maps to which string; these _Static_assert lines exist
-// only so adding a new, longer context string there without also widening
-// this constant fails the BUILD instead of silently overflowing msg[] --
-// keep this list in sync with that switch by hand, since the strings are
-// case labels' RHS, not a table this code can iterate at compile time.
-#define OTA_HTTP_CONTEXT_STR_MAX 16
+// OTA_HTTP_CONTEXT_STR_MAX now lives in ota_http.h (moved so
+// test_ota_http.c's own compute_mac() can size its msg[] buffer from the
+// same constant rather than a second hand-copied literal -- see that
+// header's doc comment). The switch below is the single source of truth for
+// which context maps to which string; these _Static_assert lines exist only
+// so adding a new, longer context string there without also widening that
+// constant fails the BUILD instead of silently overflowing msg[] -- keep
+// this list in sync with that switch by hand, since the strings are case
+// labels' RHS, not a table this code can iterate at compile time.
 _Static_assert(sizeof("esp") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
 _Static_assert(sizeof("pico") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
 _Static_assert(sizeof("esp-rollback") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");

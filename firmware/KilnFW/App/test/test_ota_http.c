@@ -657,6 +657,38 @@ static const char *ctx_str_for(ota_http_context_t ctx)
     }
 }
 
+// Guards against the exact drift class that shipped once already: the test's
+// own compute_mac() msg[] buffer used to be sized from a hand-copied literal
+// (16) that happened to be wider than ota_http.c's own literal (13) at the
+// time, so a 3-byte overflow in ota_http.c's buffer went uncaught. Now that
+// both sides size from the single OTA_HTTP_CONTEXT_STR_MAX constant
+// (ota_http.h), this test instead checks that constant itself stays a tight
+// bound on every real context string -- every one fits, and at least one
+// (the longest) actually reaches it, so a future context string could not
+// silently grow past the bound without either this assertion or the
+// _Static_assert table in ota_http.c catching it.
+static void test_context_str_max_is_a_tight_bound(void)
+{
+    static const ota_http_context_t all_ctx[] = {
+        OTA_HTTP_CONTEXT_ESP,           OTA_HTTP_CONTEXT_PICO,
+        OTA_HTTP_CONTEXT_ESP_ROLLBACK,  OTA_HTTP_CONTEXT_RECOVERY_EXIT,
+        OTA_HTTP_CONTEXT_FACTORY_RESET, OTA_HTTP_CONTEXT_PICO_ROLLBACK,
+        OTA_HTTP_CONTEXT_SW_RESET,      OTA_HTTP_CONTEXT_BOOT_GUARD_RESET,
+    };
+    size_t longest = 0;
+    for (size_t i = 0; i < sizeof(all_ctx) / sizeof(all_ctx[0]); i++) {
+        size_t len = strlen(ctx_str_for(all_ctx[i]));
+        TEST_CHECK(len <= OTA_HTTP_CONTEXT_STR_MAX,
+                  "every context string must fit within OTA_HTTP_CONTEXT_STR_MAX");
+        if (len > longest) {
+            longest = len;
+        }
+    }
+    TEST_CHECK(longest == OTA_HTTP_CONTEXT_STR_MAX,
+              "OTA_HTTP_CONTEXT_STR_MAX must equal the longest context string's length "
+              "(a looser bound would hide the next mirror-drift silently)");
+}
+
 // Issues a fresh, valid nonce directly into ota_http.c's file-scope s_nonce
 // -- the access this file #includes ota_http.c FOR (see header comment).
 static void issue_nonce(uint8_t nonce_out[OTA_AUTH_NONCE_LEN])
@@ -678,7 +710,7 @@ static void compute_mac(const char *password, const uint8_t nonce[OTA_AUTH_NONCE
     uint8_t key[32];
     hmac_sha256((const uint8_t *)password, strlen(password), (const uint8_t *)OTA_HTTP_KDF_CONTEXT,
                 strlen(OTA_HTTP_KDF_CONTEXT), key);
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
+    uint8_t msg[OTA_AUTH_NONCE_LEN + OTA_HTTP_CONTEXT_STR_MAX];
     memcpy(msg, nonce, OTA_AUTH_NONCE_LEN);
     size_t ctx_len = strlen(ctx_str);
     memcpy(msg + OTA_AUTH_NONCE_LEN, ctx_str, ctx_len);
@@ -2602,6 +2634,8 @@ void run_test_ota_http(void)
     // (see its own body), which is all these tests need.
     TEST_CHECK(start_err == ESP_ERR_INVALID_STATE || start_err == ESP_OK,
               "ota_http_start setup must reach the point of initializing s_ota_lock");
+
+    test_context_str_max_is_a_tight_bound();
 
     test_empty_password_refused_with_valid_nonce();
     test_boot_button_bypass_wins_even_with_empty_password();
