@@ -470,6 +470,32 @@ would ride along or trip the sensitive-dirty guard above). A fresh
    set-target esp32s3` explicitly before `build` -- do not rely on a stale
    `sdkconfig` or the tool's own default.
 
+Note that the MCP build tools (`build_kilnfw()`/`build_saftyfw()`,
+`tools/PcTools/src/mcpkit/workbench.py`) always build the MAIN tree's
+`firmware/KilnFW`/`firmware/SaftyFW` and take no root/worktree parameter --
+they cannot be pointed at a clean worktree the way `flash_firmware
+(kiln_fw_root=...)` can. Building the worktree itself for that workflow means
+invoking the toolchain directly, the same way
+`check_00_kilnfw_target_build.ps1` and `check_00_saftyfw_target_build.ps1` do
+against their own private checkbuild worktrees: `idf.py -C
+<worktree>\firmware\KilnFW build` for KilnFW (after `set-target esp32s3` on a
+from-scratch or fullclean'd build dir, per above), and, for SaftyFW, a
+first-time configure with `cmake -G Ninja -B build .` run from
+`<worktree>\firmware\SaftyFW` followed by a `ninja` build in that `build`
+directory (equivalently, `cmake -S <worktree>\firmware\SaftyFW -B
+<worktree>\firmware\SaftyFW\build -G Ninja` then `cmake --build
+<worktree>\firmware\SaftyFW\build`).
+
+There is also no bare `factory_reset` MCP tool: the ESP-side factory-reset
+request (`devices.system_factory_reset(scope)`) is only ever sent as part of
+a larger tool (e.g. the preset-loading flow in `mcp_server_ui_test.py`), not
+exposed standalone. The commission-flash NVS-erase path instead goes through
+`flash_firmware(erase_partitions=["nvs"], confirm_erase=True)` (or any other
+name from the `ERASABLE_DATA_PARTITIONS` allowlist -- `nvs`, `kiln_nvs`,
+`wifi_nvs`, `profiles_nvs`, `cfg` -- see `mcp_server_flash.py`), which refuses
+unless the named partition is both in that allowlist and actually present in
+`partitions.csv`, and unless `confirm_erase=True` is also passed.
+
 ## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`)
 
 Three small PowerShell tools under `tools/` close three recurring, expensive

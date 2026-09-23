@@ -849,10 +849,14 @@ def flash_firmware(
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
     board (never esptool/`idf.py flash`, per CLAUDE.md). Always writes all
-    three images (bootloader @0x0, partition table @0x8000, app @0x810000),
-    each with `program_esp ... verify` (which only erases/rewrites a region
-    if its content doesn't already match -- it does NOT do a bare full-chip
-    erase), ending in a reset so the board boots the new app immediately.
+    three images (bootloader @0x0, partition table @0x8000, and the app image
+    at the offset/size of the `APP_PARTITION_NAME` ("app") partition, resolved
+    fresh per flash from `<kiln_fw_root>/partitions.csv` -- see
+    `_resolve_app_flash_target()`), each with `program_esp ... verify` (which
+    only erases/rewrites a region if its content doesn't already match -- it
+    does NOT do a bare full-chip erase), ending in a reset so the board boots
+    the new app immediately. A pre-flight size check refuses, naming both
+    byte counts, if `KilnCtrl.bin` is larger than that partition.
 
     Requires `idf.py build` to have already produced KilnFW/build/*.bin --
     this tool does not build, only flashes.
@@ -892,8 +896,9 @@ def flash_firmware(
     what was just flashed. This exists because OpenOCD's "verify" is only a
     byte-compare during the write -- it says nothing about which partition
     the bootloader actually boots, and flash_firmware() only ever writes the
-    `factory` partition. If an earlier OTA left the boot target pointed at
-    ota_0/ota_1, every future flash_firmware() would otherwise report success
+    `APP_PARTITION_NAME` ("app") partition resolved from partitions.csv (see
+    above). If an earlier OTA left the boot target pointed elsewhere,
+    every future flash_firmware() would otherwise report success
     forever while the board keeps running old code (this is exactly the
     "my change vanished" failure mode CLAUDE.md's flash_firmware section
     warns about -- this check is what makes that fail at the tool instead of
