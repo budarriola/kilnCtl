@@ -1507,14 +1507,29 @@ def _run_profile_multi_delete(row: Row, host: str, screenshot_dir: str, cookie: 
             # silently LEFT ON BOARD with no trace in the failure message.
             cleanup_targets = list(created)
             chk_status, chk_body = _get_json_with_cookie(host, row.verify_endpoint, cookie)
-            if chk_status == 200 and isinstance(chk_body, list) and name in _profile_names(chk_body):
+            # A non-200 here (in particular a 401 -- `_get_json_with_cookie()`
+            # maps a rejected session cookie to `(None, {"error": ...})` per
+            # its own `no_relogin=True` contract) means the probe could not
+            # SEE the board's state, not that `name` was never created. Treat
+            # that as unconfirmed, distinct from a confirmed-absent 200 whose
+            # body simply lacks `name`.
+            probe_confirmed = chk_status == 200 and isinstance(chk_body, list)
+            if probe_confirmed and name in _profile_names(chk_body):
                 cleanup_targets.append(name)
             cleanup_results = [_delete_profile_by_name(row, host, screenshot_dir, cookie, n,
                                                          f"_cleanup{j}")
                                 for j, n in enumerate(cleanup_targets)]
             left = [n for n, (cok, _cd) in zip(cleanup_targets, cleanup_results) if not cok]
-            extra = (f" -- LEFT ON BOARD: {left}" if left else
-                     (f" -- cleaned up {cleanup_targets}" if cleanup_targets else " -- nothing was created"))
+            if left:
+                extra = f" -- LEFT ON BOARD: {left}"
+            elif cleanup_targets:
+                extra = f" -- cleaned up {cleanup_targets}"
+            elif not probe_confirmed:
+                extra = (f" -- cannot confirm board state for {name!r} (post-failure read-back "
+                         f"GET {row.verify_endpoint} -> {chk_status}); {name!r} may be LEFT ON "
+                         f"BOARD unconfirmed, check by hand")
+            else:
+                extra = " -- nothing was created"
             return False, f"{row.row_id} FAIL: create of {name!r} failed: {detail}{extra}"
         created.append(name)
 
@@ -1595,12 +1610,19 @@ def _run_profile_favorite_toggle(row: Row, host: str, screenshot_dir: str, cooki
     ok, detail = _create_scratch_profile(row, host, screenshot_dir, cookie, name, "_create")
     if not ok:
         chk_status, chk_body = _get_json_with_cookie(host, "/api/profiles", cookie)
+        # See _run_profile_multi_delete()'s matching comment: a non-200 probe
+        # (a rejected session cookie in particular) means the probe could not
+        # see the board's state, not that `name` was never created -- do not
+        # conflate that with a confirmed-absent 200.
         if chk_status == 200 and isinstance(chk_body, list) and name in _profile_names(chk_body):
             del_ok, del_detail = _delete_profile_by_name(row, host, screenshot_dir, cookie, name,
                                                           "_cleanup_delete")
             extra = f" -- cleaned up {name!r}" if del_ok else f" -- {name!r} LEFT ON BOARD ({del_detail})"
-        else:
+        elif chk_status == 200 and isinstance(chk_body, list):
             extra = " -- nothing was created"
+        else:
+            extra = (f" -- cannot confirm board state (post-failure read-back GET /api/profiles "
+                     f"-> {chk_status}); {name!r} may be LEFT ON BOARD unconfirmed, check by hand")
         return False, f"{row.row_id} FAIL: create failed: {detail}{extra}"
 
     mid_status, mid_body = _get_json_with_cookie(host, "/api/profiles", cookie)

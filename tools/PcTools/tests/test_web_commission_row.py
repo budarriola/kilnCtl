@@ -2199,6 +2199,119 @@ def test_w9_cleans_up_the_second_profile_even_when_its_own_create_reports_failur
     )
 
 
+def test_w9_create_fails_and_cleanup_probe_401s_reports_unconfirmed_not_nothing(monkeypatch):
+    # _get_json_with_cookie() maps a rejected session cookie to
+    # (None, {"error": "session cookie rejected (401)"}) rather than raising
+    # (http_auth.urlopen(no_relogin=True)'s contract, 1c6b1e14). Before this
+    # fix, the cleanup probe's `chk_status == 200 and ...` check treated that
+    # the same as a confirmed-absent 200 body and reported "nothing was
+    # created" -- a false negative: the probe could not see the board's
+    # state at all, so it must not claim the profile was never made.
+    monkeypatch.setattr(wcr.time, "time", lambda: 8000000)
+    n0 = wcr._new_scratch_profile_name(0)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                # pre-read
+            (None, {"error": "session cookie rejected (401)"}),    # cleanup probe: 401
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = "selector not found"
+
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "nothing was created" not in msg
+    assert "cannot confirm board state" in msg
+    assert n0 in msg
+
+
+def test_w9_create_fails_and_cleanup_probe_confirms_absent_reports_nothing_created(monkeypatch):
+    # The mirror-image, positive case: the probe DOES answer 200 and the
+    # name really is absent -- that is the one case "nothing was created" is
+    # actually true, and the fix must not turn this into a false FAIL/WARN
+    # either.
+    monkeypatch.setattr(wcr.time, "time", lambda: 8100000)
+    n0 = wcr._new_scratch_profile_name(0)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),   # pre-read
+            (200, _profiles_body(("existing", 1))),   # cleanup probe: confirmed absent
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = "selector not found"
+
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "nothing was created" in msg
+    assert "cannot confirm board state" not in msg
+
+
+def test_w10_create_fails_and_cleanup_probe_401s_reports_unconfirmed_not_nothing(monkeypatch):
+    # Same defect, W10's own inline create-failure cleanup check.
+    monkeypatch.setattr(wcr.time, "time", lambda: 8200000)
+    name = wcr._new_scratch_profile_name()
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                # pre-read
+            (None, {"error": "session cookie rejected (401)"}),    # cleanup probe: 401
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = "selector not found"
+
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+
+    ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "nothing was created" not in msg
+    assert "cannot confirm board state" in msg
+    assert name in msg
+
+
+def test_w10_create_fails_and_cleanup_probe_confirms_absent_reports_nothing_created(monkeypatch):
+    monkeypatch.setattr(wcr.time, "time", lambda: 8300000)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),   # pre-read
+            (200, _profiles_body(("existing", 1))),   # cleanup probe: confirmed absent
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    class _FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = "selector not found"
+
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+
+    ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "nothing was created" in msg
+    assert "cannot confirm board state" not in msg
+
+
 # ---------------------------------------------------------------------------
 # W18/W20/W33 -- guarded no-op click rows (sweep abort / autotune abort /
 # danger-mode exit). Each refuses before touching the board if the status
