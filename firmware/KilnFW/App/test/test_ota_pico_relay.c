@@ -632,9 +632,11 @@ static void test_retransmit_exhausted_rounds(void)
     // relay_wait_for_states()'s terminal states), so an image still-incomplete
     // after every round is observed here as UPDATE_END consuming the one
     // leftover queue entry above and still timing out for real ("no reply to
-    // UPDATE_END"), not the separate "gave up" message (which is reachable
-    // only if relay_wait_for_states() could return RECEIVING/VERIFYING as a
-    // match, which it cannot).
+    // UPDATE_END"). A separate "image still incomplete ... gave up" message
+    // used to live in the RECEIVING/VERIFYING arm of UPDATE_END's own
+    // if/else, but relay_wait_for_states() can never return with `got` true
+    // and st.state anything other than COMPLETE or one of its own terminal
+    // states, so that arm was unreachable dead code and has been removed.
 
     int sent_before = fake_sent_frames_count_cmd(SAFETY_CMD_UPDATE_DATA);
     run_relay(500); // 500 / UPDATE_CHUNK_LEN(248) => ceil = 3 chunks in the sequential pass

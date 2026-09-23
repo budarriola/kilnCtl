@@ -633,12 +633,6 @@ static void relay_task_fn(void *arg)
             ok = true;
             format_reason(reason, sizeof(reason), "ok");
             relay_set_percent(100);
-        } else if (st.state == SAFETY_LINK_UPDATE_STATE_RECEIVING ||
-                   st.state == SAFETY_LINK_UPDATE_STATE_VERIFYING) {
-            format_reason(reason, sizeof(reason),
-                     "image still incomplete after %u retransmission rounds -- gave up",
-                     (unsigned)RELAY_MAX_RETRANSMIT_ROUNDS);
-            goto abort_and_fail;
         } else if (st.state == SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE) {
             format_reason(reason, sizeof(reason),
                      "Pico rejected the image: vector table not linked for the slot it was written into");
