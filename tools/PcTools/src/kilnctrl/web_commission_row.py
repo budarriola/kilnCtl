@@ -1524,12 +1524,21 @@ def _run_profile_multi_delete(row: Row, host: str, screenshot_dir: str, cookie: 
                 extra = f" -- LEFT ON BOARD: {left}"
             elif cleanup_targets:
                 extra = f" -- cleaned up {cleanup_targets}"
-            elif not probe_confirmed:
-                extra = (f" -- cannot confirm board state for {name!r} (post-failure read-back "
-                         f"GET {row.verify_endpoint} -> {chk_status}); {name!r} may be LEFT ON "
-                         f"BOARD unconfirmed, check by hand")
-            else:
+            elif probe_confirmed:
                 extra = " -- nothing was created"
+            else:
+                extra = ""
+            # ADDITIVE, not an else-branch: when the create that failed is the
+            # SECOND one, `cleanup_targets` already holds the first (earlier,
+            # confirmed) profile, so an else-chain would report "cleaned up
+            # [first]" / "LEFT ON BOARD: [first]" and silently drop the fact
+            # that `name` itself could not be checked at all. Every
+            # unconfirmed probe gets its own sentence regardless of what
+            # happened to the earlier profiles.
+            if not probe_confirmed:
+                extra += (f" -- cannot confirm board state for {name!r} (post-failure read-back "
+                          f"GET {row.verify_endpoint} -> {chk_status}); {name!r} may be LEFT ON "
+                          f"BOARD unconfirmed, check by hand")
             return False, f"{row.row_id} FAIL: create of {name!r} failed: {detail}{extra}"
         created.append(name)
 

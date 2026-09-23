@@ -2261,6 +2261,45 @@ def test_w9_create_fails_and_cleanup_probe_confirms_absent_reports_nothing_creat
     assert "cannot confirm board state" not in msg
 
 
+def test_w9_second_create_fails_and_probe_401s_still_reports_unconfirmed(monkeypatch):
+    # Reviewer-added: the unconfirmed-probe sentence must be ADDITIVE. When
+    # the SECOND create is the one that fails, `cleanup_targets` already
+    # holds the first (earlier, confirmed) profile, so an else-chain would
+    # report only "cleaned up [n0]" and silently drop the fact that n1's own
+    # state could not be read at all.
+    monkeypatch.setattr(wcr.time, "time", lambda: 8400000)
+    n0 = wcr._new_scratch_profile_name(0)
+    n1 = wcr._new_scratch_profile_name(1)
+    monkeypatch.setattr(
+        wcr, "_get_json_with_cookie",
+        _sequential_get_json([
+            (200, _profiles_body(("existing", 1))),                # pre-read
+            (None, {"error": "session cookie rejected (401)"}),    # cleanup probe: 401
+        ]),
+    )
+    monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            class _FailProc:
+                returncode = 1
+                stdout = ""
+                stderr = "selector not found"
+            return _FailProc()
+        return _FakeProc()
+
+    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+
+    ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
+    assert not ok
+    assert "cannot confirm board state" in msg, msg
+    assert n1 in msg, msg
+    assert n0 in msg, msg
+
+
 def test_w10_create_fails_and_cleanup_probe_401s_reports_unconfirmed_not_nothing(monkeypatch):
     # Same defect, W10's own inline create-failure cleanup check.
     monkeypatch.setattr(wcr.time, "time", lambda: 8200000)
