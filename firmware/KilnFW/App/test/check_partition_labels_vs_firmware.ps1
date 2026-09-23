@@ -145,12 +145,22 @@ foreach ($file in $sourceFiles) {
         $refs += [PSCustomObject]@{ Label = $label; WantSubType = $want; File = $rel; Why = ".partition_label" }
     }
 
-    # 3. esp_spiffs_info("label" / esp_littlefs_info("label"
+    # 3. esp_spiffs_info("label" / esp_littlefs_info("label" -- same same-file
+    #    ambiguity handling as case 2 above: a file that #if-guards between
+    #    esp_vfs_spiffs_register()/esp_vfs_littlefs_register() (docs/
+    #    FILESYSTEM_PLAN.md step 2's log_store_mount.c pattern) textually
+    #    contains BOTH info calls even though only one is ever compiled in,
+    #    so this cannot assume a mismatch from raw text alone -- it would
+    #    always disagree with whichever subtype the CSV currently declares.
+    $spiffsInfoHere   = $text -match 'esp_spiffs_info\('
+    $littlefsInfoHere = $text -match 'esp_littlefs_info\('
     foreach ($m in [regex]::Matches($text, 'esp_spiffs_info\(\s*"([A-Za-z0-9_]+)"')) {
-        $refs += [PSCustomObject]@{ Label = $m.Groups[1].Value; WantSubType = 'spiffs'; File = $rel; Why = "esp_spiffs_info()" }
+        $want = if ($littlefsInfoHere) { $null } else { 'spiffs' }
+        $refs += [PSCustomObject]@{ Label = $m.Groups[1].Value; WantSubType = $want; File = $rel; Why = "esp_spiffs_info()" }
     }
     foreach ($m in [regex]::Matches($text, 'esp_littlefs_info\(\s*"([A-Za-z0-9_]+)"')) {
-        $refs += [PSCustomObject]@{ Label = $m.Groups[1].Value; WantSubType = 'littlefs'; File = $rel; Why = "esp_littlefs_info()" }
+        $want = if ($spiffsInfoHere) { $null } else { 'littlefs' }
+        $refs += [PSCustomObject]@{ Label = $m.Groups[1].Value; WantSubType = $want; File = $rel; Why = "esp_littlefs_info()" }
     }
 
     # 4. esp_partition_find_first(...,"label") -- existence only; this API is

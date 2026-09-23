@@ -1992,6 +1992,37 @@ try {
 
     Invoke-HostTestExe -Name "wifi_prov_status_disclosure" -ExePath $exe47 -BuildCmd $cmd47
 
+    # ---- test_log_store_mount.c: its own 48th AND 49th executables --------
+    # docs/FILESYSTEM_PLAN.md step 2. log_store_mount.c was "not part of any
+    # host test build" (its own header comment) -- stubs/esp_spiffs.h (new,
+    # this change) plus the existing stubs/esp_littlefs.h close that gap.
+    # Built TWICE from the SAME test source, once per CONFIG_KILNCTL_LOGS_
+    # LITTLEFS state, so the plan's step 2 requirement ("compiles under both
+    # flag states") is actually exercised rather than assumed: exe48 leaves
+    # the macro undefined (the bench's default, SPIFFS branch) and exe49
+    # defines it to 1 (the LittleFS branch) via /D on the cl command line.
+    $exe48 = Join-Path $outDir "kilnctl_host_tests_log_store_mount_spiffs.exe"
+    $lsmSpiffsObjDir = Join-Path $outDir "lsm_spiffs"
+    New-Item -ItemType Directory -Force -Path $lsmSpiffsObjDir | Out-Null
+    $cmd48 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$lsmSpiffsObjDir\\`" /Fe:`"$exe48`" " +
+            "`"$(Join-Path $testDir 'test_log_store_mount.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/log_store_mount.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/log_store.c')`""
+
+    Invoke-HostTestExe -Name "log_store_mount_spiffs" -ExePath $exe48 -BuildCmd $cmd48
+
+    $exe49 = Join-Path $outDir "kilnctl_host_tests_log_store_mount_littlefs.exe"
+    $lsmLittlefsObjDir = Join-Path $outDir "lsm_littlefs"
+    New-Item -ItemType Directory -Force -Path $lsmLittlefsObjDir | Out-Null
+    $cmd49 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_LOGS_LITTLEFS=1 " +
+            "/Fo:`"$lsmLittlefsObjDir\\`" /Fe:`"$exe49`" " +
+            "`"$(Join-Path $testDir 'test_log_store_mount.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/log_store_mount.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/log_store.c')`""
+
+    Invoke-HostTestExe -Name "log_store_mount_littlefs" -ExePath $exe49 -BuildCmd $cmd49
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -2427,7 +2458,7 @@ try {
     # test_profiles_live_http.c (56th) as its own Invoke-HostTestExe call --
     # profiles_live_http.c's five HTTP handlers (status/fork/accept/decide/
     # page), untested until now.
-    $totalExpected = 56
+    $totalExpected = 58
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

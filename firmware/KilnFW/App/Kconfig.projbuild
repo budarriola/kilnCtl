@@ -27,4 +27,18 @@ menu "KilnCtrl Application"
             builds enable this; a release build must not. See
             docs/SETUP.md for how the bench build's sdkconfig sets it.
 
+    config KILNCTL_LOGS_LITTLEFS
+        bool "Mount the `logs` partition as LittleFS instead of SPIFFS"
+        default n
+        help
+            docs/FILESYSTEM_PLAN.md step 2. When off (default), log_store_
+            mount.c mounts the `logs` partition with esp_vfs_spiffs_register()
+            as before -- the bench keeps SPIFFS until step 3 flips this
+            default and step 4 changes partitions.csv's `logs` subtype from
+            spiffs to littlefs. Turning this on WITHOUT also changing that
+            partitions.csv subtype mounts LittleFS onto a SPIFFS-formatted
+            partition, which fails and (format_if_mount_failed=true)
+            reformats it -- fine on a bench, not something to flip alone
+            against a partition with logs already worth keeping.
+
 endmenu

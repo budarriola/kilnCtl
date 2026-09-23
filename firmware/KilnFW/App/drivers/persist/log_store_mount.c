@@ -3,7 +3,11 @@
 #include <stdbool.h>
 
 #include "esp_log.h"
+#if CONFIG_KILNCTL_LOGS_LITTLEFS
+#include "esp_littlefs.h"
+#else
 #include "esp_spiffs.h"
+#endif
 
 #include "log_store.h"
 #include "flash_worker.h"
@@ -26,6 +30,26 @@ esp_err_t log_store_mount(void)
      * is a rotating, bounded LOG store, not the NVS config/stats partitions
      * partitions.csv's own header comment is so careful never to move or
      * reformat. */
+#if CONFIG_KILNCTL_LOGS_LITTLEFS
+    /* partitions.csv's `logs` line subtype must be `littlefs`, not `spiffs`,
+     * for this to mount a filesystem that was actually formatted for it --
+     * see this option's Kconfig help. Step 4 (docs/FILESYSTEM_PLAN.md) is
+     * what flips that subtype; this branch alone does not. */
+    esp_vfs_littlefs_conf_t conf = {
+        .base_path = "/logs",
+        .partition_label = "logs",
+        .partition = NULL,
+        .format_if_mount_failed = true,
+    };
+
+    esp_err_t err = esp_vfs_littlefs_register(&conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_vfs_littlefs_register(logs) failed: %s -- firing/autotune logs will NOT "
+                      "be persisted this boot (live debug-UART telemetry via telemetry_log.c is "
+                      "unaffected)", esp_err_to_name(err));
+        return err;
+    }
+#else
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/logs",
         .partition_label = "logs",
@@ -40,6 +64,7 @@ esp_err_t log_store_mount(void)
                       "unaffected)", esp_err_to_name(err));
         return err;
     }
+#endif
 
     err = log_store_init("/logs");
     if (err != ESP_OK) {
@@ -48,7 +73,11 @@ esp_err_t log_store_mount(void)
     }
 
     size_t total = 0, used = 0;
+#if CONFIG_KILNCTL_LOGS_LITTLEFS
+    if (esp_littlefs_info("logs", &total, &used) == ESP_OK) {
+#else
     if (esp_spiffs_info("logs", &total, &used) == ESP_OK) {
+#endif
         ESP_LOGI(TAG, "logs partition mounted: %u/%u bytes used", (unsigned)used, (unsigned)total);
     } else {
         ESP_LOGI(TAG, "logs partition mounted");
