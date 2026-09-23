@@ -581,9 +581,12 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * the `cfg` file first (zones_config_cfg_fs_save()), so one call closes
      * both sides. `on_disk_version_before` is only used for the log line;
      * the file-won case has no single "on-disk NVS version" to name (NVS may
-     * have been invalid, or a different, now-overwritten version), so it is
-     * logged as 0 with an explicit "file source" note instead of reusing
-     * nvs_load_from_with_migration_info()'s (unrelated) value. */
+     * have been invalid, or a different, now-overwritten version), so it
+     * passes from_cfg_file=true and the log names "cfg file source" instead
+     * of any version number; the `0` argument is then unused by the log
+     * lines and only reaches the latched
+     * zones_cfg_migration_persist_fault_t::on_disk_version field, which has
+     * no "came from the file" encoding of its own today. */
     if (err == ESP_OK && trustworthy && migrated_from_nvs) {
         (void)zones_config_persist_migrated_blob_verified(on_disk_version_before, false);
     } else if (err == ESP_OK && trustworthy && file_side_needs_writeback) {
