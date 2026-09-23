@@ -761,6 +761,73 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.assertIn("WARNING", result)
         self.assertIn("NOT confirmed cleared", result)
 
+    def test_wifi_nvs_erase_skips_reset_without_attempting_the_call(self):
+        """D2 bench finding (2026-09-23): erasing `wifi_nvs` (the partition
+        `wifi_prov_get_ap_password()` actually reads -- a SEPARATE partition
+        from the default `nvs` one, see partitions.csv) resets the board's
+        AP password to its firmware default. Any credential this call
+        resolved beforehand can no longer be valid, so the POST must never
+        even be attempted -- it must not read as an ordinary wrong-password
+        403."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 1, "recovery_mode": False}) as status_mock, \
+             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
+            result = mf.flash_firmware(
+                verify=True, ap_password="hunter2",
+                erase_partitions=["wifi_nvs"], confirm_erase=True,
+            )
+        status_mock.assert_called_once_with("192.168.1.156")
+        reset_mock.assert_not_called()
+        self.assertNotIn("error:", result)
+        self.assertIn("boot_guard_reset: skipped", result)
+        self.assertIn("wifi_nvs", result)
+        self.assertIn("before this attempt: 1", result)
+
+    def test_nvs_only_erase_does_not_skip_the_reset(self):
+        """Erasing the DEFAULT `nvs` partition alone (the ordinary
+        web-auth-reset commission case) does NOT touch `wifi_nvs`/the AP
+        password -- the reset must run exactly as it would with no erase at
+        all."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
+            result = mf.flash_firmware(
+                verify=True, ap_password="hunter2",
+                erase_partitions=["nvs"], confirm_erase=True,
+            )
+        reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
+        self.assertNotIn("boot_guard_reset: skipped", result)
+        self.assertIn("cleared and verified", result)
+
+    def test_403_names_ap_password_not_web_password(self):
+        """A 403 outside the erase-skip case must not read like a generic
+        failure -- name which credential is actually being checked, since
+        KILNCTL_AP_PASSWORD/KILNCTL_WEB_PASSWORD confusion is the exact
+        mistake this wording exists to head off."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 side_effect=mf.ota_http.OtaHttpError(
+                     "/api/ota/esp/boot_guard_reset refused: HTTP 403: wrong password",
+                     403, "wrong password")):
+            result = mf.flash_firmware(verify=True, ap_password="wrong-one")
+        self.assertFalse(result.startswith("error:"))
+        self.assertIn("WARNING", result)
+        self.assertIn("wrong AP password", result)
+        self.assertIn("KILNCTL_AP_PASSWORD is the AP Wi-Fi password, not the web admin password", result)
+
     def test_unreachable_boot_guard_endpoint_reported_as_warning_not_error(self):
         """An OtaHttpError calling the endpoint (e.g. the board dropped off
         Wi-Fi in the instant between verification and this call) is also a
