@@ -41,17 +41,23 @@ STORES:
     such rather than presented as a real board export.
 
   - "safety_config_blob" (kind "kilnctl_safety_config_blob"): (added
-    2026-09-23) the raw NVS record for SaftyFW's `config_store_record_t`
-    (firmware/SaftyFW/src/config_store.c/.h, CONFIG_STORE_FORMAT_VERSION).
-    Unlike that struct's in-RAM compiler layout (never touched here), the
-    WIRE format firmware actually reads/writes is fully deterministic and
-    already hand-explicit in C: `config_store_pack()`/`unpack_v2_fields()`
-    place every field at a named `REC_OFF_*` byte offset with
-    `put_u16_le()`/`put_u32_le()`/`put_f32_le()` (never a raw struct memcpy),
-    and the tail is `bootloader_crc32()` -- confirmed, via
+    2026-09-23) the raw flash-sector record for SaftyFW's
+    `config_store_record_t` (firmware/SaftyFW/src/config_store.c/.h,
+    CONFIG_STORE_FORMAT_VERSION) -- a fixed-size slot in the RP2040's own
+    flash, not an NVS key/value entry (NVS is ESP-IDF-specific; SaftyFW has
+    no NVS). Unlike that struct's in-RAM compiler layout (never touched
+    here), the WIRE format firmware actually reads/writes is fully
+    deterministic and already hand-explicit in C: `config_store_pack()`/
+    `unpack_v2_fields()` place every field at a named `REC_OFF_*` byte
+    offset with `put_u16_le()`/`put_u32_le()`/`put_f32_le()` (never a raw
+    struct memcpy), and the tail is `bootloader_crc32()` -- confirmed
+    equivalent to `zlib.crc32()` by reading its implementation plus
     firmware's own host-test vector (`bootloader_crc32("123456789") ==
-    0xCBF43926`), to be the standard CRC-32/ISO-HDLC polynomial, i.e.
-    exactly `zlib.crc32()`. This module mirrors `config_store_pack()`/
+    0xCBF43926`, the standard CRC-32/ISO-HDLC check value). This is a
+    stronger claim than the ESP-side `esp_crc32_le()` used by
+    profile_blob/backup below, which remains an unverified stand-in --
+    never checked against a real captured hardware blob for either. This
+    module mirrors `config_store_pack()`/
     `config_store_unpack_ex()` byte-for-byte for versions 1, 2 and current
     (3), including the v1->v3 and v2->v3 forward migrations
     (`config_store_default()`'s compiled defaults, and
@@ -807,8 +813,8 @@ def encode_safety_config_v3(f: dict) -> bytes:
 
 
 def decode_safety_config_blob(blob: bytes) -> "tuple[int, dict]":
-    """config_store_unpack_ex() -- decode a raw config_store_record_t NVS
-    record (any of format versions 1, 2 or current/3) into (version,
+    """config_store_unpack_ex() -- decode a raw config_store_record_t
+    flash-sector record (any of format versions 1, 2 or current/3) into (version,
     fields_dict). v1 and v2 records are migrated FORWARD into v3 shape
     exactly as firmware does (config_store_default() baseline + overlay for
     v1; a byte-shift then the one v3 decoder for v2), but `version` in the

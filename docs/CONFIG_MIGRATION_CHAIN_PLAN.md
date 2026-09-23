@@ -618,7 +618,7 @@ today: the `kilnctl_backup` document (delegates to the existing
 `cfg_convert.py`), the `kilnctl_profile_blob` wrapper for the raw
 `profile_persisted_t` NVS record (v1-v4, mirroring `PROFILE_VERSION`), and
 (2026-09-23) the `kilnctl_safety_config_blob` wrapper for SaftyFW's raw
-`config_store_record_t` NVS record. Forward steps mirror firmware's
+`config_store_record_t` flash-sector record. Forward steps mirror firmware's
 migration exactly; backward steps drop what the older layout cannot express
 and name every drop in a per-field report (`report.lossy` is true only when
 something is actually dropped, never merely defaulted). A regex-based
@@ -627,11 +627,10 @@ mirror-drift check (`tools/check_config_convert_mirror.py`) fails if
 are bumped in firmware without a matching update here; negative-tested by
 bumping `PROFILE_VERSION` in a scratch copy of `profiles_http.c` and
 confirming failure, then restoring byte-exact via `git cat-file blob`.
-CRC32 uses Python's `zlib.crc32()` as an unverified stand-in for
-`esp_crc32_le()`/`bootloader_crc32()` -- confirmed algorithmically equivalent
-against firmware's own host-test CRC vector (`crc32("123456789") ==
-0xCBF43926`, the standard CRC-32/zlib/ISO-HDLC check value), but never
-against a real captured NVS blob from hardware.
+`bootloader_crc32` (config_store) is verified equivalent by code reading and
+the firmware host vector `crc32("123456789") == 0xCBF43926`; `esp_crc32_le`
+(the ESP-side profile/zones blobs) remains unverified against a captured
+blob.
 
 **`config_store_record_t` (2026-09-23).** Unlike the two formats below, this
 one is fully supported: `firmware/SaftyFW/src/config_store.c` never lets the

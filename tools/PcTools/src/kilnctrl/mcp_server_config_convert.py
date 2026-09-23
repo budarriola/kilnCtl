@@ -3,11 +3,11 @@
 style, but keep the board at one version at a time"). Part of the
 mcp_server.py split pattern -- see that module's docstring for the overall
 map. This tool never writes to a board; it converts a document already in
-hand (typically pasted from a backup file, or from a raw NVS dump) to a
-target version of its own store. See kilnctrl/config_convert.py's module
-docstring for exactly which stores are supported today (kilnctl_backup,
-kilnctl_profile_blob) and which are deliberately refused
-(kilnctl_kiln_cfg_package, safety_config_store).
+hand (typically pasted from a backup file, or from a raw NVS/flash-sector
+dump) to a target version of its own store. See kilnctrl/config_convert.py's
+module docstring for exactly which stores are supported today
+(kilnctl_backup, kilnctl_profile_blob, kilnctl_safety_config_blob) and which
+are deliberately refused (kilnctl_zones_blob, kilnctl_kiln_cfg_package).
 """
 from __future__ import annotations
 
@@ -41,9 +41,8 @@ def convert_config(document_json: str, to_version: int) -> str:
     Returns the converted document as JSON, followed by the per-field
     report. Refuses (returns ``error: ...``) for a document this tool
     cannot place, a target version it does not know, or an unsupported
-    store (kiln_cfg_store's package format and SaftyFW's raw config_store
-    record are not implemented yet -- see kilnctrl/config_convert.py's
-    module docstring for why).
+    store (the zones_cfg_t blob and kiln_cfg_store's package format --
+    see kilnctrl/config_convert.py's module docstring for why).
     """
     doc = json.loads(document_json)
     out_doc, report = config_convert.convert_document(doc, to_version)

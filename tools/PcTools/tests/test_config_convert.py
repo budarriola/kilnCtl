@@ -377,6 +377,179 @@ def test_encode_safety_config_v3_round_trips_default_fields():
     assert _fields_approx_equal(decoded, fields)
 
 
+def _build_v3_golden_nontrivial():
+    """A second hand-built v3 record, distinct-valued at (almost) every
+    REC_OFF_* field -- unlike _build_v3_blob_from_defaults() this deliberately
+    avoids zeros/equal-across-fields/palindromic values so a mutation that
+    swaps two field offsets, narrows a mask, or drops a fold/clamp changes a
+    concrete assertion rather than silently agreeing with a default or a
+    zero. Returns (raw_blob, normalized_blob, expected_fields):
+      - raw_blob: what a real (corrupt-ish, out-of-range zone_ct_channel)
+        record on flash might look like.
+      - normalized_blob: raw_blob with the fields decode_safety_config_blob()
+        is required to CORRECT (the FIELDS_SET clear-mask and the derived
+        ZONE_CT_CHANNEL) patched to their expected post-decode values, and
+        the CRC recomputed over that corrected body -- this is what
+        encode_safety_config_v3(expected_fields) must reproduce byte-for-byte,
+        since decode is a normalizing operation and its output does not
+        round-trip back to raw_blob bit-for-bit by design.
+      - expected_fields: the exact dict decode_safety_config_blob() must
+        return for raw_blob.
+    """
+    buf = bytearray(b"\xff" * 512)
+    buf[0:4] = _SC_MAGIC_BYTES
+    struct.pack_into("<H", buf, 4, 3)
+    struct.pack_into("<H", buf, 6, 0)
+    struct.pack_into("<I", buf, 8, 0x01020304)  # seq
+    struct.pack_into("<I", buf, 12, 0x0008C001)  # fields_set (bit19 in the ZONE_CT_CHANNEL mask, plus 14/15/0)
+    buf[16] = 7  # tc_source
+    buf[17] = 5  # borrowed_zone_index
+    buf[18] = 2  # tc_placement_mode
+    struct.pack_into("<f", buf, 19, 999.5)  # abs_max_temp_c
+    buf[23] = 0x0A  # tc_type -- out of range (> CONFIG_STORE_TC_TYPE_MAX_REAL=7), must clamp to default 3
+    buf[24:27] = bytes([11, 22, 33])  # ct_channel_map (no clamp defined for this field)
+    buf[27] = 1  # calibration_missing
+    struct.pack_into("<f", buf, 28, 123.25)  # firing_margin_c
+    struct.pack_into("<f", buf, 32, 45.75)  # overshoot_margin_c
+    struct.pack_into("<I", buf, 36, 777)  # overshoot_time_s
+    struct.pack_into("<f", buf, 40, 12.125)  # max_rate_c_per_min
+    struct.pack_into("<I", buf, 44, 61)  # rate_window_s
+    struct.pack_into("<I", buf, 48, 62)  # blind_grace_s
+    struct.pack_into("<I", buf, 52, 603)  # frozen_window_s
+    struct.pack_into("<f", buf, 56, 201.5)  # tc_disagreement_c
+    struct.pack_into("<I", buf, 60, 301)  # tc_disagreement_time_s
+    struct.pack_into("<f", buf, 64, 1.5)  # tc_expected_offset_c
+    struct.pack_into("<f", buf, 68, 61.5)  # cj_warn_c
+    struct.pack_into("<f", buf, 72, 86.5)  # cj_max_c
+    struct.pack_into("<I", buf, 76, 63)  # cj_time_s
+    struct.pack_into("<I", buf, 80, 11)  # borrowed_stale_s
+    struct.pack_into("<I", buf, 84, 64)  # borrowed_stale_trip_s
+    buf[88] = 4  # borrowed_type_expected
+    struct.pack_into("<f", buf, 89, 2.5)  # i_present_a
+    struct.pack_into("<H", buf, 93, 100)
+    struct.pack_into("<H", buf, 95, 200)
+    struct.pack_into("<H", buf, 97, 300)  # zero_counts[3]
+    struct.pack_into("<I", buf, 99, 151)  # correlation_window_s
+    struct.pack_into("<I", buf, 103, 21)  # stuck_on_time_s
+    struct.pack_into("<I", buf, 107, 12)  # trip_verify_s
+    for i, v in enumerate((0.1, 0.2, 0.3)):
+        struct.pack_into("<f", buf, 111 + i * 4, v)  # k_ct_v_per_a
+    for i, v in enumerate((1.1, 1.2, 1.3)):
+        struct.pack_into("<f", buf, 123 + i * 4, v)  # gain
+    struct.pack_into("<f", buf, 135, 240.5)  # mains_voltage_v
+    struct.pack_into("<I", buf, 139, 121)  # power_window_s
+    struct.pack_into("<I", buf, 143, 6)  # context_max_age_s
+    struct.pack_into("<I", buf, 147, 11)  # link_timeout_s
+    struct.pack_into("<I", buf, 151, 121)  # link_dead_hard_s
+    struct.pack_into("<I", buf, 155, 201)  # mainfault_debounce_ms
+    struct.pack_into("<I", buf, 159, 501)  # telemetry_period_ms
+    struct.pack_into("<I", buf, 163, 61)  # startup_grace_s
+    struct.pack_into("<I", buf, 167, 51)  # estop_debounce_ms
+    struct.pack_into("<I", buf, 171, 1001)  # watchdog_timeout_ms
+    struct.pack_into("<I", buf, 175, 11)  # config_check_period_s
+    ct_cal_src = [(1, 1.5, 0.5), (0, 2.5, 1.5), (1, 3.5, 2.5)]
+    for ch, (calibrated, gain, offset) in enumerate(ct_cal_src):
+        base = 179 + ch * 9
+        buf[base] = calibrated
+        struct.pack_into("<f", buf, base + 1, gain)
+        struct.pack_into("<f", buf, base + 5, offset)
+    buf[206] = 0xA5  # safety_tc_installed marker: NOT installed
+    struct.pack_into("<f", buf, 207, 1500.5)  # max_expected_power_w -- distinct from every i_normal_a below
+    for i, v in enumerate((3.5, 4.5, 5.5)):
+        struct.pack_into("<f", buf, 211 + i * 4, v)  # i_normal_a
+    struct.pack_into("<H", buf, 223, 0xFFFF)  # overcurrent_pct -- must fold to 0
+    struct.pack_into("<I", buf, 225, 0xFFFFFFFF)  # overcurrent_time_s -- must fold to 0
+    buf[229] = 0xA5  # ct_installed marker: NOT installed
+    buf[230] = 1  # ct_topology = SUMMED
+    buf[231] = 1  # i_present_a_manual = true
+    struct.pack_into("<f", buf, 232, 9.5)  # tc_offset_c
+    buf[236] = 1  # estop_active_level = ACTIVE_LOW
+    buf[237] = 0
+    buf[238] = 1
+    buf[239] = 3  # zone_ct_channel -- byte 3 is out of range ( > 2), must trigger the derive fallback
+    reserved = bytes(i % 256 for i in range(264))  # ascending, not palindromic, not all-equal
+    buf[240:240 + 264] = reserved
+    crc = _sc_crc(bytes(buf[:504]))
+    buf[504:508] = crc
+    raw_blob = bytes(buf)
+
+    # normalized_blob: same as raw_blob except every field decode_safety_config_blob()
+    # is required to CORRECT rather than pass through verbatim is patched to its
+    # expected post-decode value: FIELDS_SET has bits 16-19 cleared, ZONE_CT_CHANNEL
+    # is the SUMMED-topology derivation, TC_TYPE is clamped, and OVERCURRENT_PCT/
+    # OVERCURRENT_TIME_S are folded to 0 -- exactly what
+    # encode_safety_config_v3(expected_fields) must reproduce byte-for-byte.
+    norm = bytearray(raw_blob)
+    # 0x0008C001 & ~0x000F0000: only bit19 (part of 0x00080000) falls inside the
+    # mask -- bits 0/14/15 are untouched -- so this clears the "8" nibble only.
+    normalized_fields_set = 0x0008C001 & ~0x000F0000  # == 0x0000C001
+    struct.pack_into("<I", norm, 12, normalized_fields_set)
+    norm[23] = 0x03  # tc_type clamped from the out-of-range 0x0A
+    struct.pack_into("<H", norm, 223, 0)  # overcurrent_pct folded from 0xFFFF
+    struct.pack_into("<I", norm, 225, 0)  # overcurrent_time_s folded from 0xFFFFFFFF
+    norm[237:240] = bytes([2, 2, 2])
+    norm_crc = _sc_crc(bytes(norm[:504]))
+    norm[504:508] = norm_crc
+    normalized_blob = bytes(norm)
+
+    expected_fields = {
+        "format_version": 3, "seq": 0x01020304, "fields_set": normalized_fields_set,
+        "tc_source": 7, "borrowed_zone_index": 5, "tc_placement_mode": 2, "abs_max_temp_c": 999.5,
+        "tc_type": 0x03,  # clamped from the out-of-range 0x0A
+        "ct_channel_map": [11, 22, 33], "calibration_missing": True,
+        "firing_margin_c": 123.25, "overshoot_margin_c": 45.75, "overshoot_time_s": 777,
+        "max_rate_c_per_min": 12.125, "rate_window_s": 61, "blind_grace_s": 62, "frozen_window_s": 603,
+        "tc_disagreement_c": 201.5, "tc_disagreement_time_s": 301, "tc_expected_offset_c": 1.5,
+        "cj_warn_c": 61.5, "cj_max_c": 86.5, "cj_time_s": 63, "borrowed_stale_s": 11,
+        "borrowed_stale_trip_s": 64, "borrowed_type_expected": 4, "i_present_a": 2.5,
+        "zero_counts": [100, 200, 300], "correlation_window_s": 151, "stuck_on_time_s": 21,
+        "trip_verify_s": 12, "k_ct_v_per_a": [0.1, 0.2, 0.3], "gain": [1.1, 1.2, 1.3],
+        "mains_voltage_v": 240.5, "power_window_s": 121, "context_max_age_s": 6,
+        "link_timeout_s": 11, "link_dead_hard_s": 121, "mainfault_debounce_ms": 201,
+        "telemetry_period_ms": 501, "startup_grace_s": 61, "estop_debounce_ms": 51,
+        "watchdog_timeout_ms": 1001, "config_check_period_s": 11,
+        "ct_cal": [
+            {"calibrated": True, "gain": 1.5, "offset": 0.5},
+            {"calibrated": False, "gain": 2.5, "offset": 1.5},
+            {"calibrated": True, "gain": 3.5, "offset": 2.5},
+        ],
+        "safety_tc_installed": False,  # 0xA5 marker
+        "max_expected_power_w": 1500.5,
+        "i_normal_a": [3.5, 4.5, 5.5],
+        "overcurrent_pct": 0, "overcurrent_time_s": 0,  # folded from 0xFFFF/0xFFFFFFFF
+        "ct_installed": False,  # 0xA5 marker
+        "ct_topology": 1,  # SUMMED
+        "i_present_a_manual": True,
+        "tc_offset_c": 9.5,
+        "estop_active_level": 1,  # ACTIVE_LOW
+        "zone_ct_channel": [2, 2, 2],  # derived, SUMMED topology -- NOT [0,1,2]
+        "reserved_hex": reserved.hex(),
+    }
+    return raw_blob, normalized_blob, expected_fields
+
+
+def test_decode_safety_config_v3_golden_nontrivial_every_field():
+    raw_blob, normalized_blob, expected_fields = _build_v3_golden_nontrivial()
+    version, decoded = cc.decode_safety_config_blob(raw_blob)
+    assert version == 3
+    assert _fields_approx_equal(decoded, expected_fields)
+    # encode(decode(x)) reproduces the NORMALIZED blob byte-for-byte -- not
+    # raw_blob, since decode is required to correct the out-of-range
+    # zone_ct_channel and its fields_set bits, not preserve them.
+    assert cc.encode_safety_config_v3(decoded) == normalized_blob
+
+
+def test_decode_safety_config_v3_golden_nontrivial_fields_set_mask_is_exact():
+    # Isolates the clear-mask assertion: bit19 (part of 0x000F0000) must be
+    # cleared, but bit0/14/15 (outside the mask) must survive untouched. A
+    # mutation that narrows or drops this mask (e.g. only clearing bit16)
+    # changes this exact value.
+    raw_blob, _, expected_fields = _build_v3_golden_nontrivial()
+    _, decoded = cc.decode_safety_config_blob(raw_blob)
+    assert decoded["fields_set"] == 0x0000C001
+    assert expected_fields["fields_set"] == 0x0000C001
+
+
 def test_decode_safety_config_wrong_length_refuses():
     blob = _build_v3_blob_from_defaults()[:-1]
     with pytest.raises(cc.ConfigConvertError, match="length"):
@@ -445,28 +618,93 @@ def test_decode_safety_config_v1_bad_crc_refuses():
         cc.decode_safety_config_blob(bytes(buf))
 
 
+def _build_v2_blob(fields_set_u16, ct_topology_byte, last_shifted_byte, first_reserved_byte):
+    """v2 layout (frozen, config_store.c REC_V2_OFF_*): magic/format_version/
+    reserved0/seq occupy the same 0-11 bytes as v3; fields_set is a u16 at
+    12 (not u32); the shifted field block runs v2 offset 14 (tc_source) to
+    234 (estop_active_level, v3's offset - 2) inclusive; reserved starts at
+    235 (269 B declared, only the first 264 are ever copied forward); crc at
+    504. v2 has no zone_ct_channel field at all -- it is always derived on
+    migration, never read off a v2 record."""
+    buf = bytearray(b"\xff" * 512)
+    buf[0:4] = _SC_MAGIC_BYTES
+    struct.pack_into("<H", buf, 4, 2)  # format_version = 2
+    struct.pack_into("<H", buf, 6, 0)  # reserved0
+    struct.pack_into("<I", buf, 8, 0x0A0B0C0D)  # seq
+    struct.pack_into("<H", buf, 12, fields_set_u16)  # fields_set (u16 at v2)
+    buf[14] = 0  # tc_source (v2 offset 14 == v3 offset 16)
+    buf[228] = ct_topology_byte  # ct_topology (v3 offset 230 - 2)
+    buf[234] = last_shifted_byte  # estop_active_level (v3 offset 236 - 2) -- LAST shifted byte
+    buf[235] = first_reserved_byte  # FIRST reserved byte (copied 1:1, not shifted)
+    buf[236:235 + 264] = b"\x00" * (235 + 264 - 236)
+    crc = _sc_crc(bytes(buf[:504]))
+    buf[504:508] = crc
+    return bytes(buf)
+
+
 def test_decode_safety_config_v2_migrates_zone_ct_channel_from_topology():
-    # v2 layout (frozen, config_store.c REC_V2_OFF_*): same as v3 below
-    # offset 14, fields_set is a u16 at 12, tc_source starts at 14 (v3's
-    # offset - 2), reserved starts at 235, crc at 504. Build it by taking a
-    # known-good v3 default blob and shifting the field block DOWN by 2
-    # bytes -- the exact inverse of decode_safety_config_blob()'s v2->v3
-    # migration -- so this test exercises the real shift math both ways.
-    v3 = bytearray(_build_v3_blob_from_defaults())
-    v2 = bytearray(b"\xff" * 512)
-    v2[0:12] = v3[0:12]  # magic, format_version, reserved0, seq
-    struct.pack_into("<H", v2, 4, 2)  # format_version = 2
-    struct.pack_into("<H", v2, 12, 0)  # fields_set (u16 at v2) -- nothing set
-    v2[14:14 + (235 - 14)] = v3[16:16 + (235 - 14)]  # tc_source..just-before-reserved, shifted -2
-    v2[235:235 + 264] = v3[240:240 + 264]  # reserved tail (same length both versions)
-    crc = _sc_crc(bytes(v2[:504]))
-    v2[504:508] = crc
-    version, fields = cc.decode_safety_config_blob(bytes(v2))
+    blob = _build_v2_blob(fields_set_u16=0x8001, ct_topology_byte=1,
+                           last_shifted_byte=1, first_reserved_byte=0xAB)
+    version, fields = cc.decode_safety_config_blob(blob)
     assert version == 2
     assert fields["format_version"] == 3
-    assert fields["ct_topology"] == 0  # PER_ZONE (byte 230 in the shifted block was 0)
-    assert fields["zone_ct_channel"] == [0, 1, 2]  # derived from PER_ZONE, not read from the wire
+    assert fields["seq"] == 0x0A0B0C0D
+    # zero-EXTENSION, not a shift: 0x8001 (u16) -> 0x00008001 (u32), never
+    # 0x80010000 or any other bit-shuffled variant.
+    assert fields["fields_set"] == 0x00008001
+    assert fields["ct_topology"] == 1  # SUMMED (byte 228 == v3 offset 230 - 2)
+    assert fields["zone_ct_channel"] == [2, 2, 2]  # derived from SUMMED, not [0,1,2]
+    assert fields["estop_active_level"] == 1  # last byte the shift must carry (v2 234 -> v3 236)
+    assert fields["reserved_hex"].startswith("ab")  # first reserved byte, copied 1:1 (v2 235 -> v3 240)
     assert fields["calibration_missing"] is True  # carried through from the v3-shaped bytes, not forced
+
+
+def test_decode_safety_config_v2_bad_crc_refuses():
+    blob = bytearray(_build_v2_blob(fields_set_u16=0, ct_topology_byte=0,
+                                     last_shifted_byte=0, first_reserved_byte=0))
+    blob[300] ^= 0xFF  # inside the reserved tail, well before the CRC
+    with pytest.raises(cc.ConfigConvertError, match="CRC mismatch"):
+        cc.decode_safety_config_blob(bytes(blob))
+
+
+def test_decode_safety_config_v2_wrong_magic_refuses():
+    blob = bytearray(_build_v2_blob(fields_set_u16=0, ct_topology_byte=0,
+                                     last_shifted_byte=0, first_reserved_byte=0))
+    blob[0] ^= 0xFF
+    with pytest.raises(cc.ConfigConvertError, match="magic"):
+        cc.decode_safety_config_blob(bytes(blob))
+
+
+def test_decode_safety_config_v2_truncated_refuses():
+    blob = _build_v2_blob(fields_set_u16=0, ct_topology_byte=0,
+                           last_shifted_byte=0, first_reserved_byte=0)[:-1]
+    with pytest.raises(cc.ConfigConvertError, match="length"):
+        cc.decode_safety_config_blob(blob)
+
+
+def test_decode_safety_config_v1_wrong_magic_refuses():
+    buf = bytearray(b"\xff" * 512)
+    buf[0:4] = _SC_MAGIC_BYTES
+    struct.pack_into("<H", buf, 4, 1)
+    struct.pack_into("<I", buf, 8, 1)
+    buf[12] = 0x03
+    crc = _sc_crc(bytes(buf[:248]))
+    buf[248:252] = crc
+    buf[0] ^= 0xFF
+    with pytest.raises(cc.ConfigConvertError, match="magic"):
+        cc.decode_safety_config_blob(bytes(buf))
+
+
+def test_decode_safety_config_v1_truncated_refuses():
+    buf = bytearray(b"\xff" * 512)
+    buf[0:4] = _SC_MAGIC_BYTES
+    struct.pack_into("<H", buf, 4, 1)
+    struct.pack_into("<I", buf, 8, 1)
+    buf[12] = 0x03
+    crc = _sc_crc(bytes(buf[:248]))
+    buf[248:252] = crc
+    with pytest.raises(cc.ConfigConvertError, match="length"):
+        cc.decode_safety_config_blob(bytes(buf)[:-1])
 
 
 def test_convert_safety_config_blob_v1_to_v3():
