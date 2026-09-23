@@ -1,8 +1,60 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, -Fast SKIP
+> **Status:** planning · **Last reviewed:** 2026-09-23, bootloader/partition-
+> table publishing, bench sdkconfig pins, and OTA rollback task-handle
+> hardening (thirtieth sweep) — open items below.
+> - **Both bench-commission tooling gaps from the twenty-ninth sweep are now
+>   closed**: `check_00_kilnfw_target_build.ps1` publishes `bootloader.bin`/
+>   `partition-table.bin` alongside `KilnCtrl.elf`/`.bin` (`d23d4eae`,
+>   freshness-gate fixes `51ae1ce0`/`ad2ee170` grade the published bootloader
+>   against its own subproject config header); `flash_firmware()`'s
+>   missing-binaries refusal now names both files explicitly and suppresses
+>   a dangling "did not include it" note when `KilnCtrl.bin` itself is also
+>   missing (`9c26dd91`). See the M18 pending checklist below — the bench
+>   reflash itself has not happened yet.
+> - **Bench WiFi/lwIP/GPIO_PROBE sdkconfig values pinned into
+>   `sdkconfig.defaults`** (`a513aa75`): `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM`,
+>   `CONFIG_ESP_WIFI_RX_BA_WIN`, `CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS`, and
+>   `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` (unconditional — no
+>   `DEV_AFFORDANCES`-style umbrella symbol exists in this Kconfig tree to
+>   gate it on; flagged for the owner as a possible follow-up). All four
+>   added to `check_sdkconfig_defaults_applied.ps1`'s watched-key list
+>   (`0a8db924`), negative-tested by hand-editing a generated value and
+>   confirming the check catches it. `.dram0.bss` +64 B (96,792 -> 96,856 B),
+>   fully explained by `gpio_probe.c`'s own statics plus alignment, not a
+>   regression.
+> - **`test_sdkconfig_sibling_pair_guard.py` wired into `run_all_checks.ps1`**
+>   (`b9f574d3`), closing the same class of orphaned-check gap
+>   `test_stack_budget_symbol_bounds.py` was already wired around;
+>   `build_kilnfw()` follow-up (`5a72eb50`) skips the sdkconfig sibling
+>   refresh when ninja did not actually relink, avoiding unnecessary rebuild
+>   churn.
+> - **`run_all_checks.ps1` -Fast SKIP-FAST classification hardened per opus
+>   advisories** (`af5a64ba`): `KILNCTL_CHECKS_FAST` is now set/cleared right
+>   after `$ErrorActionPreference` and cleared from every exit path
+>   (including a trap for an uncaught terminating error) so it never leaks
+>   into the calling shell; CLAUDE.md's `-Fast` wording corrected to mention
+>   `check_00_kilnfw_host_tests.ps1` as a fourth skip; new
+>   `tools/check_skip_fast_classification.ps1` negative-test-shaped self-test
+>   drives two throwaway dummy checks through a real nested `run_all_checks.ps1`
+>   run to prove the SKIP vs. SKIP-FAST bucketing end to end.
+> - **OTA on-demand task handles nulled before they go stale, stack_margin
+>   registration de-duplicated** (`95be3327`, opus-review fixes `22fcc257`,
+>   header-comment correction `24e59726`): the ESP rollback task's handle is
+>   now cleared after `vTaskDelete` so a second POST can't observe a dangling
+>   handle, and duplicate `stack_margin_register()` calls across the three
+>   OTA HTTP call sites (all serialized on the single httpd worker task, not
+>   inside the created tasks' bodies, and not guarded by any per-feature
+>   mutex — `recovery_exit` takes none) are now de-duped rather than
+>   double-counted; a mismatched `configured_stack_bytes` on a duplicate
+>   registration is silently kept (first registration wins), now documented
+>   in a header comment.
+> - **Not yet flashed**: the bench board stays at `6630e769`/`05f1ab1f`
+>   (ESP/Pico) — none of today's commits are on hardware yet; a target build
+>   at `24e59726`+ was in progress as of this sweep, flash not yet done.
+> **Previously reviewed:** 2026-09-23, -Fast SKIP
 > reclassification, three more httpd-stack heap moves, and task-liveness
-> lifecycle tagging (twenty-ninth sweep) — open items below.
+> lifecycle tagging (twenty-ninth sweep).
 > - **`-Fast`-caused SKIPs are now non-fatal without weakening SKIP-fails-by-
 >   default** (`2a1c5c96`): `run_all_checks.ps1` sets `KILNCTL_CHECKS_FAST` in
 >   the environment only when `-Fast` is passed. `check_recovery_image_size.py`,
@@ -3298,18 +3350,28 @@ Owner instruction, 2026-09-21.
 
 **2026-09-23 pending, all blocking the bench reflash + commission pass:**
 
-- [ ] Pin the bench's hand-set `sdkconfig` values in `sdkconfig.defaults`
+- [x] Pin the bench's hand-set `sdkconfig` values in `sdkconfig.defaults`
   (Wi-Fi static RX buffers 10, BA window 6, lwIP OOSEQ pbufs 4;
-  `GPIO_PROBE` routed via `DEV_AFFORDANCES`) — in review.
-- [ ] Stale published `build/`/`sdkconfig` sibling guard in the stack-budget
-  checkers, plus a `build_kilnfw()` refresh — in review.
-- [ ] `check_00_kilnfw_target_build.ps1` publishes `bootloader.bin`/
-  `partition-table.bin`, not just `KilnCtrl.elf`/`.bin` — `flash_firmware()`
-  needs both and today's build doesn't produce them — in review.
-- [ ] OTA transient task handles: `vTaskDelete` on the ESP rollback task,
-  idempotent `stack_margin_register` — in review.
-- [ ] Bench reflash + commission of both boards at final HEAD — blocked on
-  the four items above.
+  `GPIO_PROBE` pinned unconditionally, no `DEV_AFFORDANCES`-style symbol
+  exists to gate it on) — done, 2026-09-23 (`a513aa75`, watched-key coverage
+  `0a8db924`).
+- [x] Stale published `build/`/`sdkconfig` sibling guard in the stack-budget
+  checkers, plus a `build_kilnfw()` refresh — done, 2026-09-23
+  (`91477e4c` fix, `b9f574d3` wired the regression test into
+  `run_all_checks.ps1`, `5a72eb50` skips the refresh when ninja did not
+  relink).
+- [x] `check_00_kilnfw_target_build.ps1` publishes `bootloader.bin`/
+  `partition-table.bin`, not just `KilnCtrl.elf`/`.bin` — done, 2026-09-23
+  (`d23d4eae`, freshness-gate fixes `51ae1ce0`/`ad2ee170`) — closes the
+  second bench-commission gap noted in the twenty-ninth sweep above.
+- [x] OTA transient task handles: `vTaskDelete` on the ESP rollback task,
+  idempotent `stack_margin_register` — done, 2026-09-23 (`95be3327`,
+  opus-review fixes `22fcc257`/`24e59726` comment-only follow-up).
+- [ ] Bench reflash + commission of both boards at final HEAD — tooling
+  blockers above are now all cleared; a target build at `24e59726`+ was in
+  progress as of this sweep (2026-09-23) but the bench board has not been
+  reflashed yet and stays at `6630e769`/`05f1ab1f` (ESP/Pico). No commission
+  results to report until that flash lands.
 
 ---
 
