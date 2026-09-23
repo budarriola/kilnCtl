@@ -111,8 +111,17 @@ zones_cfg_fs_write_fn_t zones_config_cfg_fs_get_write_fn(void);
  * logged and otherwise ignored (the in-RAM decision already made is not
  * rolled back over a write failure -- same "degrade, don't wedge"
  * discipline cfg_fs itself follows). */
+/* out_on_disk_version (optional, may be NULL): when *out_used_file ends up
+ * true, this is the FILE blob's own claimed version byte (the same byte
+ * zones_config_cfg_fs_load_raw() would report), captured before migration --
+ * so a caller latching a migration-persist fault for the file-won path (see
+ * zones_config_store.c's zones_config_persist_migrated_blob_verified()) can
+ * report the real source version instead of a hardcoded placeholder. Left at
+ * 0 whenever the NVS candidate is the one adopted instead (*out_used_file ==
+ * false); callers that only care about the NVS side already have their own
+ * on-disk version from nvs_load_from_with_migration_info(). */
 bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
-                                  uint32_t *out_rev, bool *out_used_file);
+                                  uint32_t *out_rev, bool *out_used_file, uint8_t *out_on_disk_version);
 
 /* Writes `cfg` (must already be a valid, current-version struct -- this
  * function does not validate) to the file at `rev`. No-op returning

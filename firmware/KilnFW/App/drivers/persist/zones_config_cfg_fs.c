@@ -47,7 +47,16 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid)
+/* Shared body for zones_config_cfg_fs_load_raw() and
+ * zones_config_cfg_fs_resolve() -- out_on_disk_version is the extra output
+ * only resolve() needs (the file blob's own claimed version byte, for the
+ * migration-persist fault latch; see this file's header comment on
+ * zones_config_cfg_fs_resolve()). Kept as one internal implementation
+ * instead of two near-duplicate file reads, and instead of widening
+ * zones_config_cfg_fs_load_raw()'s own public signature, which has over a
+ * dozen call sites in test_zones_config_cfg_fs.c that do not need this
+ * value. */
+static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid, uint8_t *out_on_disk_version)
 {
     if (out_cfg) {
         memset(out_cfg, 0, sizeof(*out_cfg));
@@ -57,6 +66,9 @@ void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool 
     }
     if (out_valid) {
         *out_valid = false;
+    }
+    if (out_on_disk_version) {
+        *out_on_disk_version = 0;
     }
     if (!out_cfg || !out_rev || !out_valid) {
         return;
@@ -95,6 +107,12 @@ void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool 
     }
 
     uint32_t rev = get_u32_le(raw);
+    /* The blob's own claimed version byte (byte 0 of raw+4, same convention
+     * as nvs_load_from_decode()'s `raw[0]` in zones_config_store.c) --
+     * captured from the raw bytes before decode/migration overwrites
+     * out_cfg->version with ZONES_CFG_VERSION, and before `raw` is freed
+     * below. */
+    uint8_t on_disk_version = raw[4];
     const char *reason = "";
     /* Decoded straight into the caller's buffer -- see the malloc comment
      * above; a zones_cfg_t local here was another 812 B of main-task stack.
@@ -124,6 +142,14 @@ void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool 
 
     *out_rev = rev;
     *out_valid = true;
+    if (out_on_disk_version) {
+        *out_on_disk_version = on_disk_version;
+    }
+}
+
+void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid)
+{
+    load_raw_impl(out_cfg, out_rev, out_valid, NULL);
 }
 
 esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
@@ -219,7 +245,7 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
 }
 
 bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
-                                  uint32_t *out_rev, bool *out_used_file)
+                                  uint32_t *out_rev, bool *out_used_file, uint8_t *out_on_disk_version)
 {
     if (out_cfg) {
         memset(out_cfg, 0, sizeof(*out_cfg));
@@ -230,6 +256,9 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
     if (out_used_file) {
         *out_used_file = false;
     }
+    if (out_on_disk_version) {
+        *out_on_disk_version = 0;
+    }
     if (!nvs_cfg || !out_cfg || !out_rev || !out_used_file) {
         return false;
     }
@@ -237,7 +266,8 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
     zones_cfg_t file_cfg;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    zones_config_cfg_fs_load_raw(&file_cfg, &file_rev, &file_valid);
+    uint8_t file_on_disk_version = 0;
+    load_raw_impl(&file_cfg, &file_rev, &file_valid, &file_on_disk_version);
 
     if (!file_valid) {
         /* No usable file. Fall back to the NVS candidate, and if it is
@@ -265,6 +295,9 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         *out_cfg = file_cfg;
         *out_rev = file_rev;
         *out_used_file = true;
+        if (out_on_disk_version) {
+            *out_on_disk_version = file_on_disk_version;
+        }
         return true;
     }
 
@@ -276,6 +309,9 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         *out_cfg = file_cfg;
         *out_rev = file_rev > nvs_rev ? file_rev : nvs_rev;
         *out_used_file = true;
+        if (out_on_disk_version) {
+            *out_on_disk_version = file_on_disk_version;
+        }
         return true;
     }
 
@@ -314,6 +350,9 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         *out_cfg = file_cfg;
         *out_rev = file_rev;
         *out_used_file = true;
+        if (out_on_disk_version) {
+            *out_on_disk_version = file_on_disk_version;
+        }
         /* NVS resync happens on the next nvs_save() call driven by the
          * caller (zones_config_store.c's nvs_load() bumps its own rev and
          * re-saves both sides once it adopts this result) -- this module

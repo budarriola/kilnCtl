@@ -697,6 +697,90 @@ static void test_file_wins_after_migration_writes_back_to_nvs(void)
 }
 
 // ---------------------------------------------------------------------
+// 8b. Reviewer advisory (a03ead6c) on zones_config_store.c's file-won call
+//    site of zones_config_persist_migrated_blob_verified(): when that
+//    write-back cannot be verified (see test_zones_http.c's "lying write"
+//    test for the NVS-sourced version of this same shape), the latched
+//    zones_cfg_migration_persist_fault_t::on_disk_version used to be a
+//    hardcoded 0 for a file-sourced migration -- meaningless to an
+//    operator, since a real version WAS on disk (in the file). Same setup
+//    as test 8 above (an old-version file, empty NVS), but the write-back
+//    is sabotaged to lie about succeeding, so the fault must latch, and it
+//    must name the file blob's real pre-migration version (21), never 0.
+// ---------------------------------------------------------------------
+static void test_file_won_migration_persist_fault_names_real_file_version(void)
+{
+    TEST_SECTION("zones cfg_fs: a file-sourced migration whose write-back cannot be verified must latch "
+                 "the migration-persist fault with the FILE's real on-disk version, not a hardcoded 0");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    // Same v21 staging technique as test 8 above.
+    zones_cfg_v21_t v21;
+    memset(&v21, 0, sizeof(v21));
+    v21.version = 21;
+    v21.thermo_count = 1;
+    v21.relay_count = 1;
+    v21.max_simultaneous_relays = 1;
+    v21.safety_tc_type = 3;
+    v21.timing_profile_count = 1;
+    strncpy(v21.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    v21.timing_profiles[0].guard_progress_duty_min = 0.1f;
+    v21.timing_profiles[0].ramp_lock_band_c = 3.0f;
+    v21.zones[0].relay_mask = 1;
+    v21.zones[0].thermo_mask = 1;
+    snprintf(v21.zones[0].name, sizeof(v21.zones[0].name), "FileMigLying"); /* <= ZONE_NAME_MAX_LEN (15) --
+                                                                              * "FileMigratedLying" (17 chars)
+                                                                              * silently failed validate()/
+                                                                              * truncated and broke this test the
+                                                                              * first time around. */
+    v21.zones[0].pid_kp = 4.5f;
+    v21.zones[0].max_temp_c = 1100.0f;
+    v21.zones[0].model_k_dc = 15.0f;
+    v21.crc32 = 0;
+
+    uint8_t filebuf[4 + sizeof(v21)];
+    filebuf[0] = 3;
+    filebuf[1] = 0;
+    filebuf[2] = 0;
+    filebuf[3] = 0;
+    memcpy(filebuf + 4, &v21, sizeof(v21));
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, filebuf, sizeof(filebuf)) == ESP_OK,
+               "test setup: old-version (v21) blob staged directly into the file at rev 3");
+
+    // NOTE: no "nothing latched yet" baseline check here -- the fault latch
+    // is a single process-global that (by design, see zones_config_store.c's
+    // M13 comment) is never reset by reset_all(); an earlier test in this
+    // SAME executable (e.g. test_zones_http.c's NVS-sourced lying-write
+    // test) may have already latched it before this test runs, and that is
+    // not a defect for this test to detect.
+    zones_cfg_migration_persist_fault_t fault;
+    memset(&fault, 0xAA, sizeof(fault));
+
+    // Arm the write-back to lie on both retry attempts, same shape and same
+    // count (4 -- nvs_save() makes two set-shaped calls per attempt) as
+    // test_zones_http.c's NVS-sourced lying-write test.
+    fake_kv_script_silent_set_noops(4);
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid,
+               "load still adopts the file-sourced, migrated in-RAM config even though write-back will fail");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "FileMigLying") == 0,
+               "in-RAM config is the migrated file content regardless of the write-back outcome");
+
+    TEST_CHECK(zones_config_get_migration_persist_fault(&fault),
+              "a file-sourced write-back that lies on both attempts must latch the migration-persist fault");
+    TEST_CHECK(fault.on_disk_version == 21,
+              "THE FIX (a03ead6c): the latched fault must name the FILE blob's real pre-migration version "
+              "(21) -- it used to be hardcoded to 0 on this call site, which read as a meaningless "
+              "\"on-disk v0\" to an operator even though v21 really was on disk, in the file");
+    TEST_CHECK(fault.fw_version == ZONES_CFG_VERSION,
+              "the latched fault must name the firmware version the migration was TO, not a stale value");
+}
+
+// ---------------------------------------------------------------------
 // 9. Review follow-up to test 8: the write-back must NEVER fire when the
 //    NVS side was FOUND but refused as NEWER than this firmware
 //    (ZONES_DECODE_NEWER). That branch's contract is "flash data left
@@ -968,6 +1052,7 @@ void run_test_zones_config_cfg_fs(void)
     test_interrupted_file_write_leaves_old_or_new();
     test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_file_wins_after_migration_writes_back_to_nvs();
+    test_file_won_migration_persist_fault_names_real_file_version();
     test_newer_nvs_blob_is_not_overwritten_by_file_writeback();
     test_file_sourced_writeback_happens_once_not_every_boot();
     test_file_cycle_is_normalized_in_ram_and_on_writeback();

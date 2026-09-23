@@ -410,11 +410,16 @@ static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_
     /* `from_cfg_file` names the actual winning source for the log lines
      * below -- nvs_load()'s file-won call site has no single "on-disk NVS
      * version" to report (NVS may have been invalid, or a different,
-     * now-overwritten version) and used to pass a hardcoded 0, which read
-     * as "was on-disk v0" -- meaningless to an operator, since v0 was never
-     * really on disk anywhere. This is report text only; the latched
-     * zones_cfg_migration_persist_fault_t::on_disk_version field is
-     * unaffected. */
+     * now-overwritten version), so the log text always says "cfg file
+     * source" there rather than a version number. `on_disk_version_before_
+     * migration` itself is real either way: the NVS-won call site passes
+     * the NVS blob's on-disk version, and the file-won call site passes the
+     * FILE blob's own on-disk version (from zones_config_cfg_fs_resolve()'s
+     * out_on_disk_version). Reviewer advisory a03ead6c: this used to be a
+     * hardcoded 0 on the file-won call site, which latched into
+     * zones_cfg_migration_persist_fault_t::on_disk_version and told the
+     * dashboard/LCD banner "on-disk v0" even when the cfg-file blob carried
+     * a real version -- fixed by threading the real value through instead. */
     char source_desc[24];
     if (from_cfg_file) {
         snprintf(source_desc, sizeof(source_desc), "cfg file source");
@@ -497,8 +502,9 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     zones_cfg_t resolved;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
+    uint8_t file_on_disk_version = 0;
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, &resolved, &resolved_rev,
-                                                    &used_file);
+                                                    &used_file, &file_on_disk_version);
     s_zones_cfg_rev = resolved_rev;
     /* cfg is MOUNTED on the bench board as of 2026-09-21 (7 files, confirmed
      * via GET /api/cfgfs -- CLAUDE.md's "512K LittleFS cfg partition"), so
@@ -579,20 +585,26 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * currently in `s_zones.cfg` against NVS -- it does not care which
      * source produced it, and nvs_save() underneath it already dual-writes
      * the `cfg` file first (zones_config_cfg_fs_save()), so one call closes
-     * both sides. `on_disk_version_before` is only used for the log line;
-     * the file-won case has no single "on-disk NVS version" to name (NVS may
-     * have been invalid, or a different, now-overwritten version), so it
-     * passes from_cfg_file=true and the log names "cfg file source" instead
-     * of any version number; the `0` argument is then unused by the log
-     * lines and only reaches the latched
-     * zones_cfg_migration_persist_fault_t::on_disk_version field, which has
-     * no "came from the file" encoding of its own today. */
+     * both sides. `on_disk_version_before` is only used for the log line in
+     * the NVS-won case; the file-won case has no single "on-disk NVS
+     * version" to name (NVS may have been invalid, or a different, now-
+     * overwritten version), so it passes from_cfg_file=true and the log
+     * names "cfg file source" instead of any version number there. The
+     * VERSION argument passed here for the file-won case is
+     * `file_on_disk_version` -- the file blob's own claimed version byte,
+     * from zones_config_cfg_fs_resolve()'s matching out param above, not a
+     * hardcoded 0 -- so the latched
+     * zones_cfg_migration_persist_fault_t::on_disk_version field reports the
+     * real source version to the dashboard/LCD banner instead of a
+     * meaningless "v0" (reviewer advisory, a03ead6c: the fault struct has no
+     * separate "came from the file" encoding, but the version number itself
+     * is no longer fabricated). */
     if (err == ESP_OK && trustworthy && migrated_from_nvs) {
         (void)zones_config_persist_migrated_blob_verified(on_disk_version_before, false);
     } else if (err == ESP_OK && trustworthy && file_side_needs_writeback) {
         ESP_LOGI(ZONES_HTTP_TAG, "zones_cfg: `cfg` file source won this boot's load and diverged from NVS -- "
                       "writing the resolved config back to both NVS and the file");
-        (void)zones_config_persist_migrated_blob_verified(0, true);
+        (void)zones_config_persist_migrated_blob_verified(file_on_disk_version, true);
     }
     return err;
 }
