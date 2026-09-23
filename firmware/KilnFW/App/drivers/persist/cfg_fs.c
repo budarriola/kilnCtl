@@ -502,6 +502,20 @@ esp_err_t cfg_fs_delete(const char *rel_path)
     return ESP_OK;
 }
 
+/* Every path buffer cfg_fs_list() needs lives in one heap block, not in this
+ * frame -- same convention as cfg_fs_write_scratch_t above (dir_path/glob on
+ * Windows-host builds, dir_path/full on the on-device POSIX/newlib path):
+ * this function alone was a 1232 B httpd-worker stack frame from two
+ * CFG_FS_PATH_MAX (600 B) locals, reachable from /api/cfgfs via
+ * cfg_fs_status.c. */
+typedef struct {
+    char dir_path[CFG_FS_PATH_MAX];
+    union {
+        char glob[CFG_FS_PATH_MAX]; /* _WIN32 (host tests) */
+        char full[CFG_FS_PATH_MAX]; /* POSIX/newlib (on-device) */
+    };
+} cfg_fs_list_scratch_t;
+
 esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, size_t *out_count)
 {
     if (!rel_dir || !out_count) {
@@ -512,23 +526,31 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
         return ESP_ERR_INVALID_STATE;
     }
 
-    char dir_path[CFG_FS_PATH_MAX];
+    cfg_fs_list_scratch_t *sc = malloc(sizeof(*sc));
+    if (!sc) {
+        return ESP_ERR_NO_MEM;
+    }
+    char *dir_path = sc->dir_path;
+
     if (rel_dir[0] == '\0') {
-        strncpy(dir_path, s_base_dir, sizeof(dir_path) - 1);
-        dir_path[sizeof(dir_path) - 1] = '\0';
-    } else if (!path_join_ok(dir_path, sizeof(dir_path), s_base_dir, rel_dir)) {
+        strncpy(dir_path, s_base_dir, CFG_FS_PATH_MAX - 1);
+        dir_path[CFG_FS_PATH_MAX - 1] = '\0';
+    } else if (!path_join_ok(dir_path, CFG_FS_PATH_MAX, s_base_dir, rel_dir)) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
 
     size_t count = 0;
 #ifdef _WIN32
-    char glob[CFG_FS_PATH_MAX];
-    if (!path_join_ok(glob, sizeof(glob), dir_path, "*")) {
+    char *glob = sc->glob;
+    if (!path_join_ok(glob, CFG_FS_PATH_MAX, dir_path, "*")) {
+        free(sc);
         return ESP_ERR_INVALID_ARG;
     }
     struct _finddata_t fd;
     intptr_t h = _findfirst(glob, &fd);
     if (h == -1) {
+        free(sc);
         return ESP_OK; /* empty (or missing) directory -- zero entries, not an error */
     }
     do {
@@ -548,6 +570,7 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
 #else
     DIR *d = opendir(dir_path);
     if (!d) {
+        free(sc);
         return ESP_OK;
     }
     struct dirent *ent;
@@ -556,8 +579,8 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
             strcmp(ent->d_name, ".tmp") == 0) {
             continue;
         }
-        char full[CFG_FS_PATH_MAX];
-        if (path_join_ok(full, sizeof(full), dir_path, ent->d_name) && is_directory(full)) {
+        char *full = sc->full;
+        if (path_join_ok(full, CFG_FS_PATH_MAX, dir_path, ent->d_name) && is_directory(full)) {
             continue;
         }
         if (count < max_out) {
@@ -568,6 +591,7 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
     }
     closedir(d);
 #endif
+    free(sc);
     *out_count = (count < max_out) ? count : max_out;
     return ESP_OK;
 }
