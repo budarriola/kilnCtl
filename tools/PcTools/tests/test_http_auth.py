@@ -292,6 +292,28 @@ class HttpAuthTest(unittest.TestCase):
         self.assertEqual(logout_recorder.cookie(0), f"{http_auth.SESSION_COOKIE_NAME}={TOKEN}")
         self.assertNotIn(HOST, http_auth._SESSIONS, "logout must forget the session immediately")
 
+    # --- 6. no_relogin ----------------------------------------------------
+    def test_no_relogin_raises_401_without_attempting_a_login(self):
+        """A caller presenting a session it did not get from this module
+        (e.g. a CDP Chrome child's own cookie) must be told the truth about
+        that specific session going stale, not have this module silently
+        paper over it with a fresh env-credential login."""
+        self._with_credentials()
+        recorder = _Recorder(_unauthorized())
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                http_auth.urlopen(urllib.request.Request(URL), timeout=2.0, no_relogin=True)
+        self.assertEqual(caught.exception.code, 401)
+        self.assertEqual(len(recorder.urls), 1, "no login attempt may follow a 401 under no_relogin")
+        self.assertNotIn(HOST, http_auth._SESSIONS)
+
+    def test_no_relogin_success_is_unaffected(self):
+        recorder = _Recorder(_response(b'{"ok":true}'))
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            with http_auth.urlopen(urllib.request.Request(URL), timeout=2.0, no_relogin=True) as resp:
+                self.assertEqual(resp.read(), b'{"ok":true}')
+        self.assertEqual(recorder.urls, [URL])
+
     def test_logout_forgets_the_session_even_if_the_post_itself_fails(self):
         """The board being unreachable, or refusing the POST, must not leave
         a stale cookie behind -- this process is done with that credential
@@ -309,6 +331,68 @@ class HttpAuthTest(unittest.TestCase):
         with unittest.mock.patch.object(urllib.request, "urlopen", logout_recorder):
             self.assertTrue(http_auth.logout(HOST))
         self.assertNotIn(HOST, http_auth._SESSIONS)
+
+
+class LoginTest(unittest.TestCase):
+    """Direct coverage for the public http_auth.login() wrapper -- used by
+    web_commission_row.py's CDP path, which needs the raw cookie VALUE
+    rather than an authenticated response. Must return only the cookie,
+    never a credential, and must raise on any non-2xx."""
+
+    def setUp(self):
+        http_auth.clear_sessions()
+        self.addCleanup(http_auth.clear_sessions)
+
+    def _with_credentials(self):
+        patcher = unittest.mock.patch.dict(
+            os.environ,
+            {http_auth.USERNAME_ENV: "admin", http_auth.PASSWORD_ENV: "not-a-real-password"},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_login_returns_only_the_cookie_value(self):
+        self._with_credentials()
+        recorder = _Recorder(
+            _response(b'{"ok":true}', set_cookie=f"{http_auth.SESSION_COOKIE_NAME}={TOKEN}; HttpOnly; Path=/"))
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            result = http_auth.login("http://192.0.2.10")
+        self.assertEqual(result, TOKEN)
+        self.assertNotIn("not-a-real-password", result)
+        self.assertEqual(recorder.urls, ["http://192.0.2.10" + http_auth.LOGIN_PATH])
+        login_req = recorder.requests[0]
+        self.assertEqual(login_req.get_method(), "POST")
+        self.assertIn(b"username=admin", login_req.data)
+        # The credential DOES go out on the wire (the board has to see it to
+        # authenticate) -- what must never happen is the credential coming
+        # BACK in the return value.
+        self.assertIn(b"password=", login_req.data)
+
+    def test_login_remembers_the_session_for_a_later_urlopen(self):
+        self._with_credentials()
+        recorder = _Recorder(
+            _response(b'{"ok":true}', set_cookie=f"{http_auth.SESSION_COOKIE_NAME}={TOKEN}"))
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            http_auth.login("http://192.0.2.10")
+        self.assertEqual(http_auth._SESSIONS.get("http://192.0.2.10"), TOKEN)
+
+    def test_login_raises_http_auth_error_on_non_2xx(self):
+        self._with_credentials()
+        refused = urllib.error.HTTPError(
+            "http://192.0.2.10" + http_auth.LOGIN_PATH, 401, "Unauthorized",
+            email.message.Message(), None)
+        recorder = _Recorder(refused)
+        with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
+            with self.assertRaises(http_auth.HttpAuthError) as caught:
+                http_auth.login("http://192.0.2.10")
+        self.assertNotIn("not-a-real-password", str(caught.exception))
+
+    def test_login_raises_without_a_credential(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(http_auth.USERNAME_ENV, None)
+            os.environ.pop(http_auth.PASSWORD_ENV, None)
+            with self.assertRaises(http_auth.HttpAuthError):
+                http_auth.login("http://192.0.2.10")
 
 
 class ClientsUseTheSeamTest(unittest.TestCase):

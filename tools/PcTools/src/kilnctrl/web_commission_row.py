@@ -565,7 +565,7 @@ def dry_run(row_id: str, repo_root: Optional[str] = None) -> "tuple[bool, str]":
 # second auth client.
 # ---------------------------------------------------------------------------
 
-def _login_once(host: str, username: str, password: str, timeout: float = 10.0) -> str:
+def _login_once(host: str, timeout: float = 10.0) -> str:
     """One POST /api/auth/login via http_auth's own login seam (the same
     one urlopen() uses on a 401), so this module's login has to agree with
     every other client's about the request shape, the cookie name, and
@@ -574,11 +574,9 @@ def _login_once(host: str, username: str, password: str, timeout: float = 10.0) 
     (needed as a raw value here, not just an authenticated response --
     it is handed to a CDP-driven Chrome child via KC_SID, which has no way
     to go through http_auth's request/response seam itself). Never logs
-    the password. ``username``/``password`` are accepted for interface
-    compatibility with existing callers/tests, even though http_auth.login()
-    always reads the credential from the environment itself (the same
-    KILNCTL_WEB_USERNAME/PASSWORD this function's own callers already read
-    it from via _read_credentials())."""
+    the password. http_auth.login() always reads the credential from the
+    environment itself (the same KILNCTL_WEB_USERNAME/PASSWORD this
+    module's callers already read via _read_credentials())."""
     return http_auth.login(f"http://{host}", timeout=timeout)
 
 
@@ -595,18 +593,26 @@ def _read_credentials() -> "tuple[str, str]":
 def _get_json_with_cookie(host: str, path: str, cookie: str, timeout: float = 5.0) -> "tuple[Optional[int], Optional[dict]]":
     """Authenticated GET, used only for the post-action read-back below.
     Returns (status, parsed-json-or-None). Goes through http_auth.urlopen()
-    -- the request already carries the CDP session's own Cookie header, so
-    http_auth passes it through unchanged on a normal 2xx (same bytes on
-    the wire as before), and only falls back to its own env-credential
-    login if that cookie has gone stale and the board answers 401 -- a
-    retry this function could not previously make at all."""
+    with ``no_relogin=True`` -- the ``cookie`` passed in is the SAME session
+    the CDP-driven Chrome child is using (handed to it via KC_SID), not one
+    this module's own process logged in for. If that specific session has
+    gone stale and the board answers 401, silently falling back to
+    http_auth's own env-credential login (its default behaviour for every
+    other caller) would authenticate THIS request with a fresh session
+    while the browser half keeps presenting the old, now-invalid cookie --
+    a Python-side read-back could then report PASS while the actual UI
+    action never happened under authentication. ``no_relogin=True`` makes
+    that divergence impossible: a 401 here is returned as a failed
+    read-back, never quietly repaired."""
     url = f"http://{host}{path}"
     req = urllib.request.Request(url, headers={"Cookie": f"kiln_sid={cookie}", "Accept-Encoding": "identity"})
     try:
-        with http_auth.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout, no_relogin=True) as resp:
             status = resp.getcode()
             text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return None, {"error": "session cookie rejected (401)"}
         try:
             text = exc.read().decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -629,8 +635,9 @@ def _post_form_with_cookie(host: str, path: str, cookie: str, fields: dict,
     simple enough -- `step=<n>&state=<name>[&note=...]` -- to post directly
     the same way `_login_once()` already posts the login form). Returns
     (status, parsed-json-or-None), same contract as
-    `_get_json_with_cookie()`. Goes through http_auth.urlopen() for the
-    same reason `_get_json_with_cookie()` does -- see its docstring."""
+    `_get_json_with_cookie()`. Goes through http_auth.urlopen() with
+    ``no_relogin=True`` for the same reason `_get_json_with_cookie()` does
+    -- see its docstring."""
     url = f"http://{host}{path}"
     body = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(
@@ -642,10 +649,12 @@ def _post_form_with_cookie(host: str, path: str, cookie: str, fields: dict,
         },
     )
     try:
-        with http_auth.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout, no_relogin=True) as resp:
             status = resp.getcode()
             text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return None, {"error": "session cookie rejected (401)"}
         try:
             text = exc.read().decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -2022,8 +2031,8 @@ def run_row_live(row_id: str, host: str, screenshot_dir: str,
         return False, f"unknown row id {row_id!r}"
     validate_selector(row)  # fail fast on a stale selector before touching the board
     if cookie is None:
-        user, password = _read_credentials()
-        cookie = _login_once(host, user, password)
+        _read_credentials()  # fail fast, actionable, before touching the board
+        cookie = _login_once(host)
     os.makedirs(screenshot_dir, exist_ok=True)
 
     # A row with a dedicated multi-step shape (currently only W42's

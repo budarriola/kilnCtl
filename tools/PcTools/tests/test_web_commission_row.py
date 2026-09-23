@@ -109,7 +109,7 @@ def test_run_row_live_fails_when_readback_is_not_200(monkeypatch, fake_status, f
     # text buried inside a "successful" message.
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (fake_status, fake_body))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -123,7 +123,7 @@ def test_run_row_live_fails_when_readback_is_not_200(monkeypatch, fake_status, f
 def test_run_row_live_passes_on_clean_readback(monkeypatch):
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {"trip_reason": "none"}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
@@ -167,7 +167,7 @@ def test_run_row_live_still_logs_in_when_no_cookie_supplied(monkeypatch):
     calls = []
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: calls.append(1) or "fresh-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: calls.append(1) or "fresh-cookie")
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
@@ -180,7 +180,7 @@ def test_run_row_live_still_logs_in_when_no_cookie_supplied(monkeypatch):
 def _capture_cmd(monkeypatch, row_id="W30", **kwargs):
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     captured = {}
@@ -259,7 +259,7 @@ def test_run_row_live_passes_minimal_env_to_child(monkeypatch):
     # Chrome child, not this process's full environment.
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     monkeypatch.setenv("KILNCTL_WEB_PASSWORD_UNRELATED_SECRET", "should-not-leak")
@@ -1042,7 +1042,7 @@ def test_cdp_post_status_none_on_empty_or_nonjson_stdout():
 def test_run_row_live_dispatches_to_fill_and_restore_for_w22(monkeypatch):
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     seen = {}
 
@@ -1059,7 +1059,7 @@ def test_run_row_live_dispatches_to_fill_and_restore_for_w22(monkeypatch):
 def test_run_row_live_dispatches_to_create_delete_for_w42(monkeypatch):
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
-    monkeypatch.setattr(wcr, "_login_once", lambda host, user, pw: "fake-cookie")
+    monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     seen = {}
 
@@ -2357,3 +2357,76 @@ def test_run_row_live_dispatches_to_guarded_click_for_w18_w20_w33(monkeypatch):
         monkeypatch.setattr(wcr, "_get_json_with_cookie", _sequential_get_json([(200, body), (200, body)]))
         ok, msg = wcr.run_row_live(row_id, "192.0.2.1", "/tmp/whatever")
         assert ok, f"{row_id}: {msg}"
+
+
+# ---------------------------------------------------------------------------
+# Stale-session divergence (reviewer advisory (b)): _get_json_with_cookie and
+# _post_form_with_cookie carry the CDP Chrome child's OWN session cookie, not
+# one this process logged in for. If that specific cookie goes stale and the
+# board answers 401, http_auth.urlopen()'s normal behaviour -- silently log
+# in fresh with the env credential and retry -- would authenticate the
+# Python-side read-back with a DIFFERENT session than the one the browser is
+# still presenting, so a row could read back PASS while the actual UI action
+# ran unauthenticated. These two helpers must pass no_relogin=True and turn a
+# 401 into a loud, explicit failure instead.
+# ---------------------------------------------------------------------------
+
+import urllib.error  # noqa: E402
+import unittest.mock  # noqa: E402
+
+from kilnctrl import http_auth  # noqa: E402
+
+
+def _http_error_401():
+    import email.message
+    return urllib.error.HTTPError("http://192.0.2.1/api/status", 401, "Unauthorized",
+                                   email.message.Message(), None)
+
+
+def test_get_json_with_cookie_reports_401_without_relogin(monkeypatch):
+    calls = []
+
+    def fake_urlopen(req, timeout=None, no_relogin=False):
+        calls.append(no_relogin)
+        raise _http_error_401()
+
+    monkeypatch.setattr(http_auth, "urlopen", fake_urlopen)
+    status, body = wcr._get_json_with_cookie("192.0.2.1", "/api/status", "stale-cookie")
+    assert status is None
+    assert body == {"error": "session cookie rejected (401)"}
+    # The one call made must have asked for no_relogin -- this is the
+    # negative test's target: flip this to False (or drop the kwarg
+    # entirely) and the assertion below fails because http_auth would
+    # instead try to log in and retry using this process's env credential,
+    # which is exactly the divergence this fix closes.
+    assert calls == [True]
+
+
+def test_post_form_with_cookie_reports_401_without_relogin(monkeypatch):
+    calls = []
+
+    def fake_urlopen(req, timeout=None, no_relogin=False):
+        calls.append(no_relogin)
+        raise _http_error_401()
+
+    monkeypatch.setattr(http_auth, "urlopen", fake_urlopen)
+    status, body = wcr._post_form_with_cookie("192.0.2.1", "/api/watchdog_cfg", "stale-cookie", {"a": "1"})
+    assert status is None
+    assert body == {"error": "session cookie rejected (401)"}
+    assert calls == [True]
+
+
+def test_get_json_with_cookie_does_not_swallow_a_non_401_error(monkeypatch):
+    """Only a 401 gets the special-cased error message -- any other status
+    still reports the real code and body, unchanged."""
+    import email.message
+
+    def fake_urlopen(req, timeout=None, no_relogin=False):
+        exc = urllib.error.HTTPError("http://192.0.2.1/api/status", 500, "err",
+                                      email.message.Message(), None)
+        exc.fp = None
+        raise exc
+
+    monkeypatch.setattr(http_auth, "urlopen", fake_urlopen)
+    status, body = wcr._get_json_with_cookie("192.0.2.1", "/api/status", "cookie")
+    assert status == 500

@@ -240,7 +240,7 @@ def logout(origin: str, timeout: Optional[float] = None) -> bool:
     return True
 
 
-def urlopen(req, timeout=None):
+def urlopen(req, timeout=None, no_relogin: bool = False):
     """Drop-in for ``urllib.request.urlopen`` that answers a 401 once.
 
     Behaviour when the board is not gating (today's state, and any route of
@@ -250,7 +250,24 @@ def urlopen(req, timeout=None):
     Behaviour on 401: log in once, attach the session cookie, and reissue
     the same request exactly once. The second response is returned, or its
     error raised, as-is -- there is no second retry and no loop.
+
+    ``no_relogin`` is for a caller that is presenting a session cookie it
+    did NOT get from this module -- e.g. a CDP-driven Chrome child's own
+    ``KC_SID`` -- and needs to know if THAT SPECIFIC session went stale,
+    rather than have this module silently paper over the 401 with a fresh
+    login using this process's env credential. Without this, a caller like
+    that could read back a Python-side PASS while the browser session it
+    actually cares about was unauthenticated the whole time -- two sessions
+    quietly diverging behind one green result. When set, a 401 is raised
+    exactly as urllib would raise it (no login attempt, no retry, no change
+    to any remembered session); every other caller is unaffected.
     """
+    if no_relogin:
+        # No session lookup, no 401 handling at all -- a 401 propagates to
+        # the caller exactly as urllib.request.urlopen would raise it, and
+        # this process's own remembered session (if any) is neither read
+        # nor written by this path.
+        return urllib.request.urlopen(req, timeout=timeout)
     original = _as_request(req)
     origin = _origin(original.full_url)
 
