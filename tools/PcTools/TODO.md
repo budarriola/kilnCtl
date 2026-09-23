@@ -314,8 +314,12 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 
 **Capabilities**
 - [x] 1c. Coordinated two-board test: both halves confirmed electrically
-      2026-08-23. A reusable *script* for it is still unwritten — the run was
-      driven tool-call by tool-call.
+      2026-08-23. A reusable script now exists —
+      `tools/PcTools/scripts/coordinated_gpio_test.py` drives Steps A and B
+      of `firmware/SaftyFW/docs/HARDWARE.md` section 1 end to end (Step C is
+      deliberately not implemented: ESP GPIO6 is permanently deny-listed by
+      `gpio_probe.c`). It has not been run on hardware since this line was
+      last touched.
 - [x] 2. `kilnlink` frame decoding for a Saleae capture — landed 2026-09-20
       as `kilnctrl.kilnlink_capture` / `saleae_decode_kilnlink()`; still
       unvalidated against a real capture, see section 2 above.
