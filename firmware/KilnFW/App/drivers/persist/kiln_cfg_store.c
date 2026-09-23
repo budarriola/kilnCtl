@@ -1927,18 +1927,28 @@ bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, s
         return set_reason(reason_out, reason_cap, "internal error: NULL output buffer");
     }
 
-    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+    /* HEAP, not stack (project_httpd_stack_blob_class): reachable from
+     * export_get_handler (kiln_cfg_http.c) and backup_export_get_handler
+     * (backup_export.c), both running on the shared 8192 B httpd_worker
+     * stack. Plain malloc, freed on every return path -- same convention
+     * kiln_cfg_import_scratch_t above uses in this file. */
+    uint8_t *blob = malloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    if (!blob) {
+        return set_reason(reason_out, reason_cap, "internal error: out of memory");
+    }
     uint16_t blob_len = 0;
     kiln_pkg_safety_t pico;
     /* kiln_cfg_store_get_full_package() already refuses a half-package
      * (pico_populated == 0) with a specific, operator-facing reason -- reuse
      * that message verbatim rather than inventing a second one for the same
      * fact. */
-    if (!kiln_cfg_store_get_full_package(id, blob, sizeof(blob), &blob_len, &pico, reason_out, reason_cap)) {
+    if (!kiln_cfg_store_get_full_package(id, blob, ZONES_CONFIG_BLOB_MAX_SIZE, &blob_len, &pico, reason_out, reason_cap)) {
+        free(blob);
         return false;
     }
     char name[KILN_CFG_NAME_MAX_LEN + 1];
     if (!kiln_cfg_store_get_name(id, name, sizeof(name))) {
+        free(blob);
         return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
     }
     uint16_t pkg_schema = 0;
@@ -1947,8 +1957,10 @@ bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, s
 
     if (!kiln_package_export_json(name, pkg_schema, blob, blob_len, &pico, pkg_hash,
                                   kiln_board_identity_get(), out, out_cap, out_len)) {
+        free(blob);
         return set_reason(reason_out, reason_cap, "package too large to encode, or an internal error");
     }
+    free(blob);
     return true;
 }
 
