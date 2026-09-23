@@ -1085,8 +1085,45 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     if (($binTime -lt $newestSourceTime.Subtract($tolerance)) -or ($elfTime -lt $newestSourceTime.Subtract($tolerance))) {
         Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate the newest tracked source file's mtime ($newestSourceTime) -- the build silently did not relink against current source (known cause: MSYSTEM/MSYS environment inherited from a git-bash launcher confusing idf.py, or any other silent no-op). Refusing to publish a stale artifact as current."
     }
-    if (($bootloaderTime -lt $newestSourceTime.Subtract($tolerance)) -or ($partitionTableTime -lt $newestSourceTime.Subtract($tolerance))) {
-        Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) / $partitionTablePath (mtime $partitionTableTime) predate the newest tracked source file's mtime ($newestSourceTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
+    # bootloader.bin/partition-table.bin do NOT share KilnCtrl.elf/.bin's input
+    # set: bootloader.bin only rebuilds from bootloader sources / sdkconfig,
+    # and partition-table.bin only from partitions.csv. Grading them against
+    # $newestSourceTime (the newest mtime across all of firmware/KilnFW,
+    # hwAbstraction, CommonFW) is wrong on the same "wrong question" grounds
+    # as the original wall-clock freshness bug above: this worktree's build\
+    # persists across runs, so an ordinary incremental checkbuild after an
+    # unrelated app-source-only edit correctly leaves these two artifacts
+    # untouched (nothing about them needs to change), and the newest-source
+    # gate then reads that untouched, still-correct artifact as stale purely
+    # because some OTHER file elsewhere in the tree got newer. Confirmed
+    # empirically against a real checkbuild worktree: KilnCtrl.bin at
+    # 2026-09-23 00:53 alongside a bootloader.bin dated 2026-09-20 10:42, both
+    # legitimately current for what they each depend on. Grade each artifact
+    # only against the input(s) that can actually change it.
+    #
+    # NOTE: this deliberately grades against $MainSdkconfig (the invoking
+    # tree's own sdkconfig), not $WorktreeSdkconfig (the copy this script
+    # makes every run). Copy-Item -Force above does not preserve the source's
+    # LastWriteTime -- it stamps the copy with "now" on every single run,
+    # changed content or not -- so grading against the copy's mtime would
+    # fail every run whose bootloader wasn't *also* relinked this exact run,
+    # which is the normal, correct case on an unchanged sdkconfig. Confirmed
+    # empirically: a first attempt at this fix using $WorktreeSdkconfig's
+    # mtime failed a build where sdkconfig content was byte-identical to the
+    # previous run (hash unchanged, $sdkconfigStale false above) purely
+    # because Copy-Item had just re-stamped it with the current wall clock.
+    # $MainSdkconfig's own mtime only changes when someone actually edits it.
+    $sdkconfigTime = (Get-Item -LiteralPath $MainSdkconfig).LastWriteTime
+    if ($bootloaderTime -lt $sdkconfigTime.Subtract($tolerance)) {
+        Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) predates the sdkconfig it was built from ($MainSdkconfig, mtime $sdkconfigTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
+    }
+    $partitionsCsvPath = Join-Path $WorktreePath "firmware\KilnFW\partitions.csv"
+    if (-not (Test-Path -LiteralPath $partitionsCsvPath)) {
+        Fail "$partitionsCsvPath is missing after the mirror step -- cannot grade partition-table.bin freshness with no partitions.csv to grade it against."
+    }
+    $partitionsCsvTime = (Get-Item -LiteralPath $partitionsCsvPath).LastWriteTime
+    if ($partitionTableTime -lt $partitionsCsvTime.Subtract($tolerance)) {
+        Fail "idf.py build reported success (exit 0) but $partitionTablePath (mtime $partitionTableTime) predates $partitionsCsvPath (mtime $partitionsCsvTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
     }
 
     # Record the sdkconfig this build directory is now known-good against,

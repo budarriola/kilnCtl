@@ -1104,8 +1104,8 @@ def flash_firmware(
         stale_publish_note = ""
         if stale_publish_hits:
             stale_publish_note = (
-                " " + ", ".join(stale_publish_hits) + " missing: a build published by "
-                "check_00_kilnfw_target_build.ps1 before this change did not include it."
+                " A build published by check_00_kilnfw_target_build.ps1 before "
+                "2026-09-23 did not include it."
             )
         return (
             f"error: missing build output(s){override_note}, run `idf.py build` first: "
