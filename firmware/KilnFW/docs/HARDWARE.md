@@ -456,13 +456,15 @@ support for any of it yet.
   SSR heatsink so the controller can see SSR temperature directly, alarm on
   an overheating relay, and drive the relay fan from a measurement rather
   than an assumption. Needs ADC inputs (or an I2C ADC) plus the divider
-  network; the ESP32-S3's own ADC pins are mostly taken (see the pin table
-  above), so plan the channel budget before choosing the part.
+  network. Most ESP32-S3 pins on U4 are unconnected on the current board
+  (pin table above), and ADC1 channels live on GPIO1-10 of which only 4-10
+  are used, so GPIO1-3 are free ADC1 inputs; an I2C ADC is the fallback if
+  more channels are wanted.
 - **Two PWM outputs.** One for **relay (SSR) fan control**, one for **case fan
   control**, each intended for a 4-wire PWM fan or a low-side MOSFET driver.
-  Should come straight off ESP32-S3 GPIO through LEDC, not through the SX1509
-  expander (its PWM is 8-bit and slow to update over I2C, and the expander's
-  channels are already committed above).
+  Should come straight off free ESP32-S3 GPIO through LEDC rather than the
+  SX1509 expander, so fan speed does not depend on an I2C write and keeps
+  working through an expander reset.
 
 Related next-revision notes already recorded elsewhere: the LCD SDA/SCL swap
 and the missing backlight control line (Display section above), and the
