@@ -119,6 +119,18 @@ void run_test_pico_image_embedded(void)
     pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), &out);
     TEST_CHECK(!out.usable, "a config_format_version mismatch between the two slots is unusable");
 
+    /* ---- mismatched link_protocol_version: unusable ---- */
+    saftyfw_image_identity_t rec_link = rec;
+    rec_link.link_protocol_version = 1u;
+    memset(buf_a, 0xA5, sizeof(buf_a));
+    memset(buf_b, 0xA5, sizeof(buf_b));
+    memcpy(buf_a + 64, &rec, sizeof(rec));
+    memcpy(buf_b + 64, &rec_link, sizeof(rec_link));
+    memset(&out, 0, sizeof(out));
+    pico_image_embedded_describe_from(buf_a, sizeof(buf_a), buf_b, sizeof(buf_b), &out);
+    TEST_CHECK(!out.usable, "a link_protocol_version mismatch between the two slots is unusable -- "
+                            "mirrors pico_image_freshness.py's check_slot_bins_fresh()");
+
     /* ---- one slot has no identity record at all: unusable, names which one ---- */
     memset(buf_a, 0xA5, sizeof(buf_a));
     memset(buf_b, 0xA5, sizeof(buf_b));

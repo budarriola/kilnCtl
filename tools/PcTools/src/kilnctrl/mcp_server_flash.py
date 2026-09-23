@@ -822,11 +822,12 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
         return f"pico image: could not inspect embedded SaftyFW identity ({exc})"
     if not records:
         return "pico image: no embedded SaftyFW identity record found in app binary (KilnFW built without embedded Pico images, or embedding not yet wired up)"
-    distinct = sorted({(r.commit, r.dirty, r.config_format_version) for r in records})
+    distinct = sorted({(r.commit, r.dirty, r.config_format_version, r.link_protocol_version) for r in records})
     if len(distinct) == 1:
-        commit, dirty, cfg_ver = distinct[0]
+        commit, dirty, cfg_ver, link_proto_ver = distinct[0]
         dirty_note = " (DIRTY build)" if dirty else ""
-        return f"pico image: embedded SaftyFW identity commit={commit}{dirty_note}, config_format_version={cfg_ver}"
+        return (f"pico image: embedded SaftyFW identity commit={commit}{dirty_note}, "
+                f"config_format_version={cfg_ver}, link_protocol_version={link_proto_ver}")
     return f"pico image: embedded SaftyFW identities disagree across records: {distinct}"
 
 

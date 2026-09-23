@@ -42,6 +42,7 @@ static bool idents_agree(const saftyfw_image_identity_t *a, const saftyfw_image_
 {
     return a->dirty == b->dirty && a->commit_len == b->commit_len
            && a->config_format_version == b->config_format_version
+           && a->link_protocol_version == b->link_protocol_version
            && memcmp(a->commit, b->commit, a->commit_len) == 0;
 }
 

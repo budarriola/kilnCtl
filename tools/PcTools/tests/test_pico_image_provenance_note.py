@@ -8,7 +8,7 @@ from kilnctrl import mcp_server_flash as msf
 from kilnctrl import pico_image_freshness as fresh
 
 
-def _make_record(commit: str, dirty: bool = False, cfg_ver: int = 3) -> bytes:
+def _make_record(commit: str, dirty: bool = False, cfg_ver: int = 3, link_proto_ver: int = 0) -> bytes:
     import struct
     commit_b = commit.encode("ascii")
     commit_padded = commit_b + b"\x00" * (fresh.COMMIT_MAX - len(commit_b))
@@ -16,7 +16,7 @@ def _make_record(commit: str, dirty: bool = False, cfg_ver: int = 3) -> bytes:
         fresh._STRUCT_FMT,
         fresh.MAGIC0, fresh.MAGIC1, fresh.RECORD_VERSION,
         1 if dirty else 0, len(commit_b), commit_padded,
-        cfg_ver, 0, fresh.MAGIC_END,
+        cfg_ver, link_proto_ver, fresh.MAGIC_END,
     )
 
 
@@ -40,6 +40,7 @@ def test_single_matching_record(tmp_path):
     assert "commit=abc1234" in note
     assert "DIRTY" not in note
     assert "config_format_version=3" in note
+    assert "link_protocol_version=0" in note
 
 
 def test_dirty_record_noted(tmp_path):
@@ -61,5 +62,17 @@ def test_two_records_agreeing_is_fine(tmp_path):
 def test_disagreeing_records_flagged(tmp_path):
     p = tmp_path / "KilnCtrl.bin"
     p.write_bytes(_make_record("aaaaaaa") + b"\x00" * 8 + _make_record("bbbbbbb"))
+    note = msf._pico_image_provenance_note(str(p))
+    assert "disagree" in note
+
+
+def test_records_differing_only_in_link_protocol_version_flagged(tmp_path):
+    """Two records sharing commit/dirty/config_format_version but differing
+    in link_protocol_version must still be reported as disagreeing -- the
+    same field pico_image_freshness.check_slot_bins_fresh() and the firmware
+    mirror (idents_agree() in pico_image_embedded.c) both now compare."""
+    p = tmp_path / "KilnCtrl.bin"
+    p.write_bytes(_make_record("aaaaaaa", link_proto_ver=1) + b"\x00" * 8
+                  + _make_record("aaaaaaa", link_proto_ver=2))
     note = msf._pico_image_provenance_note(str(p))
     assert "disagree" in note
