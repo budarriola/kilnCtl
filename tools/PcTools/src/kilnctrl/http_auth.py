@@ -191,6 +191,19 @@ def _login(origin: str, timeout: Optional[float]) -> str:
         f"POST {origin}{LOGIN_PATH} succeeded but returned no {SESSION_COOKIE_NAME} cookie")
 
 
+def login(origin: str, timeout: Optional[float] = None) -> str:
+    """Public wrapper around the same one-shot login :func:`urlopen` uses
+    internally on a 401. For a caller that needs the raw session cookie
+    VALUE up front -- rather than an authenticated response -- e.g. to hand
+    it to a CDP-driven Chrome child via an environment variable, which has
+    no way to go through this module's own request/response seam itself.
+    Remembers the session the same way :func:`urlopen` would, so a later
+    call through :func:`urlopen` for the same origin reuses it rather than
+    logging in twice.
+    """
+    return _login(origin, timeout)
+
+
 def logout(origin: str, timeout: Optional[float] = None) -> bool:
     """Ends this process's own remembered session at ``origin``, if any.
 
