@@ -245,6 +245,39 @@ static void test_verify_live_config_mismatch(void)
                "live registers reverted to power-on defaults reads as MISMATCH");
 }
 
+static void test_verify_live_config_cr0_only_mismatch(void)
+{
+    TEST_SECTION("max31856_verify_live_config() -- CR0-only mismatch, CR1 still matching -> MISMATCH");
+    setup();
+
+    hal_spi_device_t *dev = max31856_spi_device_for_test();
+    uint8_t cr1_readback_rx[2] = { 0x00u, 0x23u };
+    TEST_CHECK(fake_spi_script_rx(dev, cr1_readback_rx, sizeof(cr1_readback_rx)) == HAL_OK,
+               "scripting configure()'s own CR1 readback succeeds");
+    TEST_CHECK(max31856_configure(MAX31856_TC_TYPE_K), "configure(K) succeeds");
+
+    // CR1 readback matches the shadow (0x23) but CR0 has reverted to its
+    // power-on-default 0x00 (running CR0 should be
+    // (MAX31856_OC_MODE1 << 4) | MAX31856_CR0_CMODE, never plain 0x00) --
+    // exercises the `live[0] != s_cr0_shadow` half of the comparison
+    // independently of the CR1 half the other tests already cover.
+    uint8_t live_rx[3] = { 0x00u, 0x00u, 0x23u };
+    TEST_CHECK(fake_spi_script_rx(dev, live_rx, sizeof(live_rx)) == HAL_OK,
+               "scripting a CR0-only-reverted live readback succeeds");
+
+    TEST_CHECK(max31856_verify_live_config() == MAX31856_LIVE_CHECK_MISMATCH,
+               "CR0 alone reverting to power-on default reads as MISMATCH");
+
+    // The live-check burst itself: address CR0 (0x00, read -- bit 7 clear),
+    // one address byte + 2 register bytes = 3-byte transfer, per
+    // max31856_verify_live_config()'s own "3 bytes total" comment.
+    TEST_CHECK(fake_spi_transfer_count() == 6,
+               "exactly one extra transfer beyond configure()'s own 5 for the live check");
+    const fake_spi_transfer_record_t *t5 = fake_spi_transfer(5);
+    TEST_CHECK(t5 != NULL && t5->tx_len == 3 && t5->tx[0] == MAX31856_REG_CR0,
+               "live-check transfer addresses CR0 (0x00) with a 3-byte transfer length");
+}
+
 static void test_verify_live_config_spi_failure_is_read_failed(void)
 {
     TEST_SECTION("max31856_verify_live_config() -- SPI transfer failure -> READ_FAILED, not MISMATCH");
@@ -276,5 +309,6 @@ void run_test_max31856_hal_spi(void)
     test_verify_live_config_before_configure_is_read_failed();
     test_verify_live_config_match();
     test_verify_live_config_mismatch();
+    test_verify_live_config_cr0_only_mismatch();
     test_verify_live_config_spi_failure_is_read_failed();
 }

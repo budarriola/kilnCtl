@@ -1,29 +1,34 @@
 // Host tests for firmware/SaftyFW/src/max31856_live_check.c -- the pure
-// poll-count cadence/episode-counting policy for periodically re-checking a
-// VERIFIED MAX31856's live CR0/CR1 registers against the shadow max31856.c
-// keeps. No pico-sdk/FreeRTOS/SPI dependency, same discipline as
+// elapsed-time cadence/episode-counting policy for periodically re-checking
+// a VERIFIED MAX31856's live CR0/CR1 registers against the shadow
+// max31856.c keeps. No pico-sdk/FreeRTOS/SPI dependency, same discipline as
 // test_max31856_reconfig_retry.c.
 #include "test_common.h"
 
 #include "../src/max31856_live_check.h"
 
-// Drives N ticks with `verified` held true throughout, returning the number
-// of ticks that asked for a check (should have fired exactly once per
-// MAX31856_LIVE_CHECK_INTERVAL_POLLS ticks).
-static uint32_t drive_ticks_verified(max31856_live_check_state_t *state, uint32_t ticks)
+// Drives simulated time forward in fixed steps with `verified` held true
+// throughout, returning the number of ticks that asked for a check (should
+// fire exactly once per MAX31856_LIVE_CHECK_INTERVAL_MS of elapsed now_ms).
+static uint32_t drive_ticks_verified(max31856_live_check_state_t *state, uint32_t *now_ms,
+                                      uint32_t step_ms, uint32_t steps)
 {
     uint32_t fires = 0;
-    for (uint32_t i = 0; i < ticks; i++) {
-        if (max31856_live_check_tick(state, /*verified=*/true)) {
+    for (uint32_t i = 0; i < steps; i++) {
+        *now_ms += step_ms;
+        if (max31856_live_check_tick(state, /*verified=*/true, *now_ms)) {
             fires++;
         }
     }
     return fires;
 }
 
-// The cadence must not fire before MAX31856_LIVE_CHECK_INTERVAL_POLLS ticks,
-// then fire exactly once at the boundary -- the core "SPI cost is
-// negligible" guarantee this module exists to provide.
+// The cadence must not fire before MAX31856_LIVE_CHECK_INTERVAL_MS has
+// elapsed, then fire exactly once at the boundary -- the core "SPI cost is
+// negligible" guarantee this module exists to provide. Driven in 302ms
+// steps (thermo_task's worst-case DRDY-silent iteration period) specifically
+// because that is the scenario the elapsed-time cadence was built to keep
+// correct regardless of loop period -- see max31856_live_check.h.
 static void test_fires_at_interval_boundary(void)
 {
     TEST_SECTION("max31856_live_check: fires exactly at the interval boundary");
@@ -31,36 +36,58 @@ static void test_fires_at_interval_boundary(void)
     max31856_live_check_state_t state;
     max31856_live_check_init(&state);
 
-    uint32_t fires_before = drive_ticks_verified(&state, MAX31856_LIVE_CHECK_INTERVAL_POLLS - 1u);
+    uint32_t now_ms = 0;
+    // First tick while verified only arms the clock -- it never fires.
+    now_ms += 1;
+    TEST_CHECK(!max31856_live_check_tick(&state, /*verified=*/true, now_ms),
+               "the arming tick itself never fires");
+
+    const uint32_t step_ms = 302u;
+    uint32_t steps_to_boundary = MAX31856_LIVE_CHECK_INTERVAL_MS / step_ms; // floor
+    uint32_t fires_before = drive_ticks_verified(&state, &now_ms, step_ms, steps_to_boundary - 1u);
     TEST_CHECK(fires_before == 0, "no check requested before the interval elapses");
 
-    bool fires_at_boundary = max31856_live_check_tick(&state, /*verified=*/true);
-    TEST_CHECK(fires_at_boundary, "check requested exactly at the interval boundary");
+    // Advance well past the remaining time to guarantee the boundary is
+    // crossed regardless of the floor-division remainder above.
+    now_ms += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    bool fires_at_boundary = max31856_live_check_tick(&state, /*verified=*/true, now_ms);
+    TEST_CHECK(fires_at_boundary, "check requested once the interval has elapsed");
 }
 
-// While unverified, the counter must be held at 0, not merely paused -- the
-// first tick after verification returns must start a fresh full interval.
-static void test_unverified_holds_counter_at_zero(void)
+// While unverified, the clock must be disarmed, not merely paused -- the
+// first tick after verification returns must arm a fresh full interval
+// starting from that moment, not fire on stale elapsed time.
+static void test_unverified_disarms_the_clock(void)
 {
-    TEST_SECTION("max31856_live_check: unverified holds the counter at zero");
+    TEST_SECTION("max31856_live_check: unverified disarms the clock");
 
     max31856_live_check_state_t state;
     max31856_live_check_init(&state);
 
-    // Get partway toward a check while verified.
-    (void)drive_ticks_verified(&state, MAX31856_LIVE_CHECK_INTERVAL_POLLS - 1u);
+    uint32_t now_ms = 0;
+    // Arm, then get partway toward a check while verified.
+    now_ms += 1;
+    (void)max31856_live_check_tick(&state, /*verified=*/true, now_ms);
+    now_ms += MAX31856_LIVE_CHECK_INTERVAL_MS - 1u;
+    (void)max31856_live_check_tick(&state, /*verified=*/true, now_ms);
 
-    // Go unverified for a while -- must never fire, and must reset progress.
-    for (uint32_t i = 0; i < 50u; i++) {
-        bool fired = max31856_live_check_tick(&state, /*verified=*/false);
+    // Go unverified for a while, including well past when the interval
+    // would otherwise have elapsed -- must never fire, and must disarm.
+    for (uint32_t i = 0; i < 5u; i++) {
+        now_ms += MAX31856_LIVE_CHECK_INTERVAL_MS;
+        bool fired = max31856_live_check_tick(&state, /*verified=*/false, now_ms);
         TEST_CHECK(!fired, "unverified tick never requests a check");
     }
-    TEST_CHECK(state.polls_since_check == 0,
-               "unverified ticks hold the counter at zero, not merely pause it");
+    TEST_CHECK(!state.armed, "unverified ticks disarm the clock, not merely pause it");
 
-    // Re-verified: must take a FULL fresh interval, not fire on old progress.
-    uint32_t fires = drive_ticks_verified(&state, MAX31856_LIVE_CHECK_INTERVAL_POLLS - 1u);
-    TEST_CHECK(fires == 0, "re-verified tick starts a fresh full interval, no stale progress");
+    // Re-verified: the arming tick itself must not fire, and a full fresh
+    // interval must elapse before the next one does -- no stale progress
+    // carried over from before disarming.
+    bool arming_tick_fires = max31856_live_check_tick(&state, /*verified=*/true, now_ms);
+    TEST_CHECK(!arming_tick_fires, "re-verified tick only arms, does not fire immediately");
+    now_ms += MAX31856_LIVE_CHECK_INTERVAL_MS - 1u;
+    bool fires_early = max31856_live_check_tick(&state, /*verified=*/true, now_ms);
+    TEST_CHECK(!fires_early, "re-verified clock starts a fresh full interval, no stale progress");
 }
 
 // note_result()'s episode/counter semantics: mismatch_count increments on
@@ -98,15 +125,14 @@ static void test_note_result_episode_counting(void)
 
 // Negative-test procedure for this file's coverage (per project standing
 // practice) was done by hand against the PRODUCTION function, not a
-// test-local mirror -- see the commit message body for the exact
-// failing-line transcript: MAX31856_LIVE_CHECK_INTERVAL_POLLS was temporarily
-// changed and, separately, max31856_live_check_tick()'s reset-while-
+// test-local mirror: MAX31856_LIVE_CHECK_INTERVAL_MS was temporarily
+// shortened and, separately, max31856_live_check_tick()'s disarm-while-
 // unverified branch was temporarily disabled, each confirmed to fail
-// test_fires_at_interval_boundary()/test_unverified_holds_counter_at_zero()
+// test_fires_at_interval_boundary()/test_unverified_disarms_the_clock()
 // respectively, then reverted by hand and rebuilt from clean.
 void run_test_max31856_live_check(void)
 {
     test_fires_at_interval_boundary();
-    test_unverified_holds_counter_at_zero();
+    test_unverified_disarms_the_clock();
     test_note_result_episode_counting();
 }

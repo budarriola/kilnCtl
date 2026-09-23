@@ -132,7 +132,7 @@ void thermo_task_request_tc_type_reapply(void);
 // this is visibility only, never a new trip condition.
 bool thermo_task_reconfig_gave_up(void);
 
-// --- Live config re-assertion counter, surfaced past SWD (2026-09-23) -----
+// --- Live config re-assertion counter, SWD-readable static (2026-09-23) ---
 // Mirrors s_live_config_mismatches (thermo_task.c): a running total of
 // detected CR0/CR1 mismatch CHECKS (not just episodes -- a part that resets,
 // gets reconfigured, then resets again later counts as 2), from the
@@ -146,6 +146,20 @@ bool thermo_task_reconfig_gave_up(void);
 // while max31856_tc_type_verified() reads true; see that cadence's own
 // header for why an unverified part is the separate reconfig-retry
 // mechanism's problem instead).
+//
+// This accessor currently has NO caller anywhere -- it is a static this
+// task keeps, readable via a debugger attached to the running board, but
+// nothing wires it onto the isolated link today. A Frame A flags2 bit for
+// it (link_frame.h's spare bits 2-7) was evaluated and deferred: unlike
+// thermo_task_reconfig_gave_up() above, which feeds the separate DIAG
+// frame's diag_flags byte via one computed call in link_task.c,
+// link_frame_pack_status()'s flags2 is built from a long positional
+// parameter list with roughly a dozen call sites (one production, the rest
+// in test_link_frame_wire.c) that would all need updating for one new bool
+// parameter -- materially larger and riskier than this fix's own scope. A
+// one-line WARN log already fires on every new mismatch episode (see
+// thermo_task.c); wiring this counter onto the wire is a reasonable
+// follow-up, not done here.
 uint32_t thermo_task_live_config_mismatch_count(void);
 
 #ifdef __cplusplus

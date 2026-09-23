@@ -500,12 +500,12 @@ static void thermo_task_fn(void *arg)
         // else in this task independently notices that, since
         // max31856_tc_type_verified() is a cached fact from the LAST
         // configure() call, not a live one. See max31856_live_check.h for
-        // the ~200-poll cadence and why it is only armed while currently
-        // verified (an unverified part is already the reconfig-retry
-        // block's problem to solve, and re-checking a target that was never
-        // successfully written would be meaningless).
+        // the ~30s elapsed-time cadence and why it is only armed while
+        // currently verified (an unverified part is already the
+        // reconfig-retry block's problem to solve, and re-checking a target
+        // that was never successfully written would be meaningless).
         bool verified_for_live_check = max31856_tc_type_verified();
-        if (max31856_live_check_tick(&s_live_check, verified_for_live_check)) {
+        if (max31856_live_check_tick(&s_live_check, verified_for_live_check, retry_now_ms)) {
             max31856_live_check_result_t live_result = max31856_verify_live_config();
             if (live_result == MAX31856_LIVE_CHECK_MISMATCH) {
                 bool is_new_episode = max31856_live_check_note_result(&s_live_check, false);
@@ -518,13 +518,24 @@ static void thermo_task_fn(void *arg)
                                  "safety MAX31856 live CR0/CR1 mismatch detected (part reset?), "
                                  "reconfiguring");
                 }
-                // Re-assert the commissioned config. This unconditionally
-                // clears max31856_tc_type_verified() at entry (see that
-                // function's own header comment), so from this point on
-                // snap.valid below is already downgraded via the existing
-                // "!verified -> invalid" path further down -- exactly the
-                // same fail-safe transition a boot-time reconfig retry
-                // already uses. No separate S5 wiring needed.
+                // Re-assert the commissioned config. Note this does NOT
+                // itself leave snap.valid downgraded below: max31856_configure()
+                // clears AND re-sets max31856_tc_type_verified() synchronously
+                // before returning, so `verified` already reads true again by
+                // the time snap is built this same iteration -- the
+                // "!verified -> invalid" path plays no part here. The actual
+                // fail-safe already happened BEFORE this block ever ran: a
+                // part that reset lost CMODE, so it stopped toggling ~DRDY;
+                // the DRDY-silence branch further down (notifications == 0 &&
+                // !assume_ready) already fed S5 a sensor-invalid snapshot on
+                // every iteration since the reset, and will keep doing so
+                // until a fresh conversion completes. All this reconfigure
+                // does is get that conversion started again -- the
+                // ulTaskNotifyTake(pdTRUE, 0) below then discards any
+                // notification from a conversion that started under the
+                // stale/reset registers, so the wait after this block only
+                // ever wakes on a conversion begun under the freshly
+                // reasserted config.
                 (void)max31856_configure(config_store_get_tc_type());
                 // A conversion started under the stale/reset registers may
                 // already be in flight; discard any pending notification so
@@ -537,7 +548,7 @@ static void thermo_task_fn(void *arg)
             }
             // MAX31856_LIVE_CHECK_READ_FAILED: an SPI hiccup, not evidence
             // of a reset -- report nothing, let the next scheduled check
-            // (still ~200 polls out, per max31856_live_check_tick()) retry.
+            // (still ~30s out, per max31856_live_check_tick()) retry.
         }
 
         uint32_t conv_ms = max31856_conversion_time_ms();

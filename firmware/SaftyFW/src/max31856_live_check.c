@@ -6,26 +6,36 @@ void max31856_live_check_init(max31856_live_check_state_t *state)
     if (!state) {
         return;
     }
-    state->polls_since_check = 0;
+    state->next_check_due_ms = 0;
+    state->armed = false;
     state->mismatch_count = 0;
     state->mismatch_active = false;
 }
 
-bool max31856_live_check_tick(max31856_live_check_state_t *state, bool verified)
+bool max31856_live_check_tick(max31856_live_check_state_t *state, bool verified, uint32_t now_ms)
 {
     if (!state) {
         return false;
     }
     if (!verified) {
-        // Nothing commissioned to compare against right now -- hold the
-        // cadence at 0 so the next verified tick starts a fresh interval
+        // Nothing commissioned to compare against right now -- disarm so
+        // the next verified tick arms a fresh interval from that moment,
         // rather than firing on stale progress. See header comment.
-        state->polls_since_check = 0;
+        state->armed = false;
         return false;
     }
-    state->polls_since_check++;
-    if (state->polls_since_check >= MAX31856_LIVE_CHECK_INTERVAL_POLLS) {
-        state->polls_since_check = 0;
+    if (!state->armed) {
+        // Just became verified (or this is the very first tick) -- arm a
+        // fresh full interval starting now instead of checking immediately
+        // on old, stale progress.
+        state->armed = true;
+        state->next_check_due_ms = now_ms + MAX31856_LIVE_CHECK_INTERVAL_MS;
+        return false;
+    }
+    // Wraparound-safe "now_ms >= next_check_due_ms", same idiom other
+    // xTaskGetTickCount()-derived clock comparisons in this codebase use.
+    if ((int32_t)(now_ms - state->next_check_due_ms) >= 0) {
+        state->next_check_due_ms = now_ms + MAX31856_LIVE_CHECK_INTERVAL_MS;
         return true;
     }
     return false;

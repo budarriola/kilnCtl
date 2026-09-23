@@ -35,21 +35,25 @@
 extern "C" {
 #endif
 
-// Cadence: poll-count based, not time-based -- thermo_task's loop period
-// already varies (a configured part ticks at ~151ms via DRDY, an
-// unconfigured/DRDY-silent one waits THERMO_TASK_UNCONFIGURED_WAIT_MS ==
-// 500ms per iteration), and this check is only ever armed while `verified`
-// is true, which means a real conversion cadence is already running. 200
-// polls at the configured ~151ms/conversion rate is ~30s between live
-// register re-checks -- one extra 3-byte SPI transfer (address + CR0 + CR1)
-// every ~30s is negligible next to the six-register burst max31856_read()
-// already does every single conversion, while still catching a live reset
-// well inside the timescale a human would notice a stuck reading.
-#define MAX31856_LIVE_CHECK_INTERVAL_POLLS 200u
+// Cadence: elapsed-time based, same pattern as max31856_reconfig_retry.h's
+// next_attempt_due_ms (caller passes its own xTaskGetTickCount()-derived
+// now_ms). Time-based, not poll-count-based, on purpose: thermo_task's loop
+// period is NOT constant -- a configured part ticks at ~conv_ms via DRDY,
+// but a part whose DRDY has gone silent (e.g. right after a reset clears
+// CMODE) instead waits conv_ms * THERMO_TASK_DRDY_SILENCE_MULTIPLIER per
+// iteration, not conv_ms. A poll-count cadence of 200 in exactly that
+// silent/reset scenario this module exists to catch spans far closer to 60s
+// of wall clock than 30s -- landing on S5's 60s blind_grace_s
+// (safety_guards.h) trip boundary instead of safely beating it. Counting
+// real elapsed ms instead fixes the interval at
+// MAX31856_LIVE_CHECK_INTERVAL_MS regardless of which branch the loop is
+// looping through, giving a real ~30s margin ahead of that 60s trip.
+#define MAX31856_LIVE_CHECK_INTERVAL_MS 30000u
 
 typedef struct {
-    uint32_t polls_since_check; // ticks since the last live readback attempt
-    uint32_t mismatch_count;    // cumulative NEW mismatch episodes detected
+    uint32_t next_check_due_ms; // caller's now_ms clock, valid only while `armed`
+    bool     armed;             // true once `verified` has been observed true this episode
+    uint32_t mismatch_count;    // cumulative NEW mismatch CHECKS (not just episodes -- see below)
     bool     mismatch_active;   // true while the current episode is unresolved
 } max31856_live_check_state_t;
 
@@ -59,16 +63,19 @@ void max31856_live_check_init(max31856_live_check_state_t *state);
 
 // Call once per thermo_task loop iteration, after this tick's
 // max31856_tc_type_verified() result is known (post any reconfig-retry
-// attempt already made this same iteration). Returns true iff the caller
-// should perform a fresh CR0/CR1 live readback (max31856_verify_live_config())
-// and report the result via max31856_live_check_note_result() below.
+// attempt already made this same iteration), passing the caller's current
+// xTaskGetTickCount()-derived now_ms (same clock max31856_reconfig_retry
+// uses). Returns true iff the caller should perform a fresh CR0/CR1 live
+// readback (max31856_verify_live_config()) and report the result via
+// max31856_live_check_note_result() below.
 //
-// While `verified` is false, the cadence counter is held at 0 (not merely
-// paused) so that the FIRST poll after the part becomes verified again
-// (whether via the reconfig-retry path or a live SET_CONFIG reapply) starts
-// a fresh full interval, rather than firing immediately on old, stale
-// progress toward a check that was never relevant to this configuration.
-bool max31856_live_check_tick(max31856_live_check_state_t *state, bool verified);
+// While `verified` is false, the cadence clock is disarmed (not merely
+// paused) so that the FIRST tick after the part becomes verified again
+// (whether via the reconfig-retry path or a live SET_CONFIG reapply) arms a
+// fresh full MAX31856_LIVE_CHECK_INTERVAL_MS interval starting from that
+// moment, rather than firing immediately on stale progress toward a check
+// that was never relevant to this configuration.
+bool max31856_live_check_tick(max31856_live_check_state_t *state, bool verified, uint32_t now_ms);
 
 // Call immediately after a check should_check told the caller to make.
 // `match` is whether the live readback equalled the shadow

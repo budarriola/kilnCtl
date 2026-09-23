@@ -447,30 +447,42 @@ sensor reading low tells you nothing at all.
       its power-on CR0/CR1 defaults; nothing previously re-checked the LIVE
       registers. `thermo_task.c`'s loop now also calls
       `max31856_live_check_tick()` (`max31856_live_check.c`/`.h`, a pure,
-      host-tested poll-count policy module, same split as
+      host-tested elapsed-time policy module, same split as
       `max31856_reconfig_retry.c`) every iteration while the part reads
-      verified; every `MAX31856_LIVE_CHECK_INTERVAL_POLLS` (200) polls — about
-      30s at the ~151ms/conversion cadence, chosen so the extra 3-byte CR0/CR1
-      readback is negligible next to the six-register burst `max31856_read()`
-      already does every conversion — it calls `max31856_verify_live_config()`
+      verified; every `MAX31856_LIVE_CHECK_INTERVAL_MS` (30000, ~30s of real
+      elapsed time, not a poll count — thermo_task's loop period is not
+      constant: a configured part ticks at ~conv_ms via DRDY, but a part
+      whose DRDY has gone silent instead waits
+      `conv_ms * THERMO_TASK_DRDY_SILENCE_MULTIPLIER` per iteration, so a
+      poll-count cadence would have spanned closer to 60s of wall clock in
+      exactly the silent/reset scenario this check exists for, landing on
+      S5's 60s `blind_grace_s` trip boundary instead of safely beating it) —
+      it calls `max31856_verify_live_config()`
       (`max31856.c`), which re-reads CR0/CR1 live and compares them against
       `s_cr0_shadow`/`s_cr1_shadow`, the exact bytes the last successful
       `max31856_configure()` wrote (guarded by a new `s_configured_once` flag
       so a check made before the very first configure() call cannot
       spuriously read as a match against `max31856_init()`'s power-on-default
       seed). On a mismatch, `thermo_task.c` logs one `LOG_LEVEL_WARN` line per
-      new episode and calls `max31856_configure()` again unconditionally —
-      which itself unconditionally clears `max31856_tc_type_verified()` at
-      entry, so the pre-existing `!verified -> snapshot invalid` downgrade in
-      `thermo_task.c`'s loop already fail-safes every reading from the
-      instant the mismatch is detected through to the readback confirming the
-      reconfigure, with no separate wiring needed. An SPI transfer failure on
+      new episode and calls `max31856_configure()` again unconditionally. The
+      actual fail-safe for this window is NOT the `!verified -> snapshot
+      invalid` downgrade — `max31856_configure()` clears and re-sets
+      `max31856_tc_type_verified()` synchronously, so `verified` already
+      reads true again by the time the snapshot is built that same
+      iteration. It is the DRDY-silence branch further down the same loop: a
+      reset part loses CMODE and stops toggling ~DRDY, so every iteration
+      since the reset already fed S5 a sensor-invalid snapshot, and keeps
+      doing so until a fresh conversion completes under the reasserted
+      config. An SPI transfer failure on
       the check itself is reported distinctly
       (`MAX31856_LIVE_CHECK_READ_FAILED`) and never treated as evidence of a
       reset. A running total of mismatched checks (not just episodes) is
-      exposed past SWD via `thermo_task_live_config_mismatch_count()`
-      (`thermo_task.h`); this does not touch the wire protocol (no frame
-      length or protocol version change).
+      kept in an SWD-readable static, `thermo_task_live_config_mismatch_count()`
+      (`thermo_task.h`) — that accessor currently has no caller; wiring it
+      onto the isolated link (a new Frame A `flags2` bit) was evaluated and
+      deferred as materially larger than this fix's own scope (see that
+      header's comment for why). This does not touch the wire protocol (no
+      frame length or protocol version change).
 
 **Borrowed source**
 - [x] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH` (verified
