@@ -1151,13 +1151,6 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * lock and at the SAME commit point as the state_is_running() check just
      * above, so a reservation held right now can never be raced by a start
      * that reads "not running" a moment before the reservation was taken. */
-    /* iter_tune_http.c restore_commissioned race close (step-7 review,
-     * 2026-09-23): refuse to start on a zone iter_tune_http.c's handler has
-     * reserved via autotune_engine_reserve_zone_for_external_write() -- see
-     * that function's and s_at_t's own comments. Checked under the SAME
-     * lock and at the SAME commit point as the state_is_running() check just
-     * above, so a reservation held right now can never be raced by a start
-     * that reads "not running" a moment before the reservation was taken. */
     if (s_at.external_write_reserved && s_at.external_write_reserved_zone == zone_index) {
         xSemaphoreGive(s_at.lock);
         if (err_msg) {

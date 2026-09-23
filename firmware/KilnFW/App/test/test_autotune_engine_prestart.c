@@ -770,9 +770,25 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
  * (every other test in this file only reaches the "before start" or
  * "no DONE result" refusals, which never call this stub at all). */
 static bool s_stub_set_pid_result = false;
+/* Opus review round 2 (2026-09-23): proves accept() holds its own
+ * reservation across this exact write, not just up to releasing s_at.lock
+ * beforehand -- a concurrent reserve() attempt (iter_tune_http.c's restore
+ * handler, in real life) made at the precise moment accept() is writing
+ * gains must be refused. Single-threaded host tests cannot literally
+ * interleave two tasks, so test_accept_is_gated_by_the_reservation_too()
+ * makes THIS stub itself the "concurrent caller": when armed, it calls
+ * autotune_engine_reserve_zone_for_external_write() from inside the write
+ * accept() is making, capturing whether that attempt is refused. Disarmed
+ * (false) by default so every other test that reaches this stub is
+ * unaffected. */
+static bool s_probe_reserve_during_set_pid = false;
+static bool s_probe_reserve_during_set_pid_result = true;
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
-    (void)zone_index; (void)kp; (void)ki; (void)kd;
+    (void)kp; (void)ki; (void)kd;
+    if (s_probe_reserve_during_set_pid) {
+        s_probe_reserve_during_set_pid_result = autotune_engine_reserve_zone_for_external_write(zone_index);
+    }
     return s_stub_set_pid_result;
 }
 
@@ -6358,7 +6374,7 @@ static void test_heat_enable_acquire_never_called_under_s_at_lock(void)
 // iter_tune_http.c restore-race reservation (opus review, 2026-09-23):
 // autotune_begin_run_locked()'s check at autotune_engine.c ~line 1154, and
 // autotune_engine_accept()'s matching check at autotune_engine_guard.c
-// ~line 300ish, were both added with NO test driving the real, locked code
+// ~line 387, were both added with NO test driving the real, locked code
 // path -- deleting either `if` failed nothing. These tests use the same
 // "bypass autotune_engine_start(), hand-build a real s_at.lock" pattern as
 // start_stepping_run_rule() above, since autotune_engine_start() always
@@ -6431,8 +6447,25 @@ static void test_accept_is_gated_by_the_reservation_too(void)
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept() must leave state at DONE");
 
     autotune_engine_release_zone_for_external_write(0);
+
+    /* accept() must take its OWN reservation across the write, so a
+     * concurrent reserve() attempt made while accept() is still writing is
+     * refused -- probed from inside the zones_config_set_pid() stub, the one
+     * point that runs synchronously mid-accept(). */
+    s_probe_reserve_during_set_pid = true;
+    s_probe_reserve_during_set_pid_result = true;
     accepted = autotune_engine_accept(NULL, NULL);
     TEST_CHECK(accepted, "accept() must succeed once the reservation is released");
+    TEST_CHECK(!s_probe_reserve_during_set_pid_result,
+               "a concurrent reserve() attempt made while accept() is writing gains must be refused");
+    TEST_CHECK(!s_at.external_write_reserved,
+               "accept() must release its own reservation once its writes are done");
+    TEST_CHECK(autotune_engine_reserve_zone_for_external_write(0),
+               "reserve() must succeed again once accept() has returned and released its own reservation");
+    autotune_engine_release_zone_for_external_write(0);
+
+    s_probe_reserve_during_set_pid = false;
+    s_stub_set_pid_result = false;
 }
 
 void run_test_autotune_engine_prestart(void)

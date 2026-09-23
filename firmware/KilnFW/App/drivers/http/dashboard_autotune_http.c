@@ -39,17 +39,32 @@ esp_err_t autotune_status_get_handler(httpd_req_t *req)
     autotune_engine_status_t st;
     autotune_engine_get_status(&st);
 
-    char *json = heap_caps_malloc(1300, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* 1300 -> 1400 (opus review, 2026-09-23): the external_write_reserved/
+     * _zone fields added to this JSON shrank an already-thin margin. Heap,
+     * not stack, so sizing up costs nothing on the 8 KB httpd_worker stack
+     * this handler's own comment above is about. */
+    enum { JSON_CAP = 1400 };
+    char *json = heap_caps_malloc(JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
-        ESP_LOGE(DASH_TAG, "GET /api/autotune: malloc(1300) failed for the response buffer");
+        ESP_LOGE(DASH_TAG, "GET /api/autotune: malloc(%d) failed for the response buffer", JSON_CAP);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
-    int n = dashboard_format_autotune_status_json(json, 1300, &st);
+    int n = dashboard_format_autotune_status_json(json, JSON_CAP, &st);
+    /* snprintf-style formatters report the length they WOULD have written,
+     * not the truncated length actually stored -- a caller that ever grows
+     * this JSON enough to overflow JSON_CAP must not hand httpd_resp_send()
+     * an n past what is actually in the buffer (a heap over-read). Clamp to
+     * the buffer's own content, never to more than was allocated. */
+    if (n < 0) {
+        n = 0;
+    } else if (n >= JSON_CAP) {
+        n = JSON_CAP - 1;
+    }
 
     httpd_resp_set_type(req, "application/json");
-    esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    esp_err_t ret = httpd_resp_send(req, json, (size_t)n);
     free(json);
     return ret;
 }

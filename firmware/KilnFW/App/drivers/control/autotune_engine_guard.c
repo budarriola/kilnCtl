@@ -361,17 +361,29 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         }
     }
     /* iter_tune_http.c restore_commissioned race close, follow-up (step-7
-     * review, 2026-09-23): a DONE run's own accept() writes gains via the
-     * same zones_config_set_pid() the restore handler calls -- reaching
-     * accept() from a different task (uart_bridge_ext_autotune.c's
+     * review, 2026-09-23; opus round 2): a DONE run's own accept() writes
+     * gains via the same zones_config_set_pid() the restore handler calls --
+     * reaching accept() from a different task (uart_bridge_ext_autotune.c's
      * benchproto ACCEPT command) while iter_tune_http.c holds a reservation
      * on this zone would race the restore exactly the way autotune_begin_
      * run_locked()'s check above already prevents a fresh START from doing.
      * Checked under the SAME lock, at the SAME "we are about to commit"
      * point autotune_begin_run_locked() uses -- see that function's and
-     * s_at_t's own comments for the reservation's lock discipline. Distinct
-     * message from the "already running" refusal above so a caller (or a
-     * test) can tell which of the two this is. */
+     * s_at_t's own comments for the reservation's lock discipline.
+     *
+     * Round 2 fix: the first version of this gate only READ the flag here
+     * and released the lock at xSemaphoreGive(s_at.lock) below with nothing
+     * held across the zones_config_set_pid() write further down -- leaving
+     * the exact window open that iter_tune_http.c's own reservation exists
+     * to close (a restore's reserve() could land between this check and
+     * that write, and both would then write the zone's gains). accept() now
+     * takes the SAME reservation slot for its own zone right here, under
+     * this lock hold, so a concurrent reserve() from the restore handler is
+     * refused for as long as accept() is still writing -- symmetric with
+     * how a reservation already refuses a fresh START. Released via
+     * autotune_engine_release_zone_for_external_write() on EVERY exit path
+     * below (the early failure return once zones_config_set_pid() is
+     * called, and both success returns), never left held past this call. */
     if (s_at.external_write_reserved && s_at.external_write_reserved_zone == s_at.zone_index) {
         xSemaphoreGive(s_at.lock);
         ESP_LOGW(AT_TAG, "autotune zone %u: accept refused -- an iter_tune restore is in progress on "
@@ -379,6 +391,8 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                  s_at.zone_index);
         return false;
     }
+    s_at.external_write_reserved = true;
+    s_at.external_write_reserved_zone = s_at.zone_index;
 
     uint8_t zone = s_at.zone_index;
     autotune_method_t method = s_at.method;
@@ -394,6 +408,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     xSemaphoreGive(s_at.lock);
 
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
+        autotune_engine_release_zone_for_external_write(zone);
         return false;
     }
 
@@ -454,6 +469,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         ESP_LOGI(AT_TAG, "autotune zone %u: relay-test gains accepted (no plant model written -- a relay test "
                       "measures none; any model from a previous step test is left untouched)", zone);
         if (adopt_ceiling && out) out->adoption = AUTOTUNE_CEILING_SKIPPED_RELAY_METHOD;
+        autotune_engine_release_zone_for_external_write(zone);
         return true;
     }
     /* The model goes with the gains, through the same owner and at the same
@@ -727,6 +743,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     } else {
         ESP_LOGI(AT_TAG, "autotune zone %u: gains accepted and written to zone config", zone);
     }
+    autotune_engine_release_zone_for_external_write(zone);
     return true;
 }
 
