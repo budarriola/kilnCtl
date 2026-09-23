@@ -21,6 +21,12 @@ WHAT IS COMPARED:
   - PROFILE_NAME_MAX_LEN / PROFILE_MAX_SEGMENTS / PROFILE_MAX_ON_OFF_RULES:
     firmware's #defines in profiles_types.h against config_convert.py's own
     module constants of the same names.
+  - CONFIG_STORE_FORMAT_VERSION: firmware's #define in
+    firmware/SaftyFW/src/config_store.h against config_convert.py's
+    SAFETY_CONFIG_STORE_FORMAT_VERSION (deliberately renamed in the tool,
+    since the module already has an unrelated PROFILE_VERSION constant and
+    a bare "CONFIG_STORE_FORMAT_VERSION" would invite confusion between the
+    two unrelated stores it mirrors).
 
 Fails closed (same convention as every other check in this family): if
 either source file's shape no longer matches this check's own extraction
@@ -34,14 +40,19 @@ from pathlib import Path
 
 PROFILES_HTTP_REL = "firmware/KilnFW/App/drivers/http/profiles_http.c"
 PROFILES_TYPES_REL = "firmware/KilnFW/App/drivers/persist/profiles_types.h"
+CONFIG_STORE_H_REL = "firmware/SaftyFW/src/config_store.h"
 CONFIG_CONVERT_REL = "tools/PcTools/src/kilnctrl/config_convert.py"
 
 FW_DEFINE_RE = re.compile(r"#define\s+(PROFILE_VERSION|PROFILE_NAME_MAX_LEN|PROFILE_MAX_SEGMENTS|"
-                          r"PROFILE_MAX_ON_OFF_RULES)\s+(\d+)")
+                          r"PROFILE_MAX_ON_OFF_RULES|CONFIG_STORE_FORMAT_VERSION)\s+(\d+)u?\b")
 TOOL_CONST_RE = re.compile(r"^(PROFILE_VERSION|PROFILE_NAME_MAX_LEN|PROFILE_MAX_SEGMENTS|"
-                           r"PROFILE_MAX_ON_OFF_RULES)\s*=\s*(\d+)", re.MULTILINE)
+                           r"PROFILE_MAX_ON_OFF_RULES|SAFETY_CONFIG_STORE_FORMAT_VERSION)\s*=\s*(\d+)",
+                           re.MULTILINE)
 
 CONSTANTS = ("PROFILE_VERSION", "PROFILE_NAME_MAX_LEN", "PROFILE_MAX_SEGMENTS", "PROFILE_MAX_ON_OFF_RULES")
+# (firmware name, tool name) pairs where the tool deliberately uses a
+# different identifier than firmware's #define.
+RENAMED_CONSTANTS = (("CONFIG_STORE_FORMAT_VERSION", "SAFETY_CONFIG_STORE_FORMAT_VERSION"),)
 
 
 def strip_comments(text: str) -> str:
@@ -56,6 +67,7 @@ def main() -> int:
     paths = {
         "profiles_http": repo_root / PROFILES_HTTP_REL,
         "profiles_types": repo_root / PROFILES_TYPES_REL,
+        "config_store_h": repo_root / CONFIG_STORE_H_REL,
         "tool": repo_root / CONFIG_CONVERT_REL,
     }
     for label, path in paths.items():
@@ -67,6 +79,7 @@ def main() -> int:
     fw_defines = {}
     fw_defines.update(FW_DEFINE_RE.findall(strip_comments(paths["profiles_http"].read_text(encoding="utf-8"))))
     fw_defines.update(FW_DEFINE_RE.findall(strip_comments(paths["profiles_types"].read_text(encoding="utf-8"))))
+    fw_defines.update(FW_DEFINE_RE.findall(strip_comments(paths["config_store_h"].read_text(encoding="utf-8"))))
     fw_defines = {k: int(v) for k, v in fw_defines.items()}
 
     tool_text = paths["tool"].read_text(encoding="utf-8")
@@ -84,6 +97,18 @@ def main() -> int:
             failures.append(f"{name}: firmware has {fw_defines[name]}, config_convert.py has "
                             f"{tool_consts[name]} -- update config_convert.py's struct tables (and its "
                             "PROFILE_VERSION-gated conversion logic) to match")
+
+    for fw_name, tool_name in RENAMED_CONSTANTS:
+        if fw_name not in fw_defines:
+            failures.append(f"could not extract #define {fw_name} from firmware -- update this check's "
+                            "FW_DEFINE_RE rather than letting it pass vacuously")
+        elif tool_name not in tool_consts:
+            failures.append(f"could not extract {tool_name} from {CONFIG_CONVERT_REL} -- update this "
+                            "check's TOOL_CONST_RE rather than letting it pass vacuously")
+        elif fw_defines[fw_name] != tool_consts[tool_name]:
+            failures.append(f"{fw_name}: firmware has {fw_defines[fw_name]}, config_convert.py's "
+                            f"{tool_name} has {tool_consts[tool_name]} -- update "
+                            "config_convert.py's safety_config_blob decode/encode tables to match")
 
     if failures:
         print("CONFIG-CONVERT MIRROR CHECK: FAILED")

@@ -40,29 +40,65 @@ STORES:
     this tool's own format, not one firmware emits, and is documented as
     such rather than presented as a real board export.
 
+  - "safety_config_blob" (kind "kilnctl_safety_config_blob"): (added
+    2026-09-23) the raw NVS record for SaftyFW's `config_store_record_t`
+    (firmware/SaftyFW/src/config_store.c/.h, CONFIG_STORE_FORMAT_VERSION).
+    Unlike that struct's in-RAM compiler layout (never touched here), the
+    WIRE format firmware actually reads/writes is fully deterministic and
+    already hand-explicit in C: `config_store_pack()`/`unpack_v2_fields()`
+    place every field at a named `REC_OFF_*` byte offset with
+    `put_u16_le()`/`put_u32_le()`/`put_f32_le()` (never a raw struct memcpy),
+    and the tail is `bootloader_crc32()` -- confirmed, via
+    firmware's own host-test vector (`bootloader_crc32("123456789") ==
+    0xCBF43926`), to be the standard CRC-32/ISO-HDLC polynomial, i.e.
+    exactly `zlib.crc32()`. This module mirrors `config_store_pack()`/
+    `config_store_unpack_ex()` byte-for-byte for versions 1, 2 and current
+    (3), including the v1->v3 and v2->v3 forward migrations
+    (`config_store_default()`'s compiled defaults, and
+    `config_store_derive_zone_ct_channel()`'s ct_topology ->
+    zone_ct_channel[] backfill). Wraps the raw bytes the same way
+    profile_blob does: {"kind": "kilnctl_safety_config_blob", "version": N,
+    "blob_hex": "<hex>"}. Encoding is supported ONLY to
+    CONFIG_STORE_FORMAT_VERSION (today 3): firmware has no v1/v2 *pack* path
+    any more (only the *unpack*-side forward migrations above), so writing a
+    v1- or v2-shaped record would invent a wire format nothing in firmware
+    ever produces or reads, not convert one that exists --
+    convert_safety_config_blob() refuses a target below the current format
+    version by name.
+
 NOT YET SUPPORTED (best-effort tool, refuses rather than guesses):
-  - kiln_cfg_store's "kilnpkg.json" package format (kiln_package.h) bundles
-    a whole zones_cfg_t blob AND a Pico safety-config blob inside one
-    envelope; converting it correctly means implementing kiln_package.h's
-    own container format on top of everything zones_config_migrate.c does,
-    which this pass did not have time to do safely. detect_kind() refuses
-    a document shaped like this with a clear "not yet supported" message
-    rather than attempting a partial, unverified conversion.
-  - SaftyFW's raw `config_store_record_t` NVS record
-    (firmware/SaftyFW/src/config_store.c, CONFIG_STORE_FORMAT_VERSION,
-    currently a ~100-field, 512-byte binary record with byte-level field
-    offsets) has no JSON export surface at all and no PC-side struct
-    definition existed before this pass. Mirroring its full field table
-    correctly needs more careful, incremental verification against real
-    captured records than this pass had time for; hand-transcribing ~100
-    field offsets/types from config_store.c with no fixture to check
-    against risks silently WRONG output, which is worse than refusing. This
-    module refuses this kind by name with a pointer to config_store.c/.h so
-    a future pass has the exact place to start.
   - The ESP's raw zones_cfg_t NVS/blob record
     (firmware/KilnFW/App/drivers/persist/zones_config_json.h,
-    ZONES_CFG_VERSION) is likewise refused by name (kind
-    "kilnctl_zones_blob") rather than guessed at.
+    ZONES_CFG_VERSION, currently 26) IS deterministically decodable -- every
+    historical shape from `zone_cfg_v1_t` on carries
+    `_Static_assert(sizeof(...) == N, ...)` and per-field
+    `_Static_assert(offsetof(...) == N, ...)` pairs, the same class of
+    compile-time-verified layout this module already trusts for the
+    safety_config_blob store above. It stays unsupported here purely for
+    size, not indeterminism: 26 versions of `zones_cfg_t` plus 14+ versions
+    of the nested `zone_cfg_t` (zones_config_json.h is ~3500 lines) is a
+    large, incremental mirroring effort of its own -- rushing it risks
+    exactly the silently-wrong-output failure this module's whole design is
+    built to avoid. detect_kind() refuses a document shaped like this with a
+    message naming zones_config_json.h and this reason (size, not
+    non-determinism) rather than attempting a partial, unverified
+    conversion.
+  - kiln_cfg_store's "kilnpkg.json" package format (kiln_package.h) is
+    ALREADY JSON at the envelope level (kind "kilnctl_kiln_package" per
+    kiln_package.h; `kiln_package_export_json()`/`_import_json()`) -- not
+    the opaque binary container this docstring used to describe. Its
+    envelope holds `esp_blob_hex` (the exact bytes
+    `zones_config_export_blob()` would read from/write to flash, i.e. a raw
+    zones_cfg_t blob -- the format immediately above) and a `pico` array of
+    already-decoded `{id,type,flags,value_bits}` param entries, which carry
+    no version of their own (param ids only ever go up). Converting a
+    kilnpkg.json document to a different ZONES_CFG_VERSION therefore
+    reduces entirely to decoding/re-encoding its `esp_blob_hex` field with
+    the zones_cfg_t support above -- there is no separate container format
+    left to write once that lands. This module still refuses kind
+    "kilnctl_kiln_cfg_package" by name pending that prerequisite, pointing
+    at kiln_package.h and the zones_cfg_t note above rather than the old
+    "container format" framing.
 
 CRC. profile_persisted_t's crc32 tail is esp_crc32_le() (a standard
 reflected CRC-32, poly 0xEDB88320, no init complement, no final XOR -- the
@@ -163,25 +199,21 @@ class ConversionReport:
 # message rather than a generic one.
 KNOWN_UNSUPPORTED_KINDS = {
     "kilnctl_kiln_cfg_package": (
-        "kiln_cfg_store's kilnpkg.json package (kiln_package.h) is not yet "
-        "supported by this tool -- it bundles a zones_cfg_t blob and a Pico "
-        "safety-config blob inside one envelope, and converting it correctly "
-        "needs kiln_package.h's own container format implemented here first. "
-        "See config_convert.py's module docstring."
-    ),
-    "safety_config_store": (
-        "SaftyFW's raw config_store_record_t NVS record "
-        "(firmware/SaftyFW/src/config_store.c, CONFIG_STORE_FORMAT_VERSION) "
-        "is not yet supported -- no PC-side struct definition for its "
-        "~100-field binary layout has been verified against real captured "
-        "records. See config_convert.py's module docstring."
+        "kiln_cfg_store's kilnpkg.json package (kiln_package.h) is JSON-"
+        "enveloped already, but its esp_blob_hex field carries a raw "
+        "zones_cfg_t blob -- converting it needs zones_cfg_t support first "
+        "(unsupported below for size, not indeterminism: 26 ZONES_CFG_VERSION "
+        "shapes in zones_config_json.h). See config_convert.py's module "
+        "docstring."
     ),
     "kilnctl_zones_blob": (
         "the ESP's raw zones_cfg_t NVS/blob record "
         "(firmware/KilnFW/App/drivers/persist/zones_config_json.h, "
-        "ZONES_CFG_VERSION) is not yet supported by this tool -- no PC-side "
-        "struct/CRC mirror for it has been implemented or verified here. "
-        "See config_convert.py's module docstring."
+        "ZONES_CFG_VERSION, currently 26) IS deterministically decodable "
+        "(_Static_assert'd sizes/offsets throughout) but is not yet "
+        "supported here -- 26 historical struct shapes across ~3500 lines "
+        "is a large mirroring effort this pass did not attempt. See "
+        "config_convert.py's module docstring."
     ),
 }
 
@@ -198,11 +230,13 @@ def detect_kind(doc: dict) -> str:
         return "backup"
     if kind == "kilnctl_profile_blob":
         return "profile_blob"
+    if kind == "kilnctl_safety_config_blob":
+        return "safety_config_blob"
     if kind in KNOWN_UNSUPPORTED_KINDS:
         raise ConfigConvertError(KNOWN_UNSUPPORTED_KINDS[kind])
     raise ConfigConvertError(
         f"could not identify a known config store from this document (kind={kind!r}). "
-        "Known kinds: kilnctl_backup, kilnctl_profile_blob. "
+        "Known kinds: kilnctl_backup, kilnctl_profile_blob, kilnctl_safety_config_blob. "
         f"Not-yet-supported kinds: {sorted(KNOWN_UNSUPPORTED_KINDS)}"
     )
 
@@ -465,6 +499,434 @@ def convert_profile_blob(blob: bytes, target_version: int) -> "tuple[bytes, Conv
 
 
 # ---------------------------------------------------------------------------
+# safety_config_blob store -- mirrors firmware/SaftyFW/src/config_store.c's
+# REC_OFF_* byte layout, config_store_pack()/unpack_v2_fields()/
+# config_store_unpack_ex()/config_store_default() exactly. All offsets below
+# are transcribed verbatim from config_store.c's own #define table (the
+# comment block above it, and the constants themselves) -- see
+# check_config_convert_mirror.py for the drift check that keeps
+# SAFETY_CONFIG_STORE_FORMAT_VERSION in step with firmware's
+# CONFIG_STORE_FORMAT_VERSION.
+#
+# Deliberately NOT replicated here: config_params_validate_ranges(), the
+# load-time re-check config_store_unpack_ex() runs on every branch. That is a
+# SAFETY re-validation (are these values sane to arm guards with), not a
+# FORMAT concern (are these bytes this store's shape) -- this module's job
+# stops at the latter, same as it never re-validates a profile_blob's
+# segment temperatures. A decoded document that would fail firmware's own
+# range check is not flagged by this tool.
+# ---------------------------------------------------------------------------
+
+SAFETY_CONFIG_STORE_FORMAT_VERSION = 3  # config_store.h CONFIG_STORE_FORMAT_VERSION
+SAFETY_CONFIG_STORE_FORMAT_VERSION_V2 = 2
+SAFETY_CONFIG_STORE_FORMAT_VERSION_V1 = 1
+_SC_MAGIC = 0x4B4C4331  # CONFIG_STORE_MAGIC
+_SC_RECORD_LEN = 512  # CONFIG_STORE_RECORD_LEN
+
+_SC_DEFAULT_TC_TYPE = 0x03  # CONFIG_STORE_DEFAULT_TC_TYPE (K)
+_SC_TC_TYPE_MAX_REAL = 0x07  # CONFIG_STORE_TC_TYPE_MAX_REAL
+_SC_CT_TOPOLOGY_PER_ZONE = 0
+_SC_CT_TOPOLOGY_SUMMED = 1
+_SC_SAFETY_TC_INSTALLED_MARKER_INSTALLED = 0x01
+_SC_SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED = 0xA5
+_SC_CT_INSTALLED_MARKER_INSTALLED = 0x01
+_SC_CT_INSTALLED_MARKER_NOT_INSTALLED = 0xA5
+_SC_ESTOP_ACTIVE_HIGH = 0  # DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH
+_SC_ESTOP_ACTIVE_LOW = 1  # DISCRETE_PIN_POLICY_ESTOP_ACTIVE_LOW
+
+# v3 (current) REC_OFF_* -- config_store.c's own layout-table comment.
+_SC = {
+    "MAGIC": 0, "FORMAT_VERSION": 4, "SEQ": 8, "FIELDS_SET": 12,
+    "TC_SOURCE": 16, "BORROWED_ZONE_INDEX": 17, "TC_PLACEMENT_MODE": 18,
+    "ABS_MAX_TEMP_C": 19, "TC_TYPE": 23, "CT_CHANNEL_MAP": 24,
+    "CALIBRATION_MISSING": 27, "FIRING_MARGIN_C": 28, "OVERSHOOT_MARGIN_C": 32,
+    "OVERSHOOT_TIME_S": 36, "MAX_RATE_C_PER_MIN": 40, "RATE_WINDOW_S": 44,
+    "BLIND_GRACE_S": 48, "FROZEN_WINDOW_S": 52, "TC_DISAGREEMENT_C": 56,
+    "TC_DISAGREEMENT_TIME_S": 60, "TC_EXPECTED_OFFSET_C": 64, "CJ_WARN_C": 68,
+    "CJ_MAX_C": 72, "CJ_TIME_S": 76, "BORROWED_STALE_S": 80,
+    "BORROWED_STALE_TRIP_S": 84, "BORROWED_TYPE_EXPECTED": 88,
+    "I_PRESENT_A": 89, "ZERO_COUNTS": 93, "CORRELATION_WINDOW_S": 99,
+    "STUCK_ON_TIME_S": 103, "TRIP_VERIFY_S": 107, "K_CT_V_PER_A": 111,
+    "GAIN": 123, "MAINS_VOLTAGE_V": 135, "POWER_WINDOW_S": 139,
+    "CONTEXT_MAX_AGE_S": 143, "LINK_TIMEOUT_S": 147, "LINK_DEAD_HARD_S": 151,
+    "MAINFAULT_DEBOUNCE_MS": 155, "TELEMETRY_PERIOD_MS": 159,
+    "STARTUP_GRACE_S": 163, "ESTOP_DEBOUNCE_MS": 167, "WATCHDOG_TIMEOUT_MS": 171,
+    "CONFIG_CHECK_PERIOD_S": 175, "CT_CAL": 179, "SAFETY_TC_INSTALLED": 206,
+    "MAX_EXPECTED_POWER_W": 207, "I_NORMAL_A": 211, "OVERCURRENT_PCT": 223,
+    "OVERCURRENT_TIME_S": 225, "CT_INSTALLED": 229, "CT_TOPOLOGY": 230,
+    "I_PRESENT_A_MANUAL": 231, "TC_OFFSET_C": 232, "ESTOP_ACTIVE_LEVEL": 236,
+    "ZONE_CT_CHANNEL": 237, "RESERVED": 240, "CRC": 504,
+}
+_SC_CT_CAL_CHANNEL_LEN = 9  # calibrated u8(1) + gain f32(4) + offset f32(4)
+_SC_RESERVED_LEN = 264
+
+# v2 (legacy) -- frozen, only used to migrate a v2 record into v3 shape.
+_SC_V2_OFF_FIELDS_SET = 12
+_SC_V2_OFF_TC_SOURCE = 14
+_SC_V2_OFF_RESERVED = 235
+_SC_V2_RESERVED_LEN = 269
+_SC_V2_OFF_CRC = 504
+
+# v1 (legacy) -- frozen, only used to migrate a v1 record forward.
+_SC_V1_OFF_MAGIC = 0
+_SC_V1_OFF_FORMAT_VERSION = 4
+_SC_V1_OFF_SEQ = 8
+_SC_V1_OFF_TC_TYPE = 12
+_SC_V1_OFF_CALIBRATION_MISSING = 13
+_SC_V1_OFF_CT_CAL = 16
+_SC_V1_CT_CAL_CHANNEL_LEN = 9
+_SC_V1_OFF_CRC = 248
+
+
+def _sc_crc32(data: bytes) -> int:
+    """bootloader_crc32() -- confirmed standard CRC-32/ISO-HDLC via
+    firmware's own host-test vector (bootloader_crc32("123456789") ==
+    0xCBF43926), i.e. exactly zlib.crc32()."""
+    return zlib.crc32(data) & 0xFFFFFFFF
+
+
+def _sc_pack_ct_cal(channels: "list[dict]") -> bytes:
+    out = bytearray(_SC_CT_CAL_CHANNEL_LEN * 3)
+    for ch, c in enumerate(channels):
+        base = ch * _SC_CT_CAL_CHANNEL_LEN
+        out[base] = 1 if c["calibrated"] else 0
+        struct.pack_into("<f", out, base + 1, c["gain"])
+        struct.pack_into("<f", out, base + 5, c["offset"])
+    return bytes(out)
+
+
+def _sc_unpack_ct_cal(buf: bytes, base_off: int, channel_len: int) -> "list[dict]":
+    out = []
+    for ch in range(3):
+        base = base_off + ch * channel_len
+        out.append({
+            "calibrated": buf[base] == 1,  # only wire byte 1 means calibrated
+            "gain": struct.unpack_from("<f", buf, base + 1)[0],
+            "offset": struct.unpack_from("<f", buf, base + 5)[0],
+        })
+    return out
+
+
+def safety_config_default_fields() -> dict:
+    """config_store_default() -- the exact compiled defaults, used as the v2
+    baseline a migrated v1 record is overlaid onto."""
+    return {
+        "format_version": SAFETY_CONFIG_STORE_FORMAT_VERSION, "seq": 0, "fields_set": 0,
+        "tc_source": 0, "borrowed_zone_index": 0, "tc_placement_mode": 0, "abs_max_temp_c": 0.0,
+        "tc_type": _SC_DEFAULT_TC_TYPE, "ct_channel_map": [0xFF, 0xFF, 0xFF],
+        "calibration_missing": True, "firing_margin_c": 100.0, "overshoot_margin_c": 75.0,
+        "overshoot_time_s": 120, "max_rate_c_per_min": 33.3, "rate_window_s": 60,
+        "blind_grace_s": 60, "frozen_window_s": 600, "tc_disagreement_c": 200.0,
+        "tc_disagreement_time_s": 300, "tc_expected_offset_c": 0.0, "cj_warn_c": 60.0,
+        "cj_max_c": 85.0, "cj_time_s": 60, "borrowed_stale_s": 10, "borrowed_stale_trip_s": 60,
+        "borrowed_type_expected": _SC_DEFAULT_TC_TYPE, "i_present_a": 2.0,
+        "zero_counts": [0, 0, 0], "correlation_window_s": 150, "stuck_on_time_s": 20,
+        "trip_verify_s": 10, "k_ct_v_per_a": [0.0, 0.0, 0.0], "gain": [0.715, 0.715, 0.715],
+        "mains_voltage_v": 0.0, "power_window_s": 120, "context_max_age_s": 5,
+        "link_timeout_s": 10, "link_dead_hard_s": 120, "mainfault_debounce_ms": 200,
+        "telemetry_period_ms": 500, "startup_grace_s": 60, "estop_debounce_ms": 50,
+        "watchdog_timeout_ms": 1000, "config_check_period_s": 10,
+        "ct_cal": [{"calibrated": False, "gain": 0.0, "offset": 0.0} for _ in range(3)],
+        "safety_tc_installed": True, "ct_installed": True, "max_expected_power_w": 0.0,
+        "i_normal_a": [0.0, 0.0, 0.0], "overcurrent_pct": 0, "overcurrent_time_s": 0,
+        "ct_topology": _SC_CT_TOPOLOGY_PER_ZONE, "i_present_a_manual": False,
+        "tc_offset_c": 0.0, "estop_active_level": _SC_ESTOP_ACTIVE_HIGH,
+        "zone_ct_channel": [0, 1, 2], "reserved_hex": "00" * _SC_RESERVED_LEN,
+    }
+
+
+def _sc_derive_zone_ct_channel(ct_topology: int) -> "list[int]":
+    """config_store_derive_zone_ct_channel()."""
+    if ct_topology == _SC_CT_TOPOLOGY_PER_ZONE:
+        return [0, 1, 2]
+    return [2, 2, 2]
+
+
+def _sc_unpack_v3_fields(buf: bytes) -> dict:
+    """unpack_v2_fields() -- named for the wire shape (v3), not the function
+    it mirrors; matches firmware's own naming, which kept its original name
+    across the v2->v3 field-shift."""
+    g_u16 = lambda off: struct.unpack_from("<H", buf, off)[0]
+    g_u32 = lambda off: struct.unpack_from("<I", buf, off)[0]
+    g_f32 = lambda off: struct.unpack_from("<f", buf, off)[0]
+
+    tc_type_byte = buf[_SC["TC_TYPE"]]
+    out = {
+        "format_version": g_u16(_SC["FORMAT_VERSION"]),
+        "seq": g_u32(_SC["SEQ"]),
+        "fields_set": g_u32(_SC["FIELDS_SET"]),
+        "tc_source": buf[_SC["TC_SOURCE"]],
+        "borrowed_zone_index": buf[_SC["BORROWED_ZONE_INDEX"]],
+        "tc_placement_mode": buf[_SC["TC_PLACEMENT_MODE"]],
+        "abs_max_temp_c": g_f32(_SC["ABS_MAX_TEMP_C"]),
+        "tc_type": tc_type_byte if tc_type_byte <= _SC_TC_TYPE_MAX_REAL else _SC_DEFAULT_TC_TYPE,
+        "ct_channel_map": list(buf[_SC["CT_CHANNEL_MAP"]:_SC["CT_CHANNEL_MAP"] + 3]),
+        "calibration_missing": buf[_SC["CALIBRATION_MISSING"]] != 0,
+        "firing_margin_c": g_f32(_SC["FIRING_MARGIN_C"]),
+        "overshoot_margin_c": g_f32(_SC["OVERSHOOT_MARGIN_C"]),
+        "overshoot_time_s": g_u32(_SC["OVERSHOOT_TIME_S"]),
+        "max_rate_c_per_min": g_f32(_SC["MAX_RATE_C_PER_MIN"]),
+        "rate_window_s": g_u32(_SC["RATE_WINDOW_S"]),
+        "blind_grace_s": g_u32(_SC["BLIND_GRACE_S"]),
+        "frozen_window_s": g_u32(_SC["FROZEN_WINDOW_S"]),
+        "tc_disagreement_c": g_f32(_SC["TC_DISAGREEMENT_C"]),
+        "tc_disagreement_time_s": g_u32(_SC["TC_DISAGREEMENT_TIME_S"]),
+        "tc_expected_offset_c": g_f32(_SC["TC_EXPECTED_OFFSET_C"]),
+        "cj_warn_c": g_f32(_SC["CJ_WARN_C"]),
+        "cj_max_c": g_f32(_SC["CJ_MAX_C"]),
+        "cj_time_s": g_u32(_SC["CJ_TIME_S"]),
+        "borrowed_stale_s": g_u32(_SC["BORROWED_STALE_S"]),
+        "borrowed_stale_trip_s": g_u32(_SC["BORROWED_STALE_TRIP_S"]),
+        "borrowed_type_expected": buf[_SC["BORROWED_TYPE_EXPECTED"]],
+        "i_present_a": g_f32(_SC["I_PRESENT_A"]),
+        "zero_counts": [g_u16(_SC["ZERO_COUNTS"] + i * 2) for i in range(3)],
+        "correlation_window_s": g_u32(_SC["CORRELATION_WINDOW_S"]),
+        "stuck_on_time_s": g_u32(_SC["STUCK_ON_TIME_S"]),
+        "trip_verify_s": g_u32(_SC["TRIP_VERIFY_S"]),
+        "k_ct_v_per_a": [g_f32(_SC["K_CT_V_PER_A"] + i * 4) for i in range(3)],
+        "gain": [g_f32(_SC["GAIN"] + i * 4) for i in range(3)],
+        "mains_voltage_v": g_f32(_SC["MAINS_VOLTAGE_V"]),
+        "power_window_s": g_u32(_SC["POWER_WINDOW_S"]),
+        "context_max_age_s": g_u32(_SC["CONTEXT_MAX_AGE_S"]),
+        "link_timeout_s": g_u32(_SC["LINK_TIMEOUT_S"]),
+        "link_dead_hard_s": g_u32(_SC["LINK_DEAD_HARD_S"]),
+        "mainfault_debounce_ms": g_u32(_SC["MAINFAULT_DEBOUNCE_MS"]),
+        "telemetry_period_ms": g_u32(_SC["TELEMETRY_PERIOD_MS"]),
+        "startup_grace_s": g_u32(_SC["STARTUP_GRACE_S"]),
+        "estop_debounce_ms": g_u32(_SC["ESTOP_DEBOUNCE_MS"]),
+        "watchdog_timeout_ms": g_u32(_SC["WATCHDOG_TIMEOUT_MS"]),
+        "config_check_period_s": g_u32(_SC["CONFIG_CHECK_PERIOD_S"]),
+        "ct_cal": _sc_unpack_ct_cal(buf, _SC["CT_CAL"], _SC_CT_CAL_CHANNEL_LEN),
+        # Only the explicit sentinel means "not installed" -- every other
+        # byte (0x00 legacy, 0xFF erased flash, 0x01 this build's marker)
+        # decodes as installed, the safe direction. See config_store.c.
+        "safety_tc_installed": buf[_SC["SAFETY_TC_INSTALLED"]] != _SC_SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED,
+        "ct_installed": buf[_SC["CT_INSTALLED"]] != _SC_CT_INSTALLED_MARKER_NOT_INSTALLED,
+        "ct_topology": _SC_CT_TOPOLOGY_SUMMED if buf[_SC["CT_TOPOLOGY"]] == 1 else _SC_CT_TOPOLOGY_PER_ZONE,
+        "i_present_a_manual": buf[_SC["I_PRESENT_A_MANUAL"]] == 1,
+        "tc_offset_c": g_f32(_SC["TC_OFFSET_C"]),
+        "estop_active_level": _SC_ESTOP_ACTIVE_LOW if buf[_SC["ESTOP_ACTIVE_LEVEL"]] == 1 else _SC_ESTOP_ACTIVE_HIGH,
+        "max_expected_power_w": g_f32(_SC["MAX_EXPECTED_POWER_W"]),
+        "i_normal_a": [g_f32(_SC["I_NORMAL_A"] + i * 4) for i in range(3)],
+        "reserved_hex": buf[_SC["RESERVED"]:_SC["RESERVED"] + _SC_RESERVED_LEN].hex(),
+    }
+    oc_pct_raw = g_u16(_SC["OVERCURRENT_PCT"])
+    out["overcurrent_pct"] = 0 if oc_pct_raw == 0xFFFF else oc_pct_raw
+    oc_time_raw = g_u32(_SC["OVERCURRENT_TIME_S"])
+    out["overcurrent_time_s"] = 0 if oc_time_raw == 0xFFFFFFFF else oc_time_raw
+
+    zone_ct_channel = list(buf[_SC["ZONE_CT_CHANNEL"]:_SC["ZONE_CT_CHANNEL"] + 3])
+    if any(z > 2 for z in zone_ct_channel):
+        zone_ct_channel = _sc_derive_zone_ct_channel(out["ct_topology"])
+        # CONFIG_STORE_SET_ZONE_CT_CHANNEL{,_0,_1,_2} = bits 16-19
+        # (config_store.h) -- clear all four, same as config_store_unpack_ex()'s
+        # own out-of-range fallback.
+        out["fields_set"] &= ~0x000F0000
+    out["zone_ct_channel"] = zone_ct_channel
+    return out
+
+
+def encode_safety_config_v3(f: dict) -> bytes:
+    """config_store_pack() -- always encodes CURRENT-format-version bytes.
+    There is no firmware pack path for v1/v2 any more (only the forward
+    unpack-side migrations config_store_unpack_ex() implements), so this
+    module does not invent one -- see convert_safety_config_blob()."""
+    out = bytearray(b"\xff" * _SC_RECORD_LEN)
+    struct.pack_into("<I", out, _SC["MAGIC"], _SC_MAGIC)
+    struct.pack_into("<H", out, _SC["FORMAT_VERSION"], SAFETY_CONFIG_STORE_FORMAT_VERSION)
+    struct.pack_into("<H", out, 6, 0)  # reserved0
+    struct.pack_into("<I", out, _SC["SEQ"], f["seq"])
+    struct.pack_into("<I", out, _SC["FIELDS_SET"], f["fields_set"])
+    out[_SC["TC_SOURCE"]] = f["tc_source"]
+    out[_SC["BORROWED_ZONE_INDEX"]] = f["borrowed_zone_index"]
+    out[_SC["TC_PLACEMENT_MODE"]] = f["tc_placement_mode"]
+    struct.pack_into("<f", out, _SC["ABS_MAX_TEMP_C"], f["abs_max_temp_c"])
+    out[_SC["TC_TYPE"]] = f["tc_type"]
+    out[_SC["CT_CHANNEL_MAP"]:_SC["CT_CHANNEL_MAP"] + 3] = bytes(f["ct_channel_map"])
+    out[_SC["CALIBRATION_MISSING"]] = 1 if f["calibration_missing"] else 0
+    struct.pack_into("<f", out, _SC["FIRING_MARGIN_C"], f["firing_margin_c"])
+    struct.pack_into("<f", out, _SC["OVERSHOOT_MARGIN_C"], f["overshoot_margin_c"])
+    struct.pack_into("<I", out, _SC["OVERSHOOT_TIME_S"], f["overshoot_time_s"])
+    struct.pack_into("<f", out, _SC["MAX_RATE_C_PER_MIN"], f["max_rate_c_per_min"])
+    struct.pack_into("<I", out, _SC["RATE_WINDOW_S"], f["rate_window_s"])
+    struct.pack_into("<I", out, _SC["BLIND_GRACE_S"], f["blind_grace_s"])
+    struct.pack_into("<I", out, _SC["FROZEN_WINDOW_S"], f["frozen_window_s"])
+    struct.pack_into("<f", out, _SC["TC_DISAGREEMENT_C"], f["tc_disagreement_c"])
+    struct.pack_into("<I", out, _SC["TC_DISAGREEMENT_TIME_S"], f["tc_disagreement_time_s"])
+    struct.pack_into("<f", out, _SC["TC_EXPECTED_OFFSET_C"], f["tc_expected_offset_c"])
+    struct.pack_into("<f", out, _SC["CJ_WARN_C"], f["cj_warn_c"])
+    struct.pack_into("<f", out, _SC["CJ_MAX_C"], f["cj_max_c"])
+    struct.pack_into("<I", out, _SC["CJ_TIME_S"], f["cj_time_s"])
+    struct.pack_into("<I", out, _SC["BORROWED_STALE_S"], f["borrowed_stale_s"])
+    struct.pack_into("<I", out, _SC["BORROWED_STALE_TRIP_S"], f["borrowed_stale_trip_s"])
+    out[_SC["BORROWED_TYPE_EXPECTED"]] = f["borrowed_type_expected"]
+    struct.pack_into("<f", out, _SC["I_PRESENT_A"], f["i_present_a"])
+    for i in range(3):
+        struct.pack_into("<H", out, _SC["ZERO_COUNTS"] + i * 2, f["zero_counts"][i])
+    struct.pack_into("<I", out, _SC["CORRELATION_WINDOW_S"], f["correlation_window_s"])
+    struct.pack_into("<I", out, _SC["STUCK_ON_TIME_S"], f["stuck_on_time_s"])
+    struct.pack_into("<I", out, _SC["TRIP_VERIFY_S"], f["trip_verify_s"])
+    for i in range(3):
+        struct.pack_into("<f", out, _SC["K_CT_V_PER_A"] + i * 4, f["k_ct_v_per_a"][i])
+    for i in range(3):
+        struct.pack_into("<f", out, _SC["GAIN"] + i * 4, f["gain"][i])
+    struct.pack_into("<f", out, _SC["MAINS_VOLTAGE_V"], f["mains_voltage_v"])
+    struct.pack_into("<I", out, _SC["POWER_WINDOW_S"], f["power_window_s"])
+    struct.pack_into("<I", out, _SC["CONTEXT_MAX_AGE_S"], f["context_max_age_s"])
+    struct.pack_into("<I", out, _SC["LINK_TIMEOUT_S"], f["link_timeout_s"])
+    struct.pack_into("<I", out, _SC["LINK_DEAD_HARD_S"], f["link_dead_hard_s"])
+    struct.pack_into("<I", out, _SC["MAINFAULT_DEBOUNCE_MS"], f["mainfault_debounce_ms"])
+    struct.pack_into("<I", out, _SC["TELEMETRY_PERIOD_MS"], f["telemetry_period_ms"])
+    struct.pack_into("<I", out, _SC["STARTUP_GRACE_S"], f["startup_grace_s"])
+    struct.pack_into("<I", out, _SC["ESTOP_DEBOUNCE_MS"], f["estop_debounce_ms"])
+    struct.pack_into("<I", out, _SC["WATCHDOG_TIMEOUT_MS"], f["watchdog_timeout_ms"])
+    struct.pack_into("<I", out, _SC["CONFIG_CHECK_PERIOD_S"], f["config_check_period_s"])
+    out[_SC["CT_CAL"]:_SC["CT_CAL"] + _SC_CT_CAL_CHANNEL_LEN * 3] = _sc_pack_ct_cal(f["ct_cal"])
+    out[_SC["SAFETY_TC_INSTALLED"]] = (
+        _SC_SAFETY_TC_INSTALLED_MARKER_INSTALLED if f["safety_tc_installed"]
+        else _SC_SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED
+    )
+    out[_SC["CT_INSTALLED"]] = (
+        _SC_CT_INSTALLED_MARKER_INSTALLED if f["ct_installed"] else _SC_CT_INSTALLED_MARKER_NOT_INSTALLED
+    )
+    out[_SC["CT_TOPOLOGY"]] = 1 if f["ct_topology"] == _SC_CT_TOPOLOGY_SUMMED else 0
+    out[_SC["I_PRESENT_A_MANUAL"]] = 1 if f["i_present_a_manual"] else 0
+    struct.pack_into("<f", out, _SC["TC_OFFSET_C"], f["tc_offset_c"])
+    out[_SC["ESTOP_ACTIVE_LEVEL"]] = 1 if f["estop_active_level"] == _SC_ESTOP_ACTIVE_LOW else 0
+    struct.pack_into("<f", out, _SC["MAX_EXPECTED_POWER_W"], f["max_expected_power_w"])
+    for i in range(3):
+        struct.pack_into("<f", out, _SC["I_NORMAL_A"] + i * 4, f["i_normal_a"][i])
+    struct.pack_into("<H", out, _SC["OVERCURRENT_PCT"], f["overcurrent_pct"])
+    struct.pack_into("<I", out, _SC["OVERCURRENT_TIME_S"], f["overcurrent_time_s"])
+    out[_SC["ZONE_CT_CHANNEL"]:_SC["ZONE_CT_CHANNEL"] + 3] = bytes(f["zone_ct_channel"])
+    reserved = bytes.fromhex(f.get("reserved_hex", "00" * _SC_RESERVED_LEN))
+    out[_SC["RESERVED"]:_SC["RESERVED"] + _SC_RESERVED_LEN] = reserved
+    crc = _sc_crc32(bytes(out[:_SC["CRC"]]))
+    struct.pack_into("<I", out, _SC["CRC"], crc)
+    return bytes(out)
+
+
+def decode_safety_config_blob(blob: bytes) -> "tuple[int, dict]":
+    """config_store_unpack_ex() -- decode a raw config_store_record_t NVS
+    record (any of format versions 1, 2 or current/3) into (version,
+    fields_dict). v1 and v2 records are migrated FORWARD into v3 shape
+    exactly as firmware does (config_store_default() baseline + overlay for
+    v1; a byte-shift then the one v3 decoder for v2), but `version` in the
+    return value still names the SOURCE format actually found, the same
+    convention decode_profile_blob() uses. Never runs
+    config_params_validate_ranges() -- see this section's header comment."""
+    if len(blob) != _SC_RECORD_LEN:
+        raise ConfigConvertError(
+            f"safety_config blob length {len(blob)} does not match CONFIG_STORE_RECORD_LEN "
+            f"({_SC_RECORD_LEN}) -- firmware treats anything else as corrupt, not a record to migrate"
+        )
+    magic = struct.unpack_from("<I", blob, _SC["MAGIC"])[0]
+    if magic != _SC_MAGIC:
+        raise ConfigConvertError(
+            f"safety_config blob has wrong magic (0x{magic:08x}, expected 0x{_SC_MAGIC:08x}) -- "
+            "erased flash or not this format at all"
+        )
+    version = struct.unpack_from("<H", blob, _SC["FORMAT_VERSION"])[0]
+
+    if version == SAFETY_CONFIG_STORE_FORMAT_VERSION:
+        stored_crc = struct.unpack_from("<I", blob, _SC["CRC"])[0]
+        computed_crc = _sc_crc32(blob[:_SC["CRC"]])
+        if stored_crc != computed_crc:
+            raise ConfigConvertError(
+                f"CRC mismatch for safety_config v{version} blob "
+                f"(stored 0x{stored_crc:08x}, computed 0x{computed_crc:08x}) -- treating as corrupt, "
+                "same as config_store_unpack_ex()'s own load path"
+            )
+        return version, _sc_unpack_v3_fields(blob)
+
+    if version == SAFETY_CONFIG_STORE_FORMAT_VERSION_V2:
+        stored_crc = struct.unpack_from("<I", blob, _SC_V2_OFF_CRC)[0]
+        computed_crc = _sc_crc32(blob[:_SC_V2_OFF_CRC])
+        if stored_crc != computed_crc:
+            raise ConfigConvertError(
+                f"CRC mismatch for safety_config v{version} blob "
+                f"(stored 0x{stored_crc:08x}, computed 0x{computed_crc:08x}) -- treating as corrupt"
+            )
+        v3 = bytearray(b"\xff" * _SC_RECORD_LEN)
+        v3[0:_SC_V2_OFF_FIELDS_SET] = blob[0:_SC_V2_OFF_FIELDS_SET]  # magic, format_version, reserved0, seq
+        old_fields_set = struct.unpack_from("<H", blob, _SC_V2_OFF_FIELDS_SET)[0]
+        struct.pack_into("<I", v3, _SC["FIELDS_SET"], old_fields_set)  # zero-extended; bit 16+ clear
+        shift_len = _SC_V2_OFF_RESERVED - _SC_V2_OFF_TC_SOURCE
+        v3[_SC["TC_SOURCE"]:_SC["TC_SOURCE"] + shift_len] = blob[_SC_V2_OFF_TC_SOURCE:_SC_V2_OFF_RESERVED]
+        v3[_SC["RESERVED"]:_SC["RESERVED"] + _SC_RESERVED_LEN] = (
+            blob[_SC_V2_OFF_RESERVED:_SC_V2_OFF_RESERVED + _SC_RESERVED_LEN]
+        )
+        fields = _sc_unpack_v3_fields(bytes(v3))
+        # zone_ct_channel: derived from the migrated ct_topology, same as
+        # config_store_derive_zone_ct_channel() in the v2 unpack branch --
+        # the raw bytes at that offset are meaningless on a real v2 record
+        # (reserved fill), and the gating bit is already clear.
+        fields["zone_ct_channel"] = _sc_derive_zone_ct_channel(fields["ct_topology"])
+        fields["format_version"] = SAFETY_CONFIG_STORE_FORMAT_VERSION
+        # Deliberately NOT forcing calibration_missing -- see
+        # config_store_unpack_ex()'s v2 branch comment: a v2 record was
+        # commissioned against every field except zone_ct_channel, which has
+        # a fully-specified derivation, so nothing is genuinely unknown.
+        return version, fields
+
+    if version == SAFETY_CONFIG_STORE_FORMAT_VERSION_V1:
+        stored_crc = struct.unpack_from("<I", blob, _SC_V1_OFF_CRC)[0]
+        computed_crc = _sc_crc32(blob[:_SC_V1_OFF_CRC])
+        if stored_crc != computed_crc:
+            raise ConfigConvertError(
+                f"CRC mismatch for safety_config v{version} blob "
+                f"(stored 0x{stored_crc:08x}, computed 0x{computed_crc:08x}) -- treating as corrupt"
+            )
+        fields = safety_config_default_fields()
+        fields["seq"] = struct.unpack_from("<I", blob, _SC_V1_OFF_SEQ)[0]
+        v1_tc_type_byte = blob[_SC_V1_OFF_TC_TYPE]
+        fields["tc_type"] = v1_tc_type_byte if v1_tc_type_byte <= _SC_TC_TYPE_MAX_REAL else _SC_DEFAULT_TC_TYPE
+        fields["ct_cal"] = _sc_unpack_ct_cal(blob, _SC_V1_OFF_CT_CAL, _SC_V1_CT_CAL_CHANNEL_LEN)
+        # Forced true regardless of what the v1 record held -- see
+        # config_store_unpack_ex()'s v1 branch comment: a migrated record was
+        # never commissioned against everything v3 added.
+        fields["calibration_missing"] = True
+        fields["format_version"] = SAFETY_CONFIG_STORE_FORMAT_VERSION
+        return version, fields
+
+    raise ConfigConvertError(
+        f"unknown/unsupported safety_config format_version {version} -- known versions: "
+        f"{sorted([SAFETY_CONFIG_STORE_FORMAT_VERSION_V1, SAFETY_CONFIG_STORE_FORMAT_VERSION_V2, SAFETY_CONFIG_STORE_FORMAT_VERSION])}"
+    )
+
+
+def convert_safety_config_blob(blob: bytes, target_version: int) -> "tuple[bytes, ConversionReport]":
+    """Best-effort convert a raw config_store_record_t record to
+    target_version. Encoding is supported ONLY to
+    SAFETY_CONFIG_STORE_FORMAT_VERSION (today 3) -- firmware itself has no
+    v1/v2 *pack* path any more, only the forward *unpack*-side migrations
+    decode_safety_config_blob() mirrors, so writing a v1/v2-shaped record
+    would invent a wire format nothing in firmware produces or reads."""
+    if target_version != SAFETY_CONFIG_STORE_FORMAT_VERSION:
+        raise ConfigConvertError(
+            f"safety_config target version {target_version} is not supported for ENCODING -- firmware has no "
+            f"pack path below CONFIG_STORE_FORMAT_VERSION ({SAFETY_CONFIG_STORE_FORMAT_VERSION}), only forward "
+            "unpack-side migrations into it. Refusing rather than inventing a wire format firmware never produces."
+        )
+    source_version, fields = decode_safety_config_blob(blob)
+    report = ConversionReport(store="safety_config_blob", source_version=source_version,
+                               target_version=target_version)
+    if source_version == target_version:
+        report.add("document", "version", "kept", "source and target versions are identical")
+    elif source_version == SAFETY_CONFIG_STORE_FORMAT_VERSION_V1:
+        report.add("document", "most fields", "defaulted",
+                    "source predates CONFIG_STORE_FORMAT_VERSION 2/3's whole commissioning surface; every "
+                    "field config_store_default() introduced takes its compiled default, "
+                    "calibration_missing is forced true, exactly config_store_unpack_ex()'s v1 migration")
+    elif source_version == SAFETY_CONFIG_STORE_FORMAT_VERSION_V2:
+        report.add("zone_ct_channel", "zone_ct_channel", "defaulted",
+                    "source predates zone_ct_channel (v2->v3); derived from ct_topology via "
+                    "config_store_derive_zone_ct_channel(), exactly firmware's own migration")
+    out = encode_safety_config_v3(fields)
+    return out, report
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch
 # ---------------------------------------------------------------------------
 
@@ -489,6 +951,15 @@ def convert_document(doc: dict, target_version: int) -> "tuple[dict, ConversionR
             raise ConfigConvertError(f"kilnctl_profile_blob document must carry a valid hex 'blob_hex': {exc}")
         out_blob, report = convert_profile_blob(blob, target_version)
         out_doc = {"kind": "kilnctl_profile_blob", "version": target_version, "blob_hex": out_blob.hex()}
+        return out_doc, report
+
+    if kind == "safety_config_blob":
+        try:
+            blob = bytes.fromhex(doc["blob_hex"])
+        except (KeyError, ValueError) as exc:
+            raise ConfigConvertError(f"kilnctl_safety_config_blob document must carry a valid hex 'blob_hex': {exc}")
+        out_blob, report = convert_safety_config_blob(blob, target_version)
+        out_doc = {"kind": "kilnctl_safety_config_blob", "version": target_version, "blob_hex": out_blob.hex()}
         return out_doc, report
 
     raise ConfigConvertError(f"unreachable: detect_kind returned unhandled kind {kind!r}")

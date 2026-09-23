@@ -615,18 +615,60 @@ tool that jumps any version to any other, best-effort, without ever touching
 a board. Landed as `tools/PcTools/src/kilnctrl/config_convert.py` (CLI:
 `tools/PcTools/scripts/config_convert.py`; MCP: `convert_config`). Scope
 today: the `kilnctl_backup` document (delegates to the existing
-`cfg_convert.py`) and a new `kilnctl_profile_blob` wrapper for the raw
-`profile_persisted_t` NVS record (v1-v4, mirroring `PROFILE_VERSION`).
-Forward steps mirror firmware's migration exactly; backward steps drop what
-the older layout cannot express and name every drop in a per-field report
-(`report.lossy` is true only when something is actually dropped, never
-merely defaulted). `kiln_cfg_store`'s package format and SaftyFW's raw
-`config_store_record_t` are deliberately NOT implemented yet -- refused with
-a named reason, not attempted. A regex-based mirror-drift check
-(`tools/check_config_convert_mirror.py`) fails if `PROFILE_VERSION` or its
-sibling constants are bumped in firmware without a matching update here;
-negative-tested by bumping `PROFILE_VERSION` in a scratch copy of
-`profiles_http.c` and confirming failure, then restoring byte-exact via
-`git cat-file blob`. CRC32 uses Python's `zlib.crc32()` as an unverified
-stand-in for `esp_crc32_le()` -- believed equivalent, not confirmed against a
-real captured NVS blob.
+`cfg_convert.py`), the `kilnctl_profile_blob` wrapper for the raw
+`profile_persisted_t` NVS record (v1-v4, mirroring `PROFILE_VERSION`), and
+(2026-09-23) the `kilnctl_safety_config_blob` wrapper for SaftyFW's raw
+`config_store_record_t` NVS record. Forward steps mirror firmware's
+migration exactly; backward steps drop what the older layout cannot express
+and name every drop in a per-field report (`report.lossy` is true only when
+something is actually dropped, never merely defaulted). A regex-based
+mirror-drift check (`tools/check_config_convert_mirror.py`) fails if
+`PROFILE_VERSION`/`CONFIG_STORE_FORMAT_VERSION` or their sibling constants
+are bumped in firmware without a matching update here; negative-tested by
+bumping `PROFILE_VERSION` in a scratch copy of `profiles_http.c` and
+confirming failure, then restoring byte-exact via `git cat-file blob`.
+CRC32 uses Python's `zlib.crc32()` as an unverified stand-in for
+`esp_crc32_le()`/`bootloader_crc32()` -- confirmed algorithmically equivalent
+against firmware's own host-test CRC vector (`crc32("123456789") ==
+0xCBF43926`, the standard CRC-32/zlib/ISO-HDLC check value), but never
+against a real captured NVS blob from hardware.
+
+**`config_store_record_t` (2026-09-23).** Unlike the two formats below, this
+one is fully supported: `firmware/SaftyFW/src/config_store.c` never lets the
+compiler lay the record out on its own — every field is read/written at an
+explicit named byte offset (`REC_OFF_*`) through hand-written
+`put_*_le`/`get_*_le` helpers, so the wire layout is deterministic
+independent of any compiler's struct-packing rules, and the v1->v3/v2->v3
+migrations firmware itself performs (a default-plus-overlay for v1; a
+contiguous byte-range shift for v2, matching `config_store.c`'s own
+compile-time `config_store_v2_block_shift_check`) were reproduced exactly in
+Python. Decode handles v1/v2/v3 with CRC verification per version's own byte
+range; encode targets only the current `CONFIG_STORE_FORMAT_VERSION` (3) --
+firmware has no v1/v2 pack path to mirror, so downgrading the wire format is
+refused rather than invented. Golden-vector tests build every test blob from
+firmware's own `REC_OFF_*`/`REC_V1_OFF_*`/`REC_V2_OFF_*` offsets directly
+(not through this module's own encoder), so a decode bug and an encode bug
+cannot cancel each other out; each version has a wrong-CRC and a
+truncated/wrong-magic/wrong-version negative test.
+
+Still NOT implemented, and unlike the note this section used to carry, for
+two different reasons rather than one shared "not yet" reason:
+
+- **`zones_cfg_t` (the ESP's raw zone-configuration blob).** This one IS
+  deterministically decodable in principle -- KilnFW's own
+  `zones_config_json.h`/`.c` guard the struct with `_Static_assert`s on
+  exact byte layout the same way `config_store.c` does, and there are 26
+  versions of documented history to migrate across (`ZONES_CFG_VERSION`).
+  It is left out purely for size: mirroring ~3500 lines of struct evolution
+  across every version bump is a project on its own, not a same-session
+  addition, and doing it partially (e.g. only the last few versions) would
+  silently misrepresent the tool's own claimed coverage. `KNOWN_UNSUPPORTED_KINDS`
+  names this reason explicitly rather than implying indeterminism.
+- **`kiln_cfg_store`'s package format.** This format is already a JSON
+  envelope in firmware (kind `kilnctl_kiln_package` per `kiln_package.h`,
+  distinct from this tool's refused kind string `kilnctl_kiln_cfg_package`)
+  whose `pico` array needs no migration (safety param ids only ever grow),
+  but whose `esp_blob_hex` field carries a raw `zones_cfg_t` blob. Since that
+  inner blob is exactly the format above, this format is blocked
+  transitively on `zones_cfg_t` support, not on any indeterminism of its
+  own envelope.
