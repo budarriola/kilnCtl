@@ -101,11 +101,12 @@ param(
     # Exclude checks whose repo-relative path matches this regex (-match).
     [string]$Skip,
 
-    # Skip ONLY the full target builds (check_00_kilnfw_target_build.ps1,
-    # check_00_saftyfw_target_build.ps1, check_00_kilnfw_recovery_target_
-    # build.ps1) -- for a caller that just ran build_kilnfw/build_saftyfw (or
-    # equivalent) itself and wants the rest of the suite without paying to
-    # redo the target build. Every other check,
+    # Skip ONLY the three phase-1 full target builds (check_00_kilnfw_target_
+    # build.ps1, check_00_saftyfw_target_build.ps1, check_00_kilnfw_recovery_
+    # target_build.ps1) plus the separate phase-2 check_00_kilnfw_host_tests.ps1
+    # -- for a caller that already ran build_kilnfw/build_saftyfw/
+    # build_host_tests (or the equivalent) itself and wants the rest of the
+    # suite without paying to redo that multi-minute work. Every other check,
     # including the two checks that read the target ELFs, still runs. This is
     # NOT a general "skip slow checks" switch -- everything else in the
     # default run still runs, because weakening any of it is exactly the
@@ -146,6 +147,29 @@ param(
 $SkipExitCode = 3
 
 $ErrorActionPreference = "Stop"
+
+# This process-wide env var must not outlive this run: a caller that invokes
+# this script by dot-sourcing it, or from a long-lived PowerShell session
+# that later runs a NON--Fast pass in the same process, must never see a
+# leftover KILNCTL_CHECKS_FAST from a previous -Fast run. Set/cleared here,
+# before any early `exit`, and cleaned up again at every exit point below
+# (and from the trap, for an uncaught terminating error) via
+# Clear-ChecksFastEnv, rather than relying on one cleanup line at the very
+# bottom of the script that several paths below `exit` before reaching.
+function Clear-ChecksFastEnv {
+    if ($Fast) {
+        Remove-Item Env:\KILNCTL_CHECKS_FAST -ErrorAction SilentlyContinue
+    }
+}
+if ($Fast) {
+    $env:KILNCTL_CHECKS_FAST = "1"
+} else {
+    Remove-Item Env:\KILNCTL_CHECKS_FAST -ErrorAction SilentlyContinue
+}
+trap {
+    Clear-ChecksFastEnv
+    break
+}
 
 # The repository root is this script's parent's parent -- derived, never
 # assumed from the caller's working directory, so the script gives the same
@@ -190,6 +214,7 @@ if (Test-Path $halBoundaryNegativeTest) {
     Write-Host "FAILED: expected negative test $halBoundaryNegativeTest not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } elseif (-not (Test-Path $halBoundaryNegativeTest)) {
     # 2026-09-10 (opus review, round 3): under -AllowFewerChecks this branch
@@ -216,6 +241,7 @@ if (Test-Path $routeTierNegativeTest) {
     Write-Host "FAILED: expected negative test $routeTierNegativeTest not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } else {
     Write-Host ""
@@ -238,6 +264,7 @@ if (Test-Path $configMigrationStepsNegativeTest) {
     Write-Host "FAILED: expected negative test $configMigrationStepsNegativeTest not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } else {
     Write-Host ""
@@ -260,6 +287,7 @@ if (Test-Path $stopPathNegativeTest) {
     Write-Host "FAILED: expected negative test $stopPathNegativeTest not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } else {
     Write-Host ""
@@ -287,6 +315,7 @@ if (Test-Path $stackBudgetSymbolBoundsTest) {
     Write-Host "FAILED: expected test $stackBudgetSymbolBoundsTest not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing regression test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } else {
     Write-Host ""
@@ -339,6 +368,7 @@ if (Test-Path $uiResponsiveSweepNegativeTest) {
     Write-Host "FAILED: expected negative test $uiResponsiveSweepNegativeTest not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } else {
     Write-Host ""
@@ -380,6 +410,7 @@ foreach ($name in $saftyfwOrphanTests) {
         Write-Host "FAILED: expected SaftyFW negative test $scriptPath not found --" -ForegroundColor Red
         Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
         Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+        Clear-ChecksFastEnv
         exit 2
     } elseif (-not (Test-Path $scriptPath)) {
         # Same restore as the hal-boundary block above: -AllowFewerChecks
@@ -403,6 +434,7 @@ foreach ($name in $hwAbstractionScripts) {
         Write-Host "FAILED: expected hwAbstraction test $scriptPath not found --" -ForegroundColor Red
         Write-Host "        has it moved? A missing expected check must not read as a clean run." -ForegroundColor Red
         Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+        Clear-ChecksFastEnv
         exit 2
     } elseif (-not (Test-Path $scriptPath)) {
         # Same restore as the hal-boundary block above.
@@ -442,6 +474,7 @@ if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
     Write-Host "FAILED: expected $selfcheckPy (or its venv $selfcheckPython) not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing selfcheck.py must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 } elseif (-not ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython))) {
     # Same restore as the hal-boundary block above.
@@ -465,6 +498,7 @@ if ($checks.Count -lt $MinimumChecks -and -not $AllowFewerChecks) {
     Write-Host "        the glob is broken or a directory moved -- NOT that the repository is" -ForegroundColor Red
     Write-Host "        clean. Investigate before trusting any green result from this script." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 2
 }
 
@@ -516,17 +550,16 @@ if ($Fast) {
 # SKIP still does by default, exactly as before. A check must never print
 # SKIP-FAST on its own initiative without checking this var, since a plain
 # `-AllowFewerChecks`/no -Fast run must still see a real SKIP as fatal.
-if ($Fast) {
-    $env:KILNCTL_CHECKS_FAST = "1"
-} else {
-    Remove-Item Env:\KILNCTL_CHECKS_FAST -ErrorAction SilentlyContinue
-}
+# ($env:KILNCTL_CHECKS_FAST and Clear-ChecksFastEnv are set up right after
+# $ErrorActionPreference above, before any early `exit`, and cleared here and
+# at every later exit point.)
 
 if ($ListOnly) {
     Write-Host "$($checks.Count) check scripts discovered:"
     foreach ($c in $checks) {
         Write-Host "  $($c.FullName.Substring($repoRoot.Length + 1))"
     }
+    Clear-ChecksFastEnv
     exit 0
 }
 
@@ -819,6 +852,7 @@ if ($failed.Count -gt 0) {
     }
     Write-Host ""
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 1
 }
 
@@ -844,8 +878,10 @@ if ($failed.Count -gt 0) {
 if ($skipped.Count -gt 0 -and -not $AllowSkips) {
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
     Write-Host "FAILED: $($skipped.Count) check(s) skipped and -AllowSkips was not passed -- a skip is not a pass." -ForegroundColor Red
+    Clear-ChecksFastEnv
     exit 1
 }
 
 Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Green
+Clear-ChecksFastEnv
 exit 0

@@ -540,8 +540,9 @@ since `eefff2dc` — it drives real headless Chrome over CDP and flaked under
 phase 2's concurrent load) — so a full run finishes in under 3 minutes on
 this 24-core machine instead of exceeding the 600s tool timeout. `-Only
 <regex>`/`-Skip <regex>` filter by repo-relative path for iterating on one
-check; `-Fast` skips all three phase-1 target builds for a caller that just
-ran one itself, never any other check.
+check; `-Fast` skips the three phase-1 target builds and, separately,
+`check_00_kilnfw_host_tests.ps1` (phase 2) for a caller that already ran the
+equivalent multi-minute build/host-test work itself — no other check.
 (**2026-09-20 history:** the KilnFW application build briefly gained a
 build-order dependency here, once it started `EMBED_FILES`ing both SaftyFW
 slot images so the ESP can auto-update the Pico at boot
