@@ -369,13 +369,20 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
         if not os.path.isfile(os.path.join(kiln_fw_root, "CMakeLists.txt")):
             return (f"kilnfw: error: kiln_fw_root {kiln_fw_root!r} has no CMakeLists.txt "
                      f"-- it does not look like a firmware/KilnFW-shaped directory")
-    kiln_fw_dir = kiln_fw_root or os.path.join(root, "firmware", "KilnFW")
+    if kiln_fw_root is not None and "'" in kiln_fw_root:
+        return (f"kilnfw: error: kiln_fw_root {kiln_fw_root!r} contains a single quote -- "
+                f"this path is interpolated into a single-quoted PowerShell -Command string "
+                f"and a quote in it would break that quoting")
+    kiln_fw_dir = os.path.normpath(kiln_fw_root) if kiln_fw_root is not None else os.path.join(root, "firmware", "KilnFW")
     build_dir = os.path.join(kiln_fw_dir, "build")
     saftyfw_root_arg: Optional[str] = None
     if kiln_fw_root is not None:
         # <worktree>/firmware/KilnFW -> <worktree>/firmware/SaftyFW, so the
         # embedded slot images come from the SAME worktree being built, not
-        # the main tree's firmware/SaftyFW.
+        # the main tree's firmware/SaftyFW. kiln_fw_dir is normpath'd above so
+        # a trailing backslash in kiln_fw_root (os.path.dirname("...\\KilnFW\\")
+        # otherwise returns "...\\KilnFW" itself, deriving a bogus
+        # ...\\KilnFW\\SaftyFW sibling) can't throw this off.
         worktree_firmware_dir = os.path.dirname(kiln_fw_dir)
         saftyfw_root_arg = os.path.join(worktree_firmware_dir, "SaftyFW")
         if not os.path.isfile(os.path.join(saftyfw_root_arg, "CMakeLists.txt")):
@@ -397,10 +404,12 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
                   f"update _IDF_PROFILE in mcpkit/workbench.py if Espressif moved")
         return f"{saftyfw_report}\n\n{result}" if saftyfw_report else result
     setup_note = ""
-    if kiln_fw_root is not None and not os.path.isfile(os.path.join(build_dir, "sdkconfig")):
+    if kiln_fw_root is not None:
         # Fresh or fullclean'd worktree: neither of these is a full build, so
         # neither goes through the build gate (docs/MCP_SERVERS.md's "clean
-        # worktree" section documents both traps this closes).
+        # worktree" section documents both traps this closes). The lvgl
+        # submodule check runs unconditionally -- it's cheap and independent
+        # of sdkconfig state.
         lvgl_dir = os.path.join(kiln_fw_dir, "components", "lvgl")
         if not os.path.isfile(os.path.join(lvgl_dir, "CMakeLists.txt")):
             submodule_result = _run_locked(
@@ -409,14 +418,31 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
             if "kilnfw-submodule-init: OK" not in submodule_result:
                 return submodule_result
             setup_note += f"{submodule_result}\n"
-        set_target_result = _run_locked(
-            "kilnfw-set-target", kiln_fw_dir,
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-             f"& '{_IDF_PROFILE}' *>&1 | Out-Null; idf.py -C '{kiln_fw_dir}' set-target esp32s3; "
-             f"exit $LASTEXITCODE"])
-        if "kilnfw-set-target: OK" not in set_target_result:
-            return f"{setup_note}{set_target_result}"
-        setup_note += f"{set_target_result}\n"
+        # A normal `idf.py build` never writes build/sdkconfig -- only
+        # check_00_kilnfw_target_build.ps1's publish step does that. The
+        # real "not yet configured" signal is the absence of the ROOT
+        # sdkconfig (<kiln_fw_dir>/sdkconfig, gitignored, missing in a fresh
+        # worktree) alongside a missing build/CMakeCache.txt -- testing
+        # build/sdkconfig instead made set-target run on EVERY call for a
+        # kiln_fw_root build, which clears the build dir and regenerates the
+        # root sdkconfig from defaults, discarding the caller's config on
+        # every single build (opus review of 171cc5bc, required fix). Never
+        # run set-target for a fullclean target -- there is nothing to
+        # configure yet and set-target after a fullclean just reconfigures
+        # the same defaults again for no reason.
+        needs_set_target = (
+            target != "fullclean"
+            and not os.path.isfile(os.path.join(kiln_fw_dir, "sdkconfig"))
+            and not os.path.isfile(os.path.join(build_dir, "CMakeCache.txt")))
+        if needs_set_target:
+            set_target_result = _run_locked(
+                "kilnfw-set-target", kiln_fw_dir,
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                 f"& '{_IDF_PROFILE}' *>&1 | Out-Null; idf.py -C '{kiln_fw_dir}' set-target esp32s3; "
+                 f"exit $LASTEXITCODE"])
+            if "kilnfw-set-target: OK" not in set_target_result:
+                return f"{setup_note}{set_target_result}"
+            setup_note += f"{set_target_result}\n"
     if jobs > 0 and target == "build":
         inner = f"cd '{build_dir}'; ninja -j {jobs}"
     else:

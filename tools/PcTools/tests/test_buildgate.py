@@ -117,6 +117,13 @@ def test_slots_zero_disables_the_gate_without_touching_a_mutex(monkeypatch):
 
 def test_slots_two_uncontended_acquire_and_release_reports_no_wait(monkeypatch):
     monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "2")
+    # kiln_build_gate's real mutex prefix is Global\ -- shared machine-wide
+    # with any concurrent real build. Point this test at a private, unique
+    # Local\ prefix instead so it can never flake while a real build holds
+    # the Global\ slots (opus review of 171cc5bc, advisory 3).
+    monkeypatch.setenv(
+        "KILNCTL_BUILD_GATE_MUTEX_PREFIX",
+        f"Local\\kilnctl_buildgate_test_{uuid.uuid4().hex[:12]}_slot_")
     wr = buildgate.GateWaitResult()
     with buildgate.kiln_build_gate(f"test-uncontended-{uuid.uuid4().hex[:8]}", wait_result=wr):
         pass

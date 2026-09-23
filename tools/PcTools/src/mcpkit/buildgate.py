@@ -68,10 +68,19 @@ def _slot_count() -> int:
         return 2
 
 
+_DEFAULT_MUTEX_PREFIX = "Global\\kilnctl_build_slot_"
+
+
 def _mutex_name(slot_index: int) -> str:
     # Must match tools/build_gate.ps1's Get-KilnBuildGateMutexName exactly --
-    # this name IS the shared contract between the two languages.
-    return f"Global\\kilnctl_build_slot_{slot_index}"
+    # this name IS the shared contract between the two languages. The prefix
+    # is overridable via KILNCTL_BUILD_GATE_MUTEX_PREFIX so tests can point
+    # at a private Local\ namespace instead of contending with a real build
+    # holding the machine-wide Global\ slots (opus review of 171cc5bc,
+    # advisory 3) -- production code never sets this env var, so it always
+    # gets the real Global\ prefix below.
+    prefix = os.environ.get("KILNCTL_BUILD_GATE_MUTEX_PREFIX") or _DEFAULT_MUTEX_PREFIX
+    return f"{prefix}{slot_index}"
 
 
 # ctypes.windll.kernel32 with no restype/argtypes silently treats every
