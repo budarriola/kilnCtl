@@ -84,10 +84,10 @@ an RP2040 safety processor (`firmware/SaftyFW`).
     active bring-up/debug work on this unit. **2026-09-23 update:** the bench
     MCP tooling's `gpio_probe` capability depends on this being enabled, so a
     clean worktree silently building it `n` broke that tooling path — it is
-    now pinned `y` in `firmware/KilnFW/sdkconfig.defaults` (see the new
-    "Pin the hand-set WiFi/lwIP/GPIO_PROBE bench values" block there) rather
-    than left as a local-only override; the repo default described here is
-    superseded by that pin.
+    now pinned `y` in `firmware/KilnFW/sdkconfig.defaults` (see the
+    "Pin WiFi/lwIP internal-DRAM tuning to the hand-set bench values" block
+    there) rather than left as a local-only override; the repo default
+    described here is superseded by that pin.
 
   **2026-09-23: three more gitignored-`sdkconfig` overrides pinned into
   `sdkconfig.defaults`.** A researcher pass found that
@@ -106,7 +106,7 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   6,675 B. All three are now pinned in `firmware/KilnFW/sdkconfig.defaults`
   alongside `CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y`; `CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY`
   stays unpinned since it is inert on this board's FT6336U panel, per the
-  bullet above.
+  bullet below.
   - `CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY=y` here vs. Kconfig default `n`. This
     knob only feeds the legacy NS2009 (resistive) uncalibrated-touch path in
     `lvgl_port.c`/`touch_dev.c`, gated by `!self_calibrating`. This bench's

@@ -536,8 +536,8 @@ CONFIG_IDF_TARGET="esp32s3"
 
 # --- Pin WiFi/lwIP internal-DRAM tuning to the hand-set bench values --------
 # The shared main tree's gitignored, hand-tuned sdkconfig
-# (C:\Users\budar\OneDrive\Desktop\kilnCtl\firmware\KilnFW\sdkconfig) carries
-# four values below that a fresh worktree's regenerated sdkconfig silently
+# (firmware/KilnFW/sdkconfig) carries four values below that a fresh
+# worktree's regenerated sdkconfig silently
 # drops back to plain IDF Kconfig defaults -- the same "gitignored config
 # hides mismatch" class already recorded elsewhere in this project's notes,
 # and the same reasoning as the rollback/font blocks above: if a setting
@@ -577,6 +577,17 @@ CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
 # correctly either way, so enabling it does not break that check) -- pin it
 # on so a clean worktree build supports the same bench tooling the hand-set
 # sdkconfig always has.
+#
+# 2026-09-23 review note: pinning this unconditionally does reverse this
+# symbol's own Kconfig help text ("Leave this OFF for any build going near a
+# real heater") for every clean-worktree build, not just bench/debug ones. A
+# gate on a KILNCTL_ENABLE_DEV_AFFORDANCES-style symbol (default y only for
+# dev/bench builds) would be the better shape, but no such symbol exists
+# anywhere in this Kconfig tree today and the bench's own gitignored
+# sdkconfig has no `dev_affordances`-named key either -- there is nothing to
+# gate on yet. Kept as an unconditional pin for now; owner should decide
+# whether a KILNCTL_ENABLE_DEV_AFFORDANCES-style umbrella symbol is worth
+# adding, and this pin should move behind it if so.
 CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y
 
 # NOTE: CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY is deliberately NOT pinned here. It
