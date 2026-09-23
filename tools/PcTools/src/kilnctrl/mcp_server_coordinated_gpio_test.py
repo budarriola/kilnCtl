@@ -20,7 +20,7 @@ from . import debug_probe, host_resolve, ota_http_client as ota_http, probe
 from .coordinated_gpio_test import (
     GpioTestPreflight,
     build_real_clients,
-    run_coordinated_gpio_test,
+    run_coordinated_gpio_test_lazy,
 )
 from .devices_safety import SafetyFlag
 from .link_hub import get_shared_link
@@ -50,9 +50,9 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
     cached GET_STATUS, the same client `safety_get_status` uses), no
     profile running/paused (`_srv._profiles.get_exec_status()`, the same
     client `profiles_get_exec_status` uses), and the OTA interlock reporting
-    idle (`ota_http_client.get_interlock`, unauthenticated GET
-    `/api/ota/interlock`, the same route `capability_preflight_check`
-    reads). Any read failure is folded into `None` ("could not determine"),
+    idle (`ota_http_client.get_interlock`, GET `/api/ota/interlock`,
+    ROUTE_TIER_ADMIN per `route_tier_table.h`, the same route
+    `capability_preflight_check` reads). Any read failure is folded into `None` ("could not determine"),
     which `GpioTestPreflight.refusal_reasons()` never treats as satisfied."""
     try:
         status = _srv._safety.get_status()
@@ -115,8 +115,10 @@ def coordinated_gpio_test(confirm: bool = False, host: Optional[str] = None) -> 
     A precondition that could not be read at all (an exception, or the
     underlying client returning "unknown") is treated as a refusal, never as
     "assume it's fine". Also NEVER drives or reads GPIO6 (the ESP's Fault
-    line, already deny-listed in `gpio_probe.c`) or GPIO9 (the E-stop input)
-    on either side, regardless of caller -- enforced a second time, in code,
+    line output, already deny-listed in `gpio_probe.c` -- and, on the Pico,
+    `SAFTYFW_PIN_RELAY`, the safety relay/heat-enable drive to Q4/K4) or
+    GPIO9 (the E-stop input) on either side, regardless of caller -- enforced
+    a second time, in code,
     immediately before every pin access (`coordinated_gpio_test.guard_pin`),
     as defense in depth on top of the preconditions above.
 
@@ -136,9 +138,12 @@ def coordinated_gpio_test(confirm: bool = False, host: Optional[str] = None) -> 
             "you have confirmed both boards are powered and connected."
         )
     link = get_shared_link()
-    clients = build_real_clients(
-        link, debug_probe, probe,
-        get_preflight=lambda: _gpio_test_preflight(host),
-    )
-    result = run_coordinated_gpio_test(clients, confirm=confirm)
+    preflight_fn = lambda: _gpio_test_preflight(host)
+    # build_real_clients() constructs the real ESP ProbeClient eagerly, which
+    # registers a task and starts a background thread on the shared link --
+    # run_coordinated_gpio_test_lazy checks preflight/confirm FIRST and only
+    # calls this builder once it's known the run will proceed, so a refusal
+    # never leaks a client (Opus review of bdd06947).
+    build = lambda: build_real_clients(link, debug_probe, probe, get_preflight=preflight_fn)
+    result = run_coordinated_gpio_test_lazy(preflight_fn, build, confirm=confirm)
     return result.describe()

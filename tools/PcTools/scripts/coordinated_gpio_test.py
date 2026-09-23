@@ -22,7 +22,7 @@ from kilnctrl import debug_probe, probe
 from kilnctrl.coordinated_gpio_test import (
     GpioTestPreflight,
     build_real_clients,
-    run_coordinated_gpio_test,
+    run_coordinated_gpio_test_lazy,
 )
 from kilnctrl.link_hub import get_shared_link
 from kilnctrl.safety import SafetyClient
@@ -77,10 +77,11 @@ def main() -> int:
     print("Bench only, no load wiring. Both boards must be powered.\n")
 
     link = get_shared_link()
-    clients = build_real_clients(
-        link, debug_probe, probe, get_preflight=lambda: _cli_preflight(link))
-
-    result = run_coordinated_gpio_test(clients, confirm=True)
+    preflight_fn = lambda: _cli_preflight(link)
+    # See mcp_server_coordinated_gpio_test.py's matching comment: preflight
+    # is checked before the real (side-effectful) ESP client is ever built.
+    build = lambda: build_real_clients(link, debug_probe, probe, get_preflight=preflight_fn)
+    result = run_coordinated_gpio_test_lazy(preflight_fn, build, confirm=True)
     print(result.describe())
     return 0 if not result.refused and result.all_passed else 1
 

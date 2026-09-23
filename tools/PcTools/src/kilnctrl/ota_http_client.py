@@ -883,8 +883,8 @@ def format_cfgfs(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
 
 
 def get_interlock(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
-    """GET /api/ota/interlock -- unauthenticated (ota_http_recovery.c's
-    ota_interlock_get_handler(), same exposure level as GET /api/status)
+    """GET /api/ota/interlock -- ROUTE_TIER_ADMIN (route_tier_table.h),
+    ota_http_recovery.c's ota_interlock_get_handler()
     read of the board's own live OTA interlock state
     (ota_http_check_interlocks() / ota_interlock.c). Returns
     ``{"ok": true}`` when idle-and-clear, or

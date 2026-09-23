@@ -52,6 +52,9 @@ GROUP_PREFIXES = (
 )
 
 GROUP_OVERRIDES = {
+    # Single-tool HARDWARE.md wiring test -- keep it in "gpio" rather than
+    # growing a one-tool "coordinated" group.
+    "coordinated_gpio_test": "gpio",
     # The UART link itself: nothing else works until this group does.
     "list_serial_ports": "link",
     "connect": "link",

@@ -20,11 +20,16 @@ run this test at all without shelling out to the standalone script directly,
 bypassing every precondition a normal tool call gets.
 
 DENY-LISTED PINS -- never driven or read by this module, on EITHER side,
-regardless of caller: GPIO6 (the ESP's Fault line output, already deny-listed
-inside `gpio_probe.c` on the firmware side -- a debug tool that can drive it
-could silently misrepresent the main controller's health to the safety
-processor) and GPIO9 (the E-stop input, read over SWD on the Pico side --
-driving or overriding it is a hazard this test has no business taking).
+regardless of caller: GPIO6 has two different safety-relevant meanings
+depending on which processor's pin is meant -- on the ESP it is the Fault
+line output, already deny-listed inside `gpio_probe.c` on the firmware side
+(a debug tool that can drive it could silently misrepresent the main
+controller's health to the safety processor); on the Pico it is
+`SAFTYFW_PIN_RELAY` (`firmware/SaftyFW/src/board/board_pins.h:28`), the
+safety relay/heat-enable drive to Q4/K4 -- a debug tool that can drive it
+could energize the heaters directly. GPIO9 is the E-stop input, read over
+SWD on the Pico side -- driving or overriding it is a hazard this test has
+no business taking.
 :func:`guard_pin` enforces this before every single pin write in
 :func:`run_coordinated_gpio_test`, as defense in depth on top of the
 preconditions below (which already require the safety chain to be sane
@@ -88,9 +93,12 @@ def guard_pin(gpio_num: int) -> None:
     """Refuse `gpio_num` if it is in :data:`DENY_PINS`. Called immediately
     before every pin write/read this module performs."""
     if gpio_num in DENY_PINS:
+        reason = (
+            "ESP fault line output / Pico SAFTYFW_PIN_RELAY (safety relay, "
+            "heat-enable drive to Q4/K4)" if gpio_num == 6 else "E-stop input"
+        )
         raise GpioTestDeniedPin(
-            f"refusing to touch GPIO{gpio_num} -- deny-listed "
-            f"({'ESP fault line' if gpio_num == 6 else 'E-stop input'}), never "
+            f"refusing to touch GPIO{gpio_num} -- deny-listed ({reason}), never "
             f"driven or read by coordinated_gpio_test regardless of caller"
         )
 
@@ -165,6 +173,11 @@ class GpioTestResult:
     refused: bool
     refusal_reasons: "tuple[str, ...]" = ()
     steps: "tuple[StepMeasurement, ...]" = ()
+    #: Unasserted baseline reads taken alongside each step (Pico GPIO10 in
+    #: Step A, ESP GPIO4 in Step B) -- diagnostic only, never pass/fail, but
+    #: worth keeping visible on a mismatch rather than reading-and-discarding
+    #: them as the pre-fix version did.
+    diagnostics: "tuple[str, ...]" = ()
 
     @property
     def all_passed(self) -> Optional[bool]:
@@ -188,6 +201,9 @@ class GpioTestResult:
             + ("ALL PASS -- matches HARDWARE.md" if self.all_passed
                else "MISMATCH -- do not paper over this, re-check HARDWARE.md section 1")
         )
+        if self.diagnostics:
+            lines.append("Diagnostic baseline reads (not pass/fail):")
+            lines.extend(f"  - {d}" for d in self.diagnostics)
         return "\n".join(lines)
 
 
@@ -212,20 +228,44 @@ class GpioTestClients:
     settle: Callable[[], None] = lambda: None
 
 
+def check_preflight_refusal(preflight: GpioTestPreflight, confirm: bool) -> "tuple[str, ...]":
+    """The single source of truth for whether a run should be refused, given
+    an already-read preflight snapshot and the caller's `confirm` flag.
+    Deliberately callable BEFORE any client (real or fake) is constructed --
+    see :func:`run_coordinated_gpio_test_lazy`'s docstring for why this
+    matters: constructing the real ESP client (`probe.ProbeClient`) has side
+    effects (registers a task and starts a background thread on the shared
+    link), so a caller must be able to decide refusal without ever building
+    one."""
+    reasons = list(preflight.refusal_reasons())
+    if not confirm:
+        reasons.append("confirm=True was not passed -- refusing to drive any pin")
+    return tuple(reasons)
+
+
 def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -> GpioTestResult:
     """Run Steps A and B, after checking preconditions. Never touches a pin
     if `confirm` is not `True`, or if any precondition in
     :meth:`GpioTestPreflight.refusal_reasons` fails. Restores both boards
     (reset to run mode) in a `finally` regardless of how the run ends, same
-    as the original script."""
+    as the original script.
+
+    NOTE: by the time this function is called, `clients` (and, for
+    `build_real_clients`, the real `probe.ProbeClient`) has ALREADY been
+    constructed -- so this function's own refusal check is a second,
+    defense-in-depth check, not the only one. A caller that owns something
+    with construction side effects (like the real ESP client) MUST call
+    :func:`check_preflight_refusal` itself first and skip building clients
+    entirely on refusal -- see :func:`run_coordinated_gpio_test_lazy`, which
+    both the CLI and the MCP tool use for exactly this reason (Opus review of
+    bdd06947 found the eager-construction leak this guards against)."""
     preflight = clients.get_preflight()
-    reasons = preflight.refusal_reasons()
-    if not confirm:
-        reasons = list(reasons) + ["confirm=True was not passed -- refusing to drive any pin"]
+    reasons = check_preflight_refusal(preflight, confirm)
     if reasons:
-        return GpioTestResult(refused=True, refusal_reasons=tuple(reasons))
+        return GpioTestResult(refused=True, refusal_reasons=reasons)
 
     steps: "list[StepMeasurement]" = []
+    diagnostics: "list[str]" = []
     try:
         clients.pico_halt()
         for pin in (4, 5, 10):
@@ -240,8 +280,10 @@ def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -
             clients.esp_drive(4, level)
             clients.settle()
             pico5 = clients.pico_read(5)
-            clients.pico_read(10)  # baseline read, not asserted on
-            clients.esp_read(5)
+            pico10 = clients.pico_read(10)  # baseline read, not asserted on
+            esp5_ownrx = clients.esp_read(5)
+            diagnostics.append(
+                f"stepA esp4={level!r}: pico_gpio10={pico10!r} esp5(own_rx)={esp5_ownrx!r}")
             steps.append(StepMeasurement(
                 label=f"stepA_esp4_{level}_pico5", expected=not level, observed=pico5))
         clients.esp_drive(4, False)  # leave idle low afterward
@@ -255,8 +297,9 @@ def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -
             guard_pin(4)
             clients.pico_set_output(4, level)
             clients.settle()
-            clients.esp_read(4)
+            esp4 = clients.esp_read(4)
             esp5 = clients.esp_read(5)
+            diagnostics.append(f"stepB pico4={level!r}: esp_gpio4={esp4!r}")
             steps.append(StepMeasurement(
                 label=f"stepB_pico4_{level}_esp5", expected=not level, observed=esp5))
         clients.pico_set_output(4, False)  # leave idle low
@@ -265,7 +308,35 @@ def run_coordinated_gpio_test(clients: GpioTestClients, confirm: bool = False) -
         clients.pico_reset_run()
         clients.esp_reset_run()
 
-    return GpioTestResult(refused=False, refusal_reasons=(), steps=tuple(steps))
+    return GpioTestResult(
+        refused=False, refusal_reasons=(), steps=tuple(steps),
+        diagnostics=tuple(diagnostics))
+
+
+def run_coordinated_gpio_test_lazy(
+    get_preflight: Callable[[], GpioTestPreflight],
+    build_clients: Callable[[], GpioTestClients],
+    confirm: bool = False,
+) -> GpioTestResult:
+    """Preferred entry point for any caller whose real client construction
+    has side effects (the real ESP client registers a GPIO_PROBE task and
+    starts a background thread on the shared link the moment it's built).
+    Reads the preflight and checks refusal FIRST, via
+    :func:`check_preflight_refusal`, and calls `build_clients()` -- which
+    does the actual, side-effectful construction -- only once it's already
+    known the run will proceed. On refusal, `build_clients` is never
+    invoked, so nothing is ever left open to close. Both
+    `scripts/coordinated_gpio_test.py` and `mcp_server_coordinated_gpio_test.py`
+    use this instead of calling :func:`run_coordinated_gpio_test` directly
+    with an eagerly-built `GpioTestClients` (see that function's own
+    docstring note -- Opus review of bdd06947)."""
+    preflight = get_preflight()
+    reasons = check_preflight_refusal(preflight, confirm)
+    if reasons:
+        return GpioTestResult(refused=True, refusal_reasons=reasons)
+
+    clients = build_clients()
+    return run_coordinated_gpio_test(clients, confirm=confirm)
 
 
 # ---------------------------------------------------------------------------
@@ -296,16 +367,22 @@ def build_real_clients(link, debug_probe_module, probe_module,
     MCP tool build the identical real wiring from the identical few lines."""
     import time
 
+    #: The original script's explicit per-call timeout -- ProbeClient's own
+    #: default (`probe.DEFAULT_REPLY_TIMEOUT_S`, 2.0s) is too tight for this
+    #: test's drive/read round trips; restored here after the refactor
+    #: silently dropped it (Opus review of bdd06947).
+    _ESP_TIMEOUT_S = 5.0
+
     esp = probe_module.ProbeClient(link)
     peer_pico = debug_probe_module.PEER_PICO
     peer_esp = debug_probe_module.PEER_ESP
 
     def esp_drive(gpio_num: int, level: "Optional[bool]") -> None:
         if level is None:
-            esp.set_mode(gpio_num, probe_module.MODE_INPUT)
+            esp.set_mode(gpio_num, probe_module.MODE_INPUT, timeout=_ESP_TIMEOUT_S)
             return
-        esp.set_mode(gpio_num, probe_module.MODE_OUTPUT)
-        esp.write(gpio_num, level)
+        esp.set_mode(gpio_num, probe_module.MODE_OUTPUT, timeout=_ESP_TIMEOUT_S)
+        esp.write(gpio_num, level, timeout=_ESP_TIMEOUT_S)
 
     def pico_to_sio(gpio_num: int) -> None:
         ok, out = debug_probe_module.write_memory(
@@ -334,7 +411,7 @@ def build_real_clients(link, debug_probe_module, probe_module,
     return GpioTestClients(
         get_preflight=get_preflight,
         esp_drive=esp_drive,
-        esp_read=lambda gpio_num: esp.read(gpio_num),
+        esp_read=lambda gpio_num: esp.read(gpio_num, timeout=_ESP_TIMEOUT_S),
         esp_close=esp.close,
         pico_halt=lambda: debug_probe_module.halt(peer_pico),
         pico_to_sio=pico_to_sio,

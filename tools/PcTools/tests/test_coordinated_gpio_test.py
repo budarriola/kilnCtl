@@ -17,6 +17,7 @@ from kilnctrl.coordinated_gpio_test import (
     GpioTestPreflight,
     guard_pin,
     run_coordinated_gpio_test,
+    run_coordinated_gpio_test_lazy,
 )
 
 
@@ -196,6 +197,65 @@ def test_denylisted_pin_refused_by_guard():
     # Pins the test actually uses are not deny-listed.
     for pin in (4, 5, 10):
         guard_pin(pin)  # must not raise
+
+
+def test_lazy_refusal_never_builds_the_client():
+    """Opus review of bdd06947: build_real_clients() constructs the real ESP
+    ProbeClient eagerly (registers a task, starts a background thread on the
+    shared link) -- if a caller builds it before checking preconditions,
+    every refusal leaks one. run_coordinated_gpio_test_lazy must check
+    preflight/confirm FIRST and never call the builder at all on a refusal."""
+    boards = FakeBoards()
+    armed_preflight = GpioTestPreflight(
+        safety_armed=True,  # ARMED -- must refuse
+        profile_running_or_paused=False,
+        profile_state_name="idle",
+        ota_interlock_ok=True,
+        ota_interlock_reason="ok",
+        link_up=True,
+    )
+    build_calls = []
+
+    def build_clients():
+        build_calls.append(1)  # would be `probe.ProbeClient(link)` for real
+        return _clients(boards, armed_preflight)
+
+    result = run_coordinated_gpio_test_lazy(
+        lambda: armed_preflight, build_clients, confirm=True)
+
+    assert result.refused
+    assert any("ARMED" in r for r in result.refusal_reasons)
+    assert build_calls == []  # the client was never constructed
+    assert not boards.closed  # nothing to close because nothing was opened
+    assert not boards.halted
+
+
+def test_lazy_confirm_false_never_builds_the_client():
+    boards = FakeBoards()
+    build_calls = []
+
+    def build_clients():
+        build_calls.append(1)
+        return _clients(boards, _ok_preflight())
+
+    result = run_coordinated_gpio_test_lazy(
+        _ok_preflight, build_clients, confirm=False)
+
+    assert result.refused
+    assert build_calls == []
+
+
+def test_lazy_happy_path_builds_and_runs():
+    boards = FakeBoards()
+
+    def build_clients():
+        return _clients(boards, _ok_preflight())
+
+    result = run_coordinated_gpio_test_lazy(_ok_preflight, build_clients, confirm=True)
+
+    assert not result.refused
+    assert result.all_passed is True
+    assert boards.closed  # built, run, and cleaned up
 
 
 def test_unknown_preflight_state_refuses_fail_safe():
