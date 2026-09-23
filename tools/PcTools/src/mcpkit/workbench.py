@@ -311,6 +311,15 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
 
     Flashing is deliberately not offered here: this board is programmed over
     JTAG with OpenOCD (``flash_firmware`` / ``debug_program``), never esptool.
+
+    This always builds the MAIN tree's ``firmware/KilnFW`` -- unlike
+    ``build_saftyfw``, there is no root/worktree parameter here, so it cannot
+    be pointed at a clean worktree. For that workflow, build the worktree
+    directly (``idf.py -C <wt>\\firmware\\KilnFW build``, after ``set-target
+    esp32s3`` on a from-scratch or fullclean'd build dir) and hand the result
+    to ``flash_firmware(kiln_fw_root=...)``; see docs/MCP_SERVERS.md's
+    "Building from a clean worktree for `kiln_fw_root`" section for the full
+    procedure and the SaftyFW equivalent.
     """
     root = repo_root()
     saftyfw_report = None

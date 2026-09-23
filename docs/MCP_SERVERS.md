@@ -471,7 +471,8 @@ would ride along or trip the sensitive-dirty guard above). A fresh
    `sdkconfig` or the tool's own default.
 
 `build_kilnfw()` (`tools/PcTools/src/mcpkit/workbench.py`) always builds the
-MAIN tree's `firmware/KilnFW` and takes no root/worktree parameter -- it
+MAIN tree's `firmware/KilnFW` and takes no root/worktree parameter -- its own
+docstring now states this plainly and points back here. It
 cannot be pointed at a clean worktree the way `flash_firmware
 (kiln_fw_root=...)` can. Building the worktree itself for that workflow means
 invoking the toolchain directly, the same way
