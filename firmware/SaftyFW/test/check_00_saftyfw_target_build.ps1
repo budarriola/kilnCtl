@@ -71,6 +71,7 @@
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\tools\build_gate.ps1")
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $saftyDir = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -95,6 +96,7 @@ if (-not $haveToolchainOnPath -and -not $env:PICO_TOOLCHAIN_PATH -and -not $have
     exit 3
 }
 
+$buildGate = Enter-KilnBuildGate -Label "saftyfw_target_build"
 $lock = Enter-BuildLock -Name "saftyfw_target_build"
 try {
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
@@ -148,6 +150,7 @@ try {
     }
 } finally {
     Exit-BuildLock -Lock $lock
+    Exit-KilnBuildGate -Gate $buildGate
 }
 
 $elf = Join-Path $buildDir "SaftyFW.elf"

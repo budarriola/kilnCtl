@@ -54,7 +54,9 @@ $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 . (Join-Path $PSScriptRoot "../../../tools/build_lock.ps1")
+. (Join-Path $PSScriptRoot "../../../tools/build_gate.ps1")
 $buildLockName = "saftyfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
+$buildGate = Enter-KilnBuildGate -Label "saftyfw_host_tests"
 $buildLock = Enter-BuildLock -Name $buildLockName
 try {
     $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -448,4 +450,5 @@ try {
     exit $configStoreFlashExit
 } finally {
     Exit-BuildLock -Lock $buildLock
+    Exit-KilnBuildGate -Gate $buildGate
 }

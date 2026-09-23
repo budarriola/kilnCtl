@@ -16,6 +16,13 @@ session, encoded once so the invocation stops being rediscovered:
   regression that is not there. A plain subprocess does no such wrapping.
 * ``build_kilnfw`` takes a ``jobs`` argument that calls ninja directly, because
   ``idf.py build -- -j N`` is rejected by idf.py's own argument parser.
+* Every heavy build here also goes through :func:`mcpkit.buildgate.kiln_build_gate`,
+  the machine-wide admission gate (at most ``KILNCTL_BUILD_GATE_SLOTS`` heavy
+  builds across ALL sessions, default 2) -- a separate concern from
+  :mod:`mcpkit.buildlock`'s per-resource-key lock above, which only prevents
+  two builds from corrupting the SAME build directory. This machine has hard
+  frozen under uncoordinated concurrent full target builds; see
+  ``tools/build_gate.ps1``'s header for the incident this exists for.
 
 Output is summarized, not echoed. A full firmware build is thousands of lines;
 what a caller needs is the exit status, the failing lines, and a path to the
@@ -34,6 +41,7 @@ import tempfile
 import time
 from typing import Any, Callable, Optional, Sequence
 
+from mcpkit.buildgate import kiln_build_gate
 from mcpkit.buildlock import BuildLockTimeout, build_lock
 
 #: Lines worth surfacing even when they are not near the end of the log.
@@ -274,7 +282,8 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
     argv = ["cmake", "--build", build_dir]
     if jobs > 0:
         argv += ["--parallel", str(jobs)]
-    return configure_note + _run_locked(tag, build_dir, argv, cwd=build_dir)
+    with kiln_build_gate(tag):
+        return configure_note + _run_locked(tag, build_dir, argv, cwd=build_dir)
 
 
 #: Puts idf.py, cmake, ninja and the Xtensa toolchain on PATH in one step.
@@ -350,10 +359,11 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     build_dir = os.path.join(root, "firmware", "KilnFW", "build")
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
-    kilnfw_report = _run_locked(
-        f"kilnfw-{target}", build_dir,
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        timeout=1800)
+    with kiln_build_gate(f"kilnfw-{target}"):
+        kilnfw_report = _run_locked(
+            f"kilnfw-{target}", build_dir,
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            timeout=1800)
     if target in ("build", "reconfigure") and f"kilnfw-{target}: OK" in kilnfw_report:
         elf_after = _stat_snapshot(elf_path)
         kilnfw_report = (

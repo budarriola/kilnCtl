@@ -67,6 +67,7 @@ $ErrorActionPreference = "Stop"
 $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")
 $repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
@@ -154,6 +155,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
     }
 }
 
+$buildGate = Enter-KilnBuildGate -Label "kilnfw_recovery_target_build"
 $lock = Enter-BuildLock -Name $LockName
 try {
     New-Item -ItemType Directory -Force -Path $WorktreePath | Out-Null
@@ -342,4 +344,5 @@ try {
     Write-Host "PASS: built $([System.IO.Path]::GetFileName($binPath)) ($((Get-Item -LiteralPath $binPath).Length) B) against sdkconfig.defaults hash $recoveryDefaultsHash, published to $mainRecoveryBuildDir (including as recovery.bin for tools/check_recovery_image_size.py)."
 } finally {
     Exit-BuildLock -Lock $lock
+    Exit-KilnBuildGate -Gate $buildGate
 }

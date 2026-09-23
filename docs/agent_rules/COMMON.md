@@ -47,6 +47,18 @@ the boards or the bench camera).
 - MCP servers keep serving the code they started with. Do not restart them yourself; ask
   the coordinator.
 
+## Heavy builds
+
+This machine hard-froze five times in one week under uncoordinated parallel
+`idf.py`/ninja/MSVC builds across several agent sessions. Every full ESP-IDF
+target build and host-test build now goes through `tools/build_gate.ps1` (or
+`mcpkit.buildgate` on the Python side) automatically -- never bypass it with
+`KILNCTL_BUILD_GATE_SLOTS=0` or by invoking `idf.py`/`cmake`/`ninja`/`cl.exe`
+directly outside `check_00_*.ps1`, `build_host_tests.ps1`, or the
+`build_kilnfw`/`build_saftyfw*` MCP tools. Prefer
+`run_all_checks.ps1 -Fast -Only <regex>` while iterating and run the full
+suite once per commit, not once per edit.
+
 ## Attribution
 
 The harness's own attribution reminder names a different model for the commit trailer.

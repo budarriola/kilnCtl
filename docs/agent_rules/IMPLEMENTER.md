@@ -30,6 +30,11 @@ back to the coordinator. You do not push.
   `-Fast` skips the three target builds only when you ran them yourself. A SKIP fails the
   run by default; under `-Fast`, `check_recovery_image_size.ps1` and
   `check_embedded_pico_image_fresh.ps1` SKIP by design.
+- The three target-build checks and both `build_host_tests.ps1` scripts enter
+  `tools/build_gate.ps1`'s machine-wide heavy-build gate before their real build step (see
+  COMMON.md "Heavy builds") -- with several sessions active, your build may print
+  `build gate: waiting ...` and queue rather than starting immediately. That is the gate
+  working, not a hang; never set `KILNCTL_BUILD_GATE_SLOTS=0` to skip the wait.
 - Every new check or test gets a negative test: break the thing, watch it fail, restore the
   source by hand (never `git checkout --`), then force a full rebuild. An empty `git diff`
   proves the source, not the binaries.

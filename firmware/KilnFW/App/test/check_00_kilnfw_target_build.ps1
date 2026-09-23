@@ -138,6 +138,7 @@ $ErrorActionPreference = "Continue"
 # check from the same tree, and (see the prune below) this check's prune pass
 # against another tree's build directory.
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
 
 # This file lives at firmware/KilnFW/App/test/ -- four levels below repo root.
 # -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
@@ -438,6 +439,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
 # The prune loop above deliberately stays OUTSIDE this lock: it is this tree's
 # lock, and every directory the prune can delete belongs to a different tree
 # and is guarded by that tree's own lock, which the prune takes separately.
+$buildGate = Enter-KilnBuildGate -Label "kilnfw_target_build"
 $lock = Enter-BuildLock -Name $LockName
 try {
     if (-not (Test-Path -LiteralPath $WorktreePath)) {
@@ -1380,6 +1382,7 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "bootloader\bootloader.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "partition_table\partition-table.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
+    Exit-KilnBuildGate -Gate $buildGate
 }
 
 Write-Host ""

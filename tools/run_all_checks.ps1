@@ -788,6 +788,16 @@ $restChecks = $restChecks | Where-Object {
     $_.FullName -notmatch $serialOnlyPattern
 }
 
+# Each of the three phase-1 target-build checks (and the two
+# build_host_tests.ps1 scripts) now enters tools/build_gate.ps1's
+# machine-wide heavy-build gate (KILNCTL_BUILD_GATE_SLOTS, default 2) before
+# its actual idf.py/ninja/cmake step, so "run concurrently" above is now
+# "launch concurrently" -- the three builds may still serialize (or run two
+# at a time) against that gate rather than all three hitting ninja's default
+# job count simultaneously. This is deliberate: uncoordinated concurrent
+# target builds across multiple agent sessions hard-froze this machine
+# (Kernel-Power 41, no dump) five times in one week. No change to this
+# script's own scheduling was needed -- the gate is inside the checks.
 $results = @()
 if ($buildChecks.Count -gt 0) {
     Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan
