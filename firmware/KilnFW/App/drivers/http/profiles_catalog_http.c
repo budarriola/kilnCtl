@@ -426,9 +426,11 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * single flash write, so nothing PSRAM-backed is live across that write;
      * see backup_import.c:1180-1193 and
      * docs/audits/unreviewed_changes_review_2026-09-08.md finding D6, which
-     * this comment previously described backwards). Freed on the one `send:` exit
-     * every path below funnels through; an allocation failure degrades to a
-     * clean 500 rather than a stack overflow. */
+     * this comment previously described backwards). Freed on each of the two
+     * exits it is live across -- the success send and the `overflow:` 500 --
+     * and on no other path, since every earlier error returns before this
+     * allocation; an allocation failure degrades to a clean 500 rather than
+     * a stack overflow. */
 #define PROFILE_DETAIL_JSON_CAP (816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * PROFILE_ON_OFF_RULE_JSON_MAX)
     char *json = heap_caps_malloc(PROFILE_DETAIL_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
