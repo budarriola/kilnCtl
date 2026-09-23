@@ -1,9 +1,70 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, the ota_http HMAC
+> **Status:** planning · **Last reviewed:** 2026-09-23, hmacmirror/d3bootid/
+> maxreassert closed and the compile_esp/pico_backends -Fast SKIP-FAST fix
+> (thirty-third sweep) — open items below.
+> - **`check_ota_http_context_mirror.py` landed, closing hmacmirror**
+>   (`6d2e4349`): extracts the `OTA_HTTP_CONTEXT_*` enumerators from
+>   `ota_state.h` and fails if any lacks an explicit case in `ota_http.c`'s
+>   `ota_http_verify_request()` switch or `test_ota_http.c`'s `ctx_str_for()`
+>   — a member missing a case previously fell silently into `default:`. Also
+>   strips `#` comments from the Python allow-list region before matching
+>   string literals (a commented-out entry no longer counts as live), and
+>   documents that `strip_c_comments()`'s line-first ordering still mishandles
+>   the inverse `/* a // b */` shape (accepted, fails loud via the empty-set
+>   guard). Negative-tested: a fake enum member in `ota_state.h` failed,
+>   naming both missing sites; restored by hand, empty diff confirmed.
+> - **`sw_reset` boot_id fallback landed, closing D3** (`5293cf10`, opus-review
+>   fixes `f93c6ec5`): on a `NO_REPLY` outcome from a plain reboot-in-place,
+>   the ESP now snapshots the Pico's `boot_id` before sending
+>   `SAFETY_CMD_REBOOT` and polls up to 3000 ms (200 ms steps) watching for a
+>   `boot_id` change, reporting `SW_RESET_PICO_CONFIRMED_BY_BOOT_ID` once it
+>   moves rather than the old, non-committal "not confirmed" answer — this is
+>   exactly the thirty-second sweep's D3 bench finding (`boot_id` 113→127
+>   advancing while the Pico's own ACK never made it out inside its 10 ms TX
+>   drain window before the watchdog reset). Review fixes: `kArmWaitMs` is now
+>   derived from the new `SAFETY_LINK_REBOOT_BOOT_ID_WATCH_MS` constant
+>   instead of a second hardcoded number (the pair had drifted apart once
+>   already), the handler's stale ~345ms-only comment restated with the real
+>   two-part worst case, and `confirmed_by_boot_id` added to the
+>   all-outcomes-distinct sentence test. 58/58 KilnFW host tests, negative-
+>   tested (forced always-confirmed, watched the new assertion fail, restored
+>   by hand, rebuilt clean). SaftyFW itself untouched — the Pico still can't
+>   be flashed (no CMSIS-DAP probe enumerates).
+> - **SaftyFW MAX31856 live-config re-assertion landed, closing maxreassert**
+>   (`da214e3b`, opus-review fixes `30c91165`): `thermo_task` now calls
+>   `max31856_verify_live_config()` every ~30s of elapsed time (not poll
+>   count) once a part has verified, re-running `max31856_configure()` on a
+>   CR0/CR1 mismatch against a live power-on-default reset the old
+>   verified-once cache never re-checked. Review fixes: the real fail-safe for
+>   the detection window is the pre-existing DRDY-silence branch, not the
+>   `!verified` downgrade (which self-heals synchronously within the same
+>   iteration); cadence changed from poll-count to elapsed-time so it can't
+>   drift to ~60s of wall clock in the DRDY-silent scenario it exists to catch
+>   (a poll-count cadence would have landed on S5's 60s `blind_grace_s` trip
+>   boundary instead of beating it); `thermo_task_live_config_mismatch_count()`
+>   documented as SWD-readable-only with no wire caller — wiring it onto Frame
+>   A's `flags2` was evaluated and deferred, since `link_frame_pack_status()`'s
+>   ~14 positional call sites made it materially larger than this fix's scope.
+>   `thermo_task`'s measured stack grew 1224→1232 B (ceiling bumped to match,
+>   then re-verified unchanged in the follow-up commit); 23 B new `.bss`.
+>   279/279 host tests, negative-tested. Two follow-ups tracked in
+>   `firmware/SaftyFW/docs/THERMOCOUPLE.md`: a boundary/ms-wrap host test for
+>   `max31856_live_check_tick()`, and the deferred `flags2` wire surface.
+> - **`compile_esp_backends.ps1`/`compile_pico_backends.ps1` now SKIP-FAST
+>   under `-Fast`** (`71e19c86`): both depend on phase-1 target-build output
+>   (`KilnFW/build/compile_commands.json`,
+>   `SaftyFW/build/{build.ninja,CMakeFiles/rules.ninja}`) that `-Fast` skips,
+>   so they always FAILed under `-Fast`; now they test `KILNCTL_CHECKS_FAST`
+>   and print `SKIP-FAST` (exit 3) only for that missing-build-output reason —
+>   same convention as the other three SKIP-FAST checks — while every other
+>   failure, and the missing-file case with the env var unset, still FAILs.
+> - **Bench state unchanged**: ESP still `9c26dd91`, Pico still `987050f6` (no
+>   CMSIS-DAP probe enumerates), Class C heat/firing rows still BLOCKED on
+>   `estop_verified`.
+> **Previously reviewed:** 2026-09-23, the ota_http HMAC
 > stack-overflow fix, the coordinated_gpio_test MCP tool, and the D4
-> config_volatile_dirty observability landing (thirty-second sweep) — open
-> items below.
+> config_volatile_dirty observability landing (thirty-second sweep).
 > - **`ota_http.c` HMAC context buffer overflow fixed** (`252225f7`): the
 >   stack buffer was sized 13 B while the longest context string,
 >   `"boot-guard-reset"`, is 16 B — a 3-byte stack overflow on every call
