@@ -685,6 +685,174 @@ static void test_file_wins_after_migration_writes_back_to_nvs(void)
                "file and NVS hold byte-identical content after the write-back");
 }
 
+// ---------------------------------------------------------------------
+// 9. Review follow-up to test 8: the write-back must NEVER fire when the
+//    NVS side was FOUND but refused as NEWER than this firmware
+//    (ZONES_DECODE_NEWER). That branch's contract is "flash data left
+//    untouched" -- it is real data written by a firmware ahead of this one,
+//    and an older file-sourced config overwriting it destroys it
+//    permanently. Reachable asymmetrically because nvs_save() writes the
+//    FILE FIRST and swallows the file write's error, so a newer firmware
+//    can leave NVS at vN+1 with the file still holding a valid, older vN.
+//    The file still wins THIS boot's in-RAM config -- only the write-back
+//    is suppressed.
+// ---------------------------------------------------------------------
+static void test_newer_nvs_blob_is_not_overwritten_by_file_writeback(void)
+{
+    TEST_SECTION("zones cfg_fs: a newer-than-firmware NVS blob must survive a file-sourced load -- the "
+                 "write-back is suppressed, not allowed to downgrade protected data");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    // Stage a newer-than-this-firmware blob straight into NVS. Exactly
+    // sizeof(zones_cfg_t) bytes so nvs_load_from_decode()'s read buffer
+    // takes it; the version byte alone is what makes it ZONES_DECODE_NEWER
+    // (that branch returns before any length check).
+    uint8_t newer[sizeof(zones_cfg_t)];
+    for (size_t i = 0; i < sizeof(newer); ++i) {
+        newer[i] = (uint8_t)(0xA5 ^ (i & 0xFF));
+    }
+    newer[0] = (uint8_t)(ZONES_CFG_VERSION + 1);
+    hal_kv_handle_t wh;
+    TEST_CHECK(hal_kv_open(&wh, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "test setup: NVS opened read-write");
+    TEST_CHECK(hal_kv_set_blob(&wh, NVS_KEY_ZONES, newer, sizeof(newer)) == HAL_OK,
+               "test setup: newer-than-firmware blob staged into NVS");
+    TEST_CHECK(hal_kv_commit(&wh) == HAL_OK, "test setup: NVS commit");
+    hal_kv_close(&wh);
+
+    // File side holds a perfectly valid, CURRENT-version config.
+    zones_cfg_t file_cfg;
+    fill_valid_cfg(&file_cfg, "NewerGuard", 4.5f);
+    file_cfg.version = ZONES_CFG_VERSION; /* fill_valid_cfg() leaves version 0; only nvs_save() stamps it, and
+                                           * zones_config_cfg_fs_save() re-stamps only the CRC -- a version-0
+                                           * file decodes as CORRUPT, not as the valid file this test needs. */
+    TEST_CHECK(zones_config_cfg_fs_save(&file_cfg, 3) == ESP_OK,
+               "test setup: valid current-version file written");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid,
+               "load adopts the file (NVS side refused)");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "NewerGuard") == 0,
+               "in-RAM config is the file's -- unchanged from before the write-back fix");
+
+    // THE GUARD: NVS must still hold the newer blob, byte for byte.
+    hal_kv_handle_t rh;
+    uint8_t after[sizeof(zones_cfg_t)];
+    memset(after, 0, sizeof(after));
+    size_t after_len = sizeof(after);
+    TEST_CHECK(hal_kv_open(&rh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "NVS opened read-only for verification");
+    hal_status_t rb = hal_kv_get_blob(&rh, NVS_KEY_ZONES, after, &after_len);
+    hal_kv_close(&rh);
+    TEST_CHECK(rb == HAL_OK && after_len == sizeof(newer),
+               "the NVS blob is still there at its original size");
+    TEST_CHECK(after_len == sizeof(newer) && memcmp(after, newer, sizeof(newer)) == 0,
+               "THE GUARD: the newer-than-firmware NVS blob was NOT overwritten by the file-sourced "
+               "write-back -- protected data survives a downgrade boot");
+}
+
+// ---------------------------------------------------------------------
+// 10. Review follow-up to test 8: the write-back must happen AT MOST ONCE
+//     per divergence, never on every boot (flash wear / the reset-one-side
+//     class). After the first load resyncs both sides, a second load with
+//     the in-RAM struct wiped must find them already equal and write
+//     nothing -- proven by the dual-write rev counter (bumped by every
+//     nvs_save()) standing still, and by the NVS blob bytes being
+//     unchanged.
+// ---------------------------------------------------------------------
+static uint32_t read_nvs_zones_rev(void)
+{
+    hal_kv_handle_t h;
+    uint32_t rev = 0;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+        (void)hal_kv_get_u32(&h, "zones_rev", &rev);
+        hal_kv_close(&h);
+    }
+    return rev;
+}
+
+static void test_file_sourced_writeback_happens_once_not_every_boot(void)
+{
+    TEST_SECTION("zones cfg_fs: a file-sourced write-back converges -- the next load finds both sides equal "
+                 "and writes nothing");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+
+    // Same staging as test 8: an old-version (v21) blob in the file, NVS
+    // empty, so the first load migrates in RAM and writes back.
+    zones_cfg_v21_t v21;
+    memset(&v21, 0, sizeof(v21));
+    v21.version = 21;
+    v21.thermo_count = 1;
+    v21.relay_count = 1;
+    v21.max_simultaneous_relays = 1;
+    v21.safety_tc_type = 3;
+    v21.timing_profile_count = 1;
+    strncpy(v21.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    v21.timing_profiles[0].guard_progress_duty_min = 0.1f;
+    v21.timing_profiles[0].ramp_lock_band_c = 3.0f;
+    v21.zones[0].relay_mask = 1;
+    v21.zones[0].thermo_mask = 1;
+    snprintf(v21.zones[0].name, sizeof(v21.zones[0].name), "OnceOnly");
+    v21.zones[0].pid_kp = 2.75f;
+    v21.zones[0].max_temp_c = 1150.0f;
+    v21.zones[0].model_k_dc = 15.0f;
+    v21.crc32 = 0;
+
+    uint8_t filebuf[4 + sizeof(v21)];
+    filebuf[0] = 9;
+    filebuf[1] = 0;
+    filebuf[2] = 0;
+    filebuf[3] = 0;
+    memcpy(filebuf + 4, &v21, sizeof(v21));
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, filebuf, sizeof(filebuf)) == ESP_OK,
+               "test setup: old-version (v21) blob staged into the file at rev 9");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid,
+               "first load adopts and writes back");
+    uint32_t rev_after_first = read_nvs_zones_rev();
+    TEST_CHECK(rev_after_first > 9, "the write-back ran on the first load (rev advanced past the file's 9)");
+
+    uint8_t blob_after_first[sizeof(zones_cfg_t)];
+    memset(blob_after_first, 0, sizeof(blob_after_first));
+    size_t len1 = sizeof(blob_after_first);
+    hal_kv_handle_t h1;
+    TEST_CHECK(hal_kv_open(&h1, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "NVS opened after the first load");
+    TEST_CHECK(hal_kv_get_blob(&h1, NVS_KEY_ZONES, blob_after_first, &len1) == HAL_OK,
+               "NVS holds the written-back blob after the first load");
+    hal_kv_close(&h1);
+
+    // SECOND boot: same on-flash state, in-RAM struct wiped. Both sides now
+    // decode to the same bytes, so nothing must be written.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    found = false;
+    valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "second load succeeds");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "OnceOnly") == 0 && s_zones.cfg.zones[0].pid_kp == 2.75f,
+               "second load still yields the same config");
+    TEST_CHECK(read_nvs_zones_rev() == rev_after_first,
+               "THE CONVERGENCE GUARD: the rev counter did NOT advance on the second load -- no nvs_save(), "
+               "so no write every boot (flash wear / reset-one-side class)");
+
+    uint8_t blob_after_second[sizeof(zones_cfg_t)];
+    memset(blob_after_second, 0, sizeof(blob_after_second));
+    size_t len2 = sizeof(blob_after_second);
+    hal_kv_handle_t h2;
+    TEST_CHECK(hal_kv_open(&h2, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
+               "NVS opened after the second load");
+    TEST_CHECK(hal_kv_get_blob(&h2, NVS_KEY_ZONES, blob_after_second, &len2) == HAL_OK, "NVS still readable");
+    hal_kv_close(&h2);
+    TEST_CHECK(len1 == len2 && memcmp(blob_after_first, blob_after_second, len1) == 0,
+               "the NVS blob is byte-identical across the second load -- nothing was rewritten");
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
     test_partition_absent_falls_through_to_nvs_only();
@@ -696,6 +864,8 @@ void run_test_zones_config_cfg_fs(void)
     test_interrupted_file_write_leaves_old_or_new();
     test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_file_wins_after_migration_writes_back_to_nvs();
+    test_newer_nvs_blob_is_not_overwritten_by_file_writeback();
+    test_file_sourced_writeback_happens_once_not_every_boot();
 
     reset_all();
 }

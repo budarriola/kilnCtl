@@ -138,10 +138,11 @@ esp_err_t nvs_partition_init(const char *partition)
  * but not valid; a migrated older blob is both; genuine corruption is
  * neither. */
 static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
-                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version);
+                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
+                                       bool *out_refused_newer);
 static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
                                                      bool *out_valid, bool *out_migrated,
-                                                     uint8_t *out_on_disk_version);
+                                                     uint8_t *out_on_disk_version, bool *out_refused_newer);
 
 /* Thin wrapper around the real load below, added 2026-09-09 (opus review
  * defect D). Every path through nvs_load_from_decode() that does NOT end in
@@ -167,8 +168,9 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
 {
     bool migrated_unused = false;
     uint8_t on_disk_version_unused = 0;
+    bool refused_newer_unused = false;
     return nvs_load_from_with_migration_info(partition, out_cfg, out_found, out_valid, &migrated_unused,
-                                              &on_disk_version_unused);
+                                              &on_disk_version_unused, &refused_newer_unused);
 }
 
 /* Same as nvs_load_from() above, plus the migration-write-back fix's two
@@ -176,12 +178,13 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
  * caller is nvs_load() itself, below. */
 static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
                                                      bool *out_valid, bool *out_migrated,
-                                                     uint8_t *out_on_disk_version)
+                                                     uint8_t *out_on_disk_version, bool *out_refused_newer)
 {
     bool valid = false;
     bool migrated = false;
     uint8_t on_disk_version = 0;
-    esp_err_t err = nvs_load_from_decode(partition, out_cfg, out_found, &valid, &migrated, &on_disk_version);
+    esp_err_t err = nvs_load_from_decode(partition, out_cfg, out_found, &valid, &migrated, &on_disk_version,
+                                          out_refused_newer);
     if (!valid) {
         zones_config_json_apply_model_fit_defaults(out_cfg);
     }
@@ -208,8 +211,12 @@ static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_
  * entirely if two schema-bumping firmwares are installed in a row without an
  * intervening boot on the first one (see nvs_load()'s call site). */
 static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
-                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version)
+                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
+                                       bool *out_refused_newer)
 {
+    if (out_refused_newer) {
+        *out_refused_newer = false;
+    }
     if (out_found) {
         *out_found = false;
     }
@@ -291,6 +298,14 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
                  partition, (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
         if (strcmp(partition, KILN_NVS_PARTITION) == 0) {
             zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_NEWER, raw[0], reason);
+        }
+        /* Reported separately from the latch above so nvs_load()'s `cfg`-file
+         * write-back can tell this case apart from an absent/corrupt NVS
+         * side: "found, but deliberately protected" must NOT be overwritten
+         * by an older file-sourced config. The latch itself is boot-wide and
+         * sticky, so it cannot answer "did THIS decode refuse?". */
+        if (out_refused_newer) {
+            *out_refused_newer = true;
         }
         if (out_found) {
             *out_found = true;
@@ -447,8 +462,10 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
 {
     bool migrated_from_nvs = false;
     uint8_t on_disk_version_before = 0;
+    bool nvs_refused_as_newer = false;
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
-                                                        &migrated_from_nvs, &on_disk_version_before);
+                                                        &migrated_from_nvs, &on_disk_version_before,
+                                                        &nvs_refused_as_newer);
 
     /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
@@ -485,7 +502,21 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * migration would diverge the two stores across the very next boot. */
     bool file_side_needs_writeback = false;
     if (used_file) {
-        file_side_needs_writeback = !nvs_valid || memcmp(&s_zones.cfg, &resolved, sizeof(resolved)) != 0;
+        /* NEVER when the NVS side was FOUND but refused as newer-than-this-
+         * firmware (ZONES_DECODE_NEWER): that branch's whole contract is
+         * "flash data left untouched" -- it is real, deliberately-protected
+         * data written by a firmware ahead of this one, and writing an older
+         * file-sourced config over it destroys it permanently. That is the
+         * same downgrade hazard the `>` (not `>=`) tie-break in
+         * zones_config_cfg_fs_resolve() exists to close, and it is reachable
+         * asymmetrically: nvs_save() writes the FILE FIRST and swallows its
+         * error, so a newer firmware can leave NVS at vN+1 while the file
+         * still holds a valid, older vN. The file still wins THIS boot's
+         * in-RAM config, exactly as before -- only the write-back is
+         * suppressed. A found-but-CORRUPT NVS side is NOT protected and is
+         * still written back: there is nothing there worth keeping. */
+        file_side_needs_writeback =
+            !nvs_refused_as_newer && (!nvs_valid || memcmp(&s_zones.cfg, &resolved, sizeof(resolved)) != 0);
         migrated_from_nvs = false;
         s_zones.cfg = resolved;
         if (out_found) {
