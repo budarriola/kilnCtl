@@ -80,6 +80,13 @@ static iter_tune_store_zone_t s_fake_store[ITER_TUNE_STORE_MAX_ZONES];
 static bool s_fake_present[ITER_TUNE_STORE_MAX_ZONES];
 static int s_set_zone_calls = 0;
 static esp_err_t s_set_zone_result = ESP_OK;
+// Declared here (ahead of its normal fake-group block below, which needs the
+// store fakes' own declarations already visible) so iter_tune_store_set_zone()
+// -- defined next -- can read it. See the reservation fakes' own comment
+// (below, near autotune_engine_reserve_zone_for_external_write()) for what
+// this models.
+static bool s_fake_reservation_held = false;
+static bool s_reserved_during_set_zone = false;
 
 static void fake_store_reset(void)
 {
@@ -87,6 +94,7 @@ static void fake_store_reset(void)
     memset(s_fake_present, 0, sizeof(s_fake_present));
     s_set_zone_calls = 0;
     s_set_zone_result = ESP_OK;
+    s_reserved_during_set_zone = false;
 }
 
 esp_err_t iter_tune_store_start(void) { return ESP_OK; }
@@ -105,6 +113,13 @@ bool iter_tune_store_get_zone(uint8_t zone_index, iter_tune_store_zone_t *out)
 esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zone_t *in)
 {
     s_set_zone_calls++;
+    /* Advisory 5 (opus review, 2026-09-23 second pass): the persisted-record
+     * write must ALSO happen strictly inside the reserved window, not just
+     * the live-gains write above -- the handler's own comment says the
+     * reservation is "held across both the live-gains write above and this
+     * persisted-record write", and moving the release() to before this call
+     * would leave exactly that gap unprotected. */
+    s_reserved_during_set_zone = s_fake_reservation_held;
     if (zone_index >= ITER_TUNE_STORE_MAX_ZONES || in == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -152,7 +167,6 @@ static int s_set_pid_calls = 0;
 static float s_last_set_pid_kp, s_last_set_pid_ki, s_last_set_pid_kd;
 static uint8_t s_last_set_pid_zone;
 static bool s_reserved_during_set_pid = false;
-static bool s_fake_reservation_held = false;
 
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
@@ -325,6 +339,12 @@ static void test_successful_restore_persists_new_baseline(void)
     // exactly once afterward, on the success path.
     TEST_CHECK(s_reserve_calls == 1, "zone reserved exactly once");
     TEST_CHECK(s_reserved_during_set_pid, "zones_config_set_pid runs while the zone is reserved");
+    // Advisory 5 (opus review, 2026-09-23 second pass): the persisted-record
+    // write must be inside the reservation too, not just the live-gains
+    // write above -- moving the release() call above the
+    // iter_tune_store_set_zone() call in iter_tune_http.c would make this
+    // fail.
+    TEST_CHECK(s_reserved_during_set_zone, "iter_tune_store_set_zone runs while the zone is reserved");
     TEST_CHECK(s_release_calls == 1, "zone reservation released exactly once");
     TEST_CHECK(!s_fake_reservation_held, "reservation is not left held after a successful restore");
 
@@ -388,7 +408,9 @@ static void test_refuses_when_reservation_refused(void)
     esp_err_t err = iter_tune_restore_post_handler(&req);
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (409 is in the JSON/status)");
     TEST_CHECK(s_resp_status == 409, "a refused reservation reports 409 (A1)");
-    TEST_CHECK(strstr(s_resp_body, "autotune is running") != NULL, "409 body names autotune as the reason");
+    TEST_CHECK(strstr(s_resp_body, "autotune is active") != NULL, "409 body names autotune as one possible reason");
+    TEST_CHECK(strstr(s_resp_body, "another restore is already in progress") != NULL,
+               "409 body also names a concurrent restore as the other possible reason (advisory 4)");
     TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid is never called when the reservation is refused (A1)");
     TEST_CHECK(s_set_zone_calls == 0, "iter_tune_store_set_zone is never called when the reservation is refused (A1)");
     TEST_CHECK(s_reserve_calls == 1, "reserve is attempted exactly once");

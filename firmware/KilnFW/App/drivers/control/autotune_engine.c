@@ -1151,6 +1151,13 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * lock and at the SAME commit point as the state_is_running() check just
      * above, so a reservation held right now can never be raced by a start
      * that reads "not running" a moment before the reservation was taken. */
+    /* iter_tune_http.c restore_commissioned race close (step-7 review,
+     * 2026-09-23): refuse to start on a zone iter_tune_http.c's handler has
+     * reserved via autotune_engine_reserve_zone_for_external_write() -- see
+     * that function's and s_at_t's own comments. Checked under the SAME
+     * lock and at the SAME commit point as the state_is_running() check just
+     * above, so a reservation held right now can never be raced by a start
+     * that reads "not running" a moment before the reservation was taken. */
     if (s_at.external_write_reserved && s_at.external_write_reserved_zone == zone_index) {
         xSemaphoreGive(s_at.lock);
         if (err_msg) {
@@ -1594,6 +1601,15 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
      * identification step (target_mode + a valid model) -- 0 otherwise,
      * same "only meaningful when ..." convention as model/relay below. */
     out->target_achieved_c = s_at.target_achieved_c;
+    /* Insurance against a permanently leaked reservation -- see s_at_t's own
+     * comment: there is no timeout, so the only way this can ever stay true
+     * forever is a bug (a reserve() with no matching release()) or a crash
+     * mid-window, and both are reboot-only conditions (this flag lives in
+     * s_at, not NVS, so a reboot always clears it). Exposed unconditionally,
+     * same convention as the other fields above, so a caller/operator has a
+     * way to SEE a leak exists without a JTAG read. */
+    out->external_write_reserved = s_at.external_write_reserved;
+    out->external_write_reserved_zone = s_at.external_write_reserved_zone;
     /* See autotune_engine_status_t::step_ambient_c's own comment -- exposed
      * unconditionally like target_achieved_c above, not gated to DONE, so a
      * caller can see it was captured even while STEPPING is still running. */

@@ -107,12 +107,25 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     // about to restore, and iter_tune has no way to find out its work was
     // clobbered (or vice versa). autotune_engine_reserve_zone_for_external_
     // write() combines the check with a reservation held under s_at.lock
-    // that autotune_begin_run_locked() also consults at its own commit
-    // point, so a concurrent start is refused rather than racing this
-    // handler. MUST be paired with autotune_engine_release_zone_for_
-    // external_write() on every exit path below once this succeeds.
+    // that BOTH autotune_begin_run_locked() (a fresh START) AND autotune_
+    // engine_accept() (a DONE run committing its gains) consult at their own
+    // commit point, so either kind of concurrent write is refused rather
+    // than racing this handler. MUST be paired with autotune_engine_
+    // release_zone_for_external_write() on every exit path below once this
+    // succeeds.
+    //
+    // NOT gated by this reservation (opus review 2026-09-23, second pass):
+    // adaptive_tune_model.c's SIMC-refine write (a separate module with its
+    // own lock domain, no access to s_at without an unwanted coupling) and
+    // uart_bridge_ext_control.c's CONTROL_CMD_SET_ZONE_PID benchproto command
+    // (a raw passthrough to zones_config_set_pid() with no autotune
+    // awareness at all). Both remain a live, un-closed instance of this same
+    // class of race against a restore; narrowing this comment rather than
+    // claiming a broader interlock than actually exists.
     if (!autotune_engine_reserve_zone_for_external_write((uint8_t)zone)) {
-        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"autotune is running on this zone\"}");
+        n = snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"error\":\"autotune is active on this zone, or another restore is "
+                     "already in progress\"}");
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);

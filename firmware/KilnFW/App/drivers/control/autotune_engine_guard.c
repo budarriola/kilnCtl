@@ -360,6 +360,26 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
             return false;
         }
     }
+    /* iter_tune_http.c restore_commissioned race close, follow-up (step-7
+     * review, 2026-09-23): a DONE run's own accept() writes gains via the
+     * same zones_config_set_pid() the restore handler calls -- reaching
+     * accept() from a different task (uart_bridge_ext_autotune.c's
+     * benchproto ACCEPT command) while iter_tune_http.c holds a reservation
+     * on this zone would race the restore exactly the way autotune_begin_
+     * run_locked()'s check above already prevents a fresh START from doing.
+     * Checked under the SAME lock, at the SAME "we are about to commit"
+     * point autotune_begin_run_locked() uses -- see that function's and
+     * s_at_t's own comments for the reservation's lock discipline. Distinct
+     * message from the "already running" refusal above so a caller (or a
+     * test) can tell which of the two this is. */
+    if (s_at.external_write_reserved && s_at.external_write_reserved_zone == s_at.zone_index) {
+        xSemaphoreGive(s_at.lock);
+        ESP_LOGW(AT_TAG, "autotune zone %u: accept refused -- an iter_tune restore is in progress on "
+                          "this zone",
+                 s_at.zone_index);
+        return false;
+    }
+
     uint8_t zone = s_at.zone_index;
     autotune_method_t method = s_at.method;
     autotune_gains_t g = s_at.proposed_gains;

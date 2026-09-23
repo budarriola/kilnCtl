@@ -6355,6 +6355,86 @@ static void test_heat_enable_acquire_never_called_under_s_at_lock(void)
     free(text);
 }
 
+// iter_tune_http.c restore-race reservation (opus review, 2026-09-23):
+// autotune_begin_run_locked()'s check at autotune_engine.c ~line 1154, and
+// autotune_engine_accept()'s matching check at autotune_engine_guard.c
+// ~line 300ish, were both added with NO test driving the real, locked code
+// path -- deleting either `if` failed nothing. These tests use the same
+// "bypass autotune_engine_start(), hand-build a real s_at.lock" pattern as
+// start_stepping_run_rule() above, since autotune_engine_start() always
+// fails in the host-test build.
+static void reserve_race_test_setup_idle_zone0(void)
+{
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_IDLE;
+    s_at.zone_index = 0;
+}
+
+static void test_reserve_blocks_a_fresh_start_and_names_the_reason(void)
+{
+    reserve_race_test_setup_idle_zone0();
+
+    bool reserved = autotune_engine_reserve_zone_for_external_write(0);
+    TEST_CHECK(reserved, "reserve() must succeed on an idle, unreserved zone");
+
+    char err[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, "autotune_engine_run() must be refused while the zone is reserved");
+    TEST_CHECK(strstr(err, "iter_tune restore is in progress") != NULL,
+               "refusal message must name the iter_tune restore reservation");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a refused start must leave state at IDLE");
+
+    autotune_engine_release_zone_for_external_write(0);
+}
+
+static void test_reserve_refused_while_a_run_is_live_on_the_zone(void)
+{
+    reserve_race_test_setup_idle_zone0();
+    s_at.state = AUTOTUNE_ENGINE_STEPPING; // state_is_running() == true
+
+    bool reserved = autotune_engine_reserve_zone_for_external_write(0);
+    TEST_CHECK(!reserved, "reserve() must refuse a zone with a live run");
+    TEST_CHECK(!s_at.external_write_reserved, "a refused reserve() must not leave the flag set");
+}
+
+static void test_run_starts_after_release(void)
+{
+    reserve_race_test_setup_idle_zone0();
+
+    TEST_CHECK(autotune_engine_reserve_zone_for_external_write(0), "reserve() must succeed first");
+    autotune_engine_release_zone_for_external_write(0);
+    TEST_CHECK(!s_at.external_write_reserved, "release() must clear the flag");
+
+    char err[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(ok, "autotune_engine_run() must be allowed to start once released");
+}
+
+// autotune_engine_accept()'s matching gate (required fix 2): use
+// AUTOTUNE_METHOD_RELAY with relay.valid=true rather than a full FOPDT
+// model fit, so the STEP-only ack_unsettled gate in accept() never engages
+// and this test stays focused on the reservation check alone.
+static void test_accept_is_gated_by_the_reservation_too(void)
+{
+    reserve_race_test_setup_idle_zone0();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_RELAY;
+    s_at.relay.valid = true;
+    s_stub_set_pid_result = true;
+
+    TEST_CHECK(autotune_engine_reserve_zone_for_external_write(0), "reserve() must succeed on a DONE zone");
+
+    bool accepted = autotune_engine_accept(NULL, NULL);
+    TEST_CHECK(!accepted, "accept() must be refused while the zone is reserved");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept() must leave state at DONE");
+
+    autotune_engine_release_zone_for_external_write(0);
+    accepted = autotune_engine_accept(NULL, NULL);
+    TEST_CHECK(accepted, "accept() must succeed once the reservation is released");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_heat_enable_acquire_never_called_under_s_at_lock();
@@ -6538,6 +6618,13 @@ void run_test_autotune_engine_prestart(void)
     test_readiness_blocks_on_a_drifting_zone_with_no_neighbours_at_all();
     test_readiness_missing_cj_has_no_effect_on_the_check_at_all();
     test_readiness_skips_a_zone_with_no_valid_reading_this_tick();
+
+    // iter_tune_http.c restore-race reservation (opus review, 2026-09-23) --
+    // order-independent, each hand-builds its own fresh s_at and lock.
+    test_reserve_blocks_a_fresh_start_and_names_the_reason();
+    test_reserve_refused_while_a_run_is_live_on_the_zone();
+    test_run_starts_after_release();
+    test_accept_is_gated_by_the_reservation_too();
 }
 
 

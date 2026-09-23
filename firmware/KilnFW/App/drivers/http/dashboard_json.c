@@ -309,7 +309,8 @@ int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune
         "\"relay_setpoint_c\":%.1f,\"relay_d\":%.3f,\"relay_h_c\":%.2f,"
         "\"relay_cycles_seen\":%u,\"relay_cycles_target\":%u,"
         "\"relay_valid\":%s,\"relay_ku\":%.5f,\"relay_tu_s\":%.1f,\"relay_amplitude_c\":%.2f,"
-        "\"relay_cycles_used\":%d,\"relay_reason\":\"%s\"}",
+        "\"relay_cycles_used\":%d,\"relay_reason\":\"%s\","
+        "\"external_write_reserved\":%s,\"external_write_reserved_zone\":%u}",
         autotune_state_name(st->state), autotune_sub_phase_name(st),
         st->method == AUTOTUNE_METHOD_RELAY ? "relay" : "step", st->zone_index,
         (unsigned long)st->elapsed_s, st->sample_count,
@@ -328,7 +329,8 @@ int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune
         (double)st->relay_setpoint_c, (double)st->relay_amplitude_duty, (double)st->relay_hysteresis_c,
         st->relay_cycles_seen, st->relay_cycles_target,
         st->relay.valid ? "true" : "false", (double)st->relay.ku, (double)st->relay.tu_s,
-        (double)st->relay.amplitude_c, st->relay.cycles_used, relay_reason_escaped);
+        (double)st->relay.amplitude_c, st->relay.cycles_used, relay_reason_escaped,
+        st->external_write_reserved ? "true" : "false", (unsigned)st->external_write_reserved_zone);
     return n;
 }
 

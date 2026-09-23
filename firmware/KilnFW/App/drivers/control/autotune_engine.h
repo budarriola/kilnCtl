@@ -119,6 +119,16 @@ typedef struct {
      * the operator the real landing point instead of the requested one. */
     float    target_achieved_c;
 
+    /* iter_tune_http.c restore_commissioned race close (step-7 review,
+     * 2026-09-23): mirrors s_at.external_write_reserved/_zone so a caller
+     * (or an operator reading dashboard JSON) can see a reservation exists
+     * without a JTAG read of s_at. There is no timeout on the reservation --
+     * it can only ever be left true by a bug (reserve() with no matching
+     * release()) or a crash mid-window, and both are reboot-only: this
+     * lives in s_at (RAM), not NVS, so any reboot clears it unconditionally. */
+    bool     external_write_reserved;
+    uint8_t  external_write_reserved_zone;
+
     /* Cold-junction ambient reference captured at the SETTLING->STEPPING
      * transition (autotune_engine.c ~line 2102), used by finalize_fit()'s
      * physical-plausibility check. Exposed here, next to model.baseline_c,
