@@ -34,6 +34,7 @@
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kiln_io.h"
+#include "kiln_io_owner.h" /* kiln_io_owner_command_read() -- see the pre-OTA interlock snapshot below */
 #include "MAX31856.h"
 #include "ota_auth.h"
 #include "ota_pico_relay.h"
@@ -41,6 +42,7 @@
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "stack_margin.h"
+#include "thermo_owner.h" /* thermo_owner_command_read_all() -- see the pre-OTA interlock snapshot below */
 #include "web_encoding.h"
 #include "sim_backend.h"
 #include "wifi_prov.h"
@@ -795,8 +797,8 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     // catch -- "a cooling kiln is still a hot kiln" even with nothing
     // running), every zones[i].active there is false and this loop would
     // silently check NOTHING. Reading zones_config_get_thermo_count()/
-    // MAX31856_read_all()/kiln_io_read() instead means the ceiling and
-    // heater-commanded checks below see the kiln's actual current state
+    // thermo_owner_command_read_all()/kiln_io_owner_command_read() instead
+    // means the ceiling and heater-commanded checks below see the kiln's actual current state
     // regardless of whether a profile happens to be running.
     ota_interlock_zone_snapshot_t zones[MAX31856_CHANNEL_COUNT];
     memset(zones, 0, sizeof(zones));
@@ -811,14 +813,14 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     if (sim_backend_enabled()) {
         sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &reading_count);
     } else if (s_thermo_bus && s_thermo_bus->initialized) {
-        MAX31856_read_all(s_thermo_bus, readings, MAX31856_CHANNEL_COUNT, &reading_count);
+        thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &reading_count);
     }
 
     kiln_io_state_t io_state;
     memset(&io_state, 0, sizeof(io_state));
     bool io_read_ok = false;
     if (s_io) {
-        io_read_ok = (kiln_io_read(s_io, &io_state) == ESP_OK);
+        io_read_ok = (kiln_io_owner_command_read(&io_state) == ESP_OK);
     }
 
     for (uint8_t i = 0; i < thermo_count; i++) {

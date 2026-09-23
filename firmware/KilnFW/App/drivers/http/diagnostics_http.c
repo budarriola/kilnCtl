@@ -101,9 +101,15 @@ static esp_err_t safety_page_get_handler(httpd_req_t *req)
  * ROOT CAUSE (confirmed live against the board at 192.168.1.156 before this
  * fix): the page used to depend entirely on GET /api/status's combined
  * "channels" array. That endpoint (dashboard_http.c's status_get_handler())
- * calls MAX31856_read_all() directly, ONE call covering every channel in a
- * single HTTP request/response, bypassing thermo_owner's queue entirely. If
- * any single channel's SPI transaction wedges, the whole /api/status
+ * called MAX31856_read_all() directly, ONE call covering every channel in a
+ * single HTTP request/response, bypassing thermo_owner's queue entirely
+ * (fixed 2026-09-22, docs/HTTP_HANDLER_OWNERSHIP.md -- it now goes
+ * through thermo_owner_command_read_all(), same owner queue this page
+ * already used; the per-channel bounded-wait argument below is still this
+ * page's own reason to exist, since a full read_all() still waits on every
+ * channel serially rather than bounding each one independently). Before
+ * that fix, if any single channel's SPI transaction wedged, the whole
+ * /api/status
  * response -- relays, safety link, heap, firmware version, everything, not
  * just the thermocouples -- never lands, and the page's fetch() has no
  * timeout of its own, so it sits on "Loading..." forever: not a bug in the

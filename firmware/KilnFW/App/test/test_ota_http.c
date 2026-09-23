@@ -440,12 +440,15 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 { (void)zone_index; if (out_mask) *out_mask = 0; return false; }
 float zones_config_apply_cal(uint8_t zone_index, float raw_c) { (void)zone_index; return raw_c; }
 
-// MAX31856.h / kiln_io.h -- never reached (thermo_count == 0 above skips the
-// loop that would call these), must resolve.
-esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
-{ (void)bus; (void)out; (void)max_readings; if (out_count) *out_count = 0; return ESP_FAIL; }
-esp_err_t kiln_io_read(kiln_io_t *io, kiln_io_state_t *out)
-{ (void)io; if (out) memset(out, 0, sizeof(*out)); return ESP_FAIL; }
+// thermo_owner.h / kiln_io_owner.h -- never reached (thermo_count == 0 above
+// skips the loop that would call these), must resolve.
+// docs/HTTP_HANDLER_OWNERSHIP.md Batch A (2026-09-22) routed
+// ota_http_check_interlocks() through these owner accessors instead of
+// MAX31856_read_all()/kiln_io_read() directly -- stubs renamed to match.
+esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings, size_t *out_count)
+{ (void)out; (void)max_readings; if (out_count) *out_count = 0; return ESP_FAIL; }
+esp_err_t kiln_io_owner_command_read(kiln_io_state_t *out)
+{ if (out) memset(out, 0, sizeof(*out)); return ESP_FAIL; }
 
 // ota_pico_relay.h -- never called by ota_http.c's own tests, but review
 // finding D6 adds a direct test of pico_img_stage.c (linked in for real,

@@ -1939,8 +1939,19 @@ suspected to be related to this work, was root-caused separately (also in
       DISPLAY is dead code and should be deleted rather than migrated) post
       commands to an owning task instead of running the dispatch switch
       body inline.
-- [ ] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
+- [x] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
       owner (1/2/4) each handler calls into — not a separate final phase.
+      Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`''s audit found
+      four remaining direct-driver-read call sites in `dashboard_http.c` (x2)
+      and `ota_http.c` (x2) — `MAX31856_read_all()`/`kiln_io_read()` used
+      directly instead of `thermo_owner_command_read_all()`/
+      `kiln_io_owner_command_read()` — plus one comment-only false positive
+      in `diagnostics_http.c`. All four routed through their owner accessor
+      in the same batch; `wifi_provision_http.c` (Phase 4) was already clean.
+      `tools/check_no_handler_direct_driver_calls.ps1` now enforces this
+      mechanically (zero-entry allowlist for MAX31856/kiln_io, one narrow
+      documented exception for `factory_reset.c`''s driver-storage-reset
+      `esp_wifi_restore()`/`esp_wifi_set_storage()` calls).
 - [ ] **Phase 6** (added mid-Phase-1, user request): a **system-mode command
       gate**, distinct from the owner-task pattern above. The owners answer
       "can two writers race on this state"; this answers "is this *class* of

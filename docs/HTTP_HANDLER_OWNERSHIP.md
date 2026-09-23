@@ -1,8 +1,24 @@
-# HTTP handler ownership migration plan (TODO.md Phase 5)
+# HTTP handler ownership migration (TODO.md Phase 5) -- CLOSED 2026-09-22
 
-Pending work only. Premise re-verified at `origin/main` `6ea9294e`, not stale:
-`firmware/KilnFW/TODO.md`'s "Phase 5: HTTP handler migration" line is still
-unchecked, and this pass found real, live bypasses (below), not just an
+**Status: DONE.** Batch A landed 2026-09-22: `dashboard_http.c` (x2) and
+`ota_http.c` (x2) now route through `thermo_owner_command_read_all()`/
+`kiln_io_owner_command_read()`. The table's fifth entry
+(`diagnostics_http.c`) turned out to be a false positive on closer read --
+that file already called `thermo_owner_command_read(ch, &reading)`
+per-channel; the direct `MAX31856_read_all()` its own header comment
+mentioned was describing `dashboard_http.c`'s (then-)bypass, not its own
+behavior. Only its stale comment needed updating. Enforced going forward by
+`tools/check_no_handler_direct_driver_calls.ps1`/`.py`, negative-tested
+(reintroduced call, confirmed the check fails naming file:line, restored,
+reconfirmed green) and wired into `run_all_checks.ps1` via the standard
+`check_*.ps1` glob. `firmware/KilnFW/TODO.md`'s Phase 5 line is checked off,
+citing this plan and the check. No further batches are pending; the
+non-findings and out-of-scope items below stand as the record of what was
+swept and ruled clean.
+
+Premise re-verified at `origin/main` `6ea9294e` before Batch A started, not
+stale: `firmware/KilnFW/TODO.md`'s "Phase 5: HTTP handler migration" line was
+still unchecked, and this pass found real, live bypasses (below), not just an
 unstruck TODO line.
 
 ## Scope

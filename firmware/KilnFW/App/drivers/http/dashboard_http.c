@@ -24,6 +24,7 @@
 #include "http_form.h"
 #include "kiln_io_owner.h"
 #include "nvs_report.h"
+#include "thermo_owner.h" /* thermo_owner_command_read_all() -- see the status/refresh readings block below */
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see the ERR_UPDATING case below */
 #include "profile_executor.h"
 #include "profile_feasibility.h" /* profile_feasibility_plan_curve() -- the duration model, see below */
@@ -198,7 +199,7 @@ void dashboard_get_status(dashboard_status_t *out)
          * "no thermocouple" next to a running firing. */
         sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
     } else if (s_dash.thermo_bus && s_dash.thermo_bus->initialized) {
-        MAX31856_read_all(s_dash.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+        thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
     }
     out->thermo_ready = count > 0;
     out->thermo_spi_wedged = MAX31856_bus_spi_wedged(s_dash.thermo_bus);
@@ -615,7 +616,7 @@ void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, boo
         if (sim_backend_enabled()) {
             sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
         } else if (s_dash.thermo_bus && s_dash.thermo_bus->initialized) {
-            MAX31856_read_all(s_dash.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+            thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
         }
         *out_thermo_ready = count > 0;
     }
