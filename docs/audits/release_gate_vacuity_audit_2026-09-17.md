@@ -63,7 +63,7 @@ silent PASS or a SKIP).
 `git hash-object firmware/SaftyFW/src/tasks/link_frame.c` —
 matched the pre-sabotage hash taken before the edit at the time of this
 audit. The file has since been edited for unrelated reasons (2026-09-23,
-`5a92b4a6`), so the blob citation below is refreshed to HEAD's current
+`cc060a5c`), so the blob citation below is refreshed to HEAD's current
 content rather than the 2026-09-17 value, per this repo's standing
 blob-citation-staleness practice — this does not change the finding, which
 was that the restored file's hash matched its own pre-sabotage hash, not
