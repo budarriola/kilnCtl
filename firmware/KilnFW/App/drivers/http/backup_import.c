@@ -785,6 +785,12 @@ typedef struct {
     bool slot_used_sim[PROFILES_MAX_COUNT];
     bool write_ids[PROFILES_MAX_COUNT];
     char coll_err[128];
+    /* Scratch for the existence-probe loop below (profiles_http_get()'s
+     * output is discarded -- only the bool return matters) -- folded in here
+     * rather than left as a ~428 B profile_t local of that loop, so it does
+     * not land back on the httpd_worker stack this whole block was heap-
+     * converted to get off of. */
+    profile_t tmp_slot_check;
 } backup_import_slot_scratch_t;
 
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
@@ -987,8 +993,8 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         bool *slot_used_sim = scratch->slot_used_sim;
         bool *write_ids = scratch->write_ids;
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-            profile_t tmp;
-            slot_used_sim[id] = profiles_http_get(id, &tmp);
+            memset(&scratch->tmp_slot_check, 0, sizeof(scratch->tmp_slot_check));
+            slot_used_sim[id] = profiles_http_get(id, &scratch->tmp_slot_check);
             write_ids[id] = false;
         }
         /* Opus review of 5dd23944, finding 2: this must simulate pass 2's

@@ -29,6 +29,21 @@
 
 static const char *TAG = "sw_reset";
 
+// Single cap for the heap-allocated response body below -- used at every
+// site that sizes, fills, or bounds-checks that buffer (the malloc, the
+// snprintf, and the truncation check), so the four sites can never drift
+// apart. check_httpd_task_stack_budget.py: this used to be a plain local
+// directly on the httpd_worker stack; see the malloc call below.
+#define SW_RESET_BODY_CAP 960u
+
+// The short fixed fallback sent when the heap body can't be allocated or
+// would be truncated -- both callers below need the exact same sentence.
+static const char kSwResetFallbackBody[] =
+    "ok -- rebooting this controller now. No configuration was changed. "
+    "This reboot WILL latch an S6a main-fault trip: clear it with POST "
+    "/api/safety/clear_trip (Safety page) before heating. See the log "
+    "for the safety processor's own outcome.";
+
 // --- What this route deliberately does NOT do ----------------------------
 //
 // 1. It does not clear a latched safety trip, and must not be described as
@@ -404,26 +419,23 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     // first and re-latches on the still-floating line. So the follow-up is
     // not optional advice, it is required before heating -- said here rather
     // than left for the operator to discover from a refusing kiln.
-    // check_httpd_task_stack_budget.py: this 960 B response buffer used to
-    // be a plain local directly on the httpd_worker stack. Heap (PSRAM
-    // preferred); a malloc failure falls back to the same short fixed
-    // string the truncation branch below already sends, rather than
-    // refusing the whole route -- both processors are already committed to
-    // rebooting by this point (ctx->armed below still has to run either
-    // way), so this is a response-wording fallback, not a correctness gate.
-    char *body = heap_caps_malloc(960, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // This response buffer used to be a plain local directly on the
+    // httpd_worker stack. Heap (PSRAM preferred); a malloc failure falls
+    // back to the same short fixed string the truncation branch below
+    // already sends, rather than refusing the whole route -- both
+    // processors are already committed to rebooting by this point
+    // (ctx->armed below still has to run either way), so this is a
+    // response-wording fallback, not a correctness gate.
+    char *body = heap_caps_malloc(SW_RESET_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!body) {
-        body = malloc(960);
+        body = malloc(SW_RESET_BODY_CAP);
     }
     if (!body) {
-        httpd_resp_sendstr(req, "ok -- rebooting this controller now. No configuration was changed. "
-                                "This reboot WILL latch an S6a main-fault trip: clear it with POST "
-                                "/api/safety/clear_trip (Safety page) before heating. See the log "
-                                "for the safety processor's own outcome.");
+        httpd_resp_sendstr(req, kSwResetFallbackBody);
         ctx->armed = true;
         return ESP_OK;
     }
-    int n = snprintf(body, 960,
+    int n = snprintf(body, SW_RESET_BODY_CAP,
                      "ok -- rebooting this controller now; it will be unreachable for about 10-15 "
                      "seconds, then come back on the same address. No configuration was changed on "
                      "either processor. %s "
@@ -436,15 +448,12 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
                      "the Safety page, or the dashboard's Clear Trip button. Heat stays blocked "
                      "until you do.",
                      sw_reset_pico_sentence(pico_report));
-    if (n < 0 || (size_t)n >= 960) {
+    if (n < 0 || (size_t)n >= SW_RESET_BODY_CAP) {
         /* Truncated (cannot happen with today's strings, but never send half
          * a sentence about which processors rebooted -- and never drop the
          * required-follow-up half either). */
         free(body);
-        httpd_resp_sendstr(req, "ok -- rebooting this controller now. No configuration was changed. "
-                                "This reboot WILL latch an S6a main-fault trip: clear it with POST "
-                                "/api/safety/clear_trip (Safety page) before heating. See the log "
-                                "for the safety processor's own outcome.");
+        httpd_resp_sendstr(req, kSwResetFallbackBody);
         ctx->armed = true;
         return ESP_OK;
     }
