@@ -5,12 +5,20 @@ page's own JS (net/security_page.html). Part of the mcp_server.py split
 pattern -- see that module's docstring for the overall map. This tool never
 reads a credential from anywhere but the environment, and never writes,
 logs, or echoes one back.
+
+Also home to ``web_auth_logout()``, the PC-side counterpart: it ends
+whatever admin session ``http_auth.urlopen()``'s own 401-retry login
+established for this process, via ``http_auth.logout()``. Kept in this
+module rather than a new file since it is a one-line wrapper over the same
+``/api/auth`` surface and the same env-credential-only, never-echo rules
+``web_auth_setup()`` already documents above.
 """
 from __future__ import annotations
 
 import os
 from typing import Optional
 
+from . import http_auth
 from . import mcp_server as _srv
 from . import web_auth_setup_http_client as wac
 from .http_auth import PASSWORD_ENV, USERNAME_ENV
@@ -380,3 +388,40 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
                 f"enable_web_auth=True\n{state_line}\n{after_line}")
 
     return f"ok: administrator credential configured{' and web auth enabled' if enable_web_auth else ' (web auth left as-is)'}\n{state_line}\n{after_line}"
+
+
+@_srv._tool()
+def web_auth_logout(host: Optional[str] = None) -> bool:
+    """End this process's own remembered admin web session at ``host``, if
+    any, via POST /api/auth/logout (web_auth_login_http.c's logout handler,
+    ROUTE_TIER_USER -- any authenticated session).
+
+    This is the PC-side counterpart of ``http_auth.urlopen()``'s own
+    401-retry login: every other client in this package that calls a gated
+    route logs in silently on the first 401 and then keeps reusing that
+    session cookie for the rest of this process's life. Nothing previously
+    called ``http_auth.logout()`` to ever give that session back, so it sat
+    open on the board until it timed out or the board rebooted. This tool
+    is the one caller.
+
+    Not destructive -- ending a session the board itself treats as
+    idempotent, best-effort, and always reversible by logging in again --
+    so it refuses nothing and takes no ``confirm`` parameter, unlike the
+    write tools elsewhere in this module.
+
+    Returns ``True`` if this process held a remembered session for ``host``
+    and the logout POST was sent (regardless of the board's own response
+    to it -- see ``http_auth.logout()``'s own docstring for why that is
+    still correct), ``False`` if this process had no remembered session to
+    begin with. Never raises for a refused or unreachable logout POST --
+    ``http_auth.logout()`` itself swallows that, since this side of the
+    seam is done with the credential either way.
+
+    Never prints, logs, or returns a credential value -- only the
+    ``[bool]`` result described above.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as web_auth_setup()
+
+    resolved = _ota_resolve_host(host)
+    origin = f"http://{resolved}"
+    return http_auth.logout(origin)

@@ -22,9 +22,17 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (181 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `crash_report_clear` was
-added -- an MCP tool wrapping `POST /api/crash_report/clear`
+the rest behind a search facade (182 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-22, when `web_auth_logout` was
+added -- an MCP tool wrapping `POST /api/auth/logout` via `http_auth.logout()`,
+the PC-side session seam every other client already logs in through on a 401
+but that nothing previously called to give the session back; reports `[bool]`
+only (whether a remembered session existed and the logout POST was sent),
+refuses nothing (ending a session is not destructive), and never prints a
+credential. Also removed a stale zero-caller-sweep allowlist entry for
+`binary_provenance.check_binary_fresh`, which now has a real caller via
+`assert_binary_fresh`. The one before it was `crash_report_clear`, same day --
+an MCP tool wrapping `POST /api/crash_report/clear`
 (`diagnostics_http.c`'s `crash_report_clear_post_handler()`, ROUTE_TIER_ADMIN),
 which acknowledges the board's last-crash record AND erases the coredump
 image so an old coredump is never re-captured after a reflash -- a strictly
@@ -34,7 +42,7 @@ record's summary before doing anything, refuses to clear a present-but-
 unacknowledged record unless `allow_unacknowledged=True` is also passed,
 refuses to POST unless `confirm=True`, and fails loud if a read-back after
 the POST still shows the record present. The one before it was
-`kiln_config_apply` -- an MCP tool wrapping `POST /api/kiln_configs/apply` plus a status
+`kiln_config_apply`, same day -- an MCP tool wrapping `POST /api/kiln_configs/apply` plus a status
 poll (`tools/PcTools/src/kilnctrl/kiln_configs_apply_http_client.py`),
 refusing to POST unless `confirm=True` and distinguishing the interlock 428
 from the hardware-differs 428 by response header name. The one before it was
