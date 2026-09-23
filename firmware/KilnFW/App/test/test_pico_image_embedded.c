@@ -10,6 +10,7 @@
 // directly so its statics and exact compiled behaviour are under test.
 #include <string.h>
 
+#include "kilnlink/kilnlink_version.h"
 #include "test_common.h"
 
 // asm("_binary_...") is a GCC/binutils extension (EMBED_FILES) with no MSVC
@@ -36,7 +37,7 @@ const uint8_t SaftyFW_slotB_bin_end[1] = { 0 };
 /* Builds a well-formed record with the given commit text, mirroring
  * test_pico_image_identity.c's make_record() helper. */
 static void make_record(saftyfw_image_identity_t *r, const char *commit, uint8_t dirty,
-                        uint16_t config_format_version)
+                        uint16_t config_format_version, uint16_t link_protocol_version)
 {
     memset(r, 0, sizeof(*r));
     r->magic0 = SAFTYFW_IMAGE_IDENTITY_MAGIC0;
@@ -46,7 +47,7 @@ static void make_record(saftyfw_image_identity_t *r, const char *commit, uint8_t
     r->commit_len = (uint8_t)strlen(commit);
     memcpy(r->commit, commit, strlen(commit));
     r->config_format_version = config_format_version;
-    r->link_protocol_version = 0u;
+    r->link_protocol_version = link_protocol_version;
     r->magic_end = SAFTYFW_IMAGE_IDENTITY_MAGIC_END;
 }
 
@@ -57,7 +58,8 @@ void run_test_pico_image_embedded(void)
     printf("\n-- pico image embedded --\n");
 
     saftyfw_image_identity_t rec;
-    make_record(&rec, "0123456789abcdef0123456789abcdef01234567", 0u, 2u);
+    make_record(&rec, "0123456789abcdef0123456789abcdef01234567", 0u, 2u,
+                (uint16_t)KILNLINK_PROTOCOL_VERSION);
 
     uint8_t buf_a[256];
     uint8_t buf_b[256];
@@ -76,7 +78,11 @@ void run_test_pico_image_embedded(void)
     TEST_CHECK(memcmp(out.commit, rec.commit, 40u) == 0, "the shared commit text is carried through");
     TEST_CHECK(!out.dirty, "the shared dirty flag is carried through");
     TEST_CHECK(out.config_format_version == 2u, "the shared config format version is carried through");
-    TEST_CHECK(out.link_protocol_version == 0u, "the shared link protocol version is carried through");
+    /* Deliberately a NON-ZERO fixture value: a zero here would also be produced by a
+     * zeroed/untouched out.link_protocol_version, so the assertion would pass even if
+     * describe_from() never copied the field at all. */
+    TEST_CHECK(out.link_protocol_version == (uint16_t)KILNLINK_PROTOCOL_VERSION,
+               "the shared link protocol version is carried through");
     TEST_CHECK(out.slot_found[0] && out.slot_found[1], "both slots report a found identity record");
     TEST_CHECK(out.slot_data[0] == buf_a && out.slot_data[1] == buf_b,
                "raw slot pointers are always populated for the staging writer");
@@ -84,7 +90,8 @@ void run_test_pico_image_embedded(void)
 
     /* ---- mismatched commit: unusable, both commits named in reason ---- */
     saftyfw_image_identity_t rec_b;
-    make_record(&rec_b, "fedcba9876543210fedcba9876543210fedcba9", 0u, 2u);
+    make_record(&rec_b, "fedcba9876543210fedcba9876543210fedcba9", 0u, 2u,
+                (uint16_t)KILNLINK_PROTOCOL_VERSION);
     memset(buf_a, 0xA5, sizeof(buf_a));
     memset(buf_b, 0xA5, sizeof(buf_b));
     memcpy(buf_a + 64, &rec, sizeof(rec));
