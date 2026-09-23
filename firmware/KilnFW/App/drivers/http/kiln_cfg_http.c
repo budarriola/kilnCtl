@@ -153,7 +153,7 @@ static esp_err_t list_get_handler(httpd_req_t *req)
     do {                                                                                          \
         written = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                             \
         if (written < 0 || (size_t)written >= sizeof(json) - o) {                                \
-            goto send;                                                                            \
+            goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)written;                                                                      \
     } while (0)
@@ -171,11 +171,22 @@ static esp_err_t list_get_handler(httpd_req_t *req)
     }
     APPEND("],\"max_count\":%u}", (unsigned)kiln_cfg_store_max_count());
 
-#undef APPEND
-
-send:
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
+
+overflow:
+    /* Never send the truncated, malformed partial buffer as a 200 -- that
+     * reads as success to a caller that only checks the status code. Log
+     * once and fail loud with a 500 instead (same pattern as
+     * diagnostics_http.c's crash_report/thermo_faults handlers). json[] is
+     * sized generously already; do not enlarge it to "fix" this (house
+     * rule: never enlarge httpd stack buffers). */
+    ESP_LOGE(TAG, "kiln_configs list JSON overflowed %u-byte buffer at o=%u",
+             (unsigned)sizeof(json), (unsigned)o);
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":false,\"error\":\"kiln configs list too large to encode\"}", HTTPD_RESP_USE_STRLEN);
+#undef APPEND
 }
 
 /* ---- POST /api/kiln_configs/save -- name=<str> [id=<int>] ----------------- */

@@ -148,7 +148,7 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
     do {                                                                                          \
         n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
         if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
+            goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
     } while (0)
@@ -304,9 +304,21 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
     }
     APPEND("}");
 
-send:
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
+
+overflow:
+    /* Same house rule as crash_report_get_handler()'s overflow path just
+     * below: never send the truncated, malformed partial buffer as a 200 --
+     * that reads as success to a caller that only checks the status code.
+     * Log once and fail loud with a 500 instead. json[] is 1536 B; do not
+     * enlarge it to "fix" this (house rule: never enlarge httpd stack
+     * buffers). */
+    ESP_LOGE(TAG, "thermo_faults JSON overflowed %u-byte buffer at o=%u",
+             (unsigned)sizeof(json), (unsigned)o);
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":false,\"error\":\"thermo faults report too large to encode\"}", HTTPD_RESP_USE_STRLEN);
 #undef APPEND
 }
 

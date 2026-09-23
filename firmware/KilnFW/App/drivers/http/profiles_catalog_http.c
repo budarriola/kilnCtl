@@ -442,7 +442,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     do {                                                                                          \
         n = snprintf(json + o, PROFILE_DETAIL_JSON_CAP - o, __VA_ARGS__);                        \
         if (n < 0 || (size_t)n >= PROFILE_DETAIL_JSON_CAP - o) {                                  \
-            goto send;                                                                            \
+            goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
     } while (0)
@@ -525,13 +525,27 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     }
     APPEND("]}");
 
-#undef APPEND
-
-send:
     httpd_resp_set_type(req, "application/json");
-    esp_err_t send_err = httpd_resp_send(req, json, o);
+    {
+        esp_err_t send_err = httpd_resp_send(req, json, o);
+        free(json);
+        return send_err;
+    }
+
+overflow:
+    /* Never send the truncated, malformed partial buffer as a 200 -- that
+     * reads as success to a caller that only checks the status code. Log
+     * once and fail loud with a 500 instead (same pattern as
+     * diagnostics_http.c's crash_report/thermo_faults handlers). Do not
+     * enlarge PROFILE_DETAIL_JSON_CAP to "fix" this -- it is already sized
+     * generously per the comment above. */
+    ESP_LOGE(PROFILES_TAG, "profile detail JSON overflowed %u-byte buffer at o=%u",
+             (unsigned)PROFILE_DETAIL_JSON_CAP, (unsigned)o);
     free(json);
-    return send_err;
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":false,\"error\":\"profile detail too large to encode\"}", HTTPD_RESP_USE_STRLEN);
+#undef APPEND
 }
 #undef PROFILE_DETAIL_JSON_CAP
 
