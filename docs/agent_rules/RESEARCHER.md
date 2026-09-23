@@ -7,7 +7,11 @@ commits, no board state changes. If the question needs a board read, also read `
 
 - Start from `origin/main`, not from a plan doc's narrative. Quote the plan's status block
   and grep the code before calling anything "open" or "missing". Six of seven "open" items
-  in one survey were already built.
+  in one survey were already built. Before writing up a "(A) doable now" item, grep for it:
+  two separate surveys the same day proposed raising `BACKUP_BODY_MAX` (already raised,
+  with tests) and adding a flash-layout sync check (already built, as
+  `firmware/SaftyFW/tools/check_flash_layout_sync.cmake`) -- both premises were false and an
+  implementer had to catch it. A brief that skips the grep is not a finding.
 - Name evidence by `file:line` and quote the decisive line. Distinguish what you observed
   from what you infer.
 - Prefer the repo's own tools (`check_*.ps1`, `tools/PcTools`, MCP facades) over ad-hoc

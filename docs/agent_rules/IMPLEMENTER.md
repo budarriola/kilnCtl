@@ -7,15 +7,21 @@ back to the coordinator. You do not push.
 
 - Mint a private worktree with the PowerShell tool:
   `powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label <name>`
-  (prints a path under `C:\wt\`). Work only there. Fresh worktrees need
-  `-AllowFewerChecks` on `run_all_checks.ps1`.
+  (prints a path under `C:\wt\`). Work only there -- never edit a file in the shared main
+  tree first "to check" and then `git checkout --` it to undo; that tree is shared with
+  other sessions and the undo is exactly the destructive command COMMON.md forbids. If you
+  ever find you edited outside your worktree, stop and report it rather than reverting it
+  yourself. Fresh worktrees need `-AllowFewerChecks` on `run_all_checks.ps1`.
 - `git fetch` first, then commit with `git commit -o <every changed path, explicitly>`.
   Never `git add -A`, never `--amend`, never force-push. Normal-prose message; end it with
   exactly this trailer line:
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`
 - Do not push, rebase, or remove the worktree unless the prompt says to.
 - Preserve each file's existing line endings (`ROADMAP.md`, firmware sources, TODO files and
-  most docs are CRLF in the working copy).
+  most docs are CRLF in the working copy). Never author doc prose through a PowerShell
+  single-quoted string -- an embedded apostrophe doubles (`''`) and ships silently; write
+  prose with a heredoc, the Edit tool, or a small Python script instead. One file shipped
+  39 doubled-apostrophe artifacts this way.
 
 ## Checks
 
