@@ -274,13 +274,17 @@ def run_coordinated_gpio_test(
     reasons = check_preflight_refusal(preflight, confirm)
     if reasons:
         # `clients` (and, for build_real_clients, the real ProbeClient) may
-        # already exist by this point -- close/restore it here too, not just
-        # in the `finally` below, so this refusal path never leaks either
+        # already exist by this point -- close it here too, not just in the
+        # `finally` below, so this refusal path never leaks the ESP client
         # (Opus re-review of 430ba634: this second preflight read, narrower
-        # than the caller's own, was the same leak shape).
+        # than the caller's own, was the same leak shape). Deliberately
+        # NEVER pico_reset_run()/esp_reset_run() here, unlike the finally
+        # below: the refusal reasons that reach this branch include "safety
+        # relay is ARMED" and "a profile is running/paused", and resetting
+        # either processor mid-firing would abort it and trip S6a. A refusal
+        # must be inert on both boards -- closing the PC-side probe socket
+        # is not a board reset (Opus re-review of 21383886).
         clients.esp_close()
-        clients.pico_reset_run()
-        clients.esp_reset_run()
         return GpioTestResult(refused=True, refusal_reasons=reasons)
 
     steps: "list[StepMeasurement]" = []

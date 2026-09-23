@@ -169,16 +169,21 @@ def test_refuses_when_safety_armed():
     assert result.refused
     assert any("ARMED" in r for r in result.refusal_reasons)
     assert result.steps == ()
-    # No pin was ever touched or detached from firmware...
+    # No pin was ever touched or detached from firmware, and NEITHER board is
+    # reset -- a refusal must be inert on the boards, since this exact
+    # reason (ARMED, or a profile running/paused) means resetting either
+    # processor here would abort a firing and trip S6a (Opus re-review of
+    # 21383886).
     assert not boards.halted
     assert boards.detached == []
-    # ...but the client is still closed/restored on this refusal path, since
-    # by the time run_coordinated_gpio_test's own preflight check runs, a
-    # caller may have already built a real (side-effectful) client (Opus
-    # re-review of 430ba634).
+    assert not boards.pico_reset
+    assert not boards.esp_reset
+    # ...but the ESP probe client is still closed on this refusal path,
+    # since by the time run_coordinated_gpio_test's own preflight check
+    # runs, a caller may have already built a real (side-effectful) client
+    # (Opus re-review of 430ba634) -- closing that PC-side socket is not a
+    # board reset.
     assert boards.closed
-    assert boards.pico_reset
-    assert boards.esp_reset
 
 
 def test_refuses_without_confirm():
@@ -266,8 +271,11 @@ def test_second_preflight_read_refusal_still_closes_client():
     """Opus re-review of 430ba634: run_coordinated_gpio_test's own internal
     clients.get_preflight() call (used when no `preflight=` snapshot is
     passed in) can refuse in a narrower window than a caller's own check --
-    that refusal must still close/restore the already-built client, not
-    just the happy-path finally block."""
+    that refusal must still close the already-built ESP client, not just the
+    happy-path finally block. It must NOT reset either board though (Opus
+    re-review of 21383886): a refusal reached here can mean ARMED or a
+    profile running/paused, and resetting a processor in that state would
+    abort a firing and trip S6a -- a refusal must be inert on the boards."""
     boards = FakeBoards()
     armed_preflight = GpioTestPreflight(
         safety_armed=True,
@@ -281,8 +289,8 @@ def test_second_preflight_read_refusal_still_closes_client():
 
     assert result.refused
     assert boards.closed
-    assert boards.pico_reset
-    assert boards.esp_reset
+    assert not boards.pico_reset
+    assert not boards.esp_reset
     # Never actually touched a pin though.
     assert not boards.halted
     assert boards.detached == []
