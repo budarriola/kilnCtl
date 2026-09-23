@@ -748,6 +748,8 @@ def encode_safety_config_v3(f: dict) -> bytes:
     out[_SC["TC_PLACEMENT_MODE"]] = f["tc_placement_mode"]
     struct.pack_into("<f", out, _SC["ABS_MAX_TEMP_C"], f["abs_max_temp_c"])
     out[_SC["TC_TYPE"]] = f["tc_type"]
+    if len(f["ct_channel_map"]) != 3:
+        raise ValueError(f"ct_channel_map must have exactly 3 entries, got {len(f['ct_channel_map'])}")
     out[_SC["CT_CHANNEL_MAP"]:_SC["CT_CHANNEL_MAP"] + 3] = bytes(f["ct_channel_map"])
     out[_SC["CALIBRATION_MISSING"]] = 1 if f["calibration_missing"] else 0
     struct.pack_into("<f", out, _SC["FIRING_MARGIN_C"], f["firing_margin_c"])
@@ -804,8 +806,12 @@ def encode_safety_config_v3(f: dict) -> bytes:
         struct.pack_into("<f", out, _SC["I_NORMAL_A"] + i * 4, f["i_normal_a"][i])
     struct.pack_into("<H", out, _SC["OVERCURRENT_PCT"], f["overcurrent_pct"])
     struct.pack_into("<I", out, _SC["OVERCURRENT_TIME_S"], f["overcurrent_time_s"])
+    if len(f["zone_ct_channel"]) != 3:
+        raise ValueError(f"zone_ct_channel must have exactly 3 entries, got {len(f['zone_ct_channel'])}")
     out[_SC["ZONE_CT_CHANNEL"]:_SC["ZONE_CT_CHANNEL"] + 3] = bytes(f["zone_ct_channel"])
     reserved = bytes.fromhex(f.get("reserved_hex", "00" * _SC_RESERVED_LEN))
+    if len(reserved) != _SC_RESERVED_LEN:
+        raise ValueError(f"reserved_hex must decode to exactly {_SC_RESERVED_LEN} bytes, got {len(reserved)}")
     out[_SC["RESERVED"]:_SC["RESERVED"] + _SC_RESERVED_LEN] = reserved
     crc = _sc_crc32(bytes(out[:_SC["CRC"]]))
     struct.pack_into("<I", out, _SC["CRC"], crc)

@@ -735,6 +735,27 @@ def test_convert_safety_config_blob_refuses_downgrade():
         cc.convert_safety_config_blob(blob, 2)
 
 
+def test_encode_safety_config_v3_rejects_short_ct_channel_map():
+    fields = cc.safety_config_default_fields()
+    fields["ct_channel_map"] = [0, 1]
+    with pytest.raises(ValueError, match="ct_channel_map"):
+        cc.encode_safety_config_v3(fields)
+
+
+def test_encode_safety_config_v3_rejects_short_zone_ct_channel():
+    fields = cc.safety_config_default_fields()
+    fields["zone_ct_channel"] = [0, 1]
+    with pytest.raises(ValueError, match="zone_ct_channel"):
+        cc.encode_safety_config_v3(fields)
+
+
+def test_encode_safety_config_v3_rejects_wrong_length_reserved_hex():
+    fields = cc.safety_config_default_fields()
+    fields["reserved_hex"] = "ab"
+    with pytest.raises(ValueError, match="reserved_hex"):
+        cc.encode_safety_config_v3(fields)
+
+
 def test_convert_document_safety_config_blob_wrapper():
     fields = cc.safety_config_default_fields()
     blob = cc.encode_safety_config_v3(fields)
