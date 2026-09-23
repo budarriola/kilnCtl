@@ -116,6 +116,13 @@ void run_test_pico_image_identity(void)
     TEST_CHECK(memcmp(found.commit, rec.commit, 40u) == 0, "the found commit text matches");
     TEST_CHECK(found.config_format_version == 2u,
                 "the found record carries its config format version");
+    /* Reviewer advisory (b), follow-up: the non-zero fixture is only
+     * load-bearing if it is asserted AFTER a real parse -- checking it on the
+     * struct make_record() just filled proves nothing about
+     * saftyfw_image_identity.c. This is the actual round trip: a regression
+     * that dropped link_protocol_version from the scanner's copy fails here. */
+    TEST_CHECK(found.link_protocol_version == (uint16_t)KILNLINK_PROTOCOL_VERSION,
+                "the found record carries its link protocol version");
 
     /* A record that would run off the end must not be reported -- this is the
      * bound that keeps the scan from reading past the image. */

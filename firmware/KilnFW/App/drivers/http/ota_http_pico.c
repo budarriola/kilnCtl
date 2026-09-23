@@ -284,9 +284,15 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     // This gate exists only on this manual-upload path. The auto-update-at-
     // boot path (pico_auto_update_boot.c) calls ota_pico_relay_start()
     // directly and never reaches this function, so it can never set
-    // OTA_FORCE_VERSION_HEADER and never bypasses this warning -- there is
-    // also no version skew to warn about there, since the embedded slot
-    // images are built from the same commit as this ESP binary.
+    // OTA_FORCE_VERSION_HEADER and never bypasses this warning. It is NOT
+    // skew-free, though: this comment used to claim the embedded slot images
+    // are always built from the same commit as this ESP binary, which does
+    // not hold for a flash_firmware(kiln_fw_root=...) build or a stale
+    // SaftyFW build directory. That path now runs its own equivalent gate --
+    // pico_image_embedded_protocol_ok() (net/pico_image_embedded.h), folded
+    // into pico_image_embedded_should_use(), same "0 means unknown" rule as
+    // here but with no force-header escape hatch (there is no request to
+    // carry one at boot).
     pico_image_source_info_t staged_info;
     (void)pico_image_source_describe(&staged_info);
     bool protocol_mismatch = staged_info.usable && staged_info.link_protocol_version != 0u &&
