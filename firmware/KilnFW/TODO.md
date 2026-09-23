@@ -601,9 +601,15 @@ Open items, not yet fixed:
 - [ ] **Not exercised against a real router**: the DHCP/static toggle is
       build-verified and flashed but has no live network in this environment to
       confirm actual join behavior against.
-- [ ] **Wi-Fi driver log lines arrive with an empty body** (`W (...) wifi:` with
-      nothing after the colon) roughly every 30s, so the ESP-IDF Wi-Fi driver's own
-      diagnostics are invisible through `uart_log_bridge`. Low severity, not chased.
+- [x] **Wi-Fi driver log lines arrive with an empty body** (`W (...) wifi:` with
+      nothing after the colon) roughly every 30s. RESOLVED 2026-09-22, not a
+      pipeline defect: `uart_log_bridge.c`'s parse/format path
+      (`uart_log_parse_level()`, `uart_log_vprintf()`) passes tag/message bytes
+      through untouched and reports truncation and drops explicitly, neither of
+      which matches this symptom -- it is ESP-IDF's own
+      `ESP_LOGW("wifi", "")` inside the closed-source esp_wifi blobs, upstream
+      and by design. No content is lost. Optional, not recommended: silence it
+      with `esp_log_level_set("wifi", ESP_LOG_ERROR)`.
 
 ## 2. Web UI — Main / Dashboard page
 
