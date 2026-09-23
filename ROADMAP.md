@@ -1,8 +1,50 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, the bench reflash
-> itself landed, plus the partition-table-offset resolver and
-> boot_guard_reset-after-erase fixes (thirty-first sweep) — open items below.
+> **Status:** planning · **Last reviewed:** 2026-09-23, the ota_http HMAC
+> stack-overflow fix, the coordinated_gpio_test MCP tool, and the D4
+> config_volatile_dirty observability landing (thirty-second sweep) — open
+> items below.
+> - **`ota_http.c` HMAC context buffer overflow fixed** (`252225f7`): the
+>   stack buffer was sized 13 B while the longest context string,
+>   `"boot-guard-reset"`, is 16 B — a 3-byte stack overflow on every call
+>   using that context (the `flash_firmware()` post-flash reset path from the
+>   thirty-first sweep's D2 finding included). Now sized from
+>   `OTA_HTTP_CONTEXT_STR_MAX`, with a `_Static_assert` per literal plus a
+>   runtime guard. Still in flight, not yet landed: the shared
+>   `OTA_HTTP_CONTEXT_STR_MAX` header plus
+>   `tools/check_ota_http_context_mirror.ps1` to keep the PC-side mirror from
+>   drifting out of sync again (`hmacmirror`).
+> - **`coordinated_gpio_test` MCP tool landed** (series `46ec4c4d`/
+>   `e9a9e52e`/`742405ab`/`256ead69`): the two-board GPIO test is now reachable
+>   through the `kilnctrl` facade (185 tools now, up from 184), with lazy
+>   `ProbeClient` construction so a preflight refusal never opens a client,
+>   the refusal itself made inert on the boards, and `guard_pin` checked
+>   before every read.
+> - **D4 config-store regression now observable**: `config_volatile_dirty`
+>   (`config_store_is_volatile_dirty()`, `c118f417` with `85bcc43a`) adds a
+>   diagnostic flag bit — `KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY`, bit 7,
+>   the last spare bit — surfaced in `config_volatile_dirty` on
+>   `GET /api/status`; the PC decoder and mirror-drift map were updated to
+>   match. This makes the thirty-first sweep's D4 finding (a
+>   `config_version`/`config_crc` regression across a Pico reset with every
+>   observable field unchanged) visible without a JTAG read; it does not fix
+>   the underlying RP2040 config-store atomicity defect, which stays open
+>   (`docs/CONFIG_FILESYSTEM.md`).
+> - **`PROFILE_SLOTS_100_PLAN` section 8 Q1 resolved** (`9ae25c39`): the
+>   cfg-partition-tail question was already decided and flashed to the bench
+>   at `5f58ba09` on 2026-09-20 (ROADMAP.md row L) — the plan doc's open
+>   question was stale prose, marked resolved rather than open.
+> - **Still in flight, no SHA yet**: `d3bootid` (ESP-side `sw_reset`
+>   confirmation fallback keyed on the Pico's `boot_id`, closing D3),
+>   `maxreassert` (SaftyFW MAX31856 live-reset config re-assertion),
+>   `cfgrecrc` (SaftyFW periodic config re-CRC — `config_check_period_s`
+>   finally ticking).
+> - **Bench state unchanged**: ESP still `9c26dd91`, Pico still `987050f6`
+>   (no CMSIS-DAP probe enumerates), Class C heat/firing rows still BLOCKED
+>   on `estop_verified`.
+> **Previously reviewed:** 2026-09-23, the bench reflash itself landed, plus
+> the partition-table-offset resolver and boot_guard_reset-after-erase fixes
+> (thirty-first sweep).
 > - **Bench reflash done, 2026-09-23**: ESP flashed to `9c26dd91` from
 >   `C:\wt\sdkpin_np8lkw\firmware\KilnFW` (prebuilt, not rebuilt),
 >   `erase_partitions=["nvs"]`, flash verified against the running `app`
