@@ -260,21 +260,52 @@ class RunLevelPreflightTest(unittest.TestCase):
     def test_ok_gpio_and_capability_preflight_passes(self):
         ctx = {
             "gpio_test_preflight_fn": _ok_gpio_preflight,
+            "resolve_host_fn": lambda host: host,
             "capability_preflight_run": lambda preset, host: _FakeCapabilityPreflightReport(ok=True),
         }
         self.assertIsNone(M._run_level_preflight(ctx, host=None))
 
     def test_armed_refuses(self):
         pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=True)
-        ctx = {"gpio_test_preflight_fn": lambda host: pf}
+        ctx = {"gpio_test_preflight_fn": lambda host: pf, "resolve_host_fn": lambda host: host}
         reason = M._run_level_preflight(ctx, host=None)
         self.assertIsNotNone(reason)
         self.assertIn("ARMED", reason)
+        # reworded for OTA -- must not carry GpioTestPreflight's own
+        # GPIO-detach-test wording verbatim.
+        self.assertNotIn("detach GPIO", reason)
+        self.assertIn("OTA", reason)
+
+    def test_host_resolved_once_and_shared_between_probes(self):
+        # An explicit host, or the board's own STA IP, must reach BOTH
+        # probes identically -- a LAN-only board with no explicit host must
+        # not see capability_preflight silently fall back to the AP address
+        # while the gpio preflight resolved the real STA IP.
+        seen_gpio_host = []
+        seen_cp_host = []
+
+        def gpio_fn(host):
+            seen_gpio_host.append(host)
+            return _ok_gpio_preflight()
+
+        def cp_run(preset, host):
+            seen_cp_host.append(host)
+            return _FakeCapabilityPreflightReport(ok=True)
+
+        ctx = {
+            "gpio_test_preflight_fn": gpio_fn,
+            "resolve_host_fn": lambda host: "192.168.1.87",
+            "capability_preflight_run": cp_run,
+        }
+        result = M._run_level_preflight(ctx, host=None)
+        self.assertIsNone(result)
+        self.assertEqual(seen_gpio_host, ["192.168.1.87"])
+        self.assertEqual(seen_cp_host, ["192.168.1.87"])
 
     def test_paused_refuses(self):
         pf = dataclasses.replace(
             _ok_gpio_preflight(), profile_running_or_paused=True, profile_state_name="paused")
-        ctx = {"gpio_test_preflight_fn": lambda host: pf}
+        ctx = {"gpio_test_preflight_fn": lambda host: pf, "resolve_host_fn": lambda host: host}
         reason = M._run_level_preflight(ctx, host=None)
         self.assertIsNotNone(reason)
         self.assertIn("paused", reason.lower())
@@ -283,7 +314,7 @@ class RunLevelPreflightTest(unittest.TestCase):
         def raising(host):
             raise RuntimeError("link timeout")
 
-        ctx = {"gpio_test_preflight_fn": raising}
+        ctx = {"gpio_test_preflight_fn": raising, "resolve_host_fn": lambda host: host}
         reason = M._run_level_preflight(ctx, host=None)
         self.assertIsNotNone(reason)
         self.assertIn("link timeout", reason)
@@ -294,6 +325,7 @@ class RunLevelPreflightTest(unittest.TestCase):
 
         ctx = {
             "gpio_test_preflight_fn": _ok_gpio_preflight,
+            "resolve_host_fn": lambda host: host,
             "capability_preflight_run": raising,
         }
         reason = M._run_level_preflight(ctx, host=None)
@@ -303,6 +335,7 @@ class RunLevelPreflightTest(unittest.TestCase):
     def test_unacknowledged_crash_refuses(self):
         ctx = {
             "gpio_test_preflight_fn": _ok_gpio_preflight,
+            "resolve_host_fn": lambda host: host,
             "capability_preflight_run": lambda preset, host: _FakeCapabilityPreflightReport(
                 ok=False, crash_unacknowledged=True, crash_summary="synthetic panic"),
         }
@@ -322,6 +355,7 @@ class RunOtaMatrixTest(unittest.TestCase):
         self.ctx = {
             "srv": self.fake_srv, "host": None, "ap_password": None,
             "gpio_test_preflight_fn": _ok_gpio_preflight,
+            "resolve_host_fn": lambda host: host,
             "capability_preflight_run": lambda preset, host: self.cp_report,
             "bench_test_log_doc_path": os.path.join(self.tmpdir, "BENCH_TEST_LOG.md"),
         }

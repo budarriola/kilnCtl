@@ -143,18 +143,50 @@ def _dry_run_listing(cases: Optional[str]) -> str:
     return "\n".join(lines)
 
 
+def _ota_refusal_reasons(pf) -> "list[str]":
+    """Same tri-state fields `GpioTestPreflight.refusal_reasons()` checks,
+    reworded for an OTA run instead of the GPIO-detach test that dataclass
+    was originally written for -- its own text ("refusing to detach
+    GPIO4/5/10 from firmware...") is misleading here."""
+    reasons = []
+    if pf.safety_armed is not False:
+        reasons.append(f"safety relay is ARMED or its state could not be confirmed "
+                        f"(safety_armed={pf.safety_armed!r}) -- refusing to run an OTA "
+                        f"update while the safety chain could be live")
+    if pf.profile_running_or_paused is not False:
+        reasons.append(f"a profile is running or paused, or its state could not be "
+                        f"confirmed (profile_state={pf.profile_state_name!r}) -- an OTA "
+                        f"update must not run during a firing")
+    if pf.ota_interlock_ok is not True:
+        reasons.append(f"OTA interlock is not idle or could not be confirmed: "
+                        f"{pf.ota_interlock_reason}")
+    if pf.link_up is not True:
+        reasons.append(f"safety link was not confirmed up before the run "
+                        f"(link_up={pf.link_up!r})")
+    return reasons
+
+
 def _run_level_preflight(ctx: dict, host: Optional[str]) -> Optional[str]:
     """Fail-closed gate run BEFORE `BenchTestRunner` is constructed. Returns
     a refusal reason string, or `None` if every check passed. Every probe
     is read through `ctx` so tests can inject a fake board without ever
     reaching a real one -- production code (the `ota_matrix_run` tool
-    below) leaves both keys unset and gets the real checks."""
+    below) leaves both keys unset and gets the real checks. `host` is
+    resolved once (explicit host, else the board's STA IP, else the
+    fallback-AP address -- `coordinated_gpio_test`'s own resolution order)
+    and that same resolved value is passed to both probes below, so a
+    LAN-only board with no explicit `host` does not get a spurious refusal
+    from capability_preflight defaulting to the AP address while the gpio
+    preflight resolved the real STA IP."""
+    resolve_host_fn = ctx.get("resolve_host_fn", _gpio_tool._gpio_test_resolve_host)
+    resolved_host = resolve_host_fn(host)
+
     gpio_preflight_fn = ctx.get("gpio_test_preflight_fn", _gpio_tool._gpio_test_preflight)
     try:
-        pf = gpio_preflight_fn(host)
+        pf = gpio_preflight_fn(resolved_host)
     except Exception as exc:  # noqa: BLE001 -- unreadable must refuse, not pass
         return f"could not read run-level preconditions (ARMED/link/idle/interlock): {exc}"
-    reasons = pf.refusal_reasons()
+    reasons = _ota_refusal_reasons(pf)
     if reasons:
         return "; ".join(reasons)
 
@@ -162,7 +194,7 @@ def _run_level_preflight(ctx: dict, host: Optional[str]) -> Optional[str]:
 
     cp_run = ctx.get("capability_preflight_run", capability_preflight.run_preflight)
     try:
-        cp_report = cp_run({}, host or capability_preflight.PREFLIGHT_AP_DEFAULT_HOST)
+        cp_report = cp_run({}, resolved_host)
     except Exception as exc:  # noqa: BLE001 -- unreadable must refuse, not pass
         return f"could not read capability_preflight: {exc}"
     if not cp_report.ok:

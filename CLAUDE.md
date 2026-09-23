@@ -32,7 +32,7 @@ OT-P01..05), a thin front door onto the same `BenchTestRunner` engine
 roll back a slot, and reset the safety link) and a `dry_run=True` mode that
 lists the case matrix and its preconditions with zero board access. Before
 `BenchTestRunner` is even constructed it runs its own fail-closed run-level
-gate reusing `coordinated_gpio_test`'s ARMED/link-up/executor-idle-or-paused/
+gate reusing `coordinated_gpio_test`'s ARMED/link-up/executor-not-running-or-paused/
 OTA-interlock probe (unreadable counts as a refusal, never a pass) plus a
 `capability_preflight` read -- `BenchTestRunner.preflight()` alone folds every
 probe exception into "could not determine" and never checks ARMED or the
