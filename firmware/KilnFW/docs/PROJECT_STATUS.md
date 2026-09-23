@@ -175,7 +175,15 @@ an RP2040 safety processor (`firmware/SaftyFW`).
 
 ## Explicitly NOT done — do not assume otherwise
 
-- **The RP2040 safety-processor firmware exists and the link now works.**
+**2026-09-22 note:** the items below were written when `SaftyFW` was newly
+bring-up-verified; it is now a mature firmware (guards S3–S9, CT sense,
+dual-slot OTA) with commissioning in progress under ROADMAP.md M18 — see that
+section for the live, current list of what remains open there. The bullets
+below are kept as-is (historical) except where a bullet has since been closed
+outright, and the "Suggested order" list further down is superseded by M18's
+own remaining-work list.
+
+- **Historical.** The RP2040 safety-processor firmware exists and the link now works.
   `firmware/SaftyFW` runs on real hardware and the isolated link has carried
   real telemetry end to end (2026-08-23), after the UART baud rate was
   corrected to 9600 at the time — see `docs/SAFETY_LINK.md`. The barrier was
@@ -229,6 +237,19 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   onto `wifi_prov_owner`'s queue — see `ARCHITECTURE.md` §3.
 
 ## Suggested order for what's next
+
+**2026-09-22: superseded.** All seven items below were written before
+`SaftyFW` existed and are historical; every step (UART fix, autotune,
+on-target guard walk, thermocouple-fault gating, the safety-processor
+firmware itself, and the J2 pin identity — resolved via
+`KILNCTL_DISPLAY_SWAP_DC_RESET`) has since landed. **`ROADMAP.md`'s M18
+section ("Full commissioning of the dev board") is the live plan** for what
+remains; as of this writing that is: finishing the Class C backend rows still
+needing owner authorization (C1/C6/C9/C16 and the C7/C8/C21-C24/C26 ruling
+conflict), unwired web-UI commissioning rows (W8/W9/W10 profile
+create/delete/favorite, W45/W51 destructive import/Wi-Fi-forget, and the
+owner-gated heat/E-stop/OTA/auth/Pico-reset rows), and the LCD-class sweep.
+Do not restart any of the numbered items below; read M18 instead.
 
 1. Fix the PC-link UART before trusting any further "verified" claim that
    depends on it — almost everything downstream of it is currently

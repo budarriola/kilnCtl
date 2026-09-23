@@ -1869,9 +1869,11 @@ frames" — SaftyFW does not send either frame yet (tracked in
       event()` have never decoded a frame that actually crossed the wire,
       only a clean cross-compile. Needs both the link fixed (M0) and a
       SaftyFW build that sends Frame B/D.
-- [ ] **`pc_tools`/MCP client-side decode of the two new GET_DIAG/
-      GET_TRIP_EVENT subcommands is not built** — the ESP-side answer exists;
-      nothing on the PC side parses the reply yet.
+- [x] **`pc_tools`/MCP client-side decode of the two new GET_DIAG/
+      GET_TRIP_EVENT subcommands is not built** — DONE 2026-09-22:
+      `tools/PcTools/src/kilnctrl/devices_safety.py`'s `parse_safety_response()`
+      decodes both replies into `SafetyDiag`/`SafetyTripEvent` dataclasses
+      (commits `0d4ca0b6`, `df80c49f`, `f59b21c8`, `661d229f`).
 
 ### 10.14 Command queue between every control surface and the tasks that own state
 
