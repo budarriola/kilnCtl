@@ -22,9 +22,21 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (186 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `safety_get_param` was
-added -- a READ-ONLY GET_PARAM (0x23) wrapper that reports a Pico refusal as a
+the rest behind a search facade (187 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `ota_matrix_run` was
+added -- ROADMAP.md M8's scripted, `run_pctools_tests`-style regression for
+suite `ota` (`docs/BENCH_TEST_SYSTEM_PLAN.md` section 3.4: OT-B01, OT-E01..12,
+OT-P01..05), a thin front door onto the same `BenchTestRunner` engine
+`bench_test_run()` already drives, adding a hard `confirm=True` gate (this
+matrix can flash both processors, roll back a slot, and reset the safety
+link) and a `dry_run=True` mode that lists the case matrix and its
+preconditions with zero board access. Every mutating case already gated
+itself on the executor being idle and the OTA interlock reading ok
+(`cases_ota.py`) before this tool existed; this wrapper adds the run-level
+`confirm` gate on top rather than duplicating that. Unit-tested with a fake
+board only -- never run against real hardware. The one before it was
+`safety_get_param`,
+same day -- a READ-ONLY GET_PARAM (0x23) wrapper that reports a Pico refusal as a
 refusal, never as "not found". The one before it was `coordinated_gpio_test`,
 same day -- registers `tools/PcTools/scripts/coordinated_gpio_test.py`
 (HARDWARE.md section 1 Steps A/B, the ESP4/5<->Pico4/5 crossing test) through
