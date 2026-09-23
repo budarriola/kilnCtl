@@ -276,12 +276,25 @@ static bool s_fake_inbox_auto_push_armed = false;
 static bool s_fake_inbox_auto_push_done = false;
 static uart_proto_message_t s_fake_inbox_delayed_msg;
 
+// Opt-in only: advances the fake clock on every empty uart_protocol_receive()
+// poll. Left OFF by default -- the link_reply_us tests (test_link_reply_us_*
+// above) time an exchange by the EXACT number of microseconds their own stub
+// advances via s_stub_broadcast_advance_us, and safety_drain_inbox()'s
+// internal loop calls this stub again (finding the queue now empty) right
+// after consuming the one reply message pushed at send time; advancing the
+// clock unconditionally on every empty poll would inflate those exact-match
+// timings. Only test_get_param_no_reply_reports_timeout() (a genuine,
+// permanently-empty-queue case with no exact timing to pin) needs this on,
+// so it explicitly arms it, and every reset function turns it back off.
+static bool s_fake_inbox_advance_time_on_empty = false;
+
 static void fake_inbox_reset(void)
 {
     s_fake_inbox_count = 0;
     s_fake_inbox_pos = 0;
     s_fake_inbox_auto_push_armed = false;
     s_fake_inbox_auto_push_done = false;
+    s_fake_inbox_advance_time_on_empty = false;
 }
 
 static void fake_inbox_push(const uart_proto_message_t *msg)
@@ -293,7 +306,6 @@ static void fake_inbox_push(const uart_proto_message_t *msg)
 esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_msg, TickType_t wait_ticks)
 {
     (void)inbox;
-    (void)wait_ticks;
     if (s_fake_inbox_pos < s_fake_inbox_count) {
         *out_msg = s_fake_inbox[s_fake_inbox_pos++];
         return ESP_OK;
@@ -301,6 +313,18 @@ esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_m
     if (s_fake_inbox_auto_push_armed && !s_fake_inbox_auto_push_done) {
         s_fake_inbox_auto_push_done = true;
         fake_inbox_push(&s_fake_inbox_delayed_msg);
+    }
+    /* An empty receive never actually blocked on the fake clock -- without
+     * advancing it here, a call-site loop that re-derives its remaining
+     * budget from hal_time_now_us() (safety_link_get_param()/safety_link_
+     * get_stack_margin()) would spin forever on a genuinely-no-reply case
+     * instead of eventually observing remaining_ms == 0. Advance by
+     * (roughly) the requested wait plus a small margin so the loop always
+     * makes forward progress even when wait_ticks == 0. Opt-in only -- see
+     * s_fake_inbox_advance_time_on_empty's own comment above for why this
+     * must not run unconditionally. */
+    if (s_fake_inbox_advance_time_on_empty) {
+        fake_time_advance_us((uint64_t)wait_ticks * portTICK_PERIOD_MS * 1000u + 1000u);
     }
     return ESP_ERR_TIMEOUT;
 }
@@ -1479,6 +1503,100 @@ static void test_get_param_survives_a_leading_unrelated_frame(void)
     fake_inbox_reset();
 }
 
+// Negative-test companion for the loop fix itself (6bc4fc23's opus review,
+// follow-up item 1): a genuine no-reply case must still report ESP_ERR_
+// TIMEOUT once the loop's remaining budget is exhausted, not spin forever.
+// Before the fake uart_protocol_receive() stub above was made to advance
+// the fake clock on every empty poll, this test would hang: the call-site
+// loop re-derives its remaining budget from hal_time_now_us(), which never
+// advanced on an all-ESP_ERR_TIMEOUT stub, so remaining_ms never reached 0.
+static void test_get_param_no_reply_reports_timeout(void)
+{
+    TEST_SECTION("safety_link_get_param -- a request that is sent but never answered still "
+                 "reports ESP_ERR_TIMEOUT once the loop's budget is spent, rather than spinning "
+                 "forever (the fake clock now advances on every empty uart_protocol_receive() poll)");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = false; // nothing ever lands in the inbox
+    s_fake_inbox_advance_time_on_empty = true;
+
+    uint8_t out[KILNLINK_PARAM_MAX_LEN];
+    size_t out_len = 0;
+    esp_err_t err = safety_link_get_param(&link, /*param_id=*/0x0505, out, sizeof(out), &out_len);
+
+    TEST_CHECK(err == ESP_ERR_TIMEOUT, "no reply ever arrives -- the call reports a timeout, not a hang");
+
+    fake_inbox_reset();
+}
+
+// Loop-fix coverage for safety_link_get_stack_margin(), mirroring test_get_
+// param_survives_a_leading_unrelated_frame() above exactly: a periodic
+// STATUS/DIAG/POWER push dequeued ahead of our own STACK_MARGIN reply must
+// not end the wait early -- the reply, which genuinely has not arrived yet
+// at that point, must still be picked up on a later drain within the same
+// call's budget.
+static void test_get_stack_margin_survives_a_leading_unrelated_frame(void)
+{
+    TEST_SECTION("safety_link_get_stack_margin -- an unrelated frame (a periodic STATUS/DIAG/POWER "
+                 "push) dequeued ahead of our own STACK_MARGIN reply must not end the wait early; the "
+                 "reply, which genuinely has not arrived yet at that point, must still be picked up on "
+                 "a later drain within the same call's budget.");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_stub_broadcast_send_succeeds = true;
+    /* The reply is NOT pushed at send time -- it "arrives" only after the
+     * call's first internal drain empties the queue and times out once,
+     * exactly like the real bug this reproduces. */
+    s_stub_broadcast_reply_push = false;
+    s_stub_broadcast_advance_us = 500;
+
+    s_stub_broadcast_leading_push = true;
+    memset(&s_stub_broadcast_leading_msg, 0, sizeof(s_stub_broadcast_leading_msg));
+    s_stub_broadcast_leading_msg.length = 1;
+    s_stub_broadcast_leading_msg.payload[0] = SAFETY_CMD_GET_STATUS;
+
+    kilnlink_stack_margin_t margin_in;
+    memset(&margin_in, 0, sizeof(margin_in));
+    margin_in.rounds_completed = 3;
+    margin_in.last_tick_ms = 12345;
+    for (unsigned i = 0; i < KILNLINK_STACK_MARGIN_NUM_TASKS; i++) {
+        margin_in.entries[i].task_id = (uint8_t)i;
+        margin_in.entries[i].high_water_words = (uint16_t)(100 + i);
+        margin_in.entries[i].stack_total_words = (uint16_t)(512 + i);
+    }
+
+    memset(&s_fake_inbox_delayed_msg, 0, sizeof(s_fake_inbox_delayed_msg));
+    kilnlink_stack_margin_status_t enc_status = KILNLINK_STACK_MARGIN_OK;
+    s_fake_inbox_delayed_msg.length =
+        (uint16_t)kilnlink_stack_margin_encode(&margin_in, s_fake_inbox_delayed_msg.payload,
+                                                sizeof(s_fake_inbox_delayed_msg.payload), &enc_status);
+    TEST_CHECK(enc_status == KILNLINK_STACK_MARGIN_OK, "the delayed reply frame encodes cleanly");
+
+    kilnlink_stack_margin_t out;
+    memset(&out, 0, sizeof(out));
+    esp_err_t err = safety_link_get_stack_margin(&link, &out);
+
+    TEST_CHECK(err == ESP_OK, "a reply that arrives after a leading unrelated frame must still be "
+                              "picked up within the call's own timeout budget, not dropped as ESP_ERR_TIMEOUT");
+    TEST_CHECK(out.rounds_completed == 3 && out.last_tick_ms == 12345,
+               "the decoded reply matches the delayed reply, not the leading unrelated frame");
+    TEST_CHECK(out.entries[0].high_water_words == 100 && out.entries[8].high_water_words == 108,
+               "per-task entries roundtrip through the delayed reply");
+
+    /* Leave global stub state clean for every test after this one. */
+    s_stub_broadcast_leading_push = false;
+    fake_inbox_reset();
+}
+
 // --------------------------------------------------------------------------
 // safety_reset_stale_peer_info_if_link_down() -- opus-review finding 1,
 // "the boot_id evidence channel is single-shot and unrecoverable". Before
@@ -2110,6 +2228,8 @@ int main(void)
     test_get_param_drops_reply_with_mismatched_param_id();
     test_get_param_succeeds_with_matching_param_id();
     test_get_param_survives_a_leading_unrelated_frame();
+    test_get_param_no_reply_reports_timeout();
+    test_get_stack_margin_survives_a_leading_unrelated_frame();
     test_stale_reset_leaves_flags_alone_while_link_is_up();
     test_stale_reset_clears_flags_once_link_is_observed_down();
     test_stale_reset_never_received_is_also_down();

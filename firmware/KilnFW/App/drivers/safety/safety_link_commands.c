@@ -950,6 +950,9 @@ esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_mar
         if (remaining_ms < 0) {
             remaining_ms = 0;
         }
+        if (remaining_ms < (int32_t)portTICK_PERIOD_MS) {
+            remaining_ms = 0;
+        }
         (void)safety_drain_inbox(link, (uint32_t)remaining_ms);
         got_reply = safety_take_stashed_stack_margin(link, &reply);
         if (got_reply || remaining_ms == 0) {
@@ -1051,6 +1054,9 @@ esp_err_t safety_link_get_param(SafetyLinkClass *link, uint16_t param_id, uint8_
         int64_t elapsed_ms = ((int64_t)hal_time_now_us() - gp_wait_started_us) / 1000;
         int32_t remaining_ms = (int32_t)SAFETY_LINK_REPLY_TIMEOUT_MS - (int32_t)elapsed_ms;
         if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        if (remaining_ms < (int32_t)portTICK_PERIOD_MS) {
             remaining_ms = 0;
         }
         (void)safety_drain_inbox(link, (uint32_t)remaining_ms);
