@@ -1038,6 +1038,16 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
 
     $binPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.bin"
     $elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
+    # bootloader.bin/partition-table.bin -- added 2026-09-23. flash_firmware()
+    # (tools/PcTools/src/kilnctrl/mcp_server_flash.py) unconditionally requires
+    # both alongside KilnCtrl.bin as a pre-flight, but until now this check
+    # only ever published the app image and its ELF -- a from-scratch worktree
+    # built entirely through this check therefore passed every check_*.ps1 and
+    # still could not be flashed, because nothing anywhere produced these two
+    # in the invoking tree's build\ directory. idf.py's own build already
+    # produces both as ordinary build outputs; publish them the same way.
+    $bootloaderPath = Join-Path $WorktreePath "firmware\KilnFW\build\bootloader\bootloader.bin"
+    $partitionTablePath = Join-Path $WorktreePath "firmware\KilnFW\build\partition_table\partition-table.bin"
 
     Write-Host "Building KilnFW target (CCACHE_DISABLE=1) in $WorktreePath ..."
     $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
@@ -1052,6 +1062,12 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     if (-not (Test-Path -LiteralPath $binPath) -or -not (Test-Path -LiteralPath $elfPath)) {
         Fail "idf.py build reported success (exit 0) but $binPath / $elfPath does not exist -- refusing to report PASS without a real build artifact."
     }
+    if (-not (Test-Path -LiteralPath $bootloaderPath)) {
+        Fail "idf.py build reported success (exit 0) but $bootloaderPath does not exist -- refusing to report PASS without a real build artifact (flash_firmware() requires this file)."
+    }
+    if (-not (Test-Path -LiteralPath $partitionTablePath)) {
+        Fail "idf.py build reported success (exit 0) but $partitionTablePath does not exist -- refusing to report PASS without a real build artifact (flash_firmware() requires this file)."
+    }
 
     # Positive freshness check, not just existence: both artifacts' last-write
     # time must be AT OR AFTER the newest tracked source mtime captured above
@@ -1062,10 +1078,15 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # every current source file (the legitimate no-op case) must PASS.
     $binTime = (Get-Item -LiteralPath $binPath).LastWriteTime
     $elfTime = (Get-Item -LiteralPath $elfPath).LastWriteTime
+    $bootloaderTime = (Get-Item -LiteralPath $bootloaderPath).LastWriteTime
+    $partitionTableTime = (Get-Item -LiteralPath $partitionTablePath).LastWriteTime
     # Small negative tolerance for filesystem timestamp granularity/clock skew.
     $tolerance = [TimeSpan]::FromSeconds(2)
     if (($binTime -lt $newestSourceTime.Subtract($tolerance)) -or ($elfTime -lt $newestSourceTime.Subtract($tolerance))) {
         Fail "idf.py build reported success (exit 0) but $binPath (mtime $binTime) / $elfPath (mtime $elfTime) predate the newest tracked source file's mtime ($newestSourceTime) -- the build silently did not relink against current source (known cause: MSYSTEM/MSYS environment inherited from a git-bash launcher confusing idf.py, or any other silent no-op). Refusing to publish a stale artifact as current."
+    }
+    if (($bootloaderTime -lt $newestSourceTime.Subtract($tolerance)) -or ($partitionTableTime -lt $newestSourceTime.Subtract($tolerance))) {
+        Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) / $partitionTablePath (mtime $partitionTableTime) predate the newest tracked source file's mtime ($newestSourceTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
     }
 
     # Record the sdkconfig this build directory is now known-good against,
@@ -1183,6 +1204,25 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     Publish-BuildArtifact -SourcePath $binPath -TempPath $binTmp -FinalPath (Join-Path $mainBuildDir "KilnCtrl.bin")
     Write-Host "Published fresh KilnCtrl.elf/.bin to $mainBuildDir"
 
+    # ALSO PUBLISH bootloader.bin/partition-table.bin (2026-09-23). See the
+    # comment at $bootloaderPath's declaration above for why: flash_firmware()
+    # requires both alongside KilnCtrl.bin and, before this change, nothing in
+    # the automated check suite ever published them for a from-scratch
+    # worktree. Same atomic publish convention as the two artifacts above
+    # (Copy-Item to a PID-suffixed temp file, then MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING) -- the destination subdirectories are created
+    # first since a fresh main-tree build\ has neither bootloader\ nor
+    # partition_table\ yet.
+    $mainBootloaderDir = Join-Path $mainBuildDir "bootloader"
+    $mainPartitionTableDir = Join-Path $mainBuildDir "partition_table"
+    New-Item -ItemType Directory -Force -Path $mainBootloaderDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $mainPartitionTableDir | Out-Null
+    $bootloaderTmp = Join-Path $mainBootloaderDir "bootloader.bin.tmp_$PID"
+    $partitionTableTmp = Join-Path $mainPartitionTableDir "partition-table.bin.tmp_$PID"
+    Publish-BuildArtifact -SourcePath $bootloaderPath -TempPath $bootloaderTmp -FinalPath (Join-Path $mainBootloaderDir "bootloader.bin")
+    Publish-BuildArtifact -SourcePath $partitionTablePath -TempPath $partitionTableTmp -FinalPath (Join-Path $mainPartitionTableDir "partition-table.bin")
+    Write-Host "Published fresh bootloader.bin/partition-table.bin to $mainBootloaderDir / $mainPartitionTableDir"
+
     # ALSO PUBLISH compile_commands.json (2026-09-15). check_compile_esp_backends.ps1
     # (firmware/hwAbstraction/test/compile_esp_backends.ps1) and check_duplicate_symbols.ps1
     # (tools/check_duplicate_symbols.ps1) both CONSUME build output that only this
@@ -1282,6 +1322,8 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     $mainBuildDirCleanup = Join-Path $repoRoot "firmware\KilnFW\build"
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "KilnCtrl.elf.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "KilnCtrl.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "bootloader\bootloader.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "partition_table\partition-table.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
 }
 

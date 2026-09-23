@@ -1099,7 +1099,18 @@ def flash_firmware(
     missing = [p for p in required if not os.path.isfile(p)]
     if missing:
         override_note = " (kiln_fw_root override)" if kiln_fw_root else ""
-        return f"error: missing build output(s){override_note}, run `idf.py build` first: " + ", ".join(missing)
+        stale_publish_names = ("bootloader.bin", "partition_table" + os.sep + "partition-table.bin")
+        stale_publish_hits = [p for p in missing if p.endswith(stale_publish_names)]
+        stale_publish_note = ""
+        if stale_publish_hits:
+            stale_publish_note = (
+                " " + ", ".join(stale_publish_hits) + " missing: a build published by "
+                "check_00_kilnfw_target_build.ps1 before this change did not include it."
+            )
+        return (
+            f"error: missing build output(s){override_note}, run `idf.py build` first: "
+            + ", ".join(missing) + stale_publish_note
+        )
 
     # Resolve the write target from the actual partitions.csv for this tree
     # (docs/OTA_SINGLE_SLOT_PLAN.md) rather than a hardcoded offset -- this is
