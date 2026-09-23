@@ -16,8 +16,8 @@ compile time) but its handle is NULL, so ``alive`` reads false.
 This module is pure: no link, no serial port, no board. It has two jobs:
 
 1. Parse the ``$requiredNames`` PowerShell array literal out of
-   ``tools/check_stack_margin_registration.ps1`` (:func:`load_required_task_names`,
-   :func:`load_required_task_specs`), so the expected-task list lives in
+   ``tools/check_stack_margin_registration.ps1`` (:func:`load_required_task_specs`),
+   so the expected-task list lives in
    exactly one place -- that script's own source -- rather than being copied
    into a second, driftable Python list.
 2. Diff a live :class:`~kilnctrl.devices_info.StackMarginEntry` list against
@@ -220,16 +220,6 @@ def parse_required_task_specs(script_text: str) -> "tuple[TaskSpec, ...]":
     return tuple(specs)
 
 
-def parse_required_task_names(script_text: str) -> "tuple[str, ...]":
-    """Extract just the names from :func:`parse_required_task_specs`, in
-    source order -- kept for callers that don't need the liveness tags.
-
-    Raises :class:`TaskLivenessParseError` under the same conditions as
-    :func:`parse_required_task_specs`.
-    """
-    return tuple(spec.name for spec in parse_required_task_specs(script_text))
-
-
 def load_required_task_specs(script_path: "str | Path") -> "tuple[TaskSpec, ...]":
     """Read and parse ``script_path`` (normally
     ``tools/check_stack_margin_registration.ps1``). Raises
@@ -237,13 +227,6 @@ def load_required_task_specs(script_path: "str | Path") -> "tuple[TaskSpec, ...]
     unknown liveness tag) or ``OSError`` (file not found/unreadable)."""
     text = Path(script_path).read_text(encoding="utf-8")
     return parse_required_task_specs(text)
-
-
-def load_required_task_names(script_path: "str | Path") -> "tuple[str, ...]":
-    """Read and parse ``script_path``, names only -- see
-    :func:`load_required_task_specs`."""
-    text = Path(script_path).read_text(encoding="utf-8")
-    return parse_required_task_names(text)
 
 
 @dataclass(frozen=True)
@@ -343,9 +326,8 @@ def check_task_liveness(
     tags: "dict[str, str] | None" = None,
 ) -> TaskLivenessReport:
     """Diff a live ``get_stack_margin()`` reading (``entries``) against
-    ``expected_names`` (normally :func:`load_required_task_names`'s
-    result, or the names out of :func:`load_required_task_specs`). Pure --
-    no I/O.
+    ``expected_names`` (normally the names out of
+    :func:`load_required_task_specs`'s result). Pure -- no I/O.
 
     ``tags``: optional ``{name: tag}`` map (normally built from
     :func:`load_required_task_specs`'s result) classifying each expected

@@ -16,9 +16,7 @@ from kilnctrl.task_liveness import (
     TaskLivenessParseError,
     TaskSpec,
     check_task_liveness,
-    load_required_task_names,
     load_required_task_specs,
-    parse_required_task_names,
     parse_required_task_specs,
 )
 
@@ -32,7 +30,16 @@ def _entry(name, alive=True, level=StackMarginLevel.OK, configured=4096, hwm=200
     )
 
 
-# --- parse_required_task_names ---------------------------------------------
+def _names(script_text: str) -> "tuple[str, ...]":
+    """Names only, in source order -- built on parse_required_task_specs()
+    since parse_required_task_names() was removed as dead code (no
+    production caller once tag-aware parsing landed); these tests still
+    exercise the shared name-parsing edge cases through the real entry
+    point."""
+    return tuple(spec.name for spec in parse_required_task_specs(script_text))
+
+
+# --- name parsing (via parse_required_task_specs) ---------------------------
 
 
 def test_parse_required_task_names_basic():
@@ -42,7 +49,7 @@ $requiredNames = @(
     "danger_mode"
 )
 '''
-    assert parse_required_task_names(text) == ("autotune_engine", "boot_button", "danger_mode")
+    assert _names(text) == ("autotune_engine", "boot_button", "danger_mode")
 
 
 def test_parse_required_task_names_strips_comments():
@@ -53,7 +60,7 @@ $requiredNames = @(
     "boot_button"
 )
 '''
-    names = parse_required_task_names(text)
+    names = _names(text)
     assert names == ("autotune_engine", "boot_button")
     assert "not_a_real_task" not in names
 
@@ -68,50 +75,30 @@ $requiredNames = @(
     'danger_mode'
 )
 '''
-    assert parse_required_task_names(text) == ("autotune_engine", "boot_button", "danger_mode")
+    assert _names(text) == ("autotune_engine", "boot_button", "danger_mode")
 
 
 def test_parse_required_task_names_dedupes_preserving_order():
     text = '$requiredNames = @("a", "b", "a", "c")'
-    assert parse_required_task_names(text) == ("a", "b", "c")
+    assert _names(text) == ("a", "b", "c")
 
 
 def test_parse_required_task_names_raises_when_variable_missing():
     """A renamed or restructured $requiredNames must fail loud, not report
     an empty (vacuously-passing) required-task set."""
     with pytest.raises(TaskLivenessParseError):
-        parse_required_task_names("$someOtherVariable = @(\"a\")")
+        _names("$someOtherVariable = @(\"a\")")
 
 
 def test_parse_required_task_names_raises_when_block_empty():
     with pytest.raises(TaskLivenessParseError):
-        parse_required_task_names("$requiredNames = @(\n    # nothing but comments\n)")
+        _names("$requiredNames = @(\n    # nothing but comments\n)")
 
 
 def test_parse_required_task_names_raises_on_truncated_block():
     """No closing paren at all -- must not silently match garbage."""
     with pytest.raises(TaskLivenessParseError):
-        parse_required_task_names('$requiredNames = @(\n    "a", "b"\n# never closed')
-
-
-def test_load_required_task_names_against_the_real_check_script():
-    """This is the negative-test-relevant guard for THIS parser: if
-    check_stack_margin_registration.ps1's $requiredNames block is ever
-    renamed or restructured without updating parse_required_task_names(),
-    this test fails loud rather than every caller silently getting an
-    empty/stale required-task set."""
-    assert _REAL_CHECK_SCRIPT.is_file(), (
-        f"expected {_REAL_CHECK_SCRIPT} to exist -- has the check script moved?"
-    )
-    names = load_required_task_names(_REAL_CHECK_SCRIPT)
-    # A sanity floor mirroring the check script's own "implausibly low"
-    # guard for its call-site count -- catches this parser going blind the
-    # same way that script guards against itself going blind.
-    assert len(names) >= 20
-    assert "kiln_io_owner" in names
-    assert "httpd_worker" in names
-    assert "kiln_cfg_swap" in names
-    assert "pico_auto_update" in names
+        _names('$requiredNames = @(\n    "a", "b"\n# never closed')
 
 
 # --- check_task_liveness ----------------------------------------------------
@@ -209,10 +196,8 @@ def test_parse_required_task_specs_rejects_unknown_tag():
 
 
 def test_parse_required_task_specs_preserves_names_order_and_dedup():
-    """parse_required_task_names() must keep behaving identically when
-    implemented in terms of parse_required_task_specs()."""
     text = '$requiredNames = @("a", "b", "a", "c")'
-    assert parse_required_task_names(text) == ("a", "b", "c")
+    assert tuple(s.name for s in parse_required_task_specs(text)) == ("a", "b", "c")
 
 
 def test_load_required_task_specs_against_the_real_check_script():
