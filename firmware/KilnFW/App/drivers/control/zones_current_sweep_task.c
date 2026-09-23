@@ -2231,11 +2231,14 @@ static void zone_sweep_record_ct_attribution(void)
 
 zone_sweep_refusal_t zones_current_sweep_start(void)
 {
-    bool profile_running_or_paused = false;
-    profile_exec_status_t pstat;
-    memset(&pstat, 0, sizeof(pstat));
-    profile_executor_get_status(&pstat);
-    profile_running_or_paused = (pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED);
+    /* Only state (RUNNING/PAUSED) is needed here -- profile_executor_get_
+     * active_id() is the narrow sibling of profile_executor_get_status()
+     * profile_executor.h recommends for exactly this, avoiding a 1384-byte
+     * profile_exec_status_t stack local. This runs on the httpd task
+     * (zones_http.c's sweep_start_post_handler()), same 8192-byte stack as
+     * every other handler in this file's audit trail. */
+    uint8_t active_id = 0;
+    bool profile_running_or_paused = profile_executor_get_active_id(&active_id);
 
     bool link_up = false;
     bool trip_latched = false;

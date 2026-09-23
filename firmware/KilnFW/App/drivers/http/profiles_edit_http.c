@@ -669,9 +669,11 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
     /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
      * delete a slot the executor is currently running or has paused. Same
      * check as profiles_http.c's benchproto profiles_http_delete(). */
-    profile_exec_status_t pstat;
-    profile_executor_get_status(&pstat);
-    if ((pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED) && pstat.profile_id == id) {
+    /* Only "is this id currently running/paused" is needed here -- use the
+     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * profile_exec_status_t stack local on the httpd task. */
+    uint8_t active_id = 0;
+    if (profile_executor_get_active_id(&active_id) && active_id == id) {
         /* Set explicitly rather than via httpd_resp_send_err(): esp_http_server
          * has no HTTPD_409_CONFLICT enumerator (kiln_cfg_http.c's identical
          * comment/pattern). */

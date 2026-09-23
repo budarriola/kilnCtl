@@ -261,6 +261,17 @@ void profile_executor_get_status(profile_exec_status_t *out)
     memset(out, 0, sizeof(*out));
     out->state = s_fake_exec_state;
 }
+/* adaptive_tune_revert() now calls this narrow accessor instead of the
+ * full-struct getter (2026-09-22 exec-status stack-local audit) -- derives
+ * the same RUNNING-or-PAUSED answer from the same s_fake_exec_state the
+ * fake above uses. */
+bool profile_executor_get_active_id(uint8_t *out_id)
+{
+    if (out_id) {
+        *out_id = 0;
+    }
+    return (s_fake_exec_state == PROFILE_EXEC_RUNNING || s_fake_exec_state == PROFILE_EXEC_PAUSED);
+}
 
 // R2 (2026-09-01, opus review of commit 7c47683) / S2+S3 (2026-09-01 audit
 // of ae5905f): the busy-modeling uart_bridge_ext_run_on_flash_worker()/

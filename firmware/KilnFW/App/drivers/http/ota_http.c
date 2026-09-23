@@ -5,8 +5,10 @@
 #include "ota_http_util.h"
 
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "psa/crypto.h"
 
 #include "build_info.h" /* FW_GIT_COMMIT/FW_GIT_DIRTY/FW_BUILD_DATE/FW_BUILD_TIME -- TODO.md 9.6's
@@ -53,8 +55,10 @@
 #include "ota_http_util.h"
 
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "psa/crypto.h"
 
 #include "build_info.h" /* FW_GIT_COMMIT/FW_GIT_DIRTY/FW_BUILD_DATE/FW_BUILD_TIME -- TODO.md 9.6's
@@ -754,9 +758,20 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     // .state field is used here -- see the per-zone loop below for why
     // pstat.zones[] itself is the WRONG source for temperature/heater-
     // commanded data.
-    profile_exec_status_t pstat;
-    profile_executor_get_status(&pstat);
-    switch (pstat.state) {
+    /* Heap, not a stack local: this runs on the httpd task (8192-byte
+     * stack, wifi_provision_http.c), and profile_exec_status_t is 1384
+     * bytes -- same reasoning and pattern as safety_cfg_http.c's reads.
+     * Freed right after the switch below; nothing past this point needs
+     * more than the enum it already copied out. */
+    profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!pstat) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap, "out of memory checking profile state");
+        }
+        return OTA_INTERLOCK_REFUSED;
+    }
+    profile_executor_get_status(pstat);
+    switch (pstat->state) {
         case PROFILE_EXEC_RUNNING: snap.profile_state = OTA_INTERLOCK_PROFILE_RUNNING; break;
         case PROFILE_EXEC_PAUSED:  snap.profile_state = OTA_INTERLOCK_PROFILE_PAUSED; break;
         case PROFILE_EXEC_DONE:    snap.profile_state = OTA_INTERLOCK_PROFILE_DONE; break;
@@ -764,6 +779,7 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
         case PROFILE_EXEC_IDLE:
         default:                   snap.profile_state = OTA_INTERLOCK_PROFILE_IDLE; break;
     }
+    free(pstat);
 
     snap.autotune_active = autotune_engine_is_active();
 

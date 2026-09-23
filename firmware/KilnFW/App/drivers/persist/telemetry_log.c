@@ -129,7 +129,18 @@ static int autotune_event_code_for_transition(autotune_engine_state_t prev, auto
 static void telemetry_log_task(void *arg)
 {
     (void)arg;
-    profile_exec_status_t fst;
+    /* telemetry_log_task's own stack is 6144 B (xTaskCreatePinnedToCoreWithCaps
+     * below) and this task runs forever -- heap-allocate fst ONCE, outside the
+     * loop, rather than putting a 1384-byte profile_exec_status_t on this
+     * stack every tick (matching safety_cfg_http.c's precedent for this
+     * struct, adapted for a task that never returns: one allocation for the
+     * task's entire lifetime rather than malloc/free every tick). */
+    profile_exec_status_t *fst = heap_caps_malloc(sizeof(*fst), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (fst == NULL) {
+        ESP_LOGE(TAG, "telemetry_log_task: out of memory allocating profile_exec_status_t, task exiting");
+        vTaskDelete(NULL);
+        return;
+    }
     autotune_engine_status_t ast;
     char line[TELEMETRY_LOG_LINE_BUF];
 
@@ -174,12 +185,12 @@ static void telemetry_log_task(void *arg)
          * (log_store_mount.c), never on this task's own PSRAM stack
          * touching flash directly. Nothing in this loop can stall waiting
          * on another task indefinitely. */
-        profile_executor_get_status(&fst);
-        if (fst.state == PROFILE_EXEC_RUNNING || fst.state == PROFILE_EXEC_PAUSED) {
-            if (fst.total_elapsed_s >= firing_next_s) {
-                firing_next_s = fst.total_elapsed_s + TELEMETRY_LOG_FIRING_PERIOD_S;
+        profile_executor_get_status(fst);
+        if (fst->state == PROFILE_EXEC_RUNNING || fst->state == PROFILE_EXEC_PAUSED) {
+            if (fst->total_elapsed_s >= firing_next_s) {
+                firing_next_s = fst->total_elapsed_s + TELEMETRY_LOG_FIRING_PERIOD_S;
                 if (s_enabled) {
-                    int n = telemetry_format_firing(&fst, line, sizeof(line));
+                    int n = telemetry_format_firing(fst, line, sizeof(line));
                     if (n > 0) {
                         ESP_LOGI(TAG, "%s", line);
                     }
@@ -188,12 +199,12 @@ static void telemetry_log_task(void *arg)
         } else {
             firing_next_s = 0; /* re-arm so the NEXT run logs its first tick immediately */
         }
-        int firing_code = firing_event_code_for_transition(firing_prev_state, fst.state);
+        int firing_code = firing_event_code_for_transition(firing_prev_state, fst->state);
         if (firing_code >= 0) {
             event_log_severity_t sev = (firing_code == EVENT_CODE_FIRING_FAULTED) ? EVENT_LOG_SEV_ERROR
                                                                                    : EVENT_LOG_SEV_INFO;
-            int32_t arg = (firing_code == EVENT_CODE_FIRING_FAULTED) ? (int32_t)fst.fault_guard
-                                                                      : (int32_t)fst.total_elapsed_s;
+            int32_t arg = (firing_code == EVENT_CODE_FIRING_FAULTED) ? (int32_t)fst->fault_guard
+                                                                      : (int32_t)fst->total_elapsed_s;
             /* PID_EXPANSION_PLAN.md sec 7.3, DEFECT 4 fix: DONE is the one
              * transition where this run's dwell was possibly shortened by
              * ramp-assist dwell credit (profile_exec_status_t.ramp_dwell_
@@ -211,15 +222,15 @@ static void telemetry_log_task(void *arg)
             char firing_note[EVENT_LOG_NOTE_LEN];
             firing_note[0] = '\0';
             const char *note_ptr = NULL;
-            if (firing_code == EVENT_CODE_FIRING_DONE && fst.ramp_dwell_credit_applied_s > 0.0f) {
+            if (firing_code == EVENT_CODE_FIRING_DONE && fst->ramp_dwell_credit_applied_s > 0.0f) {
                 snprintf(firing_note, sizeof(firing_note), "dwc=%us",
-                         (unsigned)fst.ramp_dwell_credit_applied_s);
+                         (unsigned)fst->ramp_dwell_credit_applied_s);
                 note_ptr = firing_note;
             }
             event_log_emit(LOG_STORE_KIND_FIRING, sev, EVENT_LOG_SRC_FIRING, (event_log_code_t)firing_code,
                             EVENT_LOG_ZONE_NONE, arg, note_ptr);
         }
-        firing_prev_state = fst.state;
+        firing_prev_state = fst->state;
 
         /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag warning event,
          * ALWAYS checked (not gated on ramp_assist_enabled -- see
@@ -230,14 +241,14 @@ static void telemetry_log_task(void *arg)
          * would report a spurious CLEARED (or never report the CLEARED for
          * a lag that was genuinely still open) against the NEXT run's own
          * numbers. */
-        bool firing_live = (fst.state == PROFILE_EXEC_RUNNING || fst.state == PROFILE_EXEC_PAUSED);
+        bool firing_live = (fst->state == PROFILE_EXEC_RUNNING || fst->state == PROFILE_EXEC_PAUSED);
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            bool cur_sustained = firing_live && fst.zones[zi].active && fst.zones[zi].ramp_lag_sustained;
+            bool cur_sustained = firing_live && fst->zones[zi].active && fst->zones[zi].ramp_lag_sustained;
             int32_t arg = 0;
             uint8_t note[EVENT_LOG_NOTE_LEN];
             int lag_code = telemetry_ramp_lag_event_for_transition(
-                lag_prev_sustained[zi], cur_sustained, fst.zones[zi].actual_c,
-                fst.zones[zi].ramp_lag_commanded_rate_c_per_hr, fst.zones[zi].ramp_lag_achieved_rate_c_per_hr,
+                lag_prev_sustained[zi], cur_sustained, fst->zones[zi].actual_c,
+                fst->zones[zi].ramp_lag_commanded_rate_c_per_hr, fst->zones[zi].ramp_lag_achieved_rate_c_per_hr,
                 lag_prev_held_s[zi], lag_prev_commanded[zi], lag_prev_achieved[zi], &arg, note);
             if (lag_code >= 0) {
                 event_log_emit(LOG_STORE_KIND_FIRING, EVENT_LOG_SEV_WARN, EVENT_LOG_SRC_FIRING,
@@ -245,9 +256,9 @@ static void telemetry_log_task(void *arg)
             }
             lag_prev_sustained[zi] = cur_sustained;
             if (cur_sustained) {
-                lag_prev_held_s[zi] = fst.zones[zi].ramp_lag_held_s;
-                lag_prev_commanded[zi] = fst.zones[zi].ramp_lag_commanded_rate_c_per_hr;
-                lag_prev_achieved[zi] = fst.zones[zi].ramp_lag_achieved_rate_c_per_hr;
+                lag_prev_held_s[zi] = fst->zones[zi].ramp_lag_held_s;
+                lag_prev_commanded[zi] = fst->zones[zi].ramp_lag_commanded_rate_c_per_hr;
+                lag_prev_achieved[zi] = fst->zones[zi].ramp_lag_achieved_rate_c_per_hr;
             }
         }
 

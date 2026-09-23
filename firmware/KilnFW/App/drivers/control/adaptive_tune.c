@@ -59,6 +59,7 @@
                              section 5 item 9 -- see adaptive_tune_internal.h's
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
                              (re-derivable) treatment this item gets. */
+#include "profile_executor.h"
 
 #include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3
 #include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
@@ -1172,9 +1173,13 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     // takes adaptive_tune_lock below -- s_exec.lock -> adaptive_tune_lock,
     // never nested the other way, same order every other call site in this
     // module keeps.
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+    /* Only state (RUNNING/PAUSED) is needed here -- use the narrow accessor
+     * profile_executor.h recommends rather than a 1384-byte profile_exec_
+     * status_t stack local. This is reachable from the httpd task
+     * (adaptive_tune_http.c's revert POST handler calls straight into this
+     * function on its own 8192-byte stack). */
+    uint8_t active_id = 0;
+    if (profile_executor_get_active_id(&active_id)) {
         if (reason) {
             snprintf(reason, reason_cap, "cannot revert while a firing is running or paused");
         }

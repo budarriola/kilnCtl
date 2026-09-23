@@ -162,18 +162,23 @@ void dashboard_plan_exec_fields(const profile_exec_status_t *st, int64_t *out_to
 
 esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (st == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory\"}");
+    }
+    profile_executor_get_status(st);
 
-    char name_escaped[sizeof(st.profile_name) * 2 + 1];
-    json_escape(st.profile_name, name_escaped, sizeof(name_escaped));
-    char reason_escaped[sizeof(st.fault_reason) * 2 + 1];
-    json_escape(st.fault_reason, reason_escaped, sizeof(reason_escaped));
+    char name_escaped[sizeof(st->profile_name) * 2 + 1];
+    json_escape(st->profile_name, name_escaped, sizeof(name_escaped));
+    char reason_escaped[sizeof(st->fault_reason) * 2 + 1];
+    json_escape(st->fault_reason, reason_escaped, sizeof(reason_escaped));
 
     int64_t total_planned_s, remaining_s;
     uint32_t elapsed_s;
     bool remaining_is_estimate;
-    dashboard_plan_exec_fields(&st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
+    dashboard_plan_exec_fields(st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
     char total_planned_buf[24], remaining_buf[24];
     if (total_planned_s < 0) {
         snprintf(total_planned_buf, sizeof(total_planned_buf), "null");
@@ -240,6 +245,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
                  (unsigned)DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
+        free(st);
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
@@ -251,12 +257,12 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         "\"ramp_dwell_credit_applied_s\":%.2f,"
         "\"fault_reason\":\"%s\",\"fault_guard\":%u,"
         "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
-        exec_state_name(st.state), st.profile_id, name_escaped, st.zone_mask, st.segment_index,
-        st.segment_count, st.dwelling ? "true" : "false", (double)st.target_c,
-        (unsigned long)st.segment_elapsed_s, (unsigned long)st.dwell_remaining_s,
-        st.ramp_lock_held ? "true" : "false", st.ramp_lock_lagging_mask,
-        (double)st.ramp_stretch_segment_s, (double)st.ramp_stretch_total_s,
-        (double)st.ramp_dwell_credit_applied_s, reason_escaped, st.fault_guard,
+        exec_state_name(st->state), st->profile_id, name_escaped, st->zone_mask, st->segment_index,
+        st->segment_count, st->dwelling ? "true" : "false", (double)st->target_c,
+        (unsigned long)st->segment_elapsed_s, (unsigned long)st->dwell_remaining_s,
+        st->ramp_lock_held ? "true" : "false", st->ramp_lock_lagging_mask,
+        (double)st->ramp_stretch_segment_s, (double)st->ramp_stretch_total_s,
+        (double)st->ramp_dwell_credit_applied_s, reason_escaped, st->fault_guard,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
     size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE)
                    ? DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1
@@ -267,13 +273,14 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * breadcrumb first means an unusually verbose fault can never be what
      * silently drops it from the response. */
     o = append_last_run_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o);
-    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
+    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, st, false);
     if (o + 1 < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE) json[o++] = '}';
     json[o < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE ? o : DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1] = '\0';
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, json, o);
     free(json);
+    free(st);
     return ret;
 }
 
@@ -319,11 +326,16 @@ esp_err_t profile_plan_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (st == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory\"}");
+    }
+    profile_executor_get_status(st);
     float start_c = PROFILE_PLAN_PREVIEW_AMBIENT_C;
-    if (st.state != PROFILE_EXEC_IDLE && st.profile_id == (uint8_t)id) {
-        start_c = st.run_start_c;
+    if (st->state != PROFILE_EXEC_IDLE && st->profile_id == (uint8_t)id) {
+        start_c = st->run_start_c;
     }
 
     profile_plan_point_t points[PLAN_MAX_POINTS];
@@ -349,6 +361,7 @@ esp_err_t profile_plan_get_handler(httpd_req_t *req)
                  (unsigned)json_cap);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
+        free(st);
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
@@ -377,6 +390,7 @@ esp_err_t profile_plan_get_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, json, o);
     free(json);
+    free(st);
     return ret;
 }
 
@@ -391,8 +405,13 @@ esp_err_t profile_plan_get_handler(httpd_req_t *req)
  * (there's one ramp per run, TODO.md 6A.5(d)), the rest is per zone. */
 esp_err_t control_status_get_handler(httpd_req_t *req)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (st == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory\"}");
+    }
+    profile_executor_get_status(st);
 
     /* Sized against the real worst case, not the previous estimate (Opus
      * review: 224/zone was already wrong before ff_hold_used_matrix/
@@ -430,24 +449,26 @@ esp_err_t control_status_get_handler(httpd_req_t *req)
                  (unsigned)DASHBOARD_JSON_CONTROL_BUF_SIZE);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
+        free(st);
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
     int n = snprintf(json, DASHBOARD_JSON_CONTROL_BUF_SIZE,
         "{\"state\":\"%s\",\"zone_mask\":%u,\"target_c\":%.2f,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,",
-        exec_state_name(st.state), st.zone_mask, (double)st.target_c, st.ramp_lock_held ? "true" : "false",
-        st.ramp_lock_lagging_mask);
+        exec_state_name(st->state), st->zone_mask, (double)st->target_c, st->ramp_lock_held ? "true" : "false",
+        st->ramp_lock_lagging_mask);
     size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_CONTROL_BUF_SIZE)
                    ? DASHBOARD_JSON_CONTROL_BUF_SIZE - 1
                    : (size_t)n;
-    o = append_zone_status_json(json, DASHBOARD_JSON_CONTROL_BUF_SIZE, o, &st, true);
+    o = append_zone_status_json(json, DASHBOARD_JSON_CONTROL_BUF_SIZE, o, st, true);
     if (o + 1 < DASHBOARD_JSON_CONTROL_BUF_SIZE) json[o++] = '}';
     json[o < DASHBOARD_JSON_CONTROL_BUF_SIZE ? o : DASHBOARD_JSON_CONTROL_BUF_SIZE - 1] = '\0';
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, json, o);
     free(json);
+    free(st);
     return ret;
 }
 

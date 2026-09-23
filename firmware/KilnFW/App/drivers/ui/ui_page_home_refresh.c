@@ -7,6 +7,10 @@
  * each section below. See ui_page_home_internal.h for the shared
  * statics/prototypes this file reaches across the split. */
 #include "ui_page_home_internal.h"
+
+#include <stdlib.h>
+
+#include "esp_heap_caps.h"
 #include "relay_cycles.h"
 #include "kiln_cfg_store.h" /* docs/KILN_PROFILES_PLAN.md section 7.4 -- "Kiln: <name>" line */
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
@@ -114,8 +118,17 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * rule, not a reimplementation. */
     dashboard_status_t ds;
     dashboard_get_status(&ds);
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
+    /* ui_home_refresh_cb runs on the LVGL task's 1 Hz timer and is already
+     * that task's deepest known dispatch target against the 4880 B
+     * measured ceiling within its 8192 B stack (see this file's own header
+     * comment above and check_all_task_stack_budgets.py) -- heap-allocate
+     * rather than add a 1384-byte profile_exec_status_t stack local here,
+     * same pattern as safety_cfg_http.c/dashboard_exec_http.c. */
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!st) {
+        return; /* out of memory -- skip this tick's repaint, next 1 Hz tick tries again */
+    }
+    profile_executor_get_status(st);
 
     /* UI_PLAN.md 6.5 -- right-quarter rail, same ds/st snapshot, no new
      * producer call. Kept out-of-line (see ui_home_rail_refresh()'s own
@@ -123,11 +136,11 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * stack frame does not grow -- it is already the lvgl task's deepest
      * known dispatch target against check_all_task_stack_budgets.py's
      * 4880 B ceiling. */
-    ui_home_rail_refresh(&ds, &st);
+    ui_home_rail_refresh(&ds, st);
 
     /* UI_PLAN.md 6.1 -- same st snapshot, no new producer call. Out-of-line
      * for the same stack-budget reason as ui_home_rail_refresh() above. */
-    ui_home_profile_label_refresh(&st);
+    ui_home_profile_label_refresh(st);
 
     /* Progress bar -- see s_ui_home_progress_wrap's own static-declaration comment.
      * dashboard_plan_exec_fields() reports elapsed 0 / total -1 for IDLE, so
@@ -138,10 +151,10 @@ void ui_home_refresh_cb(lv_timer_t *timer)
         int64_t total_planned_s, remaining_s;
         uint32_t elapsed_s;
         bool remaining_is_estimate;
-        dashboard_plan_exec_fields(&st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
+        dashboard_plan_exec_fields(st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
 
-        bool bar_running = (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED ||
-                            st.state == PROFILE_EXEC_FAULTED || st.state == PROFILE_EXEC_DONE);
+        bool bar_running = (st->state == PROFILE_EXEC_RUNNING || st->state == PROFILE_EXEC_PAUSED ||
+                            st->state == PROFILE_EXEC_FAULTED || st->state == PROFILE_EXEC_DONE);
         if (!bar_running) {
             lv_obj_add_flag(s_ui_home_progress_wrap, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -355,16 +368,16 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             snprintf(notice_buf, sizeof(notice_buf), "Config mismatch (Pico): %.130s", diverge_reason);
             lv_label_set_text(s_ui_home_lag_notice, notice_buf);
             lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
-            s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st.ramp_lock_held, s_ui_home_lag_notice_ticks);
+            s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);
             goto lag_notice_done;
         }
 
-        s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st.ramp_lock_held, s_ui_home_lag_notice_ticks);
+        s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);
 
         bool any_sustained = false;
         uint8_t sustained_mask = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            if (st.zones[zi].active && st.zones[zi].ramp_lag_sustained) {
+            if (st->zones[zi].active && st->zones[zi].ramp_lag_sustained) {
                 any_sustained = true;
                 sustained_mask |= (uint8_t)(1u << zi);
             }
@@ -418,7 +431,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
              * scroll if the name list itself runs long, per the LCD's
              * no-scroll rule. */
             if (n == 1) {
-                const profile_exec_zone_status_t *z = &st.zones[idx[0]];
+                const profile_exec_zone_status_t *z = &st->zones[idx[0]];
                 snprintf(notice_buf, sizeof(notice_buf),
                          "%s lagging %lus: %ldC/hr cmd vs %ldC/hr actual",
                          zones_buf[0] ? zones_buf : "Zone", (unsigned long)lroundf(z->ramp_lag_held_s),
@@ -447,7 +460,7 @@ lag_notice_done:;
      * discarded. */
     profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
     size_t plan_n = 0;
-    if (st.state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
+    if (st->state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
         for (uint32_t i = 1; i < UI_PAGE_HOME_CHART_POINTS; i++) {
             s_ui_home_chart_actual_pts[i] = LV_CHART_POINT_NONE;
             s_ui_home_chart_planned_pts[i] = LV_CHART_POINT_NONE;
@@ -517,12 +530,12 @@ lag_notice_done:;
          * active). state_active distinguishes the two: only the former has a
          * real schedule to show ahead of "now", so only it calls
          * profile_feasibility_plan_curve() -- calling it while IDLE would read
-         * st.segments/run_start_c left over from whatever last ran and label
+         * st->segments/run_start_c left over from whatever last ran and label
          * them as a live plan, which is exactly the "confident wrong number"
          * this task's owner warned against (2026-08-21: "the chart's time
          * scale must say the truth in both idle and running states -- idle
          * has no planned horizon, it's showing recent history"). */
-        bool state_active = (st.state != PROFILE_EXEC_IDLE);
+        bool state_active = (st->state != PROFILE_EXEC_IDLE);
         /* 2026-09-01: profile_history_entry_t.actual_c widened from one
          * float to one-per-zone (profile_executor.h, TODO.md section 0/6A.9
          * -- the dashboard's web graph used to lose every non-representative
@@ -539,7 +552,7 @@ lag_notice_done:;
          * this never reads an out-of-range index. */
         uint8_t hist_zone = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            if (st.zone_mask & (1u << zi)) { hist_zone = zi; break; }
+            if (st->zone_mask & (1u << zi)) { hist_zone = zi; break; }
         }
         /* Reset the active-axis hold exactly once per RUN -- a brand new
          * firing must not inherit the previous firing's widened range.
@@ -558,7 +571,7 @@ lag_notice_done:;
          * happen -- it can, and did.
          *
          * ui_page_home_axis_ratchet_should_reset() (ui_page_home_graph.c) is
-         * keyed to run IDENTITY instead: st.total_elapsed_s is documented
+         * keyed to run IDENTITY instead: st->total_elapsed_s is documented
          * (profile_executor.h) to be set to 0 exactly once, at
          * profile_executor_run(), and to never decrease again until the next
          * run. A decrease observed between two active ticks -- regardless of
@@ -567,12 +580,12 @@ lag_notice_done:;
          * full reasoning on why this is the best signal available without
          * modifying profile_executor.c (owned by another task). */
         if (ui_page_home_axis_ratchet_should_reset(state_active, s_ui_home_axis_hold_prev_active,
-                                                    st.total_elapsed_s, s_ui_home_axis_hold_prev_elapsed_s)) {
+                                                    st->total_elapsed_s, s_ui_home_axis_hold_prev_elapsed_s)) {
             s_ui_home_axis_hold_have = false;
         }
         s_ui_home_axis_hold_prev_active = state_active;
         if (state_active) {
-            s_ui_home_axis_hold_prev_elapsed_s = st.total_elapsed_s;
+            s_ui_home_axis_hold_prev_elapsed_s = st->total_elapsed_s;
         }
         size_t count = profile_executor_get_history_count();
         float horizon_s;
@@ -581,7 +594,7 @@ lag_notice_done:;
              * state != IDLE (profile_executor.h's own field comments) --
              * profile_feasibility_plan_curve() is pure math over that copy,
              * safe to call from this refresh timer every tick. */
-            (void)profile_feasibility_plan_curve(st.segments, st.segment_count, st.run_start_c,
+            (void)profile_feasibility_plan_curve(st->segments, st->segment_count, st->run_start_c,
                                                   plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
                                                   &plan_n);
             horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
@@ -628,7 +641,7 @@ lag_notice_done:;
             }
 
             /* Actual stops at "now" -- a bucket time in the future (past
-             * st.total_elapsed_s) has no recorded sample yet, and showing
+             * st->total_elapsed_s) has no recorded sample yet, and showing
              * one would fabricate data that hasn't happened. This gate only
              * makes sense while state_active (t_i is "seconds since run
              * start" there); the idle-with-history branch's t_i is "seconds
@@ -637,7 +650,7 @@ lag_notice_done:;
              * happened, by construction, so there is nothing to gate. */
             bool have_actual = false;
             float actual_c = NAN;
-            if (!state_active || t_i <= (float)st.total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
+            if (!state_active || t_i <= (float)st->total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
                 if (count > 0) {
                     /* Samples are recorded every HISTORY_SAMPLE_PERIOD_S
                      * seconds of real time, so ring index and elapsed time
@@ -655,7 +668,7 @@ lag_notice_done:;
                     /* No samples recorded yet this tick, but the run's real
                      * starting temperature is known -- anchor bucket 0 to it
                      * rather than leaving even the start blank. */
-                    actual_c = st.run_start_c;
+                    actual_c = st->run_start_c;
                     have_actual = true;
                 }
             }
@@ -784,7 +797,7 @@ lag_notice_done:;
              * actual sample has been recorded yet) so the dot never just
              * vanishes at the very start of a firing. */
             size_t now_idx =
-                ui_page_home_now_bucket_index(horizon_s, (float)st.total_elapsed_s, UI_PAGE_HOME_CHART_POINTS);
+                ui_page_home_now_bucket_index(horizon_s, (float)st->total_elapsed_s, UI_PAGE_HOME_CHART_POINTS);
             lv_point_t dot_pos;
             bool have_dot_pos = false;
             if (s_ui_home_chart_actual_pts[now_idx] != LV_CHART_POINT_NONE) {
@@ -841,11 +854,11 @@ lag_notice_done:;
      * this trade-off is intended before relying on the home page alone to
      * notice a trip. */
 
-    /* Merged fire button -- label and color follow the same st.state this
+    /* Merged fire button -- label and color follow the same st->state this
      * function already polled above. Running/Paused reads "Stop" in the
      * danger accent; everything else (Idle/Done/Faulted) reads "Start" in
      * the start-ish accent. */
-    if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+    if (st->state == PROFILE_EXEC_RUNNING || st->state == PROFILE_EXEC_PAUSED) {
         lv_label_set_text(s_ui_home_fire_btn_label, "Stop");
         lv_obj_set_style_bg_color(s_ui_home_fire_btn, UI_THEME_ACCENT_5, 0);
     } else {
@@ -861,15 +874,16 @@ lag_notice_done:;
      * PAUSED -- there is nothing to pause or resume in any other state.
      * No confirmation dialog, matching the web button exactly (only
      * Start/Stop confirm on either surface). */
-    if (st.state == PROFILE_EXEC_RUNNING) {
+    if (st->state == PROFILE_EXEC_RUNNING) {
         lv_label_set_text(s_ui_home_pause_btn_label, "Pause");
         lv_obj_remove_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
-    } else if (st.state == PROFILE_EXEC_PAUSED) {
+    } else if (st->state == PROFILE_EXEC_PAUSED) {
         lv_label_set_text(s_ui_home_pause_btn_label, "Resume");
         lv_obj_remove_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
     }
+    free(st);
 }
 
 /* UI_PLAN.md 6.1 -- sets the profile-name label left of Start/Pause from the

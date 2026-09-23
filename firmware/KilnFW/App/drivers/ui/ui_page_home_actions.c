@@ -10,6 +10,8 @@
 #include "ui_page_profile_picker.h" /* ui_page_profile_picker_pick_refresh() -- UI_PLAN.md 6.1 */
 #include "profiles_builtin.h" /* profiles_builtin_get(), PROFILE_BUILTIN_ID_BASE -- UI_PLAN.md 6.1 */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
+#include <stdlib.h> /* free() -- exec-status heap-alloc pattern below */
+#include "esp_heap_caps.h" /* heap_caps_malloc() */
 
 /* UI_PLAN.md 6.1 -- the profile the operator picked on the LCD this boot.
  * There is no persisted "selected profile" anywhere in this firmware: before
@@ -70,9 +72,20 @@ bool ui_home_profile_name_for_id(uint8_t id, char *out, size_t out_cap)
 
 static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    return ui_home_resolve_profile_id(&st, out_id);
+    /* Runs on the LVGL task (button press callback) -- heap-allocate rather
+     * than add a 1384-byte profile_exec_status_t stack local (see
+     * ui_page_home_refresh.c's own comment on this task's measured stack
+     * ceiling for why it is treated as tight, not generous). Needs the full
+     * struct's .state and .profile_id, so the narrow
+     * profile_executor_get_active_id() accessor does not fit here. */
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!st) {
+        return false; /* out of memory -- treat as "no known profile id" */
+    }
+    profile_executor_get_status(st);
+    bool found = ui_home_resolve_profile_id(st, out_id);
+    free(st);
+    return found;
 }
 
 static void ui_home_do_start(void)
@@ -258,9 +271,13 @@ static void ui_home_show_start_confirm_gated_cb(void *user_data)
 void ui_home_fire_btn_cb(lv_event_t *e)
 {
     (void)e;
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+    /* Only "is a firing active" is needed here, not which fields -- use the
+     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * profile_exec_status_t stack local (this runs on the lvgl task, whose
+     * own 2026-09-04 stack-corruption panic is exactly why this file's
+     * budget is tracked by check_all_task_stack_budgets.py). */
+    uint8_t active_id = 0;
+    if (profile_executor_get_active_id(&active_id)) {
         /* Stop is never gated -- docs/WEB_AUTH_PLAN.md section 9: a PIN
          * surface must never be able to prevent a running firing from being
          * stopped. Only the Start half below goes through the lock. */
@@ -280,13 +297,22 @@ void ui_home_fire_btn_cb(lv_event_t *e)
 void ui_home_pause_resume_btn_cb(lv_event_t *e)
 {
     (void)e;
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    if (st.state == PROFILE_EXEC_RUNNING) {
+    /* Runs on the LVGL task -- heap-allocate rather than add another
+     * 1384-byte profile_exec_status_t stack local; needs the full struct's
+     * .state to distinguish RUNNING from PAUSED, which the narrow
+     * profile_executor_get_active_id() accessor cannot report (it collapses
+     * both into a single "active" bool). */
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!st) {
+        return; /* out of memory -- skip this tap, next one tries again */
+    }
+    profile_executor_get_status(st);
+    if (st->state == PROFILE_EXEC_RUNNING) {
         profile_executor_pause();
-    } else if (st.state == PROFILE_EXEC_PAUSED) {
+    } else if (st->state == PROFILE_EXEC_PAUSED) {
         profile_executor_resume();
     }
+    free(st);
 }
 
 void ui_home_menu_nav_cb(lv_event_t *e)
@@ -454,9 +480,12 @@ void ui_home_auth_reset_corner_tap_cb(lv_event_t *e)
         (auth_reset_gesture_corner_t)(intptr_t)lv_event_get_user_data(e);
 
     bool estop_asserted = dashboard_http_estop_asserted();
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    bool firing_active = (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED);
+    /* Only "is a firing active" is needed here -- narrow accessor instead of
+     * a 1384-byte profile_exec_status_t stack local (this runs on the lvgl
+     * task; see this file's own header comment on that task's stack
+     * history). */
+    uint8_t active_id = 0;
+    bool firing_active = profile_executor_get_active_id(&active_id);
     bool heat_enabled = heat_enable_is_granted();
     uint32_t now_ms = (uint32_t)(hal_time_now_us() / 1000);
 

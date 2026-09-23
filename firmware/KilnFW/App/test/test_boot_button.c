@@ -57,6 +57,20 @@ void profile_executor_get_status(profile_exec_status_t *out)
     }
 }
 
+/* Same reasoning as profile_executor_get_status() above -- handle_open_
+ * requested() now calls this narrow accessor instead of the full-struct
+ * getter (2026-09-22 exec-status stack-local audit), so this TU needs a
+ * fake for it too. Reports "no firing" (false), matching the zeroed
+ * profile_executor_get_status() fake's PROFILE_EXEC_IDLE-equivalent
+ * behavior above. */
+bool profile_executor_get_active_id(uint8_t *out_id)
+{
+    if (out_id) {
+        *out_id = 0;
+    }
+    return false;
+}
+
 #include "../drivers/bridge/boot_button.c"
 
 // ---------------------------------------------------------------------------

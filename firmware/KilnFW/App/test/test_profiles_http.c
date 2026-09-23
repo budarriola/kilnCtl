@@ -597,6 +597,21 @@ void profile_executor_get_status(profile_exec_status_t *out)
     out->profile_id = g_fake_exec_profile_id;
 }
 
+/* profiles_http_delete() now calls this narrow accessor instead of the
+ * full-struct getter (2026-09-22 exec-status stack-local audit) -- fake
+ * derives the same RUNNING-or-PAUSED answer from the same g_fake_exec_*
+ * state the profile_executor_get_status() fake above uses, so every
+ * existing "delete refused because it's the running/paused slot" test
+ * keeps exercising the identical scenario through the new call path. */
+bool profile_executor_get_active_id(uint8_t *out_id)
+{
+    bool active = (g_fake_exec_state == PROFILE_EXEC_RUNNING || g_fake_exec_state == PROFILE_EXEC_PAUSED);
+    if (out_id) {
+        *out_id = g_fake_exec_profile_id;
+    }
+    return active;
+}
+
 // NOTE: profiles_favorites_set()/profiles_favorites_is() are NOT faked here
 // -- this executable links persist/profiles_favorites.c for REAL (see
 // build_host_tests.ps1's exe7 comment: "a fake would not exercise the

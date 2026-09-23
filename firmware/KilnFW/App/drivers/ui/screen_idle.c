@@ -1,7 +1,9 @@
 #include "screen_idle.h"
 
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "settings.h"
@@ -165,8 +167,19 @@ static void screen_idle_refresh_inputs(screen_idle_t *idle)
         return; /* leaves cached_* at their false/false init -- see above */
     }
 
-    profile_exec_status_t pst;
-    profile_executor_get_status(&pst);
+    /* screen_idle_task's own stack is 6144 B (screen_idle_start()'s
+     * xTaskCreatePinnedToCore below) -- heap-allocate rather than add a
+     * 1384-byte profile_exec_status_t stack local; only .state is read
+     * below (for both RUNNING/PAUSED and FAULTED), which the narrow
+     * profile_executor_get_active_id() accessor cannot report (it only
+     * distinguishes RUNNING-or-PAUSED from everything else, collapsing
+     * FAULTED into "not active"), so this stays a heap-allocated full
+     * read, same pattern as safety_cfg_http.c. */
+    profile_exec_status_t *pst = heap_caps_malloc(sizeof(*pst), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!pst) {
+        return; /* out of memory -- leaves cached_* at their previous values for another poll */
+    }
+    profile_executor_get_status(pst);
     // 2026-09-04 opus review: profile_executor is NOT the only producer that
     // means "the kiln is heating and the owner needs to see the screen".
     // autotune_engine drives relays on its own for hours with the executor
@@ -178,7 +191,7 @@ static void screen_idle_refresh_inputs(screen_idle_t *idle)
     // break autotune while the executor stays green; check BOTH producers").
     // Without this OR, "keep display on while firing" blanks the panel in the
     // middle of an autotune run.
-    bool firing_active = (pst.state == PROFILE_EXEC_RUNNING || pst.state == PROFILE_EXEC_PAUSED) ||
+    bool firing_active = (pst->state == PROFILE_EXEC_RUNNING || pst->state == PROFILE_EXEC_PAUSED) ||
                          autotune_engine_is_active();
 
     dashboard_status_t ds;
@@ -198,7 +211,8 @@ static void screen_idle_refresh_inputs(screen_idle_t *idle)
     // diag_state, so keying "error" on the safety link alone silently missed
     // an entire class of error the owner would absolutely expect to raise the
     // display: their firing just aborted. Both producers, not one.
-    bool error_active = safety_tripped || pst.state == PROFILE_EXEC_FAULTED;
+    bool error_active = safety_tripped || pst->state == PROFILE_EXEC_FAULTED;
+    free(pst); /* nothing below this point reads pst */
 
     /* Publish under the lock the policy runs under, so a concurrent touch
      * edge on the LVGL task can never read one of these updated and the

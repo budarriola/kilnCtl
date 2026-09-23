@@ -10,6 +10,7 @@
 
 #include "kiln_io_owner.h"
 #include "profile_executor_state.h"
+#include "profile_executor.h"
 #include "stack_margin.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
 
@@ -54,11 +55,17 @@ static bool state_refuses_start(profile_exec_state_t state)
 
 bool danger_mode_request_start(void)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    if (state_refuses_start(st.state)) {
-        ESP_LOGW(TAG, "danger mode refused -- a firing is in progress (profile_exec state=%d)",
-                 (int)st.state);
+    /* danger_mode_task's own stack is only 3072 B, and this is also
+     * reachable from the httpd task (diagnostics_http.c calls straight
+     * into this function) -- a 1384-byte profile_exec_status_t stack local
+     * would be a real bite out of either budget. state_refuses_start()
+     * only needs RUNNING/PAUSED, so use profile_executor_get_active_id(),
+     * the narrow accessor profile_executor.h recommends for exactly this,
+     * instead of profile_executor_get_status(). */
+    uint8_t active_id = 0;
+    bool firing_active = profile_executor_get_active_id(&active_id);
+    if (state_refuses_start(firing_active ? PROFILE_EXEC_RUNNING : PROFILE_EXEC_IDLE)) {
+        ESP_LOGW(TAG, "danger mode refused -- a firing is in progress");
         return false;
     }
     if (!s_dm.initialized) {

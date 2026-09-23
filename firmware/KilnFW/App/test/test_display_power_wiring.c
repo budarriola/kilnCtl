@@ -241,7 +241,7 @@ static void run_section1_screen_idle_calls_policy(void)
                "snapshot screen_idle_refresh_inputs() writes -- if this fails the policy is "
                "being fed from somewhere else entirely.");
 
-    TEST_CHECK(strstr(refresh_fn, "profile_executor_get_status(&pst)") != NULL &&
+    TEST_CHECK(strstr(refresh_fn, "profile_executor_get_status(pst)") != NULL &&
                    strstr(refresh_fn, "PROFILE_EXEC_RUNNING") != NULL &&
                    strstr(refresh_fn, "PROFILE_EXEC_PAUSED") != NULL,
                "firing_active must be read from profile_executor_get_status()'s REAL state "
@@ -282,7 +282,7 @@ static void run_section1_screen_idle_calls_policy(void)
                "blanks the panel mid-autotune, because autotune holds relay authority with "
                "profile_executor still at PROFILE_EXEC_IDLE.");
 
-    TEST_CHECK(strstr(refresh_fn, "pst.state == PROFILE_EXEC_FAULTED") != NULL,
+    TEST_CHECK(strstr(refresh_fn, "pst->state == PROFILE_EXEC_FAULTED") != NULL,
                "error_active must ALSO cover the ESP's own global thermal-guard abort "
                "(profile_executor's PROFILE_EXEC_FAULTED) -- the safety link's diag_state is "
                "the RP2040's own trip and is never set by an ESP-side guard fault, so keying "
@@ -455,7 +455,7 @@ static void run_section3_recovery_mode_gated(void)
                "recovery mode again the next time this module gains a new dependency on a "
                "subsystem recovery mode skips.");
 
-    const char *pe_call = strstr(fn, "profile_executor_get_status(&pst)");
+    const char *pe_call = strstr(fn, "profile_executor_get_status(pst)");
     const char *dash_call = strstr(fn, "dashboard_get_status(&ds)");
     const char *at_call = strstr(fn, "autotune_engine_is_active();");
     TEST_CHECK(pe_call != NULL && dash_call != NULL && at_call != NULL,

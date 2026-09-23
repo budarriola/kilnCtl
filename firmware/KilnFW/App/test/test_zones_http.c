@@ -558,6 +558,20 @@ void profile_executor_get_status(profile_exec_status_t *out)
 {
     if (out) *out = s_test_profile_status;
 }
+/* zones_current_sweep_start() now calls this narrow accessor instead of the
+ * full-struct getter (2026-09-22 exec-status stack-local audit) -- derives
+ * the same RUNNING-or-PAUSED answer from the same s_test_profile_status the
+ * fake above uses, so existing refusal tests keep exercising the identical
+ * scenario through the new call path. */
+bool profile_executor_get_active_id(uint8_t *out_id)
+{
+    bool active = (s_test_profile_status.state == PROFILE_EXEC_RUNNING ||
+                   s_test_profile_status.state == PROFILE_EXEC_PAUSED);
+    if (out_id) {
+        *out_id = s_test_profile_status.profile_id;
+    }
+    return active;
+}
 bool autotune_engine_is_active(void)
 {
     return s_test_autotune_active;

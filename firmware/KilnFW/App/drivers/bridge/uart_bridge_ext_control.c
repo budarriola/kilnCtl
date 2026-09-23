@@ -7,8 +7,10 @@
 #include "uart_bridge.h"
 #include "uart_bridge_ext_internal.h"
 
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -340,29 +342,39 @@ static size_t profiles_build_get(uint8_t *out, uint8_t id)
  * see uart_task_ids.h for why. */
 static size_t profiles_build_exec_status(uint8_t *out)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
+    /* profile_exec_status_t is 1384 B; this runs on bx_flash_worker, whose
+     * stack ceiling profile_executor_get_active_id()'s own doc comment
+     * measures at 3792 B (zero headroom on clean main) -- a stack-local
+     * instance here would be the same class of regression that function
+     * was added to avoid, just for a caller that (unlike that one) needs
+     * every field, not only state+id. Heap it instead, same pattern as
+     * safety_cfg_http.c's profile_exec_status_t reads. */
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!st) {
+        return 0; /* out of memory -- caller sees an empty reply, same as a malformed frame */
+    }
+    profile_executor_get_status(st);
 
     size_t o = 0;
     out[o++] = PROFILES_CMD_GET_EXEC_STATUS;
-    out[o++] = (uint8_t)st.state;
-    out[o++] = st.profile_id;
-    o = uart_bridge_ext_put_lstring(out, BRIDGE_REPLY_MAX, o, st.profile_name);
-    out[o++] = st.zone_mask;
-    out[o++] = st.segment_index;
-    out[o++] = st.segment_count;
-    out[o++] = st.dwelling ? 1 : 0;
-    uart_bridge_ext_put_f32_le(&out[o], st.target_c); o += 4;
-    uart_bridge_ext_put_u32_le(&out[o], st.segment_elapsed_s); o += 4;
-    uart_bridge_ext_put_u32_le(&out[o], st.dwell_remaining_s); o += 4;
-    out[o++] = st.ramp_lock_held ? 1 : 0;
-    out[o++] = st.ramp_lock_lagging_mask;
-    out[o++] = st.fault_guard;
+    out[o++] = (uint8_t)st->state;
+    out[o++] = st->profile_id;
+    o = uart_bridge_ext_put_lstring(out, BRIDGE_REPLY_MAX, o, st->profile_name);
+    out[o++] = st->zone_mask;
+    out[o++] = st->segment_index;
+    out[o++] = st->segment_count;
+    out[o++] = st->dwelling ? 1 : 0;
+    uart_bridge_ext_put_f32_le(&out[o], st->target_c); o += 4;
+    uart_bridge_ext_put_u32_le(&out[o], st->segment_elapsed_s); o += 4;
+    uart_bridge_ext_put_u32_le(&out[o], st->dwell_remaining_s); o += 4;
+    out[o++] = st->ramp_lock_held ? 1 : 0;
+    out[o++] = st->ramp_lock_lagging_mask;
+    out[o++] = st->fault_guard;
 
     size_t zone_count_pos = o++;
     uint8_t zone_count = 0;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        const profile_exec_zone_status_t *z = &st.zones[zi];
+        const profile_exec_zone_status_t *z = &st->zones[zi];
         if (!z->active) {
             continue;
         }
@@ -380,6 +392,7 @@ static size_t profiles_build_exec_status(uint8_t *out)
         zone_count++;
     }
     out[zone_count_pos] = zone_count;
+    free(st);
     return o;
 }
 

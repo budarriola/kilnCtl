@@ -1600,9 +1600,11 @@ bool profiles_http_delete(uint8_t id)
      * surviving record of what is actually executing, and a later re-save
      * of this id would silently relabel that run's history. Same check as
      * profiles_edit_http.c's web delete handler. */
-    profile_exec_status_t pstat;
-    profile_executor_get_status(&pstat);
-    if ((pstat.state == PROFILE_EXEC_RUNNING || pstat.state == PROFILE_EXEC_PAUSED) && pstat.profile_id == id) {
+    /* Only "is this id currently running/paused" is needed here -- use the
+     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * profile_exec_status_t stack local. */
+    uint8_t active_id = 0;
+    if (profile_executor_get_active_id(&active_id) && active_id == id) {
         return false;
     }
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,

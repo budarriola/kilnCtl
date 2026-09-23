@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "profile_executor_state.h"
+#include "profile_executor.h"
 #include "stack_margin.h"
 
 static const char *TAG = "boot_button";
@@ -107,14 +108,22 @@ static void open_window_locked(uint32_t at_ms)
 // pure logic (state_refuses_bypass()) separate and trivially testable.
 static void handle_open_requested(void)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
+    /* boot_button_task's own stack is only 3072 B -- a 1384-byte
+     * profile_exec_status_t local here would be ~45% of the whole budget.
+     * profile_executor_get_active_id() is the narrow accessor profile_
+     * executor.h recommends for exactly this: it reports RUNNING/PAUSED as
+     * a bool without materializing the full struct. state_refuses_bypass()
+     * itself stays untouched and still tested directly (test_boot_button.c)
+     * -- its true/false split is exactly RUNNING-or-PAUSED vs everything
+     * else, so either state value in the same half of that split reproduces
+     * an identical call here. */
+    uint8_t active_id = 0;
+    bool firing_active = profile_executor_get_active_id(&active_id);
 
-    if (state_refuses_bypass(st.state)) {
+    if (state_refuses_bypass(firing_active ? PROFILE_EXEC_RUNNING : PROFILE_EXEC_IDLE)) {
         ESP_LOGE(TAG, "BOOT-BUTTON RECOVERY: long-press detected but REFUSED -- a firing is in "
-                      "progress (profile_exec state=%d). Halt or wait for the firing to finish, "
-                      "then press and hold the BOOT button again while the board is running.",
-                 (int)st.state);
+                      "progress. Halt or wait for the firing to finish, "
+                      "then press and hold the BOOT button again while the board is running.");
         return;
     }
 

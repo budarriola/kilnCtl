@@ -30,6 +30,7 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 #include "gpio_probe_denylist.h"
 #include "hal_gpio.h"
 #include "profile_executor_state.h"
+#include "profile_executor.h"
 #include "settings.h"
 #include "stack_margin.h"
 #include "uart_task_ids.h"
@@ -57,9 +58,13 @@ static bool gpio_probe_is_denied(int gpio_num)
  * probe should not be poking pins in the meantime either. */
 static bool gpio_probe_run_blocked(void)
 {
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    return st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED;
+    /* gpio_probe_task's own stack is 6144 B -- a 1384-byte profile_exec_
+     * status_t local here is ~22.5% of the whole budget for a value only
+     * ever reduced to a RUNNING/PAUSED bool. Use profile_executor_get_
+     * active_id(), the narrow accessor profile_executor.h recommends for
+     * exactly this, instead of profile_executor_get_status(). */
+    uint8_t active_id = 0;
+    return profile_executor_get_active_id(&active_id);
 }
 
 typedef struct {

@@ -2,8 +2,10 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "MAX31856.h"
@@ -293,12 +295,20 @@ static void refresh_plan_chart(const profile_t *prof)
         return; /* not built yet */
     }
 
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    float start_c = UI_PAGE_PROFILE_DETAIL_PLAN_PREVIEW_AMBIENT_C;
-    if (st.state != PROFILE_EXEC_IDLE && st.profile_id == s_profile_id) {
-        start_c = st.run_start_c;
+    /* Runs on the LVGL task -- heap-allocate rather than add another
+     * 1384-byte profile_exec_status_t stack local on that task (see
+     * ui_page_home_refresh.c's own comment on its measured stack ceiling
+     * for why this task in particular is treated as tight, not generous). */
+    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!st) {
+        return; /* out of memory -- skip this repaint */
     }
+    profile_executor_get_status(st);
+    float start_c = UI_PAGE_PROFILE_DETAIL_PLAN_PREVIEW_AMBIENT_C;
+    if (st->state != PROFILE_EXEC_IDLE && st->profile_id == s_profile_id) {
+        start_c = st->run_start_c;
+    }
+    free(st); /* nothing below this point reads st */
 
     profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
     size_t plan_n = 0;

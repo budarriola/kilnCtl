@@ -31,6 +31,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -390,8 +391,20 @@ void safety_build_and_send_context(SafetyLinkClass *link)
     uint8_t relay_now_mask = io ? kiln_io_get_relay_shadow(io) : 0u;
     uint8_t relay_recent_mask = safety_context_update_relay_recent(link, relay_now_mask);
 
-    profile_exec_status_t pstat;
-    profile_executor_get_status(&pstat);
+    /* Runs on safety_poll_task every poll iteration (safety_link_poll.c),
+     * whose stack is only SAFETY_POLL_TASK_STACK = 8192 B and lives in
+     * PSRAM (safety_link.c:1636-1638's own comment on why nothing here can
+     * risk a stack overflow with the flash cache disabled) -- heap-allocate
+     * rather than materialize a 1384-byte profile_exec_status_t on that
+     * stack, same pattern as safety_cfg_http.c/dashboard_exec_http.c. Every
+     * field below is read, not just the active-firing bool, so the narrow
+     * profile_executor_get_active_id() accessor does not fit here. */
+    profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!pstat) {
+        ESP_LOGE(TAG, "safety_build_and_send_context: out of memory, skipping this PUSH_CONTEXT broadcast");
+        return;
+    }
+    profile_executor_get_status(pstat);
 
     kilnlink_context_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -421,7 +434,7 @@ void safety_build_and_send_context(SafetyLinkClass *link)
         (void)thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &reading_count);
     }
 
-    bool any_zone_faulted = (pstat.state == PROFILE_EXEC_FAULTED);
+    bool any_zone_faulted = (pstat->state == PROFILE_EXEC_FAULTED);
     bool heat_requested = false;
 
     uint8_t zone_count = thermo_bus ? (uint8_t)MAX31856_CHANNEL_COUNT : 0u;
@@ -468,15 +481,15 @@ void safety_build_and_send_context(SafetyLinkClass *link)
         }
         z->sample_counter = link->context_sample_counter[i];
 
-        bool zone_active = pstat.zones[i].active;
-        bool zone_relay_on = pstat.zones[i].relay_commanded_on;
-        bool zone_faulted = pstat.zones[i].faulted;
+        bool zone_active = pstat->zones[i].active;
+        bool zone_relay_on = pstat->zones[i].relay_commanded_on;
+        bool zone_faulted = pstat->zones[i].faulted;
         /* profile_executor.c: "each active zone runs its own independent
          * PID/guard/relay against one shared setpoint" -- there is no
          * per-zone setpoint to report, so every currently-active zone
          * reports the one shared target; an inactive zone has no setpoint,
          * same NaN-for-invalid convention as measured_c above. */
-        z->setpoint_c = zone_active ? pstat.target_c : NAN;
+        z->setpoint_c = zone_active ? pstat->target_c : NAN;
 
         if (measured_valid) {
             z->flags |= KILNLINK_ZONE_FLAG_MEASURED_VALID;
@@ -494,7 +507,7 @@ void safety_build_and_send_context(SafetyLinkClass *link)
         }
     }
 
-    if (pstat.state == PROFILE_EXEC_RUNNING) {
+    if (pstat->state == PROFILE_EXEC_RUNNING) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_PROFILE_RUNNING;
     }
     /* 2026-09-15 Opus re-review N1: "no active heat owner" for the Pico's
@@ -508,11 +521,12 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * heat-requested flag, since danger mode's manual diagnostics bypass
      * calls safety_link_request_enable() directly and can flip K4 on a
      * separate cadence from its own heat_requested bookkeeping. */
-    if (heat_owner_active_decide(pstat.state, heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE),
+    if (heat_owner_active_decide(pstat->state, heat_enable_is_held(HEAT_ENABLE_CLAIMANT_PROFILE),
                                   heat_enable_is_held(HEAT_ENABLE_CLAIMANT_AUTOTUNE),
                                   danger_mode_active())) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_HEAT_OWNER_ACTIVE;
     }
+    free(pstat); /* last read of pstat was just above -- nothing below needs it */
     if (any_zone_faulted) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_ANY_ZONE_FAULTED;
     }
