@@ -118,6 +118,20 @@ def credentials() -> Tuple[str, str]:
     return username, password
 
 
+def _redact_credentials(text: str, username: str, password: str) -> str:
+    """Replace every occurrence of ``username``/``password`` in ``text`` with
+    ``<redacted>``. Used to scrub exception text before it is interpolated
+    into an error message on a path that holds a real credential -- an
+    underlying exception (e.g. from a proxy or an HTTP library) that happens
+    to echo the request body back verbatim must never leak the value through
+    this module's own error message."""
+    scrubbed = text
+    for secret in (password, username):
+        if secret:
+            scrubbed = scrubbed.replace(secret, "<redacted>")
+    return scrubbed
+
+
 def _origin(url: str) -> str:
     parts = urllib.parse.urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}"
@@ -178,7 +192,12 @@ def _login(origin: str, timeout: Optional[float]) -> str:
             f"POST {origin}{LOGIN_PATH} was refused: HTTP {exc.code}. Check the credential in "
             f"{USERNAME_ENV}/{PASSWORD_ENV} against the board's configured web login.") from exc
     except Exception as exc:  # noqa: BLE001
-        raise HttpAuthError(f"POST {origin}{LOGIN_PATH} failed: {exc}") from exc
+        # The exception's own text might echo the request body (username or
+        # password) verbatim -- scrub both before they ever reach the raised
+        # message, rather than trusting the underlying exception to have
+        # been polite about it.
+        detail = _redact_credentials(f"{type(exc).__name__}: {exc}", username, password)
+        raise HttpAuthError(f"POST {origin}{LOGIN_PATH} failed: {detail}") from exc
 
     for raw in cookies:
         name, _, rest = raw.partition("=")

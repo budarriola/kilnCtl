@@ -401,19 +401,18 @@ class LoginTest(unittest.TestCase):
 
     def test_login_generic_failure_does_not_leak_the_password(self):
         """The login POST's ``except Exception`` branch (a non-HTTPError
-        failure, e.g. a connection reset) formats the exception straight into
-        the raised HttpAuthError's message. What this pins is that the branch
-        never assembles that message out of the password itself: the injected
-        exception's own text carries no credential, so the only way the
-        assertion below can fail is a direct interpolation leak in
-        ``_login``. It deliberately does NOT claim the stronger property that
-        a credential echoed back inside the underlying exception's own text
-        would be scrubbed -- ``{exc}`` is interpolated verbatim, so it would
-        not be."""
+        failure, e.g. a connection reset) formats the exception into the
+        raised HttpAuthError's message. This pins the stronger property that
+        the branch scrubs the credential even when the underlying
+        exception's OWN text echoes it back verbatim (e.g. a proxy or HTTP
+        library that includes the request body in its error): the injected
+        exception's message here deliberately DOES contain the fake
+        password, and the assertion below still requires it to be absent
+        from the raised error."""
         self._with_credentials()
         fake_password = "sw0rdfish-not-a-real-password"
         with unittest.mock.patch.dict(os.environ, {http_auth.PASSWORD_ENV: fake_password}):
-            failure = OSError("connection reset by peer")
+            failure = OSError(f"connection reset by peer while sending {fake_password}")
             recorder = _Recorder(failure)
             with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
                 with self.assertRaises(http_auth.HttpAuthError) as caught:
