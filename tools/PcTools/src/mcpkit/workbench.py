@@ -424,9 +424,17 @@ def _refresh_build_sdkconfig(
     if not os.path.isfile(live):
         return f"sdkconfig-refresh: SKIPPED -- no live config at {live}"
     sibling_exists = os.path.isfile(sibling)
-    live_matches_sibling = (
-        sibling_exists and _config_lines(live) == _config_lines(sibling)
-    )
+    if sibling_exists:
+        try:
+            live_matches_sibling = _config_lines(live) == _config_lines(sibling)
+        except OSError:
+            # Sibling vanished or is locked between the isfile() check above
+            # and the read (another build racing this one, most likely) --
+            # treat that as "not matching" rather than letting the OSError
+            # escape and abort the whole build_kilnfw() call.
+            live_matches_sibling = False
+    else:
+        live_matches_sibling = False
     elf_changed = elf_before != elf_after
     if sibling_exists and not live_matches_sibling and not elf_changed:
         return (
@@ -442,7 +450,7 @@ def _refresh_build_sdkconfig(
         shutil.copyfile(live, sibling)
     except OSError as exc:
         return f"sdkconfig-refresh: FAILED -- could not copy {live} -> {sibling}: {exc}"
-    verb = "created" if not sibling_exists else "now matches"
+    verb = "created from" if not sibling_exists else "now matches"
     return f"sdkconfig-refresh: OK -- {sibling} {verb} {live}"
 
 

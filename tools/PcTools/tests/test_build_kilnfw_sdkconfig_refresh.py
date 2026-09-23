@@ -198,12 +198,15 @@ def test_missing_sibling_and_elf_unchanged_creates_it(monkeypatch, tmp_path):
     assert sibling.read_text(encoding="utf-8") == live.read_text(encoding="utf-8")
 
 
-def test_comment_only_difference_and_elf_unchanged_still_refreshes(monkeypatch, tmp_path):
+def test_comment_only_difference_and_elf_unchanged_is_reported_ok(monkeypatch, tmp_path):
     """Opus review advisory 2: the sibling comparison must match
     check_all_task_stack_budgets.py's `_check_sibling_pair_agreement`, which
     compares parsed CONFIG_ lines, not raw bytes. A comment-only (or
     line-ending-only) difference is not a real disagreement and must not
-    produce an alarming SKIP.
+    produce an alarming SKIP -- it is reported OK ("already matches").
+    Since the parsed CONFIG_ lines already agree, `live_matches_sibling` is
+    True and no copy happens at all, so the sibling keeps its own (lack of)
+    comments rather than picking up live's.
     """
     root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
     live = root / "firmware" / "KilnFW" / "sdkconfig"
@@ -215,12 +218,15 @@ def test_comment_only_difference_and_elf_unchanged_still_refreshes(monkeypatch, 
         "CONFIG_KILNCTL_GPIO_PROBE=y\n",
         encoding="utf-8",
     )
-    sibling.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    sibling_text = "CONFIG_KILNCTL_GPIO_PROBE=y\n"
+    sibling.write_text(sibling_text, encoding="utf-8")
 
     result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
 
     assert "sdkconfig-refresh: OK" in result
     assert "SKIPPED" not in result
+    # No copy happens -- the sibling never picks up live's extra comment.
+    assert sibling.read_text(encoding="utf-8") == sibling_text
 
 
 def test_real_config_line_difference_and_elf_unchanged_still_skips(monkeypatch, tmp_path):
@@ -243,3 +249,34 @@ def test_real_config_line_difference_and_elf_unchanged_still_skips(monkeypatch, 
     assert "sdkconfig-refresh: SKIPPED" in result
     assert "did not change during this build" in result
     assert sibling.read_text(encoding="utf-8") == "CONFIG_KILNCTL_GPIO_PROBE=n\n"
+
+
+def test_config_lines_oserror_does_not_escape(monkeypatch, tmp_path):
+    """Opus review advisory 3 (2026-09-23 follow-up): `_config_lines()` is
+    called bare on both `live` and `sibling`. If either raises OSError --
+    the file vanished or got locked between the `isfile()` check and the
+    read, most plausibly another build racing this one -- that must not
+    escape and abort the whole `build_kilnfw()` call. The mirror source
+    (`check_all_task_stack_budgets.py`'s own `_config_lines` caller) and the
+    removed `_read_bytes` helper both caught OSError; this closes the same
+    gap here.
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"unchanged-elf-bytes")
+    live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    sibling.write_text("CONFIG_KILNCTL_GPIO_PROBE=n\n", encoding="utf-8")
+
+    def _raising_config_lines(path):
+        raise OSError("simulated race: file locked or vanished")
+
+    monkeypatch.setattr(workbench, "_config_lines", _raising_config_lines)
+
+    # Must not raise.
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    # Treated as not-matching, and the ELF did not change, so this is the
+    # ordinary SKIP path -- not a crash, and not a silent, wrong OK either.
+    assert "sdkconfig-refresh: SKIPPED" in result
