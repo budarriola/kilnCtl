@@ -1,9 +1,39 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-22, crash-report v3 +
+> **Status:** planning · **Last reviewed:** 2026-09-23, docs/checklist
+> upkeep + `boot_guard_get` MCP tool + a gzip content-parity standing check
+> (twenty-fifth sweep, docs- and tooling-only — no firmware source changed
+> this sweep) — open items below.
+> - **`zones_config_store`: the file-won migration-persist fault latch now
+>   carries the real on-disk version** instead of a hardcoded 0
+>   (`b03f9003`, blob citation refreshed `78447367`).
+> - **`boot_guard_get`**, a new READ-ONLY MCP tool wrapping `GET
+>   /api/boot_guard` (`d9f06f38`) so the recovery-mode counter can be
+>   checked without a flash in flight; `kilnctrl`'s tool count moves from
+>   182 to 183.
+> - **A standing check for TODO.md 10.6a's gzip content-parity item**
+>   (`ba2d0622`, SKIP-on-stale-build-dir fix `bd298ee0`): `KilnCtrl.bin`'s
+>   embedded `.gz` web assets are now byte-compared against their sources,
+>   SKIPping loudly on a stale/unbuilt tree rather than failing the whole
+>   suite.
+> - **Doc checklist upkeep**: verified stale boxes ticked across
+>   SAFETY_MODEL/BOOTLOADER/COMMISSIONING/DISPLAY_ST7796_PLAN (`bee3430d`),
+>   four stale/completed `firmware/KilnFW/TODO.md` items closed
+>   (`47d336da`), and the bench-preset `calibration_missing` item ticked
+>   and cited in COMMISSIONING.md (`87776202`).
+> - **`config_presets.py` docstring corrected** (`215ee790`): the
+>   `ct_channel_map`/`calibration_missing` gating was misdescribed; comment
+>   only, no behavior change.
+> - **Software backlog state, 2026-09-23:** a classifier pass found every
+>   remaining unchecked box in `firmware/SaftyFW/TODO.md` (26) and
+>   `tools/PcTools/TODO.md` (4, two duplicates) is hardware-gated.
+>   `firmware/KilnFW/TODO.md`'s remaining open items are 6A.3 (guard-disable
+>   ack gate, design-only, owner decision pending) and the two "POST
+>   handlers should post commands to owner tasks" items (~lines 1950/1958,
+>   architectural, scoped not urgent per `docs/HTTP_HANDLER_OWNERSHIP.md`).
+> **Previously reviewed:** 2026-09-22, crash-report v3 +
 > zones write-back guard + JSON-overflow hardening + web logout + Pico
-> image-identity v2 + host-test standing checks (twenty-fourth sweep) — open
-> items below.
+> image-identity v2 + host-test standing checks (twenty-fourth sweep).
 > - **zones_config: write-back hardened** — a file-sourced migration is now
 >   also written back to NVS (`3b979ec4`), and that write-back never
 >   overwrites a newer-than-firmware NVS blob (`cce21da0`).
@@ -1515,6 +1545,8 @@ open is short:
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
 | [`docs/RELEASE_HARDENING_PLAN.md`](docs/RELEASE_HARDENING_PLAN.md) | What has to be true before this controls a real kiln unattended: coredump readback for the open `profile_executor` panic, a release-gate audit against this repo's own vacuous-pass history, long-duration soak with a machine-checked verdict, guard provocation on hardware split into what the 4 W bench can and cannot ever close, failure injection, OTA/recovery mechanics, and the first-firing checklist (**closed** — [`docs/FIRST_FIRING_CHECKLIST.md`](docs/FIRST_FIRING_CHECKLIST.md), blocker 8). Risk-ordered, remaining blockers marked. **Corrected 2026-09-17 roadmap-upkeep sweep: this row's "starts once `docs/KILN_PROFILES_PLAN.md` is finished" was stale** — the plan's own doc shows it opened 2026-09-16 and several BLOCKER sub-items already closed (e.g. `bfa60679`, Blocker 6's schema-downgrade-hazard sub-item), regardless of `KILN_PROFILES_PLAN.md`'s status; read that plan's own status line for what remains, not this gating note |
 | [`docs/WEB_AUTH_PLAN.md`](docs/WEB_AUTH_PLAN.md) | Username/password and roles for the web GUI plus a numeric PIN for the LCD: an always-open Dashboard tier, `user` (start/stop only) and `administrator` (everything else), the full three-tier classification of all 140 HTTP routes, hashed and salted credentials in NVS, a fail-closed enforcement point with a mechanical route-tier check, an inactivity lock with a ten-second stay-unlocked prompt on both interfaces, and an E-stop-gated physical credential reset. Authentication ships defaulted OFF on both interfaces, so a field-upgraded board is unchanged. **Corrected 2026-09-17 roadmap-upkeep sweep: "Follows `docs/RELEASE_HARDENING_PLAN.md`" was stale — both plans opened the same day (2026-09-16) and have been landing concurrently since (route tiers, credential storage, LCD PIN entry, the web login surface, admin password/settings page, and the web-GUI inactivity lock all host-tested per `docs/WEB_AUTH_PLAN.md`'s own status line), not sequenced as this row claimed** |
+
+**Software backlog state, 2026-09-23:** every remaining unchecked box in `firmware/SaftyFW/TODO.md` (26) and `tools/PcTools/TODO.md` (4, two duplicates) is hardware-gated. `firmware/KilnFW/TODO.md`'s remaining open items are 6A.3 (guard-disable ack gate, design-only, owner decision pending) and the two "POST handlers should post commands to owner tasks" items (~lines 1950/1958, architectural, scoped not urgent per `docs/HTTP_HANDLER_OWNERSHIP.md`).
 
 ---
 
