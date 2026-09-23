@@ -80,6 +80,16 @@ import argparse
 import os
 import sys
 
+# SKIP-FAST (2026-09-23): set only by run_all_checks.ps1 when -Fast is in
+# effect. -Fast skips check_00_kilnfw_recovery_target_build.ps1, the ONLY
+# thing that produces recovery.bin -- so a missing image under -Fast is a
+# direct, expected consequence of -Fast itself, not a signal anything is
+# broken (see CLAUDE.md's "-Fast red-run caveat" and run_all_checks.ps1's own
+# comment on KILNCTL_CHECKS_FAST). The OTHER skip reason below (no `recovery`
+# partition row defined at all) is a structural gap unrelated to -Fast and
+# must never be reported as SKIP-FAST.
+_FAST = bool(os.environ.get("KILNCTL_CHECKS_FAST"))
+
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 _PCTOOLS_SRC = os.path.join(_REPO_ROOT, "tools", "PcTools", "src")
 if _PCTOOLS_SRC not in sys.path:
@@ -132,13 +142,21 @@ def run(partitions_csv: str, recovery_bin: str, partition_name: str) -> int:
     bound = entry.size
 
     if not os.path.isfile(recovery_bin):
-        return _skip(
+        reason = (
             f"{partition_name!r} partition is defined ({bound} B / 0x{bound:x} at "
             f"{partitions_csv}) but no recovery image was found at {recovery_bin!r} yet -- "
             "see docs/OTA_SINGLE_SLOT_PLAN.md section 8 step 1 (building it). "
             "This gate activates automatically once that image is built at this path "
             "(or pass --recovery-bin to match wherever it actually lands)."
         )
+        if _FAST:
+            # check_00_kilnfw_recovery_target_build.ps1 is the sole producer
+            # of this file and -Fast skips exactly that check -- this is not
+            # a new SKIP reason, just the existing one relabeled so
+            # run_all_checks.ps1 knows not to fail the run over it.
+            print(f"SKIP-FAST: {reason}")
+            return 3
+        return _skip(reason)
 
     image_size = os.path.getsize(recovery_bin)
 

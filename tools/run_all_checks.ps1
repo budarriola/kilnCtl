@@ -467,6 +467,35 @@ if ($Fast) {
     }
 }
 
+# SKIP-FAST (2026-09-23). Skipping the three phase-1 target builds above
+# necessarily starves a handful of downstream checks of the one artifact
+# they exist to grade (check_recovery_image_size.ps1 needs recovery.bin from
+# check_00_kilnfw_recovery_target_build.ps1; check_embedded_pico_image_fresh.ps1
+# needs the SaftyFW slot bins from check_00_saftyfw_target_build.ps1;
+# check_web_gzip_parity.ps1 needs the KilnFW build's embedded .gz output from
+# check_00_kilnfw_target_build.ps1) -- their own missing-prerequisite SKIP is
+# a direct, expected consequence of -Fast itself, not a sign anything is
+# broken (see CLAUDE.md's "-Fast red-run caveat"). That used to make a
+# perfectly healthy -Fast run come back red with unexplained SKIPs unless the
+# caller also passed -AllowSkips, which then ALSO silences a genuine SKIP
+# from an unrelated cause -- too blunt.
+#
+# This env var is this runner's side of the contract: it is set only when
+# -Fast is actually in effect, and only a check whose SKIP's sole cause is a
+# missing phase-1 artifact should test it and, if set, print "SKIP-FAST: "
+# instead of "SKIP: " for that specific reason (never for any other SKIP
+# reason it has). Complete-CheckResult below keys off that literal string,
+# not the exit code -- exit 3 stays the one reserved SKIP code for both. A
+# SKIP-FAST is filed into its own bucket and never fails the run; a plain
+# SKIP still does by default, exactly as before. A check must never print
+# SKIP-FAST on its own initiative without checking this var, since a plain
+# `-AllowFewerChecks`/no -Fast run must still see a real SKIP as fatal.
+if ($Fast) {
+    $env:KILNCTL_CHECKS_FAST = "1"
+} else {
+    Remove-Item Env:\KILNCTL_CHECKS_FAST -ErrorAction SilentlyContinue
+}
+
 if ($ListOnly) {
     Write-Host "$($checks.Count) check scripts discovered:"
     foreach ($c in $checks) {
@@ -482,6 +511,7 @@ Write-Host ""
 $failed = @()
 $passed = @()
 $skipped = @()
+$skippedFast = @()
 
 # Scratch dir for redirected stdout/stderr of each parallel check process.
 # Keyed by PID so two concurrent run_all_checks.ps1 invocations (different
@@ -571,6 +601,16 @@ function Complete-CheckResult {
         Write-Host "  PASS  $($Running.Rel)" -ForegroundColor Green
         return [pscustomobject]@{ Bucket = "pass"; Path = $Running.Rel }
     } elseif ($code -eq $SkipExitCode) {
+        # SKIP-FAST is checked first: a check that prints it is asserting its
+        # ONE stated reason is a direct, expected consequence of -Fast (see
+        # the block above that sets KILNCTL_CHECKS_FAST) -- filed into its
+        # own bucket rather than the ordinary "skip" one so it never counts
+        # as an unexplained/fatal SKIP below.
+        $reasonLine = ($outText -split "`r?`n" | Where-Object { $_ -match 'SKIP-FAST' } | Select-Object -First 1)
+        if ($reasonLine) {
+            Write-Host "  SKIP-FAST  $($Running.Rel)" -ForegroundColor Yellow
+            return [pscustomobject]@{ Bucket = "skipfast"; Path = $Running.Rel; Reason = $reasonLine.Trim() }
+        }
         $reasonLine = ($outText -split "`r?`n" | Where-Object { $_ -match 'SKIP' } | Select-Object -First 1)
         if (-not $reasonLine) {
             $reasonLine = "(no SKIP reason line found in output -- check violates the SKIP contract, see header)"
@@ -711,6 +751,8 @@ Remove-Item -ErrorAction SilentlyContinue -Recurse -Force $scratchDir
 foreach ($r in $results) {
     if ($r.Bucket -eq "pass") {
         $passed += $r.Path
+    } elseif ($r.Bucket -eq "skipfast") {
+        $skippedFast += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
     } elseif ($r.Bucket -eq "skip") {
         $skipped += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
     } else {
@@ -719,6 +761,19 @@ foreach ($r in $results) {
 }
 
 Write-Host ""
+
+if ($skippedFast.Count -gt 0) {
+    # Never fatal, regardless of -AllowSkips: each of these named its SKIP as
+    # a direct, expected consequence of -Fast skipping a phase-1 build. Listed
+    # separately so it reads as "expected", not folded into the ordinary
+    # skip count nor silently absorbed into "passed".
+    Write-Host "$($skippedFast.Count) check(s) skipped due to -Fast (non-fatal):" -ForegroundColor Yellow
+    foreach ($s in $skippedFast) {
+        Write-Host "  SKIP-FAST  $($s.Path)" -ForegroundColor Yellow
+        Write-Host "             $($s.Reason)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
 
 if ($skipped.Count -gt 0) {
     Write-Host "$($skipped.Count) check(s) SKIPPED (prerequisite absent -- not counted as passed):" -ForegroundColor Yellow
@@ -737,7 +792,7 @@ if ($failed.Count -gt 0) {
         Write-Host $f.Output.TrimEnd()
     }
     Write-Host ""
-    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Red
+    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
     exit 1
 }
 
@@ -761,10 +816,10 @@ if ($failed.Count -gt 0) {
 # -AllowSkips opts back into the old behavior for a machine that genuinely,
 # permanently lacks a prerequisite.
 if ($skipped.Count -gt 0 -and -not $AllowSkips) {
-    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Red
+    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
     Write-Host "FAILED: $($skipped.Count) check(s) skipped and -AllowSkips was not passed -- a skip is not a pass." -ForegroundColor Red
     exit 1
 }
 
-Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($failed.Count) failed." -ForegroundColor Green
+Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Green
 exit 0

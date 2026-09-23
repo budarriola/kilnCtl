@@ -56,9 +56,19 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import os
 import re
 import sys
 from pathlib import Path
+
+# SKIP-FAST (2026-09-23): set only by run_all_checks.ps1 when -Fast is in
+# effect. -Fast skips check_00_kilnfw_target_build.ps1, the sole producer of
+# BUILD_GZ_DIR_REL -- so a missing build-output directory under -Fast is a
+# direct, expected consequence of -Fast itself (see CLAUDE.md's "-Fast
+# red-run caveat"). The other SKIP reasons below (CMakeLists.txt missing/
+# unparseable, no asset/.gz pair located) are unrelated to -Fast and must
+# never be reported as SKIP-FAST.
+_FAST = bool(os.environ.get("KILNCTL_CHECKS_FAST"))
 
 CMAKE_REL = Path("firmware/KilnFW/App/drivers/CMakeLists.txt")
 DRIVERS_DIR_REL = Path("firmware/KilnFW/App/drivers")
@@ -101,10 +111,17 @@ def main() -> int:
 
     build_gz_dir = root / BUILD_GZ_DIR_REL
     if not build_gz_dir.is_dir():
-        print(
-            f"SKIP: check_web_gzip_parity: {build_gz_dir} does not exist -- "
+        reason = (
+            f"check_web_gzip_parity: {build_gz_dir} does not exist -- "
             "no KilnFW build output to check yet (build the KilnFW target first)"
         )
+        if _FAST:
+            # check_00_kilnfw_target_build.ps1 is the sole producer of this
+            # directory and -Fast skips exactly that check -- relabeled so
+            # run_all_checks.ps1 knows not to fail the run over it.
+            print(f"SKIP-FAST: {reason}")
+        else:
+            print(f"SKIP: {reason}")
         return 3
 
     drivers_dir = root / DRIVERS_DIR_REL

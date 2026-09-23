@@ -127,5 +127,21 @@ if ($code -eq 2) {
     foreach ($line in $output) { Write-Warning $line }
     exit 0
 }
+
+# SKIP-FAST (2026-09-23): -Fast skips check_00_saftyfw_target_build.ps1, the
+# sole producer of both slot .bin files -- so pico_image_freshness.py's
+# "SaftyFW slot bins not built yet" SKIP (checked here by its exact message,
+# never by env var alone) is a direct, expected consequence of -Fast, not a
+# defect. Relabeled to SKIP-FAST only for that specific reason and only when
+# run_all_checks.ps1 set KILNCTL_CHECKS_FAST (i.e. -Fast is actually in
+# effect); pico_image_freshness.py itself stays a pure, env-agnostic,
+# unit-testable module -- this relabeling lives only in this thin wrapper.
+# Any OTHER SKIP reason (e.g. git unavailable) is left as a plain SKIP.
+if ($code -eq 3 -and $env:KILNCTL_CHECKS_FAST -and
+        ($output -join "`n") -match 'SKIP: SaftyFW slot bins not built yet') {
+    $output | ForEach-Object { Write-Host ($_ -replace '^SKIP:', 'SKIP-FAST:') }
+    exit 3
+}
+
 $output | Write-Host
 exit $code

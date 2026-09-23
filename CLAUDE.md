@@ -554,20 +554,21 @@ still applies there.)
 `firmware/SaftyFW/build/SaftyFW_slotA.bin`/`SaftyFW_slotB.bin` haven't been
 built yet, including under `-Fast` (which skips
 `check_00_saftyfw_target_build.ps1`, the check that produces them) — this is
-the same class of expected `-Fast` SKIP as the `check_recovery_image_size.ps1`
-one below, not a regression.
-**Caveat:** `-Fast` then makes
-`check_recovery_image_size.ps1` (phase 2) SKIP, because it grades
-`recovery.bin`, which the skipped `check_00_kilnfw_recovery_target_build.ps1`
-would otherwise have produced — and since a SKIP fails the overall run by
-default (see next), a `-Fast` run on an otherwise perfectly healthy tree
-still comes back red with one unexplained skip, which reads exactly like a
-regression. This is expected from `-Fast`, not a sign anything is broken. A
-SKIP now **fails the overall run by default** (some KilnFW stack-budget
-checkers SKIP on a 0-byte/in-flight ELF, which parallel execution can make
-more likely, so a skip is no longer safely ignorable) — pass `-AllowSkips`
-to opt back into treating skips as non-fatal on a machine that genuinely and
-permanently lacks a prerequisite.
+the same class of expected `-Fast` SKIP as `check_recovery_image_size.ps1`
+and `check_web_gzip_parity.ps1`.
+**`-Fast` SKIPs are non-fatal (2026-09-23), and this is no longer a caveat
+to work around.** `-Fast` sets `KILNCTL_CHECKS_FAST` in the environment; the
+three checks above test it and, only for the one SKIP reason that is a
+direct consequence of the phase-1 build `-Fast` itself skipped (a missing
+`recovery.bin`, missing SaftyFW slot bins, or a missing KilnFW build-output
+directory), print `SKIP-FAST: ...` instead of `SKIP: ...`.
+`run_all_checks.ps1` files that into its own bucket, reports it separately
+in the summary ("N skipped due to -Fast"), and never fails the run over it —
+without needing `-AllowSkips`, and without weakening the fact that a SKIP
+for any other reason (a genuinely missing toolchain, a 0-byte/in-flight ELF,
+etc.) **still fails the overall run by default**; `-AllowSkips` still opts
+into treating those as non-fatal on a machine that genuinely and permanently
+lacks a prerequisite.
 
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
