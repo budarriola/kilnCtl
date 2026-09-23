@@ -607,6 +607,27 @@ def test_decode_safety_config_v1_migrates_forward_with_forced_calibration_missin
     assert fields["zone_ct_channel"] == [0, 1, 2]  # config_store_default()'s identity map
 
 
+def test_decode_safety_config_v1_clamps_out_of_range_tc_type():
+    # tc_type byte 0x0A exceeds _SC_TC_TYPE_MAX_REAL (0x07) -- must clamp to
+    # the default (K, 0x03), not pass an invalid enum value through.
+    buf = bytearray(b"\xff" * 512)
+    buf[0:4] = _SC_MAGIC_BYTES
+    struct.pack_into("<H", buf, 4, 1)  # format_version = 1
+    struct.pack_into("<I", buf, 8, 1)  # seq
+    buf[12] = 0x0A  # tc_type, out of range
+    buf[13] = 0
+    for ch in range(3):
+        base = 16 + ch * 9
+        buf[base] = 0
+        struct.pack_into("<f", buf, base + 1, 0.0)
+        struct.pack_into("<f", buf, base + 5, 0.0)
+    crc = _sc_crc(bytes(buf[:248]))
+    buf[248:252] = crc
+    version, fields = cc.decode_safety_config_blob(bytes(buf))
+    assert version == 1
+    assert fields["tc_type"] == 3
+
+
 def test_decode_safety_config_v1_bad_crc_refuses():
     buf = bytearray(b"\xff" * 512)
     buf[0:4] = _SC_MAGIC_BYTES
