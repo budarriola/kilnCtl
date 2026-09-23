@@ -138,6 +138,14 @@ typedef struct {
     bool tc_config_reasserted_known;
     bool tc_config_reasserted;
 
+    /* 2026-09-23: docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- the Pico's
+     * own view of which bootloader A/B slot it is currently running,
+     * surfaced via the same V3 status frame flags2 byte
+     * (SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B). Same
+     * "known" gate discipline as tc_config_reasserted_known above. */
+    bool pico_active_slot_known;
+    bool pico_active_slot_is_b;
+
     /* RELAY_LIFE_BUDGET.md -- ESP-only, never fetched from the
      * Pico (see safety_cfg_store_get_safety_relay_type()'s doc comment), so
      * unlike every other field above this is always known/valid, never
@@ -307,6 +315,10 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
     if (s->tc_config_reasserted_known) {
         APPEND(",\"tc_config_reasserted\":%s", s->tc_config_reasserted ? "true" : "false");
     }
+    /* docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- "unknown" until a V3
+     * peer has confirmed the Pico's own active-slot answer at least once. */
+    APPEND(",\"pico_active_slot\":\"%s\"",
+           (!s->link_up || !s->pico_active_slot_known) ? "unknown" : (s->pico_active_slot_is_b ? "B" : "A"));
     APPEND(",\"relay_type\":\"%s\"", relay_type_name(s->relay_type));
     APPEND(",\"ct_cal\":[");
     for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {
@@ -451,6 +463,8 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
             snap.borrowed_zone_index = st.borrowed_zone_index;
             snap.tc_config_reasserted_known = st.tc_config_reasserted_known;
             snap.tc_config_reasserted = st.tc_config_reasserted;
+            snap.pico_active_slot_known = st.pico_active_slot_known;
+            snap.pico_active_slot_is_b = st.pico_active_slot_is_b;
         }
         uint16_t peer_crc = 0;
         bool peer_known = false;

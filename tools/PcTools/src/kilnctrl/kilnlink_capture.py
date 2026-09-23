@@ -245,6 +245,16 @@ def _decode_status_frame_a(payload: bytes) -> dict:
         # re-asserted the MAX31856's CR0/CR1 config against a live-readback
         # mismatch (see SaftyFW's link_frame.h/thermo_task.h).
         out["tc_config_reasserted"] = bool(flags2 & 0x04)
+        # bits 3/4 (0x08/0x10) are LINK_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B,
+        # 2026-09-23 (docs/PICO_AUTO_UPDATE_PLAN.md:64): the Pico's own
+        # bootloader A/B slot, from update_task_get_active_slot(). Bit4 is
+        # only meaningful when bit3 is set -- same "_known" pairing
+        # convention as bit1/CJ_VALID -- so this is surfaced as one
+        # "A"/"B"/"unknown" string rather than two raw booleans.
+        if flags2 & 0x08:
+            out["pico_active_slot"] = "B" if (flags2 & 0x10) else "A"
+        else:
+            out["pico_active_slot"] = "unknown"
         out["borrowed_zone_index"] = borrowed_zone_index
     return out
 

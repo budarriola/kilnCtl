@@ -268,14 +268,24 @@ bool pico_update_attempts_record_failure(uint32_t pair_hash)
 
 /* Reset-one-side bug class (CLAUDE.md): this ESP-persisted `last_slot` is a
  * derived EXPECTATION of the Pico's actual `active_slot`, joined only by the
- * implicit contract "the ESP alternated correctly last time" -- there is no
- * wire field carrying the Pico's real active slot back, so nothing here can
- * ever detect drift between the two. A Pico reflashed by other means (SWD,
- * `debug_program(peer="pico")`) or a Pico that rejects a write for a reason
- * unrelated to slot linkage silently leaves this side's `last_slot` stale;
- * the next alternation guess is then simply wrong, discovered only via
+ * implicit contract "the ESP alternated correctly last time". A Pico
+ * reflashed by other means (SWD, `debug_program(peer="pico")`) or a Pico
+ * that rejects a write for a reason unrelated to slot linkage silently
+ * leaves this side's `last_slot` stale; the next alternation guess is then
+ * simply wrong, discovered only via
  * SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE (state 8) at the next
- * attempt, not before. Do not add other state here that assumes this value
+ * attempt, not before.
+ *
+ * 2026-09-23 (docs/PICO_AUTO_UPDATE_PLAN.md:64): a wire field carrying the
+ * Pico's real active slot back now DOES exist -- safety_link.h's cached
+ * `pico_active_slot_known`/`pico_active_slot_is_b`
+ * (SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B, flags2 bits
+ * 3/4, mirroring SaftyFW's `update_task_get_active_slot()`). This function
+ * does not yet read it: deciding what to DO when it disagrees with
+ * `last_slot` (trust the wire and overwrite the persisted guess? refuse to
+ * alternate? just log?) is a separate design decision, not a small,
+ * obviously-correct change, and is left as a TODO here rather than folded
+ * into this pass. Do not add other state here that assumes this value
  * tracks the Pico without a read-back to confirm it. */
 bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot)
 {

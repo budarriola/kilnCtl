@@ -79,7 +79,8 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
                                bool peer_supports_status_v2, uint8_t tx_dropped_sat,
                                bool peer_supports_status_v3, bool is_borrowed,
                                uint8_t borrowed_zone_index, bool cj_valid,
-                               bool tc_config_reasserted)
+                               bool tc_config_reasserted, bool active_slot_known,
+                               bool active_slot_is_b)
 {
     out[0] = LINK_FRAME_STATUS_CMD;
 
@@ -132,6 +133,12 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
             }
             if (tc_config_reasserted) {
                 flags2 |= LINK_FLAG2_TC_CONFIG_REASSERTED;
+            }
+            if (active_slot_known) {
+                flags2 |= LINK_FLAG2_ACTIVE_SLOT_KNOWN;
+                if (active_slot_is_b) {
+                    flags2 |= LINK_FLAG2_ACTIVE_SLOT_B;
+                }
             }
             out[KILNLINK_FRAME_A_OFF_FLAGS2] = flags2;
             out[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX] = borrowed_zone_index;

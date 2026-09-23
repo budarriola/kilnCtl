@@ -148,9 +148,9 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 
 // flags2 byte (offset 24, V3 only) -- 2026-09-03. Byte 1 has no room left
 // (comment above), so this is a NEW byte (V1->V2 precedent), not a ninth bit
-// squeezed somewhere. Bits 0-2 are defined so far (see below); bits 3-7 are
+// squeezed somewhere. Bits 0-4 are defined so far (see below); bits 5-7 are
 // spare, reserved for future flags rather than this byte being sized for
-// exactly three bits.
+// exactly five bits.
 #define LINK_FLAG2_BORROWED 0x01u /* tc_source is BORROWED_ZONE or BOTH -- this reading is (partly) sourced
                                     * from another zone's probe, not this board's own J7 input
                                     * (SAFETY_MODEL.md sec 3, THERMOCOUPLE.md's tc_source table). */
@@ -182,6 +182,26 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 // how many times, nor when most recently -- only thermo_task_live_config_
 // mismatch_count() itself (still SWD-only) has that detail.
 #define LINK_FLAG2_TC_CONFIG_REASSERTED 0x04u
+
+// docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap: "the ESP has no wire field
+// for the Pico's active slot, so A/B alternation is blind" (see
+// pico_update_attempts_next_slot()'s own comment, KilnFW's
+// pico_update_attempts.c, for the "reset one side of a pair" hazard this
+// closes). Two bits, not one, deliberately -- following this byte's own
+// established "_known" convention (CJ_VALID/TC_CONFIG_REASSERTED's ESP-side
+// mirrors both pair a value bit with a *_known gate, never let "false" mean
+// two different things): a single SLOT_B bit would make "slot A" and "slot
+// unknown" both read as 0, indistinguishable on the wire, which is exactly
+// the ambiguity this whole addition exists to remove. ACTIVE_SLOT_KNOWN is
+// set iff link_task.c's own view of the running bootloader slot
+// (update_task_get_active_slot(), update_task.c/.h) is known this boot;
+// ACTIVE_SLOT_B is only meaningful when KNOWN is set, and says A (clear) or
+// B (set). A plain (non-slot-linked) dev target, or a boot before
+// update_task's startup metadata read has run, reports KNOWN clear -- same
+// "unknown, not a confident false" discipline LINK_FLAG2_CJ_VALID's ESP-side
+// mirror already documents for its own *_known field.
+#define LINK_FLAG2_ACTIVE_SLOT_KNOWN 0x08u
+#define LINK_FLAG2_ACTIVE_SLOT_B     0x10u
 
 // Packs the status payload into `out` (must have room for
 // LINK_FRAME_STATUS_LEN_V2 bytes, whether or not this call ends up using all
@@ -258,6 +278,15 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 //     from this function's point of view -- the asymmetry is deliberately
 //     all on "do I know the peer is new", never on which side has which
 //     build.
+//
+// `active_slot_known`/`active_slot_is_b` control flags2 bits 3/4
+// (LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B, see those macros' own comment above) --
+// docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap. Same V3-only gate as every
+// other flags2 field: only meaningful once `peer_supports_status_v3` is
+// true, same "no new byte, no protocol bump" reasoning. Pass
+// `active_slot_known = false` (and `active_slot_is_b` is then ignored, by
+// convention passed false too) whenever the caller's own view of the running
+// slot is not yet established this boot.
 size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop, bool relay_energized,
                                bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
                                uint8_t tc_fault_bits, float amps1, float amps2, float amps3,
@@ -265,7 +294,8 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
                                bool peer_supports_status_v2, uint8_t tx_dropped_sat,
                                bool peer_supports_status_v3, bool is_borrowed,
                                uint8_t borrowed_zone_index, bool cj_valid,
-                               bool tc_config_reasserted);
+                               bool tc_config_reasserted, bool active_slot_known,
+                               bool active_slot_is_b);
 
 // --- Frame C: SAFETY_CMD_FW_VERSION (0x0B) -----------------------------------
 // Also the reply to, and identical command byte as, SAFETY_CMD_GET_FW_VERSION

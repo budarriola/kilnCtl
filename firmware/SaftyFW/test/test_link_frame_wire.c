@@ -60,6 +60,8 @@
 #define MIRROR_SAFETY_FLAG2_BORROWED        0x01u
 #define MIRROR_SAFETY_FLAG2_CJ_VALID        0x02u
 #define MIRROR_SAFETY_FLAG2_TC_CONFIG_REASSERTED 0x04u
+#define MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_KNOWN 0x08u
+#define MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_B     0x10u
 
 // safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V1/_V2/_V3 (KilnFW) and this
 // file's own LINK_FRAME_STATUS_LEN_V1/_V2/_V3 (link_frame.h, SaftyFW) now
@@ -100,6 +102,12 @@ typedef struct {
     // cj_valid_known above.
     bool tc_config_reasserted_known;
     bool tc_config_reasserted;
+    // active_slot_known/active_slot_is_b mirror LINK_FLAG2_ACTIVE_SLOT_KNOWN/
+    // _ACTIVE_SLOT_B (link_frame.h, docs/PICO_AUTO_UPDATE_PLAN.md:64) -- same
+    // two-bit "_known" convention as cj_valid_known/tc_config_reasserted_known
+    // above.
+    bool active_slot_known;
+    bool active_slot_is_b;
 } mirror_status_t;
 
 static float mirror_read_f32_le(const uint8_t *p)
@@ -159,6 +167,10 @@ static mirror_status_t mirror_apply_status(const uint8_t *payload, uint8_t lengt
         out.tc_config_reasserted_known = true;
         out.tc_config_reasserted =
             (p[KILNLINK_FRAME_A_OFF_FLAGS2] & MIRROR_SAFETY_FLAG2_TC_CONFIG_REASSERTED) != 0u;
+        out.active_slot_known =
+            (p[KILNLINK_FRAME_A_OFF_FLAGS2] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_KNOWN) != 0u;
+        out.active_slot_is_b =
+            (p[KILNLINK_FRAME_A_OFF_FLAGS2] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_B) != 0u;
     } else {
         out.borrowed_known = false;
         out.borrowed = false;
@@ -167,6 +179,8 @@ static mirror_status_t mirror_apply_status(const uint8_t *payload, uint8_t lengt
         out.cj_valid = false;
         out.tc_config_reasserted_known = false;
         out.tc_config_reasserted = false;
+        out.active_slot_known = false;
+        out.active_slot_is_b = false;
     }
     out.ok = true;
     return out;
@@ -286,7 +300,7 @@ static void test_status_frame_round_trip(void)
     link_frame_pack_status(payload, /*estop=*/true, /*relay_energized=*/true,
                             /*heating_enabled=*/false, /*temp_valid=*/true, 851.25f, 23.5f,
                             0x03u, 1.25f, 2.5f, 3.75f, /*tc_not_installed=*/false, /*tc_injected=*/false,
-                            /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0, /*peer_supports_status_v3=*/false, /*is_borrowed=*/false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                            /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0, /*peer_supports_status_v3=*/false, /*is_borrowed=*/false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
 
     // link_frame_pack_status() never sets bits 0/1 (LINK_UP/FAULT are
     // documented as "the ESP's to own", link_frame.h) -- so on its own this
@@ -342,7 +356,7 @@ static void test_status_frame_nan_when_invalid(void)
     // enforce it here rather than trusting the far side to have been
     // careful" -- is what makes the assertions below pass, not the packer.
     link_frame_pack_status(payload, false, false, false, /*temp_valid=*/false, 777.0f, 888.0f, 0,
-                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
 
     uint8_t wire_payload[LINK_FRAME_STATUS_LEN];
     uint8_t wire_length = 0;
@@ -360,7 +374,7 @@ static void test_status_frame_nan_when_invalid(void)
     // flag, not just always emitted.
     uint8_t payload2[LINK_FRAME_STATUS_LEN];
     link_frame_pack_status(payload2, false, false, false, /*temp_valid=*/true, 100.0f, 20.0f, 0,
-                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
     uint8_t wire2[LINK_FRAME_STATUS_LEN];
     uint8_t wire2_len = 0;
     TEST_CHECK(wire_round_trip(payload2, LINK_FRAME_STATUS_LEN, wire2, &wire2_len),
@@ -377,7 +391,7 @@ static void test_status_frame_negative(void)
 
     uint8_t payload[LINK_FRAME_STATUS_LEN_V1];
     link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0, 0.0f, 0.0f, 0.0f,
-                            false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                            false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
 
     // Truncated payload: one byte short of the (still valid) V1 length.
     {
@@ -495,7 +509,7 @@ static void test_status_frame_v2_tx_dropped(void)
         memset(payload, 0xAAu, sizeof(payload)); // poison byte 23 so "untouched" is provable
         size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
                                              0.0f, 0.0f, 0.0f, false, false,
-                                             /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/77u, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/77u, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V1,
                    "peer_supports_status_v2=false -> returns the V1 (23) length");
         TEST_CHECK(payload[LINK_FRAME_STATUS_LEN_V1] == 0xAAu,
@@ -513,7 +527,7 @@ static void test_status_frame_v2_tx_dropped(void)
         uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
         size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
                                              0.0f, 0.0f, 0.0f, false, false,
-                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/200u, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/200u, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
                    "peer_supports_status_v2=true -> returns the V2 (24) length");
         TEST_CHECK(payload[LINK_FRAME_STATUS_LEN_V1] == 200u, "byte 23 carries tx_dropped_sat exactly");
@@ -573,7 +587,7 @@ static void test_status_frame_v3_borrowed(void)
                                              0.0f, 0.0f, 0.0f, false, false,
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/5u,
                                              /*peer_supports_status_v3=*/false, /*is_borrowed=*/true,
-                                             /*borrowed_zone_index=*/1u, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             /*borrowed_zone_index=*/1u, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
                    "peer_supports_status_v3=false -> returns the V2 (24) length even though "
                    "is_borrowed=true was passed in");
@@ -593,7 +607,7 @@ static void test_status_frame_v3_borrowed(void)
                                              0.0f, 0.0f, 0.0f, false, false,
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
-                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "peer_supports_status_v3=true -> returns the V3 (26) length");
         TEST_CHECK(payload[24] == 0u, "flags2 byte is 0 when is_borrowed=false");
         TEST_CHECK(payload[25] == LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN,
@@ -617,7 +631,7 @@ static void test_status_frame_v3_borrowed(void)
                                              0.0f, 0.0f, 0.0f, false, false,
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/true,
-                                             /*borrowed_zone_index=*/2u, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             /*borrowed_zone_index=*/2u, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
         TEST_CHECK((payload[24] & 0x01u) != 0u, "flags2 bit 0 (BORROWED) is set when is_borrowed=true");
         TEST_CHECK(payload[25] == 2u, "borrowed_zone_index (2) survives pack exactly");
@@ -646,7 +660,7 @@ static void test_status_frame_v3_borrowed(void)
                                              0.0f, 0.0f, 0.0f, false, false,
                                              /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/true,
-                                             /*borrowed_zone_index=*/0u, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             /*borrowed_zone_index=*/0u, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V1,
                    "peer_supports_status_v2=false wins even when peer_supports_status_v3=true is "
                    "(wrongly) also passed -- V3 can never be emitted without V2");
@@ -673,7 +687,7 @@ static void test_status_frame_v3_cj_valid(void)
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
                                              LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN,
-                                             /*cj_valid=*/true, /*tc_config_reasserted=*/false);
+                                             /*cj_valid=*/true, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
         TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_CJ_VALID) != 0u,
                    "flags2 bit 1 (CJ_VALID) is set when cj_valid=true even though temp_valid=false");
@@ -703,7 +717,7 @@ static void test_status_frame_v3_cj_valid(void)
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
                                              LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN,
-                                             /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                                             /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
         TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_CJ_VALID) == 0u,
                    "flags2 bit 1 (CJ_VALID) is clear when cj_valid=false");
@@ -732,7 +746,7 @@ static void test_status_frame_v3_tc_config_reasserted(void)
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
                                              LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false,
-                                             /*tc_config_reasserted=*/false);
+                                             /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
         TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_TC_CONFIG_REASSERTED) == 0u,
                    "flags2 bit 2 (TC_CONFIG_REASSERTED) is clear when tc_config_reasserted=false");
@@ -753,7 +767,7 @@ static void test_status_frame_v3_tc_config_reasserted(void)
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/true, /*is_borrowed=*/true,
                                              /*borrowed_zone_index=*/1u, /*cj_valid=*/true,
-                                             /*tc_config_reasserted=*/true);
+                                             /*tc_config_reasserted=*/true, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
         TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_TC_CONFIG_REASSERTED) != 0u,
                    "flags2 bit 2 (TC_CONFIG_REASSERTED) is set when tc_config_reasserted=true");
@@ -785,7 +799,7 @@ static void test_status_frame_v3_tc_config_reasserted(void)
                                              /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
                                              /*peer_supports_status_v3=*/false, /*is_borrowed=*/false,
                                              LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false,
-                                             /*tc_config_reasserted=*/true);
+                                             /*tc_config_reasserted=*/true, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
                    "peer_supports_status_v3=false -> V2 length, even though tc_config_reasserted=true "
                    "was (meaninglessly) passed");
@@ -795,6 +809,106 @@ static void test_status_frame_v3_tc_config_reasserted(void)
         TEST_CHECK(!parsed.tc_config_reasserted_known,
                    "tc_config_reasserted_known reads false (UNKNOWN) for a non-V3 frame, not a false "
                    "\"not reasserted\"");
+    }
+}
+
+static void test_status_frame_v3_active_slot(void)
+{
+    TEST_SECTION("status frame -- V3 ACTIVE_SLOT_KNOWN/ACTIVE_SLOT_B flags (flags2 bits 3-4)");
+
+    // active_slot_known=false -- both bits clear, same "unknown" case a
+    // plain non-slot-linked dev target reports.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
+                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false,
+                                             /*tc_config_reasserted=*/false, /*active_slot_known=*/false,
+                                             /*active_slot_is_b=*/false);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_KNOWN) == 0u,
+                   "flags2 bit 3 (ACTIVE_SLOT_KNOWN) is clear when active_slot_known=false");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_B) == 0u,
+                   "flags2 bit 4 (ACTIVE_SLOT_B) is also clear -- meaningless when KNOWN is clear");
+
+        mirror_status_t parsed = mirror_apply_status(payload, (uint8_t)len);
+        TEST_CHECK(parsed.ok, "V3-length frame parses");
+        TEST_CHECK(!parsed.active_slot_known, "mirror reports active_slot_known == false (unknown)");
+    }
+
+    // active_slot_known=true, active_slot_is_b=false -- slot A, alongside
+    // tc_config_reasserted=true to prove bits 3/4 are independent of bit 2.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
+                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false,
+                                             /*tc_config_reasserted=*/true, /*active_slot_known=*/true,
+                                             /*active_slot_is_b=*/false);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_KNOWN) != 0u,
+                   "flags2 bit 3 (ACTIVE_SLOT_KNOWN) is set");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_B) == 0u,
+                   "flags2 bit 4 (ACTIVE_SLOT_B) is clear -- slot A");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_TC_CONFIG_REASSERTED) != 0u,
+                   "flags2 bit 2 (TC_CONFIG_REASSERTED) still set alongside bits 3/4 -- not aliased");
+
+        uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V3];
+        uint8_t wire_length = 0;
+        TEST_CHECK(wire_round_trip(payload, (uint8_t)len, wire_payload, &wire_length),
+                   "V3 status frame survives the real kilnlink wire round trip");
+
+        mirror_status_t parsed = mirror_apply_status(wire_payload, wire_length);
+        TEST_CHECK(parsed.ok, "V3-length frame parses after a real wire round trip");
+        TEST_CHECK(parsed.active_slot_known, "mirror reports active_slot_known == true");
+        TEST_CHECK(!parsed.active_slot_is_b, "active_slot_is_b reads false (slot A) after pack->wire->parse");
+    }
+
+    // active_slot_known=true, active_slot_is_b=true -- slot B.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
+                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false,
+                                             /*tc_config_reasserted=*/false, /*active_slot_known=*/true,
+                                             /*active_slot_is_b=*/true);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_KNOWN) != 0u,
+                   "flags2 bit 3 (ACTIVE_SLOT_KNOWN) is set");
+        TEST_CHECK((payload[24] & MIRROR_SAFETY_FLAG2_ACTIVE_SLOT_B) != 0u,
+                   "flags2 bit 4 (ACTIVE_SLOT_B) is set -- slot B");
+
+        mirror_status_t parsed = mirror_apply_status(payload, (uint8_t)len);
+        TEST_CHECK(parsed.ok, "V3-length frame parses");
+        TEST_CHECK(parsed.active_slot_known, "mirror reports active_slot_known == true");
+        TEST_CHECK(parsed.active_slot_is_b, "active_slot_is_b reads true (slot B)");
+    }
+
+    // Not V3 -- active_slot_known must read false (unknown), never a false
+    // "slot A confidently", same discipline as tc_config_reasserted_known.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/false, /*is_borrowed=*/false,
+                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false,
+                                             /*tc_config_reasserted=*/false, /*active_slot_known=*/true,
+                                             /*active_slot_is_b=*/true);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
+                   "peer_supports_status_v3=false -> V2 length, even though active_slot_known=true "
+                   "was (meaninglessly) passed");
+
+        mirror_status_t parsed = mirror_apply_status(payload, (uint8_t)len);
+        TEST_CHECK(parsed.ok, "V2-length frame parses");
+        TEST_CHECK(!parsed.active_slot_known,
+                   "active_slot_known reads false (UNKNOWN) for a non-V3 frame, not a confident slot A");
     }
 }
 
@@ -1045,7 +1159,7 @@ static void test_telemetry_keeps_flowing_on_version_mismatch(void)
     uint8_t payload[LINK_FRAME_STATUS_LEN_V1];
     link_frame_pack_status(payload, /*estop=*/false, /*relay_energized=*/false,
                             /*heating_enabled=*/false, /*temp_valid=*/true, 500.0f, 22.0f, 0, 0.1f,
-                            0.2f, 0.3f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false);
+                            0.2f, 0.3f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN, /*cj_valid=*/false, /*tc_config_reasserted=*/false, /*active_slot_known=*/false, /*active_slot_is_b=*/false);
     uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V1];
     uint8_t wire_length = 0;
     TEST_CHECK(wire_round_trip(payload, LINK_FRAME_STATUS_LEN_V1, wire_payload, &wire_length),
@@ -1086,6 +1200,7 @@ void run_test_link_frame_wire(void)
     test_status_frame_v3_borrowed();
     test_status_frame_v3_cj_valid();
     test_status_frame_v3_tc_config_reasserted();
+    test_status_frame_v3_active_slot();
     test_fw_version_round_trip();
     test_fw_version_negative();
     test_version_compatibility_named_matrix();

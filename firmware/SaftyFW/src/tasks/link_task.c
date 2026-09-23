@@ -888,6 +888,14 @@ static void link_task_send_status(void)
     // comment on the macro for why this is a nonzero-count test, not a
     // one-shot pulse.
     bool tc_config_reasserted = thermo_task_live_config_mismatch_count() != 0u;
+    // LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B (docs/PICO_AUTO_UPDATE_PLAN.md:64) --
+    // update_task_get_active_slot() (update_task.c) is the authoritative
+    // "which bootloader slot is this boot actually running" answer, cached
+    // once at that task's own startup from a real flash metadata read; see
+    // its own doc comment (update_task.h) for why it's a separate cache from
+    // that module's PENDING_VERIFY-only s_own_slot.
+    bool active_slot_is_b = false;
+    bool active_slot_known = update_task_get_active_slot(&active_slot_is_b);
 
     uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
     bool energized_bit = false;
@@ -898,7 +906,8 @@ static void link_task_send_status(void)
                                          tc_not_installed, tc_injected,
                                          peer_supports_status_v2, tx_dropped_sat,
                                          peer_supports_status_v3, is_borrowed, borrowed_zone_index_wire,
-                                         cj_valid, tc_config_reasserted);
+                                         cj_valid, tc_config_reasserted, active_slot_known,
+                                         active_slot_is_b);
 
     if (link_task_send_broadcast(payload, (uint8_t)len)) {
         s_status_tx_ok_count++;

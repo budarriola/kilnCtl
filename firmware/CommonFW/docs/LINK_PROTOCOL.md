@@ -1025,7 +1025,7 @@ is what makes phase 2 of `TODO.md` possible before any ESP work lands.
 | 15..18 | f32 LE | current 2, A |
 | 19..22 | f32 LE | current 3, A |
 | 23 | u8 | **V2 only** (24 bytes total) — `tx_dropped_sat`, saturating uart_owner TX-ring-drop count, 255 = "254 or more" |
-| 24 | u8 | **V3 only** (26 bytes total) — flags2: bit0 `BORROWED` (this reading is sourced, at least partly, from another zone's probe — `tc_source` is `BORROWED_ZONE` or `BOTH`); bit1 `CJ_VALID`; bit2 `TC_CONFIG_REASSERTED` (2026-09-23 — sticky for the rest of this boot once `thermo_task.c` has ever re-asserted the MAX31856's CR0/CR1 config against a live-readback mismatch; see `thermo_task_live_config_mismatch_count()`); bits 3-7 spare |
+| 24 | u8 | **V3 only** (26 bytes total) — flags2: bit0 `BORROWED` (this reading is sourced, at least partly, from another zone's probe — `tc_source` is `BORROWED_ZONE` or `BOTH`); bit1 `CJ_VALID`; bit2 `TC_CONFIG_REASSERTED` (2026-09-23 — sticky for the rest of this boot once `thermo_task.c` has ever re-asserted the MAX31856's CR0/CR1 config against a live-readback mismatch; see `thermo_task_live_config_mismatch_count()`); bit3 `ACTIVE_SLOT_KNOWN` / bit4 `ACTIVE_SLOT_B` (2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64 — the Pico's own bootloader A/B slot, from `update_task_get_active_slot()`; bit4 only meaningful when bit3 is set, same paired-with-a-`_known`-gate convention as bit1/CJ_VALID); bits 5-7 spare |
 | 25 | u8 | **V3 only** — `borrowed_zone_index` (0..2), or `0xFF` if the borrowed zone itself is not commissioned on the Pico |
 
 Flags: bits 0 (`LINK_UP`) and 1 (`FAULT`) are the **ESP's** to own — the Pico

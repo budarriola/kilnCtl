@@ -249,6 +249,23 @@ extern "C" {
  * how many times or when most recently. */
 #define SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED 0x04u
 
+/* 2026-09-23: mirrors SaftyFW's link_frame.h LINK_FLAG2_ACTIVE_SLOT_KNOWN
+ * exactly (same numeric value, same reasoning) -- docs/PICO_AUTO_UPDATE_PLAN.md:64's
+ * named gap ("the ESP has no wire field for the Pico's active slot, so A/B
+ * alternation is blind"). Set iff update_task_get_active_slot() (SaftyFW)
+ * established this boot's running bootloader slot from a real flash
+ * metadata record; SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_B is only
+ * meaningful when this bit is set (same "_known" pairing convention as
+ * CJ_VALID/TC_CONFIG_REASSERTED above -- a plain SLOT_B bit alone would
+ * make "slot A" and "slot unknown" both read as 0). */
+#define SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN 0x08u
+
+/* 2026-09-23: mirrors SaftyFW's link_frame.h LINK_FLAG2_ACTIVE_SLOT_B
+ * exactly (same numeric value, same reasoning). Clear = slot A, set = slot
+ * B; meaningless unless SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN is also
+ * set. */
+#define SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_B 0x10u
+
 /* borrowed_zone_index sentinel (byte 25) -- mirrors SaftyFW's link_frame.h
  * LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN exactly. A real value is always
  * 0..2 (config_store.h borrowed_zone_index's own range), so 0xFF can never
@@ -872,6 +889,19 @@ typedef struct {
      * rationale. */
     bool     tc_config_reasserted_known;
     bool     tc_config_reasserted;
+
+    /* 2026-09-23: docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- the Pico's
+     * own view of which bootloader A/B slot it is currently running,
+     * carried in the SAME V3 status frame's flags2 byte (bits 3/4,
+     * SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B). Same
+     * "false/meaningless until proven otherwise" convention as
+     * tc_config_reasserted_known above: pico_active_slot_known is false for
+     * a V1/V2 frame, a V3 peer not yet confirmed, or a Pico boot that never
+     * established its own active slot (e.g. a non-slot-linked dev target).
+     * When pico_active_slot_known is true, pico_active_slot_is_b says A
+     * (false) or B (true). */
+    bool     pico_active_slot_known;
+    bool     pico_active_slot_is_b;
 
     /* SAFETY_CMD_POWER (Frame E) telemetry -- ROADMAP.md M5/M6, TODO.md
      * 10.10. NaN/false fields below mean "never received" or "not a valid

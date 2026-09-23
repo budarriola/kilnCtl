@@ -753,6 +753,78 @@ static void test_apply_status_v3_tc_config_reasserted(void)
                "a peer regressing from V3 to V1 mid-session clears the stale tc_config_reasserted_known flag");
 }
 
+static void test_apply_status_v3_active_slot(void)
+{
+    TEST_SECTION("safety_apply_status -- V3 (26B) ACTIVE_SLOT_KNOWN/ACTIVE_SLOT_B flags2 bits 3/4 "
+                 "(2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64): absent-byte contract reads as "
+                 "UNKNOWN, present byte decodes A/B correctly and is independent of bits 0/1/2, and "
+                 "a V3->V1 regression clears the stale known-flag");
+
+    // Pinned so this test cannot pass by tautology against the very macros
+    // the decoder itself uses to interpret payload[24]: the slot-A/slot-B
+    // cases below deliberately use raw hex literals for the slot bits, not
+    // these macros, so a swap of the macro values in safety_link.h is
+    // caught rather than silently moving both sides together.
+    _Static_assert(SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN == 0x08u,
+                   "test_apply_status_v3_active_slot's raw literals (0x08u/0x18u) assume this value");
+    _Static_assert(SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_B == 0x10u,
+                   "test_apply_status_v3_active_slot's raw literals (0x08u/0x18u) assume this value");
+
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // V1 (23 bytes): no byte 24/25 at all -- must read as
+    // pico_active_slot_known == false, never a confident slot A.
+    set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V1 frame is accepted");
+    TEST_CHECK(link.cached.pico_active_slot_known == false,
+               "V1 frame leaves pico_active_slot_known false (no byte 24/25 to read)");
+
+    // V3 (26 bytes), bits 3+4 set (KNOWN + slot B, raw literal 0x18u) --
+    // proves the new bits are decoded independently, not aliased onto any
+    // existing flag. Bits 0/1 still use their own macros here since this
+    // case isn't testing THEM against a swap.
+    msg.payload[24] = (uint8_t)(SAFETY_LINK_STATUS_FLAG2_BORROWED | SAFETY_LINK_STATUS_FLAG2_CJ_VALID |
+                                SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED | 0x18u);
+    msg.payload[25] = 1u;
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V3 (26-byte) frame is accepted");
+    TEST_CHECK(link.cached.pico_active_slot_known == true, "V3 frame sets pico_active_slot_known true");
+    TEST_CHECK(link.cached.pico_active_slot_is_b == true,
+               "V3 frame's flags2 bit4 becomes cached.pico_active_slot_is_b (slot B)");
+    TEST_CHECK(link.cached.borrowed == true, "bit0 still decodes correctly alongside bits3/4");
+    TEST_CHECK(link.cached.cj_valid == true, "bit1 still decodes correctly alongside bits3/4");
+    TEST_CHECK(link.cached.tc_config_reasserted == true, "bit2 still decodes correctly alongside bits3/4");
+
+    // KNOWN set, B clear -- slot A -- proves bit4 is read off its own mask,
+    // not hard-coded true whenever bit3 is set. Raw literal 0x08u, not the
+    // macro: see the _Static_assert block above.
+    msg.payload[24] = 0x08u;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "KNOWN-only V3 frame decodes");
+    TEST_CHECK(link.cached.pico_active_slot_known == true, "KNOWN bit alone sets pico_active_slot_known true");
+    TEST_CHECK(link.cached.pico_active_slot_is_b == false, "B bit clear -> pico_active_slot_is_b false (slot A)");
+
+    // B set, KNOWN clear -- a wire value that should never actually occur
+    // (link_frame_pack_status() never sets B without KNOWN), but the decode
+    // must still read it off its own mask rather than inferring KNOWN from
+    // B, matching the sender-side contract precisely.
+    msg.payload[24] = (uint8_t)SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_B;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "B-only V3 frame decodes");
+    TEST_CHECK(link.cached.pico_active_slot_known == false, "KNOWN clear even with B set");
+    TEST_CHECK(link.cached.pico_active_slot_is_b == true, "B bit decodes true off its own mask regardless");
+
+    // Regression V3 -> V1: a peer that stops sending V3 must not leave a
+    // stale pico_active_slot_known=true pointing at the last V3 frame's
+    // now-stale bytes.
+    set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V1 frame after a V3 frame is still accepted");
+    TEST_CHECK(link.cached.pico_active_slot_known == false,
+               "a peer regressing from V3 to V1 mid-session clears the stale pico_active_slot_known flag");
+}
+
 static void test_safety_tc_is_separate_physical_sensor_predicate(void)
 {
     TEST_SECTION("safety_tc_is_separate_physical_sensor() -- ROADMAP.md 'Safety TC display "
@@ -2233,6 +2305,7 @@ int main(void)
     test_apply_power_accepts_v1_and_v2_lengths_and_gates_counts_on_flag();
     test_apply_status_v3_borrowed();
     test_apply_status_v3_tc_config_reasserted();
+    test_apply_status_v3_active_slot();
     test_safety_tc_is_separate_physical_sensor_predicate();
     test_apply_status_temp_valid_flag_is_sole_authority();
     test_apply_status_ignores_peer_link_up_and_fault_bits();

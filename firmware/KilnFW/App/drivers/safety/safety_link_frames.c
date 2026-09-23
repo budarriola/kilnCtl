@@ -711,6 +711,10 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.tc_config_reasserted_known = true;
         link->cached.tc_config_reasserted =
             (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED) != 0u;
+        link->cached.pico_active_slot_known =
+            (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN) != 0u;
+        link->cached.pico_active_slot_is_b =
+            (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_B) != 0u;
     } else {
         link->cached.borrowed_known = false;
         link->cached.borrowed = false;
@@ -719,6 +723,8 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.cj_valid = false;
         link->cached.tc_config_reasserted_known = false;
         link->cached.tc_config_reasserted = false;
+        link->cached.pico_active_slot_known = false;
+        link->cached.pico_active_slot_is_b = false;
     }
     /* cj_temp_c's own NaN gate -- deliberately separate from tc_temp_c's
      * TEMP_VALID gate above (2026-09-08 fix). A V3 peer told us cj_valid

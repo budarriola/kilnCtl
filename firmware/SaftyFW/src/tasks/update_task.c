@@ -315,6 +315,14 @@ static uint8_t s_sticky_error = 0; // latched, non-fatal per-chunk errors (e.g. 
 static bool s_confirm_pending = false;
 static uint8_t s_own_slot = BOOTLOADER_SLOT_A;
 
+// --- Active-slot cache for update_task_get_active_slot() (docs/
+// PICO_AUTO_UPDATE_PLAN.md:64) -- populated once, at startup, by
+// update_task_startup_confirm_check() below; NOT the same thing as
+// s_own_slot above (see update_task_get_active_slot()'s own doc comment in
+// update_task.h for why that cache cannot be reused here).
+static bool s_active_slot_known = false;
+static uint8_t s_active_slot = BOOTLOADER_SLOT_A;
+
 // --- Little-endian helpers (this module's own, not shared with
 // link_frame.c -- small enough not to be worth a shared header for two
 // call sites) ---------------------------------------------------------------
@@ -1316,6 +1324,20 @@ static void update_task_startup_confirm_check(void)
     if (meta.active_slot >= BOOTLOADER_SLOT_COUNT) {
         return; // malformed record -- should not happen (metadata_unpack() would already have rejected obviously bad content), defensive only
     }
+    // Populates update_task_get_active_slot()'s cache from this same read,
+    // unconditionally -- independent of the PENDING_VERIFY branch below,
+    // which is s_own_slot's own narrower concern (see that variable's
+    // comment). A real, well-formed metadata record always names an active
+    // slot, whether or not this boot happens to be mid-confirm.
+    // Store order matters: link_task (higher priority) can preempt this
+    // task between these two statements. Store s_active_slot FIRST, then a
+    // compiler barrier, then s_active_slot_known LAST -- so any reader that
+    // observes KNOWN == true is guaranteed to also see the already-stored,
+    // correct s_active_slot value (never a stale/default slot alongside a
+    // true KNOWN flag).
+    s_active_slot = meta.active_slot;
+    __compiler_memory_barrier();
+    s_active_slot_known = true;
     if (meta.slots[meta.active_slot].state == BOOTLOADER_SLOT_PENDING_VERIFY) {
         s_confirm_pending = true;
         s_own_slot = meta.active_slot;
@@ -1683,11 +1705,24 @@ bool update_task_transfer_active(void)
     return s_transfer_active;
 }
 
+bool update_task_get_active_slot(bool *out_is_b)
+{
+    if (!s_active_slot_known) {
+        return false;
+    }
+    if (out_is_b != NULL) {
+        *out_is_b = (s_active_slot == BOOTLOADER_SLOT_B);
+    }
+    return true;
+}
+
 bool update_task_start(void)
 {
     s_transfer_active = false;
     s_confirm_pending = false;
     s_own_slot = BOOTLOADER_SLOT_A;
+    s_active_slot_known = false;
+    s_active_slot = BOOTLOADER_SLOT_A;
     s_sticky_error = 0;
 
     s_rx_queue = xQueueCreate(UPDATE_TASK_QUEUE_DEPTH, sizeof(update_task_msg_t));

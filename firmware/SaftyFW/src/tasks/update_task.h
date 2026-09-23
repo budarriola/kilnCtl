@@ -170,6 +170,33 @@ void update_task_reboot_now(void);
 // transition in the unsafe direction.
 bool update_task_transfer_active(void);
 
+// docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap: "the ESP has no wire field
+// for the Pico's active slot, so A/B alternation is blind". Returns true and
+// fills `*out_is_b` (false = BOOTLOADER_SLOT_A, true = BOOTLOADER_SLOT_B) iff
+// this boot's active slot was established from a real flash metadata record
+// read at update_task_fn() startup (the same read
+// update_task_startup_confirm_check() already performs for the confirm-gate
+// check, reused here rather than re-reading flash a second time). Returns
+// false (and leaves `*out_is_b` untouched) for a plain, non-slot-linked dev
+// target with no metadata record at all, or a malformed one -- same
+// "unknown, not a confident false" discipline this codebase already applies
+// to borrowed_zone_index/cj_valid on the KilnFW mirror side (see
+// safety_link.h there). Deliberately a SEPARATE cache from `s_own_slot`
+// above: that one is scoped narrowly to the PENDING_VERIFY confirm-gate case
+// and is never set otherwise, which would silently read as "always A" for
+// this getter's very different question ("what slot is actually running,
+// regardless of confirm-gate state").
+//
+// Cached once at update_task_fn() startup, not re-read per call: a
+// completed transfer deliberately flips metadata active_slot to the target
+// WITHOUT rebooting (update_task.c process_end), so after UPDATE_END
+// metadata names the next boot's slot, not the running one. This cache,
+// taken once at boot, is the running slot and must never be refreshed from
+// metadata mid-boot. (update_task_request_rollback() does still reboot the
+// RP2040 immediately, but that path starts a fresh boot -- and thus a fresh
+// cache read -- rather than needing this cache updated in place.)
+bool update_task_get_active_slot(bool *out_is_b);
+
 #ifdef __cplusplus
 }
 #endif

@@ -396,7 +396,8 @@ def test_decode_status_frame_a_all_three_lengths():
     base = struct_pack_status()
     for extra, expect in ((b"", {}), (b"\x02", {"tx_dropped_sat": 2}),
                           (b"\x02\x01\x03", {"tx_dropped_sat": 2, "flags2": 1, "borrowed": True,
-                                             "tc_config_reasserted": False, "borrowed_zone_index": 3})):
+                                             "tc_config_reasserted": False, "pico_active_slot": "unknown",
+                                             "borrowed_zone_index": 3})):
         payload = base + extra
         name, decoded, err = kc.decode_payload(7, 7, payload)
         assert err is None, err
@@ -421,6 +422,35 @@ def test_decode_status_frame_a_tc_config_reasserted_bit():
     name, decoded, err = kc.decode_payload(7, 7, payload_clear)
     assert err is None, err
     assert decoded["tc_config_reasserted"] is False
+
+
+def test_decode_status_frame_a_active_slot_bits():
+    # flags2 bits 3/4 (0x08/0x10, LINK_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B,
+    # 2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64) ride the same V3 flags2
+    # byte -- proves they decode into a single "A"/"B"/"unknown" string,
+    # independent of the other bits, and that B (0x10) alone without KNOWN
+    # (0x08) still reads "unknown" rather than a confident B.
+    base = struct_pack_status()
+
+    payload_unknown = base + b"\x02\x00\x03"  # flags2 all clear
+    name, decoded, err = kc.decode_payload(7, 7, payload_unknown)
+    assert err is None, err
+    assert decoded["pico_active_slot"] == "unknown"
+
+    payload_a = base + b"\x02\x08\x03"  # KNOWN set, B clear -> slot A
+    name, decoded, err = kc.decode_payload(7, 7, payload_a)
+    assert err is None, err
+    assert decoded["pico_active_slot"] == "A"
+
+    payload_b = base + b"\x02\x18\x03"  # KNOWN | B set -> slot B
+    name, decoded, err = kc.decode_payload(7, 7, payload_b)
+    assert err is None, err
+    assert decoded["pico_active_slot"] == "B"
+
+    payload_b_alone = base + b"\x02\x10\x03"  # B set, KNOWN clear -> still unknown
+    name, decoded, err = kc.decode_payload(7, 7, payload_b_alone)
+    assert err is None, err
+    assert decoded["pico_active_slot"] == "unknown"
 
 
 def struct_pack_status() -> bytes:
