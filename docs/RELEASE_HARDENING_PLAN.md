@@ -42,10 +42,25 @@ it is closed, and a rough size on this repository's existing S/M/L/XL scale.
 
 ---
 
-## 1. BLOCKER — the `profile_executor` panic is unresolved, and it is the
-## release-defining defect
+## 1. CLOSED by owner decision — the `profile_executor` panic no longer gates
+## release
 
-**The gap.** `profile_executor` has panicked four times with the same
+> **Status, corrected 2026-09-22:** the owner closed this line. It is not
+> tracked as a release BLOCKER any more, and no session should re-dispatch
+> work against it — **only a new crash report reopens it.** The decision
+> itself has no separate dated audit entry or ROADMAP.md row of its own; a
+> repo-wide grep for "profile_executor", "profiles_stop" and "owner" near
+> this date found nothing beyond the coordinating session's own project
+> memory (`project_profile_executor_panic_at_stop`), which carries no
+> timestamp of its own beyond "recent" — so this section cites that memory as
+> the closure's source rather than inventing a commit or date the repo does
+> not otherwise record. If a future pass finds a dated audit or ROADMAP entry
+> for this decision, update this note to cite it directly instead. The
+> "release-defining defect" framing and the numbered "how to know it is
+> closed" list below are kept as history — they describe what was true
+> before the owner's decision, not a live gate any more.
+
+**The gap (historical).** `profile_executor` had panicked four times with the same
 signature: `IllegalInstruction`, `exc_pc = 0xfffffffd` (a saved PC of exactly
 zero, i.e. a return through a smashed `a0`), `backtrace_corrupted = true`,
 crash task `profile_executo`. The history is in

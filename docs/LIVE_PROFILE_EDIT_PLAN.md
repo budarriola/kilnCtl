@@ -18,8 +18,25 @@ Two further requirements, same day, both non-negotiable:
 > Both profile tools must be built on one implementation, so a change to one
 > changes both.
 
-Nothing here is built. This is a plan; the decisions in it are settled unless
-they appear under "Owner decisions needed" at the end.
+**Status, corrected 2026-09-22: mostly BUILT.** The five-route live-edit HTTP
+surface (`firmware/KilnFW/App/drivers/http/profiles_live_http.c`), its
+firmware-side store (`firmware/KilnFW/App/drivers/persist/live_profile.c`/
+`.h`), the web page (`firmware/KilnFW/App/drivers/http/live_profile_page.html`)
+and the `profile_live_get`/`profile_live_fork`/`profile_live_edit`/
+`profile_live_decide` MCP tool quartet (`tools/PcTools/src/kilnctrl/
+profile_live_http_client.py`) all shipped 2026-09-20: `d4af3eb1` (HTTP
+surface pass 2, five ADMIN routes + host tests), `7c7432fe` (JSON refusals,
+working-copy fetch, status fields), `d1f43870` (Opus review nits N1-N5),
+`bb61aac9` (the MCP tool quartet), `c7d57ecc` and `75641b82` (edit_live
+field-handling fixes) — `git log --oneline -- firmware/KilnFW/App/drivers/
+http/profiles_live_http.c tools/PcTools/src/kilnctrl/
+profile_live_http_client.py`. This plan keeps the `_PLAN` suffix rather than
+being renamed, because one genuinely unbuilt piece remains: **owner decision
+2 in section 12** (refusing a `max_temp_c` lower than a zone's currently
+commanded setpoint in the general config-edit path, `kiln_cfg_store.c`) is
+still only a recorded requirement, not landed code — see that section's own
+note. That is the only open part; everything else the plan describes is on
+the board. The decisions below remain settled regardless of build status.
 
 ---
 
@@ -530,6 +547,14 @@ undisturbed.
    sequencing rule, that file was NOT edited here. Decision 2 is recorded as
    a settled requirement, not landed code, and is the direct next step once
    that file's in-flight work lands.
+
+   **Still open, confirmed 2026-09-22:** `kiln_cfg_store.c` has since taken
+   several unrelated commits (`c3d4b73f`, `e10f4348`, `cfe1cacc`, `d1f79531`,
+   `76197227`), so the "in-flight" blocker named above is gone, but a grep of
+   `kiln_cfg_store_apply()` and the file's `max_temp_c` handling for this
+   refusal (by zone, against a currently commanded setpoint, naming both
+   values) finds nothing. **This is the one remaining unbuilt piece of this
+   plan** — see the status note at the top of this file.
 3. **Name collisions on save-as: REFUSE**, reusing the kiln-config store's
    existing `normalize_name`/`name_collides` rule (case-insensitive,
    whitespace-trimmed) rather than writing a second predicate, per the
