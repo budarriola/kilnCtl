@@ -182,12 +182,18 @@ static int fake_sent_frames_count_cmd(uint8_t cmd)
 // its specific deadline.
 #define FAKE_STATUS_QUEUE_MAX 32
 static safety_link_update_status_t g_status_queue[FAKE_STATUS_QUEUE_MAX];
+// Parallel "stale" marker per queued entry -- see fake_status_push_stale()'s
+// own comment for why this exists (opus review 2026-09-23: distinguishing a
+// genuinely-timed-out round from one that merely consumed the next real
+// entry early).
+static uint8_t g_status_stale[FAKE_STATUS_QUEUE_MAX];
 static int g_status_queue_len = 0;
 static int g_status_queue_pos = 0;
 
 static void fake_status_reset(void)
 {
     memset(g_status_queue, 0, sizeof(g_status_queue));
+    memset(g_status_stale, 0, sizeof(g_status_stale));
     g_status_queue_len = 0;
     g_status_queue_pos = 0;
 }
@@ -197,7 +203,9 @@ static void fake_status_push(uint8_t state, uint8_t last_error, uint8_t gap_coun
     if (g_status_queue_len >= FAKE_STATUS_QUEUE_MAX) {
         return;
     }
-    safety_link_update_status_t *st = &g_status_queue[g_status_queue_len++];
+    safety_link_update_status_t *st = &g_status_queue[g_status_queue_len];
+    g_status_stale[g_status_queue_len] = 0;
+    g_status_queue_len++;
     memset(st, 0, sizeof(*st));
     st->state = state;
     st->last_error = last_error;
@@ -207,15 +215,33 @@ static void fake_status_push(uint8_t state, uint8_t last_error, uint8_t gap_coun
     }
 }
 
+// Pushes a queue slot that IS consumed (advances g_status_queue_pos, so a
+// later push still lands after it in FIFO order) but is reported with an
+// enormous out_age_ms, so relay_wait_for_states()'s own freshness check
+// (age_ms <= elapsed) rejects it every time -- modelling a real "nothing
+// fresh this round" condition rather than relying on queue underrun, which
+// (per the opus review this responds to) can be silently satisfied by the
+// NEXT round's real entry instead of ever exercising the timeout path.
+static void fake_status_push_stale(void)
+{
+    fake_status_push(0, 0, 0, NULL);
+    g_status_stale[g_status_queue_len - 1] = 1;
+}
+
 uint32_t g_ota_pico_relay_fake_ticks = 0; // definition; declared extern by stubs_ota_pico_relay/freertos/task.h
 
 esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_update_status_t *out, uint32_t *out_age_ms)
 {
     (void)link;
     if (g_status_queue_pos < g_status_queue_len) {
-        *out = g_status_queue[g_status_queue_pos++];
+        int idx = g_status_queue_pos++;
+        *out = g_status_queue[idx];
         if (out_age_ms) {
-            *out_age_ms = 0;
+            // 0xFFFFFFFFu is never <= any realistic `elapsed` value computed
+            // from the fake tick counter, so this entry never passes
+            // relay_wait_for_states()'s freshness check -- it is consumed
+            // (advances the queue) but never accepted.
+            *out_age_ms = g_status_stale[idx] ? 0xFFFFFFFFu : 0u;
         }
         return ESP_OK;
     }
@@ -508,26 +534,44 @@ static void test_retransmit_missed_round_not_fatal(void)
 {
     test_reset_relay_state();
     fake_status_push(SAFETY_LINK_UPDATE_STATE_RECEIVING, 0, 0, NULL); // BEGIN reply
-    // Round 1's wait gets nothing fresh -- simulate by pushing nothing and
-    // relying on the queue underrun to time out that ONE relay_wait_for_states()
-    // call (RELAY_GAP_ROUND_WAIT_MS), then supply the rest.
+
+    // relay_wait_for_states() polls once, then vTaskDelay(RELAY_STATUS_POLL_MS)
+    // if it misses, until now_ms() >= deadline. Each poll -- hit or miss --
+    // consumes one queued entry (via the fake FIFO), so round 1's ENTIRE
+    // RELAY_GAP_ROUND_WAIT_MS window must be fed stale (rejected-by-age)
+    // entries, or a later poll would simply pick up round 2's real entry
+    // early -- which is what the previous (vacuous) version of this test
+    // actually did: it queued only one dummy slot, round 1 consumed it,
+    // found the queue "empty" only by luck of ordering, and round 2's own
+    // entry got grabbed by round 1 on the very next poll instead, so
+    // `!got` (ota_pico_relay.c's `if (!got) { ... continue; }`) was never
+    // reached. The number of polls before timeout is
+    // ceil(RELAY_GAP_ROUND_WAIT_MS / RELAY_STATUS_POLL_MS) + 1 (the last
+    // poll's own status check still runs, and still must miss, before the
+    // deadline check after it returns false) -- push exactly that many
+    // stale entries so round 1 is stale-fed for its whole window and
+    // nothing is left over for round 2 to consume early.
+    uint32_t stale_needed =
+        (RELAY_GAP_ROUND_WAIT_MS + RELAY_STATUS_POLL_MS - 1u) / RELAY_STATUS_POLL_MS + 1u;
+    for (uint32_t i = 0; i < stale_needed; i++) {
+        fake_status_push_stale();
+    }
     fake_status_push(SAFETY_LINK_UPDATE_STATE_RECEIVING, 0, 0, NULL); // round 2: 0 gaps
     fake_status_push(SAFETY_LINK_UPDATE_STATE_COMPLETE, 0, 0, NULL);  // UPDATE_END reply
 
-    // Exhaust the queue exactly once before round 2's item by consuming the
-    // BEGIN-reply entry, then let round 1 hit the exhausted-queue path.
-    // (fake_status_get_update_status's exhaustion path returns ESP_ERR_NOT_FOUND
-    // and force-advances the clock, which relay_wait_for_states() treats as
-    // "no fresh status this round" only because `got` is false when the
-    // deadline is reached with nothing queued -- exercised by the ordering
-    // above: after BEGIN's single entry is consumed, round 1 finds the queue
-    // empty and its wait times out/returns false, then `continue` lets round 2
-    // consume the next queued RECEIVING/0-gaps entry.)
     run_relay(500);
 
     ota_pico_relay_status_t st;
     ota_pico_relay_get_status(&st);
     CHECK(st.phase == OTA_PICO_RELAY_PHASE_DONE);
+    // The whole queue (BEGIN + every stale entry + round-2 reply +
+    // UPDATE_END reply) was consumed with nothing left over -- proves
+    // round 1 genuinely timed out consuming ONLY stale entries (reaching
+    // `!got -> continue`), rather than round 2's real entry being consumed
+    // by round 1 itself, and that round 2 (not round 1) is what actually
+    // supplied the 0-gaps reply that let the relay proceed to UPDATE_END.
+    CHECK(g_status_queue_pos == g_status_queue_len);
+    CHECK(g_status_queue_len == (int)(1u + stale_needed + 2u));
 }
 
 static void test_retransmit_failed_mid_update(void)
@@ -581,12 +625,26 @@ static void test_retransmit_exhausted_rounds(void)
     // "gave up" message (which is reachable only if relay_wait_for_states()
     // could return RECEIVING/VERIFYING as a match, which it cannot).
 
-    run_relay(500);
+    int sent_before = fake_sent_frames_count_cmd(SAFETY_CMD_UPDATE_DATA);
+    run_relay(500); // 500 / UPDATE_CHUNK_LEN(248) => ceil = 3 chunks in the sequential pass
+    int sent_after = fake_sent_frames_count_cmd(SAFETY_CMD_UPDATE_DATA);
+
     ota_pico_relay_status_t st;
     ota_pico_relay_get_status(&st);
     CHECK(st.phase == OTA_PICO_RELAY_PHASE_FAILED);
     CHECK(strstr(st.last_error, "no reply to UPDATE_END") != NULL);
     CHECK(fake_sent_frames_count_cmd(SAFETY_CMD_UPDATE_ABORT) == 1);
+    // Pins the actual round count: 3 sequential-pass chunks + one
+    // gap-resend of chunk 0 per round, for exactly RELAY_MAX_RETRANSMIT_ROUNDS
+    // rounds. A sabotaged loop bound (e.g. `round < 3u` instead of
+    // `round < RELAY_MAX_RETRANSMIT_ROUNDS`) changes this count even though
+    // the final phase/message stay identical either way -- that insensitivity
+    // is exactly what made this test vacuous before this assertion existed.
+    CHECK((sent_after - sent_before) == (int)(3 + RELAY_MAX_RETRANSMIT_ROUNDS));
+    // All BEGIN + per-round entries were consumed by the retransmit loop
+    // itself, none left over for UPDATE_END to accidentally match against.
+    CHECK(g_status_queue_pos == g_status_queue_len);
+    CHECK(g_status_queue_len == (int)(1 + RELAY_MAX_RETRANSMIT_ROUNDS));
 }
 
 // --- UPDATE_END failure transitions -----------------------------------
