@@ -442,6 +442,20 @@ boot_guard or crash_report state (also `kiln_nvs`), or the `cfg` LittleFS
 partition's own data -- each of those is erased only if separately named in
 `erase_partitions`.
 
+**Three binaries, not one.** `flash_firmware()` now hard-requires and flashes
+`bootloader.bin` and `partition-table.bin` alongside `KilnCtrl.bin`, refusing
+before touching OpenOCD if either is missing from `<kiln_fw_root>/build` --
+pre-2026-09-23 checkbuild output did not publish those two files, so a
+`kiln_fw_root` pointed at an older build directory is refused rather than
+silently flashing an app image over a stale bootloader/partition table.
+`partition-table.bin`'s write offset is resolved from
+`CONFIG_PARTITION_TABLE_OFFSET` in `<kiln_fw_root>/sdkconfig`, falling back to
+`<kiln_fw_root>/build/sdkconfig` only if the root copy is genuinely absent,
+and finally to IDF's own default (0x8000) if neither file sets the key --
+`_resolve_partition_table_offset()`, whose result note always says which
+path was used or why the default applied. `fixture_flash()` shares the same
+resolver for its own partition-table image.
+
 ## Building from a clean worktree for `kiln_fw_root`
 
 `flash_firmware(kiln_fw_root=...)` exists for exactly the "build from a clean

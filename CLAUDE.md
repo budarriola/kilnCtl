@@ -204,6 +204,12 @@ old app image, and post-flash verification correctly failed loud). A hard
 pre-flight size check now also refuses, naming both byte counts, if
 `KilnCtrl.bin` is larger than the target partition.
 
+`flash_firmware()` now also hard-requires and flashes `bootloader.bin` and
+`partition-table.bin` alongside `KilnCtrl.bin` (2026-09-23), resolving the
+partition-table write offset from `CONFIG_PARTITION_TABLE_OFFSET` in
+`<kiln_fw_root>/sdkconfig` rather than a hardcoded 0x8000 (`fixture_flash()`
+uses the same resolver). Full detail: `docs/MCP_SERVERS.md`'s flash section.
+
 It still does not touch `otadata`, and this is a known, deliberate gap, not
 a fixed one: on this table, a blank/erased `otadata` makes the bootloader
 boot the factory-subtype partition (`recovery`), not the `app` partition
