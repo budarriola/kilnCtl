@@ -1101,21 +1101,39 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # legitimately current for what they each depend on. Grade each artifact
     # only against the input(s) that can actually change it.
     #
-    # NOTE: this deliberately grades against $MainSdkconfig (the invoking
-    # tree's own sdkconfig), not $WorktreeSdkconfig (the copy this script
-    # makes every run). Copy-Item -Force above does not preserve the source's
-    # LastWriteTime -- it stamps the copy with "now" on every single run,
-    # changed content or not -- so grading against the copy's mtime would
-    # fail every run whose bootloader wasn't *also* relinked this exact run,
-    # which is the normal, correct case on an unchanged sdkconfig. Confirmed
-    # empirically: a first attempt at this fix using $WorktreeSdkconfig's
-    # mtime failed a build where sdkconfig content was byte-identical to the
-    # previous run (hash unchanged, $sdkconfigStale false above) purely
-    # because Copy-Item had just re-stamped it with the current wall clock.
-    # $MainSdkconfig's own mtime only changes when someone actually edits it.
-    $sdkconfigTime = (Get-Item -LiteralPath $MainSdkconfig).LastWriteTime
-    if ($bootloaderTime -lt $sdkconfigTime.Subtract($tolerance)) {
-        Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) predates the sdkconfig it was built from ($MainSdkconfig, mtime $sdkconfigTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
+    # NOTE (corrected 2026-09-23, second review of this fix): grading
+    # bootloader.bin against $MainSdkconfig's own mtime is ALSO the wrong
+    # question, just one level up from the $WorktreeSdkconfig mistake this
+    # comment used to warn about. $MainSdkconfig's mtime advances on ANY edit
+    # to the source sdkconfig, including changes that only affect the app
+    # build (bootloader-irrelevant options) -- the bootloader correctly does
+    # not relink for those, so bootloader.bin legitimately stays older than
+    # $MainSdkconfig indefinitely and this gate would false-FAIL a healthy
+    # tree. Measured empirically: main-tree sdkconfig at 2026-09-20 21:02:07
+    # vs. a real checkbuild's bootloader.bin at 2026-09-20 10:42:11 -- a
+    # sticky ~10-hour-wide false FAIL with no app-only edit in between.
+    #
+    # The right input is the BOOTLOADER SUBPROJECT'S OWN generated header,
+    # <worktree>\firmware\KilnFW\build\bootloader\config\sdkconfig.h --
+    # kconfgen only rewrites this file when a bootloader-relevant config
+    # value actually changed, so its mtime tracks exactly the input that can
+    # change bootloader.bin, the same "grade each artifact only against the
+    # input(s) that can actually change it" principle as the KilnCtrl.elf/.bin
+    # and partition-table.bin checks above. (Do NOT use
+    # build\config\sdkconfig.h -- that is the APP's generated header and
+    # shares $MainSdkconfig's same false-FAIL problem.) Confirmed empirically
+    # against the same checkbuild: bootloader\config\sdkconfig.h at
+    # 2026-09-20 10:41:50, 21 seconds before bootloader.bin -- the gate
+    # passes on this healthy, no-op build and still catches a genuine stale
+    # artifact (see the negative test for this check).
+    $bootloaderSdkconfigHeaderPath = Join-Path $WorktreePath "firmware\KilnFW\build\bootloader\config\sdkconfig.h"
+    if (Test-Path -LiteralPath $bootloaderSdkconfigHeaderPath) {
+        $bootloaderSdkconfigHeaderTime = (Get-Item -LiteralPath $bootloaderSdkconfigHeaderPath).LastWriteTime
+        if ($bootloaderTime -lt $bootloaderSdkconfigHeaderTime.Subtract($tolerance)) {
+            Fail "idf.py build reported success (exit 0) but $bootloaderPath (mtime $bootloaderTime) predates the bootloader subproject's own generated config ($bootloaderSdkconfigHeaderPath, mtime $bootloaderSdkconfigHeaderTime) -- refusing to publish a stale artifact as current (see the KilnCtrl.elf/.bin freshness check above for the failure class this guards against)."
+        }
+    } else {
+        Write-Host "NOTE: $bootloaderSdkconfigHeaderPath not found -- skipping bootloader.bin freshness-vs-config check (existence-only check above still applies)."
     }
     $partitionsCsvPath = Join-Path $WorktreePath "firmware\KilnFW\partitions.csv"
     if (-not (Test-Path -LiteralPath $partitionsCsvPath)) {

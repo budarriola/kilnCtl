@@ -876,6 +876,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self.assertTrue(result.startswith("error:"))
         self.assertIn("missing build output", result)
         self.assertIn("override", result)
+        self.assertIn("before 2026-09-23", result)
 
     def test_valid_override_flashes_from_that_tree(self):
         with unittest.mock.patch.object(
