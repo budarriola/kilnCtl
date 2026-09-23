@@ -92,7 +92,7 @@ restored the line by hand, re-ran the check green, and confirmed
 `git diff -- firmware/KilnFW/App/idf_component.yml` showed only the intended
 addition.
 
-### Step 2 — subtype + mount call swap, guarded by a build flag
+### Step 2 — subtype + mount call swap, guarded by a build flag — DONE (`b039d5ee`)
 In `log_store_mount.c`, add `esp_vfs_littlefs_register()` behind a
 compile-time flag alongside the existing `esp_vfs_spiffs_register()` call;
 default flag keeps SPIFFS. `log_store.c` itself needs no change — it is
