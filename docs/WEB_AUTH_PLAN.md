@@ -1319,14 +1319,20 @@ behavioural test result and must not be recorded as one.
 - The session table under real concurrent browsers, against the ~6-socket
   accept-mailbox ceiling.
 
-**Blocked on the owner, 2026-09-18.** Live verification of web auth against
-the board needs `KILNCTL_WEB_USERNAME` and `KILNCTL_WEB_PASSWORD` set as
-Windows *user* environment variables: the PcTools HTTP clients read the
-credential from those two variables and from nowhere else
-(`tools/PcTools/src/kilnctrl/http_auth.py:56`-`57`), so while they are unset
-every authenticated request from the tooling goes out unauthenticated and the
-policy cannot be exercised. No credential value belongs in any file in this
-repository — only the variable names.
+**Credential blocker lifted, 2026-09-22.** `KILNCTL_WEB_USERNAME` and
+`KILNCTL_WEB_PASSWORD` now exist as Windows *user* environment variables on
+the bench machine, and web auth is ON on the bench board (see
+`docs/BENCH_TEST_LOG.md` and CLAUDE.md's `web_auth_setup` paragraph). The
+PcTools HTTP clients read the credential from those two variables and from
+nowhere else (`tools/PcTools/src/kilnctrl/http_auth.py:56`-`57`), so
+authenticated requests from the tooling can now exercise the policy. No
+credential value belongs in any file in this repository — only the variable
+names. What remains is hardware execution, not the credential: the five
+bullets above (the keypad overlay's 480x320/no-scroll fit, the reset gesture
+against a real E-stop, LCD Stop while locked during a firing, the internal
+DRAM low-water re-measurement, and the session table under real concurrent
+browsers against the accept-mailbox ceiling) are still unexecuted on the
+bench and remain hardware-gated.
 
 ---
 

@@ -8,10 +8,12 @@
 > `relay_type_N=` on the `POST`, and each unowned relay carries a device-type
 > dropdown beside its name field, so `kgDeviceType()` now receives real types.
 > `UNSET` stays selectable and renders as the unknown glyph. The array costs a
-> measured 24 bytes; no buffer grew. The graphic is not verified on hardware: another
-> task owned flashing, so the bench board runs firmware without this page; the
-> render function is verified against real captured `/api/zones` and
-> `/api/status` JSON instead. **Opened:** 2026-09-18.
+> measured 24 bytes; no buffer grew. **2026-09-22:** the bench board now runs
+> firmware that includes this page (`dde785bf`, the most recent commit
+> touching these files, is an ancestor of the bench firmware commit
+> `63a48ab3`); the on-hardware set/reboot/read-back round trip is still
+> unexecuted. Until then, the render function is verified against real
+> captured `/api/zones` and `/api/status` JSON instead. **Opened:** 2026-09-18.
 >
 > **Visual target:** [`docs/images/zone_graphic_reference_stacked_rings.jpg`](images/zone_graphic_reference_stacked_rings.jpg),
 > owner-supplied. The artwork stages build against that image rather than
