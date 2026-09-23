@@ -387,11 +387,10 @@ still resolved to the root venv's interpreter. The leftover root
 `pdf-mcp.exe`/`python.exe` processes still held both the root `pdfMcp/`
 and `tools/pdfMcp/.venv`, so a self-referential replacement was built
 side-by-side at `tools/pdfMcp/.venv_new` instead (`pip install
-pdf-mcp==2.0.0`, shebangs confirmed pointing at `.venv_new`). **Pending
-swap**: next time no `pdf-mcp.exe` is running, rename `tools/pdfMcp/.venv_new`
-to `tools/pdfMcp/.venv` and delete the root `pdfMcp/` copy — `.mcp.json`
-already points only at `tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`, no config
-change needed.
+pdf-mcp==2.0.0`, shebangs confirmed pointing at `.venv_new`). **Swap done**:
+`tools/pdfMcp/.venv_new` has since been renamed to `tools/pdfMcp/.venv` and
+the root `pdfMcp/` copy deleted — `.mcp.json` already pointed only at
+`tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`, so no config change was needed.
 
 All main-board KiCad project files live under **hardware/mainBoard/** (paths below are relative to that
 directory unless noted). A second, independent board — the 3-channel thermocouple daughterboard —
@@ -524,7 +523,7 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
-As of 2026-09-19 it discovers 116 checks (`-ListOnly -AllowFewerChecks`,
+As of 2026-09-23 it discovers 141 checks (`-ListOnly -AllowFewerChecks`,
 recounted at this commit; the count drifts upward as checks are added, so
 re-verify with a fresh `-ListOnly` run rather than trusting this number).
 `a42ac369` added `check_lint_pages.ps1` so `lint_pages.js` -- previously only
@@ -694,10 +693,10 @@ a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
 **The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
-(as of 2026-09-19, after `docs/LIVE_PROFILE_EDIT_PLAN.md` pass 2's five new
-live-edit routes) reports 155 `httpd_uri_t` routes registered under
-`firmware/KilnFW/App/drivers/*.c` against `wifi_provision_http.c`'s
-`config.max_uri_handlers = 160` — five spare slots. The next route added
+(as of 2026-09-23, recounted at this commit) reports 158 `httpd_uri_t` routes
+registered under `firmware/KilnFW/App/drivers/*.c` against
+`wifi_provision_http.c`'s `config.max_uri_handlers = 165` — 7 spare slots.
+The next route added
 anywhere under `drivers/` will need that cap bumped in the same change, or
 the check fails; see the check script's own header comment for why this is a
 compile-time array size shared by every build configuration (including
