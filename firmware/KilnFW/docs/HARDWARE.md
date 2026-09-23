@@ -465,6 +465,11 @@ support for any of it yet.
   Should come straight off free ESP32-S3 GPIO through LEDC rather than the
   SX1509 expander, so fan speed does not depend on an I2C write and keeps
   working through an expander reset.
+- **Room for more I/O expanders.** The owner may add extra I2C I/O expanders
+  later (more relays, more inputs, more indicators). Leave address headroom
+  next to the SX1509 (its ADDR pins select among four addresses) and bring
+  the I2C bus out to a header or spare footprint so another expander can be
+  fitted without a board respin.
 
 Related next-revision notes already recorded elsewhere: the LCD SDA/SCL swap
 and the missing backlight control line (Display section above), and the
