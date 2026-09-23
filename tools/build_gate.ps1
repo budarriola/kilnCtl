@@ -38,6 +38,17 @@
 # ONLY for a machine known to run a single session at a time; on a shared
 # machine running multiple agent sessions, leaving it enabled is the whole
 # point.
+#
+# KILNCTL_BUILD_GATE_MUTEX_PREFIX: overrides the "Global\kilnctl_build_slot_"
+# mutex name prefix below. This exists ONLY so a unit test (Python's
+# mcpkit/buildgate.py has the matching override) can point at a private
+# Local\ namespace instead of contending with a real build holding the
+# machine-wide Global\ slots -- it is not a normal operator knob. If set, it
+# MUST be set to the exact same value for every PowerShell AND Python caller
+# gating the SAME real build, or the two sides silently gate on different
+# mutexes and stop actually admission-controlling each other. Leave it unset
+# for every real build; unset on both sides is the only supported steady
+# state.
 
 function Get-KilnBuildGateSlotCount {
     $raw = $env:KILNCTL_BUILD_GATE_SLOTS
@@ -55,8 +66,16 @@ function Get-KilnBuildGateSlotCount {
 function Get-KilnBuildGateMutexName {
     param([Parameter(Mandatory = $true)][int]$SlotIndex)
     # "Global\" so every session/user on the machine contends for the same
-    # slots, not just the current logon session.
-    return "Global\kilnctl_build_slot_$SlotIndex"
+    # slots, not just the current logon session. The prefix is overridable
+    # via KILNCTL_BUILD_GATE_MUTEX_PREFIX -- see that variable's header
+    # comment above; must match mcpkit/buildgate.py's own default/override
+    # exactly, since this name IS the shared contract between the two
+    # languages.
+    $prefix = $env:KILNCTL_BUILD_GATE_MUTEX_PREFIX
+    if ([string]::IsNullOrEmpty($prefix)) {
+        $prefix = "Global\kilnctl_build_slot_"
+    }
+    return "$prefix$SlotIndex"
 }
 
 # Tries every slot once (WaitOne(0), round robin), then falls back to a

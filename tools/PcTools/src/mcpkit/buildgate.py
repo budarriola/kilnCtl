@@ -79,6 +79,14 @@ def _mutex_name(slot_index: int) -> str:
     # holding the machine-wide Global\ slots (opus review of 171cc5bc,
     # advisory 3) -- production code never sets this env var, so it always
     # gets the real Global\ prefix below.
+    #
+    # This is a test/diagnostics knob only, not a normal operator setting: if
+    # it is set at all, it MUST be set to the exact same value on both the
+    # Python side (here) and the PowerShell side
+    # (tools/build_gate.ps1's Get-KilnBuildGateMutexName), or the two sides
+    # silently gate on different mutexes and stop admission-controlling each
+    # other for the same real build. Leave it unset on both sides for every
+    # real build.
     prefix = os.environ.get("KILNCTL_BUILD_GATE_MUTEX_PREFIX") or _DEFAULT_MUTEX_PREFIX
     return f"{prefix}{slot_index}"
 
