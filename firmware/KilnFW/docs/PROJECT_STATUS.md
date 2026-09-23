@@ -48,6 +48,13 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   session's repo reorganisation — they failed identically before it); recheck
   before trusting the current pass count, `tools/PcTools/**` is out of scope
   for this pass.
+- **One-time serial flash is a prerequisite, not a footnote.** The
+  `otadata` + two-slot `partitions.csv` layout above can only be written over
+  a cable (bootloader + partition table + first app image via
+  `flash_firmware()`'s OpenOCD/JTAG path) — a board still on the old
+  single-`factory` table cannot OTA its way onto the new one. See
+  `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` §3 ("The partition table has to
+  change first, over a cable") for the full rationale.
 - **Board wiring traced from the schematics, not assumed** — `docs/HARDWARE.md`.
   Real discrepancies found and fixed: the safety link's pin assignment was
   swapped in `KilnFW`'s Kconfig defaults relative to the board

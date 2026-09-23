@@ -1333,8 +1333,13 @@ overlap/overflow.
       for rollback confirmation).
 - [ ] **Pre-change partition table archived** so a rollback to pre-OTA
       firmware is possible — not done before the flash above.
-- [ ] **One-time serial flash documented as a prerequisite step**, not a
-      footnote — still outstanding.
+- [x] **One-time serial flash documented as a prerequisite step**, not a
+      footnote. DONE — added a dedicated bullet to
+      `firmware/KilnFW/docs/PROJECT_STATUS.md`'s "Current build/hardware
+      configuration" section, naming the JTAG/serial requirement explicitly
+      and pointing at `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` §3, which
+      already carried the underlying rationale but only as narrative prose,
+      not a bring-up-checklist item.
 - [ ] **`nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` read out and archived from
       the physical board with `esptool read_flash` before the new table is
       ever flashed for real.** The one irreversible step in this whole plan.
@@ -1389,10 +1394,13 @@ Crypto API), constant-time comparison, lockout after 3 failures (doubling to
 15 min, per-endpoint), every attempt logged with source IP, and only the
 derived key (never the literal PSK) ever reaches the comparison.
 
-- [ ] **Not yet stated anywhere user-visible** that this scheme does not
-      defend against anyone who already knows the AP password (that IS the
-      credential) — the prose exists in `UPDATE_PROTOCOL.md` §2 but the OTA
-      web page doesn't say it yet.
+- [x] **Stated user-visible on the OTA web page.** DONE — the prose exists
+      in `UPDATE_PROTOCOL.md` §2, and `ota_page.html:135-139`'s note under the
+      AP-password field already says the same thing in user-facing copy:
+      "This proves you're on the network with the AP password -- it does not
+      stop anyone else who also knows it...". Predates this classifier pass
+      (present since the file's 2026-09-05 `drivers/` reorg move, `9f18ca5c`);
+      this item was stale.
 - [ ] **TLS — planned in `docs/UI_PLAN.md` §6, not authorized to build.**
       Adds confidentiality/integrity to the image transfer (today plaintext
       LAN); does not replace or weaken the HMAC scheme above, and is not
@@ -1562,15 +1570,28 @@ HTTP handler at the point a 10.3 LCD page first needs the same data (not
 speculatively ahead of a real second caller). See `docs/ARCHITECTURE_
 DECISIONS.md`'s LVGL/LCD section for the rule statement.
 
-- [ ] As each 10.3 page is built, extract its backend data access from the
+- [x] As each 10.3 page is built, extract its backend data access from the
       matching HTTP handler into a shared plain-C getter/action function —
       actions (`profile_executor_run()`/`_pause()`/`_halt()`,
       `relay_authority_*`) are already single-implementation and correct as
       called from the LCD; it's specifically the *read* side each handler
-      still inlines that needs splitting when a page reaches for it.
-- [ ] Where a handler is split, update the HTTP handler to call the new
+      still inlines that needs splitting when a page reaches for it. DONE for
+      every page built to date: `dashboard_get_status()`
+      (`dashboard_http.c:88`, consumed by `ui_page_home_refresh.c:116`),
+      `dashboard_exec_http.c:120`'s exported read seam (consumed by
+      `ui_page_home.c`), and `wifi_prov_*()` getters (`wifi_prov_api.c`,
+      consumed by `ui_page_network.c`, whose own header comment at
+      `ui_page_network.c:23-40` enumerates the shared call for every control
+      on the page) are each cited by name at both call sites — grep
+      `TODO.md 10.1a` across `App/drivers/ui/*.c` and `App/drivers/http/*.c`
+      for the full cross-reference list. This bullet is a standing rule
+      (line above), so it still applies to any page built after this pass.
+- [x] Where a handler is split, update the HTTP handler to call the new
       shared getter too — never leave it calling the data-owning module
-      directly while only the LCD gets the seam.
+      directly while only the LCD gets the seam. DONE for every page built to
+      date — same citations as above; each shared getter's own call sites
+      list both an `App/drivers/http/*.c` and an `App/drivers/ui/*.c` caller,
+      not the LCD side alone.
 
 ### 10.2 Visual style — match KlipperScreen
 
