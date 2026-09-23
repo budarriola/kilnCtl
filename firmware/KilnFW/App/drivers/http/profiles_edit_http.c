@@ -513,10 +513,28 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         target_id = (uint8_t)free_slot;
     }
 
-    profile_t tmp;
-    memset(&tmp, 0, sizeof(tmp));
+    /* check_httpd_task_stack_budget.py: profile_t (~428 B) used to be a
+     * plain local (`tmp`) here, contributing to this handler's own
+     * httpd_worker frame for the whole function (it stays live until the
+     * commit near the end). Heap (PSRAM preferred), freed on every return
+     * path below -- same convention as `body`/`warn_json`/`json` in this
+     * same function. */
+    profile_t *tmp = heap_caps_malloc(sizeof(*tmp), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (tmp == NULL) {
+        tmp = malloc(sizeof(*tmp));
+    }
+    if (tmp == NULL) {
+        free(body);
+        ESP_LOGE(PROFILES_TAG, "POST /api/profile: malloc(%u) failed for the profile_t scratch",
+                 (unsigned)sizeof(*tmp));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory\"}");
+    }
+    memset(tmp, 0, sizeof(*tmp));
     char err_msg[128];
-    bool parse_ok = profiles_parse_profile_fields(body, &tmp, err_msg, sizeof(err_msg));
+    bool parse_ok = profiles_parse_profile_fields(body, tmp, err_msg, sizeof(err_msg));
     /* Last use of `body` in this function either way -- free it here, before
      * warn_json is allocated below, rather than holding it until the
      * function returns. */
@@ -527,7 +545,9 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_msg);
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        free(tmp);
+        return ret;
     }
 
     /* Feasibility + ceiling check, docs/LIVE_PROFILE_EDIT_PLAN.md section 8
@@ -548,13 +568,14 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     if (warn_json == NULL) {
         ESP_LOGE(PROFILES_TAG, "POST /api/profile: malloc(%u) failed for the warnings buffer",
                  (unsigned)warn_json_cap);
+        free(tmp);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
     char validate_err[224];
-    if (!profiles_validate_candidate(&tmp, PROFILE_VALIDATE_ADVISORY, warn_json, warn_json_cap, validate_err,
+    if (!profiles_validate_candidate(tmp, PROFILE_VALIDATE_ADVISORY, warn_json, warn_json_cap, validate_err,
                                      sizeof(validate_err))) {
         char json[256];
         int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", validate_err);
@@ -562,6 +583,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "application/json");
         esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
         free(warn_json);
+        free(tmp);
         return ret;
     }
 
@@ -580,7 +602,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
          * this is a USER-SLOT save, and "Copy builtin" deliberately posts the
          * builtin's own code back as the new slot's name -- that must save,
          * not 400. See live_edit_name_collides_ex()'s doc comment. */
-        if (live_edit_name_collides_ex(tmp.name, profile_post_name_at, NULL, target_id, false, name_err,
+        if (live_edit_name_collides_ex(tmp->name, profile_post_name_at, NULL, target_id, false, name_err,
                                         sizeof(name_err))) {
             /* name_err can echo the operator-supplied name back verbatim
              * (see live_edit_name_collides()'s "%s" formats) -- escape
@@ -595,11 +617,13 @@ esp_err_t profile_post_handler(httpd_req_t *req)
             httpd_resp_set_type(req, "application/json");
             esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
             free(warn_json);
+            free(tmp);
             return ret;
         }
     }
 
-    s_profiles.profiles[target_id] = tmp;
+    s_profiles.profiles[target_id] = *tmp;
+    free(tmp);
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot(target_id);
     if (err != ESP_OK) {

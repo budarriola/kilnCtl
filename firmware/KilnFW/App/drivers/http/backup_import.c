@@ -777,6 +777,16 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
     return true;
 }
 
+/* check_httpd_task_stack_budget.py: scratch for the profile-slot-simulation
+ * block inside backup_import_apply_locked() below -- see that block's own
+ * comment. Heap-allocated (PSRAM preferred) rather than a plain local so it
+ * does not add to backup_import_apply_locked()'s own httpd_worker frame. */
+typedef struct {
+    bool slot_used_sim[PROFILES_MAX_COUNT];
+    bool write_ids[PROFILES_MAX_COUNT];
+    char coll_err[128];
+} backup_import_slot_scratch_t;
+
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
                                         timing_profile_candidate_t *timing_profile_candidates)
@@ -957,8 +967,25 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * both checks, matching the pre-existing behavior of every check above:
      * nothing here newly rejects an import that was previously accepted. */
     {
-        bool slot_used_sim[PROFILES_MAX_COUNT];
-        bool write_ids[PROFILES_MAX_COUNT];
+        /* check_httpd_task_stack_budget.py: these two PROFILES_MAX_COUNT
+         * bool arrays plus the per-candidate coll_err[128] below used to be
+         * plain locals of this block, contributing to this function's own
+         * frame on the httpd_worker path (backup_import_post_handler ->
+         * backup_import_apply_locked). Bundled into one heap allocation,
+         * freed on every return out of this block, same "malloc + free on
+         * every return path, 500-equivalent refusal on OOM" convention this
+         * file already uses for candidates/zone_candidates/
+         * timing_profile_candidates above. */
+        backup_import_slot_scratch_t *scratch = heap_caps_malloc(sizeof(*scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!scratch) {
+            scratch = malloc(sizeof(*scratch));
+        }
+        if (!scratch) {
+            snprintf(err_msg, err_cap, "out of memory (profile slot scratch)");
+            return false;
+        }
+        bool *slot_used_sim = scratch->slot_used_sim;
+        bool *write_ids = scratch->write_ids;
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             profile_t tmp;
             slot_used_sim[id] = profiles_http_get(id, &tmp);
@@ -1009,6 +1036,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                  * too means the whole import is refused up front rather
                  * than partially committing the candidates before it. */
                 snprintf(err_msg, err_cap, "profile storage full");
+                free(scratch);
                 return false;
             }
             write_ids[free_slot] = true;
@@ -1021,7 +1049,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             if (candidates[i].p.name[0] == '\0') {
                 continue; /* unnamed candidate -- see comment above */
             }
-            char coll_err[128];
+            char *coll_err = scratch->coll_err;
             /* include_builtins=false both here and below (Opus review of
              * 5dd23944, finding 1/BLOCKER): these candidates land in USER
              * slots, and a backup legitimately containing a user copy of a
@@ -1029,7 +1057,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
              * must import, not refuse the whole restore. See
              * live_edit_name_collides_ex()'s doc comment. */
             if (live_edit_name_collides_ex(candidates[i].p.name, import_batch_name_at, &batch_ctx, (uint8_t)i, false,
-                                            coll_err, sizeof(coll_err))) {
+                                            coll_err, sizeof(scratch->coll_err))) {
                 /* -Werror=format-truncation: bound the %s width explicitly
                  * so GCC can prove this fits at every call site's err_cap,
                  * rather than assuming coll_err's full 128-byte declared
@@ -1039,14 +1067,17 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                  * what surfaced this previously-quiet truncation risk. */
                 snprintf(err_msg, err_cap, "profile entry %u: duplicate name within this import (%.80s)",
                         (unsigned)i, coll_err);
+                free(scratch);
                 return false;
             }
             if (live_edit_name_collides_ex(candidates[i].p.name, import_board_name_at, &board_ctx, 0xFF, false,
-                                            coll_err, sizeof(coll_err))) {
+                                            coll_err, sizeof(scratch->coll_err))) {
                 snprintf(err_msg, err_cap, "profile entry %u: %.80s", (unsigned)i, coll_err);
+                free(scratch);
                 return false;
             }
         }
+        free(scratch);
     }
 
     /* ---- Pass 1b: zone tuning ---- */
