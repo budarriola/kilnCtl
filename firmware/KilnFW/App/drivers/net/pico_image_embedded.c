@@ -101,10 +101,12 @@ bool pico_image_embedded_describe_from(const uint8_t *slot_a, uint32_t slot_a_le
     out->commit_len = ident_a.commit_len;
     out->dirty = (ident_a.dirty != 0u);
     out->config_format_version = ident_a.config_format_version;
+    out->link_protocol_version = ident_a.link_protocol_version;
     out->usable = true;
     ESP_LOGI(TAG, "embedded SaftyFW images usable: slot A %lu B, slot B %lu B, commit %s%s, "
-                  "config format v%u",
+                  "config format v%u, link protocol v%u",
              (unsigned long)out->slot_len[0], (unsigned long)out->slot_len[1], out->commit,
-             out->dirty ? " (dirty)" : "", (unsigned)out->config_format_version);
+             out->dirty ? " (dirty)" : "", (unsigned)out->config_format_version,
+             (unsigned)out->link_protocol_version);
     return true;
 }

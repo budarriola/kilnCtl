@@ -76,6 +76,7 @@ void run_test_pico_image_embedded(void)
     TEST_CHECK(memcmp(out.commit, rec.commit, 40u) == 0, "the shared commit text is carried through");
     TEST_CHECK(!out.dirty, "the shared dirty flag is carried through");
     TEST_CHECK(out.config_format_version == 2u, "the shared config format version is carried through");
+    TEST_CHECK(out.link_protocol_version == 0u, "the shared link protocol version is carried through");
     TEST_CHECK(out.slot_found[0] && out.slot_found[1], "both slots report a found identity record");
     TEST_CHECK(out.slot_data[0] == buf_a && out.slot_data[1] == buf_b,
                "raw slot pointers are always populated for the staging writer");

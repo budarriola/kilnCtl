@@ -25,9 +25,11 @@
 // Both slot binaries are produced from the SAME SaftyFW commit in the same
 // build (see the ONE check_00_saftyfw_target_build.ps1 invocation the
 // FLASH_BUDGET.md / build instructions describe), so their embedded
-// saftyfw_image_identity_t records must agree byte-for-byte on everything
-// except the two placeholders the identity record predates position
-// (commit, commit_len, dirty, config_format_version, link_protocol_version).
+// saftyfw_image_identity_t records must agree on every field this module
+// reads (commit, commit_len, dirty, config_format_version,
+// link_protocol_version) -- the fields the identity record itself defines,
+// as opposed to placement/padding bytes around the record that this module
+// never inspects.
 // A mismatch here is not
 // a "which one do we trust" question -- it means the two .bin files landed
 // in this build from two DIFFERENT SaftyFW builds (a stale artifact left
@@ -92,6 +94,7 @@ typedef struct {
     uint8_t  commit_len;
     bool     dirty;
     uint16_t config_format_version;
+    uint16_t link_protocol_version;
 
     /* Raw bytes of each embedded slot, for pico_img_stage.h's writer.
      * Always populated (even when !usable) so a caller can still log sizes;

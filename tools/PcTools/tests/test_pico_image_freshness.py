@@ -218,6 +218,19 @@ def test_stale_record_fails(tmp_path, monkeypatch):
     assert "fresh99" in result.message
 
 
+def test_pass_message_names_both_schema_versions(tmp_path, monkeypatch):
+    """The PASS message must list both config_format_version and
+    link_protocol_version, matching the FAIL/disagree message's coverage --
+    previously the PASS message named only config_format_version."""
+    a = _write_slot(tmp_path, "a.bin", "abc1234", extra=b"\xaa" * 64)
+    b = _write_slot(tmp_path, "b.bin", "abc1234", extra=b"\xbb" * 64)
+    monkeypatch.setattr(fresh, "git_saftyfw_scoped_head", lambda repo_root: "abc1234")
+    result = fresh.check_slot_bins_fresh(a, b, tmp_path)
+    assert result.status == "PASS"
+    assert "config_format_version=3" in result.message
+    assert "link_protocol_version=16" in result.message
+
+
 def test_git_saftyfw_scoped_head_real_repo_matches_git_cli():
     """Sanity check against the real repo (not a fixture):
     git_saftyfw_scoped_head() must return exactly what `git log -1

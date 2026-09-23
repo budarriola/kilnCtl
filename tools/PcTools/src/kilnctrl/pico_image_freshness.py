@@ -299,6 +299,7 @@ def check_slot_bins_fresh(slot_a: Path, slot_b: Path, repo_root: Path) -> Freshn
     return FreshnessResult(
         "PASS",
         f"SaftyFW slot images agree on commit {ident_a.commit} "
-        f"(dirty={ident_a.dirty}, config_format_version={ident_a.config_format_version}), "
+        f"(dirty={ident_a.dirty}, config_format_version={ident_a.config_format_version}, "
+        f"link_protocol_version={ident_a.link_protocol_version}), "
         f"matching the last commit to touch {', '.join(SCOPED_PATHS)}.",
     )
