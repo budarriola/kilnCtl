@@ -543,6 +543,24 @@ bool autotune_engine_is_active(void);
  * question). */
 bool autotune_engine_is_active_on_zone(uint8_t zone_index);
 
+/* iter_tune_http.c's restore_commissioned race close (step-7 review,
+ * 2026-09-23, advisory A1 follow-up): the handler's own check-then-apply
+ * shape (autotune_engine_is_active_on_zone() once, then zones_config_set_pid()
+ * later) left a window where autotune could begin on the zone in between,
+ * clobbering the restore or being silently clobbered by it. Reserve the zone
+ * before reading/computing the gains to restore; release it once the write
+ * (zones_config_set_pid() + the persisted-store update) is done, on EVERY
+ * exit path once reserved, success or failure. Reserve takes and releases
+ * s_at.lock internally and never holds it across the caller's own write --
+ * the actual interlock is that autotune_begin_run_locked() refuses to start
+ * on a reserved zone at the same commit point (under the same lock) it
+ * already refuses an already-running zone. Returns false (does not reserve,
+ * nothing to release) if autotune already owns this zone or another external
+ * writer already holds the single reservation slot; returns true (trivially,
+ * nothing to protect against) if the engine has never started. */
+bool autotune_engine_reserve_zone_for_external_write(uint8_t zone_index);
+void autotune_engine_release_zone_for_external_write(uint8_t zone_index);
+
 #ifdef __cplusplus
 }
 #endif

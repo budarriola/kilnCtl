@@ -797,6 +797,27 @@ typedef struct {
     float            predicted_max_ramp_ambient_c_per_hr; /* see autotune_engine_status_t's own field of this name */
 
     autotune_coupling_matrix_t coupling;
+
+    /* iter_tune_http.c's restore_commissioned race close (step-7 review,
+     * 2026-09-23): the ONLY caller of autotune_engine_reserve_zone_for_
+     * external_write()/autotune_engine_release_zone_for_external_write() is
+     * that handler's check-then-set_pid-then-persist sequence, which used to
+     * call autotune_engine_is_active_on_zone() once, release nothing, and
+     * apply gains later with no interlock against an autotune run starting
+     * on the same zone in between. Both accessors take/release s_at.lock
+     * internally and never hold it across the caller's own zones_config_
+     * set_pid()/NVS write -- the actual mutual exclusion is that autotune_
+     * begin_run_locked() checks this flag at the same commit point (under
+     * the same lock) it checks state_is_running(), so a reservation held by
+     * the HTTP handler makes a concurrent autotune start refuse cleanly
+     * instead of racing the restore's write. A single flag (not a per-zone
+     * array) is correct today because both the reservation holder (iter_
+     * tune_http.c, httpd single-worker, CLAUDE.md "httpd single worker,
+     * static buffers by design") and the engine itself (one global instance,
+     * one zone_index at a time) are each serialized to at most one live
+     * user. */
+    bool     external_write_reserved;
+    uint8_t  external_write_reserved_zone;
 } s_at_t;
 
 extern s_at_t s_at;

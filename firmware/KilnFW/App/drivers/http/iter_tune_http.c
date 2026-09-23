@@ -7,7 +7,7 @@
 
 #include "esp_log.h"
 
-#include "autotune_engine.h" // autotune_engine_is_active_on_zone()
+#include "autotune_engine.h" // autotune_engine_reserve_zone_for_external_write()
 #include "iter_tune.h"
 #include "iter_tune_store.h"
 #include "zones_config_accessors.h" // zones_config_set_pid(), MAX31856_CHANNEL_COUNT
@@ -99,11 +99,19 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
-    // A1 (step 7 review, 2026-09-23): refuse while autotune owns this zone --
-    // autotune_engine_guard.c's accept path would silently overwrite
-    // whatever gains we are about to restore, and iter_tune has no way to
-    // find out its work was clobbered.
-    if (autotune_engine_is_active_on_zone((uint8_t)zone)) {
+    // A1 (step 7 review, 2026-09-23) + the follow-up step-7 review race
+    // (2026-09-23): refuse while autotune owns this zone, AND close the
+    // window between that check and the zones_config_set_pid()/persist below
+    // where autotune could start and race the restore -- autotune_engine_
+    // guard.c's accept path would silently overwrite whatever gains we are
+    // about to restore, and iter_tune has no way to find out its work was
+    // clobbered (or vice versa). autotune_engine_reserve_zone_for_external_
+    // write() combines the check with a reservation held under s_at.lock
+    // that autotune_begin_run_locked() also consults at its own commit
+    // point, so a concurrent start is refused rather than racing this
+    // handler. MUST be paired with autotune_engine_release_zone_for_
+    // external_write() on every exit path below once this succeeds.
+    if (!autotune_engine_reserve_zone_for_external_write((uint8_t)zone)) {
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"autotune is running on this zone\"}");
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "application/json");
@@ -132,6 +140,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         // must not be recorded as if the restore happened -- the persisted
         // record is left completely untouched (not even the OFF/status
         // fields), so a retried restore still sees the original anchor.
+        autotune_engine_release_zone_for_external_write((uint8_t)zone);
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"zones_config_set_pid refused\"}");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
@@ -152,6 +161,11 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     stored.status = transient.status;       // OFF, per iter_tune_restore_commissioned()
     stored.stop_reason = transient.stop_reason; // NONE
     esp_err_t persist_err = iter_tune_store_set_zone((uint8_t)zone, &stored);
+
+    // Reservation held across both the live-gains write above and this
+    // persisted-record write -- released only once the whole restore is
+    // durably done, success or not.
+    autotune_engine_release_zone_for_external_write((uint8_t)zone);
 
     if (persist_err != ESP_OK) {
         n = snprintf(json, sizeof(json),

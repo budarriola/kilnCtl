@@ -4,7 +4,8 @@
 // same "no other seam" convention test_partition_info_http.c/test_zones_
 // http.c already document).
 //
-// WHY THIS EXISTS (step 7 review, 2026-09-23, finding 2 + advisory A1):
+// WHY THIS EXISTS (step 7 review, 2026-09-23, finding 2 + advisory A1, and
+// the same day's step-7 follow-up race review):
 //   - finding 2a (reset-one-side): iter_tune_restore_commissioned() sets
 //     the in-RAM state's baseline = the restored gains, but the handler
 //     used to persist only enabled/status/stop_reason, leaving the
@@ -13,18 +14,40 @@
 //     persisted record completely untouched, not recorded as OFF.
 //   - A1: refuse (409) while autotune owns the zone, without touching the
 //     persisted record or calling zones_config_set_pid() at all.
-// This file exercises all three end to end against a fake iter_tune_store
-// (in-RAM struct, no real NVS/cfg_fs) and a fake zones_config_set_pid()/
-// autotune_engine_is_active_on_zone(), asserting on the persisted record
-// AFTER each call, not merely the handler's return code -- the same
-// "assert on the actual output, not just ESP_OK" discipline test_partition_
-// info_http.c's own header comment describes.
+//   - race follow-up: the handler used to call autotune_engine_is_active_
+//     on_zone() once and apply gains later, with no interlock against
+//     autotune starting in the window between -- closed by replacing that
+//     check with autotune_engine_reserve_zone_for_external_write()/
+//     autotune_engine_release_zone_for_external_write(), which this file
+//     fakes as a single held/not-held flag (s_fake_reservation_held) so the
+//     tests below can assert the write happens ONLY while reserved and the
+//     reservation is released on every exit path once acquired, never
+//     otherwise -- see test_set_pid_observes_reservation_held_and_release_
+//     always_paired() below. This does not exercise the real engine's
+//     lock-protected flag or autotune_begin_run_locked()'s matching check
+//     (both live in autotune_engine.c, which pulls in readiness_gate.h,
+//     ota_http.h, relay_authority.h, profile_executor.c and more -- far too
+//     much to stub for this file, which is deliberately scoped to the
+//     handler alone, same as test_autotune_engine_prestart.c staying
+//     separate from this one). What IS host-tested here is the property
+//     that makes the real fix race-free: the handler brackets its entire
+//     read-compute-write-persist sequence between one reserve() and one
+//     release() call, on every path, with no gap where reserve succeeded but
+//     release was skipped.
+// This file exercises all of the above end to end against a fake iter_tune_
+// store (in-RAM struct, no real NVS/cfg_fs) and fake zones_config_set_pid()/
+// autotune_engine_reserve_zone_for_external_write()/autotune_engine_release_
+// zone_for_external_write(), asserting on the persisted record AFTER each
+// call, not merely the handler's return code -- the same "assert on the
+// actual output, not just ESP_OK" discipline test_partition_info_http.c's
+// own header comment describes.
 //
 // Own executable (not merged into kilnctl_host_tests.exe), same reason
 // test_partition_info_http.c/test_zones_http.c get their own: this file
 // supplies its own iter_tune_store_*/zones_config_set_pid/autotune_engine_
-// is_active_on_zone bodies, which would multiply-define against another
-// test file's own fakes of the same symbols if linked together.
+// reserve_zone_for_external_write/autotune_engine_release_zone_for_external_
+// write bodies, which would multiply-define against another test file's own
+// fakes of the same symbols if linked together.
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -112,13 +135,24 @@ bool iter_tune_store_schema_refused(uint8_t *out_version)
 }
 
 // ---------------------------------------------------------------------
-// Fake zones_config_set_pid()/autotune_engine_is_active_on_zone() -- the
-// two seams the handler decides its whole outcome on.
+// Fake zones_config_set_pid()/autotune_engine_reserve_zone_for_external_
+// write()/autotune_engine_release_zone_for_external_write() -- the seams
+// the handler decides its whole outcome on, and the pair that brackets the
+// race window (see this file's header comment).
+//
+// s_fake_reservation_held models the real engine's s_at.external_write_
+// reserved flag: set true by a successful reserve(), false by release().
+// zones_config_set_pid() captures its value at call time (s_reserved_
+// during_set_pid) so a test can assert the write only ever happens while
+// reserved -- the property that makes the real, lock-protected version of
+// this flag actually close the race against autotune_begin_run_locked().
 // ---------------------------------------------------------------------
 static bool s_set_pid_result = true;
 static int s_set_pid_calls = 0;
 static float s_last_set_pid_kp, s_last_set_pid_ki, s_last_set_pid_kd;
 static uint8_t s_last_set_pid_zone;
+static bool s_reserved_during_set_pid = false;
+static bool s_fake_reservation_held = false;
 
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
@@ -127,14 +161,31 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_last_set_pid_kp = kp;
     s_last_set_pid_ki = ki;
     s_last_set_pid_kd = kd;
+    s_reserved_during_set_pid = s_fake_reservation_held;
     return s_set_pid_result;
 }
 
-static bool s_autotune_active_zone_result = false;
-bool autotune_engine_is_active_on_zone(uint8_t zone_index)
+static bool s_reserve_result = true;   // false simulates autotune already owning the zone
+static int s_reserve_calls = 0;
+static int s_release_calls = 0;
+static uint8_t s_last_reserve_zone = 0xFF, s_last_release_zone = 0xFF;
+
+bool autotune_engine_reserve_zone_for_external_write(uint8_t zone_index)
 {
-    (void)zone_index;
-    return s_autotune_active_zone_result;
+    s_reserve_calls++;
+    s_last_reserve_zone = zone_index;
+    if (!s_reserve_result) {
+        return false; // refused -- nothing reserved, nothing to release
+    }
+    s_fake_reservation_held = true;
+    return true;
+}
+
+void autotune_engine_release_zone_for_external_write(uint8_t zone_index)
+{
+    s_release_calls++;
+    s_last_release_zone = zone_index;
+    s_fake_reservation_held = false;
 }
 
 // ---------------------------------------------------------------------
@@ -221,9 +272,15 @@ static void reset_capture(void)
     s_resp_status = 200; // no explicit set_status call means httpd's real default, 200
     s_set_pid_calls = 0;
     s_set_pid_result = true;
-    s_autotune_active_zone_result = false;
     s_fake_schema_refused = false;
     s_fake_schema_refused_version = 0;
+    s_reserved_during_set_pid = false;
+    s_reserve_result = true;
+    s_reserve_calls = 0;
+    s_release_calls = 0;
+    s_last_reserve_zone = 0xFF;
+    s_last_release_zone = 0xFF;
+    s_fake_reservation_held = false;
     fake_store_reset();
 }
 
@@ -264,6 +321,13 @@ static void test_successful_restore_persists_new_baseline(void)
     TEST_CHECK(s_set_pid_calls == 1, "zones_config_set_pid called exactly once");
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "response reports ok:true");
 
+    // Race close: the zone must be reserved for the write and released
+    // exactly once afterward, on the success path.
+    TEST_CHECK(s_reserve_calls == 1, "zone reserved exactly once");
+    TEST_CHECK(s_reserved_during_set_pid, "zones_config_set_pid runs while the zone is reserved");
+    TEST_CHECK(s_release_calls == 1, "zone reservation released exactly once");
+    TEST_CHECK(!s_fake_reservation_held, "reservation is not left held after a successful restore");
+
     iter_tune_store_zone_t out;
     TEST_CHECK(iter_tune_store_get_zone(0, &out), "zone 0 still persisted after restore");
     // iter_tune_restore_commissioned() sets state->baseline = the anchor
@@ -292,6 +356,13 @@ static void test_refused_apply_leaves_record_untouched(void)
     TEST_CHECK(strstr(s_resp_body, "\"ok\":false") != NULL, "response reports ok:false");
     TEST_CHECK(s_set_zone_calls == 0, "iter_tune_store_set_zone() is never called on a refused apply (finding 2b)");
 
+    // Race close: even on a refused apply, the reservation taken before the
+    // write must still be released -- a leaked reservation would wedge every
+    // future autotune start on this zone forever.
+    TEST_CHECK(s_reserve_calls == 1, "zone reserved exactly once even on a refused apply");
+    TEST_CHECK(s_release_calls == 1, "zone reservation released even on a refused apply (no leak)");
+    TEST_CHECK(!s_fake_reservation_held, "reservation is not left held after a refused apply");
+
     iter_tune_store_zone_t out;
     TEST_CHECK(iter_tune_store_get_zone(0, &out), "zone 0 still present");
     TEST_CHECK(out.baseline_kp == before.baseline_kp && out.enabled == before.enabled &&
@@ -299,28 +370,58 @@ static void test_refused_apply_leaves_record_untouched(void)
                "persisted record is byte-for-byte unchanged after a refused apply (finding 2b)");
 }
 
-// A1: refuse with 409 while autotune owns the zone, touching neither
-// zones_config_set_pid() nor the persisted record.
-static void test_refuses_while_autotune_active_on_zone(void)
+// A1 + race close: refuse with 409 when autotune_engine_reserve_zone_for_
+// external_write() refuses (autotune already owns the zone, or -- in the
+// real engine -- started in the window this reservation exists to close),
+// touching neither zones_config_set_pid() nor the persisted record. Since
+// reserve() itself refused, there is nothing to release.
+static void test_refuses_when_reservation_refused(void)
 {
     reset_capture();
     iter_tune_store_zone_t before = make_commissioned_zone(12.0f, 99.0f);
     s_fake_store[0] = before;
     s_fake_present[0] = true;
     s_fake_query = "zone=0";
-    s_autotune_active_zone_result = true;
+    s_reserve_result = false;
 
     httpd_req_t req = {0};
     esp_err_t err = iter_tune_restore_post_handler(&req);
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (409 is in the JSON/status)");
-    TEST_CHECK(s_resp_status == 409, "autotune-active zone refuses with 409 (A1)");
+    TEST_CHECK(s_resp_status == 409, "a refused reservation reports 409 (A1)");
     TEST_CHECK(strstr(s_resp_body, "autotune is running") != NULL, "409 body names autotune as the reason");
-    TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid is never called while autotune owns the zone (A1)");
-    TEST_CHECK(s_set_zone_calls == 0, "iter_tune_store_set_zone is never called while autotune owns the zone (A1)");
+    TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid is never called when the reservation is refused (A1)");
+    TEST_CHECK(s_set_zone_calls == 0, "iter_tune_store_set_zone is never called when the reservation is refused (A1)");
+    TEST_CHECK(s_reserve_calls == 1, "reserve is attempted exactly once");
+    TEST_CHECK(s_release_calls == 0, "nothing is released when reserve() itself refused -- there was never a reservation to release");
 
     iter_tune_store_zone_t out;
     TEST_CHECK(iter_tune_store_get_zone(0, &out), "zone 0 still present");
-    TEST_CHECK(out.baseline_kp == before.baseline_kp, "persisted record is unchanged while autotune owns the zone (A1)");
+    TEST_CHECK(out.baseline_kp == before.baseline_kp, "persisted record is unchanged when the reservation is refused (A1)");
+}
+
+// Race close, direct: the handler must bracket its ENTIRE read-compute-
+// write-persist sequence between exactly one reserve() and one release(),
+// with the write observably happening while reserved. This is the property
+// that makes the real (lock-protected) flag in autotune_engine.c actually
+// exclude a concurrent autotune_begin_run_locked() for the whole window this
+// handler is doing its work, not just at the single instant of the old
+// autotune_engine_is_active_on_zone() check this replaced.
+static void test_reservation_brackets_entire_write_and_pairs_exactly(void)
+{
+    reset_capture();
+    s_fake_store[0] = make_commissioned_zone(12.0f, 99.0f);
+    s_fake_present[0] = true;
+    s_fake_query = "zone=0";
+
+    TEST_CHECK(!s_fake_reservation_held, "no reservation held before the handler runs");
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_restore_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_reserve_calls == 1 && s_release_calls == 1, "reserve/release called exactly once each, paired");
+    TEST_CHECK(s_last_reserve_zone == 0 && s_last_release_zone == 0, "reserve and release name the same zone");
+    TEST_CHECK(s_reserved_during_set_pid, "the live-gains write happened strictly inside the reserved window");
+    TEST_CHECK(!s_fake_reservation_held, "the reservation is fully released once the handler returns");
 }
 
 static void test_missing_zone_query_refuses_400(void)
@@ -333,6 +434,7 @@ static void test_missing_zone_query_refuses_400(void)
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK on a missing zone param (400 is in the JSON/status)");
     TEST_CHECK(s_resp_status == 400, "missing zone param refuses with 400");
     TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid never called on a bad request");
+    TEST_CHECK(s_reserve_calls == 0, "the zone is never reserved on a bad request -- refused before that point");
 }
 
 static void test_never_commissioned_zone_refuses_409(void)
@@ -346,6 +448,7 @@ static void test_never_commissioned_zone_refuses_409(void)
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK on a never-commissioned zone (409 is in the JSON/status)");
     TEST_CHECK(s_resp_status == 409, "never-commissioned zone refuses with 409");
     TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid never called for a never-commissioned zone");
+    TEST_CHECK(s_reserve_calls == 0, "the zone is never reserved for a never-commissioned zone -- refused before that point");
 }
 
 // Advisory finding 10 (step 7 review, 2026-09-23): GET /api/iter_tune/status
@@ -376,7 +479,8 @@ int main(void)
 
     test_successful_restore_persists_new_baseline();
     test_refused_apply_leaves_record_untouched();
-    test_refuses_while_autotune_active_on_zone();
+    test_refuses_when_reservation_refused();
+    test_reservation_brackets_entire_write_and_pairs_exactly();
     test_missing_zone_query_refuses_400();
     test_never_commissioned_zone_refuses_409();
     test_status_reports_schema_refused_version();

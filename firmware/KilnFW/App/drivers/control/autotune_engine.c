@@ -1144,6 +1144,21 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         return false;
     }
 
+    /* iter_tune_http.c restore_commissioned race close (step-7 review,
+     * 2026-09-23): refuse to start on a zone iter_tune_http.c's handler has
+     * reserved via autotune_engine_reserve_zone_for_external_write() -- see
+     * that function's and s_at_t's own comments. Checked under the SAME
+     * lock and at the SAME commit point as the state_is_running() check just
+     * above, so a reservation held right now can never be raced by a start
+     * that reads "not running" a moment before the reservation was taken. */
+    if (s_at.external_write_reserved && s_at.external_write_reserved_zone == zone_index) {
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "an iter_tune restore is in progress on zone %u", (unsigned)zone_index);
+        }
+        return false;
+    }
+
     /* The atomic gate (relay_authority.h's heat-claim doc comment): the
      * zones_current_sweep_is_active() check above is a plain, non-atomic
      * read made before s_at.lock was even taken -- a sweep can start in the
@@ -1672,4 +1687,43 @@ bool autotune_engine_is_active_on_zone(uint8_t zone_index)
     bool active = state_is_running(s_at.state) && s_at.zone_index == zone_index;
     xSemaphoreGive(s_at.lock);
     return active;
+}
+
+bool autotune_engine_reserve_zone_for_external_write(uint8_t zone_index)
+{
+    /* See autotune_begin_run_locked()'s guard comment above: recovery mode
+     * (or a not-yet-started engine) means s_at.lock is NULL and nothing can
+     * ever start a run, so there is nothing to reserve against. */
+    if (s_at.lock == NULL) {
+        return true;
+    }
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    if (state_is_running(s_at.state) && s_at.zone_index == zone_index) {
+        xSemaphoreGive(s_at.lock);
+        return false;
+    }
+    if (s_at.external_write_reserved) {
+        /* Single reservation slot, not a per-zone array -- see s_at_t's own
+         * comment for why one live external writer is the only case that can
+         * exist today. Refuse rather than silently clobber the existing
+         * holder's accounting. */
+        xSemaphoreGive(s_at.lock);
+        return false;
+    }
+    s_at.external_write_reserved = true;
+    s_at.external_write_reserved_zone = zone_index;
+    xSemaphoreGive(s_at.lock);
+    return true;
+}
+
+void autotune_engine_release_zone_for_external_write(uint8_t zone_index)
+{
+    if (s_at.lock == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    if (s_at.external_write_reserved && s_at.external_write_reserved_zone == zone_index) {
+        s_at.external_write_reserved = false;
+    }
+    xSemaphoreGive(s_at.lock);
 }
