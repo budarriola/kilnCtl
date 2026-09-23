@@ -364,7 +364,7 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     do {                                                                                          \
         n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
         if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
+            goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
     } while (0)
@@ -394,9 +394,22 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     }
     APPEND("],\"backtrace_corrupted\":%s}", rec.bt_corrupted ? "true" : "false");
 
-send:
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
+
+overflow:
+    /* Buffer overflow while building the crash-report JSON: never send the
+     * truncated, malformed partial body as a 200 -- that reads as success to
+     * a caller that only checks the status code. Log once and fail loud with
+     * a 500 instead. json[] is 768 B and the margin after the v3 fields is
+     * only ~61 B, so this is meant to be reachable if the record grows again
+     * -- do not enlarge json[] to "fix" it (house rule: never enlarge httpd
+     * stack buffers). */
+    ESP_LOGE(TAG, "crash_report JSON overflowed %u-byte buffer at o=%u",
+             (unsigned)sizeof(json), (unsigned)o);
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":false,\"error\":\"crash report too large to encode\"}", HTTPD_RESP_USE_STRLEN);
 #undef APPEND
 }
 
