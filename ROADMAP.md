@@ -1,8 +1,59 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, SaftyFW clean-worktree
-> configure tooling plus a task-liveness MCP tool (twenty-eighth sweep) — open
-> items below.
+> **Status:** planning · **Last reviewed:** 2026-09-23, -Fast SKIP
+> reclassification, three more httpd-stack heap moves, and task-liveness
+> lifecycle tagging (twenty-ninth sweep) — open items below.
+> - **`-Fast`-caused SKIPs are now non-fatal without weakening SKIP-fails-by-
+>   default** (`2a1c5c96`): `run_all_checks.ps1` sets `KILNCTL_CHECKS_FAST` in
+>   the environment only when `-Fast` is passed. `check_recovery_image_size.py`,
+>   `check_web_gzip_parity.py`, and `check_embedded_pico_image_fresh.ps1` each
+>   test that var and, only for the one SKIP reason that is a direct
+>   consequence of the phase-1 build `-Fast` itself skipped (missing
+>   `recovery.bin`, a missing KilnFW `.gz` build dir, or missing SaftyFW slot
+>   bins), print `SKIP-FAST: ...` instead of `SKIP: ...`. `run_all_checks.ps1`
+>   buckets these separately, reports the count in its summary, and never
+>   fails the run over them — without `-AllowSkips`, and without changing
+>   that a plain SKIP for any other reason still fails the run by default.
+>   Verified both ways: `KILNCTL_CHECKS_FAST` unset still prints plain SKIP
+>   and fails; set, the same checks print SKIP-FAST and the run exits 0.
+> - **Three more `httpd_worker`-reachable stack locals moved to heap**
+>   (`a1e11d26`, Opus-reviewed follow-up `a37abc03`): `backup_import_apply_locked()`'s
+>   profile-slot-simulation scratch (two `PROFILES_MAX_COUNT` bool arrays plus
+>   a 128 B `coll_err`, and now also the ~428 B per-iteration `profile_t`
+>   existence-probe local) folded into one heap-allocated
+>   `backup_import_slot_scratch_t`; `profile_post_handler()`'s ~428 B
+>   `profile_t tmp` moved to heap; `sw_reset_post_handler()`'s 960 B response
+>   buffer moved to heap (OOM falls back to a short fixed string), its cap
+>   named `SW_RESET_BODY_CAP` instead of a bare literal at four sites, and its
+>   two fallback strings hoisted into one `kSwResetFallbackBody` constant. Two
+>   `sizeof()` truncation-check bugs fixed along the way (would have silently
+>   shrunk to `sizeof(char*)` once the locals became heap pointers).
+>   `check_httpd_task_stack_budget.py` honest free: 2104 B (LOW) -> 2520 B,
+>   deepest path now `backup_import_post_handler` at 3872 B. `.dram0.bss`
+>   unchanged — stack locals only, no new statics.
+> - **`check_task_liveness` required tasks now carry a lifecycle tag**
+>   (`01ea790a`, ambiguous-tag hardening `4f38b22a`, docstring/doc cleanup
+>   `eb161458`): the first live run against the bench board found six false
+>   positives that are all by design — `pico_auto_update` self-deletes after
+>   boot (`boot-once`, also gated on not-recovery-mode and a healthy safety
+>   link); `gpio_probe`/`i2c_owner_ns2009` are build-config/hardware-probe
+>   conditional (`config`); `ota_pico_rollback`/`recovery_exit`/
+>   `ota_rollback_reboot` are transient HTTP-handler tasks (`on-demand`). Each
+>   `$requiredNames` entry in `check_stack_margin_registration.ps1` now carries
+>   its lifecycle as a trailing `# liveness: <tag>` comment on the same source
+>   line; `task_liveness.py` parses it and splits fault buckets
+>   (`fault_dead`/`fault_absent`) from informational ones
+>   (`info_dead`/`info_absent`) — only an untagged (`always`) DEAD/ABSENT, or a
+>   `boot-once` ABSENT, is still a fault. The parser now rejects a tagged line
+>   with more than one or zero quoted names (`TaskLivenessParseError`) and
+>   finds `liveness:` anywhere in the comment rather than anchored to its
+>   start, closing a silent-drop and a silent-ignore gap the first pass left
+>   open. Dead `_strip_ps1_comment_lines()` helper removed. 50 tests passed
+>   (47 pre-existing + 3 new).
+> - **Not yet flashed**: the bench board stays at `6630e769`/`05f1ab1f`
+>   (ESP/Pico) — none of today's commits are on hardware yet.
+> **Previously reviewed:** 2026-09-23, SaftyFW clean-worktree
+> configure tooling plus a task-liveness MCP tool (twenty-eighth sweep).
 > - **`build_saftyfw()` resolves `PICO_SDK_PATH` automatically** (`af4b23e0`):
 >   a new `mcpkit/pico_sdk.py` `resolve_pico_sdk_path()` (env var, else the
 >   bench default at `C:\pico-tools\pico-sdk` if it looks real, else a clear
@@ -3244,6 +3295,21 @@ Owner instruction, 2026-09-21.
    just the `web_auth`-recovery erase already done 2026-09-21, given the
    `zones_cfg`/config-schema rollback hazards documented in CLAUDE.md. Still
    open.
+
+**2026-09-23 pending, all blocking the bench reflash + commission pass:**
+
+- [ ] Pin the bench's hand-set `sdkconfig` values in `sdkconfig.defaults`
+  (Wi-Fi static RX buffers 10, BA window 6, lwIP OOSEQ pbufs 4;
+  `GPIO_PROBE` routed via `DEV_AFFORDANCES`) — in review.
+- [ ] Stale published `build/`/`sdkconfig` sibling guard in the stack-budget
+  checkers, plus a `build_kilnfw()` refresh — in review.
+- [ ] `check_00_kilnfw_target_build.ps1` publishes `bootloader.bin`/
+  `partition-table.bin`, not just `KilnCtrl.elf`/`.bin` — `flash_firmware()`
+  needs both and today's build doesn't produce them — in review.
+- [ ] OTA transient task handles: `vTaskDelete` on the ESP rollback task,
+  idempotent `stack_margin_register` — in review.
+- [ ] Bench reflash + commission of both boards at final HEAD — blocked on
+  the four items above.
 
 ---
 
