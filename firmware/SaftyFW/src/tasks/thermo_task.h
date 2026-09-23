@@ -5,6 +5,7 @@
 #define SAFTYFW_TASKS_THERMO_TASK_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "snapshots.h"
 
@@ -130,6 +131,22 @@ void thermo_task_request_tc_type_reapply(void);
 // thermo_task_injection_active() above. Does NOT change what S5 does --
 // this is visibility only, never a new trip condition.
 bool thermo_task_reconfig_gave_up(void);
+
+// --- Live config re-assertion counter, surfaced past SWD (2026-09-23) -----
+// Mirrors s_live_config_mismatches (thermo_task.c): a running total of
+// detected CR0/CR1 mismatch CHECKS (not just episodes -- a part that resets,
+// gets reconfigured, then resets again later counts as 2), from the
+// periodic live-readback cadence in max31856_live_check.h. Every mismatch
+// this counts triggers an immediate max31856_configure() re-assertion from
+// thermo_task_fn()'s own loop -- see that file's wiring for the full
+// rationale (THERMOCOUPLE.md completion checklist: "automatic config
+// re-assertion if the part is ever seen to have reset"). 0 for the entire
+// life of a boot means either the part never reset, or -- on a board that
+// has never yet verified at all -- the check never armed (it is only active
+// while max31856_tc_type_verified() reads true; see that cadence's own
+// header for why an unverified part is the separate reconfig-retry
+// mechanism's problem instead).
+uint32_t thermo_task_live_config_mismatch_count(void);
 
 #ifdef __cplusplus
 }

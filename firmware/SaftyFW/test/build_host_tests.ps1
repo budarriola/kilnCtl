@@ -189,6 +189,13 @@ try {
         (Join-Path $testDir "test_max31856_fault_pin_policy.c"),
         (Join-Path $srcDir "max31856_reconfig_retry.c"),
         (Join-Path $testDir "test_max31856_reconfig_retry.c"),
+        # 2026-09-23 -- pure poll-count cadence/episode-counting policy for
+        # re-checking a VERIFIED part's live CR0/CR1 registers against the
+        # shadow max31856.c keeps (a part that resets mid-run and reverts to
+        # power-on defaults, undetected by anything else) -- see
+        # max31856_live_check.h.
+        (Join-Path $srcDir "max31856_live_check.c"),
+        (Join-Path $testDir "test_max31856_live_check.c"),
         (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
         (Join-Path $testDir "test_thermo_task_drdy_recovery.c"),
         (Join-Path $srcDir "link_diag_flags.c"),

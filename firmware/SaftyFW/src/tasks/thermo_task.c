@@ -29,6 +29,7 @@
 #include "config_store.h" // safety_tc_installed (0x0211) -- the structural injection gate, see thermo_task.h
 #include "log_task.h" // log_task_log() -- one WARN line when the reconfig retry gives up, see below
 #include "max31856.h"
+#include "max31856_live_check.h" // periodic live CR0/CR1 re-check while tc_type IS verified, see its own header
 #include "max31856_reconfig_retry.h" // periodic re-probe while tc_type is unverified, see its own header
 #include "max31856_tc_range_policy.h" // per-tc_type plausibility band, see its own header for the full argument
 #include "task_priorities.h"
@@ -172,6 +173,18 @@ static volatile uint32_t s_drdy_missed_edge_recoveries = 0;
 static max31856_reconfig_retry_state_t s_reconfig_retry;
 static volatile uint32_t s_reconfig_retries = 0;
 static volatile bool s_reconfig_gave_up = false;
+
+// Live config re-assertion (THERMOCOUPLE.md completion checklist item: "if
+// the part is ever seen to have reset"). Unlike s_reconfig_retry above --
+// which only ever fires while tc_type_verified() has NEVER gone true -- this
+// periodically re-checks the live CR0/CR1 registers against the shadow
+// max31856.c keeps, WHILE verified, catching a part that resets itself mid-
+// run and silently reverts to its power-on defaults. See
+// max31856_live_check.h for the cadence/episode-counting policy this state
+// drives. s_live_config_mismatches (SWD-readable, same discipline as
+// s_reconfig_retries above) mirrors the state struct's mismatch_count.
+static max31856_live_check_state_t s_live_check;
+static volatile uint32_t s_live_config_mismatches = 0;
 
 // Live tc_type reapply request (thermo_task.h's thermo_task_request_tc_type_
 // reapply()). Set from link_task.c's task context after a SET_CONFIG write
@@ -374,6 +387,14 @@ bool thermo_task_reconfig_gave_up(void)
     return s_reconfig_gave_up;
 }
 
+uint32_t thermo_task_live_config_mismatch_count(void)
+{
+    // s_live_config_mismatches is `volatile uint32_t`, written only from
+    // this task's own loop -- same single-word, single-writer discipline as
+    // s_reconfig_retries above.
+    return s_live_config_mismatches;
+}
+
 static void thermo_task_fn(void *arg)
 {
     (void)arg;
@@ -412,6 +433,7 @@ static void thermo_task_fn(void *arg)
                                         &thermo_drdy_isr);
 
     max31856_reconfig_retry_init(&s_reconfig_retry);
+    max31856_live_check_init(&s_live_check);
 
     for (;;) {
         // Re-probe the part while its tc_type has never verified -- see
@@ -467,6 +489,55 @@ static void thermo_task_fn(void *arg)
                 log_task_log(LOG_LEVEL_WARN, "thermo_task",
                              "safety MAX31856 reconfig retry gave up, tc_type unverified");
             }
+        }
+
+        // Periodic live config re-assertion (THERMOCOUPLE.md completion
+        // checklist: "automatic config re-assertion if the part is ever
+        // seen to have reset"). Unlike the reconfig-retry block just above
+        // (which only ever fires while verified has NEVER gone true), this
+        // catches a part that verified once and then reset itself mid-run,
+        // silently reverting to its power-on CR0/CR1 defaults -- nothing
+        // else in this task independently notices that, since
+        // max31856_tc_type_verified() is a cached fact from the LAST
+        // configure() call, not a live one. See max31856_live_check.h for
+        // the ~200-poll cadence and why it is only armed while currently
+        // verified (an unverified part is already the reconfig-retry
+        // block's problem to solve, and re-checking a target that was never
+        // successfully written would be meaningless).
+        bool verified_for_live_check = max31856_tc_type_verified();
+        if (max31856_live_check_tick(&s_live_check, verified_for_live_check)) {
+            max31856_live_check_result_t live_result = max31856_verify_live_config();
+            if (live_result == MAX31856_LIVE_CHECK_MISMATCH) {
+                bool is_new_episode = max31856_live_check_note_result(&s_live_check, false);
+                s_live_config_mismatches = s_live_check.mismatch_count;
+                if (is_new_episode) {
+                    // Log once per episode, not once per poll -- same
+                    // "give up loudly, not repeatedly" discipline as the
+                    // reconfig-retry block's own gave-up log above.
+                    log_task_log(LOG_LEVEL_WARN, "thermo_task",
+                                 "safety MAX31856 live CR0/CR1 mismatch detected (part reset?), "
+                                 "reconfiguring");
+                }
+                // Re-assert the commissioned config. This unconditionally
+                // clears max31856_tc_type_verified() at entry (see that
+                // function's own header comment), so from this point on
+                // snap.valid below is already downgraded via the existing
+                // "!verified -> invalid" path further down -- exactly the
+                // same fail-safe transition a boot-time reconfig retry
+                // already uses. No separate S5 wiring needed.
+                (void)max31856_configure(config_store_get_tc_type());
+                // A conversion started under the stale/reset registers may
+                // already be in flight; discard any pending notification so
+                // the wait below only ever wakes on a conversion started
+                // after this reconfigure, matching the reconfig-retry
+                // block's own discard above.
+                (void)ulTaskNotifyTake(pdTRUE, 0);
+            } else if (live_result == MAX31856_LIVE_CHECK_MATCH) {
+                (void)max31856_live_check_note_result(&s_live_check, true);
+            }
+            // MAX31856_LIVE_CHECK_READ_FAILED: an SPI hiccup, not evidence
+            // of a reset -- report nothing, let the next scheduled check
+            // (still ~200 polls out, per max31856_live_check_tick()) retry.
         }
 
         uint32_t conv_ms = max31856_conversion_time_ms();

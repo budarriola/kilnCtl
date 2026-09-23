@@ -440,23 +440,53 @@ sensor reading low tells you nothing at all.
       (`max31856_tc_type_verified()`, §2's "Part B" note above). This closes
       the "was the write actually accepted" half of the gap this checklist
       item used to describe.
-- [ ] Automatic config re-assertion if the part is ever seen to have reset
-      — **still not done**. The CR1 readback above only runs inside
-      `max31856_configure()` itself (boot, and any FUTURE explicit re-assert
-      call); nothing yet independently detects a live part reset mid-run
-      and calls `max31856_configure()` again on its own. A part that resets
-      itself after a successful boot-time configure would revert to its
-      power-on CR1 (Type K, `MAX31856_AVGSEL_4_SAMPLES` off) with nothing
-      to notice until the NEXT explicit configure call, which nothing today
-      triggers automatically.
+- [x] Automatic config re-assertion if the part is ever seen to have reset —
+      **done 2026-09-23**. `max31856_tc_type_verified()` is only a cached
+      fact from the last `max31856_configure()` call, so it stayed `true`
+      forever even if the part later reset mid-run and silently reverted to
+      its power-on CR0/CR1 defaults; nothing previously re-checked the LIVE
+      registers. `thermo_task.c`'s loop now also calls
+      `max31856_live_check_tick()` (`max31856_live_check.c`/`.h`, a pure,
+      host-tested poll-count policy module, same split as
+      `max31856_reconfig_retry.c`) every iteration while the part reads
+      verified; every `MAX31856_LIVE_CHECK_INTERVAL_POLLS` (200) polls — about
+      30s at the ~151ms/conversion cadence, chosen so the extra 3-byte CR0/CR1
+      readback is negligible next to the six-register burst `max31856_read()`
+      already does every conversion — it calls `max31856_verify_live_config()`
+      (`max31856.c`), which re-reads CR0/CR1 live and compares them against
+      `s_cr0_shadow`/`s_cr1_shadow`, the exact bytes the last successful
+      `max31856_configure()` wrote (guarded by a new `s_configured_once` flag
+      so a check made before the very first configure() call cannot
+      spuriously read as a match against `max31856_init()`'s power-on-default
+      seed). On a mismatch, `thermo_task.c` logs one `LOG_LEVEL_WARN` line per
+      new episode and calls `max31856_configure()` again unconditionally —
+      which itself unconditionally clears `max31856_tc_type_verified()` at
+      entry, so the pre-existing `!verified -> snapshot invalid` downgrade in
+      `thermo_task.c`'s loop already fail-safes every reading from the
+      instant the mismatch is detected through to the readback confirming the
+      reconfigure, with no separate wiring needed. An SPI transfer failure on
+      the check itself is reported distinctly
+      (`MAX31856_LIVE_CHECK_READ_FAILED`) and never treated as evidence of a
+      reset. A running total of mismatched checks (not just episodes) is
+      exposed past SWD via `thermo_task_live_config_mismatch_count()`
+      (`thermo_task.h`); this does not touch the wire protocol (no frame
+      length or protocol version change).
 
 **Borrowed source**
 - [x] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH` (verified
       2026-09-03: `config_store.h`'s `tc_source` field, `config_params.c`
       SET/GET, contradiction-with-`tc_placement_mode` rejected at
       `config_params_validate()`, host-tested)
-- [ ] `SAFETY_FLAG_BORROWED` set in status frames when borrowing — still
-      genuinely open, no such bit exists in `CommonFW` yet
+- [x] `SAFETY_FLAG_BORROWED` set in status frames when borrowing — **landed
+      2026-09-03**, not via a `CommonFW` bit but a NEW byte: Frame A grew a V3
+      (26-byte) extension, byte 24 flags2 bit0 `LINK_FLAG2_BORROWED`
+      (`link_frame.h`) plus byte 25 `borrowed_zone_index`
+      (`LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN` = 0xFF sentinel), gated on
+      `LINK_FRAME_STATUS_V3_MIN_PROTOCOL` (10). `link_task_send_status()`
+      derives both from the commissioned `tc_source`/zone record. See
+      `TODO.md`'s own entry for the full history (bits 0x40/0x80 were already
+      spent by `LINK_FLAG_TC_NOT_INSTALLED`/`LINK_FLAG_TC_INJECTED`, which is
+      why this needed a new byte rather than a free bit in the existing one).
 - [x] `tc_placement_mode` forced to `CHAMBER_AGREED`; contradictory config
       **rejected** (verified 2026-09-03, same validator as above)
 - [x] S13 implemented against `sample_counter` (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`) —

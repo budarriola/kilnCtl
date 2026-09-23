@@ -186,6 +186,86 @@ static void test_unscripted_read_returns_zero_not_garbage(void)
                "an all-zero (unscripted) SR byte carries no fault bits");
 }
 
+// max31856_verify_live_config() -- 2026-09-23, the periodic config-drift
+// check (THERMOCOUPLE.md's "automatic config re-assertion if the part is
+// ever seen to have reset"). Covers all four documented outcomes.
+
+static void test_verify_live_config_before_configure_is_read_failed(void)
+{
+    TEST_SECTION("max31856_verify_live_config() -- never configured -> READ_FAILED, not MATCH");
+    setup();
+
+    // No max31856_configure() call at all this bring-up -- must not report
+    // MATCH just because the live (unwritten) registers happen to equal
+    // max31856_init()'s power-on-default shadow seed.
+    TEST_CHECK(max31856_verify_live_config() == MAX31856_LIVE_CHECK_READ_FAILED,
+               "never-configured reads as READ_FAILED, never MATCH or MISMATCH");
+}
+
+static void test_verify_live_config_match(void)
+{
+    TEST_SECTION("max31856_verify_live_config() -- live registers equal the shadow -> MATCH");
+    setup();
+
+    hal_spi_device_t *dev = max31856_spi_device_for_test();
+    uint8_t cr1_readback_rx[2] = { 0x00u, 0x23u };
+    TEST_CHECK(fake_spi_script_rx(dev, cr1_readback_rx, sizeof(cr1_readback_rx)) == HAL_OK,
+               "scripting configure()'s own CR1 readback succeeds");
+    TEST_CHECK(max31856_configure(MAX31856_TC_TYPE_K), "configure(K) succeeds");
+
+    // Live readback of CR0+CR1: script the exact bytes configure() just
+    // wrote (CR0 running == OC_MODE1<<4 | CMODE, CR1 == 0x23).
+    uint8_t live_rx[3] = { 0x00u, (uint8_t)((MAX31856_OC_MODE1 << 4) | MAX31856_CR0_CMODE), 0x23u };
+    TEST_CHECK(fake_spi_script_rx(dev, live_rx, sizeof(live_rx)) == HAL_OK,
+               "scripting a matching live CR0/CR1 readback succeeds");
+
+    TEST_CHECK(max31856_verify_live_config() == MAX31856_LIVE_CHECK_MATCH,
+               "live registers equal to the shadow reads as MATCH");
+}
+
+static void test_verify_live_config_mismatch(void)
+{
+    TEST_SECTION("max31856_verify_live_config() -- live registers differ -> MISMATCH");
+    setup();
+
+    hal_spi_device_t *dev = max31856_spi_device_for_test();
+    uint8_t cr1_readback_rx[2] = { 0x00u, 0x23u };
+    TEST_CHECK(fake_spi_script_rx(dev, cr1_readback_rx, sizeof(cr1_readback_rx)) == HAL_OK,
+               "scripting configure()'s own CR1 readback succeeds");
+    TEST_CHECK(max31856_configure(MAX31856_TC_TYPE_K), "configure(K) succeeds");
+
+    // Live readback showing the part's power-on-default CR0/CR1 (0x00, 0x03)
+    // -- as if it silently reset mid-run, reverting away from the
+    // commissioned shadow (CR0 running, CR1 0x23).
+    uint8_t live_rx[3] = { 0x00u, 0x00u, 0x03u };
+    TEST_CHECK(fake_spi_script_rx(dev, live_rx, sizeof(live_rx)) == HAL_OK,
+               "scripting a power-on-default (reset) live CR0/CR1 readback succeeds");
+
+    TEST_CHECK(max31856_verify_live_config() == MAX31856_LIVE_CHECK_MISMATCH,
+               "live registers reverted to power-on defaults reads as MISMATCH");
+}
+
+static void test_verify_live_config_spi_failure_is_read_failed(void)
+{
+    TEST_SECTION("max31856_verify_live_config() -- SPI transfer failure -> READ_FAILED, not MISMATCH");
+    setup();
+
+    hal_spi_device_t *dev = max31856_spi_device_for_test();
+    uint8_t cr1_readback_rx[2] = { 0x00u, 0x23u };
+    TEST_CHECK(fake_spi_script_rx(dev, cr1_readback_rx, sizeof(cr1_readback_rx)) == HAL_OK,
+               "scripting configure()'s own CR1 readback succeeds");
+    TEST_CHECK(max31856_configure(MAX31856_TC_TYPE_K), "configure(K) succeeds");
+
+    // A transient SPI hiccup on the live-check transfer itself must never be
+    // reported as MISMATCH (that would falsely claim the part reset when the
+    // bus, not the sensor, is the problem) -- see max31856_live_check.h's own
+    // note_result() contract on why READ_FAILED must be handled separately.
+    fake_spi_inject_enqueue_timeout(max31856_spi_bus_for_test(), 1);
+
+    TEST_CHECK(max31856_verify_live_config() == MAX31856_LIVE_CHECK_READ_FAILED,
+               "a failed SPI transfer reads as READ_FAILED, never MISMATCH");
+}
+
 void run_test_max31856_hal_spi(void)
 {
     test_configure_writes_and_cr1_readback();
@@ -193,4 +273,8 @@ void run_test_max31856_hal_spi(void)
     test_read_decodes_temperature_and_faults();
     test_read_open_fault_invalidates_tc_only();
     test_unscripted_read_returns_zero_not_garbage();
+    test_verify_live_config_before_configure_is_read_failed();
+    test_verify_live_config_match();
+    test_verify_live_config_mismatch();
+    test_verify_live_config_spi_failure_is_read_failed();
 }

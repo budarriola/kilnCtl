@@ -221,6 +221,13 @@ bool max31856_bus_init(void);
  * its own. */
 hal_spi_device_t *max31856_spi_device_for_test(void);
 
+/* Test-only, same shape as max31856_spi_device_for_test() above: exposes the
+ * module's own hal_spi_bus_t* so a host test can call fake_spi_inject_
+ * enqueue_timeout(bus, N) against the SAME bus max31856_verify_live_config()
+ * actually transfers on, without max31856.c growing a real caller-facing
+ * "give me your bus" API it has no other reason to have. */
+hal_spi_bus_t *max31856_spi_bus_for_test(void);
+
 /* Configures cs_gpio as a plain output (idling high) and fault_gpio as an
  * input with the internal pull-up (the daughterboard's ~FAULT is open-drain
  * with nothing else pulling it up, same reasoning as KilnFW's MAX31856_init
@@ -270,6 +277,34 @@ bool max31856_configure(uint8_t tc_type);
  * to invalid, feeding the existing S5 path, exactly like a failed
  * max31856_tc_range_is_plausible()/_uncommissioned() check. */
 bool max31856_tc_type_verified(void);
+
+/* Result of max31856_verify_live_config() -- see its own comment. */
+typedef enum {
+    MAX31856_LIVE_CHECK_MATCH = 0,       /* live CR0/CR1 equal the shadow written by the last configure() */
+    MAX31856_LIVE_CHECK_MISMATCH = 1,    /* live CR0/CR1 differ -- the part likely reset itself */
+    MAX31856_LIVE_CHECK_READ_FAILED = 2, /* the SPI transfer itself failed, or configure() never ran */
+} max31856_live_check_result_t;
+
+/* Periodic config-drift check (THERMOCOUPLE.md's "automatic config
+ * re-assertion if the part is ever seen to have reset"): reads CR0 and CR1
+ * back live, in one 3-byte transfer (address + 2 registers, auto-
+ * incrementing per the datasheet the same way max31856_read()'s 6-register
+ * burst does), and compares them against s_cr0_shadow/s_cr1_shadow -- the
+ * exact bytes the last successful max31856_configure() call wrote. Unlike
+ * max31856_tc_type_verified() (a cached fact from configure()-time), this
+ * function always does a fresh SPI transfer, so it is the caller's
+ * responsibility (thermo_task's max31856_live_check.h cadence) not to call
+ * it on every sample -- see that header for why every ~200 polls is enough
+ * and cheap.
+ *
+ * Returns MAX31856_LIVE_CHECK_READ_FAILED (never MISMATCH) if
+ * max31856_configure() has not yet run this bring-up, or if the readback
+ * transfer itself fails -- both are "cannot currently confirm", not
+ * evidence of a reset, and the caller must not count either as a mismatch
+ * episode (a transient SPI hiccup is not the part reverting to power-on
+ * defaults). Does not change s_tc_type_verified or any other driver state;
+ * purely a read + compare. */
+max31856_live_check_result_t max31856_verify_live_config(void);
 
 /* One burst read of CJTH..SR (0x0A..0x0F, six registers, one transaction) --
  * cold-junction temperature, linearized thermocouple temperature and fault

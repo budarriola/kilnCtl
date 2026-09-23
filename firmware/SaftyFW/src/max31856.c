@@ -78,6 +78,17 @@ static uint8_t s_cr1_shadow;
 // once a new one has started, even if the new call itself fails partway.
 static bool s_tc_type_verified = false;
 
+// True once max31856_configure() has completed at least one successful
+// write sequence (CR0/CR1/MASK all written OK), regardless of whether the
+// CR1 readback matched. Needed so max31856_verify_live_config() can tell
+// "never configured yet -- s_cr0_shadow/s_cr1_shadow are just max31856_init()'s
+// power-on-default seed values, not a real commissioned target" apart from
+// "configured, and the live registers now disagree with that target" --
+// without this flag, a part read before its first configure() call would
+// spuriously report MAX31856_LIVE_CHECK_MATCH (power-on registers matching
+// the power-on-default shadow) instead of READ_FAILED.
+static bool s_configured_once = false;
+
 // hal_spi.h handles for the one MAX31856 device on SPI0 -- see this file's
 // top comment. hal_spi_pico.c's backing spi_owner.c is itself a process-wide
 // singleton, so these are the only bus/device instances that will ever
@@ -99,6 +110,11 @@ static hal_spi_device_t s_spi_dev;
 hal_spi_device_t *max31856_spi_device_for_test(void)
 {
     return &s_spi_dev;
+}
+
+hal_spi_bus_t *max31856_spi_bus_for_test(void)
+{
+    return &s_spi_bus;
 }
 
 bool max31856_bus_init(void)
@@ -190,6 +206,7 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio)
     s_cr0_shadow = 0x00u;
     s_cr1_shadow = 0x03u;
     s_tc_type_verified = false; // no configure() has run yet on this bring-up
+    s_configured_once = false;
 
     s_initialized = true;
     return true;
@@ -263,6 +280,13 @@ bool max31856_configure(uint8_t tc_type)
         return false;
     }
     s_cr0_shadow = cr0_running;
+    // All three registers written successfully -- s_cr0_shadow/s_cr1_shadow
+    // now hold a real commissioned target, not max31856_init()'s power-on
+    // seed values, so max31856_verify_live_config() can start trusting a
+    // MATCH result. Set here (not at function entry) so a future early
+    // return added above this line still correctly reports READ_FAILED,
+    // never a false MATCH against a target that was never actually written.
+    s_configured_once = true;
 
     // Part B (max31856_tc_range_policy.h): read CR1 back once, here at
     // configure-time, not on thermo_task's hot per-sample path -- this
@@ -293,6 +317,28 @@ bool max31856_configure(uint8_t tc_type)
 bool max31856_tc_type_verified(void)
 {
     return s_initialized && s_tc_type_verified;
+}
+
+max31856_live_check_result_t max31856_verify_live_config(void)
+{
+    if (!s_initialized || !s_configured_once) {
+        return MAX31856_LIVE_CHECK_READ_FAILED;
+    }
+
+    // CR0 (0x00) and CR1 (0x01) are adjacent -- one 2-register burst from
+    // CR0, address auto-increment, same discipline max31856_read()'s
+    // 6-register burst already relies on. Cheap: 3 bytes total (address +
+    // 2), nowhere near the 7-byte temperature burst this driver already
+    // does on every conversion.
+    uint8_t live[2];
+    if (!max31856_read_burst(MAX31856_REG_CR0, live, sizeof(live))) {
+        return MAX31856_LIVE_CHECK_READ_FAILED;
+    }
+
+    if (live[0] != s_cr0_shadow || live[1] != s_cr1_shadow) {
+        return MAX31856_LIVE_CHECK_MISMATCH;
+    }
+    return MAX31856_LIVE_CHECK_MATCH;
 }
 
 bool max31856_read(max31856_reading_t *out)

@@ -84,6 +84,13 @@ set(SAFTYFW_APP_SOURCES
     # main.c's one-shot configure() runs) -- consumed by thermo_task.c, see
     # max31856_reconfig_retry.h.
     src/max31856_reconfig_retry.c
+    # Pure poll-count cadence/episode-counting policy for re-checking a
+    # VERIFIED part's live CR0/CR1 registers against the shadow max31856.c
+    # keeps, so a part that resets itself mid-run (silently reverting to
+    # power-on defaults) is detected and re-configured instead of latching
+    # forever with a stale "verified" cache -- consumed by thermo_task.c,
+    # see max31856_live_check.h.
+    src/max31856_live_check.c
     src/current_sense.c
     # NOTE: src/spi_owner.c, src/tasks/uart_owner.c and
     # src/tasks/uart_owner_tx_policy.c moved to the hwabstraction_pico

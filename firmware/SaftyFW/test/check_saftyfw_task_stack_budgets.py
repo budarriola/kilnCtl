@@ -370,7 +370,15 @@ CEILING_BYTES = {
     # total 1216 -> 1224 B. Re-pinned to the new measured value, same
     # "pinned at measured, not a padded guess" convention this table's own
     # header comment describes.
-    "thermo_task": 1224,
+    #
+    # 2026-09-23, periodic live CR0/CR1 re-assertion check (THERMOCOUPLE.md
+    # "automatic MAX31856 config re-assertion on live reset"):
+    # thermo_task_fn()'s loop gained three locals (verified_for_live_check,
+    # live_result, is_new_episode) around the new max31856_live_check_tick()/
+    # max31856_verify_live_config()/max31856_live_check_note_result() call
+    # depth, moving the measured total 1224 -> 1232 B. Re-pinned to the new
+    # measured value, same convention.
+    "thermo_task": 1232,
     # 2026-09-18, the mid-erase watchdog reset fix
     # (docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md):
     # update_task_erase_slot() went from an inline offset/remaining walk over
