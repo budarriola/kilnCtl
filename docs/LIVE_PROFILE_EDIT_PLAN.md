@@ -30,13 +30,11 @@ working-copy fetch, status fields), `d1f43870` (Opus review nits N1-N5),
 `bb61aac9` (the MCP tool quartet), `c7d57ecc` and `75641b82` (edit_live
 field-handling fixes) — `git log --oneline -- firmware/KilnFW/App/drivers/
 http/profiles_live_http.c tools/PcTools/src/kilnctrl/
-profile_live_http_client.py`. This plan keeps the `_PLAN` suffix rather than
-being renamed, because one genuinely unbuilt piece remains: **owner decision
-2 in section 12** (refusing a `max_temp_c` lower than a zone's currently
-commanded setpoint in the general config-edit path, `kiln_cfg_store.c`) is
-still only a recorded requirement, not landed code — see that section's own
-note. That is the only open part; everything else the plan describes is on
-the board. The decisions below remain settled regardless of build status.
+profile_live_http_client.py`. **Section 12 decision 2, corrected
+2026-09-22: closed by the existing OTA interlock, no code change needed** —
+see that section's own note. Everything the plan describes is on the board;
+this plan could lose the `_PLAN` suffix once that closure is reviewed. The
+decisions below remain settled regardless of build status.
 
 ---
 
@@ -531,30 +529,42 @@ undisturbed.
      stale.
 2. **A ceiling lowered mid-firing below the running setpoint: REFUSE THE
    CEILING CHANGE.** This overrides the plan's original "leave it to guard 5
-   and the Pico" position (end of section 7). The config-edit path
-   (`kiln_cfg_store_apply()`, `kiln_cfg_store.c:767`) must itself refuse to
-   accept a new `max_temp_c` below any zone's currently commanded setpoint
-   while a firing is in progress, naming the zone and both values -- not
-   merely refuse to adopt the change into the executor after the fact. This
-   is a change to the general config-edit path, not only to the live-edit
-   feature, and is independent of section 7's pickup-time re-validation
-   (which still exists, for a ceiling that drops between accept and pickup
-   by some other route).
+   and the Pico" position (end of section 7).
 
-   **Sequencing note (2026-09-18):** `kiln_cfg_store.c`/`.h` are carrying
-   another session's uncommitted changes (confirmed via `git status` in the
-   shared tree before this pass touched anything). Per the standing
-   sequencing rule, that file was NOT edited here. Decision 2 is recorded as
-   a settled requirement, not landed code, and is the direct next step once
-   that file's in-flight work lands.
+   **Closed, 2026-09-22, no per-zone check needed — the hazard is already
+   structurally unreachable.** Both config-apply paths call the OTA
+   interlock before touching anything else: `kiln_cfg_store_apply()`
+   (`firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c:1443`) and
+   `kiln_cfg_swap_apply_impl()`'s "step 0"
+   (`firmware/KilnFW/App/drivers/persist/kiln_cfg_swap.c:531`) both call
+   `ota_http_check_interlocks()`, which hard-refuses whenever a profile is
+   RUNNING or PAUSED
+   (`firmware/KilnFW/App/drivers/net/ota_interlock.c:56-63`), with no
+   operator-ack bypass for either state (the one ack this interlock accepts
+   covers only "safety link down", same file lines 44-47). So no config
+   apply of any kind — a lowered `max_temp_c` included — can reach a running
+   or paused firing on either apply path; a per-zone ceiling-vs-setpoint
+   comparison on those paths would be unreachable dead code.
+   `kiln_cfg_store_apply()` itself has no non-test caller today (the live
+   route, `POST /api/kiln_configs/apply` in
+   `firmware/KilnFW/App/drivers/http/kiln_cfg_http.c:399`, goes through
+   `kiln_cfg_swap_worker_submit()`), which does not change the conclusion —
+   the swap path carries the identical interlock call.
 
-   **Still open, confirmed 2026-09-22:** `kiln_cfg_store.c` has since taken
-   several unrelated commits (`c3d4b73f`, `e10f4348`, `cfe1cacc`, `d1f79531`,
-   `76197227`), so the "in-flight" blocker named above is gone, but a grep of
-   `kiln_cfg_store_apply()` and the file's `max_temp_c` handling for this
-   refusal (by zone, against a currently commanded setpoint, naming both
-   values) finds nothing. **This is the one remaining unbuilt piece of this
-   plan** — see the status note at the top of this file.
+   The one surface that CAN change bounds while a firing is running is the
+   live-edit feature's own accept-time validator (section 7's pickup-time
+   re-validation), which already refuses an out-of-bound edit with 400
+   before the working copy is written. No further change is needed.
+
+   Already covered by existing tests, no new test needed:
+   `test_kiln_cfg_store.c`'s `test_apply_refused_while_run_active()` (line
+   636) and `test_kiln_cfg_swap.c`'s "swap during a firing refused
+   (interlock)" case (line 639) both drive their interlock fakes to a
+   refused/running result and assert `kiln_cfg_store_apply()`/the swap apply
+   path refuse.
+
+   (An implementation of a per-zone check was built and then rejected in
+   review as unreachable given the interlock above.)
 3. **Name collisions on save-as: REFUSE**, reusing the kiln-config store's
    existing `normalize_name`/`name_collides` rule (case-insensitive,
    whitespace-trimmed) rather than writing a second predicate, per the
