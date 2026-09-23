@@ -489,7 +489,8 @@ sensor reading low tells you nothing at all.
       ~13 in `test_link_frame_wire.c`); decoded on the ESP in
       `safety_link_frames.c`/`safety_link.h`, exposed as
       `tc_config_reasserted_known`/`tc_config_reasserted` in
-      `/api/kiln_configs`'s commissioning JSON (`safety_cfg_http.c`), and
+      `/api/safety/commissioning`'s commissioning JSON (`safety_cfg_http.c`,
+      `commissioning_get_handler()`), and
       decoded by PcTools in `kilnlink_capture.py`.
 
 **Borrowed source**

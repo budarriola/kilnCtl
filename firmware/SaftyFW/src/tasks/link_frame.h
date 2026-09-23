@@ -148,8 +148,9 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 
 // flags2 byte (offset 24, V3 only) -- 2026-09-03. Byte 1 has no room left
 // (comment above), so this is a NEW byte (V1->V2 precedent), not a ninth bit
-// squeezed somewhere. Only bit 0 defined so far; bits 1-7 are reserved for
-// future flags rather than this byte being sized for exactly one bit.
+// squeezed somewhere. Bits 0-2 are defined so far (see below); bits 3-7 are
+// spare, reserved for future flags rather than this byte being sized for
+// exactly three bits.
 #define LINK_FLAG2_BORROWED 0x01u /* tc_source is BORROWED_ZONE or BOTH -- this reading is (partly) sourced
                                     * from another zone's probe, not this board's own J7 input
                                     * (SAFETY_MODEL.md sec 3, THERMOCOUPLE.md's tc_source table). */

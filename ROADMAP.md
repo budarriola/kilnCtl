@@ -53,7 +53,8 @@
 >   (Opus B1) — the production comparison already used the wraparound-safe
 >   `(int32_t)(now_ms - due_ms) >= 0` idiom, so this was test-only. The
 >   remaining follow-up, tracked in `firmware/SaftyFW/docs/THERMOCOUPLE.md`: the
->   deferred `flags2` wire surface.
+>   deferred `flags2` wire surface. **Closed 2026-09-23** (`5a92b4a6`): wired
+>   onto Frame A `flags2` bit2 (`LINK_FLAG2_TC_CONFIG_REASSERTED`, 0x04).
 > - **`compile_esp_backends.ps1`/`compile_pico_backends.ps1` now SKIP-FAST
 >   under `-Fast`** (`71e19c86`): both depend on phase-1 target-build output
 >   (`KilnFW/build/compile_commands.json`,

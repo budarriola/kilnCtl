@@ -621,6 +621,24 @@ static void test_apply_status_v3_tc_config_reasserted(void)
     TEST_CHECK(link.cached.borrowed == true, "bit0 still decodes correctly alongside bit2");
     TEST_CHECK(link.cached.cj_valid == true, "bit1 still decodes correctly alongside bit2");
 
+    // bit2 alone (0x04), bits 0/1 clear -- proves bit2 is decoded off its own
+    // mask, not aliased onto BORROWED (0x01) or CJ_VALID (0x02): a decode
+    // that mistakenly used either of those masks would read false here.
+    msg.payload[24] = (uint8_t)(SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED);
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "bit2-only V3 frame decodes");
+    TEST_CHECK(link.cached.tc_config_reasserted == true, "bit2 alone still sets tc_config_reasserted true");
+    TEST_CHECK(link.cached.borrowed == false, "bit0 clear alongside a lone bit2");
+    TEST_CHECK(link.cached.cj_valid == false, "bit1 clear alongside a lone bit2");
+
+    // bits 0/1 set (0x03), bit2 clear -- proves bit2 is decoded off its own
+    // mask in the other direction: a decode that mistakenly used the
+    // BORROWED or CJ_VALID mask in place of bit2 would read true here.
+    msg.payload[24] = (uint8_t)(SAFETY_LINK_STATUS_FLAG2_BORROWED | SAFETY_LINK_STATUS_FLAG2_CJ_VALID);
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "bits0/1-only V3 frame decodes");
+    TEST_CHECK(link.cached.tc_config_reasserted == false, "bit2 clear -> tc_config_reasserted false even with bits 0/1 set");
+    TEST_CHECK(link.cached.borrowed == true, "bit0 still true");
+    TEST_CHECK(link.cached.cj_valid == true, "bit1 still true");
+
     // Same V3 frame but bit 2 clear -- proves the bit is read from the wire,
     // not hard-coded true by this decode path.
     msg.payload[24] = 0u;
