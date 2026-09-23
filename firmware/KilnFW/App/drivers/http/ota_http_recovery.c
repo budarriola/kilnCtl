@@ -90,6 +90,11 @@
 // caller who fails the challenge/HMAC/lockout gate learns nothing about
 // recovery-mode state at all -- same verify_result_str() 403 shape as every
 // other route in this file, before any board-state check runs.
+// File-scope (not handler-local) so ota_recovery_exit_reboot_task() below
+// can null it itself right before deleting -- see that task's own comment
+// on why. DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target.
+static TaskHandle_t s_recovery_exit_reboot_task;
+
 static void ota_recovery_exit_reboot_task(void *arg)
 {
     (void)arg;
@@ -99,6 +104,14 @@ static void ota_recovery_exit_reboot_task(void *arg)
                         * Same internal-RAM-stack requirement as before: esp_restart() disables the
                         * flash cache, which a PSRAM-backed task stack cannot survive -- see this
                         * task's own stack_margin_register() call below, unchanged. */
+    // Null before deleting: stack_margin_read() (stack_margin.c) reads this
+    // handle fresh on every report and treats non-NULL as "alive", calling
+    // uxTaskGetStackHighWaterMark() on it -- left non-NULL past this point it
+    // would dangle onto a deleted task the instant the scheduler reclaims
+    // this TCB. (A reader racing this assignment and seeing the handle just
+    // before it's cleared is benign: uxTaskGetStackHighWaterMark() on a task
+    // that is about to be deleted but not yet reclaimed is still valid.)
+    s_recovery_exit_reboot_task = NULL;
     vTaskDelete(NULL); /* defensive only: hal_wdt_reboot() is not declared noreturn (the host
                          * fake deliberately returns so tests can observe the call -- see
                          * fake_wdt.c), so this guards a real backend that somehow returns
@@ -153,7 +166,6 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
      * recovery-mode escape hatch panics the board instead of rebooting it.
      * (Same trap that produced a real crash in profile_executor.c earlier
      * the same day; see its task-creation comment.) */
-    static TaskHandle_t s_recovery_exit_reboot_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     if (xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
                     tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task) != pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "

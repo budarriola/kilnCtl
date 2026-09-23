@@ -611,6 +611,12 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// File-scope (not handler-local) so ota_rollback_reboot_task() below can
+// null it itself on its (never-taken-in-practice) failure fallthrough --
+// see that task's own comment on why. DRAM_PSRAM_PLAN.md Phase 0 (4.2):
+// stack_margin_register() target.
+static TaskHandle_t s_ota_rollback_reboot_task;
+
 // --- POST /api/ota/esp/rollback -- see ota_http.h's doc comment above this
 // section for the full contract. Runs on its own short-lived task (same
 // factory_reset.c reboot_task() pattern) so the JSON response already
@@ -646,6 +652,16 @@ static void ota_rollback_reboot_task(void *arg)
     ESP_LOGE(OTA_HTTP_TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
                   "board NOT rebooted, still running the current image",
              esp_err_to_name(err));
+    // Unlike the other two background tasks in this file's family, this
+    // function has no vTaskDelete(NULL) to null the handle before -- on
+    // success esp_restart() never returns and this line is unreached; this
+    // fallback (the call itself failing to even start) is the only path
+    // that falls off the end of the task function. Null the handle here so
+    // stack_margin_read() (stack_margin.c), which treats a non-NULL handle
+    // as alive and calls uxTaskGetStackHighWaterMark() on it, does not read
+    // back "alive" for a task that is about to be torn down by the FreeRTOS
+    // port's own return handling.
+    s_ota_rollback_reboot_task = NULL;
 }
 esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 {
@@ -724,7 +740,6 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
     // is nothing left to release.
-    static TaskHandle_t s_ota_rollback_reboot_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     if (xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
                      tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task) != pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "

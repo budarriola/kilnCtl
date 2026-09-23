@@ -401,6 +401,11 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// File-scope (not handler-local) so ota_pico_rollback_task() below can null
+// it itself right before deleting -- see that task's own comment on why.
+// DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target.
+static TaskHandle_t s_ota_pico_rollback_task;
+
 // Background task for POST /api/ota/pico/rollback -- see that handler's own
 // doc comment (opus-review finding 3) for why this call moved off the httpd
 // worker task. Owns releasing the OTA_HTTP_CONTEXT_PICO update-claim mutex
@@ -434,6 +439,14 @@ static void ota_pico_rollback_task(void *arg)
     // own doc comment for why the claim must stay held for that entire
     // span, not just until the handler returns.
     ota_http_update_end();
+    // Null before deleting: stack_margin_read() (stack_margin.c) reads this
+    // handle fresh on every report and treats non-NULL as "alive", calling
+    // uxTaskGetStackHighWaterMark() on it -- left non-NULL past this point it
+    // would dangle onto a deleted task the instant the scheduler reclaims
+    // this TCB. (A reader racing this line and seeing the handle just before
+    // it's cleared is benign: uxTaskGetStackHighWaterMark() on a task that is
+    // about to be deleted but not yet reclaimed is still a valid read.)
+    s_ota_pico_rollback_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -565,7 +578,6 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         xSemaphoreGive(ota_http_pico_rollback_async_lock);
     }
 
-    static TaskHandle_t s_ota_pico_rollback_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     if (xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL, tskIDLE_PRIORITY + 1,
                      &s_ota_pico_rollback_task) !=
         pdPASS) {
