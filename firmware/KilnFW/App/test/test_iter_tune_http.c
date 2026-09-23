@@ -4,7 +4,7 @@
 // same "no other seam" convention test_partition_info_http.c/test_zones_
 // http.c already document).
 //
-// WHY THIS EXISTS (Opus review of 5f2acb7f, finding 2 + advisory A1):
+// WHY THIS EXISTS (step 7 review, 2026-09-23, finding 2 + advisory A1):
 //   - finding 2a (reset-one-side): iter_tune_restore_commissioned() sets
 //     the in-RAM state's baseline = the restored gains, but the handler
 //     used to persist only enabled/status/stop_reason, leaving the

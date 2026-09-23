@@ -734,9 +734,9 @@ a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
 **The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
-(as of 2026-09-23, recounted at this commit) reports 158 `httpd_uri_t` routes
+(as of 2026-09-23, recounted after the iter_tune step-7-review commit) reports 160 `httpd_uri_t` routes
 registered under `firmware/KilnFW/App/drivers/*.c` against
-`wifi_provision_http.c`'s `config.max_uri_handlers = 165` — 7 spare slots.
+`wifi_provision_http.c`'s `config.max_uri_handlers = 170` — 10 spare slots.
 The next route added
 anywhere under `drivers/` will need that cap bumped in the same change, or
 the check fails; see the check script's own header comment for why this is a

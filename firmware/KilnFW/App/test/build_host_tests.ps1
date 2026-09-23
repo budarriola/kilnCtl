@@ -2333,7 +2333,7 @@ try {
     Invoke-HostTestExe -Name "fuzzy_nine_cell_probe" -ExePath $exeFuzzyCell -BuildCmd $cmdFuzzyCell
 
     # ---- test_iter_tune_http.c: its own 59th, separate executable ------------
-    # Opus review of 5f2acb7f (docs/ITER_TUNE_REDESIGN_PLAN.md step 7), finding
+    # step 7 review, 2026-09-23 (docs/ITER_TUNE_REDESIGN_PLAN.md step 7), finding
     # 2 + advisory A1: proves iter_tune_restore_post_handler() (POST
     # /api/iter_tune/restore_commissioned) (a) persists the RESTORED baseline
     # (not the stale pre-restore one) on a successful restore, (b) leaves the
@@ -2501,7 +2501,7 @@ try {
     # test_profiles_live_http.c (56th) as its own Invoke-HostTestExe call --
     # profiles_live_http.c's five HTTP handlers (status/fork/accept/decide/
     # page), untested until now.
-    # 58 -> 59: Opus review of 5f2acb7f (finding 2 + advisory A1) added
+    # 58 -> 59: step 7 review, 2026-09-23 (finding 2 + advisory A1) added
     # test_iter_tune_http.c as its own 59th Invoke-HostTestExe call --
     # iter_tune_restore_post_handler()'s persist-on-success/refuse-on-
     # rejected-apply/refuse-while-autotune-active behaviour, previously

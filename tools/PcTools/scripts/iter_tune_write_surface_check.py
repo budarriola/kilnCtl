@@ -64,7 +64,7 @@ EXCLUDED_DIRS = {"test", "build"}
 EXCLUDED_FILES = set(ITER_TUNE_FILES)
 
 # The decision core's actual, closed function set is read straight out of
-# iter_tune.h's own declarations (Opus review of 5f2acb7f, advisory A2) --
+# iter_tune.h's own declarations (step 7 review, 2026-09-23, advisory A2) --
 # matched by exact name, NOT by the "iter_tune_" prefix alone. A prefix-only
 # match would also trip on this same file's own iter_tune_store_*()/
 # iter_tune_http_*() functions (iter_tune_store.c/.h, iter_tune_http.c/.h),

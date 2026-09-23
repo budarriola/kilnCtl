@@ -1476,9 +1476,11 @@
 > diagnostics (malloc/assert latching, `boot_reason` bits) have never been
 > verified on hardware; iter_tune persistence + HTTP surface (plan step 7)
 > landed, acceptance partially met (own NVS namespace, cfg_fs dual-write,
-> restore-commissioned route; target build not yet run against this change
-> because of the unrelated ui_page_diagnostics.c ca70e522 format-truncation
-> break, so "full check suite green" is not yet satisfied, and only
+> restore-commissioned route; the unrelated ui_page_diagnostics.c ca70e522
+> format-truncation break that had been blocking a real target build is
+> fixed on main (f7285b9a) -- target build + host tests green (2026-09-23,
+> .dram0.bss +96 B), but this is not the same as a full run_all_checks.ps1
+> pass, which has not been run against this change. Only
 > ITER_TUNE_STORE_VERSION 1 exists today so "schema migration tested both
 > directions" covers only the reject-an-unknown-version direction, not an
 > actual v1->v2 migration) -- per-zone opt-in is a stored field nothing can

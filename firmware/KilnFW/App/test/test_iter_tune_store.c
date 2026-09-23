@@ -35,7 +35,7 @@
 // against an EMPTY directory, so a leftover iter_tune.bin (or its .tmp/
 // staging copy) from a prior run of this binary defeats it silently,
 // leaving a non-empty cfg_fs_test_iter_tune_store/ at the repo root
-// (Opus review of 5f2acb7f, finding 3).
+// (step 7 review, 2026-09-23, finding 3).
 static void tit_scratch_clean(void)
 {
     char path[600];
@@ -108,7 +108,7 @@ static void test_nvs_round_trip(void)
     TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 10.0f, "zone 0 reads back after set");
 
     // Simulate a reboot: reset in-RAM state only, reload from the (fake) NVS
-    // backing store. NOTE (Opus review of 5f2acb7f, finding 4): this is a
+    // backing store. NOTE (step 7 review, 2026-09-23, finding 4): this is a
     // same-version persistence round trip, NOT a schema migration -- only
     // ITER_TUNE_STORE_VERSION 1 exists today, so there is no v1->v2 case to
     // migrate yet. See docs/ITER_TUNE_REDESIGN_PLAN.md row 7 for the honest

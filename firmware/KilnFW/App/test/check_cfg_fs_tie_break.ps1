@@ -59,7 +59,7 @@ $bridges = @(Get-ChildItem -Path $bridgeDir -Filter '*_cfg_fs.c' -File |
 # tie-break every *_cfg_fs.c bridge uses, but keeps its plan-mandated name
 # (iter_tune_store.h's own header comment: "SAME shape kiln_cfg_store_cfg_fs.c/
 # zones_config_cfg_fs.c use"), not the *_cfg_fs.c suffix, so the glob above
-# never sees it (Opus review of 5f2acb7f, advisory A3). Added explicitly
+# never sees it (step 7 review, 2026-09-23, advisory A3). Added explicitly
 # rather than widening the glob, since a name-suffix-only match would also
 # start matching unrelated future files that happen to end in "_cfg_fs.c"
 # for other reasons.

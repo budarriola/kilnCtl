@@ -145,7 +145,7 @@ esp_err_t iter_tune_store_start(void) {
     bool file_ok = cfg_fs_load_raw(&file_blob, &file_rev);
 
     // Log a rev disagreement the same way zones_config_cfg_fs.c/
-    // kiln_cfg_store_cfg_fs.c do (Opus review of 5f2acb7f, advisory A5) --
+    // kiln_cfg_store_cfg_fs.c do (step 7 review, 2026-09-23, advisory A5) --
     // both sides being present but not agreeing is worth a boot-time
     // breadcrumb even though the tie-break below resolves it safely either
     // way.

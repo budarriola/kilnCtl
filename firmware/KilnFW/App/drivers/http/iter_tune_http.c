@@ -91,7 +91,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
-    // A1 (Opus review of 5f2acb7f): refuse while autotune owns this zone --
+    // A1 (step 7 review, 2026-09-23): refuse while autotune owns this zone --
     // autotune_engine_guard.c's accept path would silently overwrite
     // whatever gains we are about to restore, and iter_tune has no way to
     // find out its work was clobbered.
@@ -120,7 +120,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     bool applied = zones_config_set_pid((uint8_t)zone, restored.kp, restored.ki, restored.kd);
 
     if (!applied) {
-        // Opus review of 5f2acb7f, finding 2: a refused zones_config_set_pid
+        // step 7 review, 2026-09-23, finding 2: a refused zones_config_set_pid
         // must not be recorded as if the restore happened -- the persisted
         // record is left completely untouched (not even the OFF/status
         // fields), so a retried restore still sees the original anchor.
@@ -130,7 +130,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
-    // Opus review of 5f2acb7f, finding 2 (reset-one-side class):
+    // step 7 review, 2026-09-23, finding 2 (reset-one-side class):
     // iter_tune_restore_commissioned() sets state->baseline = the restored
     // gains (iter_tune.c:139-147) -- that is now what step 8's
     // iter_tune_active_gains() would return for this zone, so the persisted
