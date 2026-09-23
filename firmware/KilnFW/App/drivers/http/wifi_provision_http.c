@@ -2,9 +2,11 @@
 
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
+#include "esp_heap_caps.h" /* heap_caps_malloc() -- networks_get_handler() below */
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
@@ -440,8 +442,21 @@ static esp_err_t networks_get_handler(httpd_req_t *req)
      * contributing a fixed-size chunk -- no per-request allocation sized
      * from anything a client sent. Sized generously over
      * (20 scan + 8 saved) * ~80 bytes/entry for the extra fields this
-     * response carries versus /scan's plain entries. */
-    char json[(20 + NETWORKS_SAVED_MAX) * 96 + 16];
+     * response carries versus /scan's plain entries.
+     *
+     * HEAP, not stack: this runs on the same httpd_worker task as every
+     * other handler in this file (8 KB total, CLAUDE.md's "httpd stack blob
+     * class") -- this 2704 B buffer is far too large to add to the same
+     * high-water mark those handlers do. Same size and shape as before;
+     * only where the buffer lives changed. Freed on every return path. */
+    const size_t json_cap = (20 + NETWORKS_SAVED_MAX) * 96 + 16;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /networks: malloc(%u) failed for the response buffer", (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     json[o++] = '[';
     bool first = true;
@@ -469,17 +484,17 @@ static esp_err_t networks_get_handler(httpd_req_t *req)
             /* rssi/secure key omitted entirely (not emitted as null) when a
              * saved network isn't currently in scan range -- simplest to
              * parse client-side, documented here and in the endpoint doc. */
-            n = snprintf(json + o, sizeof(json) - o,
+            n = snprintf(json + o, json_cap - o,
                          "%s{\"ssid\":\"%s\",\"saved\":true,\"in_range\":true,\"rssi\":%d,"
                          "\"secure\":%s,\"connected\":%s}",
                          first ? "" : ",", ssid_escaped, (int)rssi, secure ? "true" : "false",
                          connected ? "true" : "false");
         } else {
-            n = snprintf(json + o, sizeof(json) - o,
+            n = snprintf(json + o, json_cap - o,
                          "%s{\"ssid\":\"%s\",\"saved\":true,\"in_range\":false,\"connected\":%s}",
                          first ? "" : ",", ssid_escaped, connected ? "true" : "false");
         }
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+        if (n < 0 || (size_t)n >= json_cap - o) {
             break; /* ran out of room -- stop here rather than overrun */
         }
         o += (size_t)n;
@@ -502,23 +517,25 @@ static esp_err_t networks_get_handler(httpd_req_t *req)
         char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
         json_escape(scanned[j].ssid, ssid_escaped, sizeof(ssid_escaped));
 
-        int n = snprintf(json + o, sizeof(json) - o,
+        int n = snprintf(json + o, json_cap - o,
                          "%s{\"ssid\":\"%s\",\"saved\":false,\"in_range\":true,\"rssi\":%d,"
                          "\"secure\":%s,\"connected\":%s}",
                          first ? "" : ",", ssid_escaped, (int)scanned[j].rssi,
                          scanned[j].secure ? "true" : "false", connected ? "true" : "false");
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+        if (n < 0 || (size_t)n >= json_cap - o) {
             break; /* ran out of room -- stop here rather than overrun */
         }
         o += (size_t)n;
         first = false;
     }
 
-    if (o + 1 < sizeof(json)) {
+    if (o + 1 < json_cap) {
         json[o++] = ']';
     }
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
 }
 
 static esp_err_t forget_post_handler(httpd_req_t *req)

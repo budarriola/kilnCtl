@@ -146,7 +146,18 @@ static esp_err_t safety_page_get_handler(httpd_req_t *req)
  * effect so the page can say so too, rather than leaving it ambiguous. */
 static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
 {
-    char json[1536];
+    /* HEAP, not stack: this runs on the same httpd_worker task as every
+     * other handler in this file (8 KB total, CLAUDE.md's "httpd stack blob
+     * class") -- 1536 B of locals here adds to the same high-water mark
+     * those handlers do. Same size and shape as before; only where the
+     * buffer lives changed. Freed on every return path. */
+    char *json = heap_caps_malloc(1536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/thermo/faults: malloc(1536) failed for the response buffer");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int n;
 
@@ -311,17 +322,19 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
     APPEND("}");
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
 
 overflow:
     /* Same house rule as crash_report_get_handler()'s overflow path just
      * below: never send the truncated, malformed partial buffer as a 200 --
      * that reads as success to a caller that only checks the status code.
-     * Log once and fail loud with a 500 instead. json[] is 1536 B; do not
-     * enlarge it to "fix" this (house rule: never enlarge httpd stack
+     * Log once and fail loud with a 500 instead. The buffer is 1536 B; do
+     * not enlarge it to "fix" this (house rule: never enlarge httpd
      * buffers). */
-    ESP_LOGE(TAG, "thermo_faults JSON overflowed %u-byte buffer at o=%u",
-             (unsigned)sizeof(json), (unsigned)o);
+    ESP_LOGE(TAG, "thermo_faults JSON overflowed a 1536-byte buffer at o=%u", (unsigned)o);
+    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, "{\"ok\":false,\"error\":\"thermo faults report too large to encode\"}", HTTPD_RESP_USE_STRLEN);

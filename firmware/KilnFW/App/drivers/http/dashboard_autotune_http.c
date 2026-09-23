@@ -25,18 +25,32 @@
  * dashboard_format_autotune_status_json() (2026-08-31 dashboard-split pass)
  * -- pure formatting with no httpd/hardware dependency, so it can be host-
  * tested the same way append_zone_status_json() already is. Same buffer size
- * (1300, unchanged) and same snprintf-into-stack-buffer shape as before; only
- * where the formatting code is DEFINED changed. */
+ * (1300, unchanged) and same snprintf-into-a-buffer shape as before; only
+ * where the formatting code is DEFINED changed, and (2026-09-23) where the
+ * buffer itself lives -- see the handler's own comment below. */
 esp_err_t autotune_status_get_handler(httpd_req_t *req)
 {
+    /* st (sizeof ~472 B) stays on the stack -- only the 1300 B json[] moves
+     * to HEAP: this runs on the same httpd_worker task as every handler in
+     * this file (measured at 64 bytes free of 8192 live, see
+     * autotune_matrix_get_handler() above) and 1300 B of locals adds to the
+     * same high-water mark those handlers do. Freed on every return path. */
     autotune_engine_status_t st;
     autotune_engine_get_status(&st);
 
-    char json[1300];
-    int n = dashboard_format_autotune_status_json(json, sizeof(json), &st);
+    char *json = heap_caps_malloc(1300, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(DASH_TAG, "GET /api/autotune: malloc(1300) failed for the response buffer");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    int n = dashboard_format_autotune_status_json(json, 1300, &st);
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    free(json);
+    return ret;
 }
 
 /* TODO.md 6A.5(b): cross-zone coupling matrix built up across completed
