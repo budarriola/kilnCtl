@@ -90,6 +90,7 @@
 // caller who fails the challenge/HMAC/lockout gate learns nothing about
 // recovery-mode state at all -- same verify_result_str() 403 shape as every
 // other route in this file, before any board-state check runs.
+
 // File-scope (not handler-local) so ota_recovery_exit_reboot_task() below
 // can null it itself right before deleting -- see that task's own comment
 // on why. DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target.

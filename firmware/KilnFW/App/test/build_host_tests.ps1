@@ -131,6 +131,7 @@ try {
         (Join-Path $testDir "test_dram_margin.c"),
         (Join-Path $testDir "test_httpd_socket_budget.c"),
         (Join-Path $testDir "test_stack_margin.c"),
+        (Join-Path $testDir "test_stack_margin_registry.c"),
         (Join-Path $testDir "test_log_store.c"),
         (Join-Path $testDir "test_cfg_fs.c"),
         (Join-Path $testDir "test_cfg_fs_format_gate.c"),

@@ -652,16 +652,20 @@ static void ota_rollback_reboot_task(void *arg)
     ESP_LOGE(OTA_HTTP_TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
                   "board NOT rebooted, still running the current image",
              esp_err_to_name(err));
-    // Unlike the other two background tasks in this file's family, this
-    // function has no vTaskDelete(NULL) to null the handle before -- on
-    // success esp_restart() never returns and this line is unreached; this
-    // fallback (the call itself failing to even start) is the only path
-    // that falls off the end of the task function. Null the handle here so
+    // This fallback (the call itself failing to even start the reboot) is
+    // the only path in this task that falls off the end of the function --
+    // on success esp_restart() never returns and this line is unreached.
+    // With CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y, a task function that
+    // returns is NOT quietly torn down: vPortTaskWrapper (IDF
+    // components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c) logs
+    // "FreeRTOS Task ... should not return, Aborting now!" and calls
+    // abort(), which panics the board. Null the handle first so
     // stack_margin_read() (stack_margin.c), which treats a non-NULL handle
     // as alive and calls uxTaskGetStackHighWaterMark() on it, does not read
-    // back "alive" for a task that is about to be torn down by the FreeRTOS
-    // port's own return handling.
+    // back "alive" for a task that is about to be deleted, then delete the
+    // task explicitly so the function never actually returns.
     s_ota_rollback_reboot_task = NULL;
+    vTaskDelete(NULL);
 }
 esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 {

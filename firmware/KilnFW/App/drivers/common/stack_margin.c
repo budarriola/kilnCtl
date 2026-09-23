@@ -23,6 +23,32 @@ bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t co
         ESP_LOGE(TAG, "register() called with a NULL/empty name or NULL handle slot -- not registered");
         return false;
     }
+
+    // Idempotent by (name, handle_slot): a handful of registration sites --
+    // the three OTA background-task launchers (ota_http_esp.c/ota_http_pico.c/
+    // ota_http_recovery.c) among them -- call this once per invocation of a
+    // POST handler that can run more than once a boot, always with the same
+    // literal name and the same file-scope TaskHandle_t* slot. Without this
+    // check every repeat POST appended a fresh row, and since the registry
+    // has no removal path, enough repeat calls silently walk it to
+    // STACK_MARGIN_MAX_TASKS, after which registration logs and stops --
+    // for every task registered anywhere in the firmware, not just the
+    // repeat offender. A call with the same name but a DIFFERENT slot is not
+    // this case -- it is either a real name collision between two distinct
+    // tasks or a caller bug -- so that one is still logged and refused
+    // rather than silently accepted or silently appended.
+    for (size_t i = 0; i < s_count; i++) {
+        if (strncmp(s_entries[i].name, name, STACK_MARGIN_NAME_MAX - 1) == 0) {
+            if (s_entries[i].handle_slot == (TaskHandle_t *)task_handle_slot) {
+                return true; // already registered by this exact call site -- no-op
+            }
+            ESP_LOGE(TAG, "register() called for '%s' with a different handle slot than its "
+                          "existing registration -- not re-registered (name collision?)",
+                     name);
+            return false;
+        }
+    }
+
     if (s_count >= STACK_MARGIN_MAX_TASKS) {
         ESP_LOGE(TAG, "registry full (%u/%u) -- '%s' not registered; raise STACK_MARGIN_MAX_TASKS",
                  (unsigned)s_count, (unsigned)STACK_MARGIN_MAX_TASKS, name);

@@ -433,20 +433,25 @@ static void ota_pico_rollback_task(void *arg)
     ESP_LOGW(OTA_HTTP_TAG, "OTA pico rollback: safety_link_send_rollback_ex outcome=%d reason=%u",
              (int)outcome, (unsigned)reason_code);
 
-    // Released here, on EVERY outcome, now that the WHOLE rollback attempt
-    // (send-burst/reply-window leg AND the boot_id-reconnect watch) has run
-    // to completion on this task -- see ota_pico_rollback_post_handler()'s
-    // own doc comment for why the claim must stay held for that entire
-    // span, not just until the handler returns.
-    ota_http_update_end();
-    // Null before deleting: stack_margin_read() (stack_margin.c) reads this
-    // handle fresh on every report and treats non-NULL as "alive", calling
+    // Null the handle BEFORE releasing the update-claim mutex below: once
+    // ota_http_update_end() releases the claim, a second POST can win it and
+    // start a fresh ota_pico_rollback_task() with its own handle -- nulling
+    // after that release would race clobbering that fresh handle back to
+    // NULL. stack_margin_read() (stack_margin.c) reads this handle fresh on
+    // every report and treats non-NULL as "alive", calling
     // uxTaskGetStackHighWaterMark() on it -- left non-NULL past this point it
     // would dangle onto a deleted task the instant the scheduler reclaims
     // this TCB. (A reader racing this line and seeing the handle just before
     // it's cleared is benign: uxTaskGetStackHighWaterMark() on a task that is
     // about to be deleted but not yet reclaimed is still a valid read.)
     s_ota_pico_rollback_task = NULL;
+
+    // Released here, on EVERY outcome, now that the WHOLE rollback attempt
+    // (send-burst/reply-window leg AND the boot_id-reconnect watch) has run
+    // to completion on this task -- see ota_pico_rollback_post_handler()'s
+    // own doc comment for why the claim must stay held for that entire
+    // span, not just until the handler returns.
+    ota_http_update_end();
     vTaskDelete(NULL);
 }
 

@@ -126,7 +126,32 @@ extern "C" {
  * Returns false, logging why, without registering anything, if the
  * registry is full or a NULL/empty name or NULL slot pointer was passed --
  * a silently-dropped registration would read on the PC side as "this task
- * doesn't exist," which is worse than a boot-time log line saying so. */
+ * doesn't exist," which is worse than a boot-time log line saying so.
+ *
+ * Idempotent by (name, handle_slot): calling this again with the same name
+ * AND the same slot pointer is a no-op that returns true without appending
+ * a second row. This matters because not every call site fires once per
+ * boot -- the three OTA background-task launchers (ota_rollback_reboot,
+ * ota_pico_rollback, recovery_exit) register from inside a short-lived task
+ * that a POST handler can (re)start any number of times in one boot, always
+ * with the same literal name and the same file-scope TaskHandle_t* slot.
+ * Without this de-dup every repeat POST would append a fresh row, and since
+ * the registry has no removal path, enough repeats silently walk it to
+ * STACK_MARGIN_MAX_TASKS, after which every OTHER task's registration
+ * anywhere in the firmware logs and fails too. A call with the same name
+ * but a DIFFERENT slot is a distinct case (a real name collision, or a
+ * caller bug) and is still logged and refused, not silently accepted.
+ *
+ * Not internally locked: every current call site registers from a context
+ * that is effectively single-threaded with respect to this registry --
+ * boot-time tasks register once each from app_main()'s own sequential boot
+ * sequence, and the three repeat-call OTA sites above register from a
+ * background task guarded by that feature's own update-claim mutex, so at
+ * most one of them can be mid-registration at a time (the httpd worker
+ * itself is also single-threaded, so two POSTs can never reach the register
+ * call concurrently either). If a future caller registers from a genuinely
+ * concurrent context, this function needs a critical section added, not
+ * just a duplicate-safe scan. */
 bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t configured_stack_bytes);
 
 /* Number of tasks currently registered (<= STACK_MARGIN_MAX_TASKS). */
