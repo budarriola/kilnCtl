@@ -1608,12 +1608,6 @@ waiting, not unwritten:
 
 - `GUARD_TEST_MATRIX.md` §3's trip rows — every enabled guard's real trip,
   safe-state power-on, sensor open-circuit, current-mapping commissioning.
-- ~~The safety processor's own MAX31856~~ — **fitted 2026-08-24 and verified
-  reading 30.2 °C.** ~~Still absent: any CT~~ — **2026-09-05: a CT is now
-  fitted on `Current3` (GPIO28/ADC2) and confirmed working** — 1A:1V CT,
-  ~+59 mV DC offset, reading the summed current of ALL heaters (not
-  per-zone); `Current1`/`Current2` remain unpopulated. See the new items
-  below and `firmware/SaftyFW/docs/HARDWARE.md` §9.
 - S9's welded-contactor escalation, which by definition needs a welded
   contactor. **Checked 2026-09-03**: not a SimFW task — SimFW was removed
   (`8553244`, 2026-08-28) and its replacement, `firmware/UnitTestFw`, is
@@ -1659,22 +1653,6 @@ now a short list, which is the point:
   hardware-verified via `touch_get_state()` ("screen on" → "screen blanked"),
   as is NVS persistence across a reboot. Wake-on-touch, first-touch-swallow
   and error dismissal still need the owner's finger.
-- ~~Touch was mirrored top-to-bottom on the ST7796 glass~~ **CLOSED
-  (`f028e2f`)** — Y-invert was the wrong knob (X was fine); capacitive
-  orientation knobs are now conditional on `KILNCTL_DISPLAY_PANEL_ST7796`.
-- ~~LVGL's wake-edge invalidate reentered its own flush callback~~
-  **CLOSED (`51e1ef5`) — killed a live firing on the bench before the fix.**
-  This is the root cause behind the `safety_poll` panic/`configASSERT`
-  chain; full postmortem in `CLAUDE.md` "Firmware gotchas".
-- ~~LCD diagnostics 9 pages, profile-detail layout, builtin-catalogue
-  browse-by-family, web display-settings styling, cone/firing-type
-  verification~~ **all CLOSED 2026-09-04** (`1cf200f`, `445a78e`, `0470185`,
-  `70ef683`, `9d73c8f`) — owner-feedback fixes on the real panel plus a
-  source-checked correction of the builtin catalogue's cone metadata (3
-  fixed, 15 confirmed). The remaining 10 unrated cones closed 2026-09-05
-  (`1501f0c`+`3b0c82e`): `PROFILES_BUILTIN_CONE_UNRATED`, LCD catalogue
-  "Unrated" bucket sorted last (owner decision).
-  Full detail: `docs/COMPLETED_2026-09.md`. Not yet flashed.
 - **`screen_idle` held its own lock across the producer reads, 2026-09-04
   (`7a8594d`).** The policy tick called `dashboard_get_status()` (five
   MAX31856 SPI bursts), `kiln_io_owner_command_read()` (blocks up to 200 ms on
@@ -1682,73 +1660,6 @@ now a short list, which is the point:
   lock the LVGL task takes on every tick and touch — against the module's own
   documented invariant. Reads moved outside the lock and throttled to 1 Hz,
   policy now reads a cached snapshot; five mutation tests, all red.
-- ~~**The LCD back buttons do not work**~~ **CLOSED (`1982ed6`).** Root cause
-  was the topbar's z-order-first-match hit test: icons are built left-to-right
-  (Back, Home, Prev, Next, Gear) so every icon except the last in a row was
-  shadowed by whichever came after it, and Back was *always* shadowed since
-  something always follows it. Fixed by capping the touch-area extension at
-  `UI_THEME_PADDING_PX/2` per side (`ui_theme_apply_touch_area()`) and
-  registering the icon row as a touch group (`ui_topbar.c`).
-- ~~Diagnose the HTTP concurrency reset~~ — **stale, corrected 2026-09-04: this
-  shipped and was already moved out.** Root cause was
-  `CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE` defaulting to 6 — a fixed-size mailbox, not
-  a heap failure or the backlog/socket-table limits three prior passes chased.
-  Raised 6→16; reset rate 22.5%→0.0% at the same concurrency levels. This
-  bullet itself was left behind when the finding moved to
-  `docs/COMPLETED_2026-09.md#http-connection-resets-under-concurrency--root-cause-and-fix-2026-09-04`
-  on 2026-09-04 — the upkeep rule says a finished item leaves this file, and
-  the one-line pointer was missing until now.
-- ~~A guard that every `src/**.c` is in its CMakeLists or explicitly
-  excluded.~~ **Stale, corrected 2026-09-03: this shipped**, predating this
-  roadmap's last review — `tools/check_c_files_in_cmakelists.ps1`, wired
-  into `run_repo_checks`/`run_all_checks.ps1`. `tick_timing.c` (the incident
-  that motivated it, 2026-08-28: added to the host-test list but not
-  `SaftyFW/CMakeLists.txt`, so the host suite compiled it happily while the
-  real target link failed) is itself already fixed too.
-- ~~**PID Expansion Plan Phase 3b — cross-zone coupling feedforward.**~~
-  **Stale, corrected 2026-09-02: this shipped.** The coupling matrix persists
-  per-zone (`coupling_coeff[]`, `zones_config_accessors.c`/
-  `zones_config_json.c`, config store) and `zone_coupling_solve.c` /
-  `profile_executor_feedforward.c` apply it as a full 3x3 directed matrix —
-  the asymmetric-pair schema concern this entry raised is already resolved by
-  storing a full row per zone rather than one scalar coefficient. A re-solved
-  asymmetric matrix was adopted onto the board 2026-09-02 — see
-  `PID_EXPANSION_PLAN.md` §2/§3.2 for the coefficients and the caveats.
-- ~~**New, scoped but not yet in a plan doc: per-zone enable/disable**~~ —
-  **stale, corrected 2026-09-03 (second pass): the feature already existed.**
-  `zones_cfg_t.thermo_count` is already exactly this: a contiguous-prefix
-  `[0, thermo_count)` zone count, validated by `zones_config_json_validate()`
-  and `parse_zone_fields()`. A zone dropped by shrinking the count keeps its
-  stored config rather than losing it, so raising the count restores it.
-  `profiles_http.c`'s `valid_zone_bits` already stops any profile targeting a
-  zone outside the prefix, and guards, autotune and the coupling matrix are all
-  already bounded by the same value. `zones_post_handler()` already refuses a
-  structural change (409) while a firing is RUNNING/PAUSED **or** while any
-  affected zone is still hot or has a relay commanded on — a stronger interlock
-  than driving the relay off at toggle time.
-  The scoping note above was doubly stale: `ZONES_CFG_VERSION` is at **15**, not
-  11 — five further migrations have landed since that prerequisite was written.
-  **Shipped 2026-09-03:** `zones_page.html` now offers per-zone checkboxes as
-  UI sugar over `thermo_count` (checking zone *i* sets the count to *i+1*,
-  unchecking sets it to *i*), so the contiguous-prefix rule holds by
-  construction instead of relying on the operator editing a number by hand.
-  No config-version bump and no migration were needed, and adding a second
-  parallel "enabled" field would have duplicated `thermo_count`'s meaning
-- ~~**New: Pico rollback from the OTA page**, plus a link-protocol reply
-  frame so a Pico rollback refusal is visible~~ — **stale, corrected
-  2026-09-03: this shipped.** `kilnlink_rollback_result.h` is exactly that
-  reply frame (`link_task.c`'s `link_task_handle_rollback()` sends it instead
-  of the old fire-and-forget path), and `ota_http.c`'s
-  `ota_pico_rollback_post_handler()` / `ota_pico_rollback_status_get_handler()`
-  drive it from `POST /api/ota/pico/rollback`. Not yet exercised against a
-  live mismatch (M8)
-- ~~**New: safety processor build identity** (commit + build date) shown on
-  the OTA page~~ — **stale, corrected 2026-09-03: this shipped.**
-  `saftyfw_build_info.h` is regenerated every build (`CMakeLists.txt`'s
-  `saftyfw_build_info` target) and reported over the link; `dashboard_http.c`
-  exposes `safety_build_commit`/`safety_build_datetime`/`safety_build_dirty`
-  and `ota_page.html` renders them
-
 **Closed 2026-08-27 through 2026-09-04, no longer open** — DRAM/stack
 reclamation, PID Cohen-Coon/fuzzy-layer landing, SNTP sync, the first
 hardware coupling-matrix/RGA measurements, the withdrawal of coupled/Ki

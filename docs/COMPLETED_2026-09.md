@@ -1428,6 +1428,13 @@ the real ST7796 panel unless noted.
   (`target_c`/`ramp_c_per_hr`/`dwell_min`/`segment_count`) was touched.
   Owner decision needed on the 10 unresolved entries — see ROADMAP.md
   "Blocked on you". Not yet flashed (firing in progress).
+- **The LCD back buttons did not work — `1982ed6`.** Root cause was the
+  topbar's z-order-first-match hit test: icons are built left-to-right
+  (Back, Home, Prev, Next, Gear) so every icon except the last in a row was
+  shadowed by whichever came after it, and Back was always shadowed since
+  something always follows it. Fixed by capping the touch-area extension at
+  `UI_THEME_PADDING_PX/2` per side (`ui_theme_apply_touch_area()`) and
+  registering the icon row as a touch group (`ui_topbar.c`).
 
 ## M12 — commissioning the operator can actually do, full detail, moved 2026-09-16
 
