@@ -358,6 +358,13 @@ class PreflightReport:
                     )
             else:
                 lines.append(f"  [ok]     task liveness: all {len(tl.expected)} expected task(s) alive")
+        else:
+            lines.append(
+                "  [skip]   task liveness: not checked (no link) -- this preflight has no "
+                "live UART link to the board, or the required-task list could not be "
+                "loaded, so a dead or absent required task on this boot would not be "
+                "caught here."
+            )
         if not self.checks:
             lines.append("  no HTTP-gated capabilities required by this preset/apply plan.")
         for c in self.checks:

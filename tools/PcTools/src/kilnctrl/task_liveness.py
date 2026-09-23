@@ -48,8 +48,11 @@ DEFAULT_CHECK_SCRIPT_RELPATH = "tools/check_stack_margin_registration.ps1"
 _REQUIRED_NAMES_BLOCK_RE = re.compile(
     r"\$requiredNames\s*=\s*@\(\s*(.*?)\s*\)", re.DOTALL
 )
-#: Matches one quoted PowerShell string literal, e.g. "kiln_io_owner".
-_QUOTED_STRING_RE = re.compile(r'"([^"]+)"')
+#: Matches one quoted PowerShell string literal, double- or single-quoted,
+#: e.g. "kiln_io_owner" or 'kiln_io_owner' -- PowerShell array literals
+#: accept either, and a $requiredNames edit that switches quote style (or
+#: mixes them) must not silently drop entries from the parsed list.
+_QUOTED_STRING_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
 
 
 class TaskLivenessParseError(Exception):
@@ -99,7 +102,7 @@ def parse_required_task_names(script_text: str) -> "tuple[str, ...]":
     names = []
     seen = set()
     for m in _QUOTED_STRING_RE.finditer(body):
-        name = m.group(1)
+        name = m.group(1) if m.group(1) is not None else m.group(2)
         if name not in seen:
             seen.add(name)
             names.append(name)

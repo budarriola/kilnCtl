@@ -47,11 +47,17 @@ def _preflight_task_liveness():
     import os
 
     from . import task_liveness
+    from .devices_info import InfoResponseError
     from .info import InfoQueryError
 
     try:
         entries = _srv._info.get_stack_margin()
-    except InfoQueryError:
+    except (InfoQueryError, InfoResponseError):
+        # InfoResponseError (devices_info.py) is a ValueError raised when
+        # the reply parses but its shape is malformed -- not a subclass of
+        # InfoQueryError, so it must be caught separately. Either way this
+        # is "could not check", not "confirmed absent": treat it the same
+        # as every other failure path above and report not-checked.
         return None
     repo_root = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")

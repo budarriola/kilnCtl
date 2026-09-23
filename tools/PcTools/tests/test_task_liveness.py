@@ -55,6 +55,19 @@ $requiredNames = @(
     assert "not_a_real_task" not in names
 
 
+def test_parse_required_task_names_accepts_mixed_quote_styles():
+    """PowerShell array literals accept either quote style, and a script
+    edit that switches or mixes them must not silently drop entries -- the
+    original regex only matched double-quoted strings."""
+    text = '''
+$requiredNames = @(
+    "autotune_engine", 'boot_button',
+    'danger_mode'
+)
+'''
+    assert parse_required_task_names(text) == ("autotune_engine", "boot_button", "danger_mode")
+
+
 def test_parse_required_task_names_dedupes_preserving_order():
     text = '$requiredNames = @("a", "b", "a", "c")'
     assert parse_required_task_names(text) == ("a", "b", "c")

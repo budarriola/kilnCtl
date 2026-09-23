@@ -479,6 +479,24 @@ class TaskLivenessGatingTest(unittest.TestCase):
                                        preset_name="test-preset")
         self.assertTrue(report.ok)
 
+    def test_no_task_liveness_supplied_shows_explicit_skip_line(self):
+        """task_liveness=None must not read as 'checked and fine' in
+        describe() -- an explicit [skip] line makes the blind spot visible
+        rather than silently omitting any mention of task liveness."""
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
+        text = report.describe()
+        self.assertIn("[skip]", text)
+        self.assertIn("task liveness: not checked (no link)", text)
+
 
 if __name__ == "__main__":
     unittest.main()
