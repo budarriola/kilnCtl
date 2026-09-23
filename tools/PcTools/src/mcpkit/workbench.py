@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -342,9 +343,41 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
         f"kilnfw-{target}", build_dir,
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         timeout=1800)
+    if target in ("build", "reconfigure") and f"kilnfw-{target}: OK" in kilnfw_report:
+        kilnfw_report = f"{kilnfw_report}\n\n{_refresh_build_sdkconfig(root, build_dir)}"
     if saftyfw_report is not None:
         return f"{saftyfw_report}\n\n{kilnfw_report}"
     return kilnfw_report
+
+
+def _refresh_build_sdkconfig(root: str, build_dir: str) -> str:
+    """Keep ``build/sdkconfig`` from outliving the ELF it describes.
+
+    ``check_00_kilnfw_target_build.ps1`` publishes an isolated checkbuild's
+    own sdkconfig into an invoking tree's ``build/`` next to the ELF it also
+    publishes there -- a config PUBLISHED alongside the artifact it produced,
+    which ``check_all_task_stack_budgets.py``'s sdkconfig resolution treats
+    as authoritative. A later plain ``idf.py build`` (i.e. THIS function)
+    relinks ``build/KilnCtrl.elf`` from the tree's own
+    ``firmware/KilnFW/sdkconfig`` but never touched that published sibling
+    before this fix, so the two could silently disagree -- the sibling then
+    describing an EARLIER build than the ELF sitting next to it (a "reset one
+    side of a pair" bug; see CLAUDE.md). ``check_all_task_stack_budgets.py``
+    now refuses to grade against a disagreeing sibling rather than silently
+    trusting either one, but the fix belongs here too: after any build this
+    tool performs, make the two agree again by overwriting the sibling with
+    the tree's live config, so an ordinary ``build_kilnfw()`` call never
+    leaves that trap behind for the checker to find later.
+    """
+    live = os.path.join(root, "firmware", "KilnFW", "sdkconfig")
+    sibling = os.path.join(build_dir, "sdkconfig")
+    if not os.path.isfile(live):
+        return f"sdkconfig-refresh: SKIPPED -- no live config at {live}"
+    try:
+        shutil.copyfile(live, sibling)
+    except OSError as exc:
+        return f"sdkconfig-refresh: FAILED -- could not copy {live} -> {sibling}: {exc}"
+    return f"sdkconfig-refresh: OK -- {sibling} now matches {live}"
 
 
 def run_pctools_tests(pattern: Optional[str] = None) -> str:

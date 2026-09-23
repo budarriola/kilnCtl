@@ -270,6 +270,80 @@ def _sdkconfig_candidates(elf):
     return cands
 
 
+def _config_lines(path):
+    """{CONFIG_KEY: value} for every non-comment `CONFIG_*=value` line.
+
+    A "# CONFIG_X is not set" comment line is deliberately excluded here (as
+    in _load_sdkconfig): this helper is only used to compare two sdkconfigs
+    for a real difference in SET options, not to diff comment formatting.
+    """
+    parsed = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            if "=" in line:
+                k, _, v = line.strip().partition("=")
+                if k.startswith("CONFIG_"):
+                    parsed[k] = v
+    return parsed
+
+
+def _check_sibling_pair_agreement(elf_dir):
+    """Compare `<elf_dir>/sdkconfig` against `<elf_dir>/../sdkconfig`.
+
+    check_00_kilnfw_target_build.ps1 publishes an isolated checkbuild's
+    sdkconfig into the invoking tree's build/ next to the ELF it also
+    publishes there. A later plain `idf.py build` in that same build/
+    directory replaces the ELF but leaves the published sdkconfig sibling
+    in place, so the two can silently drift apart: the sibling then
+    reflects an EARLIER build than the ELF it sits next to, and grading the
+    newer ELF against it is exactly the "reset one side of a pair" failure
+    this check exists to catch (see CLAUDE.md).
+
+    Comparing file mtimes was tried and rejected: in the ordinary case of an
+    unchanged tree, `idf.py build` can leave build/sdkconfig with an OLDER
+    mtime than a freshly linked ELF even though the two are byte-identical
+    in content, which would false-positive. Comparing the CONFIG_ lines
+    themselves is the actual invariant that matters.
+
+    Returns None if the pair agrees (or either file is missing/unreadable --
+    that is not this function's failure mode). Returns a loud message string
+    naming both paths and the differing symbols if they disagree.
+    """
+    if os.path.basename(elf_dir).lower() == ELF_ARCHIVE_DIRNAME:
+        return None  # archived ELFs never resolve against the parent config; see rule 3
+    sibling = os.path.join(elf_dir, "sdkconfig")
+    parent = os.path.abspath(os.path.join(elf_dir, os.pardir, "sdkconfig"))
+    if not (os.path.isfile(sibling) and os.path.isfile(parent)):
+        return None
+    try:
+        sibling_cfg = _config_lines(sibling)
+        parent_cfg = _config_lines(parent)
+    except OSError:
+        return None
+    keys = sorted(set(sibling_cfg) | set(parent_cfg))
+    diffs = [
+        (k, sibling_cfg.get(k, "<unset>"), parent_cfg.get(k, "<unset>"))
+        for k in keys
+        if sibling_cfg.get(k) != parent_cfg.get(k)
+    ]
+    if not diffs:
+        return None
+    diff_lines = "\n".join(f"  {k}: sibling={sv!r} parent={pv!r}" for k, sv, pv in diffs)
+    return (
+        f"UNRESOLVED: {sibling} (published beside the ELF's own build) and {parent} "
+        "(the ELF's build-directory parent) DISAGREE on "
+        f"{len(diffs)} CONFIG_ symbol(s):\n{diff_lines}\n"
+        "This is the check_00_kilnfw_target_build.ps1 publish leaving a stale sibling "
+        "sdkconfig behind a newer ELF from a later plain `idf.py build` in the same "
+        "directory -- grading that ELF against either file without knowing which one "
+        "actually produced it risks a silently wrong result either way. Fix: delete "
+        f"{sibling} (falls back to the parent config), rebuild so build_kilnfw refreshes "
+        "it to match, or pass --sdkconfig naming the config that actually produced this ELF."
+    )
+
+
 def use_sdkconfig_for_elf(elf, explicit=None):
     """Point sdkconfig reads at the config belonging to `elf`'s own build.
 
@@ -281,8 +355,20 @@ def use_sdkconfig_for_elf(elf, explicit=None):
         SDKCONFIG_PATH = os.path.abspath(explicit)
         SDKCONFIG_ORIGIN = "supplied explicitly with --sdkconfig"
         return SDKCONFIG_PATH, SDKCONFIG_ORIGIN
+    elf_dir = os.path.dirname(os.path.abspath(elf))
     cands = _sdkconfig_candidates(elf)
     for path, origin in cands:
+        if origin == "published inside the ELF's own directory" and os.path.isfile(path):
+            # This is the specific pairing (`<elf-dir>/sdkconfig` vs.
+            # `<elf-dir>/../sdkconfig`) that can drift apart -- see
+            # _check_sibling_pair_agreement's docstring. A rule-1 stem-named
+            # config (checked earlier in this loop) is per-ELF and provenance-
+            # carrying by construction, so it is never subject to this check.
+            disagreement = _check_sibling_pair_agreement(elf_dir)
+            if disagreement is not None:
+                SDKCONFIG_PATH = None
+                SDKCONFIG_ORIGIN = disagreement
+                return SDKCONFIG_PATH, SDKCONFIG_ORIGIN
         if os.path.isfile(path):
             SDKCONFIG_PATH = os.path.abspath(path)
             SDKCONFIG_ORIGIN = origin
