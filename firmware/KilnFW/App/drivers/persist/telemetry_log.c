@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "esp_heap_caps.h" /* MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT below -- was previously reached
+                            * only transitively via freertos/idf_additions.h */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"

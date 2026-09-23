@@ -51,53 +51,6 @@
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 
-#include "ota_http.h"
-#include "ota_http_util.h"
-
-#include <stdarg.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include "esp_heap_caps.h"
-#include "psa/crypto.h"
-
-#include "build_info.h" /* FW_GIT_COMMIT/FW_GIT_DIRTY/FW_BUILD_DATE/FW_BUILD_TIME -- TODO.md 9.6's
-                          * per-processor build-identity fields for the ESP side, same header
-                          * safety_link.c already includes for the ANNOUNCE_VERSION payload */
-#include "esp_app_desc.h"
-#include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
-#include "esp_log.h"
-#include "esp_ota_ops.h"
-#include "esp_partition.h"
-#include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-
-#include "lwip/inet.h"
-#include "lwip/sockets.h"
-
-#include <math.h>
-
-#include "autotune_engine.h"
-#include "boot_button.h"
-#include "boot_guard.h"
-#include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
-#include "kiln_io.h"
-#include "MAX31856.h"
-#include "ota_auth.h"
-#include "ota_pico_relay.h"
-#include "ota_record.h"
-#include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
-#include "run_state.h"
-#include "stack_margin.h"
-#include "web_encoding.h"
-#include "sim_backend.h"
-#include "wifi_prov.h"
-#include "wifi_provision_http.h"
-#include "zones_config_accessors.h"
-
 const char *OTA_HTTP_TAG = "ota_http";
 
 // GET /ota page (TODO.md 9.6) -- gzipped at configure time by
