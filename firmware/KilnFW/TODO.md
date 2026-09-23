@@ -1108,10 +1108,15 @@ after an early out-of-memory bug, see `docs/BRINGUP_HAZARDS.md`).
       heater timing, and a working autotune card are on the page. Bang-bang
       hysteresis is DONE -- exposed per-timing-profile as
       `bangbang_hysteresis_c` (`zones_http_handlers.c:250-257`), no longer
-      hardcoded. Still missing: per-band
-      PID gains/fitted model (gain scheduling is unbuilt, 6A.4), and most
-      guard thresholds beyond `sanity_rate_c_per_min` (partially closed by
-      the "Advanced guard thresholds" disclosure, 6A.3).
+      hardcoded. **CLOSED 2026-09-22:** the six always-emitted, POST-round-
+      tripped per-zone scalars that had zero renders anywhere on the page --
+      `coupling_diag_k_dc`, `ease_off_window_mult`, `approach_rate_cap_c_per_hr`,
+      `error_band_c`, `rate_band_c_per_s`, `progress_band_c` -- now render
+      under two own-value (no inheritance group) disclosures, "Coupling
+      diagnostic gain" and "Controller bands & shaping", and round-trip on
+      save; covered by `test_zones_type_toggle.js`. Still missing: per-band
+      PID gains/fitted model (gain scheduling is unbuilt, 6A.4) -- the only
+      remaining part of this line item.
 - [x] **Per-relay `window_ms`/`min_on_ms`/`min_off_ms`** — CLOSED
       2026-09-20, deliberately kept per-zone, not implemented per-relay.
       `zones_config_json.h`'s `zone_cfg_t::heater_window_ms` comment (added

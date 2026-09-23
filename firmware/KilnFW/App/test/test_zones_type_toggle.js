@@ -216,6 +216,9 @@ function renderZoneFragment(zoneType) {
       zone_type: zoneType, failsafe_state: 0, hyst_c: 0, min_on_s: 0,
       min_off_s: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0,
       fuzzy_strength_pct: 30,
+      coupling_diag_k_dc: 12.5, ease_off_window_mult: 2.5,
+      approach_rate_cap_c_per_hr: 300, error_band_c: 15,
+      rate_band_c_per_s: 0.25, progress_band_c: 3.5,
     },
     current: {},
     i: 0,
@@ -319,6 +322,59 @@ assert(typeof toggleZoneTypeUi === 'function', 'sanity: toggleZoneTypeUi extract
   assert(minons && !isVisible(minons), 'heater zone: minimum ON time (min_on_s) field is hidden');
   assert(minoffs && !isVisible(minoffs), 'heater zone: minimum OFF time (min_off_s) field is hidden');
   assert(failsafestate && !isVisible(failsafestate), 'heater zone: fail-safe state field is hidden');
+}
+
+// ---------------------------------------------------------------------------
+// Case 3 (2026-09-22): six always-emitted, POST-round-tripped scalars that
+// GET /api/zones and POST /api/zones both handle (zones_http_get.c ~528-574,
+// zones_http_post_parse.c ~799-921) had zero renders anywhere on this page --
+// coupling_diag_k_dc, ease_off_window_mult, approach_rate_cap_c_per_hr,
+// error_band_c, rate_band_c_per_s, progress_band_c. A whole-page save from
+// this page could only avoid erasing them because the server's own
+// OPTIONAL/omit-preserves fallback happened to cover the gap; an operator
+// could never SEE or CHANGE any of them from the web UI at all. This proves
+// both directions: the real rendered markup shows the value GET supplied
+// (render), and the real save-collection source sends it back under the
+// exact wire key POST expects (round trip).
+// ---------------------------------------------------------------------------
+{
+  const div = buildZoneDiv(0);
+  const fieldMap = [
+    ['.couplingdiag', 'coupling_diag_k_dc', 12.5],
+    ['.easeoffmult', 'ease_off_window_mult', 2.5],
+    ['.approachratecap', 'approach_rate_cap_c_per_hr', 300],
+    ['.errorband', 'error_band_c', 15],
+    ['.rateband', 'rate_band_c_per_s', 0.25],
+    ['.progressband', 'progress_band_c', 3.5],
+  ];
+  fieldMap.forEach(([cls, fieldName, expected]) => {
+    const el = div.querySelector(cls);
+    assert(el !== null, 'render: .' + cls.slice(1) + ' input exists on the page for ' + fieldName);
+    assert(el && Number(el.value) === expected,
+      'render: .' + cls.slice(1) + ' shows the GET-supplied value for ' + fieldName +
+      ' (got ' + (el && el.value) + ', want ' + expected + ')');
+  });
+
+  // Round trip: saveAll()'s collection loop must send each field back under
+  // the exact wire key zones_http_post_parse.c's snprintf(key, ..., "z%u_...")
+  // calls construct, read off ownStack (this zone's own stack, matching the
+  // cal-offset field's "no inheritance group" precedent just above it) --
+  // not off a group-terminal stack, since none of these six is part of any
+  // settings_source inheritance group on the C side.
+  const postKeyMap = [
+    ['couplingdiag', 'coupling_diag_k_dc'],
+    ['easeoffmult', 'easeoffmult'],
+    ['approachratecap', 'approachratecap'],
+    ['errorband', 'errorband'],
+    ['rateband', 'rateband'],
+    ['progressband', 'progressband'],
+  ];
+  postKeyMap.forEach(([cls, wireKey]) => {
+    const re = new RegExp(
+      "params\\.push\\('z' \\+ i \\+ '_" + wireKey + "=' \\+ ownStack\\.querySelector\\('\\." + cls + "'\\)\\.value\\)"
+    );
+    assert(re.test(SRC), 'round trip: saveAll() sends z<i>_' + wireKey + ' from ownStack.' + cls);
+  });
 }
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
