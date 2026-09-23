@@ -920,6 +920,12 @@ volatile install along with the corruption) — the ESP-side effect is
 `config_version` appearing to go backwards, the same class of surprise as
 the D4 note elsewhere in this document.
 
+Accepted gap: because this check runs on a 10 s timer rather than gating
+every read, a `s_cached_record` corrupted between ticks can be used by up to
+one `safety_core` tick before the periodic check catches it (single-copy
+repair) or the both-bad-copies trip lands. This window is bounded by the
+check period and is accepted, not tracked as an open defect.
+
 ---
 
 ## 5. Context from the main controller

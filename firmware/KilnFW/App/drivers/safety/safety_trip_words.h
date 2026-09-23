@@ -75,9 +75,8 @@ static inline const char *safety_trip_words_cause(uint8_t reason)
     case 12: return "A safety sensor reading stopped changing (frozen), not tracking a moving load";
     case 13: return "Enclosure/cold-junction temperature exceeded its limit";
     case 14: return "A borrowed zone's thermocouple reading stopped updating";
-    case 15: return "Safety processor's in-RAM configuration was found corrupted twice in the "
-                     "same boot (periodic self-check) -- restored from its last confirmed "
-                     "flash write both times";
+    case 15: return "Safety processor's in-RAM configuration was found corrupted in RAM twice "
+                     "this boot, or with no good copy left in RAM (periodic self-check)";
     case 16: return "Safety processor self-test failed at boot";
     default: return "Unrecognised guard code";
     }
@@ -233,7 +232,8 @@ static inline const char *safety_trip_words_cause_numbered(uint8_t reason, float
  * LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE comment). Every latch below still needs
  * an explicit Clear Trip after the cause is resolved -- see this header's
  * top comment and firmware/SaftyFW/docs/SAFETY_MODEL.md sec 6 for why a new
- * firing and a reboot both leave it latched. */
+ * firing and a reboot both leave it latched. Exception: S16 (config corrupt)
+ * clears only by reboot -- Clear Trip is a no-op while it is latched. */
 static inline const char *safety_trip_words_remedy(uint8_t reason)
 {
     switch (reason) {
