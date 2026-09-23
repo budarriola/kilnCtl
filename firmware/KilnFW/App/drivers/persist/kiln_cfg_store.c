@@ -587,7 +587,7 @@ static void nvs_load_store_with_cfg_fs(void)
      * boot with IllegalInstruction: docs/audits/boot_hang_2026-09-08.md.
      * An allocation failure degrades exactly like "no cfg partition":
      * whatever nvs_load_store() already put in s_store stands. */
-    kiln_cfg_store_blob_t *resolved = malloc(sizeof(*resolved));
+    kiln_cfg_store_blob_t *resolved = kiln_cfg_store_blob_alloc();
     if (!resolved) {
         ESP_LOGW(TAG, "kiln cfg resolve scratch alloc failed (%u bytes) -- keeping the NVS candidate",
                  (unsigned)sizeof(*resolved));
@@ -1757,8 +1757,8 @@ void kiln_cfg_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, b
      * reasoning as nvs_load_store()'s own malloc() for its v1 scratch
      * buffer. Two of them here (file + NVS candidates) briefly, freed
      * before returning on every path. */
-    kiln_cfg_store_blob_t *f_blob = malloc(sizeof(*f_blob));
-    kiln_cfg_store_blob_t *n_blob = malloc(sizeof(*n_blob));
+    kiln_cfg_store_blob_t *f_blob = kiln_cfg_store_blob_alloc();
+    kiln_cfg_store_blob_t *n_blob = kiln_cfg_store_blob_alloc();
     if (!f_blob || !n_blob) {
         ESP_LOGW(TAG, "kiln_cfg_store_get_dualwrite_status: malloc failed -- reporting unknown");
         free(f_blob);

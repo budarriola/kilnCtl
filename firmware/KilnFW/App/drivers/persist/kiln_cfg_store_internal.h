@@ -20,6 +20,9 @@
 #define KILN_CFG_STORE_INTERNAL_H
 
 #include <stdint.h>
+#include <stdlib.h>
+
+#include "esp_heap_caps.h"
 
 #include "kiln_cfg_store.h" /* KILN_CFG_NAME_MAX_LEN, KILN_CFG_MAX_COUNT */
 #include "kiln_package.h" /* kiln_pkg_safety_t, KILN_PKG_SAFETY_PARAM_CAP -- the Pico half, v3+ */
@@ -82,6 +85,47 @@ typedef struct {
     int32_t next_id;
     kiln_cfg_entry_t entries[KILN_CFG_MAX_COUNT];
 } kiln_cfg_store_blob_t;
+
+/* Transient scratch-buffer allocator for one kiln_cfg_store_blob_t (~7.5
+ * KiB). Every caller of this helper uses the result as a READ/decode/memcmp
+ * scratch buffer -- a destination for hal_kv_get_blob()/
+ * kiln_cfg_store_cfg_fs_load_raw(), or migration-chain scratch that is only
+ * ever memcpy'd INTO the live s_store -- never handed directly as the SOURCE
+ * pointer to a flash write (nvs_set_blob()/esp_flash_write()) or a LittleFS
+ * write. Both nvs_save_store() (kiln_cfg_store.c) and
+ * kiln_cfg_store_cfg_fs_save() (kiln_cfg_store_cfg_fs.c) copy from the live
+ * s_store into their OWN small, separately allocated buffer before writing,
+ * so this helper's PSRAM preference never touches a flash write's source
+ * buffer.
+ *
+ * ESP-IDF's esp_flash_read()/esp_flash_write() (components/spi_flash/
+ * include/esp_flash.h, IDF 6.0.2 as vendored under this repo's toolchain)
+ * document a PSRAM-resident buffer as legal for BOTH directions on the
+ * ESP32-S3: "Buffer is in external PSRAM which cannot be concurrently
+ * accessed" is bounce-buffered automatically through a temporary internal
+ * buffer, only failing (ESP_ERR_NO_MEM) if that small temporary internal
+ * buffer itself cannot be allocated. So even a hypothetical future direct
+ * flash use of one of these buffers would remain legal, not merely
+ * "currently unused for that purpose."
+ *
+ * Motivation: two or more of these ~7.5 KiB buffers can be briefly live at
+ * once during boot (nvs_load_store_with_cfg_fs()'s `resolved` plus
+ * kiln_cfg_store_cfg_fs_resolve()'s own `file_blob`), which is most of a
+ * one-time ~17 KB internal-DRAM min_free dip -- the board has ~7.9 MB PSRAM
+ * free. Falls back to plain, internal malloc() if the PSRAM allocation
+ * fails (e.g. before PSRAM init, or PSRAM exhausted) so behavior degrades
+ * exactly like every existing NULL-check at these call sites already
+ * handles. Freed with an ordinary free() either way --
+ * heap_caps_malloc()'s memory is free()-compatible. */
+static inline kiln_cfg_store_blob_t *kiln_cfg_store_blob_alloc(void)
+{
+    kiln_cfg_store_blob_t *p =
+        heap_caps_malloc(sizeof(kiln_cfg_store_blob_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        p = malloc(sizeof(kiln_cfg_store_blob_t));
+    }
+    return p;
+}
 
 #ifdef __cplusplus
 }

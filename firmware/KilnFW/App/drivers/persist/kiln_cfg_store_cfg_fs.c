@@ -158,7 +158,7 @@ bool kiln_cfg_store_cfg_fs_resolve(const kiln_cfg_store_blob_t *nvs_blob, bool n
         return false;
     }
 
-    kiln_cfg_store_blob_t *file_blob = malloc(sizeof(kiln_cfg_store_blob_t));
+    kiln_cfg_store_blob_t *file_blob = kiln_cfg_store_blob_alloc();
     if (!file_blob) {
         /* Cannot even attempt the file side this call -- degrade to the NVS
          * candidate exactly like "partition absent"/"file absent" would. */
