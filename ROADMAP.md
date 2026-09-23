@@ -1,8 +1,59 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, bootloader/partition-
-> table publishing, bench sdkconfig pins, and OTA rollback task-handle
-> hardening (thirtieth sweep) — open items below.
+> **Status:** planning · **Last reviewed:** 2026-09-23, the bench reflash
+> itself landed, plus the partition-table-offset resolver and
+> boot_guard_reset-after-erase fixes (thirty-first sweep) — open items below.
+> - **Bench reflash done, 2026-09-23**: ESP flashed to `9c26dd91` from
+>   `C:\wt\sdkpin_np8lkw\firmware\KilnFW` (prebuilt, not rebuilt),
+>   `erase_partitions=["nvs"]`, flash verified against the running `app`
+>   partition and build timestamp; `web_auth_setup` re-bootstrapped the admin
+>   record from env vars (web auth back on, LCD auth off, 30 min/10 min
+>   timeouts). Readiness 16 ok / 2 not_done / 3 other. Pico is **still**
+>   `987050f6` — no CMSIS-DAP debug probe enumerates on USB (physical fault,
+>   needs the owner to replug/check the probe). Class C heat/firing rows stay
+>   BLOCKED on `estop_verified`, which needs the bench E-stop jumper pulled by
+>   the owner; not faked. Full detail:
+>   `docs/BENCH_TEST_LOG.md`'s "M18" section is the place for this run's
+>   evidence — not yet appended, since this sweep is docs-only for
+>   `ROADMAP.md`; the run itself is documented in the bench agent's own
+>   scratchpad output only as of this sweep.
+> - **Findings from that run:** (D2) `flash_firmware()`'s post-flash
+>   `boot_guard_reset` 403'd — root cause is ordering: erasing `nvs` in the
+>   same session resets the board's AP password to its default before the
+>   tool signs the HMAC with the env-var password, so the reset can never
+>   succeed on an `nvs`-erasing flash; tool-side fix landed same day
+>   (`fc22cc9a`, skip the attempt rather than 403 with a stale password), the
+>   env-var side is an owner action. (D3) `POST /api/sw_reset` reported the
+>   Pico reboot "not confirmed" even though `boot_id` advanced (113→127) —
+>   the confirmation path doesn't work against the Pico's current
+>   `987050f6` build; an ESP-side `boot_id` fallback is in flight, not yet
+>   landed. (D4) `config_version`/`config_crc` regressed to an older record
+>   across that same reset with every observable commissioning field
+>   unchanged — matches the known, still-unfixed RP2040 config-store
+>   atomicity defect (`docs/CONFIG_FILESYSTEM.md`); an observability flag for
+>   this is in flight, not yet landed. (D5) the bench LCD camera capture is
+>   badly out of focus/overexposed (left ~60% of the panel saturates to
+>   white) — hue reads correct where unsaturated, but LCD colour rows are not
+>   judgeable until the camera is refocused. Also in flight, not yet landed:
+>   a `coordinated_gpio_test` MCP wrapper and a 3-byte HMAC-buffer overflow
+>   fix in `ota_http`.
+> - **Partition-table offset no longer hardcoded**: `flash_firmware()`/
+>   `fixture_flash()` now resolve `CONFIG_PARTITION_TABLE_OFFSET` from the
+>   target's own `sdkconfig` instead of assuming `0x8000` (`7d774a5b`,
+>   opus-review fixes `fae0de6d` — quoted values, note surfaced to
+>   `fixture_flash()`'s result, a real-OSError-vs-absent distinction, a
+>   `build/sdkconfig` fallback path). Docs for flashing all three published
+>   binaries (`bootloader.bin`/`partition-table.bin`/`KilnCtrl.bin`) and how
+>   the offset is resolved landed the same day (`f00b0a20`).
+> - **`task_liveness` dead-code removal** (`a36e76fa`): the names-only
+>   `load_required_task_names`/`parse_required_task_names` wrappers were
+>   flagged by the zero-caller sweep once both real callers switched to the
+>   tag-aware `load_required_task_specs()`; removed, with the shared
+>   name-parsing edge-case tests rewritten against `parse_required_task_specs()`
+>   directly rather than dropped.
+> **Previously reviewed:** 2026-09-23, bootloader/partition-table publishing,
+> bench sdkconfig pins, and OTA rollback task-handle hardening (thirtieth
+> sweep).
 > - **Both bench-commission tooling gaps from the twenty-ninth sweep are now
 >   closed**: `check_00_kilnfw_target_build.ps1` publishes `bootloader.bin`/
 >   `partition-table.bin` alongside `KilnCtrl.elf`/`.bin` (`d23d4eae`,
@@ -3367,11 +3418,14 @@ Owner instruction, 2026-09-21.
 - [x] OTA transient task handles: `vTaskDelete` on the ESP rollback task,
   idempotent `stack_margin_register` — done, 2026-09-23 (`95be3327`,
   opus-review fixes `22fcc257`/`24e59726` comment-only follow-up).
-- [ ] Bench reflash + commission of both boards at final HEAD — tooling
-  blockers above are now all cleared; a target build at `24e59726`+ was in
-  progress as of this sweep (2026-09-23) but the bench board has not been
-  reflashed yet and stays at `6630e769`/`05f1ab1f` (ESP/Pico). No commission
-  results to report until that flash lands.
+- [x] Bench ESP reflash — done, 2026-09-23: `9c26dd91`, `nvs` erased, web
+  auth re-bootstrapped, readiness 16 ok / 2 not_done / 3 other. See the
+  top-of-file entry above for findings (D2-D5).
+- [ ] Bench Pico reflash — still `987050f6`; blocked, no CMSIS-DAP debug
+  probe enumerates on USB (physical, needs the owner to replug/check the
+  probe).
+- [ ] Class C heat/firing commissioning rows — blocked on `estop_verified`,
+  which needs the bench E-stop jumper pulled by the owner.
 
 ---
 
