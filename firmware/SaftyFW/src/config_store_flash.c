@@ -93,6 +93,7 @@
 #include "flash_layout.h" // bootloader/ -- SAFTYFW_CONFIG_STORE_FLASH_OFFSET/_SIZE
 #include "max31856.h"      // MAX31856_TC_TYPE_K -- asserted to match CONFIG_STORE_DEFAULT_TC_TYPE
 #include "tasks/console_uart.h" // console_uart_puts() -- the boot-time "record REJECTED" log line
+#include "tasks/log_task.h" // log_task_log() -- ram_integrity repair/recurrence lines
 #include "tasks/relay_owner.h" // relay_owner_get_state() -- the ARMED check
 
 // Compile-time cross-check: config_store.h's CONFIG_STORE_DEFAULT_TC_TYPE is
@@ -211,6 +212,29 @@ static uint32_t s_cached_record_crc;
 // How many times config_store_check_ram_integrity() has found and repaired
 // a mismatch. Monotonic; see config_store.h's getter comment.
 static uint32_t s_ram_integrity_fail_count;
+
+// First-vs-second-detection tracking for the "reload + WARN on first,
+// TRIP on recurrence" posture SAFETY_MODEL.md section 4 requires (2026-09-23
+// Opus review of the original config_check_period_s work, which wrongly
+// installed config_store_default() unconditionally -- config_store_default()
+// zeroes abs_max_temp_c, silently disabling S1 while possibly energized,
+// SAFETY_MODEL.md's own worked example for why this check exists at all).
+// Link_task (core 0) only -- bookkeeping for THIS function alone, no other
+// reader.
+static bool s_ram_integrity_fault_seen_this_boot;
+
+// Cross-core: set true only on the SECOND (recurrence) detection within a
+// boot, read every tick by safety_core.c (core 1 / SAFTYFW_CORE_TRIP_PATH)
+// via config_store_ram_integrity_recurrence_pending() to latch
+// SAFETY_TRIP_CONFIG_CORRUPT. `volatile bool` is sufficient here (not a
+// seqlock): single writer (link_task, core 0), single reader (safety_core,
+// core 1), plain aligned byte, matching s_fallback_active's own precedent
+// for a simple cross-core flag in this file. Cleared only by a fresh boot
+// (config_store_boot_load()) -- deliberately not auto-cleared by this file,
+// since only an explicit CLEAR_TRIP (safety_core.c) should be able to make
+// the resulting trip clearable, and re-corrupting after a clear must be able
+// to trip again immediately (see config_store_boot_load() below).
+static volatile bool s_ram_integrity_recurrence_pending;
 
 // --- Seqlock for s_cached_record (2026-09-09) -------------------------------
 //
@@ -413,6 +437,19 @@ static bool s_fallback_test_force = false;
 void config_store_test_force_fallback_path(bool force)
 {
     s_fallback_test_force = force;
+}
+
+// TEST-ONLY (2026-09-23): manufactures the exact RAM corruption
+// config_store_check_ram_integrity() exists to catch -- flips one byte of
+// the live cached record WITHOUT touching s_cached_record_crc or going
+// through config_store_seqlock_write(), i.e. changes the record underneath
+// the tracked CRC the same way bit rot, an overrun, or a wild write would.
+// See config_store.h's declaration for why this is gated the same as the
+// fallback-race hooks above.
+void config_store_test_corrupt_cached_record(void)
+{
+    uint8_t *raw = (uint8_t *)&s_cached_record;
+    raw[0] ^= 0xFFu;
 }
 
 #endif // SAFTYFW_HOST_TEST_BUILD
@@ -728,6 +765,19 @@ void config_store_boot_load(void)
     // ever runs.
     s_cached_record_crc = config_store_record_crc(&s_cached_record);
 
+    // A fresh boot is exactly what clears the ram_integrity first/second-
+    // detection bookkeeping and the recurrence-trip request -- see their own
+    // doc comments ("cleared only by a fresh boot"). On real hardware these
+    // statics are already zero from a genuine power-on reset; this line
+    // exists for the host-test binary, which calls config_store_boot_load()
+    // repeatedly within one process and would otherwise carry a prior test's
+    // corruption count/recurrence flag into the next (the same class of
+    // cross-test static leakage config_store_test_reset_fallback_state()
+    // exists to close for the fallback buffer).
+    s_ram_integrity_fault_seen_this_boot = false;
+    s_ram_integrity_recurrence_pending = false;
+    s_ram_integrity_fail_count = 0u;
+
     // Opus review finding B (2026-09-09): seed the writer-owned fallback
     // buffer from the boot-time record instead of leaving s_fallback_valid
     // false until the first-ever config_store_write(). Before this, a
@@ -973,18 +1023,80 @@ bool config_store_check_ram_integrity(void)
     // at its last legitimate install, i.e. it changed underneath this check
     // without going through config_store_seqlock_write() -- RAM corruption,
     // not a legitimate update (every legitimate update path keeps the pair
-    // in lockstep, per that function's own comment). Same posture a boot-
-    // time CRC failure takes: compiled defaults, calibration_missing forced
-    // true, no-safe-default guards stay disabled (config_store_default()
-    // already encodes all three). Routed through config_store_seqlock_write()
-    // so the repaired record and its freshly recomputed tracked CRC land
-    // together, not as two separate writes to the pair this function itself
-    // exists to keep from drifting apart.
+    // in lockstep, per that function's own comment).
+    //
+    // 2026-09-23 (Opus review of the original config_check_period_s work):
+    // this used to install config_store_default() unconditionally.
+    // config_store_default() zeroes abs_max_temp_c, which silently disables
+    // S1 (safety_guards.c reads abs_max_temp_c straight off the record --
+    // it has no separate "is this a real threshold" check), and the install
+    // went through config_store_seqlock_write() directly, bypassing
+    // config_store_write_ex()'s "refuse while ARMED" gate -- installing a
+    // brand-new record, defaults or not, into a board that may be energized
+    // right now. Neither is acceptable for a corruption REPAIR, which must
+    // never itself make the board less safe than the corruption already did.
+    //
+    // Correct repair: restore from s_persisted_record, the RAM mirror of
+    // flash truth (updated only by config_store_boot_load() and a confirmed
+    // successful flash write, never by a RAM-only volatile install -- see
+    // its own doc comment above). That is real, already-committed
+    // configuration, not compiled defaults, so a genuine abs_max_temp_c
+    // survives a RAM-corruption repair intact. Restoring the WHOLE record
+    // (seq included) also keeps s_cached_record's seq in lockstep with
+    // s_persisted_record's, so config_store_is_volatile_dirty() correctly
+    // reads false afterward -- a repair is not a volatile install and must
+    // not be mistaken for one.
+    //
+    // calibration_missing is forced true on the restored copy regardless of
+    // what was persisted: SAFETY_MODEL.md section 4 says "reload from flash,
+    // report calibration_missing", and this repair is exactly the class of
+    // event that report exists for -- something wrote over RAM that no
+    // config path should ever be able to reach.
+    //
+    // First detection this boot: reload only (WARN via calibration_missing,
+    // already an existing signal safety_core.c/the LCD read). Second
+    // (recurrence) detection: also latch s_ram_integrity_recurrence_pending,
+    // which safety_core.c's SAFETY_TRIP_CONFIG_CORRUPT (S16) check reads
+    // every tick -- "corrupted once is a fluke worth a warning; corrupted
+    // twice in one boot means something is actively stomping RAM and the
+    // record can no longer be trusted enough to keep running on."
     s_ram_integrity_fail_count++;
-    config_store_record_t safe;
-    config_store_default(&safe);
-    config_store_seqlock_write(&safe);
+
+    config_store_record_t repaired = s_persisted_record;
+    repaired.calibration_missing = true;
+
+    bool discarded_volatile_install = (snap.seq != s_persisted_record.seq);
+
+    config_store_seqlock_write(&repaired);
+    s_cached_record_crc = config_store_record_crc(&repaired);
+
+    char line[96];
+    if (discarded_volatile_install) {
+        snprintf(line, sizeof(line),
+                 "ram_integrity repair discarded a live volatile install (seq %lu != persisted %lu)",
+                 (unsigned long)snap.seq, (unsigned long)s_persisted_record.seq);
+        log_task_log(LOG_LEVEL_WARN, "config", line);
+    }
+
+    if (s_ram_integrity_fault_seen_this_boot) {
+        s_ram_integrity_recurrence_pending = true;
+        snprintf(line, sizeof(line),
+                 "ram_integrity corruption RECURRED this boot (count %lu) -- restored, requesting trip",
+                 (unsigned long)s_ram_integrity_fail_count);
+        log_task_log(LOG_LEVEL_ERROR, "config", line);
+    } else {
+        s_ram_integrity_fault_seen_this_boot = true;
+        snprintf(line, sizeof(line),
+                 "ram_integrity corruption detected, repaired from flash copy (count %lu), calibration_missing set",
+                 (unsigned long)s_ram_integrity_fail_count);
+        log_task_log(LOG_LEVEL_WARN, "config", line);
+    }
     return false;
+}
+
+bool config_store_ram_integrity_recurrence_pending(void)
+{
+    return s_ram_integrity_recurrence_pending;
 }
 
 uint32_t config_store_get_ram_integrity_fail_count(void)

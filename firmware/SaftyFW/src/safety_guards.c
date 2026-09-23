@@ -456,6 +456,24 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         return false; /* already latched -- caller should have de-energized K4 already */
     }
 
+    /* --- S16: config_store RAM integrity corrupted twice this boot ---------
+     * config_store_flash.c's config_store_check_ram_integrity() (ticked by
+     * link_task at config_check_period_s cadence) already reloaded from the
+     * flash-truth copy and forced calibration_missing on the FIRST
+     * corruption -- that alone is WARN territory, not a trip, per
+     * SAFETY_MODEL.md section 4. This module only ever sees the input
+     * already collapsed to "did a SECOND one happen" (config_integrity_trip,
+     * safety_core_build_input() reading config_store_ram_integrity_
+     * recurrence_pending()), so there is nothing graduated to do here:
+     * unconditional, like S6a/S7 just below, because "RAM is being actively
+     * corrupted" is exactly the class of fact that must not wait on
+     * context_valid or any other gate to be believed. */
+    if (in->config_integrity_trip) {
+        trip(state, SAFETY_TRIP_CONFIG_CORRUPT,
+             "config_store RAM integrity corrupted twice this boot (recurrence)");
+        return true;
+    }
+
     /* --- S6a: main controller explicitly asserts fault -----------------------
      * mainFault (GPIO10, active low), already debounced 200ms by
      * discrete_task -- unambiguous, no further conditions (SAFETY_MODEL.md

@@ -1526,6 +1526,126 @@ static void test_fallback_aba_two_commits_during_one_copy(void)
                "recheck cannot detect (the index legitimately returns to the same value)");
 }
 
+// 2026-09-23, Opus review of the original config_check_period_s work --
+// config_store_check_ram_integrity()'s repair used to install
+// config_store_default() (silently zeroing abs_max_temp_c, disabling S1)
+// directly via config_store_seqlock_write(), bypassing config_store_write_
+// ex()'s "refuse while ARMED" gate. These three tests exercise the corrected
+// design: restore from s_persisted_record (the real, committed flash copy),
+// never compiled defaults; keep the cache's seq in lockstep with the
+// persisted seq so config_store_is_volatile_dirty() reads false afterward;
+// and only escalate to a recurrence-trip request on a SECOND corruption
+// within the same boot.
+static void test_ram_integrity_repair_restores_persisted_not_defaults(void)
+{
+    TEST_SECTION("config_store_flash: ram_integrity repair restores persisted record, not defaults");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T -- a real, non-default committed value
+    rec.calibration_missing = false;
+    rec.abs_max_temp_c = 950.0f; // a real ceiling; config_store_default() would zero this
+    rec.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: durable commit accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == false, "fixture: freshly committed, not dirty");
+    TEST_CHECK(config_store_get_ram_integrity_fail_count() == 0u, "fixture: no corruption yet");
+
+    config_store_test_corrupt_cached_record();
+    TEST_CHECK(config_store_check_ram_integrity() == false,
+               "corruption is detected (cache no longer hashes to its tracked CRC)");
+    TEST_CHECK(config_store_get_ram_integrity_fail_count() == 1u,
+               "the fail counter increments exactly once for one corruption");
+
+    config_store_record_t after;
+    TEST_CHECK(config_store_get_full_record(&after) == true, "fixture: repaired record readable");
+    TEST_CHECK(after.tc_type == 0x07u,
+               "repair restores the PERSISTED (committed) tc_type, not config_store_default()'s");
+    TEST_CHECK(after.abs_max_temp_c == 950.0f,
+               "repair restores the real abs_max_temp_c -- never silently zeroed (S1 must not go dark)");
+    TEST_CHECK(after.calibration_missing == true,
+               "calibration_missing is forced true on a repaired record regardless of what was persisted "
+               "(SAFETY_MODEL.md section 4: report calibration_missing on detection)");
+    TEST_CHECK(config_store_is_volatile_dirty() == false,
+               "restoring the whole record (seq included) keeps cache/persisted seq in lockstep -- a "
+               "repair must never be mistaken for a live volatile install");
+    TEST_CHECK(config_store_ram_integrity_recurrence_pending() == false,
+               "a single corruption this boot is WARN-only -- no trip requested yet");
+}
+
+static void test_ram_integrity_second_corruption_this_boot_requests_trip(void)
+{
+    TEST_SECTION("config_store_flash: second ram_integrity corruption this boot requests a trip");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.calibration_missing = false;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: durable commit accepted");
+
+    config_store_test_corrupt_cached_record();
+    TEST_CHECK(config_store_check_ram_integrity() == false, "fixture: first corruption detected and repaired");
+    TEST_CHECK(config_store_ram_integrity_recurrence_pending() == false,
+               "fixture: first detection this boot does not request a trip");
+
+    config_store_test_corrupt_cached_record();
+    TEST_CHECK(config_store_check_ram_integrity() == false, "second corruption detected and repaired");
+    TEST_CHECK(config_store_get_ram_integrity_fail_count() == 2u,
+               "the fail counter reflects both corruptions");
+    TEST_CHECK(config_store_ram_integrity_recurrence_pending() == true,
+               "a SECOND corruption within the same boot escalates to a trip request "
+               "(safety_core.c's S16/SAFETY_TRIP_CONFIG_CORRUPT reads this every tick)");
+
+    // The repair itself remains correct even on recurrence -- still a real
+    // record, not defaults, and still not left volatile-dirty.
+    config_store_record_t after;
+    TEST_CHECK(config_store_get_full_record(&after) == true, "fixture: repaired record readable");
+    TEST_CHECK(after.calibration_missing == true, "calibration_missing still forced true on recurrence");
+    TEST_CHECK(config_store_is_volatile_dirty() == false, "still not volatile-dirty on recurrence");
+}
+
+static void test_ram_integrity_repair_discards_live_volatile_install(void)
+{
+    TEST_SECTION("config_store_flash: ram_integrity repair discards a live volatile install, not just RAM corruption");
+    reset_all();
+    config_store_boot_load();
+
+    // Durable, committed base: tc_type A.
+    config_store_record_t durable;
+    config_store_default(&durable);
+    durable.tc_type = 0x01u; // MAX31856_TC_TYPE_K
+    durable.calibration_missing = false;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&durable, &reason) == true, "fixture: durable commit (tc_type K) accepted");
+
+    // A legitimate RAM-only volatile install moves the cache to tc_type B,
+    // ahead of flash-truth -- this is NOT corruption (config_store_is_
+    // volatile_dirty() would correctly read true right now).
+    config_store_record_t volatile_rec;
+    config_store_default(&volatile_rec);
+    volatile_rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+    volatile_rec.calibration_missing = false;
+    TEST_CHECK(config_store_write_volatile(&volatile_rec, NULL) == true,
+               "fixture: volatile install (tc_type T) accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == true, "fixture: cache now legitimately ahead of flash-truth");
+
+    // Now corrupt the (volatile-dirty) cache on top of that.
+    config_store_test_corrupt_cached_record();
+    TEST_CHECK(config_store_check_ram_integrity() == false, "corruption on top of a volatile install is detected");
+
+    config_store_record_t after;
+    TEST_CHECK(config_store_get_full_record(&after) == true, "fixture: repaired record readable");
+    TEST_CHECK(after.tc_type == 0x01u,
+               "repair restores the PERSISTED tc_type (K) -- the live volatile install (T) is discarded, "
+               "not preserved, since it cannot be trusted once the RAM holding it was found corrupted");
+    TEST_CHECK(config_store_is_volatile_dirty() == false,
+               "the repair also clears the (now-discarded) volatile-dirty state");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -1554,6 +1674,9 @@ int main(void)
     test_seqlock_concurrent_read_never_tears();
     test_seqlock_multi_reader_never_tears();
     test_fallback_aba_two_commits_during_one_copy();
+    test_ram_integrity_repair_restores_persisted_not_defaults();
+    test_ram_integrity_second_corruption_this_boot_requests_trip();
+    test_ram_integrity_repair_discards_live_volatile_install();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

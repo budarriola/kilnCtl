@@ -1490,10 +1490,20 @@ bool config_store_ram_integrity_ok(const config_store_record_t *rec, uint32_t ex
 {
     // See config_store.h's header comment for why this compares against a
     // CRC captured at the record's last legitimate install, not against
-    // flash: a live volatile install (config_store_write_volatile()) is a
-    // deliberate, legitimate RAM/flash divergence, not corruption, and this
-    // codebase has no separate "intentionally diverged" signal to tell the
-    // two apart from a raw byte comparison.
+    // flash. config_store_is_volatile_dirty() DOES exist and does tell a
+    // live volatile install (config_store_write_volatile()) apart from
+    // flash -- that is not the reason for the CRC-at-install design here.
+    // The real reason: this function's job is corruption detection, which
+    // has to work identically whether the cache currently holds a durable
+    // record or a legitimately-diverged volatile one -- a raw RAM-vs-flash
+    // byte comparison would flag every live volatile install as a false
+    // positive, since "diverged from flash" is exactly what a volatile
+    // install is SUPPOSED to look like. Comparing against a CRC captured at
+    // the record's own last legitimate install (durable or volatile, both
+    // go through the same seqlock-write choke point) sidesteps that
+    // entirely: only a corruption that happens AFTER that point -- bit rot,
+    // an overrun, a wild write -- can make this return false, regardless of
+    // whether is_volatile_dirty() would currently read true or false.
     return config_store_record_crc(rec) == expected_crc;
 }
 

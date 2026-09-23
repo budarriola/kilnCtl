@@ -1732,6 +1732,17 @@ void config_store_test_force_fallback_path(bool force);
 // state() for why this is needed at all in a host test binary.
 void config_store_test_reset_fallback_state(void);
 
+// TEST-ONLY (2026-09-23): flips one byte of the live cached record WITHOUT
+// touching its tracked CRC (s_cached_record_crc) or going through
+// config_store_seqlock_write() -- i.e. it manufactures exactly the RAM
+// corruption config_store_check_ram_integrity() exists to catch (bit rot, an
+// overrun, a wild write landing on s_cached_record from outside every
+// legitimate updater). Gated behind SAFTYFW_HOST_TEST_BUILD, same posture as
+// the fallback-race hooks above -- compiled out of target firmware entirely.
+#ifdef SAFTYFW_HOST_TEST_BUILD
+void config_store_test_corrupt_cached_record(void);
+#endif
+
 // The cached record's `seq`, mapped through config_store_seq_to_version()
 // below -- what SAFETY_CMD_FW_VERSION's `config_version` byte carries
 // (LINK_PROTOCOL.md sec 4). Bumped by every accepted config_store_write(),
@@ -1855,28 +1866,60 @@ bool config_store_ram_integrity_ok(const config_store_record_t *rec, uint32_t ex
 
 // Glue: snapshots the live cached record (config_store_get_full_record()),
 // checks it against the CRC captured at its last legitimate install via
-// config_store_ram_integrity_ok(), and on a mismatch repairs the cache to
-// config_store_default() (compiled defaults + calibration_missing = true --
-// the same posture a boot-time CRC failure takes, per CONFIG_REFERENCE.md's
-// "the safe fallback is not the permissive one") through the same seqlock-
-// write choke point, so the repaired record and its tracked CRC land in
-// lockstep together. Returns true if the record was fine (or no stable
+// config_store_ram_integrity_ok(), and on a mismatch repairs the cache from
+// s_persisted_record -- the RAM mirror of flash truth, never compiled
+// defaults (2026-09-23, Opus review: installing config_store_default() here
+// zeroed abs_max_temp_c and silently disabled S1 while possibly energized,
+// and went through config_store_seqlock_write() directly, bypassing
+// config_store_write_ex()'s "refuse while ARMED" gate -- unacceptable for a
+// repair, which must never itself make the board less safe). The restored
+// copy has calibration_missing forced true regardless of what was persisted
+// (SAFETY_MODEL.md section 4: "reload from flash, report calibration_
+// missing"), and restoring the whole record (seq included) keeps the cache's
+// seq in lockstep with s_persisted_record's, so config_store_is_volatile_
+// dirty() correctly reads false afterward instead of mistaking a repair for
+// a live volatile install. First detection this boot: reload + WARN only.
+// Second (recurrence) detection: also latches
+// config_store_ram_integrity_recurrence_pending(), which safety_core.c polls
+// every tick to trip SAFETY_TRIP_CONFIG_CORRUPT (S16) -- "corrupted once is
+// a fluke worth a warning; corrupted twice in one boot means something is
+// actively stomping RAM." Returns true if the record was fine (or no stable
 // snapshot was available this poll -- a transient seqlock-retry exhaustion
 // is not treated as corruption; the next period tries again), false if a
 // mismatch was found and repaired. Increments the counter
 // config_store_get_ram_integrity_fail_count() reports on a mismatch. Meant
 // to be ticked at config_check_period_s cadence by link_task, the sole
-// owner of config_store writes -- see link_task.c's call site. NOT flash
-// I/O and NOT host-tested (config_store_flash.c, like the rest of its
-// seqlock-backed state, is exercised on hardware only); the decision logic
-// above is what the negative test targets.
+// owner of config_store writes -- see link_task.c's call site. This function
+// itself does no flash I/O (the repair is RAM-only, same as any other
+// seqlock-write install) and IS host-tested:
+// test_config_store_flash.c's ram_integrity tests corrupt s_cached_record
+// via config_store_test_corrupt_cached_record() against a real fake-flash-
+// backed persisted record and assert the restore-from-persisted, counter,
+// volatile-dirty-false, and recurrence-trip posture end to end.
 bool config_store_check_ram_integrity(void);
 
 // How many times config_store_check_ram_integrity() has found and repaired
 // a RAM integrity mismatch since boot. Monotonic, never reset by anything
 // other than a reboot -- there is no "acknowledge" path for this counter,
-// unlike calibration_missing.
+// unlike calibration_missing. Surfaced read-only over the wire via
+// SAFETY_CMD_GET_PARAM id 0x0505 (link_task.c's link_task_send_param(),
+// special-cased ahead of config_params_get() since it reads a runtime
+// counter, not a config_store_record_t field) -- deliberately absent from
+// CONFIG_PARAM_TABLE[] (config_params.c) so it never enumerates under
+// GET_CONFIG_PAGE and is automatically refused by config_params_set() (no
+// SET path for a monotonic fault counter).
 uint32_t config_store_get_ram_integrity_fail_count(void);
+
+// True once a SECOND (recurrence) RAM-integrity corruption has been found
+// and repaired within the current boot -- see config_store_check_ram_
+// integrity()'s own comment. Cross-core: written only by link_task (core 0,
+// inside config_store_check_ram_integrity()), read every tick by
+// safety_core.c (core 1) to latch SAFETY_TRIP_CONFIG_CORRUPT. Level, not
+// edge -- stays true (and the guard keeps re-tripping, harmlessly, same as
+// any other already-latched guard) until a fresh boot; only a reboot, never
+// a CLEAR_TRIP, can make a config_store this untrustworthy trustworthy
+// again.
+bool config_store_ram_integrity_recurrence_pending(void);
 
 // --- update_task's PENDING_VERIFY -> VALID gate (TODO.md Phase 10.8) -------
 

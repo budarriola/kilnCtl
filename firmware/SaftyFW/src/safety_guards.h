@@ -104,7 +104,7 @@ typedef enum {
     SAFETY_TRIP_FROZEN_SENSOR   = 12, /* S11 -- implemented */
     SAFETY_TRIP_ENCLOSURE_TEMP  = 13, /* S12 -- implemented */
     SAFETY_TRIP_BORROWED_STALE  = 14, /* S13 -- implemented */
-    SAFETY_TRIP_CONFIG_CORRUPT  = 15, /* not this module -- config_store, Phase 9 */
+    SAFETY_TRIP_CONFIG_CORRUPT  = 15, /* S16 -- implemented 2026-09-23, config_store recurrence */
     SAFETY_TRIP_SELF_TEST       = 16, /* not this module -- watchdog_task's job */
 } safety_trip_t;
 
@@ -612,6 +612,18 @@ typedef struct {
      * (left false) when cfg->ct_topology_summed is false -- per_zone mode's
      * S14 keeps using relay_commanded_now_for_ct exactly as before. */
     bool  relay_commanded_now_for_zone[3];
+
+    /* S16/SAFETY_TRIP_CONFIG_CORRUPT. Plain caller-supplied fact, same
+     * division of labour as main_fault_asserted/estop_pressed just above:
+     * safety_core.c reads config_store_ram_integrity_recurrence_pending()
+     * (config_store.h) once per tick and hands over the boolean; this
+     * module makes no config_store call of its own. True once a SECOND
+     * (recurrence) RAM-corruption has been found and repaired within the
+     * current boot -- a single corruption reloads from flash and reports
+     * calibration_missing (WARN) without ever setting this. See
+     * safety_guards.c's S16 block for why it is checked unconditionally,
+     * alongside S6a/S7, rather than gated on context_valid. */
+    bool config_integrity_trip;
 
     float dt_s;
 } safety_guard_input_t;

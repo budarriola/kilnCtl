@@ -883,11 +883,17 @@ over-current fault — see §3/§7.
 
 ### Runtime configuration integrity · continuous
 
-Not a guard, a background check: the in-RAM threshold/calibration set is
-re-CRC'd against its flash copy every 10 s. A mismatch means RAM corruption,
-which on a safety processor is not something to discover during a trip
-evaluation — reload from flash, report `calibration_missing`, and if it
-recurs, trip.
+Not a guard, a background check: the in-RAM working record
+(`s_cached_record`) is re-CRC'd against itself every 10 s. A mismatch means
+RAM corruption, which on a safety processor is not something to discover
+during a trip evaluation — restore from `s_persisted_record` (the RAM
+mirror of the last confirmed flash write, never from compiled defaults, so
+an in-progress firing's real `abs_max_temp_c` is never silently replaced by
+a zeroed one), force `calibration_missing`, and if the corruption recurs
+within the same boot, trip via S16 (`SAFETY_TRIP_CONFIG_CORRUPT`,
+`safety_guards.c`). A live but not-yet-flash-confirmed volatile install
+found underneath the corruption is discarded along with it and logged —
+restoring it would risk restoring corrupted bytes.
 
 This is cheap paranoia and it is warranted here specifically because a
 corrupted `abs_max_temp_c` fails silent: a threshold that has quietly become

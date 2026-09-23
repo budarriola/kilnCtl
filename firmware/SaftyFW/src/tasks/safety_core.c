@@ -1376,6 +1376,11 @@ static safety_guard_input_t safety_core_build_input(void)
                                          relay_commanded_now_for_ct[2] },
         .relay_commanded_now_for_zone = { relay_commanded_now_for_zone[0], relay_commanded_now_for_zone[1],
                                            relay_commanded_now_for_zone[2] },
+        // S16. config_store_flash.c (core 0, link_task) latches this the
+        // moment a SECOND RAM-corruption is found this boot; this is a
+        // plain read of that cross-core flag, no debounce or gating of its
+        // own needed here -- see safety_guards.h's field comment.
+        .config_integrity_trip = config_store_ram_integrity_recurrence_pending(),
         // 2026-08-27 audit item 1: measured (clamped, fallback-safe) dt_s,
         // computed above via tick_dt_compute_s() -- no longer the raw
         // compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. See that call

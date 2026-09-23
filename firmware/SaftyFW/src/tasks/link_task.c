@@ -2758,8 +2758,41 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
 // in-progress staged one -- CONFIG_REFERENCE.md section 7's "which
 // thresholds is the safety processor actually enforcing" must be answerable
 // from what is enforced, not from an uncommitted edit in flight.
+// GET-only diagnostic, id 0x0505 (0x0501-0x0504 are the section-5 config
+// params in config_params.c's CONFIG_PARAM_TABLE[] -- see that file). This
+// one is NOT in that table and never will be: it reports a runtime counter
+// (config_store_get_ram_integrity_fail_count()), not a config_store_
+// record_t field, so config_params_get()'s pure `(rec, id) -> value`
+// signature has no way to answer it -- special-cased here, before that
+// call, instead. Deliberately un-enumerable (absent from CONFIG_PARAM_
+// TABLE[] means it never appears under GET_CONFIG_PAGE) and automatically
+// refused by config_params_set() (no SET case exists for it) -- a monotonic
+// fault counter has no business being settable. Clamped to UINT16_MAX
+// (kilnlink's U16 param type) rather than silently wrapping if it somehow
+// exceeds that in one boot's lifetime.
+#define LINK_TASK_PARAM_ID_RAM_INTEGRITY_FAIL_COUNT 0x0505u
+
 static void link_task_send_param(uint16_t param_id)
 {
+    if (param_id == LINK_TASK_PARAM_ID_RAM_INTEGRITY_FAIL_COUNT) {
+        uint32_t count = config_store_get_ram_integrity_fail_count();
+        kilnlink_param_t reply;
+        reply.param_id = param_id;
+        reply.found = 1u;
+        reply.type = KILNLINK_PARAM_TYPE_U16;
+        memset(&reply.value, 0, sizeof(reply.value));
+        reply.value.u16_val = (count > 0xFFFFu) ? 0xFFFFu : (uint16_t)count;
+
+        uint8_t payload[KILNLINK_PARAM_MAX_LEN];
+        kilnlink_param_status_t status;
+        size_t len = kilnlink_param_encode(&reply, payload, sizeof(payload), &status);
+        if (len == 0) {
+            return;
+        }
+        link_task_send_broadcast(payload, (uint8_t)len);
+        return;
+    }
+
     config_store_record_t rec;
     config_store_get_full_record(&rec);
 

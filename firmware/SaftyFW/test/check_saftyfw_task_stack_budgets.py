@@ -363,7 +363,14 @@ CEILING_BYTES = {
     # trip_msg[64]` local and its snprintf() call -- moving the measured
     # total 2168 -> 2176 B. Re-pinned to the new measured value, same
     # convention.
-    "safety_core": 2176,
+    #
+    # 2026-09-23, config-store RAM-integrity recurrence trip (S16,
+    # SAFETY_TRIP_CONFIG_CORRUPT): safety_guards_tick() gained one new
+    # unconditional `if (in->config_integrity_trip) { trip(...); return
+    # true; }` block ahead of S6a, mirroring S6a/S7's existing shape --
+    # moving the measured total 2176 -> 2184 B. Re-pinned to the new
+    # measured value, same convention.
+    "safety_core": 2184,
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,
     # forced_reconfigure) around the reconfig-retry gate, moving the measured
