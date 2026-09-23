@@ -151,7 +151,8 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
      * class") -- 1536 B of locals here adds to the same high-water mark
      * those handlers do. Same size and shape as before; only where the
      * buffer lives changed. Freed on every return path. */
-    char *json = heap_caps_malloc(1536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t json_cap = 1536;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
         ESP_LOGE(TAG, "GET /api/thermo/faults: malloc(1536) failed for the response buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -163,8 +164,8 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+        n = snprintf(json + o, json_cap - o, __VA_ARGS__);                                        \
+        if (n < 0 || (size_t)n >= json_cap - o) {                                                 \
             goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
@@ -333,7 +334,7 @@ overflow:
      * Log once and fail loud with a 500 instead. The buffer is 1536 B; do
      * not enlarge it to "fix" this (house rule: never enlarge httpd
      * buffers). */
-    ESP_LOGE(TAG, "thermo_faults JSON overflowed a 1536-byte buffer at o=%u", (unsigned)o);
+    ESP_LOGE(TAG, "thermo_faults JSON overflowed a %u-byte buffer at o=%u", (unsigned)json_cap, (unsigned)o);
     free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");

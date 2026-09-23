@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h" /* heap_caps_malloc() -- autotune_matrix_get_handler()/autotune_status_get_handler() below */
 #include "esp_log.h"
 
 #include "autotune_engine.h"
