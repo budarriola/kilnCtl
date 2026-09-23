@@ -358,6 +358,24 @@ static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Longest context string literal used by the switch in
+// ota_http_verify_request() below ("boot-guard-reset", 16 chars). Sizes the
+// msg[] HMAC buffer there. The switch below is the single source of truth
+// for which context maps to which string; these _Static_assert lines exist
+// only so adding a new, longer context string there without also widening
+// this constant fails the BUILD instead of silently overflowing msg[] --
+// keep this list in sync with that switch by hand, since the strings are
+// case labels' RHS, not a table this code can iterate at compile time.
+#define OTA_HTTP_CONTEXT_STR_MAX 16
+_Static_assert(sizeof("esp") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("pico") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("esp-rollback") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("recovery") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("factory-reset") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("pico-rollback") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("sw-reset") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+_Static_assert(sizeof("boot-guard-reset") - 1 <= OTA_HTTP_CONTEXT_STR_MAX, "widen OTA_HTTP_CONTEXT_STR_MAX");
+
 ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const uint8_t mac[32],
                                                    const char *client_ip)
 {
@@ -492,13 +510,32 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
                                (const uint8_t *)OTA_HTTP_KDF_CONTEXT, strlen(OTA_HTTP_KDF_CONTEXT),
                                key);
 
-    // expected_mac = HMAC-SHA256(key, nonce || context)
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 13]; // "esp" (3), "pico" (4), "esp-rollback" (12), "recovery" (8),
-                                           // "factory-reset" (13), or "pico-rollback" (13) -- 13 covers
-                                           // all six context strings currently in use; if a future
-                                           // context string exceeds 13 chars, widen this buffer AND
-                                           // update this comment
+    // expected_mac = HMAC-SHA256(key, nonce || context). msg is sized from
+    // OTA_HTTP_CONTEXT_STR_MAX (see its _Static_assert block above this
+    // function) rather than a hand-counted literal -- a hand-counted "13"
+    // here once silently underflowed by 3 bytes when
+    // OTA_HTTP_CONTEXT_BOOT_GUARD_RESET's "boot-guard-reset" (16 chars) was
+    // added to the switch above without anyone widening this buffer to
+    // match: the memcpy below wrote 3 bytes past msg[] and hmac_sha256()
+    // then read them back on every boot_guard_reset request, a silent stack
+    // smash on the httpd task (the MAC still matched the PC side, since both
+    // sides used the same ctx_len, so nothing external caught it). The
+    // runtime guard right below is a second line of defense in case a
+    // future context string is added to the switch but the _Static_assert
+    // table is missed.
+    uint8_t msg[OTA_AUTH_NONCE_LEN + OTA_HTTP_CONTEXT_STR_MAX];
     size_t ctx_len = strlen(ctx_str);
+    if (ctx_len > OTA_HTTP_CONTEXT_STR_MAX) {
+        ESP_LOGE(OTA_HTTP_TAG, "OTA verify(%s) from %s: context string (%u bytes) exceeds "
+                      "OTA_HTTP_CONTEXT_STR_MAX (%u) -- refusing rather than overflow msg[]",
+                 ctx_str, ip, (unsigned)ctx_len, (unsigned)OTA_HTTP_CONTEXT_STR_MAX);
+        memset(key, 0, sizeof(key));
+        if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+            ota_auth_nonce_invalidate(&s_nonce);
+            xSemaphoreGive(s_ota_lock);
+        }
+        return OTA_HTTP_VERIFY_BAD_MAC;
+    }
     memcpy(msg, nonce_copy, sizeof(nonce_copy));
     memcpy(msg + sizeof(nonce_copy), ctx_str, ctx_len);
 
