@@ -33,14 +33,37 @@ ONE SAFETY FIELD IS STILL GATED ON HARDWARE, and not by a software gap:
 ``ct_channel_map[0..2]`` records which relay each current transformer is
 physically clamped around. Its only honest producer is the zone
 current-sweep (``zone_sweep_push_ct_channel_map()`` in ``zones_http.c``),
-which needs a CT to exist. On a bench with no CT fitted there is nothing
-for that map to be true about, and committing a guess would clear
-``calibration_missing`` -- making the safety processor report itself
-COMMISSIONED, and grant heat, on the strength of a mapping nobody measured.
-So a preset keeps any assumed map in a SEPARATE ``"safety_ct_channel_map_
-backup"`` section that is applied only when a caller passes
-``use_ct_map_backup=True`` knowingly. See ``config_presets/
-bench_fixture.json`` for the worked example.
+which needs a CT to exist. ``ct_channel_map`` is NOT unconditionally required
+for ``calibration_missing`` to clear: since the 2026-09-09 CT-optional fix,
+``config_params_all_required_set()`` (``firmware/SaftyFW/src/config_params.c``)
+only adds ``CONFIG_STORE_SET_CT_CHANNEL_MAP`` to its required-bits mask when
+``ct_installed != 0`` (and the board is not in summed CT topology); a preset
+that honestly commits ``ct_installed = 0`` on a CT-less bench exempts the map
+from the requirement entirely, rather than needing to supply one. Committing
+a GUESSED map instead -- on a board that does have a CT, or by leaving
+``ct_installed`` at a stale/wrong value -- would clear ``calibration_missing``
+on the strength of a mapping nobody measured, which is what this module
+guards against: it keeps any assumed map in a SEPARATE
+``"safety_ct_channel_map_backup"`` section that is applied only when a caller
+passes ``use_ct_map_backup=True`` knowingly. See ``config_presets/
+bench_fixture.json`` for the worked example -- as of the CT-optional fix, that
+file's own ``"safety"`` section commits ``ct_installed = 0`` and carries no
+``ct_channel_map`` at all (see its ``_ct_channel_map_retired_comment``); the
+backup-section mechanism remains for a board that does have CTs the
+current-sweep cannot resolve on its own.
+
+THIS PC-SIDE PRESET IS NOT THE ONLY THING CALLED A "BENCH PRESET" IN THIS
+CODEBASE. This module's ``load_config_preset("bench_fixture")`` writes over
+``POST /api/safety/commissioning`` and is what the note above describes. A
+separate, unrelated ``POST /api/safety/commissioning/bench_preset`` HTTP
+route also exists on the board itself (``bench_preset_post_handler()`` in
+``firmware/KilnFW/App/drivers/http/safety_cfg_http.c``, dev-tools-only,
+gated out of release builds) -- it stages a fixed set of non-commissioning
+test values (debounce/watchdog/etc.) over the safety link and deliberately
+does NOT send the sec-1 commissioning fields, so it leaves
+``calibration_missing`` SET. Do not conflate the two: this file's preset
+clears the flag (via ``ct_installed = 0``); the ESP route of the same name
+does not touch it at all.
 
 Presets are DATA under ``tools/PcTools/config_presets/*.json``, never
 compiled into any firmware image. That is deliberate, not incidental: a
@@ -180,12 +203,19 @@ def _validate(name: str, data: object) -> None:
 
 
 #: Safety param names a preset's "safety" section may NEVER carry. These are
-#: the three ct_channel_map ids: committing all three is what makes the
-#: Pico's config_params_finalize_ct_channel_map() set the group bit, which
-#: clears calibration_missing, which lets commissioning_gate.c grant heat.
-#: They belong in the opt-in-only backup section (or nowhere), so that a
-#: routine "load the bench preset" can never silently declare a board
-#: commissioned on an unmeasured CT map -- see this module's docstring.
+#: the three ct_channel_map ids. Committing all three sets the
+#: CONFIG_STORE_SET_CT_CHANNEL_MAP fields_set bit, which is one of the bits
+#: config_params_all_required_set() (firmware/SaftyFW/src/config_params.c)
+#: checks before calibration_missing clears -- but that bit is only ever
+#: REQUIRED when ct_installed != 0 (CT-optional fix, 2026-09-09); a preset
+#: that honestly declares ct_installed = 0 does not need this field at all
+#: (see this module's docstring). So the risk this guards against is a
+#: preset committing a GUESSED map -- on a board that does have a CT, or
+#: alongside a wrong/stale ct_installed -- which would help clear
+#: calibration_missing on the strength of a mapping nobody measured, letting
+#: commissioning_gate.c grant heat on it. ct_channel_map fields belong in the
+#: opt-in-only backup section (or nowhere), so that a routine "load the bench
+#: preset" can never silently declare a board commissioned this way.
 _CT_MAP_FIELDS = ("ct_channel_map[0]", "ct_channel_map[1]", "ct_channel_map[2]")
 
 
