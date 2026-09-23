@@ -1784,42 +1784,58 @@ void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *
         return;
     }
 
-    profile_t f_profile;
-    memset(&f_profile, 0, sizeof(f_profile));
+    /* 2026-09-23 httpd-stack fix: this function used to carry two profile_t
+     * locals, a profile_persisted_t, a decoded profile_t and a
+     * PROFILES_MAX_COUNT-uint32_t revs[] array all as plain stack locals
+     * (~1840 B), making it the single largest frame on
+     * cfgfs_status_get_handler's path -- the deepest reachable httpd_worker
+     * path measured by check_httpd_task_stack_budget.py. Bundled into one
+     * heap allocation instead, freed on every return path, same convention
+     * as this file's other malloc'd scratch structs (e.g. kiln_cfg_import_
+     * scratch_t). Never enlarges any buffer -- same fields, same sizes, just
+     * off the 8 KB httpd stack. */
+    struct dualwrite_scratch {
+        profile_t f_profile;
+        profile_t n_profile;
+        profile_persisted_t loaded;
+        profile_t decoded;
+        uint32_t revs[PROFILES_MAX_COUNT];
+    };
+    struct dualwrite_scratch *s = malloc(sizeof(*s));
+    if (!s) {
+        ESP_LOGE(PROFILES_TAG, "profiles_http_get_dualwrite_status: malloc failed -- reporting unknown");
+        return;
+    }
+    memset(s, 0, sizeof(*s));
+
     uint32_t f_rev = 0;
     bool f_valid = false;
-    profiles_cfg_fs_load_raw(id, &f_profile, &f_rev, &f_valid);
+    profiles_cfg_fs_load_raw(id, &s->f_profile, &f_rev, &f_valid);
 
     bool n_valid = false;
-    profile_t n_profile;
-    memset(&n_profile, 0, sizeof(n_profile));
     uint32_t n_rev = 0;
     if (nvs_partition_init(PROFILES_NVS_PARTITION) == HAL_OK) {
         hal_kv_handle_t h;
         if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) == HAL_OK) {
             char key[8];
             profile_nvs_key(id, key, sizeof(key));
-            profile_persisted_t loaded;
-            size_t len = sizeof(loaded);
-            if (hal_kv_get_blob(&h, key, &loaded, &len) == HAL_OK) {
-                profile_t decoded;
+            size_t len = sizeof(s->loaded);
+            if (hal_kv_get_blob(&h, key, &s->loaded, &len) == HAL_OK) {
                 const char *reason = "";
-                if (profile_decode_blob(&loaded, len, &decoded, &reason) == PROFILE_DECODE_OK) {
+                if (profile_decode_blob(&s->loaded, len, &s->decoded, &reason) == PROFILE_DECODE_OK) {
                     n_valid = true;
-                    n_profile = decoded;
+                    s->n_profile = s->decoded;
                 }
             }
-            uint32_t revs[PROFILES_MAX_COUNT];
-            memset(revs, 0, sizeof(revs));
-            size_t rev_len = sizeof(revs);
-            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, revs, &rev_len) == HAL_OK) {
-                n_rev = revs[id];
+            size_t rev_len = sizeof(s->revs);
+            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, s->revs, &rev_len) == HAL_OK) {
+                n_rev = s->revs[id];
             }
             hal_kv_close(&h);
         }
     }
 
-    bool content_equal = f_valid && n_valid && (memcmp(&f_profile, &n_profile, sizeof(f_profile)) == 0);
+    bool content_equal = f_valid && n_valid && (memcmp(&s->f_profile, &s->n_profile, sizeof(s->f_profile)) == 0);
     if (file_valid) {
         *file_valid = f_valid;
     }
@@ -1835,4 +1851,5 @@ void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *
     if (diverged) {
         *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
     }
+    free(s);
 }

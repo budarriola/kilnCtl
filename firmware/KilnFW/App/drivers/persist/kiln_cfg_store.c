@@ -1151,12 +1151,35 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
         return set_reason(reason_out, reason_cap, "a saved kiln config already has that name");
     }
 
-    uint8_t scratch[ZONES_CONFIG_BLOB_MAX_SIZE];
+    /* 2026-09-23 httpd-stack fix: `scratch`/`scratch_cfg` used to be plain
+     * stack locals here (896 B + sizeof(zones_cfg_t), ~2.6 KB together),
+     * making this function's own frame the single largest contributor to
+     * commissioning_post_handler's httpd_worker stack path
+     * (firmware/KilnFW/App/test/check_httpd_task_stack_budget.py). This
+     * function runs on whichever task calls it -- kiln_cfg_store_save_current()
+     * is reachable from httpd handlers via commissioning_post_handler and the
+     * kiln_configs apply/save routes, so a large local here sits on the
+     * tight 8 KB httpd stack, not just on a PSRAM-stack worker task. Both
+     * scratch buffers now come from the heap (malloc + free on every return
+     * path), same convention already used elsewhere in this file (e.g. the
+     * `kiln_cfg_import_scratch_t` heap bundle above) -- never enlarging any
+     * buffer, just relocating it. */
+    uint8_t *scratch = malloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    zones_cfg_t *scratch_cfg = malloc(sizeof(*scratch_cfg));
+    if (!scratch || !scratch_cfg) {
+        free(scratch);
+        free(scratch_cfg);
+        return set_reason(reason_out, reason_cap, "out of memory exporting current zones config");
+    }
     size_t blob_size = zones_config_blob_size();
-    if (blob_size == 0 || blob_size > sizeof(scratch)) {
+    if (blob_size == 0 || blob_size > ZONES_CONFIG_BLOB_MAX_SIZE) {
+        free(scratch);
+        free(scratch_cfg);
         return set_reason(reason_out, reason_cap, "current zones config could not be exported");
     }
-    if (!zones_config_export_blob(scratch, sizeof(scratch))) {
+    if (!zones_config_export_blob(scratch, ZONES_CONFIG_BLOB_MAX_SIZE)) {
+        free(scratch);
+        free(scratch_cfg);
         return set_reason(reason_out, reason_cap, "current zones config could not be exported");
     }
 
@@ -1165,12 +1188,16 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
     if (id_or_negative >= 0) {
         idx = find_index_by_id(id_or_negative);
         if (idx < 0) {
+            free(scratch);
+            free(scratch_cfg);
             return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
         }
         id = id_or_negative;
     } else {
         idx = find_free_slot();
         if (idx < 0) {
+            free(scratch);
+            free(scratch_cfg);
             return set_reason(reason_out, reason_cap, "kiln config store is full");
         }
         id = s_store.next_id++;
@@ -1193,10 +1220,11 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
      * read as a defined, zeroed extension rather than stack garbage --
      * harmless today since blob_size == sizeof(zones_cfg_t) always, but
      * cheap insurance against that changing. */
-    zones_cfg_t scratch_cfg;
-    memset(&scratch_cfg, 0, sizeof(scratch_cfg));
-    memcpy(&scratch_cfg, scratch, blob_size);
-    populate_pico_half_and_hash(e, &scratch_cfg, recapture_pico_half);
+    memset(scratch_cfg, 0, sizeof(*scratch_cfg));
+    memcpy(scratch_cfg, scratch, blob_size);
+    populate_pico_half_and_hash(e, scratch_cfg, recapture_pico_half);
+    free(scratch);
+    free(scratch_cfg);
 
     if (id_or_negative < 0) {
         /* A config just saved FROM the running kiln is, by construction,
