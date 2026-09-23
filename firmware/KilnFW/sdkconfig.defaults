@@ -533,3 +533,54 @@ CONFIG_LV_FONT_MONTSERRAT_10=y
 # ESP32-S3 and always has been, so pin it here rather than relying on every
 # fresh tree remembering an explicit `idf.py set-target esp32s3`.
 CONFIG_IDF_TARGET="esp32s3"
+
+# --- Pin WiFi/lwIP internal-DRAM tuning to the hand-set bench values --------
+# The shared main tree's gitignored, hand-tuned sdkconfig
+# (C:\Users\budar\OneDrive\Desktop\kilnCtl\firmware\KilnFW\sdkconfig) carries
+# four values below that a fresh worktree's regenerated sdkconfig silently
+# drops back to plain IDF Kconfig defaults -- the same "gitignored config
+# hides mismatch" class already recorded elsewhere in this project's notes,
+# and the same reasoning as the rollback/font blocks above: if a setting
+# matters, it belongs in a tracked file, not only in the one gitignored copy
+# every prior bench flash happened to be built from.
+#
+# CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM / CONFIG_ESP_WIFI_RX_BA_WIN: IDF's
+# esp_wifi/Kconfig defaults BOTH to 16 (not 10/6) once
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y, which this project sets. Per that
+# Kconfig's own help text, each static RX buffer costs ~1.6 KB and is
+# allocated from internal DRAM at esp_wifi_init() (freed only at
+# esp_wifi_deinit(), i.e. never in this firmware) -- so building with the
+# regenerated 16/16 instead of the bench's proven 10/6 costs roughly
+# (16-10)*1.6KB =~ 9.6 KB more internal DRAM, against a running build that
+# has already measured heap_internal min_free as low as 6,675 B
+# (project_esp_internal_dram_exhaustion). 10/6 is what every prior bench
+# flash was actually built and proven stable with; pin it rather than let a
+# clean worktree quietly regenerate the larger, unproven pair.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+
+# CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS: IDF's lwip/Kconfig defaults this to 0 (not
+# 4) under the same SPIRAM_TRY_ALLOCATE_WIFI_LWIP condition above; per that
+# Kconfig's help text, 0 means "TCP will not control the number of OOSEQ
+# pbufs" queued per pcb, which in a poor network environment can let
+# out-of-order TCP pbufs consume the WiFi MAC layer's entire RX buffer pool.
+# 4 (the non-SPIRAM default, and the value the bench has actually run under
+# every prior flash, though not isolated by a dedicated experiment the way
+# the DRAM numbers above were) bounds that queue instead. Pinning 4 here
+# keeps the proven bench behavior; if a future session isolates this value
+# specifically, update this comment rather than the number alone.
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+
+# CONFIG_KILNCTL_ENABLE_GPIO_PROBE: the bench MCP tooling's gpio_probe
+# capability depends on this being enabled (check_all_task_stack_budgets.py's
+# per-task rows already declare Kconfig gating since 3ec08793 and grade
+# correctly either way, so enabling it does not break that check) -- pin it
+# on so a clean worktree build supports the same bench tooling the hand-set
+# sdkconfig always has.
+CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y
+
+# NOTE: CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY is deliberately NOT pinned here. It
+# is inert on this board's FT6336U capacitive touch panel (it only feeds the
+# legacy resistive NS2009 path) -- see firmware/KilnFW/docs/PROJECT_STATUS.md
+# "Hardware present on this bench unit". Pinning an inert value would just be
+# noise.

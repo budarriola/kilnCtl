@@ -81,8 +81,32 @@ an RP2040 safety processor (`firmware/SaftyFW`).
     `UART_TASK_ID_GPIO_PROBE`) — deny-listed against SPI/I2C/SX1509/display/
     safety-link pins and refused while a profile is running, but still a
     debug-only surface with no role in normal operation. Left on locally for
-    active bring-up/debug work on this unit; the repo default stays `n` since
-    nothing in the design needs it enabled by default.
+    active bring-up/debug work on this unit. **2026-09-23 update:** the bench
+    MCP tooling's `gpio_probe` capability depends on this being enabled, so a
+    clean worktree silently building it `n` broke that tooling path — it is
+    now pinned `y` in `firmware/KilnFW/sdkconfig.defaults` (see the new
+    "Pin the hand-set WiFi/lwIP/GPIO_PROBE bench values" block there) rather
+    than left as a local-only override; the repo default described here is
+    superseded by that pin.
+
+  **2026-09-23: three more gitignored-`sdkconfig` overrides pinned into
+  `sdkconfig.defaults`.** A researcher pass found that
+  `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM` (10 here vs. IDF's Kconfig default of
+  16 once `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`, which this project sets),
+  `CONFIG_ESP_WIFI_RX_BA_WIN` (6 vs. 16 under the same condition), and
+  `CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS` (4 vs. 0) were all hand-set on this bench's
+  gitignored `sdkconfig` and every prior bench flash was built from them, but
+  none was pinned in `sdkconfig.defaults` — so a clean worktree regenerated
+  the larger IDF defaults instead (this is the same "gitignored config hides
+  mismatch" class as the GPIO_PROBE override above). The RX buffer/BA window
+  pair matters because each static RX buffer is ~1.6 KB of internal DRAM,
+  allocated at `esp_wifi_init()` and never freed — the regenerated 16/16 pair
+  costs roughly 9.6 KB more internal DRAM than the proven 10/6 pair, against a
+  running build that has already measured `heap_internal` min_free as low as
+  6,675 B. All three are now pinned in `firmware/KilnFW/sdkconfig.defaults`
+  alongside `CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y`; `CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY`
+  stays unpinned since it is inert on this board's FT6336U panel, per the
+  bullet above.
   - `CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY=y` here vs. Kconfig default `n`. This
     knob only feeds the legacy NS2009 (resistive) uncalibrated-touch path in
     `lvgl_port.c`/`touch_dev.c`, gated by `!self_calibrating`. This bench's
