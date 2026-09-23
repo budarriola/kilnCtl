@@ -242,18 +242,21 @@ def build_saftyfw(jobs: int = 0, saftyfw_root: Optional[str] = None) -> str:
     and injecting it into only that subprocess's environment -- never this
     process's, and never persisted.
     """
+    if saftyfw_root is not None:
+        if not os.path.isabs(saftyfw_root):
+            return f"saftyfw: error: saftyfw_root must be an absolute path, got {saftyfw_root!r}"
+        if not os.path.isfile(os.path.join(saftyfw_root, "CMakeLists.txt")):
+            return (f"saftyfw: error: saftyfw_root {saftyfw_root!r} has no CMakeLists.txt "
+                     f"-- it does not look like a firmware/SaftyFW-shaped directory")
     root = saftyfw_root or os.path.join(repo_root(), "firmware", "SaftyFW")
     build_dir = os.path.join(root, "build")
     return _cmake_build("saftyfw", build_dir, jobs, source_dir=root)
 
 
-def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: Optional[str] = None) -> str:
+def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
     configure_note = ""
     if not os.path.isdir(build_dir) or not os.path.isfile(os.path.join(build_dir, "CMakeCache.txt")):
-        src = source_dir or os.path.dirname(build_dir)
-        if source_dir is None:
-            return (f"{tag}: error: {build_dir} does not exist -- configure it once with "
-                    f"`cmake -S {src} -B {build_dir} -G Ninja` first")
+        src = source_dir
         from mcpkit.pico_sdk import PicoSdkNotFoundError, resolve_pico_sdk_path
         try:
             sdk_path = resolve_pico_sdk_path()
@@ -264,7 +267,7 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: Optional[str] 
         configure_argv = ["cmake", "-S", src, "-B", build_dir, "-G", "Ninja"]
         result = _run_locked(f"{tag}-configure", build_dir, configure_argv, cwd=src, env=configure_env)
         first_line = result.splitlines()[0] if result else ""
-        if "FAILED" in first_line or "TIMEOUT" in first_line:
+        if not first_line.startswith(f"{tag}-configure: OK"):
             return result
         configure_note = f" (configured from scratch, PICO_SDK_PATH={sdk_path})\n"
     argv = ["cmake", "--build", build_dir]
