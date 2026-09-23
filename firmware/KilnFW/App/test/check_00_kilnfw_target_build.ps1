@@ -1246,6 +1246,31 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
         }
     }
     Write-Host "Published object-file trees for check_duplicate_symbols.ps1 to $mainBuildDir\esp-idf\*"
+
+    # ALSO PUBLISH THE PRE-GZIPPED WEB ASSETS (2026-09-22). App/drivers/CMakeLists.txt
+    # gzips KILNCTL_GZIP_ASSETS into this component's binary dir at CONFIGURE time and
+    # embeds the .gz via EMBED_TXTFILES; tools/check_web_gzip_parity.py grades those
+    # .gz files against their sources. Like compile_commands.json and the .obj trees
+    # above, they are build output only this check ever produces -- and without this
+    # publish the invoking tree keeps whatever .gz some earlier hand-run `build_kilnfw`
+    # left behind, which is routinely older than current source, so the parity check
+    # could only ever SKIP (never actually grade the build this run just made).
+    $gzSrcDir = Join-Path $WorktreePath "firmware\KilnFW\build\esp-idf\drivers"
+    $gzFiles = @()
+    if (Test-Path -LiteralPath $gzSrcDir) {
+        $gzFiles = @(Get-ChildItem -LiteralPath $gzSrcDir -Filter "*.gz" -File -ErrorAction SilentlyContinue)
+    }
+    if ($gzFiles.Count -gt 0) {
+        $gzDstDir = Join-Path $mainBuildDir "esp-idf\drivers"
+        New-Item -ItemType Directory -Force -Path $gzDstDir | Out-Null
+        foreach ($gz in $gzFiles) {
+            $gzTmp = Join-Path $gzDstDir "$($gz.Name).tmp_$PID"
+            Publish-BuildArtifact -SourcePath $gz.FullName -TempPath $gzTmp -FinalPath (Join-Path $gzDstDir $gz.Name)
+        }
+        Write-Host "Published $($gzFiles.Count) pre-gzipped web asset(s) for check_web_gzip_parity.py to $gzDstDir"
+    } else {
+        Write-Host "NOTE: no *.gz found in $gzSrcDir -- check_web_gzip_parity.py will SKIP." -ForegroundColor Yellow
+    }
 } finally {
     # Belt-and-suspenders: Publish-BuildArtifact already removes its own temp
     # file on a MoveFileEx failure, but an unexpected exception elsewhere in

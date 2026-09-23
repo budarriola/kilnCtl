@@ -17,6 +17,22 @@ script parses the asset list straight out of that CMakeLists.txt (so the two
 never drift apart), decompresses each corresponding .gz in the build
 directory, and byte-compares it against the source file.
 
+STALE BUILD OUTPUT IS A SKIP, NOT A FAIL (2026-09-22 follow-up). The build
+directory this reads is NOT produced by run_all_checks.ps1's phase 1:
+`check_00_kilnfw_target_build.ps1` builds in its own isolated
+`C:\\wt\\checkbuild*` worktree and publishes only a named set of artifacts
+back into the invoking tree's `firmware/KilnFW/build/` (KilnCtrl.elf/.bin,
+compile_commands.json, sdkconfig, the component .obj trees -- and, since the
+same follow-up, these .gz files). Whatever .gz files a tree happens to hold
+otherwise are left over from whenever someone last ran `build_kilnfw` there,
+so they are routinely older than current source through no defect of anyone's:
+the shared main tree held 7 such stale .gz on 2026-09-22. Byte-comparing those
+would make a full check run red for a non-defect. So a .gz whose mtime
+predates its own source is reported as SKIP (exit 3) naming every stale file,
+never FAIL. A .gz that is NOT older than its source but still decompresses to
+different bytes is a hand-edit or a corruption, and remains a hard FAIL --
+that is the case this check exists for.
+
 SKIP CONDITION. The .gz files are build output, not tracked in git -- a
 fresh checkout or a worktree that never ran the KilnFW target build has none
 of them. That is expected, not a defect: this script SKIPs (exit 3, printing
@@ -31,7 +47,8 @@ Exit codes (matching this repo's check convention, see
 tools/check_no_doubled_apostrophes.py and run_all_checks.ps1's header):
   0 -- PASS, at least one asset compared and every compared pair matched.
   1 -- FAIL, at least one asset's decompressed .gz differs from its source.
-  3 -- SKIP, no build output / asset list found to check against at all.
+  3 -- SKIP, no build output / asset list found to check against at all, or
+       the build output present is older than the source it came from.
 
 Usage: python tools/check_web_gzip_parity.py [--root REPO_ROOT]
 """
@@ -94,6 +111,7 @@ def main() -> int:
     compared = 0
     missing: list[str] = []
     mismatches: list[str] = []
+    stale: list[str] = []
 
     for asset in assets:
         src_path = drivers_dir / asset
@@ -103,6 +121,18 @@ def main() -> int:
             continue
         if not gz_path.is_file():
             missing.append(f"{gz_path} (build output missing)")
+            continue
+        # FRESHNESS GATE -- see "STALE BUILD OUTPUT IS A SKIP" in the module
+        # docstring. A .gz older than its own source is not a content defect;
+        # it is an ordinary build directory that predates an edit to that
+        # source, which is the normal state of any tree whose KilnFW target
+        # has not been rebuilt since. Byte-comparing it reports a FAIL for a
+        # non-defect.
+        if gz_path.stat().st_mtime < src_path.stat().st_mtime:
+            stale.append(
+                f"{gz_path} (mtime predates its source {src_path} -- build output "
+                "older than the source it was generated from)"
+            )
             continue
         try:
             with gzip.open(gz_path, "rb") as f:
@@ -125,23 +155,37 @@ def main() -> int:
         for m in missing:
             print(f"  {m}")
 
+    # Mismatches among the pairs that ARE fresh are still a hard FAIL even
+    # when other pairs are stale -- a hand-edited or corrupt .gz newer than
+    # its source is exactly what this check exists to catch.
+    if mismatches:
+        print(f"check_web_gzip_parity: {len(mismatches)} mismatch(es) found:")
+        for m in mismatches:
+            print(f"  {m}")
+        print(
+            "  An embedded .gz decompresses to content different from its own source file, "
+            "and is NOT older than that source -- so it was hand-edited or is corrupt. "
+            "Reconfigure/rebuild KilnFW so CMakeLists.txt regenerates it from the current source."
+        )
+        return 1
+
+    if stale:
+        print(
+            f"SKIP: check_web_gzip_parity: {len(stale)} of {len(assets)} embedded .gz file(s) "
+            "are older than their own source -- this build directory predates the current "
+            "source and has nothing current to grade. Rebuild the KilnFW target "
+            "(check_00_kilnfw_target_build.ps1 / build_kilnfw) and re-run."
+        )
+        for s in stale:
+            print(f"  {s}")
+        return 3
+
     if compared == 0 and not mismatches:
         print(
             "SKIP: check_web_gzip_parity: no asset/.gz pair could be located to compare "
             f"(checked {len(assets)} asset(s) against {build_gz_dir})"
         )
         return 3
-
-    if mismatches:
-        print(f"check_web_gzip_parity: {len(mismatches)} mismatch(es) found:")
-        for m in mismatches:
-            print(f"  {m}")
-        print(
-            "  An embedded .gz decompresses to content different from its own source file -- "
-            "this means the .gz is stale or was hand-edited. Reconfigure/rebuild KilnFW so "
-            "CMakeLists.txt regenerates it from the current source."
-        )
-        return 1
 
     print(
         f"check_web_gzip_parity: OK -- {compared}/{len(assets)} embedded .gz asset(s) "
