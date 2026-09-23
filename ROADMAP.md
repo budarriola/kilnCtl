@@ -1,7 +1,33 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-21, pico-auto-update
-> hardening + M18 read-only sweeps (twenty-third sweep) — open items below.
+> **Status:** planning · **Last reviewed:** 2026-09-22, crash-report v3 +
+> zones write-back guard + JSON-overflow hardening + web logout + Pico
+> image-identity v2 + host-test standing checks (twenty-fourth sweep) — open
+> items below.
+> - **zones_config: write-back hardened** — a file-sourced migration is now
+>   also written back to NVS (`3b979ec4`), and that write-back never
+>   overwrites a newer-than-firmware NVS blob (`cce21da0`).
+> - **Five HTTP handlers fail loud (500) instead of a truncated 200 on JSON
+>   overflow** — `diagnostics_http.c`, `board_temps` http, `kiln_cfg_http.c`
+>   and `profiles_catalog_http.c` (`9335c348`, stale-comment fix
+>   `017b418b`), plus `crash_report_http.c` (`e42cbc4c`).
+> - **`POST /api/auth/logout`** (`58673efe`, review fixes `678da66e`): any
+>   authenticated session can end its own session; the web UI's "Log out"
+>   button is hidden when web auth is off.
+> - **Pico image-identity record bumped to v2**, carrying
+>   `link_protocol_version` and a 409 pre-warning before `POST
+>   /api/ota/pico` relays a Pico image built for a different link protocol
+>   (`0085627b`); `6630e769` fixed the KilnFW host-test build the bump
+>   broke.
+> - **Standing checks added for SaftyFW's host tests and CommonFW's ctest
+>   suite** (`3fc1502f`).
+> - **Bench:** ESP flashed to `6630e769` and verified (logout, zones intact,
+>   crash_report clean). Pico auto-update stays compiled out
+>   (`PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT` defaults to 0) while the
+>   two-slot bootloader install is still NO-GO, so the Pico stays at
+>   `05f1ab1f`.
+> **Previously reviewed:** 2026-09-21, pico-auto-update
+> hardening + M18 read-only sweeps (twenty-third sweep).
 > - **Pico auto-update: readiness text fix, state tracking, kill switch
 >   landed** (`c48c9b4a`, `581f2679`, `cba52447`). `readiness_http.c` no
 >   longer prints a hardcoded "matches" sentence before any comparison ran;
@@ -337,12 +363,13 @@
 >   2026-09-21 login attempt above did not reboot the board; the
 >   crash-report JSON carries no timestamp, build hash or dump_id so this
 >   cannot be dated from outside, which is a follow-up candidate, not a task.
->   **Fixed 2026-09-22:** `GET /api/crash_report` now also reports `dump_id`
->   (already existed internally, just unexposed), `fw_build` (the running
->   image's build date+time at capture time), and a best-effort
->   `crash_uptime_s`/`crash_uptime_known` pair fed by a new RTC-memory beacon
->   (`crash_report_note_alive()`, called from `monitor_task.c`'s heartbeat,
->   accurate to within one heartbeat period). Record layout bumped to v3
+>   **Fixed 2026-09-22** (`c2f7aad7`): `GET /api/crash_report` now also
+>   reports `dump_id` (already existed internally, just unexposed),
+>   `fw_build` (the running image's build date+time at capture time), and a
+>   best-effort `crash_uptime_s`/`crash_uptime_known` pair fed by a new
+>   RTC-memory beacon (`crash_report_note_alive()`, called from
+>   `monitor_task.c`'s heartbeat, accurate to within one heartbeat period),
+>   invalidated at every boot (`ca025cad`). Record layout bumped to v3
 >   (`CRASH_REPORT_RECORD_VERSION`), old records are refused, not misparsed.
 >   **Done:** the owner-decided login latency fix (fast login plus an
 >   escalating per-IP wrong-password backoff, remote/local IP scope) has
