@@ -16,6 +16,12 @@
 # the same .obj paths and corrupt each other -- which matters when several
 # agents are working the same checkout at once. Defaults to the old path, so
 # every existing invocation is unchanged.
+#
+# $ErrorActionPreference below is "Stop", so any stderr line is fatal --
+# including a `vswhere.exe is not recognized` line, which shows up when an
+# ESP-IDF export script has already rewritten PATH in this same shell. Fix:
+# prepend `C:\Program Files (x86)\Microsoft Visual Studio\Installer` to PATH
+# before running this script.
 param([string]$OutDir = "")
 $ErrorActionPreference = "Stop"
 

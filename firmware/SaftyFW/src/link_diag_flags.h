@@ -122,7 +122,7 @@ extern "C" {
 //                                                          disabled() --
 //                                                          same rationale as
 //                                                          bit5 above, for
-//                                                          S8 instead of S1.
+//                                                          S8 instead of S1).
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
                                  bool clear_trip_diag_present, bool tc_reconfig_gave_up,
                                  bool abs_max_temp_disabled, bool rate_guard_disabled);

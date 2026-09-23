@@ -147,8 +147,8 @@
  * render_worst_case_status_json() for the measured total.
  *
  * 2026-09-22: two new unconditional fields on this same endpoint,
- * ",\"safety_s1_abs_max_disabled\":false" (34B) and
- * ",\"safety_s8_rate_guard_disabled\":false" (37B) -- S1/S8 shipping
+ * ",\"safety_s1_abs_max_disabled\":false" (35B) and
+ * ",\"safety_s8_rate_guard_disabled\":false" (38B) -- S1/S8 shipping
  * disabled-by-zero, surfaced next to safety_tc_reconfig_gave_up (see
  * dashboard_status_http.c). Measured worst case grew to 5273B, over this
  * buffer's old 5248B size by 25B alone -- not enough headroom left for this

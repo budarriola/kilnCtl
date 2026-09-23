@@ -1,9 +1,24 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, docs/checklist
+> **Status:** planning · **Last reviewed:** 2026-09-23, three bench-finding
+> DRAM/stack fixes plus a SaftyFW telemetry gap (twenty-sixth sweep) — open
+> items below.
+> - **`kiln_cfg_store` transient blob scratch moved to PSRAM** (`6a308c6e`):
+>   root cause of the bench board's 6675 B internal-heap low-water at boot —
+>   two ~7.5 KiB `kiln_cfg_store_blob_t` mallocs live at once on the main
+>   task during boot.
+> - **Two `httpd_worker`-reachable handler locals moved off the 8 KB httpd
+>   stack** (`26e382bd`): live margin had read CRITICAL, 1172 B free.
+> - **SaftyFW: S1/S8 disabled-by-zero get distinct kilnlink diag bits 5/6**
+>   (`03c872e2`), plus a web status banner;
+>   `DASHBOARD_JSON_STATUS_BUF_SIZE` grown 5248 -> 5376 (measured worst case
+>   5273 B).
+> - **Not yet flashed**: the bench board stays at `6630e769`/`05f1ab1f`
+>   (ESP/Pico) — none of the three fixes above are on hardware yet.
+> **Previously reviewed:** 2026-09-23, docs/checklist
 > upkeep + `boot_guard_get` MCP tool + a gzip content-parity standing check
 > (twenty-fifth sweep, docs- and tooling-only — no firmware source changed
-> this sweep) — open items below.
+> this sweep).
 > - **`zones_config_store`: the file-won migration-persist fault latch now
 >   carries the real on-disk version** instead of a hardcoded 0
 >   (`b03f9003`, blob citation refreshed `78447367`).
