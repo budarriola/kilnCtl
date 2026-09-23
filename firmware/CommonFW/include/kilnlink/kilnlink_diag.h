@@ -112,6 +112,18 @@ typedef enum {
      * rise) ships disabled-by-zero, same rationale and same "distinct from
      * CALIBRATION_MISSING" reasoning as bit5 above, for S8 instead of S1. */
     KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED = 0x40u,
+    /* bit7, added 2026-09-23: config_store_write_volatile() (KILN_PROFILES_
+     * PLAN.md item 15) bumps s_cached_record.seq (and therefore config_
+     * version/config_crc) in RAM only -- it never touches flash. A reboot
+     * right after one drops config_version back to whatever was last durably
+     * committed, which read on the bench as a durability bug (171 -> 167
+     * across a clean reboot) before this bit existed. Set iff config_store_
+     * is_volatile_dirty() is true right now, i.e. the cache has moved ahead
+     * of flash-truth and a reboot this instant would NOT reproduce the
+     * config_version this frame is also carrying. Same "spare bit in an
+     * already-transmitted byte" precedent as bits 3-6 above -- purely
+     * additive, no KILNLINK_PROTOCOL_VERSION bump, no frame length change. */
+    KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY = 0x80u,
 } kilnlink_diag_flag_t;
 
 /* state byte (offset 24) -- LINK_PROTOCOL.md sec 6, Frame B: 0 init,

@@ -123,9 +123,24 @@ extern "C" {
 //                                                          same rationale as
 //                                                          bit5 above, for
 //                                                          S8 instead of S1).
+//   bit7 CONFIG_VOLATILE_DIRTY <- config_volatile_dirty   (link_task.c's
+//                                                          caller sources
+//                                                          this from
+//                                                          config_store_is_
+//                                                          volatile_dirty() --
+//                                                          true when a RAM-only
+//                                                          config_store_write_
+//                                                          volatile() install
+//                                                          has moved config_
+//                                                          version ahead of
+//                                                          what is actually
+//                                                          on flash; see
+//                                                          kilnlink_diag.h's
+//                                                          bit7 comment).
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
                                  bool clear_trip_diag_present, bool tc_reconfig_gave_up,
-                                 bool abs_max_temp_disabled, bool rate_guard_disabled);
+                                 bool abs_max_temp_disabled, bool rate_guard_disabled,
+                                 bool config_volatile_dirty);
 
 #ifdef __cplusplus
 }

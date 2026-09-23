@@ -932,6 +932,32 @@ uint8_t config_store_get_config_version(void)
     return config_store_seq_to_version(snap.seq);
 }
 
+// See config_store.h's own doc comment for the contract. Deliberately reads
+// s_cached_record only through config_store_seqlock_read() (never a plain
+// struct read) so a trip-path caller can never observe a torn cache -- the
+// same discipline every other cache getter in this file follows;
+// s_persisted_record needs no such guard, per its own single-writer,
+// core-0-only comment above.
+bool config_store_is_volatile_dirty(void)
+{
+    if (!s_loaded) {
+        return false;
+    }
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return false;
+    }
+    return snap.seq != s_persisted_record.seq;
+}
+
+uint8_t config_store_get_persisted_config_version(void)
+{
+    if (!s_loaded) {
+        return 0;
+    }
+    return config_store_seq_to_version(s_persisted_record.seq);
+}
+
 uint16_t config_store_get_config_crc(void)
 {
     if (!s_loaded) {

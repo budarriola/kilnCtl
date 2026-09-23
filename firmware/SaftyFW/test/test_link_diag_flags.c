@@ -21,9 +21,9 @@ static void test_calibration_missing_bit_follows_the_argument(void)
     TEST_SECTION("calibration_missing bit follows the record, not hard-coded to 1");
 
     uint8_t flags_true =
-        link_diag_flags_compute(/*calibration_missing=*/true, false, false, false, false, false);
+        link_diag_flags_compute(/*calibration_missing=*/true, false, false, false, false, false, false);
     uint8_t flags_false =
-        link_diag_flags_compute(/*calibration_missing=*/false, false, false, false, false, false);
+        link_diag_flags_compute(/*calibration_missing=*/false, false, false, false, false, false, false);
 
     TEST_CHECK((flags_true & KILNLINK_DIAG_FLAG_CALIBRATION_MISSING) != 0u,
                "calibration_missing=true -> bit set");
@@ -36,10 +36,10 @@ static void test_sim_context_seen_bit_independent(void)
 {
     TEST_SECTION("sim_context_seen bit is independent of calibration_missing, both directions");
 
-    uint8_t both_false = link_diag_flags_compute(false, false, false, false, false, false);
-    uint8_t sim_only = link_diag_flags_compute(false, true, false, false, false, false);
-    uint8_t cal_only = link_diag_flags_compute(true, false, false, false, false, false);
-    uint8_t both_true = link_diag_flags_compute(true, true, false, false, false, false);
+    uint8_t both_false = link_diag_flags_compute(false, false, false, false, false, false, false);
+    uint8_t sim_only = link_diag_flags_compute(false, true, false, false, false, false, false);
+    uint8_t cal_only = link_diag_flags_compute(true, false, false, false, false, false, false);
+    uint8_t both_true = link_diag_flags_compute(true, true, false, false, false, false, false);
 
     TEST_CHECK(both_false == 0u, "neither flag -> flags byte is 0");
     TEST_CHECK(sim_only == (uint8_t)KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN,
@@ -55,7 +55,7 @@ static void test_estop_unwired_suspect_never_set(void)
 {
     TEST_SECTION("estop_unwired_suspect (bit2) is never set -- no detection heuristic exists");
 
-    uint8_t flags = link_diag_flags_compute(true, true, true, false, false, false);
+    uint8_t flags = link_diag_flags_compute(true, true, true, false, false, false, false);
     TEST_CHECK((flags & (uint8_t)KILNLINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT) == 0u,
                "bit2 stays clear even with every other input true");
 }
@@ -65,9 +65,9 @@ static void test_clear_trip_diag_present_bit_follows_the_argument(void)
     TEST_SECTION("clear_trip_diag_present (bit3) bit follows the argument, not hard-coded");
 
     uint8_t flags_true = link_diag_flags_compute(false, false, /*clear_trip_diag_present=*/true,
-                                                  false, false, false);
+                                                  false, false, false, false);
     uint8_t flags_false = link_diag_flags_compute(false, false, /*clear_trip_diag_present=*/false,
-                                                   false, false, false);
+                                                   false, false, false, false);
 
     TEST_CHECK((flags_true & (uint8_t)KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT) != 0u,
                "clear_trip_diag_present=true -> bit3 set -- this is the actual fix: before it, "
@@ -82,9 +82,9 @@ static void test_clear_trip_diag_present_bit_independent(void)
     TEST_SECTION("clear_trip_diag_present (bit3) is independent of the other two inputs, both "
                  "directions");
 
-    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false);
-    uint8_t clear_trip_only = link_diag_flags_compute(false, false, true, false, false, false);
-    uint8_t all_three = link_diag_flags_compute(true, true, true, false, false, false);
+    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false, false);
+    uint8_t clear_trip_only = link_diag_flags_compute(false, false, true, false, false, false, false);
+    uint8_t all_three = link_diag_flags_compute(true, true, true, false, false, false, false);
 
     TEST_CHECK(none == 0u, "no flag -> flags byte is 0");
     TEST_CHECK(clear_trip_only == (uint8_t)KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT,
@@ -101,9 +101,9 @@ static void test_tc_reconfig_gave_up_bit_follows_the_argument(void)
     TEST_SECTION("tc_reconfig_gave_up (bit4) bit follows the argument, not hard-coded");
 
     uint8_t flags_true =
-        link_diag_flags_compute(false, false, false, /*tc_reconfig_gave_up=*/true, false, false);
+        link_diag_flags_compute(false, false, false, /*tc_reconfig_gave_up=*/true, false, false, false);
     uint8_t flags_false =
-        link_diag_flags_compute(false, false, false, /*tc_reconfig_gave_up=*/false, false, false);
+        link_diag_flags_compute(false, false, false, /*tc_reconfig_gave_up=*/false, false, false, false);
 
     TEST_CHECK((flags_true & (uint8_t)KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP) != 0u,
                "tc_reconfig_gave_up=true -> bit4 set -- this is the actual fix: before it, "
@@ -118,9 +118,9 @@ static void test_tc_reconfig_gave_up_bit_independent(void)
     TEST_SECTION("tc_reconfig_gave_up (bit4) is independent of the other three inputs, both "
                  "directions");
 
-    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false);
-    uint8_t gave_up_only = link_diag_flags_compute(false, false, false, true, false, false);
-    uint8_t all_four = link_diag_flags_compute(true, true, true, true, false, false);
+    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false, false);
+    uint8_t gave_up_only = link_diag_flags_compute(false, false, false, true, false, false, false);
+    uint8_t all_four = link_diag_flags_compute(true, true, true, true, false, false, false);
 
     TEST_CHECK(none == 0u, "no flag -> flags byte is 0");
     TEST_CHECK(gave_up_only == (uint8_t)KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP,
@@ -138,9 +138,9 @@ static void test_abs_max_temp_disabled_bit_follows_the_argument(void)
     TEST_SECTION("abs_max_temp_disabled (bit5, S1) bit follows the argument, not hard-coded");
 
     uint8_t flags_true = link_diag_flags_compute(false, false, false, false,
-                                                  /*abs_max_temp_disabled=*/true, false);
+                                                  /*abs_max_temp_disabled=*/true, false, false);
     uint8_t flags_false = link_diag_flags_compute(false, false, false, false,
-                                                   /*abs_max_temp_disabled=*/false, false);
+                                                   /*abs_max_temp_disabled=*/false, false, false);
 
     TEST_CHECK((flags_true & (uint8_t)KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED) != 0u,
                "abs_max_temp_disabled=true -> bit5 set -- this is the actual fix: before it, "
@@ -155,9 +155,9 @@ static void test_rate_guard_disabled_bit_follows_the_argument(void)
     TEST_SECTION("rate_guard_disabled (bit6, S8) bit follows the argument, not hard-coded");
 
     uint8_t flags_true = link_diag_flags_compute(false, false, false, false, false,
-                                                  /*rate_guard_disabled=*/true);
+                                                  /*rate_guard_disabled=*/true, false);
     uint8_t flags_false = link_diag_flags_compute(false, false, false, false, false,
-                                                   /*rate_guard_disabled=*/false);
+                                                   /*rate_guard_disabled=*/false, false);
 
     TEST_CHECK((flags_true & (uint8_t)KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED) != 0u,
                "rate_guard_disabled=true -> bit6 set -- same fix as bit5, for S8 "
@@ -171,10 +171,10 @@ static void test_s1_s8_disabled_bits_independent(void)
     TEST_SECTION("abs_max_temp_disabled (bit5) and rate_guard_disabled (bit6) are independent "
                  "of each other and of the other four inputs, both directions");
 
-    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false);
-    uint8_t s1_only = link_diag_flags_compute(false, false, false, false, true, false);
-    uint8_t s8_only = link_diag_flags_compute(false, false, false, false, false, true);
-    uint8_t all_six = link_diag_flags_compute(true, true, true, true, true, true);
+    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false, false);
+    uint8_t s1_only = link_diag_flags_compute(false, false, false, false, true, false, false);
+    uint8_t s8_only = link_diag_flags_compute(false, false, false, false, false, true, false);
+    uint8_t all_six = link_diag_flags_compute(true, true, true, true, true, true, false);
 
     TEST_CHECK(none == 0u, "no flag -> flags byte is 0");
     TEST_CHECK(s1_only == (uint8_t)KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED,
@@ -191,6 +191,46 @@ static void test_s1_s8_disabled_bits_independent(void)
                "untouched");
 }
 
+static void test_config_volatile_dirty_bit_follows_the_argument(void)
+{
+    TEST_SECTION("config_volatile_dirty (bit7) bit follows the argument, not hard-coded");
+
+    uint8_t flags_true = link_diag_flags_compute(false, false, false, false, false, false,
+                                                  /*config_volatile_dirty=*/true);
+    uint8_t flags_false = link_diag_flags_compute(false, false, false, false, false, false,
+                                                   /*config_volatile_dirty=*/false);
+
+    TEST_CHECK((flags_true & (uint8_t)KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY) != 0u,
+               "config_volatile_dirty=true -> bit7 set -- this is the fix: before it, a RAM-only "
+               "config_store_write_volatile() install that bumped config_version had no distinct "
+               "wire signal telling a reader the bump would not survive a reboot");
+    TEST_CHECK((flags_false & (uint8_t)KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY) == 0u,
+               "config_volatile_dirty=false -> bit7 CLEAR");
+}
+
+static void test_config_volatile_dirty_bit_independent(void)
+{
+    TEST_SECTION("config_volatile_dirty (bit7) is independent of the other six inputs, both "
+                 "directions");
+
+    uint8_t none = link_diag_flags_compute(false, false, false, false, false, false, false);
+    uint8_t dirty_only = link_diag_flags_compute(false, false, false, false, false, false, true);
+    uint8_t all_seven = link_diag_flags_compute(true, true, true, true, true, true, true);
+
+    TEST_CHECK(none == 0u, "no flag -> flags byte is 0");
+    TEST_CHECK(dirty_only == (uint8_t)KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY,
+               "config_volatile_dirty alone -> only bit7");
+    TEST_CHECK(all_seven == (uint8_t)(KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN |
+                                        KILNLINK_DIAG_FLAG_CALIBRATION_MISSING |
+                                        KILNLINK_DIAG_FLAG_CLEAR_TRIP_DIAG_PRESENT |
+                                        KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP |
+                                        KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED |
+                                        KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED |
+                                        KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY),
+               "all seven set -> exactly those seven bits, bit2 (estop_unwired_suspect) still "
+               "untouched");
+}
+
 void run_test_link_diag_flags(void)
 {
     test_calibration_missing_bit_follows_the_argument();
@@ -203,4 +243,6 @@ void run_test_link_diag_flags(void)
     test_abs_max_temp_disabled_bit_follows_the_argument();
     test_rate_guard_disabled_bit_follows_the_argument();
     test_s1_s8_disabled_bits_independent();
+    test_config_volatile_dirty_bit_follows_the_argument();
+    test_config_volatile_dirty_bit_independent();
 }

@@ -1741,6 +1741,29 @@ void config_store_test_reset_fallback_state(void);
 // before config_store_boot_load().
 uint8_t config_store_get_config_version(void);
 
+// True when a RAM-only config_store_write_volatile() install has moved the
+// cache (s_cached_record.seq) ahead of the last record actually landed in
+// flash (s_persisted_record.seq) -- i.e. config_store_get_config_version()
+// is currently reporting a version that a reboot right now would NOT
+// reproduce, because nothing has persisted it. Both fields are single-writer,
+// core-0-only (see their own comments in config_store_flash.c), so this is
+// safe to call from the same link_task/core-0 context config_store_write()
+// and config_store_write_volatile() already run in; it does not need the
+// s_cached_record seqlock itself for anything s_persisted_record touches, but
+// still reads s_cached_record through the same config_store_seqlock_read()
+// path every other cache getter uses, so a caller on the trip path core
+// cannot tear it either. Returns false before config_store_boot_load() (no
+// divergence is possible if nothing has loaded yet).
+bool config_store_is_volatile_dirty(void);
+
+// config_store_get_config_version() applied to s_persisted_record (the last
+// record actually landed in flash) instead of s_cached_record (the live,
+// possibly volatile-only, cache) -- what a reboot right now would report.
+// Returns 0 before config_store_boot_load(), same sentinel as config_store_
+// get_config_version() for the same reason (see that function's own
+// comment).
+uint8_t config_store_get_persisted_config_version(void);
+
 // Pure mapping from the cached record's `seq` (a uint32_t log counter -- one
 // commit can run for the life of a board, so it must never wrap back onto a
 // meaningful value in any human timeframe) to the u8 byte SAFETY_CMD_

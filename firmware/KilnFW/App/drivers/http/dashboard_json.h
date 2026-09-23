@@ -154,8 +154,14 @@
  * buffer's old 5248B size by 25B alone -- not enough headroom left for this
  * file's own required 50B minimum margin. Grown 5248 -> 5376 (+128, same
  * step convention as every prior bump here) rather than shaving margin to
- * the bone again. */
-#define DASHBOARD_JSON_STATUS_BUF_SIZE 5376
+ * the bone again.
+ *
+ * 2026-09-23: one more unconditional field on the same endpoint,
+ * ",\"config_volatile_dirty\":false" (30B) -- SaftyFW's config_store_write_
+ * volatile() RAM-only-install tracking (see dashboard_status_http.c). Grown
+ * 5376 -> 5504 (+128, same step convention as every prior bump here) rather
+ * than shaving margin to the bone. */
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 5504
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
  * past out_cap, always NUL-terminates) rather than overflow -- src is

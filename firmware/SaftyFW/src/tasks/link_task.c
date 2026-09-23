@@ -1109,12 +1109,19 @@ static void link_task_send_diag(void)
     // bit does not answer "is S1/S8 itself armed"). See kilnlink_diag.h's
     // bit5/bit6 comments and config_store.h's config_store_is_abs_max_temp_
     // disabled()/config_store_is_rate_guard_disabled() for the distinction.
+    // bit7 config_volatile_dirty: WIRED 2026-09-23 -- config_store_write_
+    // volatile() (item 15) lands its config_version/config_crc bump in RAM
+    // only; this bit tells a reader (the ESP, or a bench operator) that a
+    // reboot right now would NOT reproduce the config_version this same
+    // frame reports. See kilnlink_diag.h's bit7 comment and config_store.h's
+    // config_store_is_volatile_dirty().
     uint8_t diag_flags =
         link_diag_flags_compute(config_store_is_calibration_missing(), s_context_sim_seen,
                                  clear_trip_diag_get_cached().magic_ok,
                                  thermo_task_reconfig_gave_up(),
                                  config_store_is_abs_max_temp_disabled(),
-                                 config_store_is_rate_guard_disabled());
+                                 config_store_is_rate_guard_disabled(),
+                                 config_store_is_volatile_dirty());
     //
     // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
     // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own

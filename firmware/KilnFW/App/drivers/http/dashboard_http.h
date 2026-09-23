@@ -359,6 +359,14 @@ typedef struct {
      * specifically are armed. */
     bool     safety_s1_abs_max_disabled;
     bool     safety_s8_rate_guard_disabled;
+    /* 2026-09-23: SaftyFW's config_store_write_volatile() (RP2040, KILN_
+     * PROFILES_PLAN.md item 15) bumps config_version/config_crc in RAM only
+     * -- SAFETY_LINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY, safety_link.h. True
+     * means a reboot right now would NOT reproduce the config_version this
+     * same document reports -- nothing has persisted it yet. Meaningless
+     * (stays false) until diag_ever_received is true, same convention as the
+     * two fields above. */
+    bool     safety_config_volatile_dirty;
 
     bool     trip_event_ever_received;
     uint8_t  trip_reason;

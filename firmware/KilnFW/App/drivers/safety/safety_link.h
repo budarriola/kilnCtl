@@ -297,6 +297,11 @@ extern "C" {
  * by itself say whether S1/S8 specifically are armed. */
 #define SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED 0x20u
 #define SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED   0x40u
+/* bit7, mirrored 2026-09-23: config_store_write_volatile() (RP2040,
+ * KILN_PROFILES_PLAN.md item 15) bumps config_version/config_crc in RAM only
+ * -- see kilnlink_diag.h's bit7 comment. True means a reboot right now would
+ * NOT reproduce the config_version this same frame also carries. */
+#define SAFETY_LINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY    0x80u
 
 /* DIAG boot_reason byte (offset 10), kilnlink_diag.h's
  * kilnlink_diag_boot_flag_t mirrored here, same reasoning as above. */

@@ -304,6 +304,48 @@ static void test_write_volatile_repeated_then_flash_commit_still_gated(void)
 // the generic CONFIG_STORE_WRITE_REFUSED_ARMED, silently losing the
 // tc_type-only carve-out's more specific refusal reason precisely when a
 // volatile install happens to be live.
+// config_store_is_volatile_dirty()/config_store_get_persisted_config_version()
+// -- a volatile install must flip dirty true and bump config_version without
+// moving the PERSISTED version at all; a subsequent durable commit must clear
+// dirty and bring the persisted version up to match.
+static void test_volatile_dirty_flag_and_persisted_version(void)
+{
+    TEST_SECTION("config_store_flash: is_volatile_dirty/get_persisted_config_version");
+    reset_all();
+    config_store_boot_load();
+
+    TEST_CHECK(config_store_is_volatile_dirty() == false,
+               "a freshly booted, never-written cache is not dirty");
+    uint8_t persisted_before = config_store_get_persisted_config_version();
+    TEST_CHECK(persisted_before == config_store_get_config_version(),
+               "cache and flash-truth versions agree before any write");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+    rec.calibration_missing = false;
+    TEST_CHECK(config_store_write_volatile(&rec, NULL) == true,
+               "fixture: volatile install accepted");
+
+    TEST_CHECK(config_store_is_volatile_dirty() == true,
+               "a volatile install leaves the cache ahead of flash-truth");
+    TEST_CHECK(config_store_get_persisted_config_version() == persisted_before,
+               "a volatile install must not move the persisted version");
+    TEST_CHECK(config_store_get_config_version() != persisted_before,
+               "fixture: the live (cache) version did move");
+
+    // A durable commit clears the divergence: both sides land on the same
+    // seq, so dirty must go false again and the persisted version must catch
+    // up to what the cache already reported.
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true,
+               "fixture: durable commit accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == false,
+               "a durable write clears the volatile-dirty flag");
+    TEST_CHECK(config_store_get_persisted_config_version() == config_store_get_config_version(),
+               "a durable write brings the persisted version back in sync with the cache");
+}
+
 static void test_write_uses_persisted_record_not_ram_after_volatile_install(void)
 {
     TEST_SECTION("config_store_flash: tc_type-only comparison uses the persisted (flash) record, "
@@ -1492,6 +1534,7 @@ int main(void)
     test_write_refused_while_armed();
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();
+    test_volatile_dirty_flag_and_persisted_version();
     test_write_uses_persisted_record_not_ram_after_volatile_install();
     test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type();
     test_write_ex_ct_cal_only_armed_exemption();

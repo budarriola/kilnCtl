@@ -5,7 +5,8 @@
 
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
                                  bool clear_trip_diag_present, bool tc_reconfig_gave_up,
-                                 bool abs_max_temp_disabled, bool rate_guard_disabled)
+                                 bool abs_max_temp_disabled, bool rate_guard_disabled,
+                                 bool config_volatile_dirty)
 {
     uint8_t flags = 0;
     if (sim_context_seen) {
@@ -27,6 +28,9 @@ uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
     }
     if (rate_guard_disabled) {
         flags |= (uint8_t)KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED;
+    }
+    if (config_volatile_dirty) {
+        flags |= (uint8_t)KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY;
     }
     return flags;
 }

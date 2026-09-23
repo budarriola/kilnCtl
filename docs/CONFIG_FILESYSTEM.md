@@ -368,6 +368,19 @@ count.
   2026-09-10 to a later HEAD (`b88ea6ba`); commissioning survived both
   resets. Full detail:
   `docs/audits/flash_endurance_review_2026-09-07.md` §5, R2.
+- **`config_version` can regress across a reboot — by design, now named.**
+  `config_store_write_volatile()` (`SAFETY_CMD_APPLY_CONFIG_VOLATILE`,
+  KILN_PROFILES_PLAN.md item 15) bumps `s_cached_record.seq` — and
+  therefore the reported `config_version`/`config_crc` — in RAM only; it
+  never touches flash. A reboot right after one drops `config_version`
+  back to whatever was last durably committed (bench-observed 171 -> 167),
+  which reads as a durability bug unless you know the RAM-only path
+  exists. `config_store_is_volatile_dirty()`/
+  `config_store_get_persisted_config_version()` (2026-09-23) name this
+  explicitly, and the divergence is now also visible off-board: DIAG frame
+  bit7 (`KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY`, purely additive, no
+  `KILNLINK_PROTOCOL_VERSION` bump) carries it to the ESP, decoded into
+  `GET /api/status`'s unconditional `config_volatile_dirty` field.
 
 ## Dual-write window: now measured (2026-09-07)
 

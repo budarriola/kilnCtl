@@ -531,6 +531,14 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND(",\"safety_s8_rate_guard_disabled\":%s",
            ds->safety_s8_rate_guard_disabled ? "true" : "false");
 
+    /* 2026-09-23: surfaces SaftyFW's config_store_is_volatile_dirty() (RP2040
+     * KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY, safety_link.h) -- true when a
+     * RAM-only config_store_write_volatile() install has moved config_version
+     * ahead of what is actually landed in flash, i.e. a reboot right now
+     * would NOT reproduce the config_version this same document reports. See
+     * dashboard_http.h's field comment. */
+    APPEND(",\"config_volatile_dirty\":%s", ds->safety_config_volatile_dirty ? "true" : "false");
+
     /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
      * GET /api/board_temps already established (TODO.md 10.7): a JSON null
      * cannot be mistaken for a real 0 C reading or a real 0 W power figure

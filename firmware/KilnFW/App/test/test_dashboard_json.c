@@ -699,6 +699,11 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
      * booleans, worst case is "false" (5 bytes, one longer than "true"). */
     STATUS_APPEND(",\"safety_s1_abs_max_disabled\":%s", "false");
     STATUS_APPEND(",\"safety_s8_rate_guard_disabled\":%s", "false");
+    /* 2026-09-23: same "main status endpoint too" convention as the two
+     * fields just above, for SaftyFW's config_store_write_volatile()
+     * RAM-only-install tracking (dashboard_status_http.c). "false" is again
+     * the wider boolean rendering. */
+    STATUS_APPEND(",\"config_volatile_dirty\":%s", "false");
 
     STATUS_APPEND(",\"safety_temp_c\":%.2f", -1234.56);
     /* Emitted UNCONDITIONALLY by dashboard_status_http.c and missing from this

@@ -361,6 +361,13 @@ void dashboard_get_status(dashboard_status_t *out)
                 (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED) != 0u;
             out->safety_s8_rate_guard_disabled =
                 (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED) != 0u;
+            /* 2026-09-23: surfaces SaftyFW's config_store_write_volatile()
+             * RAM-only install tracking (SAFETY_LINK_DIAG_FLAG_CONFIG_
+             * VOLATILE_DIRTY, safety_link.h) -- same "main status too, not
+             * just a diag-detail document" convention as the two fields
+             * above. */
+            out->safety_config_volatile_dirty =
+                (sl.diag_flags & SAFETY_LINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY) != 0u;
 
             out->trip_event_ever_received = sl.trip_event_ever_received;
             out->trip_reason = sl.trip_reason;
