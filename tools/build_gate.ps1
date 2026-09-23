@@ -99,33 +99,43 @@ function Enter-KilnBuildGate {
         }
     }
 
-    # Every slot busy. Poll slot 0 with a bounded wait, printing a waiting
-    # line every $PollIntervalSeconds so this looks gated, not hung.
-    for ($j = 1; $j -lt $mutexes.Count; $j++) { $mutexes[$j].Dispose() }
-    $mutex0 = $mutexes[0]
+    # Every slot busy. Wait on ALL of them (WaitAny), not just slot 0 --
+    # watching one slot only means a waiter never notices a DIFFERENT slot
+    # freeing up, so it can time out at $TimeoutSeconds while another slot
+    # sits idle the whole time. Keep every handle open while waiting; print a
+    # waiting line every $PollIntervalSeconds so this looks gated, not hung.
     $elapsed = 0
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-Host "build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)" -ForegroundColor Yellow
     while ($elapsed -lt $TimeoutSeconds) {
         $chunk = [Math]::Min($PollIntervalSeconds, $TimeoutSeconds - $elapsed)
-        $acquired = $false
+        # WaitAny returns 0..n-1 on acquisition, or the sentinel
+        # [System.Threading.WaitHandle]::WaitTimeout (258) on a plain
+        # timeout -- that sentinel is a small POSITIVE int, not negative, so
+        # it must be checked explicitly rather than assumed to be < 0.
+        $signaledIndex = [System.Threading.WaitHandle]::WaitTimeout
         try {
-            $acquired = $mutex0.WaitOne([TimeSpan]::FromSeconds($chunk))
+            $signaledIndex = [System.Threading.WaitHandle]::WaitAny($mutexes, [TimeSpan]::FromSeconds($chunk))
         } catch [System.Threading.AbandonedMutexException] {
-            $acquired = $true
+            # .NET still hands back which mutex was abandoned via MutexIndex.
+            $signaledIndex = $_.Exception.MutexIndex
         }
         # Real elapsed time, not the requested chunk size -- a wait that
         # returns early (e.g. an abandoned mutex freed by a killed holder,
         # seconds into a 30s chunk) must not be reported as a full chunk.
         $elapsed = [Math]::Round($stopwatch.Elapsed.TotalSeconds)
-        if ($acquired) {
-            Write-Host "build gate: acquired slot 0 for '$Label' after ${elapsed}s wait" -ForegroundColor DarkGray
-            return [PSCustomObject]@{ Disabled = $false; Mutex = $mutex0; SlotIndex = 0; Label = $Label }
+        if ($signaledIndex -ge 0 -and $signaledIndex -lt $mutexes.Count) {
+            $wonMutex = $mutexes[$signaledIndex]
+            for ($j = 0; $j -lt $mutexes.Count; $j++) {
+                if ($j -ne $signaledIndex) { $mutexes[$j].Dispose() }
+            }
+            Write-Host "build gate: acquired slot $signaledIndex for '$Label' after ${elapsed}s wait" -ForegroundColor DarkGray
+            return [PSCustomObject]@{ Disabled = $false; Mutex = $wonMutex; SlotIndex = $signaledIndex; Label = $Label }
         }
         Write-Host "build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)" -ForegroundColor Yellow
     }
 
-    $mutex0.Dispose()
+    foreach ($m in $mutexes) { $m.Dispose() }
     throw "build gate: timed out after ${TimeoutSeconds}s waiting for a heavy-build slot (label=$Label, slots=$slots) -- another run appears stuck holding every slot"
 }
 

@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import os
 import re
 import subprocess
@@ -64,6 +65,9 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "PcTools", "src"))
+from mcpkit.buildgate import kiln_build_gate  # noqa: E402
 
 
 def repo_root() -> str:
@@ -145,6 +149,13 @@ class Gate:
     # machine, prereq() returns a reason string and the gate is SKIPPED
     # (not FAILED) -- an environment fact, not a code regression.
     prereq: Optional[Callable[[], Optional[str]]] = None
+    # True for a full ESP-IDF/ninja target build -- holds
+    # mcpkit.buildgate.kiln_build_gate (the same machine-wide heavy-build
+    # admission gate tools/build_gate.ps1 and workbench.py's build_kilnfw/
+    # build_saftyfw use) around the subprocess call, so this suite's own
+    # target builds count against the same slots as everything else (opus
+    # review finding #3 -- this suite ran its heavy builds ungated).
+    heavy: bool = False
 
 
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
@@ -167,12 +178,18 @@ def _run_gate(gate: Gate) -> GateResult:
     started = time.monotonic()
     env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
     try:
-        completed = subprocess.run(
-            argv, cwd=cwd or ROOT, capture_output=True, text=True, errors="replace",
-            timeout=gate.timeout, env=env, shell=False,
-        )
+        with kiln_build_gate(gate.name) if gate.heavy else contextlib.nullcontext():
+            completed = subprocess.run(
+                argv, cwd=cwd or ROOT, capture_output=True, text=True, errors="replace",
+                timeout=gate.timeout, env=env, shell=False,
+            )
         rc = completed.returncode
         output = (completed.stdout or "") + (completed.stderr or "")
+    except TimeoutError as exc:
+        # The gate itself timed out waiting for a heavy-build slot, distinct
+        # from the subprocess.TimeoutExpired case below.
+        return GateResult(gate.name, gate.stage, "FAIL", time.monotonic() - started,
+                           f"build gate timed out: {exc}")
     except FileNotFoundError as exc:
         return GateResult(gate.name, gate.stage, "FAIL", time.monotonic() - started,
                            f"could not launch {argv[0]!r}: {exc}")
@@ -294,7 +311,8 @@ def _gate_build_kilnfw() -> Gate:
         command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
         return (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                 build_dir)
-    return Gate("build_kilnfw (ESP-IDF compile, no flash)", 3, build, timeout=1800, prereq=_idf_prereq)
+    return Gate("build_kilnfw (ESP-IDF compile, no flash)", 3, build, timeout=1800,
+                prereq=_idf_prereq, heavy=True)
 
 
 def _saftyfw_build_prereq() -> Optional[str]:
@@ -310,7 +328,7 @@ def _gate_build_saftyfw() -> Gate:
         build_dir = os.path.join(ROOT, "firmware", "SaftyFW", "build")
         return (["cmake", "--build", build_dir], build_dir)
     return Gate("build_saftyfw (pico-sdk compile, no flash)", 3, build, timeout=900,
-                prereq=_saftyfw_build_prereq)
+                prereq=_saftyfw_build_prereq, heavy=True)
 
 
 GATES = [

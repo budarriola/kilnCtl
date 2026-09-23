@@ -97,6 +97,11 @@ if (-not $haveToolchainOnPath -and -not $env:PICO_TOOLCHAIN_PATH -and -not $have
 }
 
 $buildGate = Enter-KilnBuildGate -Label "saftyfw_target_build"
+try {
+# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
+# before its own try block starts, the gate is still released by the outer
+# finally below -- a flat gate/lock/try/finally chain would leak the gate
+# slot forever in that case.
 $lock = Enter-BuildLock -Name "saftyfw_target_build"
 try {
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
@@ -150,6 +155,8 @@ try {
     }
 } finally {
     Exit-BuildLock -Lock $lock
+}
+} finally {
     Exit-KilnBuildGate -Gate $buildGate
 }
 

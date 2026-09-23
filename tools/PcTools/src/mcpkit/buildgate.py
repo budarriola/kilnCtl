@@ -28,15 +28,34 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import ctypes.wintypes as wintypes
 import os
+import sys
 import time
 from typing import Iterator
 
 _WAIT_OBJECT_0 = 0x00000000
-_WAIT_ABANDONED = 0x00000080
+_WAIT_ABANDONED_0 = 0x00000080
 _WAIT_TIMEOUT = 0x00000102
 _WAIT_FAILED = 0xFFFFFFFF
 _INFINITE = 0xFFFFFFFF
+
+# The MCP server (workbench.py) talks to its client over stdio -- a stray
+# print() to stdout from inside a build tool call would corrupt that
+# framing. Every gate log line goes to stderr by default for that reason
+# (opus review finding A2); a caller with its own transport can still pass
+# a different `log`.
+def _log_to_stderr(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+class GateWaitResult:
+    """Returned alongside the held gate: how long acquisition actually took."""
+
+    __slots__ = ("waited_seconds",)
+
+    def __init__(self, waited_seconds: float = 0.0) -> None:
+        self.waited_seconds = waited_seconds
 
 
 def _slot_count() -> int:
@@ -55,23 +74,69 @@ def _mutex_name(slot_index: int) -> str:
     return f"Global\\kilnctl_build_slot_{slot_index}"
 
 
+# ctypes.windll.kernel32 with no restype/argtypes silently treats every
+# return as a plain (signed, on most builds) C int and never populates the
+# real last-error code -- WaitForSingleObject's failure sentinel
+# (0xFFFFFFFF) can never be observed that way (it prints as -1), and
+# ctypes.get_last_error() reads 0 unless the DLL was opened with
+# use_last_error=True. Both are opus review finding A1's root cause; fixed
+# here by opening kernel32 explicitly and giving every entry point its real
+# Win32 signature.
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+_kernel32.CreateMutexW.restype = wintypes.HANDLE
+_kernel32.CreateMutexW.argtypes = (wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR)
+
+_kernel32.WaitForSingleObject.restype = wintypes.DWORD
+_kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+
+_kernel32.WaitForMultipleObjects.restype = wintypes.DWORD
+_kernel32.WaitForMultipleObjects.argtypes = (
+    wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL, wintypes.DWORD)
+
+_kernel32.ReleaseMutex.restype = wintypes.BOOL
+_kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+
+_kernel32.CloseHandle.restype = wintypes.BOOL
+_kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+
 class _KernelMutex:
     """Thin wrapper around one named Win32 mutex handle."""
 
     def __init__(self, name: str) -> None:
-        self._kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        self.handle = self._kernel32.CreateMutexW(None, False, name)
+        self.handle = _kernel32.CreateMutexW(None, False, name)
         if not self.handle:
             raise OSError(f"CreateMutexW({name!r}) failed: {ctypes.get_last_error()}")
 
     def wait(self, timeout_ms: int) -> int:
-        return self._kernel32.WaitForSingleObject(self.handle, timeout_ms)
+        return _kernel32.WaitForSingleObject(self.handle, timeout_ms)
 
     def release(self) -> None:
-        self._kernel32.ReleaseMutex(self.handle)
+        _kernel32.ReleaseMutex(self.handle)
 
     def close(self) -> None:
-        self._kernel32.CloseHandle(self.handle)
+        _kernel32.CloseHandle(self.handle)
+
+
+def _wait_any(mutexes: "list[_KernelMutex]", timeout_ms: int) -> int:
+    """WaitForMultipleObjects(bWaitAll=False) over every handle.
+
+    Returns the signaled/abandoned slot index (0..n-1), or _WAIT_TIMEOUT.
+    Watching only slot 0 (the original implementation) meant a queued
+    waiter never noticed slot 1..n-1 freeing up -- opus review finding A2/#2:
+    the timeout could be reached while another slot sat idle the whole time.
+    """
+    n = len(mutexes)
+    handles = (wintypes.HANDLE * n)(*(m.handle for m in mutexes))
+    result = _kernel32.WaitForMultipleObjects(n, handles, False, timeout_ms)
+    if _WAIT_OBJECT_0 <= result < _WAIT_OBJECT_0 + n:
+        return result - _WAIT_OBJECT_0
+    if _WAIT_ABANDONED_0 <= result < _WAIT_ABANDONED_0 + n:
+        return result - _WAIT_ABANDONED_0
+    if result == _WAIT_FAILED:
+        raise OSError(f"build gate: WaitForMultipleObjects failed: {ctypes.get_last_error()}")
+    return _WAIT_TIMEOUT
 
 
 @contextlib.contextmanager
@@ -80,15 +145,19 @@ def kiln_build_gate(
     *,
     timeout_seconds: float = 3600.0,
     poll_interval_seconds: float = 30.0,
-    log: "callable" = print,
+    log: "callable" = _log_to_stderr,
+    wait_result: "GateWaitResult | None" = None,
 ) -> Iterator[None]:
     """Hold one of the machine-wide heavy-build slots for the ``with`` block.
 
     ``KILNCTL_BUILD_GATE_SLOTS=0`` disables this gate entirely (single-session
-    machine only). Otherwise tries every slot non-blocking first, then polls
-    slot 0 with a bounded wait, printing a waiting line every
-    ``poll_interval_seconds`` so a slow build reads as gated, not hung --
-    matching ``build_gate.ps1``'s own behavior exactly.
+    machine only). Otherwise tries every slot non-blocking first, then waits
+    on ALL slots at once (WaitForMultipleObjects, not just slot 0 -- opus
+    review finding #2) with a bounded total timeout, printing a waiting line
+    every ``poll_interval_seconds`` so a slow build reads as gated, not hung
+    -- matching ``build_gate.ps1``'s own behavior. Pass a ``GateWaitResult``
+    via ``wait_result`` to read back how long acquisition took, e.g. to fold
+    "gate waited Ns" into a build report string (opus review finding A2).
     """
     slots = _slot_count()
     if slots <= 0:
@@ -96,44 +165,57 @@ def kiln_build_gate(
         yield
         return
 
-    mutexes = [_KernelMutex(_mutex_name(i)) for i in range(slots)]
+    mutexes: "list[_KernelMutex]" = []
+    try:
+        for i in range(slots):
+            # If CreateMutexW fails partway through, close what was already
+            # opened rather than leaking those handles (opus review A4).
+            mutexes.append(_KernelMutex(_mutex_name(i)))
+    except Exception:
+        for m in mutexes:
+            m.close()
+        raise
+
     held: "_KernelMutex | None" = None
+    held_index = -1
     try:
         # Non-blocking pass over every slot, round robin.
         for i, m in enumerate(mutexes):
             result = m.wait(0)
-            if result in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
-                held = m
+            if result in (_WAIT_OBJECT_0, _WAIT_ABANDONED_0):
+                held, held_index = m, i
                 log(f"build gate: acquired slot {i} for '{label}' (slots={slots})")
                 break
+            if result not in (_WAIT_TIMEOUT,):
+                raise OSError(f"build gate: WaitForSingleObject on slot {i} failed: {ctypes.get_last_error()}")
 
         if held is None:
-            # Every slot busy -- poll slot 0 with a bounded wait.
-            m0 = mutexes[0]
+            # Every slot busy -- wait on all of them together so a slot other
+            # than 0 freeing up is noticed immediately, not just slot 0's.
             elapsed = 0.0
             log(f"build gate: waiting (label={label}, {elapsed:.0f}s, slots={slots})")
             while elapsed < timeout_seconds:
                 chunk = min(poll_interval_seconds, timeout_seconds - elapsed)
                 started = time.monotonic()
-                result = m0.wait(int(chunk * 1000))
+                idx = _wait_any(mutexes, int(chunk * 1000))
                 elapsed += time.monotonic() - started
-                if result in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
-                    held = m0
-                    log(f"build gate: acquired slot 0 for '{label}' after {elapsed:.0f}s wait")
+                if idx != _WAIT_TIMEOUT:
+                    held, held_index = mutexes[idx], idx
+                    log(f"build gate: acquired slot {idx} for '{label}' after {elapsed:.0f}s wait")
                     break
-                if result == _WAIT_FAILED:
-                    raise OSError(f"build gate: WaitForSingleObject failed: {ctypes.get_last_error()}")
                 log(f"build gate: waiting (label={label}, {elapsed:.0f}s, slots={slots})")
             if held is None:
                 raise TimeoutError(
                     f"build gate: timed out after {timeout_seconds:.0f}s waiting for a heavy-build "
                     f"slot (label={label}, slots={slots}) -- another run appears stuck holding every slot")
+            if wait_result is not None:
+                wait_result.waited_seconds = elapsed
 
         try:
             yield
         finally:
             held.release()
-            log(f"build gate: released slot for '{label}'")
+            log(f"build gate: released slot {held_index} for '{label}'")
     finally:
         for m in mutexes:
             m.close()

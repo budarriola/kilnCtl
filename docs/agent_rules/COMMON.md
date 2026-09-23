@@ -57,7 +57,11 @@ target build and host-test build now goes through `tools/build_gate.ps1` (or
 directly outside `check_00_*.ps1`, `build_host_tests.ps1`, or the
 `build_kilnfw`/`build_saftyfw*` MCP tools. Prefer
 `run_all_checks.ps1 -Fast -Only <regex>` while iterating and run the full
-suite once per commit, not once per edit.
+suite once per commit, not once per edit. The rule covers every full target
+build and every host-test build, including `check_01_*_pushed_build.ps1` and
+`check_bootloader_builds.ps1`; the direct ninja/cl calls in
+`check_sim_scenarios.ps1`, `check_sim_iter_tune_bars.ps1`, and
+`run_sim_factorial.ps1` are small enough to stay exempt.
 
 ## Attribution
 

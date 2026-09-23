@@ -440,6 +440,11 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
 # lock, and every directory the prune can delete belongs to a different tree
 # and is guarded by that tree's own lock, which the prune takes separately.
 $buildGate = Enter-KilnBuildGate -Label "kilnfw_target_build"
+try {
+# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
+# before its own try block starts, the gate is still released by the outer
+# finally below -- a flat gate/lock/try/finally chain would leak the gate
+# slot forever in that case.
 $lock = Enter-BuildLock -Name $LockName
 try {
     if (-not (Test-Path -LiteralPath $WorktreePath)) {
@@ -1382,6 +1387,8 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "bootloader\bootloader.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "partition_table\partition-table.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
+}
+} finally {
     Exit-KilnBuildGate -Gate $buildGate
 }
 

@@ -41,7 +41,7 @@ import tempfile
 import time
 from typing import Any, Callable, Optional, Sequence
 
-from mcpkit.buildgate import kiln_build_gate
+from mcpkit.buildgate import GateWaitResult, kiln_build_gate
 from mcpkit.buildlock import BuildLockTimeout, build_lock
 
 #: Lines worth surfacing even when they are not near the end of the log.
@@ -282,8 +282,19 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
     argv = ["cmake", "--build", build_dir]
     if jobs > 0:
         argv += ["--parallel", str(jobs)]
-    with kiln_build_gate(tag):
-        return configure_note + _run_locked(tag, build_dir, argv, cwd=build_dir)
+    wait_result = GateWaitResult()
+    try:
+        with kiln_build_gate(tag, wait_result=wait_result):
+            report = _run_locked(tag, build_dir, argv, cwd=build_dir)
+    except TimeoutError as exc:
+        # Same "...: FAILED (lock contention)" string shape _run_locked's own
+        # BuildLockTimeout handler returns, so a caller parsing this tool's
+        # output does not need a second failure shape for the gate timing out
+        # instead of the per-directory lock (opus review A3).
+        return f"{tag}: FAILED (lock contention) -- {exc}"
+    if wait_result.waited_seconds > 0:
+        report = f"{report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)"
+    return configure_note + report
 
 
 #: Puts idf.py, cmake, ninja and the Xtensa toolchain on PATH in one step.
@@ -359,11 +370,21 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     build_dir = os.path.join(root, "firmware", "KilnFW", "build")
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
-    with kiln_build_gate(f"kilnfw-{target}"):
-        kilnfw_report = _run_locked(
-            f"kilnfw-{target}", build_dir,
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-            timeout=1800)
+    wait_result = GateWaitResult()
+    try:
+        with kiln_build_gate(f"kilnfw-{target}", wait_result=wait_result):
+            kilnfw_report = _run_locked(
+                f"kilnfw-{target}", build_dir,
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                timeout=1800)
+    except TimeoutError as exc:
+        # Same string shape as _run_locked's own lock-contention failure --
+        # opus review A3.
+        result = f"kilnfw-{target}: FAILED (lock contention) -- {exc}"
+        return f"{saftyfw_report}\n\n{result}" if saftyfw_report else result
+    if wait_result.waited_seconds > 0:
+        kilnfw_report = (
+            f"{kilnfw_report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)")
     if target in ("build", "reconfigure") and f"kilnfw-{target}: OK" in kilnfw_report:
         elf_after = _stat_snapshot(elf_path)
         kilnfw_report = (

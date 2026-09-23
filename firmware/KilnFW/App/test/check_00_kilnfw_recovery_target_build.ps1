@@ -156,6 +156,11 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
 }
 
 $buildGate = Enter-KilnBuildGate -Label "kilnfw_recovery_target_build"
+try {
+# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
+# before its own try block starts, the gate is still released by the outer
+# finally below -- a flat gate/lock/try/finally chain would leak the gate
+# slot forever in that case.
 $lock = Enter-BuildLock -Name $LockName
 try {
     New-Item -ItemType Directory -Force -Path $WorktreePath | Out-Null
@@ -344,5 +349,7 @@ try {
     Write-Host "PASS: built $([System.IO.Path]::GetFileName($binPath)) ($((Get-Item -LiteralPath $binPath).Length) B) against sdkconfig.defaults hash $recoveryDefaultsHash, published to $mainRecoveryBuildDir (including as recovery.bin for tools/check_recovery_image_size.py)."
 } finally {
     Exit-BuildLock -Lock $lock
+}
+} finally {
     Exit-KilnBuildGate -Gate $buildGate
 }

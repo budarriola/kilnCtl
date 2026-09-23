@@ -119,6 +119,7 @@ $ErrorActionPreference = "Stop"
 $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
 
 # -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
 # [ or ] would fail to resolve here. This matters more than cosmetically now
@@ -210,6 +211,12 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     if (Test-Path "Env:$v") { Remove-Item "Env:$v" }
 }
 
+$buildGate = Enter-KilnBuildGate -Label "kilnfw_pushed_build"
+try {
+# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
+# before its own try block starts, the gate is still released by the outer
+# finally below -- a flat gate/lock/try/finally chain would leak the gate
+# slot forever in that case.
 $lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree"
 try {
     # CREATION IS INSIDE THE LOCK (2026-09-16). It used to sit above, outside
@@ -347,6 +354,9 @@ try {
     }
 } finally {
     Exit-BuildLock -Lock $lock
+}
+} finally {
+    Exit-KilnBuildGate -Gate $buildGate
 }
 
 Write-Host ""

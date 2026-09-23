@@ -40,6 +40,7 @@ $ErrorActionPreference = "Stop"
 $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\tools\build_gate.ps1")
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 
@@ -83,6 +84,12 @@ if (-not (Test-Path $WorktreePath)) {
     }
 }
 
+$buildGate = Enter-KilnBuildGate -Label "saftyfw_pushed_build"
+try {
+# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
+# before its own try block starts, the gate is still released by the outer
+# finally below -- a flat gate/lock/try/finally chain would leak the gate
+# slot forever in that case.
 $lock = Enter-BuildLock -Name "saftyfw_checkbuild_origin_worktree"
 try {
     Write-Host "Checking out origin/main ($originSha) in $WorktreePath, discarding any prior state there ..."
@@ -148,6 +155,9 @@ try {
     }
 } finally {
     Exit-BuildLock -Lock $lock
+}
+} finally {
+    Exit-KilnBuildGate -Gate $buildGate
 }
 
 $elf = Join-Path $buildDir "SaftyFW.elf"

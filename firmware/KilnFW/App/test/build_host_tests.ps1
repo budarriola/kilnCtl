@@ -40,6 +40,11 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . (Join-Path $PSScriptRoot "../../../../tools/build_gate.ps1")
 $buildLockName = "kilnfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
 $buildGate = Enter-KilnBuildGate -Label "kilnfw_host_tests"
+try {
+# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
+# before its own try block starts, the gate is still released by the outer
+# finally below -- a flat gate/lock/try/finally chain would leak the gate
+# slot forever in that case.
 $buildLock = Enter-BuildLock -Name $buildLockName
 try {
     $exe = Join-Path $outDir "kilnctl_host_tests.exe"
@@ -2504,5 +2509,7 @@ try {
     exit 0
 } finally {
     Exit-BuildLock -Lock $buildLock
+}
+} finally {
     Exit-KilnBuildGate -Gate $buildGate
 }
