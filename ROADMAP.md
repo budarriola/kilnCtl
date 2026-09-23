@@ -1,8 +1,31 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, three bench-finding
-> DRAM/stack fixes plus a SaftyFW telemetry gap (twenty-sixth sweep) — open
+> **Status:** planning · **Last reviewed:** 2026-09-23, four more httpd-stack
+> handler moves plus a stack-local check fix (twenty-seventh sweep) — open
 > items below.
+> - **`kiln_cfg_store_export_package_json`'s 896 B blob scratch moved off the
+>   8 KB httpd stack** (`d2c25d7b`), reachable from `export_get_handler` and
+>   `backup_export_get_handler`; malloc'd instead, freed on every return path.
+> - **Three more `httpd_worker`-reachable handler buffers moved to PSRAM
+>   heap** (`b7bc31d2`): `networks_get_handler` (2704 B),
+>   `autotune_status_get_handler` (1300 B), `thermo_faults_get_handler`
+>   (1536 B). Follow-up (`96ff1765`) fixed a `sizeof(json)` on the now-heap
+>   pointer in `thermo_faults_get_handler` that review caught before push —
+>   the pointer's `sizeof` is 4, not the 1536 B buffer, which would have
+>   500'd every `GET /api/thermo/faults` call.
+> - **`check_no_exec_status_stack_locals.py` now also catches an initialized
+>   `profile_exec_status_t` stack local** (`= {0};`/`= {};`/compound-literal
+>   forms), not just a bare declaration (`d4dfd75c`). `telemetry_log_task`'s
+>   own one-time allocation was made `static` in the same commit, removing an
+>   OOM failure mode; `.dram0.bss` is now 96856 B of the 101000 B ceiling
+>   (headroom 4144 B).
+> - **Pending:** `cfg_fs_list`'s scratch heap move is in review; a
+>   task-liveness MCP tool is in progress; SaftyFW clean-worktree configure
+>   tooling (a `PICO_SDK_PATH` resolver) is in progress.
+> - **Not yet flashed**: the bench board stays at `6630e769`/`05f1ab1f`
+>   (ESP/Pico) — none of today's commits are on hardware yet.
+> **Previously reviewed:** 2026-09-23, three bench-finding
+> DRAM/stack fixes plus a SaftyFW telemetry gap (twenty-sixth sweep).
 > - **`kiln_cfg_store` transient blob scratch moved to PSRAM** (`6a308c6e`):
 >   root cause of the bench board's 6675 B internal-heap low-water at boot —
 >   two ~7.5 KiB `kiln_cfg_store_blob_t` mallocs live at once on the main
