@@ -27,14 +27,28 @@ per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `ota_matrix_run` was
 added -- ROADMAP.md M8's scripted, `run_pctools_tests`-style regression for
 suite `ota` (`docs/BENCH_TEST_SYSTEM_PLAN.md` section 3.4: OT-B01, OT-E01..12,
 OT-P01..05), a thin front door onto the same `BenchTestRunner` engine
-`bench_test_run()` already drives, adding a hard `confirm=True` gate (this
-matrix can flash both processors, roll back a slot, and reset the safety
-link) and a `dry_run=True` mode that lists the case matrix and its
-preconditions with zero board access. Every mutating case already gated
-itself on the executor being idle and the OTA interlock reading ok
-(`cases_ota.py`) before this tool existed; this wrapper adds the run-level
-`confirm` gate on top rather than duplicating that. Unit-tested with a fake
-board only -- never run against real hardware. The one before it was
+`bench_test_run()` already drives, adding a hard `confirm is True` gate
+(exactly `True`, not merely truthy -- this matrix can flash both processors,
+roll back a slot, and reset the safety link) and a `dry_run=True` mode that
+lists the case matrix and its preconditions with zero board access. Before
+`BenchTestRunner` is even constructed it runs its own fail-closed run-level
+gate reusing `coordinated_gpio_test`'s ARMED/link-up/executor-idle-or-paused/
+OTA-interlock probe (unreadable counts as a refusal, never a pass) plus a
+`capability_preflight` read -- `BenchTestRunner.preflight()` alone folds every
+probe exception into "could not determine" and never checks ARMED or the
+interlock itself, so this run-level gate is additive, not a replacement.
+Every mutating case still gates itself on the executor being idle and the
+OTA interlock reading ok (`cases_ota.py`) immediately before it acts, with
+one deliberate exception: OT-E07/OT-E08 intentionally push during a firing/
+autotune run to prove the push is refused, and only run at all when
+`allow_heat=True` is passed (default `False`). OT-B01 (the dual-reflash trip)
+checks executor-idle but not the OTA interlock itself -- covered by this
+tool's run-level gate. **Without an `ota_*` image path/commit parameter set,
+only OT-B01 actually executes** -- every other case reads its own image path
+out of context and SKIPs for lack of one, same as calling
+`bench_test_run(suite="ota")` with none set; passing the relevant image
+parameters lets more of the matrix run. Unit-tested with a fake board only --
+never run against real hardware. The one before it was
 `safety_get_param`,
 same day -- a READ-ONLY GET_PARAM (0x23) wrapper that reports a Pico refusal as a
 refusal, never as "not found". The one before it was `coordinated_gpio_test`,
