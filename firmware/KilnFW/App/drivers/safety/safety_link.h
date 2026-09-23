@@ -1141,6 +1141,7 @@ typedef struct {
     uint32_t cmd_ct_auto_zero_status_count;       /* KILNLINK_CT_AUTO_ZERO_STATUS_CMD (0x28) */
     uint32_t cmd_reboot_result_count;             /* KILNLINK_REBOOT_RESULT_CMD (0x2A) */
     uint32_t cmd_stack_margin_count;              /* KILNLINK_STACK_MARGIN_CMD (0x2C) */
+    uint32_t cmd_param_count;                     /* KILNLINK_PARAM_CMD (0x1E), reply to SAFETY_CMD_GET_PARAM (0x23) */
 
     /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
      * cmd byte a dequeued frame carried, but says nothing about how LONG it
@@ -1169,6 +1170,7 @@ typedef struct {
     uint8_t last_ct_auto_zero_status_len;
     uint8_t last_reboot_result_len;
     uint8_t last_stack_margin_len;
+    uint8_t last_param_len;
 
     /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
      * reply latency, measured in safety_exchange() (safety_link_inbox.c)
@@ -1392,6 +1394,19 @@ typedef struct {
     uart_proto_message_t stashed_stack_margin;
     bool                 has_stashed_stack_margin;
     TickType_t           stashed_stack_margin_tick;
+
+    /* KILNLINK_PARAM_CMD (0x1E) -- the reply to SAFETY_CMD_GET_PARAM (0x23,
+     * KILNLINK_PROTOCOL_VERSION 7). Same "always stashed, one caller
+     * (safety_link_get_param()), serialized by xact_lock" pattern as
+     * stashed_stack_margin/stashed_reboot_result above: exactly one consumer
+     * and nothing to match a reply against beyond "most recent request" and
+     * the param_id echoed back in the payload itself (checked by the caller
+     * after taking the stash, not here). Variable length (KILNLINK_PARAM_
+     * HDR_LEN..KILNLINK_PARAM_MAX_LEN), unlike the fixed-length stashes
+     * above -- the bound check lives in safety_drain_inbox_ex()'s switch. */
+    uart_proto_message_t stashed_param;
+    bool                 has_stashed_param;
+    TickType_t           stashed_param_tick;
 
     safety_link_stats_t stats;
     /* Running sum backing stats.link_reply_us_mean -- kept outside
@@ -2484,6 +2499,37 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
  * reading), ESP_FAIL if a reply arrived but failed to decode, ESP_OK on
  * success. */
 esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_margin_t *out);
+
+/* SAFETY_CMD_GET_PARAM (0x23) / SAFETY_CMD_PARAM (0x1E reply -- kilnlink_
+ * param.h's KILNLINK_PARAM_CMD), KILNLINK_PROTOCOL_VERSION 7 -- docs/
+ * COMMISSIONING.md sec 2. Same request/reply/stash shape as safety_link_
+ * get_stack_margin() above (one caller, serialized by xact_lock, reply
+ * always stashed rather than out-param plumbed -- see stashed_param's own
+ * comment above), NOT the CT_CAL shape. Unlike GET_STACK_MARGIN this is NOT
+ * decoded here: like safety_link_get_ct_cal(), the raw PARAM reply (cmd byte
+ * included, KILNLINK_PARAM_HDR_LEN..KILNLINK_PARAM_MAX_LEN bytes) is copied
+ * into `out` verbatim so the PC-facing bridge case can relay it unmodified,
+ * except that the returned param_id (bytes 1-2) is checked against the one
+ * requested before this function hands the frame back -- a reply belonging
+ * to a different param_id (e.g. a very late stash from a prior request that
+ * survived the stale-take below by a hair) must never be handed out as this
+ * call's answer.
+ *
+ * `out_cap` must be at least KILNLINK_PARAM_MAX_LEN (9) bytes. `found == 0`
+ * in the decoded reply means the Pico's build does not recognise this
+ * param_id -- that is a normal, valid answer (KILNLINK_PARAM_HDR_LEN bytes,
+ * ESP_OK), not an error; the caller (the PC-facing bridge case) relays it
+ * exactly as the CT_CAL case relays a driver reply, letting the far end see
+ * `found`.
+ *
+ * Returns ESP_ERR_INVALID_ARG for a NULL link/out or too-small out_cap,
+ * ESP_ERR_INVALID_STATE if the driver isn't initialized, ESP_ERR_TIMEOUT if
+ * the request was never ACKed or no PARAM reply arrived within SAFETY_LINK_
+ * REPLY_TIMEOUT_MS, ESP_FAIL if a PARAM-shaped frame arrived but its
+ * param_id did not match the one requested, ESP_OK with *out_len set on
+ * success. */
+esp_err_t safety_link_get_param(SafetyLinkClass *link, uint16_t param_id, uint8_t *out, size_t out_cap,
+                                 size_t *out_len);
 
 /* CT_COMMISSIONING_PLAN.md step 2 -- SAFETY_CMD_CT_AUTO_ZERO_BEGIN (0x26),
  * fire-and-forget, same contract as safety_link_send_set_ct_cal(): only

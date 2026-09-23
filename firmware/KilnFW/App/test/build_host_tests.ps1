@@ -1125,6 +1125,7 @@ try {
                  "kilnlink_apply_config_volatile.c",
                  "kilnlink_clear_trip.c", "kilnlink_commit_config.c", "kilnlink_commit_config_rejected.c",
                  "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
+                 "kilnlink_get_param.c",
                  "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_reboot.c",
                  "kilnlink_reboot_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
                  "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",

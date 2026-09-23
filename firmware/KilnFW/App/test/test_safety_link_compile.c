@@ -1199,6 +1199,192 @@ static void test_rollback_result_frame_is_not_stashed_when_someone_is_waiting(vo
 }
 
 // --------------------------------------------------------------------------
+// SAFETY_CMD_PARAM (0x1E) / SAFETY_CMD_GET_PARAM (0x23), KILNLINK_PROTOCOL_
+// VERSION 7 -- inbox stash coverage (5-byte found=0, 9-byte found=1/f32,
+// 4-byte too-short and 10-byte too-long rejection) plus an end-to-end
+// safety_link_get_param() param_id-mismatch test via the stubbed broadcast
+// send/reply mechanism (s_stub_broadcast_*, used above by the link_reply_us
+// tests). Modeled on make_rollback_result_frame() / test_rollback_result_
+// late_frame_is_stashed_not_dropped() above.
+// --------------------------------------------------------------------------
+
+static uint8_t make_param_frame(uint8_t *payload, uint16_t param_id, uint8_t found, uint8_t type,
+                                 const uint8_t *value, uint8_t value_len)
+{
+    kilnlink_param_t p;
+    memset(&p, 0, sizeof(p));
+    p.param_id = param_id;
+    p.found = found;
+    p.type = type;
+    if (value && value_len) {
+        memcpy(&p.value, value, value_len);
+    }
+    kilnlink_param_status_t enc_status = KILNLINK_PARAM_OK;
+    size_t enc_len = kilnlink_param_encode(&p, payload, KILNLINK_PARAM_MAX_LEN, &enc_status);
+    assert(enc_len >= KILNLINK_PARAM_HDR_LEN && "test setup: encode must succeed");
+    return (uint8_t)enc_len;
+}
+
+static void test_param_frame_5_byte_found_zero_is_stashed(void)
+{
+    TEST_SECTION("safety_drain_inbox_ex -- a 5-byte PARAM frame (found=0, no value bytes) is "
+                 "captured into the stash");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.length = make_param_frame(msg.payload, /*param_id=*/0x0505, /*found=*/0,
+                                   /*type=*/KILNLINK_PARAM_TYPE_U8, NULL, 0);
+    TEST_CHECK(msg.length == KILNLINK_PARAM_HDR_LEN, "a found=0 reply is exactly the header, 5 bytes");
+
+    fake_inbox_reset();
+    fake_inbox_push(&msg);
+    (void)safety_drain_inbox_ex(&link, 0, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+    TEST_CHECK(link.has_stashed_param == true, "a 5-byte PARAM frame is stashed, not dropped");
+    TEST_CHECK(link.stashed_param.length == KILNLINK_PARAM_HDR_LEN, "the stashed copy keeps its length");
+
+    uart_proto_message_t taken;
+    TEST_CHECK(safety_take_stashed_param(&link, &taken) == true, "the stash is consumable");
+    TEST_CHECK(link.has_stashed_param == false, "taking it clears the stash");
+    kilnlink_param_t decoded;
+    TEST_CHECK(kilnlink_param_decode(taken.payload, taken.length, &decoded) == KILNLINK_PARAM_OK,
+               "a found=0 frame decodes cleanly");
+    TEST_CHECK(decoded.param_id == 0x0505 && decoded.found == 0, "decoded fields match what was sent");
+}
+
+static void test_param_frame_9_byte_found_one_f32_is_stashed(void)
+{
+    TEST_SECTION("safety_drain_inbox_ex -- a 9-byte PARAM frame (found=1, type=F32, 4 value bytes) "
+                 "is captured into the stash");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    float f = 3.5f;
+    uint8_t value[4];
+    memcpy(value, &f, sizeof(value));
+
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.length = make_param_frame(msg.payload, /*param_id=*/0x0102, /*found=*/1,
+                                   /*type=*/KILNLINK_PARAM_TYPE_F32, value, sizeof(value));
+    TEST_CHECK(msg.length == KILNLINK_PARAM_MAX_LEN, "a found=1/F32 reply is the widest shape, 9 bytes");
+
+    fake_inbox_reset();
+    fake_inbox_push(&msg);
+    (void)safety_drain_inbox_ex(&link, 0, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+    TEST_CHECK(link.has_stashed_param == true, "a 9-byte PARAM frame is stashed, not dropped");
+    TEST_CHECK(link.stashed_param.length == KILNLINK_PARAM_MAX_LEN, "the stashed copy keeps its length");
+
+    uart_proto_message_t taken;
+    TEST_CHECK(safety_take_stashed_param(&link, &taken) == true, "the stash is consumable");
+    kilnlink_param_t decoded;
+    TEST_CHECK(kilnlink_param_decode(taken.payload, taken.length, &decoded) == KILNLINK_PARAM_OK,
+               "a found=1/F32 frame decodes cleanly");
+    TEST_CHECK(decoded.param_id == 0x0102 && decoded.found == 1 && decoded.type == KILNLINK_PARAM_TYPE_F32,
+               "decoded fields match what was sent");
+    TEST_CHECK(decoded.value.f32_val == 3.5f, "the decoded value survives the round trip");
+}
+
+static void test_param_frame_4_byte_too_short_is_not_stashed(void)
+{
+    TEST_SECTION("safety_drain_inbox_ex -- a 4-byte frame with cmd byte KILNLINK_PARAM_CMD is too "
+                 "short to be a real PARAM reply (below KILNLINK_PARAM_HDR_LEN) and must NOT be stashed");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.length = KILNLINK_PARAM_HDR_LEN - 1;
+    msg.payload[0] = KILNLINK_PARAM_CMD;
+
+    fake_inbox_reset();
+    fake_inbox_push(&msg);
+    (void)safety_drain_inbox_ex(&link, 0, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+    TEST_CHECK(link.has_stashed_param == false, "a too-short frame is not stashed");
+}
+
+static void test_param_frame_10_byte_too_long_is_not_stashed(void)
+{
+    TEST_SECTION("safety_drain_inbox_ex -- a 10-byte frame with cmd byte KILNLINK_PARAM_CMD is too "
+                 "long to be a real PARAM reply (above KILNLINK_PARAM_MAX_LEN) and must NOT be stashed");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.length = KILNLINK_PARAM_MAX_LEN + 1;
+    msg.payload[0] = KILNLINK_PARAM_CMD;
+
+    fake_inbox_reset();
+    fake_inbox_push(&msg);
+    (void)safety_drain_inbox_ex(&link, 0, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+    TEST_CHECK(link.has_stashed_param == false, "a too-long frame is not stashed");
+}
+
+static void test_get_param_drops_reply_with_mismatched_param_id(void)
+{
+    TEST_SECTION("safety_link_get_param -- a PARAM reply carrying a DIFFERENT param_id than requested "
+                 "(a very late reply to a prior call) is dropped as an error, never handed back as "
+                 "this call's answer");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = true;
+    s_stub_broadcast_advance_us = 500;
+    memset(&s_stub_broadcast_reply_msg, 0, sizeof(s_stub_broadcast_reply_msg));
+    s_stub_broadcast_reply_msg.length =
+        make_param_frame(s_stub_broadcast_reply_msg.payload, /*param_id=*/0x9999, /*found=*/1,
+                          KILNLINK_PARAM_TYPE_U8, (const uint8_t[]){ 7 }, 1);
+
+    uint8_t out[KILNLINK_PARAM_MAX_LEN];
+    size_t out_len = 0;
+    esp_err_t err = safety_link_get_param(&link, /*param_id=*/0x0505, out, sizeof(out), &out_len);
+
+    TEST_CHECK(err != ESP_OK, "a param_id mismatch must never be reported as success");
+    TEST_CHECK(link.has_stashed_param == false, "the mismatched reply was consumed (taken), not left "
+                                                 "sitting in the stash for a later caller to misread");
+}
+
+static void test_get_param_succeeds_with_matching_param_id(void)
+{
+    TEST_SECTION("safety_link_get_param -- a PARAM reply carrying the SAME param_id as requested "
+                 "succeeds and hands back the raw frame bytes");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = true;
+    s_stub_broadcast_advance_us = 500;
+    memset(&s_stub_broadcast_reply_msg, 0, sizeof(s_stub_broadcast_reply_msg));
+    s_stub_broadcast_reply_msg.length =
+        make_param_frame(s_stub_broadcast_reply_msg.payload, /*param_id=*/0x0505, /*found=*/1,
+                          KILNLINK_PARAM_TYPE_U8, (const uint8_t[]){ 7 }, 1);
+
+    uint8_t out[KILNLINK_PARAM_MAX_LEN];
+    size_t out_len = 0;
+    esp_err_t err = safety_link_get_param(&link, /*param_id=*/0x0505, out, sizeof(out), &out_len);
+
+    TEST_CHECK(err == ESP_OK, "a matching param_id succeeds");
+    TEST_CHECK(out_len == s_stub_broadcast_reply_msg.length, "the raw reply length is handed back unchanged");
+    kilnlink_param_t decoded;
+    TEST_CHECK(kilnlink_param_decode(out, out_len, &decoded) == KILNLINK_PARAM_OK,
+               "the raw bytes handed back decode cleanly");
+    TEST_CHECK(decoded.found == 1 && decoded.value.u8_val == 7, "the relayed value matches what the peer sent");
+}
+
+// --------------------------------------------------------------------------
 // safety_reset_stale_peer_info_if_link_down() -- opus-review finding 1,
 // "the boot_id evidence channel is single-shot and unrecoverable". Before
 // this fix, peer_version_known/pico_boot_id_known/peer_build_known were set
@@ -1822,6 +2008,12 @@ int main(void)
     test_versions_compatible_is_two_sided();
     test_rollback_result_late_frame_is_stashed_not_dropped();
     test_rollback_result_frame_is_not_stashed_when_someone_is_waiting();
+    test_param_frame_5_byte_found_zero_is_stashed();
+    test_param_frame_9_byte_found_one_f32_is_stashed();
+    test_param_frame_4_byte_too_short_is_not_stashed();
+    test_param_frame_10_byte_too_long_is_not_stashed();
+    test_get_param_drops_reply_with_mismatched_param_id();
+    test_get_param_succeeds_with_matching_param_id();
     test_stale_reset_leaves_flags_alone_while_link_is_up();
     test_stale_reset_clears_flags_once_link_is_observed_down();
     test_stale_reset_never_received_is_also_down();

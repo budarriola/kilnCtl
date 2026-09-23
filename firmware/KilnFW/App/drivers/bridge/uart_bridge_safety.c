@@ -20,6 +20,8 @@
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- IO_CMD_SET_RELAY[_MASK]'s ERR_UPDATING case */
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
+#include "kilnlink/kilnlink_get_param.h"
+#include "kilnlink/kilnlink_param.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
 #include "kiln_ui.h"
 #include "lvgl_port.h"
@@ -34,6 +36,14 @@
 #include "uart_bridge_internal.h"
 
 static const char *TAG = "uart_bridge";
+
+/* KILNLINK_PARAM_MAX_LEN (9) is the widest reply this file's SAFETY_CMD_
+ * GET_PARAM case can relay -- confirm BRIDGE_REPLY_MAX (the shared reply
+ * buffer every safety subcommand writes into) is big enough for it, at
+ * compile time, so a future shrink of BRIDGE_REPLY_MAX cannot silently
+ * truncate a PARAM reply. */
+_Static_assert(BRIDGE_REPLY_MAX >= KILNLINK_PARAM_MAX_LEN,
+               "BRIDGE_REPLY_MAX must fit the widest SAFETY_CMD_PARAM reply");
 
 /* --------------------------------------------------------------------------
  * SAFETY (task 7) -- the isolated link to the RP2040
@@ -232,6 +242,31 @@ static void safety_bridge_task(void *arg)
                  * in this file whose driver call can fail. */
                 size_t got_len = 0;
                 err = safety_link_get_ct_cal(ctx->link, reply, sizeof(reply), &got_len);
+                reply_len = (err == ESP_OK) ? got_len : 0;
+                break;
+            }
+            case SAFETY_CMD_GET_PARAM: {
+                /* Own id (0x23) since KILNLINK_PROTOCOL_VERSION 7, same
+                 * "own request id, own reply id" split as GET_CT_CAL above
+                 * (the reply is SAFETY_CMD_PARAM/0x1E, never 0x23). Live,
+                 * blocking round trip to the Pico, just like GET_CT_CAL --
+                 * never answered from a cache, and can genuinely time out
+                 * (ESP_ERR_TIMEOUT) if a Pico predating protocol 7 never
+                 * answers, which falls through to the generic "err !=
+                 * ESP_OK" driver-error refusal below. The 2-byte param_id
+                 * (msg.payload[1..2], LE) is opaque here -- this bridge case
+                 * does not know or care what it means, same split kilnlink_
+                 * get_param.h's own doc comment describes; safety_link_
+                 * get_param() relays whatever the Pico answers, `found`
+                 * byte included, verbatim. */
+                if (!bridge_args_ok("safety", &msg, KILNLINK_GET_PARAM_LEN)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
+                uint16_t param_id = bridge_u16_le(&msg.payload[1]);
+                size_t got_len = 0;
+                err = safety_link_get_param(ctx->link, param_id, reply, sizeof(reply), &got_len);
                 reply_len = (err == ESP_OK) ? got_len : 0;
                 break;
             }

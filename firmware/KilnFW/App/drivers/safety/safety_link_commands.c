@@ -49,6 +49,8 @@
 #include "kilnlink/kilnlink_ct_cal.h"
 #include "kilnlink/kilnlink_get_config_page.h"
 #include "kilnlink/kilnlink_get_ct_cal.h"
+#include "kilnlink/kilnlink_get_param.h"
+#include "kilnlink/kilnlink_param.h"
 #include "kilnlink/kilnlink_ct_auto_zero_begin.h"
 #include "kilnlink/kilnlink_get_ct_auto_zero.h"
 #include "kilnlink/kilnlink_ct_auto_zero_status.h"
@@ -952,6 +954,111 @@ esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_mar
         return ESP_FAIL;
     }
 
+    return ESP_OK;
+}
+
+/* SAFETY_CMD_GET_PARAM (0x23) / SAFETY_CMD_PARAM (0x1E reply), KILNLINK_
+ * PROTOCOL_VERSION 7 -- see safety_link.h's doc comment for the full
+ * contract. Structured like safety_link_get_stack_margin() above (xact_lock,
+ * clear-any-stale-stash-first, drain, stashed-reply take), NOT like
+ * safety_link_get_ct_cal() -- see stashed_param's own comment in
+ * safety_link.h for why. Unlike get_stack_margin, the reply is relayed raw
+ * (copied verbatim into `out`), not decoded into a kilnlink_param_t here --
+ * same "the ESP relays this frame to the PC unmodified" split safety_link_
+ * get_ct_cal() uses, since the PC-facing bridge case (uart_bridge_safety.c)
+ * just forwards the bytes on. */
+esp_err_t safety_link_get_param(SafetyLinkClass *link, uint16_t param_id, uint8_t *out, size_t out_cap,
+                                 size_t *out_len)
+{
+    if (!link || !out || out_cap < KILNLINK_PARAM_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_get_param_t req = { .param_id = param_id };
+    uint8_t request[KILNLINK_GET_PARAM_LEN];
+    kilnlink_get_param_status_t req_status = KILNLINK_GET_PARAM_OK;
+    size_t req_len = kilnlink_get_param_encode(&req, request, sizeof(request), &req_status);
+    if (req_len == 0) {
+        ESP_LOGE(TAG, "get_param: encode failed (status=%d)", (int)req_status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "get_param: timed out after %ums waiting for the safety link "
+                      "transaction lock", (unsigned)SAFETY_XACT_LOCK_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* A reply stashed by a PRIOR request must never be read as this one's
+     * answer -- same reasoning as safety_link_get_stack_margin()'s own
+     * stale-take above. */
+    uart_proto_message_t stale;
+    (void)safety_take_stashed_param(link, &stale);
+    (void)safety_drain_inbox(link, 0);
+
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  request, req_len);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return err;
+    }
+
+    (void)safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS);
+
+    uart_proto_message_t reply;
+    bool got_reply = safety_take_stashed_param(link, &reply);
+    xSemaphoreGive(link->xact_lock);
+
+    if (!got_reply) {
+        /* Silence -- a Pico too old to have a dispatch case for 0x23, a lost
+         * reply, or a dead link. Never fabricate a reading. */
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "get_param: no PARAM reply within %ums (a safety processor predating "
+                      "KILNLINK_PROTOCOL_VERSION 7 answers exactly like this)",
+                 (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* The stash's bound check (safety_drain_inbox_ex()'s KILNLINK_PARAM_CMD
+     * case) only proved the length is plausible, not that this reply
+     * actually answers OUR request -- a very late reply to a prior GET_PARAM
+     * call could in principle land here if it arrived in the narrow window
+     * between the stale-take above and this request's own send. param_id is
+     * bytes 1-2 (LE) of the payload, right after the cmd byte; check it
+     * directly rather than fully decoding, since a mismatch must be treated
+     * as "no answer for THIS request" regardless of whether the rest of the
+     * frame would otherwise decode cleanly. */
+    if (reply.length < KILNLINK_PARAM_HDR_LEN) {
+        ESP_LOGE(TAG, "get_param: stashed PARAM reply shorter than its own header");
+        return ESP_FAIL;
+    }
+    uint16_t reply_param_id = (uint16_t)reply.payload[1] | ((uint16_t)reply.payload[2] << 8);
+    if (reply_param_id != param_id) {
+        ESP_LOGW(TAG, "get_param: dropped a PARAM reply for id 0x%04X, requested 0x%04X",
+                 (unsigned)reply_param_id, (unsigned)param_id);
+        return ESP_FAIL;
+    }
+
+    memcpy(out, reply.payload, reply.length);
+    if (out_len) {
+        *out_len = reply.length;
+    }
     return ESP_OK;
 }
 

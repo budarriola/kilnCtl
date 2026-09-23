@@ -46,6 +46,7 @@
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "kilnlink/kilnlink_reboot_result.h"
+#include "kilnlink/kilnlink_param.h"
 #include "kilnlink/kilnlink_stack_margin.h"
 #include "kilnlink/kilnlink_get_stack_margin.h"
 #include "kilnlink/kilnlink_rollback_result.h"
@@ -235,6 +236,10 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_stack_margin_count++;
         link->stats.last_stack_margin_len = len;
         break;
+    case KILNLINK_PARAM_CMD:
+        link->stats.cmd_param_count++;
+        link->stats.last_param_len = len;
+        break;
     default:
         /* Not counted here -- the switch in safety_drain_inbox_ex() below
          * already counts and records this exact case via
@@ -418,6 +423,25 @@ bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_st
                     link->stashed_stack_margin = msg;
                     link->has_stashed_stack_margin = true;
                     link->stashed_stack_margin_tick = xTaskGetTickCount();
+                    safety_unlock(link);
+                }
+                break;
+            case KILNLINK_PARAM_CMD: /* SAFETY_CMD_PARAM (0x1E) -- the reply to SAFETY_CMD_GET_PARAM
+                                        * (0x23). ALWAYS stashed, same reasoning as STACK_MARGIN/
+                                        * REBOOT_RESULT above: one caller (safety_link_get_param()),
+                                        * serialized by xact_lock. Variable length, unlike every other
+                                        * ALWAYS-stashed frame above -- KILNLINK_PARAM_HDR_LEN (found=0,
+                                        * no value bytes) up to KILNLINK_PARAM_MAX_LEN (found=1, the
+                                        * widest value type, f32) is accepted here; kilnlink_param_decode()
+                                        * (called by safety_link_get_param()'s caller, if it decodes at
+                                        * all) is what validates the exact length for the specific `type`
+                                        * byte carried, same split CONFIG_PAGE's "any frame long enough to
+                                        * plausibly be a reply is captured" comment above already uses. */
+                if (msg.length >= KILNLINK_PARAM_HDR_LEN && msg.length <= KILNLINK_PARAM_MAX_LEN &&
+                    safety_lock(link)) {
+                    link->stashed_param = msg;
+                    link->has_stashed_param = true;
+                    link->stashed_param_tick = xTaskGetTickCount();
                     safety_unlock(link);
                 }
                 break;
@@ -649,6 +673,27 @@ bool safety_take_stashed_stack_margin(SafetyLinkClass *link, uart_proto_message_
             } else {
                 *out = link->stashed_stack_margin;
                 link->has_stashed_stack_margin = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* Takes the stashed PARAM frame, same age-ceiling/take-once contract as
+ * safety_take_stashed_stack_margin() above. Consumed only by safety_link_
+ * get_param(). */
+bool safety_take_stashed_param(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_param) {
+            if (safety_elapsed_ms(link->stashed_param_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_param = false; /* too old to be anyone's reply */
+            } else {
+                *out = link->stashed_param;
+                link->has_stashed_param = false;
                 took = true;
             }
         }

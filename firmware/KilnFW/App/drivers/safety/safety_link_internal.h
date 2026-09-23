@@ -98,6 +98,7 @@ void safety_clear_stashed_commit_rejected(SafetyLinkClass *link);
 bool safety_take_stashed_rollback_result(SafetyLinkClass *link, uart_proto_message_t *out);
 bool safety_take_stashed_reboot_result(SafetyLinkClass *link, uart_proto_message_t *out);
 bool safety_take_stashed_stack_margin(SafetyLinkClass *link, uart_proto_message_t *out);
+bool safety_take_stashed_param(SafetyLinkClass *link, uart_proto_message_t *out);
 void safety_clear_stashed_rollback_result(SafetyLinkClass *link);
 bool safety_take_stashed_ct_auto_zero_status(SafetyLinkClass *link, uart_proto_message_t *out);
 

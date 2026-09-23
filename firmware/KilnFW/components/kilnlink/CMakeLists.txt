@@ -88,6 +88,12 @@ idf_component_register(
          # VERSION 13. docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md.
          "${KILNLINK_DIR}/src/kilnlink_get_stack_margin.c"
          "${KILNLINK_DIR}/src/kilnlink_stack_margin.c"
+         # SAFETY_CMD_GET_PARAM (0x23) / SAFETY_CMD_PARAM (0x1E reply),
+         # KILNLINK_PROTOCOL_VERSION 7 -- safety_link_commands.c's
+         # safety_link_get_param(), the passthrough backing the PC-side
+         # safety_get_param tool.
+         "${KILNLINK_DIR}/src/kilnlink_get_param.c"
+         "${KILNLINK_DIR}/src/kilnlink_param.c"
          # docs/PICO_AUTO_UPDATE_PLAN.md G1/G2 -- the pure scanner that finds
          # a SaftyFW image's self-declared build identity. Not a wire codec,
          # but shared between the two firmwares for the same reason every
