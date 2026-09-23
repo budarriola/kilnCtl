@@ -77,11 +77,14 @@ _REQUIRED_NAMES_BLOCK_RE = re.compile(
 #: mixes them) must not silently drop entries from the parsed list.
 _QUOTED_STRING_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
 
-#: Matches a "# liveness: <tag>" trailing comment on a $requiredNames entry
-#: line. Case-sensitive on purpose -- a typo'd tag must fail loud (see
-#: parse_required_task_specs()) rather than silently falling back to
-#: "always" and reporting a real by-design gap as a fault.
-_LIVENESS_TAG_RE = re.compile(r'^\s*liveness:\s*([A-Za-z][A-Za-z0-9_-]*)')
+#: Matches a "liveness: <tag>" trailing comment on a $requiredNames entry
+#: line, found ANYWHERE in the comment text (not anchored to its start) --
+#: an entry like "b",  # note # liveness: config still carries a real tag
+#: rather than silently defaulting to "always". Case-sensitive on purpose --
+#: a typo'd tag must fail loud (see parse_required_task_specs()) rather than
+#: silently falling back to "always" and reporting a real by-design gap as a
+#: fault.
+_LIVENESS_TAG_RE = re.compile(r'liveness:\s*([A-Za-z][A-Za-z0-9_-]*)')
 
 #: The one always-default tag plus the three by-design exceptions
 #: check_task_liveness()/TaskLivenessReport.describe() understand. See this
@@ -115,18 +118,6 @@ class TaskLivenessParseError(Exception):
 def default_check_script_path(repo_root: "str | Path") -> Path:
     """``repo_root``/``tools/check_stack_margin_registration.ps1``."""
     return Path(repo_root) / DEFAULT_CHECK_SCRIPT_RELPATH
-
-
-def _strip_ps1_comment_lines(text: str) -> str:
-    """Drop full-line and trailing ``#`` comments. Good enough for this
-    file's own style (no ``#`` inside a quoted task name), and mirrors the
-    check script's own light-touch comment handling rather than a full
-    PowerShell parser."""
-    out_lines = []
-    for line in text.splitlines():
-        idx = line.find("#")
-        out_lines.append(line if idx < 0 else line[:idx])
-    return "\n".join(out_lines)
 
 
 def _find_required_names_block_lines(script_text: str) -> "tuple[int, int]":
@@ -199,6 +190,18 @@ def parse_required_task_specs(script_text: str) -> "tuple[TaskSpec, ...]":
         tag = "always"
         tag_match = _LIVENESS_TAG_RE.search(comment_part)
         if tag_match:
+            if len(names_on_line) > 1:
+                raise TaskLivenessParseError(
+                    f"a '# liveness: ...' tag comment applies to a single "
+                    f"entry, but line {line.strip()!r} carries {len(names_on_line)} "
+                    f"quoted names -- put each tagged name on its own line."
+                )
+            if len(names_on_line) == 0:
+                raise TaskLivenessParseError(
+                    f"a '# liveness: ...' tag comment was found on line "
+                    f"{line.strip()!r}, but that line has no quoted task "
+                    f"name for it to apply to."
+                )
             tag = tag_match.group(1)
             if tag not in VALID_LIVENESS_TAGS:
                 raise TaskLivenessParseError(

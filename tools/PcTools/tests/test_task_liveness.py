@@ -289,6 +289,38 @@ def test_untagged_dead_task_still_refuses():
     assert "FAIL" in text
 
 
+def test_tag_comment_on_multi_name_line_raises():
+    """A '# liveness: ...' tag comment must apply to exactly one entry --
+    two names sharing the same tagged line is ambiguous and must fail loud
+    rather than silently tagging both."""
+    text = '$requiredNames = @(\n    "a", "b",  # liveness: config\n)'
+    with pytest.raises(TaskLivenessParseError):
+        parse_required_task_specs(text)
+
+
+def test_tag_comment_with_no_names_on_line_raises():
+    """A liveness tag comment with zero quoted names on its line has
+    nothing to apply to and must fail loud rather than being silently
+    dropped."""
+    text = '''
+$requiredNames = @(
+    "a"
+    # liveness: config
+)
+'''
+    with pytest.raises(TaskLivenessParseError):
+        parse_required_task_specs(text)
+
+
+def test_tag_found_anywhere_in_comment_not_just_at_start():
+    """The tag regex must not be anchored to the start of the comment --
+    'liveness:' preceded by other comment text must still be parsed rather
+    than silently defaulting to 'always'."""
+    text = '$requiredNames = @(\n    "a",  # note # liveness: config\n)'
+    specs = {s.name: s.tag for s in parse_required_task_specs(text)}
+    assert specs == {"a": "config"}
+
+
 def test_untagged_absent_task_still_refuses_with_no_tags_map_at_all():
     """Same guarantee with no `tags` argument passed at all (the plain
     pre-tag call shape every existing caller used) -- must default every
