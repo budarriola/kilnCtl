@@ -677,7 +677,26 @@ second hand-copied one that can drift. It reports expected-and-alive,
 expected-but-DEAD (registered, `alive=False` -- creation failed this boot),
 expected-but-ABSENT (never registered -- older firmware or a code
 regression), and extra (alive, not in the expected list -- informational).
+
+Not every required task is expected alive on every boot. Each
+`$requiredNames` entry carries a liveness tag as a trailing
+`# liveness: <tag>` comment on its own source line -- `always` (the
+default, no comment needed: a plain long-lived service, DEAD or ABSENT is
+always a fault), `config` (conditional on a Kconfig option or a runtime
+hardware probe, e.g. `gpio_probe`/`i2c_owner_ns2009` -- DEAD or ABSENT is
+informational), `on-demand` (a transient task an HTTP handler creates per
+request, e.g. `ota_pico_rollback`/`recovery_exit`/`ota_rollback_reboot` --
+DEAD or ABSENT between requests is informational), and `boot-once` (a
+one-shot boot-time task that self-deletes once it has a verdict, e.g.
+`pico_auto_update` -- DEAD after boot is normal, but ABSENT is still a
+fault: its `stack_margin_register()` call site never fired at all). This
+was added after the first live run reported six false positives that were
+all by design; the tag lives on the same source line as the name, one
+source of truth, same discipline as the required-name list itself.
+
 `capability_preflight_check` runs this same cross-check over the link before
 every preflight and refuses the run (same as an unacknowledged crash report)
-if any expected task is dead or absent, unless `allow_missing_tasks=True` is
-passed.
+if any `always`/untagged task is dead or absent, or any `boot-once` task is
+absent -- unless `allow_missing_tasks=True` is passed. A `config`/
+`on-demand`/`boot-once`-tagged task's by-design gap is reported but never
+blocks.

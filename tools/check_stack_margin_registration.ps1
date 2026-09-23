@@ -145,9 +145,14 @@ function Get-CodeOnlyLines {
 # register count.
 $requiredNames = @(
     "autotune_engine", "boot_button", "danger_mode", "spi_owner",
-    "i2c_owner_sx1509", "i2c_owner_ns2009",
-    "gpio_probe", "kiln_io_owner", "lvgl", "recovery_exit", "ota_rollback_reboot",
-    "ota_pico_rollback", "profile_executor", "profile_exec_wdt",
+    "i2c_owner_sx1509",
+    "i2c_owner_ns2009",  # liveness: config -- only created if a runtime i2c probe finds an NS2009 (NS2009.c); this bench has an FT6336U instead
+    "kiln_io_owner", "lvgl",
+    "gpio_probe",  # liveness: config -- only created when CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y (Kconfig)
+    "recovery_exit",  # liveness: on-demand -- transient task an HTTP handler (ota_http_recovery.c) creates per POST /api/ota/esp/recovery_exit call
+    "ota_rollback_reboot",  # liveness: on-demand -- transient task ota_http_esp.c's rollback handler creates on demand
+    "ota_pico_rollback",  # liveness: on-demand -- transient task ota_http_pico.c's rollback handler creates on demand
+    "profile_executor", "profile_exec_wdt",
     "safety_owner_evt", "safety_proto_rx", "safety_poll",
     "screen_idle", "telemetry_log", "thermo_owner", "link_watchdog",
     "bx_flash_worker", "info_uart_bridge", "system_uart_bridge", "httpd_worker",
@@ -169,8 +174,10 @@ $requiredNames = @(
     # self-deletes once it has a verdict, so it is short-lived rather than a
     # service, but it runs on EVERY boot and does a bounded link wait plus a
     # flash scan before deciding, which is exactly the shape whose high-water
-    # mark has to stay measurable.
-    "pico_auto_update"
+    # mark has to stay measurable. Tagged boot-once (not config/on-demand):
+    # ABSENT would still mean its stack_margin_register() call site never
+    # fired at all, which is a fault; DEAD after boot is its normal state.
+    "pico_auto_update"  # liveness: boot-once
 )
 # 2026-09-08: the six UART bridge tasks above (thermo/touch/ui_test/io/
 # uart_log/safety) were long-lived (`while (true)`, never self-deleting)

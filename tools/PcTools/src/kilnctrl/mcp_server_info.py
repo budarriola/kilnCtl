@@ -141,15 +141,21 @@ def check_task_liveness() -> str:
     Reports:
       - expected-and-alive: registered and running, as expected.
       - expected-but-DEAD: registered (a call site exists and fired) but
-        `alive=False` -- task creation failed THIS boot. FATAL.
+        `alive=False` -- task creation failed THIS boot. FATAL for a plain
+        (untagged/`always`) task; informational for one tagged `config`,
+        `on-demand`, or `boot-once` in `$requiredNames` (a by-design gap --
+        conditional on build config/hardware, transient, or a one-shot boot
+        task that has since self-deleted).
       - expected-but-ABSENT: never appeared in the reply at all -- older
-        firmware, or a code regression dropped its registration. FATAL.
+        firmware, or a code regression dropped its registration. FATAL for
+        `always`/`boot-once`; informational for `config`/`on-demand`.
       - extra: alive tasks not in the expected list -- informational only.
 
-    The expected-task list is parsed live from
-    `tools/check_stack_margin_registration.ps1`'s own `$requiredNames`
-    array, not copied into a second, driftable list -- see
-    `task_liveness.py`'s module docstring.
+    The expected-task list, and each name's liveness tag, is parsed live
+    from `tools/check_stack_margin_registration.ps1`'s own `$requiredNames`
+    array (a trailing `# liveness: <tag>` comment on the entry's line), not
+    copied into a second, driftable list -- see `task_liveness.py`'s module
+    docstring.
     """
     try:
         entries = _srv._info.get_stack_margin()
@@ -162,10 +168,12 @@ def check_task_liveness() -> str:
     )
     script_path = task_liveness.default_check_script_path(repo_root)
     try:
-        expected = task_liveness.load_required_task_names(script_path)
+        specs = task_liveness.load_required_task_specs(script_path)
     except (task_liveness.TaskLivenessParseError, OSError) as exc:
         return f"error: could not load required-task list from {script_path}: {exc}"
-    report = task_liveness.check_task_liveness(entries, expected)
+    expected = tuple(spec.name for spec in specs)
+    tags = {spec.name: spec.tag for spec in specs}
+    report = task_liveness.check_task_liveness(entries, expected, tags=tags)
     return report.describe()
 
 

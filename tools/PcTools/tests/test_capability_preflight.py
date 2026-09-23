@@ -377,7 +377,7 @@ class TaskLivenessGatingTest(unittest.TestCase):
     access of its own, so it is handed to run_preflight() pre-computed,
     exactly as mcp_server_capability_preflight.py's tool does."""
 
-    def _tl_report(self, dead=(), absent=()):
+    def _tl_report(self, dead=(), absent=(), tags=None):
         from kilnctrl import task_liveness
         from kilnctrl.devices_info import StackMarginEntry
         from kilnctrl.protocol import StackMarginLevel
@@ -395,7 +395,7 @@ class TaskLivenessGatingTest(unittest.TestCase):
                 entries.append(StackMarginEntry(name=name, configured_stack_bytes=4096,
                                                  hwm_bytes=2000, alive=True,
                                                  level=StackMarginLevel.OK))
-        return task_liveness.check_task_liveness(entries, expected)
+        return task_liveness.check_task_liveness(entries, expected, tags=tags)
 
     def test_dead_task_blocks_a_run_that_needs_no_capability(self):
         preset = _preset(False)
@@ -478,6 +478,46 @@ class TaskLivenessGatingTest(unittest.TestCase):
             report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
                                        preset_name="test-preset")
         self.assertTrue(report.ok)
+
+    def test_config_tagged_dead_task_does_not_block(self):
+        """A task tagged 'config' (conditional on build config/hardware)
+        being dead must never refuse a run, with no allow_missing_tasks
+        override needed -- it is informational, not a fault."""
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        tl = self._tl_report(dead=("httpd_worker",), tags={"httpd_worker": "config"})
+        self.assertTrue(tl.ok)
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset", task_liveness=tl)
+        self.assertTrue(report.ok)
+        self.assertIn("[info]", report.describe())
+        self.assertIn("httpd_worker", report.describe())
+
+    def test_untagged_dead_task_still_blocks_even_with_a_tags_map(self):
+        """MANDATORY negative test: supplying a tags map for one name must
+        never widen the by-design exception to an untagged ('always') name
+        that stays a plain fault."""
+        preset = _preset(False)
+        responses = {
+            "/api/status": _STATUS_BODY,
+            "/api/crash_report": _CRASH_NONE_BODY,
+            "/api/ramp_assist": _RAMP_ASSIST_ABSENT_BODY,
+        }
+        tl = self._tl_report(dead=("profile_executor",), tags={"httpd_worker": "config"})
+        self.assertFalse(tl.ok)
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            report = cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset", task_liveness=tl)
+        self.assertFalse(report.ok)
+        self.assertIn("DEAD", report.describe())
+        self.assertIn("profile_executor", report.describe())
 
     def test_no_task_liveness_supplied_shows_explicit_skip_line(self):
         """task_liveness=None must not read as 'checked and fine' in

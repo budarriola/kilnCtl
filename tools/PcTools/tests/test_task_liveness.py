@@ -14,9 +14,12 @@ from kilnctrl.devices_info import StackMarginEntry
 from kilnctrl.protocol import StackMarginLevel
 from kilnctrl.task_liveness import (
     TaskLivenessParseError,
+    TaskSpec,
     check_task_liveness,
     load_required_task_names,
+    load_required_task_specs,
     parse_required_task_names,
+    parse_required_task_specs,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -175,3 +178,122 @@ def test_describe_mentions_dead_and_absent_names():
     assert "ABSENT" in text
     assert "b" in text and "c" in text
     assert "FAIL" in text
+
+
+# --- liveness tags -----------------------------------------------------
+
+
+def test_parse_required_task_specs_defaults_to_always():
+    text = '$requiredNames = @(\n    "a", "b"\n)'
+    specs = parse_required_task_specs(text)
+    assert specs == (TaskSpec(name="a", tag="always"), TaskSpec(name="b", tag="always"))
+
+
+def test_parse_required_task_specs_reads_trailing_tag_comment():
+    text = '''
+$requiredNames = @(
+    "a",
+    "b",  # liveness: boot-once
+    "c",  # liveness: config
+    "d"  # liveness: on-demand
+)
+'''
+    specs = {s.name: s.tag for s in parse_required_task_specs(text)}
+    assert specs == {"a": "always", "b": "boot-once", "c": "config", "d": "on-demand"}
+
+
+def test_parse_required_task_specs_rejects_unknown_tag():
+    text = '$requiredNames = @(\n    "a",  # liveness: bogus\n)'
+    with pytest.raises(TaskLivenessParseError):
+        parse_required_task_specs(text)
+
+
+def test_parse_required_task_specs_preserves_names_order_and_dedup():
+    """parse_required_task_names() must keep behaving identically when
+    implemented in terms of parse_required_task_specs()."""
+    text = '$requiredNames = @("a", "b", "a", "c")'
+    assert parse_required_task_names(text) == ("a", "b", "c")
+
+
+def test_load_required_task_specs_against_the_real_check_script():
+    """The six known by-design exceptions from the first live
+    check_task_liveness run must carry their tags in the real script."""
+    specs = {s.name: s.tag for s in load_required_task_specs(_REAL_CHECK_SCRIPT)}
+    assert specs["pico_auto_update"] == "boot-once"
+    assert specs["gpio_probe"] == "config"
+    assert specs["i2c_owner_ns2009"] == "config"
+    assert specs["ota_pico_rollback"] == "on-demand"
+    assert specs["recovery_exit"] == "on-demand"
+    assert specs["ota_rollback_reboot"] == "on-demand"
+    # An ordinary long-lived task stays untagged/"always".
+    assert specs["kiln_io_owner"] == "always"
+
+
+def test_boot_once_dead_is_informational_not_fault():
+    expected = ("pico_auto_update",)
+    tags = {"pico_auto_update": "boot-once"}
+    entries = [_entry("pico_auto_update", alive=False)]
+    report = check_task_liveness(entries, expected, tags=tags)
+    assert report.ok
+    assert report.fault_dead == ()
+    assert report.info_dead == ("pico_auto_update",)
+
+
+def test_boot_once_absent_is_a_fault():
+    """Unlike DEAD, a boot-once task that never even registered means its
+    stack_margin_register() call site is missing entirely -- still a
+    fault."""
+    expected = ("pico_auto_update",)
+    tags = {"pico_auto_update": "boot-once"}
+    report = check_task_liveness([], expected, tags=tags)
+    assert not report.ok
+    assert report.fault_absent == ("pico_auto_update",)
+    assert report.info_absent == ()
+
+
+def test_config_tag_dead_and_absent_are_both_informational():
+    expected = ("gpio_probe", "i2c_owner_ns2009")
+    tags = {"gpio_probe": "config", "i2c_owner_ns2009": "config"}
+    entries = [_entry("gpio_probe", alive=False)]
+    report = check_task_liveness(entries, expected, tags=tags)
+    assert report.ok
+    assert report.info_dead == ("gpio_probe",)
+    assert report.info_absent == ("i2c_owner_ns2009",)
+    assert report.fault_dead == () and report.fault_absent == ()
+
+
+def test_on_demand_tag_dead_and_absent_are_both_informational():
+    expected = ("ota_pico_rollback", "recovery_exit")
+    tags = {"ota_pico_rollback": "on-demand", "recovery_exit": "on-demand"}
+    entries = [_entry("ota_pico_rollback", alive=False)]
+    report = check_task_liveness(entries, expected, tags=tags)
+    assert report.ok
+    assert set(report.info_dead) == {"ota_pico_rollback"}
+    assert set(report.info_absent) == {"recovery_exit"}
+
+
+def test_untagged_dead_task_still_refuses():
+    """MANDATORY negative test: a plain (untagged, i.e. 'always') task that
+    is dead must still fail the report even when a `tags` map is supplied
+    for OTHER names -- tagging must never accidentally widen to tasks that
+    were never given a by-design exception."""
+    expected = ("kiln_io_owner", "gpio_probe")
+    tags = {"gpio_probe": "config"}
+    entries = [_entry("kiln_io_owner", alive=False), _entry("gpio_probe", alive=False)]
+    report = check_task_liveness(entries, expected, tags=tags)
+    assert not report.ok
+    assert report.fault_dead == ("kiln_io_owner",)
+    assert report.info_dead == ("gpio_probe",)
+    text = report.describe()
+    assert "kiln_io_owner" in text
+    assert "FAIL" in text
+
+
+def test_untagged_absent_task_still_refuses_with_no_tags_map_at_all():
+    """Same guarantee with no `tags` argument passed at all (the plain
+    pre-tag call shape every existing caller used) -- must default every
+    name to 'always' and still refuse."""
+    expected = ("kiln_io_owner",)
+    report = check_task_liveness([], expected)
+    assert not report.ok
+    assert report.fault_absent == ("kiln_io_owner",)

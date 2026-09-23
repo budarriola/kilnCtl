@@ -64,10 +64,12 @@ def _preflight_task_liveness():
     )
     script_path = task_liveness.default_check_script_path(repo_root)
     try:
-        expected = task_liveness.load_required_task_names(script_path)
+        specs = task_liveness.load_required_task_specs(script_path)
     except (task_liveness.TaskLivenessParseError, OSError):
         return None
-    return task_liveness.check_task_liveness(entries, expected)
+    expected = tuple(spec.name for spec in specs)
+    tags = {spec.name: spec.tag for spec in specs}
+    return task_liveness.check_task_liveness(entries, expected, tags=tags)
 
 
 @_srv._tool()
@@ -103,12 +105,16 @@ def capability_preflight_check(name: str, host: Optional[str] = None,
     here too, mirroring apply_preset()'s own gating exactly.
 
     Also refuses (same as an unacknowledged crash report) if the live
-    `check_task_liveness` cross-check finds a required task dead (task
-    creation failed this boot) or absent (never registered) -- unless
-    `allow_missing_tasks=True`. That check runs over the direct UART link,
-    not `host`; if no link/board answers it, task liveness is simply not
-    checked (never treated as a failure), so a preflight against a board
-    reachable only by Wi-Fi HTTP still works.
+    `check_task_liveness` cross-check finds an `always`/untagged required
+    task dead (task creation failed this boot) or absent (never
+    registered), or a `boot-once` task absent -- unless
+    `allow_missing_tasks=True`. A `config`/`on-demand`/`boot-once`-tagged
+    task being dead or absent by design (see `$requiredNames` in
+    `tools/check_stack_margin_registration.ps1`) is reported but never
+    blocks. That check runs over the direct UART link, not `host`; if no
+    link/board answers it, task liveness is simply not checked (never
+    treated as a failure), so a preflight against a board reachable only by
+    Wi-Fi HTTP still works.
     """
     try:
         preset = config_presets.load_preset_data(name)

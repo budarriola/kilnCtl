@@ -38,8 +38,16 @@ required-task list live out of the `.ps1` script rather than a second
 hand-copied one (`tools/PcTools/src/kilnctrl/task_liveness.py`, unit-tested
 with no board). `capability_preflight` now also runs this cross-check and
 refuses a run with a dead or absent required task, same as an
-unacknowledged crash report, unless `allow_missing_tasks=True`. The one
-before it was `boot_guard_get`, 2026-09-22 -- a READ-ONLY MCP tool wrapping
+unacknowledged crash report, unless `allow_missing_tasks=True`.
+**2026-09-23 follow-up:** the first live run reported six false positives
+that are all by design (`pico_auto_update` self-deletes after boot;
+`gpio_probe`/`i2c_owner_ns2009` are config/hardware-conditional;
+`ota_pico_rollback`/`recovery_exit`/`ota_rollback_reboot` are on-demand HTTP
+handler tasks) -- each `$requiredNames` entry in the `.ps1` script now
+carries a `# liveness: <tag>` comment (`always` default, `config`,
+`on-demand`, `boot-once`), and only an `always`/untagged DEAD-or-ABSENT or a
+`boot-once` ABSENT still refuses; the other combinations report
+informationally. The one before it was `boot_guard_get`, 2026-09-22 -- a READ-ONLY MCP tool wrapping
 `GET /api/boot_guard`
 (`ota_http_recovery.c`'s `ota_boot_guard_status_get_handler()`), reusing
 `ota_http_client.get_boot_guard_status()` (already called internally by

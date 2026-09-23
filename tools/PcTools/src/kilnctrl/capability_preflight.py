@@ -344,19 +344,30 @@ class PreflightReport:
             )
         if self.task_liveness is not None:
             tl = self.task_liveness
-            if tl.dead or tl.absent:
+            if tl.fault_dead or tl.fault_absent:
                 severity = "[FATAL]" if not self.allow_missing_tasks else "[allowed]"
-                if tl.dead:
+                if tl.fault_dead:
                     lines.append(
                         f"  {severity} TASK(S) DEAD (registered, not running -- task "
-                        f"creation failed this boot): {', '.join(sorted(tl.dead))}"
+                        f"creation failed this boot): {', '.join(sorted(tl.fault_dead))}"
                     )
-                if tl.absent:
+                if tl.fault_absent:
                     lines.append(
                         f"  {severity} TASK(S) ABSENT (never registered on this board -- "
-                        f"older firmware or a code regression): {', '.join(sorted(tl.absent))}"
+                        f"older firmware or a code regression): {', '.join(sorted(tl.fault_absent))}"
                     )
-            else:
+            if tl.info_dead:
+                lines.append(
+                    f"  [info]   task(s) dead but by design (config/hardware-conditional, "
+                    f"on-demand, or a one-shot boot task that has since self-deleted -- "
+                    f"not a fault): {', '.join(sorted(tl.info_dead))}"
+                )
+            if tl.info_absent:
+                lines.append(
+                    f"  [info]   task(s) absent but by design (config/hardware-conditional "
+                    f"or on-demand -- not a fault): {', '.join(sorted(tl.info_absent))}"
+                )
+            if not (tl.fault_dead or tl.fault_absent or tl.info_dead or tl.info_absent):
                 lines.append(f"  [ok]     task liveness: all {len(tl.expected)} expected task(s) alive")
         else:
             lines.append(
