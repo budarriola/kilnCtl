@@ -421,6 +421,24 @@ static void refresh_unacked_cache(void)
 
 void crash_report_init(void)
 {
+    /* Snapshot-AND-INVALIDATE the beacon, first thing and on EVERY path out of
+     * this function (reset-one-side class, CLAUDE.md): s_uptime_beacon is
+     * RTC_NOINIT storage, so it survives the very reset that brought us here
+     * and keeps whatever the PREVIOUS boot's monitor_task last wrote. Without
+     * this clear, a crash that happens in a LATER boot but BEFORE monitor_task
+     * has run its first heartbeat would be captured with the earlier boot's
+     * uptime and crash_uptime_known=1 -- a confidently wrong number, exactly
+     * the failure mode the magic check already prevents for power-on garbage.
+     * Clearing it here makes "known" mean what its field comment claims: the
+     * beacon was written by monitor_task during the boot that crashed.
+     *
+     * Safe to do here because this runs in main_boot_early.c's early-boot
+     * sequence, long before main_network_http.c starts monitor_task -- there
+     * is no writer to race with, and no other reader of the beacon exists. */
+    const crash_uptime_beacon_t boot_beacon = s_uptime_beacon;
+    s_uptime_beacon.magic = 0u;
+    s_uptime_beacon.uptime_s = 0u;
+
     esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != ESP_OK) {
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- crash record cannot be captured/read",
@@ -491,7 +509,7 @@ void crash_report_init(void)
 
     hal_sysinfo_build_info_t build_info;
     hal_sysinfo_get_build_info(&build_info);
-    fill_v3_fields(&rec, &s_uptime_beacon, &build_info);
+    fill_v3_fields(&rec, &boot_beacon, &build_info);
 
     seal_crc(&rec);
 

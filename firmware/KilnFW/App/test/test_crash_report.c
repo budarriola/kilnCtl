@@ -803,6 +803,43 @@ static void test_crash_report_note_alive_writes_a_valid_beacon(void)
                "a beacon written by crash_report_note_alive() reads back as known");
 }
 
+// The beacon is RTC_NOINIT storage: it survives the reset that brought the
+// board back up, so a value written by an EARLIER boot is still sitting there
+// when crash_report_init() runs. crash_report_init() must invalidate it, or a
+// crash that happens before monitor_task's first heartbeat in a later boot
+// gets captured with the earlier boot's uptime and crash_uptime_known=1.
+static void test_init_invalidates_a_stale_beacon(void)
+{
+    TEST_SECTION("crash_report_init -- invalidates the carried-over RTC beacon so a later boot's "
+                 "pre-heartbeat crash cannot be dated with an earlier boot's uptime");
+
+    reset_all();
+    fake_sysinfo_reset_all();
+    fake_sysinfo_set_coredump_present(false);
+
+    // Stand in for "the previous boot's monitor_task left this behind".
+    s_uptime_beacon.magic = CRASH_UPTIME_BEACON_MAGIC;
+    s_uptime_beacon.uptime_s = 4242u;
+
+    crash_report_init(); // takes the no-coredump early return -- must STILL clear the beacon
+
+    TEST_CHECK(s_uptime_beacon.magic != CRASH_UPTIME_BEACON_MAGIC,
+               "crash_report_init() clears the carried-over beacon even on its earliest return "
+               "path (no coredump present)");
+
+    crash_report_record_t out;
+    memset(&out, 0, sizeof(out));
+    hal_sysinfo_build_info_t build_info;
+    memset(&build_info, 0, sizeof(build_info));
+    build_info.valid = false;
+    fill_v3_fields(&out, &s_uptime_beacon, &build_info);
+    TEST_CHECK(out.crash_uptime_known == 0u,
+               "the post-init beacon reads as unknown, not as the previous boot's 4242 s");
+    TEST_CHECK(out.crash_uptime_s != 4242u, "the stale uptime value does not leak through");
+
+    fake_sysinfo_reset_all();
+}
+
 void run_test_crash_report(void)
 {
     test_crc_round_trip();
@@ -825,6 +862,7 @@ void run_test_crash_report(void)
     test_fill_v3_fields_valid_beacon_and_build_info();
     test_fill_v3_fields_bad_magic_reads_as_unknown();
     test_crash_report_note_alive_writes_a_valid_beacon();
+    test_init_invalidates_a_stale_beacon();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

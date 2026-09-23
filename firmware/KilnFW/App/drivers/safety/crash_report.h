@@ -114,12 +114,14 @@ typedef struct {
                                   // a wall-clock time (this board has no RTC/SNTP, same as every
                                   // other "NO WALL CLOCK" module -- see this header's top comment).
                                   // 0 if crash_uptime_known is 0.
-    uint8_t  crash_uptime_known; // 1 if crash_uptime_s came from a beacon that survived the reset
-                                  // with its magic intact; 0 on a power-on reset (RTC memory lost)
-                                  // or if the beacon was never written this boot cycle (e.g. the
-                                  // very first crash after a cold boot, before monitor_task's first
-                                  // heartbeat) -- crash_uptime_s must not be read as 0 seconds in
-                                  // that case, only as "unknown".
+    uint8_t  crash_uptime_known; // 1 if crash_uptime_s came from a beacon written by monitor_task
+                                  // during the boot that crashed; 0 on a power-on reset (RTC memory
+                                  // lost) or if that boot crashed before monitor_task's first
+                                  // heartbeat ran -- crash_report_init() invalidates the beacon at
+                                  // the start of EVERY boot, so a value left over from an earlier
+                                  // boot can never be reported as this crash's uptime.
+                                  // crash_uptime_s must not be read as 0 seconds when this is 0,
+                                  // only as "unknown".
     char     fw_build[CRASH_REPORT_FW_BUILD_MAX]; // hal_sysinfo_get_build_info()'s date+time,
                                   // formatted the same way dashboard_http.c's own fw_build field is
                                   // ("Aug 20 2026 14:03:11") -- read from the RUNNING image at
