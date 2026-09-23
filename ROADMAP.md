@@ -1,8 +1,55 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, four more httpd-stack
-> handler moves plus a stack-local check fix (twenty-seventh sweep) — open
+> **Status:** planning · **Last reviewed:** 2026-09-23, SaftyFW clean-worktree
+> configure tooling plus a task-liveness MCP tool (twenty-eighth sweep) — open
 > items below.
+> - **`build_saftyfw()` resolves `PICO_SDK_PATH` automatically** (`af4b23e0`):
+>   a new `mcpkit/pico_sdk.py` `resolve_pico_sdk_path()` (env var, else the
+>   bench default at `C:\pico-tools\pico-sdk` if it looks real, else a clear
+>   error) is now the single source of truth, and `build_saftyfw()` takes an
+>   optional `saftyfw_root` (mirroring `flash_firmware`'s `kiln_fw_root`) and
+>   configures its build directory from scratch when needed. Verified end to
+>   end in a worktree with `PICO_SDK_PATH` unset. Follow-up (`b41ef7b6`)
+>   rejects a relative or non-SaftyFW-shaped `saftyfw_root` up front, and makes
+>   `_cmake_build()`'s configure-success gate positive (proceed only on a
+>   `<tag>-configure: OK` first line) instead of the old negative check, which
+>   let a "cmake not found" configure fall through to `cmake --build` on an
+>   unconfigured directory and misreport "configured from scratch".
+> - **`check_task_liveness`**, a new READ-ONLY MCP tool (`a0829d71`) that
+>   cross-checks a live `stack_margin_read()` snapshot against the
+>   `$requiredNames` list `check_stack_margin_registration.ps1` enforces at
+>   the source level — that check only proves every required task has a
+>   registration call site, never that `xTaskCreate*()` actually fired on a
+>   given boot, and a failed creation is log-only (`ESP_LOGE`, non-fatal,
+>   nothing HTTP-visible). Reports alive / DEAD (registered, not running) /
+>   ABSENT (never registered) / extra (informational). `capability_preflight`
+>   now runs this cross-check too and refuses a run with a dead or absent
+>   required task, same as an unacknowledged crash report, unless
+>   `allow_missing_tasks=True`. `kilnctrl`'s tool count moves 183 -> 184.
+> - **Stale blob citation fixed** in
+>   `docs/audits/release_gate_vacuity_audit_2026-09-16g.md` (`30e13029`):
+>   `wifi_provision_http.c`'s blob moved again (`b7bc31d2`, twenty-seventh
+>   sweep's heap move), reddening `check_doc_hash_citations.ps1` against the
+>   old 8fc84030 citation; the underlying claim still held, so the citation
+>   was updated to blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`06e191a4` and the old one marked superseded.
+> - **Pending:** `cfg_fs_list`'s scratch heap move is still in review.
+> - **Bench commission flash still blocked, and now on a second, independent
+>   gap**: `check_00_kilnfw_target_build.ps1` publishes only
+>   `KilnCtrl.elf`/`KilnCtrl.bin`, never `bootloader.bin` or
+>   `partition-table.bin`, which `flash_firmware()` requires — a rebuild that
+>   also produces those two is needed before the pending ESP fixes
+>   (`6a308c6e` DRAM fix, plus this sweep's tooling) can be flashed. A
+>   pre-flash `check_task_liveness` baseline against the still-running old
+>   board build (`6630e769`) reported 29/35 alive, `pico_auto_update` DEAD,
+>   and `gpio_probe`/`i2c_owner_ns2009`/`ota_pico_rollback`/
+>   `ota_rollback_reboot`/`recovery_exit` ABSENT — all five are conditional
+>   tasks (compiled/started only under specific build or runtime gates), so
+>   this is not necessarily a fault; classifying which ABSENTs are expected
+>   for this build config is an open follow-up.
+> - **Not yet flashed**: the bench board stays at `6630e769`/`05f1ab1f`
+>   (ESP/Pico) — none of today's commits are on hardware yet.
+> **Previously reviewed:** 2026-09-23, four more httpd-stack
+> handler moves plus a stack-local check fix (twenty-seventh sweep).
 > - **`kiln_cfg_store_export_package_json`'s 896 B blob scratch moved off the
 >   8 KB httpd stack** (`d2c25d7b`), reachable from `export_get_handler` and
 >   `backup_export_get_handler`; malloc'd instead, freed on every return path.
