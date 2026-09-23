@@ -345,43 +345,63 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
 @_srv._tool()
 def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False,
                         host: Optional[str] = None) -> str:
-    """Acknowledge AND erase the board's last-crash record (POST
-    /api/crash_report/clear, diagnostics_http.c's crash_report_clear_post_
-    handler(), ROUTE_TIER_ADMIN) -- the same action crash_report_clear()
-    performs on the board: crash_report_acknowledge() followed by
-    hal_sysinfo_coredump_erase(), freeing the `coredump` partition slot so
-    an OLD coredump is never re-captured/re-reported after a reflash. This
-    is a strictly more destructive action than crash_report_ack(), which
-    never touches the coredump image -- use crash_report_ack() when only
-    dismissing the banner is wanted.
+    """Acknowledge AND erase the board's last-crash record AND/OR a stale
+    coredump image (POST /api/crash_report/clear, diagnostics_http.c's
+    crash_report_clear_post_handler(), ROUTE_TIER_ADMIN) -- the same action
+    crash_report_clear() performs on the board: crash_report_acknowledge()
+    followed by hal_sysinfo_coredump_erase(), freeing the `coredump`
+    partition slot so an OLD coredump is never re-captured/re-reported
+    after a reflash. This is a strictly more destructive action than
+    crash_report_ack(), which never touches the coredump image -- use
+    crash_report_ack() when only dismissing the banner is wanted.
 
-    Always fetches the CURRENT report first (GET /api/crash_report). If no
-    crash is on record (``present: false``), this returns that and does
-    nothing else -- no POST is ever sent for a record that is not present.
+    2026-09-22 fix: this tool used to gate entirely on GET /api/crash_
+    report's ``present`` -- the NVS record -- and refused to run at all on
+    a board with a stale coredump IMAGE but no crash record (e.g. after the
+    record was already acknowledged/cleared on a previous pass, or a
+    quarantined/corrupted record that ``load()`` in crash_report.c silently
+    treats as "no record"). "Free the coredump partition before a reflash"
+    is this tool's whole motivation, so it now ALSO fetches
+    GET /api/coredump/info (coredump_fetch.get_coredump_info(), the same
+    read read_esp_coredump() uses) and proceeds when EITHER the NVS record
+    OR the coredump image is present -- never requiring both.
 
-    Otherwise the report's summary is put in the result FIRST, before
-    anything is cleared, so a caller sees what it is about to erase.
+    Always fetches BOTH the current record (GET /api/crash_report) and the
+    current image info (GET /api/coredump/info) first. If NEITHER is
+    present, this returns that and does nothing else -- no POST is ever
+    sent when there is nothing to clear.
+
+    Otherwise a summary of both -- the record's details (or "no crash
+    record present") and the image's presence/data_len/partition_size --
+    is put in the result FIRST, before anything is cleared, so a caller
+    sees what it is about to erase.
 
     REFUSES to clear an UNACKNOWLEDGED record unless
     ``allow_unacknowledged=True`` is ALSO passed, regardless of
     ``confirm`` -- a bench agent must not erase a crash nobody has
-    actually reviewed. This is stricter than crash_report_ack(), which has
-    no such gate since acknowledging is non-destructive.
+    actually reviewed. This gate only applies when a record is present;
+    an image-only clear (no NVS record at all) is not gated by it, since
+    there is no record to have reviewed.
 
     REFUSES UNLESS ``confirm=True`` -- without it, this is a dry run: it
-    reports the pending record (or "nothing pending") and says what it
-    WOULD clear, but sends no POST. Same rule crash_report_ack()/safety_
+    reports what is pending (record and/or image) and says what it WOULD
+    clear, but sends no POST. Same rule crash_report_ack()/safety_
     set_rate_guard() use.
 
     With ``confirm=True`` (and, if needed, ``allow_unacknowledged=True``),
     POSTs the clear (crash_report_clear_http_client.py, over the same
     web-auth seam every other ADMIN-tier write tool in this package uses),
-    then re-fetches GET /api/crash_report and FAILS LOUDLY (does not
-    report success) if the record still reads ``present: true``
-    afterward -- an ``{"ok":true}`` POST reply is not trusted alone, same
-    rule crash_report_ack()'s own docstring gives (see CLAUDE.md's
-    boot_guard write-lies section for why an unverified success report is
-    exactly the failure class this project has been bitten by before).
+    then re-fetches BOTH GET /api/crash_report and GET /api/coredump/info
+    and FAILS LOUDLY (does not report success) if EITHER still reads
+    present afterward -- an ``{"ok":true}`` POST reply is not trusted
+    alone, same rule crash_report_ack()'s own docstring gives (see
+    CLAUDE.md's boot_guard write-lies section for why an unverified
+    success report is exactly the failure class this project has been
+    bitten by before). Note ``hal_sysinfo_coredump_erase()`` (esp_core_
+    dump_image_erase()) can itself answer non-OK on an already-empty
+    partition -- if the board's own erase 500s on a partition this tool's
+    own pre-fetch already saw as not-present, that is reported as the
+    ordinary 500 failure below, not silently swallowed.
 
     A 500 ("coredump erase failed" -- the ONLY failure the board's own
     crash_report_clear() propagates; a failed NVS erase of the crash
@@ -392,14 +412,14 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
     generic error string. Unlike /ack, this route has no separate 409
     "nothing to do" status -- crash_report_clear() always attempts the
     erase, so a POST is only ever sent here when the pre-fetch already
-    confirmed a record is present.
+    confirmed the record and/or the image is present.
 
     Host is auto-resolved the same way get_heap_status()/crash_report_ack()
     do; pass `host` explicitly for kilnctl.local or a board reachable only
     from a different network than this link's serial port.
     """
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as crash_report_ack()
-    from . import crash_report_clear_http_client
+    from . import coredump_fetch, crash_report_clear_http_client
 
     resolved = _ota_resolve_host(host)
     try:
@@ -407,20 +427,34 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
     except dashboard_http_client.DashboardHttpError as exc:
         return f"error: could not read GET /api/crash_report (host={resolved}): {exc}"
 
-    if not before.get("present"):
-        return f"nothing pending -- GET /api/crash_report reports present=false (host={resolved})"
+    try:
+        image_before = coredump_fetch.get_coredump_info(resolved)
+    except coredump_fetch.CoredumpFetchError as exc:
+        return f"error: could not read GET /api/coredump/info (host={resolved}): {exc}"
 
-    summary = _describe_crash_report(before)
+    def _image_summary(info) -> str:
+        return (f"coredump image: present={info.present} data_len=0x{info.data_len:08x} "
+                f"partition_size=0x{info.partition_size:08x}")
 
-    if not before.get("acknowledged") and not allow_unacknowledged:
+    record_present = bool(before.get("present"))
+    image_present = image_before.present
+    image_summary = _image_summary(image_before)
+
+    if not record_present and not image_present:
+        return (f"nothing pending -- no crash record and no coredump image present "
+                f"({image_summary}) (host={resolved})")
+
+    summary = _describe_crash_report(before) if record_present else "no crash record present"
+
+    if record_present and not before.get("acknowledged") and not allow_unacknowledged:
         return (
             f"REFUSED: record is present but NOT acknowledged -- pass allow_unacknowledged=True "
-            f"to clear an unreviewed crash anyway -- {summary} (host={resolved})"
+            f"to clear an unreviewed crash anyway -- {summary}; {image_summary} (host={resolved})"
         )
 
     if not confirm:
         return (
-            f"DRY RUN (pass confirm=True to actually clear) -- pending crash: {summary} "
+            f"DRY RUN (pass confirm=True to actually clear) -- {summary}; {image_summary} "
             f"(host={resolved})"
         )
 
@@ -428,21 +462,31 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
         crash_report_clear_http_client.post_crash_report_clear(resolved)
     except crash_report_clear_http_client.CrashReportClearHttpError as exc:
         if exc.status == 500:
-            return (f"failed: board could not erase the coredump image (500) -- {summary} "
-                     f"(host={resolved}): {exc}")
+            return (f"failed: board could not erase the coredump image (500) -- {summary}; "
+                     f"{image_summary} (host={resolved}): {exc}")
         return f"error clearing crash report over HTTP (host={resolved}): {exc}"
 
     try:
         after = dashboard_http_client.get_crash_report(resolved)
-    except dashboard_http_client.DashboardHttpError as exc:
+        image_after = coredump_fetch.get_coredump_info(resolved)
+    except (dashboard_http_client.DashboardHttpError, coredump_fetch.CoredumpFetchError) as exc:
         return (f"error: POST /api/crash_report/clear returned ok, but the confirming re-fetch "
                 f"failed (host={resolved}): {exc} -- clear state UNKNOWN, re-check before "
                 f"trusting this")
 
-    if not after.get("present"):
-        return f"ok - cleared and confirmed by read-back: {summary} (host={resolved})"
-    return (f"FAILED: POST /api/crash_report/clear returned ok, but the re-fetched record still "
-            f"reads present=true -- {summary} (host={resolved}). Do not trust this as cleared.")
+    record_gone = not after.get("present")
+    image_gone = not image_after.present
+    if record_gone and image_gone:
+        return (f"ok - cleared and confirmed by read-back: {summary}; {_image_summary(image_after)} "
+                 f"(host={resolved})")
+    still_present = []
+    if not record_gone:
+        still_present.append("crash record still present=true")
+    if not image_gone:
+        still_present.append("coredump image still present=true")
+    return (f"FAILED: POST /api/crash_report/clear returned ok, but the re-fetch shows "
+            f"{'; '.join(still_present)} -- {summary}; {_image_summary(image_after)} "
+            f"(host={resolved}). Do not trust this as cleared.")
 
 
 @_srv._tool()
