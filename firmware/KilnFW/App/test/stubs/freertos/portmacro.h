@@ -15,4 +15,13 @@ typedef int portMUX_TYPE;
 #define portENTER_CRITICAL(mux) ((void)(mux))
 #define portEXIT_CRITICAL(mux)  ((void)(mux))
 
+// taskENTER_CRITICAL/taskEXIT_CRITICAL -- the FreeRTOS task-level spelling of
+// the same primitive (ota_pico_relay.c's s_status_mux guard uses these, not
+// the port-level names above). Added for test_ota_pico_relay.c, the first
+// host test to compile a file that calls them; same "expands to nothing,
+// sufficient for a single-threaded host test" reasoning as portENTER_CRITICAL
+// above.
+#define taskENTER_CRITICAL(mux) ((void)(mux))
+#define taskEXIT_CRITICAL(mux)  ((void)(mux))
+
 #endif // KILNCTL_TEST_STUB_PORTMACRO_H

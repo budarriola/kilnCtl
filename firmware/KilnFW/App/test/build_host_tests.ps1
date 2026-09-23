@@ -989,6 +989,36 @@ try {
 
     Invoke-HostTestExe -Name "dashboard_status_http" -ExePath $exe9 -BuildCmd $cmd9
 
+    # ---- test_ota_pico_relay.c: its own, separate executable -----------------
+    # docs/PICO_AUTO_UPDATE_PLAN.md used to flag this gap: "ota_pico_relay.c's
+    # own state machine has no host test today (only its terminal-state
+    # recognition is exercised indirectly)." relay_task_fn() is `static` with
+    # no other seam into it, so this file #includes ota_pico_relay.c directly
+    # -- same convention as test_ota_http.c/test_dashboard_status_http.c above
+    # -- and needs its own executable for the same file-scope TAG/static
+    # collision reason. It also needs its own PRIVATE freertos/task.h (see
+    # stubs_ota_pico_relay/freertos/task.h's own header comment): the shared
+    # stub hardcodes xTaskGetTickCount() to 0, which would make
+    # relay_wait_for_states()'s timeout branch unreachable and hang this
+    # executable on any unmatched wait -- this private shim gives it a
+    # controllable fake clock instead. hal_time_now_us() is linked for REAL
+    # (hwAbstraction/host/fake_time.c), same convention as every other
+    # executable that needs it.
+    $exeOtaPicoRelay = Join-Path $outDir "kilnctl_host_tests_ota_pico_relay.exe"
+    $otaPicoRelayObjDir = Join-Path $outDir "ota_pico_relay"
+    New-Item -ItemType Directory -Force -Path $otaPicoRelayObjDir | Out-Null
+    # /I stubs_ota_pico_relay precedes @hostTestsRsp's own /I list so this
+    # executable's private freertos/task.h shim wins over the shared
+    # stubs/freertos/task.h without touching the shared response file or any
+    # other executable's include resolution.
+    $otaPicoRelayStubDir = Join-Path $testDir "stubs_ota_pico_relay"
+    $cmdOtaPicoRelay = "call `"$vcvars`" x64 >nul && cl /I`"$otaPicoRelayStubDir`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$otaPicoRelayObjDir\\`" /Fe:`"$exeOtaPicoRelay`" " +
+            "`"$(Join-Path $testDir 'test_ota_pico_relay.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+
+    Invoke-HostTestExe -Name "ota_pico_relay" -ExePath $exeOtaPicoRelay -BuildCmd $cmdOtaPicoRelay
+
     # ---- test_uart_protocol_link_delegate.c: its own NINTH, separate executable
     # SaftyFW/TODO.md Phase 1's "KilnFW's uart_protocol.c delegating framing/CRC,
     # proven byte-identical" item -- see that file's own header comment. Needs
@@ -2506,7 +2536,10 @@ try {
     # iter_tune_restore_post_handler()'s persist-on-success/refuse-on-
     # rejected-apply/refuse-while-autotune-active behaviour, previously
     # untested (see that file's own header comment).
-    $totalExpected = 59
+    # 59 -> 60: added test_ota_pico_relay.c's own Invoke-HostTestExe call --
+    # ota_pico_relay.c's relay state machine, untested until now
+    # (docs/PICO_AUTO_UPDATE_PLAN.md).
+    $totalExpected = 60
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
