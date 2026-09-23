@@ -3,8 +3,8 @@ dependencies:
   # need the raw station IP -- see mdns_init()/mdns_hostname_set() in main.c.
   espressif/mdns: "^1"
   # LittleFS for the `logs` partition, staged per docs/FILESYSTEM_PLAN.md
-  # step 1 -- registry fetch only, nothing in App/drivers references this
-  # component yet (that's step 2). Not used to mount anything today.
+  # step 2 landed (b039d5ee): log_store_mount.c mounts logs with this component
+  # when CONFIG_KILNCTL_LOGS_LITTLEFS is set (default off, SPIFFS path otherwise).
   joltwallet/littlefs: "^1"
   # LVGL is NOT listed here -- it's vendored as a git submodule at
   # firmware/KilnFW/components/lvgl (pinned to v9.5.0), matching how
