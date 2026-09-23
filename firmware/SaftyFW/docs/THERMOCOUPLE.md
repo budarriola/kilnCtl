@@ -483,10 +483,6 @@ sensor reading low tells you nothing at all.
       deferred as materially larger than this fix's own scope (see that
       header's comment for why). This does not touch the wire protocol (no
       frame length or protocol version change).
-- [ ] **Follow-up, not yet done:** a boundary/ms-wrap host test for
-      `max31856_live_check_tick()` — the elapsed-time comparison against
-      `MAX31856_LIVE_CHECK_INTERVAL_MS` has no test covering `now_ms` wrap or
-      the exact tick boundary today.
 - [ ] **Follow-up, not yet done:** surface a live-config mismatch on the wire
       via a spare Frame A `flags2` bit, once a change touching all of
       `link_frame_pack_status()`'s ~14 positional call sites (one production,

@@ -48,9 +48,12 @@
 >   ~14 positional call sites made it materially larger than this fix's scope.
 >   `thermo_task`'s measured stack grew 1224→1232 B (ceiling bumped to match,
 >   then re-verified unchanged in the follow-up commit); 23 B new `.bss`.
->   279/279 host tests, negative-tested. Two follow-ups tracked in
->   `firmware/SaftyFW/docs/THERMOCOUPLE.md`: a boundary/ms-wrap host test for
->   `max31856_live_check_tick()`, and the deferred `flags2` wire surface.
+>   279/279 host tests, negative-tested. One follow-up (a boundary/ms-wrap
+>   host test for `max31856_live_check_tick()`) landed same day, `8fb05c36`
+>   (Opus B1) — the production comparison already used the wraparound-safe
+>   `(int32_t)(now_ms - due_ms) >= 0` idiom, so this was test-only. The
+>   remaining follow-up, tracked in `firmware/SaftyFW/docs/THERMOCOUPLE.md`: the
+>   deferred `flags2` wire surface.
 > - **`compile_esp_backends.ps1`/`compile_pico_backends.ps1` now SKIP-FAST
 >   under `-Fast`** (`71e19c86`): both depend on phase-1 target-build output
 >   (`KilnFW/build/compile_commands.json`,
