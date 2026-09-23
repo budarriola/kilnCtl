@@ -675,6 +675,23 @@ review, and is recorded in the same places.
 justify the fuzzy error axis vs `z->effective_target_c`. *Stop:* if aligning
 changes behaviour for any zone with a non-zero `approach_rate_cap_c_per_hr`, stop
 and escalate — that is a behaviour change, out of scope here.
+**DONE, already landed 2026-09-11 (`7d76d8fc`), predating this plan's own §8
+schedule** — verified 2026-09-22 against `origin/main`:
+`pid_fuzzy_prepare_gains()` (`profile_executor_pid_tick.c`) computes
+`error_c` from `zone_commanded_setpoint_c(z, zi)`, the same helper
+`pid_family_zone_tick()`'s `pid_update_terms()`/`zone_feedforward()` calls use,
+rather than the shared `s_exec.target_c` — no second call site left to drift.
+All three live zones still read `approach_rate_cap_c_per_hr == 0.0`, so the
+entry stop-condition (no live behaviour change at cap 0) was and remains
+satisfied; the sibling `seed_bumpless_with_ff()` instance of the same bug was
+fixed in the same commit. Regression coverage:
+`test_profile_executor_prestart.c` calls the real `pid_fuzzy_prepare_gains()`
+with a configured cap and a diverged `effective_target_c` and checks its
+output against two direct `pid_fuzzy_adjust()` calls (correct-error vs.
+old-wrong-error), proving both the cap-0 no-op and the nonzero-cap coupling;
+negative-tested by hand at the time (revert, rebuild, 4 checks fail, restore,
+forced rebuild, 4949/4949 passes). No further code or test change made by
+this pass.
 
 **Stage 2 — decision point.** *Entry:* stages 0-1 complete. Re-run §4.3's
 criteria against stage 0's table and put the (iii)-vs-(ii)-vs-(iv) choice to the
@@ -712,7 +729,7 @@ work specifically* are listed.
 | **Persisted baseline that ratchets** (same memory entry, `project_self_referential_rested_check`) | Monotonically-rising confidence is this shape exactly | Under the recommendation, nothing persists and ratchets — a further argument for (v)/(iii) over (i) |
 | **Negative test on a mirror is vacuous** (`project_negative_test_on_a_mirror_is_vacuous`) | `fuzzy_gain_mirror_drift_check.py` is a Python mirror of `pid_fuzzy.c`. Breaking the mirror to prove a check fires proves nothing | Negative-test by breaking `pid_fuzzy.c` itself, then **restore by hand** and prove with an empty `git diff` — never `git checkout --` (`feedback_negative_test_restore_by_hand`) |
 | **Idealised test input hides branches** (`project_idealized_test_input_bug_class`) | Stage 0 feeds synthetic error/rate by design. Unquantized synthetic input will exercise cells the 5 s / quantized real sampling never reaches | Stage 0's table is a statement about the *math*, not about reachability. Label it so; do not let a cell "exercised in the probe" count as evidence for a confidence scheme |
-| **Paired input left shared** (`project_paired_input_left_shared`) | Finding (D), live today and inert only because all three caps read 0.0 | Stage 1 |
+| **Paired input left shared** (`project_paired_input_left_shared`) | Finding (D). **Fixed** `7d76d8fc` (2026-09-11, before Stage 1 was scheduled here) — `pid_fuzzy_prepare_gains()` now calls the same `zone_commanded_setpoint_c(z, zi)` helper `pid_family_zone_tick()` uses | Closed — see Stage 1 |
 | **Bypassed owner module** (`project_bypassed_owner_module_bug_class`) | A second gain-adaptation mechanism beside `adaptive_tune` (finding B) is this class applied to gains | Single-writer rule, criterion 5. Extend `adaptive_tune`; do not parallel it |
 | **A sim win read as a hardware result** (scoping §6.2) | The single-zone harness is trustworthy for *ranking*, not for absolute degC | Every sim claim must be written as "under `sim_plant.c`'s model", and multi-zone claims not made at all |
 | **`abs_max_temp_c` on the Pico** (`feedback_abs_max_same_or_looser`) | Nothing in this plan touches safety-processor state | Stated for the record; no work item |
