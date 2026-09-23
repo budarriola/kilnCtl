@@ -22,6 +22,18 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $CcPath = Join-Path $RepoRoot "firmware\KilnFW\build\compile_commands.json"
 
 if (-not (Test-Path $CcPath)) {
+    # SKIP-FAST (2026-09-23): -Fast skips check_00_kilnfw_target_build.ps1,
+    # the sole producer of compile_commands.json in this tree -- so this
+    # missing-file condition is a direct, expected consequence of -Fast, not
+    # a defect. Relabeled to SKIP-FAST only when run_all_checks.ps1 actually
+    # set KILNCTL_CHECKS_FAST (i.e. -Fast is in effect); with the env var
+    # unset, a missing compile_commands.json still means the build genuinely
+    # never ran, and this stays a FAIL. Same convention as
+    # check_embedded_pico_image_fresh.ps1.
+    if ($env:KILNCTL_CHECKS_FAST) {
+        Write-Host "SKIP-FAST: Missing $CcPath -- -Fast skipped the KilnFW target build that produces it."
+        exit 3
+    }
     Write-Error "Missing $CcPath -- run build_kilnfw (or idf.py build) at least once first."
     exit 1
 }

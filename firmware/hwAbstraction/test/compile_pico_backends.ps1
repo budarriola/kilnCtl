@@ -32,11 +32,27 @@ $BuildDir = Join-Path $RepoRoot "firmware\SaftyFW\build"
 $NinjaPath = Join-Path $BuildDir "build.ninja"
 $RulesPath = Join-Path $BuildDir "CMakeFiles\rules.ninja"
 
+# SKIP-FAST (2026-09-23): -Fast skips check_00_saftyfw_target_build.ps1, the
+# sole producer of build.ninja/CMakeFiles/rules.ninja in this tree -- so
+# either file being missing is a direct, expected consequence of -Fast, not
+# a defect. Relabeled to SKIP-FAST only when run_all_checks.ps1 actually set
+# KILNCTL_CHECKS_FAST (i.e. -Fast is in effect); with the env var unset, a
+# missing build.ninja/rules.ninja still means SaftyFW genuinely was never
+# configured/built, and this stays a FAIL. Same convention as
+# check_embedded_pico_image_fresh.ps1.
 if (-not (Test-Path $NinjaPath)) {
+    if ($env:KILNCTL_CHECKS_FAST) {
+        Write-Host "SKIP-FAST: Missing $NinjaPath -- -Fast skipped the SaftyFW target build that produces it."
+        exit 3
+    }
     Write-Error "Missing $NinjaPath -- configure/build SaftyFW at least once first (e.g. via CMake+Ninja)."
     exit 1
 }
 if (-not (Test-Path $RulesPath)) {
+    if ($env:KILNCTL_CHECKS_FAST) {
+        Write-Host "SKIP-FAST: Missing $RulesPath -- -Fast skipped the SaftyFW target build that produces it."
+        exit 3
+    }
     Write-Error "Missing $RulesPath -- configure/build SaftyFW at least once first (e.g. via CMake+Ninja)."
     exit 1
 }
