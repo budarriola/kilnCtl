@@ -37,13 +37,22 @@ across module boundaries.
 
 What counts as a violation: a `profile_exec_status_t` (or
 `autotune_engine_status_t`-style array-of-it) declared as a plain automatic
-variable -- `profile_exec_status_t foo;` or `profile_exec_status_t foo[N];`
--- anywhere under firmware/KilnFW/App/drivers/**/*.c. A pointer declaration
+variable -- `profile_exec_status_t foo;`, `profile_exec_status_t foo[N];`,
+or the same two shapes with a single-line initializer
+(`profile_exec_status_t foo = {0};`, `profile_exec_status_t foo = {};`,
+`profile_exec_status_t foo = (profile_exec_status_t){...};`,
+`profile_exec_status_t foo[N] = {0};`) -- anywhere under
+firmware/KilnFW/App/drivers/**/*.c. A pointer declaration
 (`profile_exec_status_t *foo = heap_caps_malloc(...)`) is NOT flagged --
 that is the fix, not the bug. A function PARAMETER of this type
 (`void f(profile_exec_status_t *st)` or, more rarely, by value) is also not
 flagged by the declaration regex below since parameters do not match the
-"name;" / "name[N];" statement shape this scans for.
+"name;" / "name[N];" / "name = ...;" statement shape this scans for. A
+`static` local (`static profile_exec_status_t foo;`) is also NOT flagged --
+that is an allowed fix (see telemetry_log.c), and the regex only matches
+when the type name starts the line, which `static` precedes. A multi-line
+brace initializer whose semicolon lands on a later line is not caught by
+this single-line scan; no such call site exists in this codebase today.
 
 This is a source-text scan (like the repo's other check_*.py/ps1 guards),
 not a compiler AST -- see the negative-test evidence in
@@ -78,13 +87,18 @@ SCAN_DIRS = ("firmware/KilnFW/App/drivers",)
 EXPLICIT_ALLOWLIST: set[tuple[str, int]] = set()
 
 #: Matches a plain automatic declaration of profile_exec_status_t, with or
-#: without an array suffix, but NOT a pointer declaration (no leading `*`
-#: after the type name) and not a cast/sizeof usage. Deliberately anchored
-#: on `profile_exec_status_t` as a whole word so it does not also match
-#: `profile_exec_status_t *` (heap-alloc, fine) or a comment mentioning the
-#: type name in prose.
+#: without an array suffix and with or without a single-line initializer
+#: (`= {0};`, `= {};`, `= (profile_exec_status_t){...};`), but NOT a pointer
+#: declaration (no leading `*` after the type name) and not a cast/sizeof
+#: usage. Deliberately anchored on `profile_exec_status_t` as a whole word
+#: at the START of the (whitespace-trimmed) line, so it does not also match
+#: `profile_exec_status_t *` (heap-alloc, fine), a comment mentioning the
+#: type name in prose, or a `static profile_exec_status_t foo;` local
+#: (allowed fix -- `static` precedes the type name, so the anchor excludes
+#: it).
 STACK_LOCAL_RE = re.compile(
-    r"^\s*profile_exec_status_t\s+(?!\*)[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\s*;"
+    r"^\s*profile_exec_status_t\s+(?!\*)[A-Za-z_][A-Za-z0-9_]*"
+    r"(\[[^\]]*\])?\s*(=[^;]*)?;"
 )
 
 
