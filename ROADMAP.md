@@ -1,8 +1,58 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, hmacmirror/d3bootid/
+> **Status:** planning · **Last reviewed:** 2026-09-23, the machine-wide build
+> gate, the `safety_get_param` GET_PARAM wire, and cfgrecrc closed
+> (thirty-fourth sweep) — open items below.
+> - **Machine-wide heavy-build gate landed** (`e3aaa4ff`, opus-review fixes
+>   `2afc1d44`/`d487db9f`/`4d8c3327`, PowerShell-side mutex-prefix parity
+>   `e51f8b36`): `tools/build_gate.ps1`
+>   (`Enter-KilnBuildGate`/`Exit-KilnBuildGate`) and its Python mirror
+>   `tools/PcTools/src/mcpkit/buildgate.py` cap heavy builds (ESP-IDF target
+>   builds, MSVC host-test builds) at `KILNCTL_BUILD_GATE_SLOTS` (default 2)
+>   across every session on the machine at once, via named kernel mutexes
+>   (`Global\kilnctl_build_slot_<i>`) rather than a semaphore, so a killed
+>   agent can't strand a slot. Answers the five hard freezes (Kernel-Power 41)
+>   recorded in one week under uncoordinated parallel `idf.py`/ninja/MSVC
+>   builds. Wired into every `check_00_*.ps1`, `build_host_tests.ps1`, and the
+>   `build_kilnfw`/`build_saftyfw*` MCP tools (see `docs/agent_rules/COMMON.md`
+>   "Heavy builds"); never bypass it with `KILNCTL_BUILD_GATE_SLOTS=0` or a
+>   direct `idf.py`/`cmake`/`ninja`/`cl.exe` call outside those entry points.
+> - **`safety_get_param` MCP tool landed, and the GET_PARAM wire it depends on
+>   is now real end to end.** `d3c9f194` (opus-review fixes `8bdb232b`) added
+>   the PC-side GET_PARAM(0x23)/PARAM(0x1E) wire codec and a READ-ONLY
+>   `safety_get_param` tool that reports a Pico refusal as a refusal, never as
+>   "not found". `6cb77943` then wired the missing ESP32-S3 side —
+>   `SAFETY_CMD_GET_PARAM`/`SAFETY_CMD_PARAM` passthrough,
+>   `KILNLINK_PROTOCOL_VERSION` 7 — so a param such as `0x0505` (the config
+>   re-CRC fail counter, see cfgrecrc below) can actually be read over the
+>   isolated link rather than timing out; stale "unsupported"/"not wired"
+>   wording and hard-coded commit-hash citations were removed from the PC-side
+>   docstrings the same day (`0a40224e`, `3f62cbbf`). Separately,
+>   `safety_link`'s own GET_PARAM/GET_STACK_MARGIN reply loop only drained one
+>   frame per timeout budget instead of looping across it — fixed same day
+>   (`6bc4fc23`, follow-ups `a33239d7`) and covered by a new host-test spin
+>   guard on the receive stub (`8ce6d794`).
+> - **SaftyFW periodic in-RAM config re-CRC landed, closing cfgrecrc**
+>   (`7b0cf2b3`, opus re-review fixes `9abc5c4e`/`ca70e522`/`fb756d1d`):
+>   `config_check_period_s` now actually ticks — the RAM copy of the
+>   commissioned config is re-CRC'd on that cadence and a mismatch restores
+>   from the persisted `s_persisted_record` (fixed same day, `f6d88133`: the
+>   first landing wrongly restored compiled defaults, which would have
+>   silently disarmed S1/other guards on a real corruption, the same class of
+>   defect as the `repair_to_defaults` finding elsewhere in this file). The
+>   failure counter is `0x0505` over GET_PARAM, per the row above.
+> - **Test-hardening landed alongside the iter_tune step-7 and Pico-OTA-relay
+>   rows below** (not separately gated): `2ded3afa` added a host test for
+>   `ota_pico_relay.c`'s state machine (107 checks); `327f0b4d` fixed two of
+>   those tests an Opus review found vacuous; `b8f8ab8e` pinned
+>   `test_retransmit_exhausted_rounds` against an off-by-one-high loop bound
+>   found while fixing it.
+> - **Bench state unchanged**: ESP still `9c26dd91`, Pico still `987050f6` (no
+>   CMSIS-DAP probe enumerates), Class C heat/firing rows still BLOCKED on
+>   `estop_verified`.
+> **Previously reviewed:** 2026-09-23, hmacmirror/d3bootid/
 > maxreassert closed and the compile_esp/pico_backends -Fast SKIP-FAST fix
-> (thirty-third sweep) — open items below.
+> (thirty-third sweep).
 > - **`check_ota_http_context_mirror.py` landed, closing hmacmirror**
 >   (`6d2e4349`): extracts the `OTA_HTTP_CONTEXT_*` enumerators from
 >   `ota_state.h` and fails if any lacks an explicit case in `ota_http.c`'s
@@ -1816,7 +1866,7 @@ open is short:
 |---|---|---|
 | ~~Attach the safety thermocouple to the safety processor's own MAX31856 (J7)~~ — **stale, corrected 2026-09-09: fitted 2026-08-24**, reading `30.20 C (CJ 28.08 C)`; see M3 above. This row was left behind after the fact | — | `firmware/SaftyFW/docs/SAFETY_MODEL.md` §S5 |
 | Bench webcam re-aim + LCD colour verification (numeric pixel sampling, not eyeball) | Display power / colour items above | `CLAUDE.md` "Camera aim (2026-09-06)"; `DISPLAY_ST7796_PLAN.md` §4 |
-| ~~`iter_tune.c` wire-vs-delete decision~~ — **decided 2026-09-08: keep it, redesign it.** Three open questions for the owner in `ITER_TUNE_REDESIGN_PLAN.md` §9 are settled by that section itself (auto-snapshot anchor, 6-trial budget, bench-fixture-only scope). **Steps 1, 2 and 5 landed 2026-09-09** (`8f80a4de`, three latent defects found in review fixed same day, `249ce287`): `control/firing_score.c`/`firing_compare.c` plus a rewritten `iter_tune.c` decision core (old whole-firing IAE path deleted, not left dual), validated by a Monte-Carlo sim harness (`sim_iter_tune.c`) — 24/24 converged, 660 null comparisons 0% false-accept, 660 mismatched-plant runs 13 better/0 worse/0 cage violations. **Corrected 2026-09-14 roadmap truth-up: step 3 (the G1-G4 sim-harness gaps, `e0d2e006`) and step 4 (the §6.5 credibility gate, `225d4b91`) also landed 2026-09-09, and step 7's write-surface guard (`check_iter_tune_write_surface.ps1`, `f3fcd597`) too** — `docs/ITER_TUNE_REDESIGN_PLAN.md` itself was corrected 2026-09-10 to say so; this row never followed. **Still open: the credibility gate FAILS against a real recorded firing for a currently-unknown reason** (two explanations investigated and retired — see the 2026-09-11 sweep note above, do not re-propose either), plus the noise-floor artifact and step 9's first hardware trial (owner present). Step 7 (persistence/HTTP surface) landed but acceptance is only partially met -- see docs/ITER_TUNE_REDESIGN_PLAN.md row 7 for exactly what is missing. Shadow mode (step 8) remains unbuilt. | `docs/ITER_TUNE_REDESIGN_PLAN.md` §8/§9 |
+| ~~`iter_tune.c` wire-vs-delete decision~~ — **decided 2026-09-08: keep it, redesign it.** Three open questions for the owner in `ITER_TUNE_REDESIGN_PLAN.md` §9 are settled by that section itself (auto-snapshot anchor, 6-trial budget, bench-fixture-only scope). **Steps 1, 2 and 5 landed 2026-09-09** (`8f80a4de`, three latent defects found in review fixed same day, `249ce287`): `control/firing_score.c`/`firing_compare.c` plus a rewritten `iter_tune.c` decision core (old whole-firing IAE path deleted, not left dual), validated by a Monte-Carlo sim harness (`sim_iter_tune.c`) — 24/24 converged, 660 null comparisons 0% false-accept, 660 mismatched-plant runs 13 better/0 worse/0 cage violations. **Corrected 2026-09-14 roadmap truth-up: step 3 (the G1-G4 sim-harness gaps, `e0d2e006`) and step 4 (the §6.5 credibility gate, `225d4b91`) also landed 2026-09-09, and step 7's write-surface guard (`check_iter_tune_write_surface.ps1`, `f3fcd597`) too** — `docs/ITER_TUNE_REDESIGN_PLAN.md` itself was corrected 2026-09-10 to say so; this row never followed. **Still open: the credibility gate FAILS against a real recorded firing for a currently-unknown reason** (two explanations investigated and retired — see the 2026-09-11 sweep note above, do not re-propose either), plus the noise-floor artifact and step 9's first hardware trial (owner present). Step 7 (persistence/HTTP surface) landed (`7e754997`, opus-review fixes `bb6d3947`) but acceptance is only partially met -- see docs/ITER_TUNE_REDESIGN_PLAN.md row 7 for exactly what is missing; it bumped `wifi_provision_http.c`'s `max_uri_handlers` 165 -> 170 for headroom in the same commit, per `check_uri_handler_cap.ps1`. Shadow mode (step 8) remains unbuilt. | `docs/ITER_TUNE_REDESIGN_PLAN.md` §8/§9 |
 ~~CT commissioning steps 0 and 6 (noise-floor capture, bench run with the owner)~~ — **both closed.** Step 0 was closed 2026-09-18; step 6 closed 2026-09-19 by owner decision as a software walkthrough only (see the M-size CT commissioning row above). S3/S4/S9/S14/S15 stay DORMANT (`i_normal_a not measured`) — that is now expected to stay true on this bench permanently, not pending further work; only a real load can change it. | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; M5 |
 | ~~E-stop double-pole switch not yet fitted~~ — **closed 2026-09-10, owner decision: "im not going to wire the double pole switch on the fixture. consider it closed so long as the signal is checked and acted on."** Pole 2 (GPIO9 → S7 → `relay_owner` trip) is read, debounced, tripped and relay-de-energized independently on the RP2040, end-to-end pinned by `firmware/SaftyFW/test/test_estop_deenergizes_relay.c`, and bench-verified via `firmware/SaftyFW/README.md`'s procedure + `estop_verified`. Pole 1 stays permanently unwired on this fixture, so the E-stop here is firmware-mediated only — immaterial on this ~4 W/120 V fixture; a real kiln should still wire pole 1 | — (was: full E-stop hardware coverage beyond GPIO9's software-visible pole) | `firmware/SaftyFW/docs/HARDWARE.md` §5.1/§5.2; `docs/SAFETY_CASE.md` H7 |
 | `abs_max_temp_c` must be raised **Pico-first, then ESP**, before a real (non-bench) firing — and the Pico's ceiling must never end up tighter than the ESP's | Real-kiln firing readiness | `docs/SETUP_WIZARD.md`; `docs/ON_OFF_ZONE_PLAN.md` |
