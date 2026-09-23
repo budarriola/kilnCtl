@@ -143,15 +143,21 @@ extern "C" {
  * caller bug) and is still logged and refused, not silently accepted.
  *
  * Not internally locked: every current call site registers from a context
- * that is effectively single-threaded with respect to this registry --
- * boot-time tasks register once each from app_main()'s own sequential boot
- * sequence, and the three repeat-call OTA sites above register from a
- * background task guarded by that feature's own update-claim mutex, so at
- * most one of them can be mid-registration at a time (the httpd worker
- * itself is also single-threaded, so two POSTs can never reach the register
- * call concurrently either). If a future caller registers from a genuinely
- * concurrent context, this function needs a critical section added, not
- * just a duplicate-safe scan. */
+ * that is effectively single-threaded with respect to this registry.
+ * Boot-time tasks register once each from app_main()'s own sequential boot
+ * sequence. The three repeat-call OTA sites above (ota_http_esp.c,
+ * ota_http_pico.c, ota_http_recovery.c) register directly in their POST
+ * handler -- not from inside the task body they just created -- and every
+ * httpd POST handler runs on the single httpd worker task, so those three
+ * call sites are serialized by that worker, not by any per-feature update
+ * claim (recovery_exit takes no such claim at all; see its handler). There
+ * is one pre-existing, accepted narrow window this doesn't cover: httpd
+ * starts in main_network_http_bringup(), before main_bridges_bringup()
+ * registers its ~10 boot-time tasks (main.c), so an OTA POST arriving in
+ * that gap could register concurrently with a boot-time registration. This
+ * predates stack_margin_register() and is not introduced here. If a future
+ * caller registers from a genuinely concurrent context, this function needs
+ * a critical section added, not just a duplicate-safe scan. */
 bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t configured_stack_bytes);
 
 /* Number of tasks currently registered (<= STACK_MARGIN_MAX_TASKS). */

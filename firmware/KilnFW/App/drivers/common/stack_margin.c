@@ -37,11 +37,15 @@ bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t co
     // this case -- it is either a real name collision between two distinct
     // tasks or a caller bug -- so that one is still logged and refused
     // rather than silently accepted or silently appended.
+    // Compares only the first STACK_MARGIN_NAME_MAX-1 (19) chars of `name` --
+    // matches how names are stored below (name[STACK_MARGIN_NAME_MAX]).
     for (size_t i = 0; i < s_count; i++) {
         if (strncmp(s_entries[i].name, name, STACK_MARGIN_NAME_MAX - 1) == 0) {
             if (s_entries[i].handle_slot == (TaskHandle_t *)task_handle_slot) {
                 return true; // already registered by this exact call site -- no-op
             }
+            // A mismatched configured_stack_bytes on this same (name, slot)
+            // pair is not checked or reported here -- first registration wins.
             ESP_LOGE(TAG, "register() called for '%s' with a different handle slot than its "
                           "existing registration -- not re-registered (name collision?)",
                      name);
