@@ -170,6 +170,67 @@ def _resolve_app_flash_target(kiln_fw_root: str) -> partition_table.PartitionEnt
     )
 
 
+DEFAULT_PARTITION_TABLE_OFFSET = 0x8000
+
+
+def _resolve_partition_table_offset(kiln_fw_root: str) -> "tuple[int, str]":
+    """Reads `<kiln_fw_root>/sdkconfig` for `CONFIG_PARTITION_TABLE_OFFSET=0x....`
+    and returns `(offset, note)`.
+
+    Falls back to `DEFAULT_PARTITION_TABLE_OFFSET` (IDF's own default) ONLY
+    when the key is absent from sdkconfig (or sdkconfig itself is missing) --
+    `note` says so explicitly in that case. If the key IS present but its
+    value cannot be parsed as an integer, this raises `ValueError` rather
+    than silently falling back: a present-but-garbled value is far more
+    likely to mean the offset actually differs from the default than that
+    the file is merely malformed, and guessing wrong here writes the
+    partition table image over live flash at the wrong address -- the same
+    class of incident `_resolve_app_flash_target()` exists to prevent for
+    the app image."""
+    sdkconfig_path = os.path.join(kiln_fw_root, "sdkconfig")
+    try:
+        f = open(sdkconfig_path, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        # Covers both "does not exist" and any other unreadable-file case --
+        # os.path.isfile() is deliberately not used as a separate pre-check
+        # since some callers (unit tests faking build-output presence with a
+        # blanket os.path.isfile patch) would otherwise report a stale True
+        # here and then fail on the open() below anyway.
+        return (
+            DEFAULT_PARTITION_TABLE_OFFSET,
+            f"note: {sdkconfig_path} not found -- using IDF's default "
+            f"CONFIG_PARTITION_TABLE_OFFSET (0x{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
+        )
+    with f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("CONFIG_PARTITION_TABLE_OFFSET="):
+                continue
+            raw = line.split("=", 1)[1].strip()
+            try:
+                offset = int(raw, 0)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{sdkconfig_path} has CONFIG_PARTITION_TABLE_OFFSET={raw!r}, "
+                    f"which could not be parsed as an integer -- refusing to guess "
+                    f"the partition-table flash offset rather than risk writing it "
+                    f"to the wrong address."
+                ) from exc
+            note = ""
+            if offset != DEFAULT_PARTITION_TABLE_OFFSET:
+                note = (
+                    f"note: {sdkconfig_path} sets CONFIG_PARTITION_TABLE_OFFSET="
+                    f"0x{offset:x}, overriding IDF's default (0x"
+                    f"{DEFAULT_PARTITION_TABLE_OFFSET:x})."
+                )
+            return offset, note
+    return (
+        DEFAULT_PARTITION_TABLE_OFFSET,
+        f"note: {sdkconfig_path} has no CONFIG_PARTITION_TABLE_OFFSET key -- using "
+        f"IDF's default (0x{DEFAULT_PARTITION_TABLE_OFFSET:x}).",
+    )
+
+
 def _chip_app_target_partition(
     host: str, target_name: str, get_partitions_fn=None
 ) -> "tuple[Optional[partition_table.PartitionEntry], list[partition_table.PartitionEntry]]":
@@ -1127,6 +1188,13 @@ def flash_firmware(
     except ValueError as exc:
         return f"error: {exc}"
 
+    try:
+        partition_table_offset, partition_table_offset_note = _resolve_partition_table_offset(
+            effective_kiln_fw_root
+        )
+    except ValueError as exc:
+        return f"error: {exc}"
+
     app_bin_path = os.path.join(build_dir, "KilnCtrl.bin")
     app_bin_size = os.path.getsize(app_bin_path)
     if app_bin_size > app_target.size:
@@ -1209,6 +1277,8 @@ def flash_firmware(
     if kiln_fw_root:
         provenance_note += f"\nprovenance: kiln_fw_root override in use: {kiln_fw_root}"
     provenance_note += "\n" + _pico_image_provenance_note(app_bin_path)
+    if partition_table_offset_note:
+        provenance_note += "\n" + partition_table_offset_note
     _srv._session_log.info("flash_firmware: %s", provenance_note.replace("\n", " | "))
 
     stale = stale_check.check_kilnfw_stale(effective_kiln_fw_root)
@@ -1273,12 +1343,12 @@ def flash_firmware(
     tcl_parts = [
         f"adapter serial {MAIN_BOARD_JTAG_SERIAL}",
         "program_esp build/bootloader/bootloader.bin 0x0 verify",
-        # 0x8000 here is IDF's default CONFIG_PARTITION_TABLE_OFFSET, hardcoded
-        # rather than resolved from sdkconfig -- unlike app_target.offset above,
-        # which IS read from partitions.csv. If this project ever changes the
-        # partition table offset, this literal needs updating too (follow-up,
-        # not done here).
-        "program_esp build/partition_table/partition-table.bin 0x8000 verify",
+        # Resolved from <kiln_fw_root>/sdkconfig's CONFIG_PARTITION_TABLE_OFFSET
+        # (falling back to IDF's default, 0x8000, only when that key is absent)
+        # -- see _resolve_partition_table_offset(). Previously hardcoded to
+        # 0x8000 regardless of sdkconfig, unlike app_target.offset above (which
+        # IS read from partitions.csv); this closes that gap the same way.
+        f"program_esp build/partition_table/partition-table.bin 0x{partition_table_offset:x} verify",
         f"program_esp build/KilnCtrl.bin 0x{app_target.offset:x} verify",
     ]
     for entry in erase_targets:
@@ -1455,11 +1525,21 @@ def fixture_flash(
     if not openocd_exe:
         return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
 
+    fixture_root = _unit_test_fixture_fw_root()
+
     images: "list[tuple[str, str]]" = []  # (path, flash offset)
     if bootloader_bin:
         images.append((bootloader_bin, "0x0"))
     if partition_table_bin:
-        images.append((partition_table_bin, "0x8000"))
+        # Same _resolve_partition_table_offset() helper flash_firmware() uses
+        # for the main board, so the two can never drift independently --
+        # both used to hardcode 0x8000 (IDF's default) regardless of what
+        # this project's own sdkconfig actually says.
+        try:
+            fixture_partition_table_offset, _note = _resolve_partition_table_offset(fixture_root)
+        except ValueError as exc:
+            return f"error: {exc}"
+        images.append((partition_table_bin, f"0x{fixture_partition_table_offset:x}"))
     if app_bin:
         images.append((app_bin, "0x810000"))
     if not images:
@@ -1492,7 +1572,6 @@ def fixture_flash(
     parts[-1] += " reset exit"
     tcl = "; ".join(parts)
 
-    fixture_root = _unit_test_fixture_fw_root()
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=fixture_root, timeout_s=90)
     if ok:
         return "flashed and verified OK (" + ", ".join(os.path.basename(p) for p, _ in images) + "), board reset"

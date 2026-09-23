@@ -317,5 +317,64 @@ class FixtureFlashTest(unittest.TestCase):
         self.assertIn("flashed and verified OK", result)
 
 
+class FixtureFlashPartitionTableOffsetTest(unittest.TestCase):
+    """fixture_flash()'s partition_table_bin offset used to be hardcoded to
+    0x8000 regardless of the fixture project's own sdkconfig -- the same
+    defect class flash_firmware() had for the main board. Both now go
+    through the same _resolve_partition_table_offset() helper so they can't
+    drift independently; this covers fixture_flash()'s call site."""
+
+    def setUp(self):
+        self._openocd_patch = unittest.mock.patch.object(mf, "_find_openocd_exe", return_value="fake-openocd.exe")
+        self._openocd_patch.start()
+        self.addCleanup(self._openocd_patch.stop)
+
+        self._kill_patch = unittest.mock.patch.object(mf, "kill_openocd_sessions", return_value="")
+        self._kill_patch.start()
+        self.addCleanup(self._kill_patch.stop)
+
+        self.run_mock = unittest.mock.Mock(return_value=(True, "verified"))
+        self._run_patch = unittest.mock.patch.object(mf, "_run_openocd", self.run_mock)
+        self._run_patch.start()
+        self.addCleanup(self._run_patch.stop)
+
+        self._isfile_patch = unittest.mock.patch.object(mf.os.path, "isfile", return_value=True)
+        self._isfile_patch.start()
+        self.addCleanup(self._isfile_patch.stop)
+
+        self._ports_patch = unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG])
+        self._ports_patch.start()
+        self.addCleanup(self._ports_patch.stop)
+
+    def test_uses_resolved_offset_from_helper(self) -> None:
+        with unittest.mock.patch.object(mf, "_resolve_partition_table_offset", return_value=(0x10000, "")) as resolve_mock:
+            result = mf.fixture_flash(partition_table_bin="fake/partition-table.bin")
+        self.assertIn("flashed and verified OK", result)
+        resolve_mock.assert_called_once_with(mf._unit_test_fixture_fw_root())
+        _openocd_exe, _board_cfg, tcl = self.run_mock.call_args.args[:3]
+        self.assertIn('partition-table.bin" 0x10000 verify', tcl)
+        self.assertNotIn("0x8000", tcl)
+
+    def test_falls_back_to_default_when_helper_reports_default(self) -> None:
+        with unittest.mock.patch.object(
+            mf, "_resolve_partition_table_offset",
+            return_value=(mf.DEFAULT_PARTITION_TABLE_OFFSET, "note: no sdkconfig"),
+        ):
+            result = mf.fixture_flash(partition_table_bin="fake/partition-table.bin")
+        self.assertIn("flashed and verified OK", result)
+        _openocd_exe, _board_cfg, tcl = self.run_mock.call_args.args[:3]
+        self.assertIn('partition-table.bin" 0x8000 verify', tcl)
+
+    def test_unparsable_offset_refuses_before_openocd(self) -> None:
+        with unittest.mock.patch.object(
+            mf, "_resolve_partition_table_offset",
+            side_effect=ValueError("bad CONFIG_PARTITION_TABLE_OFFSET"),
+        ):
+            result = mf.fixture_flash(partition_table_bin="fake/partition-table.bin")
+        self.assertTrue(result.startswith("error:"), result)
+        self.assertIn("bad CONFIG_PARTITION_TABLE_OFFSET", result)
+        self.run_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

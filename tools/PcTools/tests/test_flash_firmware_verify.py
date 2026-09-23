@@ -948,6 +948,48 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self.assertIsNotNone(prov)
         self.assertIsNone(prov["kiln_fw_root_override"])
 
+    def _write_sdkconfig(self, contents: str) -> None:
+        with open(os.path.join(self.override_kiln_fw_root, "sdkconfig"), "w", encoding="utf-8") as f:
+            f.write(contents)
+
+    def test_partition_table_offset_present_non_default_is_honored(self):
+        """CONFIG_PARTITION_TABLE_OFFSET in sdkconfig, set to something other
+        than IDF's 0x8000 default, must be the offset actually written to."""
+        self._write_sdkconfig("CONFIG_PARTITION_TABLE_OFFSET=0x10000\n")
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("partition_table/partition-table.bin 0x10000 verify", tcl)
+        self.assertNotIn("partition-table.bin 0x8000 verify", tcl)
+
+    def test_partition_table_offset_absent_falls_back_with_note(self):
+        """No sdkconfig at all (or none containing the key) falls back to
+        IDF's default (0x8000) and the fallback is noted in the result, not
+        silently assumed."""
+        # setUp() never writes an sdkconfig for override_kiln_fw_root.
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("using IDF's default", result)
+
+    def test_partition_table_offset_absent_key_in_present_file_falls_back_with_note(self):
+        self._write_sdkconfig("CONFIG_SOMETHING_ELSE=y\n")
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertIn("flashed and verified OK", result)
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("using IDF's default", result)
+
+    def test_partition_table_offset_malformed_refuses_before_openocd(self):
+        """A present but unparsable value must refuse loudly rather than
+        guess -- never silently fall back to the default."""
+        self._write_sdkconfig("CONFIG_PARTITION_TABLE_OFFSET=not_a_number\n")
+        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        self.assertTrue(result.startswith("error:"), result)
+        self.assertIn("CONFIG_PARTITION_TABLE_OFFSET", result)
+        self.run_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
