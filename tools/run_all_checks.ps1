@@ -294,6 +294,32 @@ if (Test-Path $stackBudgetSymbolBoundsTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_sdkconfig_sibling_pair_guard.py (firmware/KilnFW/App/test/) is a
+# regression test for use_sdkconfig_for_elf()'s sibling-pair agreement guard
+# in this same directory's check_all_task_stack_budgets.py -- the "reset one
+# side of a pair" class where check_00_kilnfw_target_build.ps1 publishes a
+# checkbuild's sdkconfig next to the ELF, but a later plain `idf.py build`
+# replaces the ELF while leaving that published sibling in place, so the ELF
+# could silently be graded against a stale, disagreeing config. Named
+# test_*, not check_*, so the glob above does not pick it up; wired
+# explicitly here, same pattern as test_stack_budget_symbol_bounds.py above.
+# Needs no ELF and no toolchain, so it runs unconditionally.
+$sdkconfigSiblingPairGuardTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_sdkconfig_sibling_pair_guard.py"
+if (Test-Path $sdkconfigSiblingPairGuardTest) {
+    $checks += Get-Item $sdkconfigSiblingPairGuardTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected test $sdkconfigSiblingPairGuardTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing regression test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected test $sdkconfigSiblingPairGuardTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
 # test_check_ui_responsive_sweep.ps1 is a negative test, not a guard -- it
 # proves ui_responsive_sweep.mjs's isTransientHarnessError() classifier (used
 # by check_ui_responsive_sweep.ps1, itself glob-discovered above) can still

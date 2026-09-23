@@ -273,9 +273,11 @@ def _sdkconfig_candidates(elf):
 def _config_lines(path):
     """{CONFIG_KEY: value} for every non-comment `CONFIG_*=value` line.
 
-    A "# CONFIG_X is not set" comment line is deliberately excluded here (as
-    in _load_sdkconfig): this helper is only used to compare two sdkconfigs
-    for a real difference in SET options, not to diff comment formatting.
+    A "# CONFIG_X is not set" comment line is excluded here, matching
+    _load_sdkconfig's convention that absence and "is not set" are the same
+    value (the "n" value): a key present as `=y` in one file and absent (or
+    "is not set") in the other IS a real disagreement and is still reported
+    as one, via the set-difference of parsed keys.
     """
     parsed = {}
     with open(path, encoding="utf-8", errors="replace") as f:
