@@ -12,6 +12,18 @@ side of a pair" bug; see CLAUDE.md). `build_kilnfw()` now refreshes
 build/sdkconfig from the tree's live config after every successful
 build/reconfigure so the pair never has a chance to drift.
 
+2026-09-23 follow-up (opus review): the blind refresh above has its own
+narrow window. `check_00_kilnfw_target_build.ps1` publishes the checkbuild
+worktree's sdkconfig as the provenance record of the ELF it published. If
+the live sdkconfig is then edited and `build_kilnfw(jobs=N)` (the
+`ninja -j N` path) is called but ninja does NOT relink -- which it is not
+guaranteed to do off an sdkconfig-only change -- a blind copy would
+overwrite the correct published sibling with a config that never produced
+the ELF still on disk, silencing the sibling-agreement guard instead of
+tripping it. `_refresh_build_sdkconfig` now only copies when the live
+config already matches the sibling, or when the ELF actually changed
+(mtime/size) during this build; otherwise it skips and says so by name.
+
 Both the real toolchain call (`_run_locked`) and SaftyFW's own build are
 monkeypatched here -- this test proves only the refresh behavior, not that
 a real ESP-IDF build succeeded.
@@ -23,7 +35,16 @@ import os
 from mcpkit import workbench
 
 
-def _fake_ok_run_locked(tag, resource_key, argv, **kwargs):
+def _fake_ok_run_locked_relinks_elf(tag, resource_key, argv, **kwargs):
+    """Simulates a build that actually relinks build/KilnCtrl.elf."""
+    elf = os.path.join(resource_key, "KilnCtrl.elf")
+    with open(elf, "ab") as f:
+        f.write(b"x")
+    return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
+
+
+def _fake_ok_run_locked_no_relink(tag, resource_key, argv, **kwargs):
+    """Simulates a build where ninja decided nothing needed relinking."""
     return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
 
 
@@ -44,7 +65,9 @@ def _stub_common(monkeypatch, tmp_path, run_locked_fn):
 
 
 def test_successful_build_refreshes_stale_sibling(monkeypatch, tmp_path):
-    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked)
+    # No ELF exists before the build; the fake run_locked creates one, so the
+    # ELF demonstrably changed (None -> present) and the refresh proceeds.
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_relinks_elf)
     live = root / "firmware" / "KilnFW" / "sdkconfig"
     sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
     live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
@@ -57,7 +80,7 @@ def test_successful_build_refreshes_stale_sibling(monkeypatch, tmp_path):
 
 
 def test_no_live_config_skips_without_failing_the_build_report(monkeypatch, tmp_path):
-    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked)
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_relinks_elf)
     # No firmware/KilnFW/sdkconfig at all.
     result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
 
@@ -81,7 +104,7 @@ def test_failed_build_does_not_touch_sibling(monkeypatch, tmp_path):
 
 
 def test_fullclean_target_does_not_refresh(monkeypatch, tmp_path):
-    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked)
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_relinks_elf)
     live = root / "firmware" / "KilnFW" / "sdkconfig"
     sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
     live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
@@ -91,3 +114,65 @@ def test_fullclean_target_does_not_refresh(monkeypatch, tmp_path):
 
     assert "sdkconfig-refresh" not in result
     assert sibling.read_text(encoding="utf-8") == "# CONFIG_KILNCTL_GPIO_PROBE is not set\n"
+
+
+def test_live_differs_and_elf_unchanged_skips_refresh(monkeypatch, tmp_path):
+    """The narrow window: ninja did not relink, so the published sibling is
+    still the correct provenance record for the ELF on disk. A blind copy
+    here would silence check_all_task_stack_budgets.py's sibling-agreement
+    guard instead of leaving it free to catch a genuine drift.
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"unchanged-elf-bytes")
+    live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    sibling.write_text("# CONFIG_KILNCTL_GPIO_PROBE is not set\n", encoding="utf-8")
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "sdkconfig-refresh: SKIPPED" in result
+    assert "did not change during this build" in result
+    assert str(live) in result
+    assert str(sibling) in result
+    # The published sibling -- still the correct provenance record for the
+    # ELF that is actually on disk -- must be left untouched.
+    assert sibling.read_text(encoding="utf-8") == "# CONFIG_KILNCTL_GPIO_PROBE is not set\n"
+
+
+def test_live_differs_and_elf_changed_refreshes(monkeypatch, tmp_path):
+    """When the ELF actually changed, the build really did relink from the
+    live config, so the sibling must be brought into agreement with it.
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_relinks_elf)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"stale-elf-bytes")
+    live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    sibling.write_text("# CONFIG_KILNCTL_GPIO_PROBE is not set\n", encoding="utf-8")
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "sdkconfig-refresh: OK" in result
+    assert sibling.read_text(encoding="utf-8") == live.read_text(encoding="utf-8")
+
+
+def test_live_identical_and_elf_unchanged_is_a_harmless_noop(monkeypatch, tmp_path):
+    """Nothing changed anywhere; the report must not claim a refresh happened
+    when there was nothing to refresh (the sibling already agreed).
+    """
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_no_relink)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    elf = root / "firmware" / "KilnFW" / "build" / "KilnCtrl.elf"
+    elf.write_bytes(b"unchanged-elf-bytes")
+    same_text = "CONFIG_KILNCTL_GPIO_PROBE=y\n"
+    live.write_text(same_text, encoding="utf-8")
+    sibling.write_text(same_text, encoding="utf-8")
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "SKIPPED -- " not in result or "did not change during this build" not in result
+    assert sibling.read_text(encoding="utf-8") == same_text

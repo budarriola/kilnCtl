@@ -339,18 +339,44 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     # command is also guarding against.
     command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
     build_dir = os.path.join(root, "firmware", "KilnFW", "build")
+    elf_path = os.path.join(build_dir, "KilnCtrl.elf")
+    elf_before = _stat_snapshot(elf_path)
     kilnfw_report = _run_locked(
         f"kilnfw-{target}", build_dir,
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         timeout=1800)
     if target in ("build", "reconfigure") and f"kilnfw-{target}: OK" in kilnfw_report:
-        kilnfw_report = f"{kilnfw_report}\n\n{_refresh_build_sdkconfig(root, build_dir)}"
+        elf_after = _stat_snapshot(elf_path)
+        kilnfw_report = (
+            f"{kilnfw_report}\n\n"
+            f"{_refresh_build_sdkconfig(root, build_dir, elf_path, elf_before, elf_after)}")
     if saftyfw_report is not None:
         return f"{saftyfw_report}\n\n{kilnfw_report}"
     return kilnfw_report
 
 
-def _refresh_build_sdkconfig(root: str, build_dir: str) -> str:
+def _stat_snapshot(path: str) -> Optional[tuple]:
+    """(mtime_ns, size) for ``path``, or ``None`` if it does not exist yet.
+
+    Used to tell whether a build actually relinked the ELF, since ninja does
+    not reliably relink on an sdkconfig-only change alone (see
+    ``check_all_task_stack_budgets.py``'s own comment on
+    ``CMAKE_CONFIGURE_DEPENDS`` not repeating a build).
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _refresh_build_sdkconfig(
+    root: str,
+    build_dir: str,
+    elf_path: str,
+    elf_before: Optional[tuple],
+    elf_after: Optional[tuple],
+) -> str:
     """Keep ``build/sdkconfig`` from outliving the ELF it describes.
 
     ``check_00_kilnfw_target_build.ps1`` publishes an isolated checkbuild's
@@ -368,16 +394,52 @@ def _refresh_build_sdkconfig(root: str, build_dir: str) -> str:
     tool performs, make the two agree again by overwriting the sibling with
     the tree's live config, so an ordinary ``build_kilnfw()`` call never
     leaves that trap behind for the checker to find later.
+
+    2026-09-23 narrow window (opus review): ``check_00_kilnfw_target_build.ps1``
+    publishes the checkbuild worktree's sdkconfig into this tree's ``build/``
+    as the provenance record of the ELF it published. If someone edits the
+    live ``firmware/KilnFW/sdkconfig`` afterward and calls ``build_kilnfw``
+    with ``jobs`` set (the ``ninja -j N`` path) and ninja does NOT relink --
+    which it is not guaranteed to do off an sdkconfig-only change -- a blind
+    copy here would overwrite the correct published sibling with a config
+    that never produced the ELF still sitting in ``build/``, silencing
+    ``check_all_task_stack_budgets.py``'s guard instead of tripping it. So:
+    only copy when either the live config already matches the sibling (a
+    no-op either way) or the ELF actually changed (new mtime/size) during
+    this build. When the live config differs and the ELF did NOT change, skip
+    the copy and say so explicitly, naming both paths, rather than reporting
+    a bland OK.
     """
     live = os.path.join(root, "firmware", "KilnFW", "sdkconfig")
     sibling = os.path.join(build_dir, "sdkconfig")
     if not os.path.isfile(live):
         return f"sdkconfig-refresh: SKIPPED -- no live config at {live}"
+    live_matches_sibling = (
+        os.path.isfile(sibling)
+        and _read_bytes(live) == _read_bytes(sibling)
+    )
+    elf_changed = elf_before != elf_after
+    if not live_matches_sibling and not elf_changed:
+        return (
+            f"sdkconfig-refresh: SKIPPED -- {live} differs from {sibling} but "
+            f"{elf_path} did not change during this build, so the sibling may "
+            f"still be the correct provenance record for the ELF on disk; NOT "
+            f"refreshed to avoid silencing check_all_task_stack_budgets.py's "
+            f"sibling-agreement guard"
+        )
     try:
         shutil.copyfile(live, sibling)
     except OSError as exc:
         return f"sdkconfig-refresh: FAILED -- could not copy {live} -> {sibling}: {exc}"
     return f"sdkconfig-refresh: OK -- {sibling} now matches {live}"
+
+
+def _read_bytes(path: str) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 def run_pctools_tests(pattern: Optional[str] = None) -> str:
