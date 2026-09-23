@@ -39,10 +39,28 @@
 # `git checkout --` to undo). Negative-tested 2026-09-07 four ways: a CSV row
 # renamed, a row's subtype changed, a firmware label typo'd, and the `cfg`
 # allowlist entry removed. All four failed with the specific diagnostic.
+#
+# 2026-09-22 addition: a file that textually contains BOTH the SPIFFS and
+# LittleFS mount branches behind an #if (docs/FILESYSTEM_PLAN.md step 2's
+# log_store_mount.c pattern) resolves $want to $null in cases 2/3 above,
+# purely because the ambiguity-detection logic can't tell which branch is
+# actually compiled in from source text alone -- which means the `logs` row's
+# subtype in partitions.csv went completely unchecked by this script once
+# that pattern landed. Fixed by reading the deciding Kconfig value,
+# CONFIG_KILNCTL_LOGS_LITTLEFS, directly: when a file has both branches AND
+# defines a partition_label, the flag's value (not textual ambiguity) decides
+# $want. Read from `sdkconfig.defaults` -- the tracked, checked-in source of
+# truth for this flag's shipped default -- not the gitignored, machine-local
+# `sdkconfig`, which may carry a developer's local override that other
+# checkouts (and CI) never see. If a real `sdkconfig` exists alongside it in
+# the same tree, it is read too and wins (it reflects what a build in *this*
+# tree would actually produce), but its absence is normal, not an error.
+# -KconfigLogsLittlefsFile lets negative tests point this at a scratch copy.
 
 param(
     [string]$CsvPath,
-    [string]$SourceRoot
+    [string]$SourceRoot,
+    [string]$KconfigLogsLittlefsFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +74,38 @@ if (-not $SourceRoot) { $SourceRoot = Join-Path $appRoot "drivers" }
 
 if (-not (Test-Path $CsvPath))    { throw "check_partition_labels_vs_firmware.ps1: partitions CSV not found at $CsvPath" }
 if (-not (Test-Path $SourceRoot)) { throw "check_partition_labels_vs_firmware.ps1: source root not found at $SourceRoot" }
+
+# --- Resolve CONFIG_KILNCTL_LOGS_LITTLEFS, the flag that decides which mount
+#     branch log_store_mount.c actually compiles in. Kconfig default is `n`
+#     (App/Kconfig.projbuild), so absence in either file means off/spiffs. A
+#     real, gitignored `sdkconfig` (if present next to sdkconfig.defaults)
+#     wins over the tracked default, since it reflects what this tree's own
+#     build would produce; sdkconfig.defaults is the fallback source of truth
+#     otherwise. ---
+function Get-KconfigBoolValue {
+    param([string]$Path, [string]$Key)
+    if (-not (Test-Path $Path)) { return $null }
+    foreach ($line in (Get-Content -Path $Path)) {
+        $t = $line.Trim()
+        if ($t -eq "CONFIG_${Key}=y") { return $true }
+        if ($t -eq "# CONFIG_${Key} is not set") { return $false }
+        if ($t -match "^CONFIG_${Key}=") { return $false }
+    }
+    return $null
+}
+
+if (-not $KconfigLogsLittlefsFile) {
+    $sdkconfigDefaults = Join-Path $kilnfwRoot "sdkconfig.defaults"
+    $sdkconfigReal     = Join-Path $kilnfwRoot "sdkconfig"
+    $logsLittlefsFlag  = $null
+    if (Test-Path $sdkconfigReal) { $logsLittlefsFlag = Get-KconfigBoolValue -Path $sdkconfigReal -Key 'KILNCTL_LOGS_LITTLEFS' }
+    if ($null -eq $logsLittlefsFlag) { $logsLittlefsFlag = Get-KconfigBoolValue -Path $sdkconfigDefaults -Key 'KILNCTL_LOGS_LITTLEFS' }
+    if ($null -eq $logsLittlefsFlag) { $logsLittlefsFlag = $false } # Kconfig default: n
+} else {
+    $logsLittlefsFlag = Get-KconfigBoolValue -Path $KconfigLogsLittlefsFile -Key 'KILNCTL_LOGS_LITTLEFS'
+    if ($null -eq $logsLittlefsFlag) { $logsLittlefsFlag = $false }
+}
+$logsWantSubType = if ($logsLittlefsFlag) { 'littlefs' } else { 'spiffs' }
 
 # --- Partitions that legitimately exist in the table with no firmware
 #     reference yet. Each needs a reason and, ideally, the step that removes
@@ -141,7 +191,15 @@ foreach ($file in $sourceFiles) {
         $label = $m.Groups[1].Value
         if     ($spiffsHere -and -not $littlefsHere)   { $want = 'spiffs' }
         elseif ($littlefsHere -and -not $spiffsHere)   { $want = 'littlefs' }
-        else                                           { $want = $null }
+        elseif ($label -eq 'logs' -and $spiffsHere -and $littlefsHere) {
+            # Both branches textually present -- this is the log_store_mount.c
+            # #if CONFIG_KILNCTL_LOGS_LITTLEFS pattern. CONFIG_KILNCTL_LOGS_LITTLEFS
+            # (resolved above from sdkconfig/sdkconfig.defaults) decides which one
+            # is actually compiled in, not textual ambiguity.
+            $want = $logsWantSubType
+        } else {
+            $want = $null
+        }
         $refs += [PSCustomObject]@{ Label = $label; WantSubType = $want; File = $rel; Why = ".partition_label" }
     }
 
@@ -155,12 +213,22 @@ foreach ($file in $sourceFiles) {
     $spiffsInfoHere   = $text -match 'esp_spiffs_info\('
     $littlefsInfoHere = $text -match 'esp_littlefs_info\('
     foreach ($m in [regex]::Matches($text, 'esp_spiffs_info\(\s*"([A-Za-z0-9_]+)"')) {
-        $want = if ($littlefsInfoHere) { $null } else { 'spiffs' }
-        $refs += [PSCustomObject]@{ Label = $m.Groups[1].Value; WantSubType = $want; File = $rel; Why = "esp_spiffs_info()" }
+        $lbl = $m.Groups[1].Value
+        if ($littlefsInfoHere) {
+            $want = if ($lbl -eq 'logs') { $logsWantSubType } else { $null }
+        } else {
+            $want = 'spiffs'
+        }
+        $refs += [PSCustomObject]@{ Label = $lbl; WantSubType = $want; File = $rel; Why = "esp_spiffs_info()" }
     }
     foreach ($m in [regex]::Matches($text, 'esp_littlefs_info\(\s*"([A-Za-z0-9_]+)"')) {
-        $want = if ($spiffsInfoHere) { $null } else { 'littlefs' }
-        $refs += [PSCustomObject]@{ Label = $m.Groups[1].Value; WantSubType = $want; File = $rel; Why = "esp_littlefs_info()" }
+        $lbl = $m.Groups[1].Value
+        if ($spiffsInfoHere) {
+            $want = if ($lbl -eq 'logs') { $logsWantSubType } else { $null }
+        } else {
+            $want = 'littlefs'
+        }
+        $refs += [PSCustomObject]@{ Label = $lbl; WantSubType = $want; File = $rel; Why = "esp_littlefs_info()" }
     }
 
     # 4. esp_partition_find_first(...,"label") -- existence only; this API is

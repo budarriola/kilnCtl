@@ -123,7 +123,10 @@ with no regression. Delete the SPIFFS branch and the build flag from
 step 2; `idf_component.yml` dependency becomes unconditional.
 This step is the only one that is hard to walk back cheaply (removing the
 SPIFFS code path), so it stays last and gated on a real firing, not a
-bench smoke test.
+bench smoke test. `check_partition_labels_vs_firmware.ps1` now derives the
+expected `logs` subtype from `CONFIG_KILNCTL_LOGS_LITTLEFS` (sdkconfig.defaults),
+so flipping the flag and the CSV's `logs` subtype must land in the same commit
+or the check fails.
 
 ### What stays untouched, on purpose
 - `zones_cfg`, `profile_t`, `kiln_cfg_store`, `wifi_prov`, `ota_record` —
