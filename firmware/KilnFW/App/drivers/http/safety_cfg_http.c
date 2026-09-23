@@ -129,6 +129,15 @@ typedef struct {
     bool borrowed;
     uint8_t borrowed_zone_index; /* SAFETY_LINK_BORROWED_ZONE_UNKNOWN if not commissioned on the Pico */
 
+    /* 2026-09-23: SaftyFW thermo_task.c's live-config mismatch counter,
+     * surfaced via the same V3 status frame flags2 byte as borrowed above
+     * (SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED). Same "known" gate
+     * discipline as borrowed_known -- UNKNOWN on a V1/V2 frame or an
+     * unconfirmed V3 peer, never a false "never reasserted". Sticky for the
+     * rest of the Pico's boot once true, not a count. */
+    bool tc_config_reasserted_known;
+    bool tc_config_reasserted;
+
     /* RELAY_LIFE_BUDGET.md -- ESP-only, never fetched from the
      * Pico (see safety_cfg_store_get_safety_relay_type()'s doc comment), so
      * unlike every other field above this is always known/valid, never
@@ -294,6 +303,10 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
             APPEND(",\"borrowed_zone_index\":%u", (unsigned)s->borrowed_zone_index);
         }
     }
+    APPEND(",\"tc_config_reasserted_known\":%s", s->tc_config_reasserted_known ? "true" : "false");
+    if (s->tc_config_reasserted_known) {
+        APPEND(",\"tc_config_reasserted\":%s", s->tc_config_reasserted ? "true" : "false");
+    }
     APPEND(",\"relay_type\":\"%s\"", relay_type_name(s->relay_type));
     APPEND(",\"ct_cal\":[");
     for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {
@@ -436,6 +449,8 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
             snap.borrowed_known = st.borrowed_known;
             snap.borrowed = st.borrowed;
             snap.borrowed_zone_index = st.borrowed_zone_index;
+            snap.tc_config_reasserted_known = st.tc_config_reasserted_known;
+            snap.tc_config_reasserted = st.tc_config_reasserted;
         }
         uint16_t peer_crc = 0;
         bool peer_known = false;

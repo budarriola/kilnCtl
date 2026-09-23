@@ -882,6 +882,12 @@ static void link_task_send_status(void)
     // guaranteed by LINK_FRAME_STATUS_V3_MIN_PROTOCOL > _V2_MIN_PROTOCOL, but
     // link_frame_pack_status() itself does not trust that ordering blindly).
     bool peer_supports_status_v3 = link_frame_status_v3_supported(s_peer_protocol_version);
+    // LINK_FLAG2_TC_CONFIG_REASSERTED (2026-09-23) -- sticky for the rest of
+    // this boot once thermo_task.c has ever re-asserted the MAX31856's
+    // config against a live-readback mismatch. See link_frame.h's own
+    // comment on the macro for why this is a nonzero-count test, not a
+    // one-shot pulse.
+    bool tc_config_reasserted = thermo_task_live_config_mismatch_count() != 0u;
 
     uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
     bool energized_bit = false;
@@ -892,7 +898,7 @@ static void link_task_send_status(void)
                                          tc_not_installed, tc_injected,
                                          peer_supports_status_v2, tx_dropped_sat,
                                          peer_supports_status_v3, is_borrowed, borrowed_zone_index_wire,
-                                         cj_valid);
+                                         cj_valid, tc_config_reasserted);
 
     if (link_task_send_broadcast(payload, (uint8_t)len)) {
         s_status_tx_ok_count++;

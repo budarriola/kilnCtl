@@ -395,12 +395,32 @@ def test_decode_set_clock():
 def test_decode_status_frame_a_all_three_lengths():
     base = struct_pack_status()
     for extra, expect in ((b"", {}), (b"\x02", {"tx_dropped_sat": 2}),
-                          (b"\x02\x01\x03", {"tx_dropped_sat": 2, "flags2": 1, "borrowed": True, "borrowed_zone_index": 3})):
+                          (b"\x02\x01\x03", {"tx_dropped_sat": 2, "flags2": 1, "borrowed": True,
+                                             "tc_config_reasserted": False, "borrowed_zone_index": 3})):
         payload = base + extra
         name, decoded, err = kc.decode_payload(7, 7, payload)
         assert err is None, err
         for k, v in expect.items():
             assert decoded[k] == v
+
+
+def test_decode_status_frame_a_tc_config_reasserted_bit():
+    # flags2 bit 2 (0x04, LINK_FLAG2_TC_CONFIG_REASSERTED, 2026-09-23) rides
+    # the same V3 flags2 byte as bit 0 (borrowed) -- proves it decodes
+    # independently, both set and clear.
+    base = struct_pack_status()
+
+    payload_set = base + b"\x02\x05\x03"  # bit0 (borrowed) | bit2 (tc_config_reasserted)
+    name, decoded, err = kc.decode_payload(7, 7, payload_set)
+    assert err is None, err
+    assert decoded["flags2"] == 0x05
+    assert decoded["borrowed"] is True
+    assert decoded["tc_config_reasserted"] is True
+
+    payload_clear = base + b"\x02\x01\x03"  # bit0 only, bit2 clear
+    name, decoded, err = kc.decode_payload(7, 7, payload_clear)
+    assert err is None, err
+    assert decoded["tc_config_reasserted"] is False
 
 
 def struct_pack_status() -> bytes:

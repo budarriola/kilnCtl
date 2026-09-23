@@ -147,19 +147,17 @@ bool thermo_task_reconfig_gave_up(void);
 // header for why an unverified part is the separate reconfig-retry
 // mechanism's problem instead).
 //
-// This accessor currently has NO caller anywhere -- it is a static this
-// task keeps, readable via a debugger attached to the running board, but
-// nothing wires it onto the isolated link today. A Frame A flags2 bit for
-// it (link_frame.h's spare bits 2-7) was evaluated and deferred: unlike
-// thermo_task_reconfig_gave_up() above, which feeds the separate DIAG
-// frame's diag_flags byte via one computed call in link_task.c,
-// link_frame_pack_status()'s flags2 is built from a long positional
-// parameter list with roughly a dozen call sites (one production, the rest
-// in test_link_frame_wire.c) that would all need updating for one new bool
-// parameter -- materially larger and riskier than this fix's own scope. A
-// one-line WARN log already fires on every new mismatch episode (see
-// thermo_task.c); wiring this counter onto the wire is a reasonable
-// follow-up, not done here.
+// 2026-09-23: now wired onto the isolated link. link_task.c's status-frame
+// builder calls this once per Frame A tick and passes `count != 0` as
+// link_frame_pack_status()'s `tc_config_reasserted` parameter, which sets
+// Frame A flags2 bit 2 (LINK_FLAG2_TC_CONFIG_REASSERTED, link_frame.h) --
+// unlike thermo_task_reconfig_gave_up() above, which feeds the separate DIAG
+// frame's diag_flags byte, this one rides the V3 status frame's flags2 byte
+// alongside LINK_FLAG2_BORROWED/LINK_FLAG2_CJ_VALID. The wire bit is a
+// nonzero-count test, not the count itself -- it answers only "was the
+// config ever reasserted this boot", sticky for the rest of the boot; the
+// exact count remains SWD-only via this accessor. A one-line WARN log still
+// fires on every new mismatch episode (see thermo_task.c).
 uint32_t thermo_task_live_config_mismatch_count(void);
 
 #ifdef __cplusplus

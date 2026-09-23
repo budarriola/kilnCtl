@@ -241,6 +241,14 @@ extern "C" {
  * diag_safety_tc_state() "probe_fault" state). */
 #define SAFETY_LINK_STATUS_FLAG2_CJ_VALID 0x02u
 
+/* 2026-09-23: mirrors SaftyFW's link_frame.h LINK_FLAG2_TC_CONFIG_REASSERTED
+ * exactly (same numeric value, same reasoning). Set iff thermo_task.c's
+ * live-config mismatch counter is nonzero -- sticky for the rest of the
+ * Pico's boot, not a one-shot pulse (that counter never resets). Answers
+ * only "was the MAX31856's config ever reasserted this boot", nothing about
+ * how many times or when most recently. */
+#define SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED 0x04u
+
 /* borrowed_zone_index sentinel (byte 25) -- mirrors SaftyFW's link_frame.h
  * LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN exactly. A real value is always
  * 0..2 (config_store.h borrowed_zone_index's own range), so 0xFF can never
@@ -849,6 +857,21 @@ typedef struct {
      * diagnostics_http.h's diag_safety_tc_state(). */
     bool     cj_valid_known;
     bool     cj_valid;
+
+    /* 2026-09-23: SaftyFW thermo_task.c's live-config mismatch counter,
+     * carried in the SAME V3 status frame's flags2 byte (bit 2,
+     * SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED) that borrowed_known/
+     * cj_valid_known above already use -- no new frame, no protocol bump.
+     * Same "false/meaningless until proven otherwise" convention: a V1/V2
+     * frame, or a V3 peer this ESP hasn't yet confirmed, carries no
+     * information here, which is UNKNOWN, not "never reasserted". When
+     * tc_config_reasserted_known is true, tc_config_reasserted says whether
+     * the safety processor has EVER re-asserted the MAX31856's CR0/CR1
+     * config against a live-readback mismatch this boot (sticky, not a
+     * count) -- see SaftyFW's thermo_task.h/link_frame.h for the full
+     * rationale. */
+    bool     tc_config_reasserted_known;
+    bool     tc_config_reasserted;
 
     /* SAFETY_CMD_POWER (Frame E) telemetry -- ROADMAP.md M5/M6, TODO.md
      * 10.10. NaN/false fields below mean "never received" or "not a valid

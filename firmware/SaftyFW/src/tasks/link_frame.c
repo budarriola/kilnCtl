@@ -78,7 +78,8 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
                                bool tc_not_installed, bool tc_injected,
                                bool peer_supports_status_v2, uint8_t tx_dropped_sat,
                                bool peer_supports_status_v3, bool is_borrowed,
-                               uint8_t borrowed_zone_index, bool cj_valid)
+                               uint8_t borrowed_zone_index, bool cj_valid,
+                               bool tc_config_reasserted)
 {
     out[0] = LINK_FRAME_STATUS_CMD;
 
@@ -128,6 +129,9 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
             }
             if (cj_valid) {
                 flags2 |= LINK_FLAG2_CJ_VALID;
+            }
+            if (tc_config_reasserted) {
+                flags2 |= LINK_FLAG2_TC_CONFIG_REASSERTED;
             }
             out[KILNLINK_FRAME_A_OFF_FLAGS2] = flags2;
             out[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX] = borrowed_zone_index;

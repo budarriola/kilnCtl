@@ -478,16 +478,19 @@ sensor reading low tells you nothing at all.
       (`MAX31856_LIVE_CHECK_READ_FAILED`) and never treated as evidence of a
       reset. A running total of mismatched checks (not just episodes) is
       kept in an SWD-readable static, `thermo_task_live_config_mismatch_count()`
-      (`thermo_task.h`) — that accessor currently has no caller; wiring it
-      onto the isolated link (a new Frame A `flags2` bit) was evaluated and
-      deferred as materially larger than this fix's own scope (see that
-      header's comment for why). This does not touch the wire protocol (no
+      (`thermo_task.h`). This does not touch the wire protocol (no
       frame length or protocol version change).
-- [ ] **Follow-up, not yet done:** surface a live-config mismatch on the wire
-      via a spare Frame A `flags2` bit, once a change touching all of
+- [x] **2026-09-23:** surfaced on the wire via Frame A `flags2` bit2
+      (`LINK_FLAG2_TC_CONFIG_REASSERTED`, 0x04) — `link_task.c` sets it
+      whenever `thermo_task_live_config_mismatch_count() != 0`, sticky for
+      the rest of the boot (a nonzero-count test, not a one-shot pulse — see
+      `link_frame.h`'s comment on the macro). Required touching all of
       `link_frame_pack_status()`'s ~14 positional call sites (one production,
-      ~13 in `test_link_frame_wire.c`) is in flight anyway — deferred above as
-      out of scope for this fix alone, not ruled out.
+      ~13 in `test_link_frame_wire.c`); decoded on the ESP in
+      `safety_link_frames.c`/`safety_link.h`, exposed as
+      `tc_config_reasserted_known`/`tc_config_reasserted` in
+      `/api/kiln_configs`'s commissioning JSON (`safety_cfg_http.c`), and
+      decoded by PcTools in `kilnlink_capture.py`.
 
 **Borrowed source**
 - [x] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH` (verified

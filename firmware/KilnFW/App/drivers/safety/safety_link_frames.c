@@ -708,12 +708,17 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->cached.borrowed_zone_index = p[KILNLINK_FRAME_A_OFF_BORROWED_ZONE_INDEX];
         link->cached.cj_valid_known = true;
         link->cached.cj_valid = (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_CJ_VALID) != 0u;
+        link->cached.tc_config_reasserted_known = true;
+        link->cached.tc_config_reasserted =
+            (p[KILNLINK_FRAME_A_OFF_FLAGS2] & SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED) != 0u;
     } else {
         link->cached.borrowed_known = false;
         link->cached.borrowed = false;
         link->cached.borrowed_zone_index = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
         link->cached.cj_valid_known = false;
         link->cached.cj_valid = false;
+        link->cached.tc_config_reasserted_known = false;
+        link->cached.tc_config_reasserted = false;
     }
     /* cj_temp_c's own NaN gate -- deliberately separate from tc_temp_c's
      * TEMP_VALID gate above (2026-09-08 fix). A V3 peer told us cj_valid

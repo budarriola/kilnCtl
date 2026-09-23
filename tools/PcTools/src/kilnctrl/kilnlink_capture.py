@@ -238,6 +238,13 @@ def _decode_status_frame_a(payload: bytes) -> dict:
         flags2, borrowed_zone_index = struct.unpack_from("<BB", payload, 24)
         out["flags2"] = flags2
         out["borrowed"] = bool(flags2 & 0x01)
+        # bit 1 (0x02) is CJ_VALID (LINK_FLAG2_CJ_VALID, SaftyFW's link_frame.h)
+        # -- not decoded here, same as before this change.
+        # bit 2 (0x04) is LINK_FLAG2_TC_CONFIG_REASSERTED, 2026-09-23: sticky
+        # for the rest of the Pico's boot once thermo_task.c has ever
+        # re-asserted the MAX31856's CR0/CR1 config against a live-readback
+        # mismatch (see SaftyFW's link_frame.h/thermo_task.h).
+        out["tc_config_reasserted"] = bool(flags2 & 0x04)
         out["borrowed_zone_index"] = borrowed_zone_index
     return out
 

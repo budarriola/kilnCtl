@@ -167,6 +167,21 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 // derives independently of th.valid/temp_valid.
 #define LINK_FLAG2_CJ_VALID 0x02u
 
+// 2026-09-23 (THERMOCOUPLE.md's deferred follow-up): surfaces
+// thermo_task_live_config_mismatch_count() (thermo_task.h) on the wire.
+// thermo_task.c re-asserts the MAX31856's CR0/CR1 config whenever a live
+// readback disagrees with what it last configured (a part reset losing its
+// register state); that accessor previously had no caller anywhere. Set
+// iff the caller's mismatch count is nonzero -- deliberately STICKY for the
+// rest of the boot, not a one-shot pulse: the counter itself never resets
+// (thermo_task.c has no reset path for it, and none is added here -- see
+// this file's "reset one side of a pair" class in CLAUDE.md before ever
+// adding one), so "was the config ever reasserted this boot" is the
+// honest, simplest question this single bit can answer. It does NOT report
+// how many times, nor when most recently -- only thermo_task_live_config_
+// mismatch_count() itself (still SWD-only) has that detail.
+#define LINK_FLAG2_TC_CONFIG_REASSERTED 0x04u
+
 // Packs the status payload into `out` (must have room for
 // LINK_FRAME_STATUS_LEN_V2 bytes, whether or not this call ends up using all
 // of them). `safety_tc_c`/`cj_c` should already be NaN when `temp_valid`/
@@ -202,7 +217,9 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 // itself new enough for V2, but this function does not assume the caller
 // enforces that ordering -- it enforces it itself). When both gates pass,
 // returns LINK_FRAME_STATUS_LEN_V3 (26): byte 24 is a flags2 byte (bit 0
-// LINK_FLAG2_BORROWED, set iff `is_borrowed`) and byte 25 is
+// LINK_FLAG2_BORROWED, set iff `is_borrowed`; bit 1 LINK_FLAG2_CJ_VALID, set
+// iff `cj_valid`; bit 2 LINK_FLAG2_TC_CONFIG_REASSERTED, set iff
+// `tc_config_reasserted` -- see that macro's own comment above) and byte 25 is
 // `borrowed_zone_index` verbatim (pass LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN
 // when the caller does not know it, e.g. borrowed_zone_index is not
 // commissioned -- see link_task.c's call site for how it decides this).
@@ -246,7 +263,8 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop,
                                bool tc_not_installed, bool tc_injected,
                                bool peer_supports_status_v2, uint8_t tx_dropped_sat,
                                bool peer_supports_status_v3, bool is_borrowed,
-                               uint8_t borrowed_zone_index, bool cj_valid);
+                               uint8_t borrowed_zone_index, bool cj_valid,
+                               bool tc_config_reasserted);
 
 // --- Frame C: SAFETY_CMD_FW_VERSION (0x0B) -----------------------------------
 // Also the reply to, and identical command byte as, SAFETY_CMD_GET_FW_VERSION

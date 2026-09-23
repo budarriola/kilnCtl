@@ -589,6 +589,55 @@ static void test_apply_status_v3_borrowed(void)
                "a peer regressing from V3 to V1 mid-session clears the stale borrowed_known flag");
 }
 
+static void test_apply_status_v3_tc_config_reasserted(void)
+{
+    TEST_SECTION("safety_apply_status -- V3 (26B) TC_CONFIG_REASSERTED flags2 bit 2 (2026-09-23): "
+                 "absent-byte contract reads as UNKNOWN, present byte decodes correctly and is "
+                 "independent of bits 0/1, and a V3->V1 regression clears the stale known-flag");
+
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // V1 (23 bytes): no byte 24/25 at all -- must read as
+    // tc_config_reasserted_known == false, never a confident "not
+    // reasserted".
+    set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V1 frame is accepted");
+    TEST_CHECK(link.cached.tc_config_reasserted_known == false,
+               "V1 frame leaves tc_config_reasserted_known false (no byte 24/25 to read)");
+
+    // V3 (26 bytes), bit 2 set alongside bits 0/1 -- proves the new bit is
+    // decoded independently, not aliased onto BORROWED/CJ_VALID.
+    msg.payload[24] = (uint8_t)(SAFETY_LINK_STATUS_FLAG2_BORROWED | SAFETY_LINK_STATUS_FLAG2_CJ_VALID |
+                                SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED);
+    msg.payload[25] = 1u;
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V3 (26-byte) frame is accepted");
+    TEST_CHECK(link.cached.tc_config_reasserted_known == true, "V3 frame sets tc_config_reasserted_known true");
+    TEST_CHECK(link.cached.tc_config_reasserted == true,
+               "V3 frame's flags2 bit2 becomes cached.tc_config_reasserted");
+    TEST_CHECK(link.cached.borrowed == true, "bit0 still decodes correctly alongside bit2");
+    TEST_CHECK(link.cached.cj_valid == true, "bit1 still decodes correctly alongside bit2");
+
+    // Same V3 frame but bit 2 clear -- proves the bit is read from the wire,
+    // not hard-coded true by this decode path.
+    msg.payload[24] = 0u;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "second V3 frame decodes");
+    TEST_CHECK(link.cached.tc_config_reasserted_known == true, "still known == true (a V3 frame was received)");
+    TEST_CHECK(link.cached.tc_config_reasserted == false, "flags2 bit2 clear -> cached.tc_config_reasserted == false");
+
+    // Regression V3 -> V1: a peer that stops sending V3 must not leave a
+    // stale tc_config_reasserted_known=true pointing at the last V3 frame's
+    // now-stale bytes.
+    set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V1 frame after a V3 frame is still accepted");
+    TEST_CHECK(link.cached.tc_config_reasserted_known == false,
+               "a peer regressing from V3 to V1 mid-session clears the stale tc_config_reasserted_known flag");
+}
+
 static void test_safety_tc_is_separate_physical_sensor_predicate(void)
 {
     TEST_SECTION("safety_tc_is_separate_physical_sensor() -- ROADMAP.md 'Safety TC display "
@@ -1740,6 +1789,7 @@ int main(void)
     test_apply_status_accepts_v1_and_v2_lengths();
     test_apply_power_accepts_v1_and_v2_lengths_and_gates_counts_on_flag();
     test_apply_status_v3_borrowed();
+    test_apply_status_v3_tc_config_reasserted();
     test_safety_tc_is_separate_physical_sensor_predicate();
     test_apply_status_temp_valid_flag_is_sole_authority();
     test_apply_status_ignores_peer_link_up_and_fault_bits();
