@@ -76,6 +76,9 @@ MIRROR_MAP = [
      "safety_link.h", "SAFETY_LINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED",
      "safety_link.h", "SAFETY_LINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED"),
+    # 2026-09-23: bit7, config_store_write_volatile() RAM-only tracking.
+    ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY",
+     "safety_link.h", "SAFETY_LINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_POWERON", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_POWERON"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_WATCHDOG", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_WATCHDOG"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_BOOT_BROWNOUT", "safety_link.h", "SAFETY_LINK_DIAG_BOOT_BROWNOUT"),

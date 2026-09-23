@@ -160,7 +160,8 @@
  * ",\"config_volatile_dirty\":false" (30B) -- SaftyFW's config_store_write_
  * volatile() RAM-only-install tracking (see dashboard_status_http.c). Grown
  * 5376 -> 5504 (+128, same step convention as every prior bump here) rather
- * than shaving margin to the bone. */
+ * than shaving margin to the bone. Measured headroom at this size, per
+ * test_dashboard_json.c's fill_worst_case_zone()-driven render: 201B. */
 #define DASHBOARD_JSON_STATUS_BUF_SIZE 5504
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes

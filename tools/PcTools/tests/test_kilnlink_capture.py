@@ -304,6 +304,34 @@ def test_decode_diag_frame_b_matches_encoder_fields():
     assert decoded["log_frames_dropped"] == 9
 
 
+def test_decode_diag_frame_b_config_volatile_dirty_bit7():
+    # 2026-09-23: bit7 (KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY) was added
+    # to kilnlink_diag.h/link_diag_flags.c but initially missed in this
+    # codec's own _DIAG_FLAG table (opus review finding on 85bcc43a) --
+    # same class of gap the 2026-09-22 backfill comment above already
+    # names. Exercise it by name, same shape as the CALIBRATION_MISSING
+    # case above.
+    from kilnctrl import kilnlink_codec as codec
+
+    fields = {
+        "trip_reason": 6,
+        "warn_mask": 0x0004,
+        "trip_mask": 0x0020,
+        "uptime_ms": 999,
+        "boot_reason": "KILNLINK_DIAG_BOOT_POWERON",
+        "context_age_100ms": 3,
+        "context_frames_ok": 100,
+        "context_frames_bad": 1,
+        "tx_frames_dropped": 0,
+        "state": "KILNLINK_DIAG_STATE_TRIPPED",
+        "flags": "KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY",
+        "log_frames_dropped": 9,
+    }
+    payload = codec.encode_diag(fields)
+    decoded = kc.decode_payload(7, 7, payload)[1]
+    assert decoded["flags"] == 0x80
+
+
 def test_decode_trip_frame_d_matches_encoder_fields():
     from kilnctrl import kilnlink_codec as codec
 

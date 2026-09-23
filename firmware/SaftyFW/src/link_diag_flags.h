@@ -137,6 +137,8 @@ extern "C" {
 //                                                          on flash; see
 //                                                          kilnlink_diag.h's
 //                                                          bit7 comment).
+//   bit7 was the last spare bit in this byte; the next diag flag needs a new
+//   byte on the wire.
 uint8_t link_diag_flags_compute(bool calibration_missing, bool sim_context_seen,
                                  bool clear_trip_diag_present, bool tc_reconfig_gave_up,
                                  bool abs_max_temp_disabled, bool rate_guard_disabled,

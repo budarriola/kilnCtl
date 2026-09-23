@@ -1753,7 +1753,9 @@ uint8_t config_store_get_config_version(void);
 // still reads s_cached_record through the same config_store_seqlock_read()
 // path every other cache getter uses, so a caller on the trip path core
 // cannot tear it either. Returns false before config_store_boot_load() (no
-// divergence is possible if nothing has loaded yet).
+// divergence is possible if nothing has loaded yet). A seqlock retry
+// exhaustion inside that read also reports false (clean), the same safe-
+// default fallback config_store_get_config_version() uses.
 bool config_store_is_volatile_dirty(void);
 
 // config_store_get_config_version() applied to s_persisted_record (the last

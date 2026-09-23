@@ -304,6 +304,41 @@ static void test_write_volatile_repeated_then_flash_commit_still_gated(void)
 // the generic CONFIG_STORE_WRITE_REFUSED_ARMED, silently losing the
 // tc_type-only carve-out's more specific refusal reason precisely when a
 // volatile install happens to be live.
+static void test_write_uses_persisted_record_not_ram_after_volatile_install(void)
+{
+    TEST_SECTION("config_store_flash: tc_type-only comparison uses the persisted (flash) record, "
+                 "not a RAM record already mutated by a volatile install (opus review item 4)");
+    reset_all();
+    config_store_boot_load(); // persisted record: all-default, uncommissioned
+
+    // A neutral volatile install while NOT armed: allowed, and it leaves
+    // s_cached_record differing from the persisted/flash record in
+    // mains_voltage_v -- but flash itself is untouched.
+    config_store_record_t volatile_rec;
+    config_store_default(&volatile_rec);
+    volatile_rec.mains_voltage_v = 240.0f;
+    TEST_CHECK(config_store_write_volatile(&volatile_rec, NULL) == true,
+               "fixture: neutral volatile install accepted while not armed");
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+
+    // This candidate differs from the PERSISTED/flash record in tc_type
+    // ONLY -- but differs from the current RAM record (s_cached_record) in
+    // BOTH tc_type and mains_voltage_v, since the volatile install above
+    // only touched RAM.
+    config_store_record_t candidate;
+    config_store_default(&candidate);
+    candidate.tc_type = 0x07u;
+    const char *reason = NULL;
+    bool ok = config_store_write(&candidate, &reason);
+    TEST_CHECK(ok == false, "write refused while ARMED");
+    TEST_CHECK(reason != NULL &&
+                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN),
+               "classified as tc_type-only against the PERSISTED record (item 4) -- comparing "
+               "against the volatile-mutated RAM record instead would report the generic "
+               "CONFIG_STORE_WRITE_REFUSED_ARMED here");
+}
+
 // config_store_is_volatile_dirty()/config_store_get_persisted_config_version()
 // -- a volatile install must flip dirty true and bump config_version without
 // moving the PERSISTED version at all; a subsequent durable commit must clear
@@ -344,41 +379,6 @@ static void test_volatile_dirty_flag_and_persisted_version(void)
                "a durable write clears the volatile-dirty flag");
     TEST_CHECK(config_store_get_persisted_config_version() == config_store_get_config_version(),
                "a durable write brings the persisted version back in sync with the cache");
-}
-
-static void test_write_uses_persisted_record_not_ram_after_volatile_install(void)
-{
-    TEST_SECTION("config_store_flash: tc_type-only comparison uses the persisted (flash) record, "
-                 "not a RAM record already mutated by a volatile install (opus review item 4)");
-    reset_all();
-    config_store_boot_load(); // persisted record: all-default, uncommissioned
-
-    // A neutral volatile install while NOT armed: allowed, and it leaves
-    // s_cached_record differing from the persisted/flash record in
-    // mains_voltage_v -- but flash itself is untouched.
-    config_store_record_t volatile_rec;
-    config_store_default(&volatile_rec);
-    volatile_rec.mains_voltage_v = 240.0f;
-    TEST_CHECK(config_store_write_volatile(&volatile_rec, NULL) == true,
-               "fixture: neutral volatile install accepted while not armed");
-
-    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
-
-    // This candidate differs from the PERSISTED/flash record in tc_type
-    // ONLY -- but differs from the current RAM record (s_cached_record) in
-    // BOTH tc_type and mains_voltage_v, since the volatile install above
-    // only touched RAM.
-    config_store_record_t candidate;
-    config_store_default(&candidate);
-    candidate.tc_type = 0x07u;
-    const char *reason = NULL;
-    bool ok = config_store_write(&candidate, &reason);
-    TEST_CHECK(ok == false, "write refused while ARMED");
-    TEST_CHECK(reason != NULL &&
-                   reason == config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN),
-               "classified as tc_type-only against the PERSISTED record (item 4) -- comparing "
-               "against the volatile-mutated RAM record instead would report the generic "
-               "CONFIG_STORE_WRITE_REFUSED_ARMED here");
 }
 
 // 2026-09-15, adversarial re-review of d43e96b2, defect 1 -- THE case that
@@ -1534,8 +1534,8 @@ int main(void)
     test_write_refused_while_armed();
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();
-    test_volatile_dirty_flag_and_persisted_version();
     test_write_uses_persisted_record_not_ram_after_volatile_install();
+    test_volatile_dirty_flag_and_persisted_version();
     test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type();
     test_write_ex_ct_cal_only_armed_exemption();
     test_write_volatile_refuses_loosening_while_armed();

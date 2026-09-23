@@ -122,7 +122,9 @@ typedef enum {
      * of flash-truth and a reboot this instant would NOT reproduce the
      * config_version this frame is also carrying. Same "spare bit in an
      * already-transmitted byte" precedent as bits 3-6 above -- purely
-     * additive, no KILNLINK_PROTOCOL_VERSION bump, no frame length change. */
+     * additive, no KILNLINK_PROTOCOL_VERSION bump, no frame length change.
+     * bit7 was the last spare bit in this byte; the next diag flag needs a
+     * new byte on the wire. */
     KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY = 0x80u,
 } kilnlink_diag_flag_t;
 

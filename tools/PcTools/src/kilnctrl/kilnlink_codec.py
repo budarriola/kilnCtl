@@ -181,6 +181,9 @@ _DIAG_FLAG = {
     "KILNLINK_DIAG_FLAG_TC_RECONFIG_GAVE_UP": 0x10,
     "KILNLINK_DIAG_FLAG_S1_ABS_MAX_TEMP_DISABLED": 0x20,
     "KILNLINK_DIAG_FLAG_S8_RATE_GUARD_DISABLED": 0x40,
+    # 2026-09-23: bit7, the last spare bit in this byte -- the next diag
+    # flag needs a new byte on the wire, not just a table entry here.
+    "KILNLINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY": 0x80,
 }
 
 
