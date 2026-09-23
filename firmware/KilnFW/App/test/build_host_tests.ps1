@@ -883,6 +883,15 @@ try {
             # its own inline erase/write/manifest logic -- linked in for real,
             # same rationale as pico_image_manifest.c/ota_image_crc.c beside it.
             "`"$(Join-Path $driversDir 'net/pico_img_stage.c')`" " +
+            # KilnFW TODO.md 9.4: ota_pico_do_stage() now re-scans the image it
+            # just staged via pico_image_source_describe(), to learn the image's
+            # OWN declared link protocol version. Linked in for real, same
+            # rationale as pico_img_stage.c/ota_image_crc.c above: it is a pure
+            # scanner over the fake pico_img partition test_ota_http.c already
+            # supplies, and a stub would hide the real symbol this executable
+            # has to keep linkable.
+            "`"$(Join-Path $driversDir 'net/pico_image_source.c')`" " +
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\saftyfw_image_identity.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +

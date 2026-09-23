@@ -31,7 +31,7 @@ static void make_record(saftyfw_image_identity_t *r, const char *commit, uint8_t
     r->commit_len = (uint8_t)strlen(commit);
     memcpy(r->commit, commit, strlen(commit));
     r->config_format_version = 2u;
-    r->reserved = 0u;
+    r->link_protocol_version = 0u;
     r->magic_end = SAFTYFW_IMAGE_IDENTITY_MAGIC_END;
 }
 

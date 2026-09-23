@@ -309,6 +309,14 @@ esp_err_t esp_partition_write(const esp_partition_t *partition, size_t dst_offse
 esp_err_t esp_partition_erase_range(const esp_partition_t *partition, size_t offset, size_t size)
 { (void)partition; (void)offset; (void)size; return ESP_OK; }
 uint32_t esp_partition_get_main_flash_sector_size(void) { return 4096u; }
+// Referenced by net/pico_image_source.c, linked in for real (see
+// build_host_tests.ps1's cmd8) because ota_pico_do_stage() now calls
+// pico_image_source_describe() for KilnFW TODO.md 9.4's protocol-version
+// warning. Never reached by a test in this file -- ota_pico_do_stage() is not
+// exercised here -- but zero-fills rather than leaving the caller's buffer
+// untouched, so the scan it feeds stays deterministic if that ever changes.
+esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset, void *dst, size_t size)
+{ (void)partition; (void)src_offset; if (dst) memset(dst, 0, size); return ESP_OK; }
 
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *start_from)
 { (void)start_from; return NULL; }
