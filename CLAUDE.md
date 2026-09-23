@@ -548,7 +548,9 @@ everything else throttled in parallel (`-MaxParallel`, default 8); phase 3
 is `check_ui_responsive_sweep.ps1` alone (`-MaxParallel 1`, forced serial
 since `eefff2dc` — it drives real headless Chrome over CDP and flaked under
 phase 2's concurrent load) — so a full run finishes in under 3 minutes on
-this 24-core machine instead of exceeding the 600s tool timeout. `-Only
+this 24-core machine (when no other session holds a build gate slot -- see
+"Heavy builds" in `docs/agent_rules/COMMON.md`) instead of exceeding the
+600s tool timeout. `-Only
 <regex>`/`-Skip <regex>` filter by repo-relative path for iterating on one
 check; `-Fast` skips the three phase-1 target builds and, separately,
 `check_00_kilnfw_host_tests.ps1` (phase 2) for a caller that already ran the

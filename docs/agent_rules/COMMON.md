@@ -57,11 +57,18 @@ target build and host-test build now goes through `tools/build_gate.ps1` (or
 directly outside `check_00_*.ps1`, `build_host_tests.ps1`, or the
 `build_kilnfw`/`build_saftyfw*` MCP tools. Prefer
 `run_all_checks.ps1 -Fast -Only <regex>` while iterating and run the full
-suite once per commit, not once per edit. The rule covers every full target
-build and every host-test build, including `check_01_*_pushed_build.ps1` and
-`check_bootloader_builds.ps1`; the direct ninja/cl calls in
-`check_sim_scenarios.ps1`, `check_sim_iter_tune_bars.ps1`, and
-`run_sim_factorial.ps1` are small enough to stay exempt.
+suite once per commit, not once per edit (with no other session holding a
+build slot, a full run finishes in under 3 minutes on this 24-core machine --
+one that is waiting on a slot takes longer, not longer than expected). The
+rule covers every full target build and every host-test build, including
+`check_01_*_pushed_build.ps1` and `check_bootloader_builds.ps1`; the direct
+ninja/cl calls in `check_sim_scenarios.ps1`, `check_sim_iter_tune_bars.ps1`,
+and `run_sim_factorial.ps1` are small enough to stay exempt. Building a clean
+git worktree at HEAD (e.g. for `flash_firmware(kiln_fw_root=...)`) also goes
+through the gate: use `build_kilnfw(kiln_fw_root=...)` /
+`build_saftyfw(saftyfw_root=...)`, never a bare `idf.py`/`cmake`/`ninja`
+invocation against that worktree either -- see docs/MCP_SERVERS.md's
+"Building from a clean worktree for `kiln_fw_root`" section.
 
 ## Attribution
 

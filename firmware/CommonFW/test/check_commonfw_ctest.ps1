@@ -40,6 +40,13 @@ $ErrorActionPreference = "Stop"
 $testDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $commonDir = Split-Path -Parent $testDir
 
+# Build gate: this cmake --build compiles ~three dozen host-test executables,
+# the same heavy-build shape build_host_tests.ps1 already goes through -- not
+# a "small ninja/cl call" exempt under COMMON.md's Heavy builds rule (opus
+# review advisory d). Gates only the --build call below, not the cheap
+# configure or the ctest run.
+. (Join-Path $testDir "..\..\..\tools\build_gate.ps1")
+
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
@@ -71,10 +78,16 @@ try {
 
     # No -target: build everything CMakeLists.txt declares (both libraries
     # plus every host-test executable), not just one.
-    $bld = & cmake --build $buildDir --config Debug 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $gate = Enter-KilnBuildGate -Label "commonfw_ctest"
+    try {
+        $bld = & cmake --build $buildDir --config Debug 2>&1
+        $bldExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $gate
+    }
+    if ($bldExit -ne 0) {
         $bld | ForEach-Object { Write-Host $_ }
-        throw "cmake --build of firmware/CommonFW failed (exit $LASTEXITCODE)."
+        throw "cmake --build of firmware/CommonFW failed (exit $bldExit)."
     }
 
     # --timeout is ctest's own per-test wall-clock bound -- the general form

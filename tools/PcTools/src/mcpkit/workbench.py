@@ -302,13 +302,31 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
 _IDF_PROFILE = r"C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
 
 
-def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False) -> str:
+def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False,
+                  kiln_fw_root: Optional[str] = None) -> str:
     """Build the ESP32-S3 main firmware (``firmware/KilnFW``) via ESP-IDF.
 
     ``target`` is an idf.py target -- ``build``, ``fullclean``, ``reconfigure``.
     ``jobs`` above zero bypasses idf.py and calls ninja directly, because
     idf.py's argument parser rejects ``-- -j N``; it therefore only applies to
     an already-configured build directory and is ignored for other targets.
+
+    ``kiln_fw_root`` is an optional absolute path to a ``firmware/KilnFW``-
+    shaped directory (mirroring ``flash_firmware``'s own ``kiln_fw_root`` and
+    ``build_saftyfw``'s ``saftyfw_root``), for building the sanctioned "clean
+    git worktree at HEAD" flow through this gated tool instead of a bare
+    ``idf.py -C <worktree>\\firmware\\KilnFW build`` invocation outside any
+    lock/gate (opus review of 7f6d3db5, finding 1 -- COMMON.md forbade the
+    direct call while MCP_SERVERS.md told agents to make it anyway, and this
+    tool had no parameter to gate it end to end). When given, the companion
+    SaftyFW build (see below) also runs against that worktree's own
+    ``firmware/SaftyFW``, not the main tree's, so the embedded slot images
+    come from the same worktree being built. On a from-scratch or
+    ``fullclean``'d root this also runs ``git submodule update --init
+    components/lvgl`` and ``idf.py set-target esp32s3`` first (the two traps
+    documented in docs/MCP_SERVERS.md's "Building from a clean worktree for
+    `kiln_fw_root`" section) -- neither is a full build, so neither goes
+    through the build gate.
 
     2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW APPLICATION build
     now ``EMBED_FILES`` two SaftyFW slot images
@@ -331,20 +349,42 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
 
     Flashing is deliberately not offered here: this board is programmed over
     JTAG with OpenOCD (``flash_firmware`` / ``debug_program``), never esptool.
+    Hand a successful ``kiln_fw_root`` build's directory straight to
+    ``flash_firmware(kiln_fw_root=...)``.
 
-    This always builds the MAIN tree's ``firmware/KilnFW`` -- unlike
-    ``build_saftyfw``, there is no root/worktree parameter here, so it cannot
-    be pointed at a clean worktree. For that workflow, build the worktree
-    directly (``idf.py -C <wt>\\firmware\\KilnFW build``, after ``set-target
-    esp32s3`` on a from-scratch or fullclean'd build dir) and hand the result
-    to ``flash_firmware(kiln_fw_root=...)``; see docs/MCP_SERVERS.md's
-    "Building from a clean worktree for `kiln_fw_root`" section for the full
-    procedure and the SaftyFW equivalent.
+    The build gate slot is released and re-acquired BETWEEN the SaftyFW build
+    and the KilnFW build below (each goes through its own ``with
+    kiln_build_gate(...)`` block, not one shared one) -- a queued waiter can
+    take the slot in that gap and run its own build before this call's KilnFW
+    half starts. That is intentional, not a bug: holding one slot across both
+    builds here would make a 2-slot machine behave like a 1-slot machine for
+    every KilnFW build, and the two builds are already ordered by the
+    SaftyFW-first data dependency above, not by holding the gate continuously
+    (opus review of 7f6d3db5, finding 2).
     """
     root = repo_root()
+    if kiln_fw_root is not None:
+        if not os.path.isabs(kiln_fw_root):
+            return f"kilnfw: error: kiln_fw_root must be an absolute path, got {kiln_fw_root!r}"
+        if not os.path.isfile(os.path.join(kiln_fw_root, "CMakeLists.txt")):
+            return (f"kilnfw: error: kiln_fw_root {kiln_fw_root!r} has no CMakeLists.txt "
+                     f"-- it does not look like a firmware/KilnFW-shaped directory")
+    kiln_fw_dir = kiln_fw_root or os.path.join(root, "firmware", "KilnFW")
+    build_dir = os.path.join(kiln_fw_dir, "build")
+    saftyfw_root_arg: Optional[str] = None
+    if kiln_fw_root is not None:
+        # <worktree>/firmware/KilnFW -> <worktree>/firmware/SaftyFW, so the
+        # embedded slot images come from the SAME worktree being built, not
+        # the main tree's firmware/SaftyFW.
+        worktree_firmware_dir = os.path.dirname(kiln_fw_dir)
+        saftyfw_root_arg = os.path.join(worktree_firmware_dir, "SaftyFW")
+        if not os.path.isfile(os.path.join(saftyfw_root_arg, "CMakeLists.txt")):
+            return (f"kilnfw: error: derived saftyfw_root {saftyfw_root_arg!r} (sibling of "
+                     f"kiln_fw_root) has no CMakeLists.txt -- kiln_fw_root does not look like "
+                     f"it is under a normal firmware/KilnFW + firmware/SaftyFW worktree layout")
     saftyfw_report = None
     if target in ("build", "reconfigure") and not skip_saftyfw:
-        saftyfw_report = build_saftyfw(jobs)
+        saftyfw_report = build_saftyfw(jobs, saftyfw_root=saftyfw_root_arg)
         saftyfw_ok = "saftyfw: OK" in saftyfw_report
         if not saftyfw_ok:
             return (
@@ -356,10 +396,31 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
         result = (f"kilnfw: error: ESP-IDF profile not found at {_IDF_PROFILE} -- "
                   f"update _IDF_PROFILE in mcpkit/workbench.py if Espressif moved")
         return f"{saftyfw_report}\n\n{result}" if saftyfw_report else result
+    setup_note = ""
+    if kiln_fw_root is not None and not os.path.isfile(os.path.join(build_dir, "sdkconfig")):
+        # Fresh or fullclean'd worktree: neither of these is a full build, so
+        # neither goes through the build gate (docs/MCP_SERVERS.md's "clean
+        # worktree" section documents both traps this closes).
+        lvgl_dir = os.path.join(kiln_fw_dir, "components", "lvgl")
+        if not os.path.isfile(os.path.join(lvgl_dir, "CMakeLists.txt")):
+            submodule_result = _run_locked(
+                "kilnfw-submodule-init", kiln_fw_dir,
+                ["git", "submodule", "update", "--init", "components/lvgl"], cwd=kiln_fw_dir)
+            if "kilnfw-submodule-init: OK" not in submodule_result:
+                return submodule_result
+            setup_note += f"{submodule_result}\n"
+        set_target_result = _run_locked(
+            "kilnfw-set-target", kiln_fw_dir,
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+             f"& '{_IDF_PROFILE}' *>&1 | Out-Null; idf.py -C '{kiln_fw_dir}' set-target esp32s3; "
+             f"exit $LASTEXITCODE"])
+        if "kilnfw-set-target: OK" not in set_target_result:
+            return f"{setup_note}{set_target_result}"
+        setup_note += f"{set_target_result}\n"
     if jobs > 0 and target == "build":
-        inner = f"cd '{os.path.join(root, 'firmware', 'KilnFW', 'build')}'; ninja -j {jobs}"
+        inner = f"cd '{build_dir}'; ninja -j {jobs}"
     else:
-        inner = f"idf.py -C '{os.path.join(root, 'firmware', 'KilnFW')}' {target}"
+        inner = f"idf.py -C '{kiln_fw_dir}' {target}"
     # powershell.exe does NOT propagate a native command's exit code as its own
     # process exit code unless the script explicitly does so -- without the
     # trailing `exit $LASTEXITCODE`, this always returned 0 even when idf.py
@@ -367,7 +428,6 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     # to avoid. See _MSYS_ENV_VARS above for the sibling false-pass this same
     # command is also guarding against.
     command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
-    build_dir = os.path.join(root, "firmware", "KilnFW", "build")
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
     wait_result = GateWaitResult()
@@ -385,7 +445,12 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     if wait_result.waited_seconds > 0:
         kilnfw_report = (
             f"{kilnfw_report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)")
-    if target in ("build", "reconfigure") and f"kilnfw-{target}: OK" in kilnfw_report:
+    if setup_note:
+        kilnfw_report = f"{setup_note}{kilnfw_report}"
+    # The sdkconfig-provenance-sibling fix only makes sense for the main
+    # tree's own firmware/KilnFW -- an isolated kiln_fw_root worktree has no
+    # relationship to check_00_kilnfw_target_build.ps1's published sibling.
+    if kiln_fw_root is None and target in ("build", "reconfigure") and f"kilnfw-{target}: OK" in kilnfw_report:
         elf_after = _stat_snapshot(elf_path)
         kilnfw_report = (
             f"{kilnfw_report}\n\n"

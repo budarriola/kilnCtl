@@ -112,8 +112,8 @@ class _KernelMutex:
     def wait(self, timeout_ms: int) -> int:
         return _kernel32.WaitForSingleObject(self.handle, timeout_ms)
 
-    def release(self) -> None:
-        _kernel32.ReleaseMutex(self.handle)
+    def release(self) -> bool:
+        return bool(_kernel32.ReleaseMutex(self.handle))
 
     def close(self) -> None:
         _kernel32.CloseHandle(self.handle)
@@ -214,7 +214,12 @@ def kiln_build_gate(
         try:
             yield
         finally:
-            held.release()
+            # A genuine ReleaseMutex failure here strands the slot until this
+            # (long-lived, in the MCP server) process exits -- log it rather
+            # than swallowing it silently (opus review advisory b).
+            if not held.release():
+                log(f"build gate: WARNING -- ReleaseMutex failed for slot {held_index} "
+                    f"('{label}'): {ctypes.get_last_error()}")
             log(f"build gate: released slot {held_index} for '{label}'")
     finally:
         for m in mutexes:

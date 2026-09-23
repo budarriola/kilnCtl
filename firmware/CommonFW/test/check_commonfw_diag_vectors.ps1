@@ -42,6 +42,11 @@ $ErrorActionPreference = "Stop"
 $testDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $commonDir = Split-Path -Parent $testDir
 
+# Build gate: gates the cmake --build call below only (opus review advisory
+# d) -- same heavy-build class as check_commonfw_ctest.ps1's, just scoped to
+# one target.
+. (Join-Path $testDir "..\..\..\tools\build_gate.ps1")
+
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     Write-Host "SKIP: no ``cmake`` on PATH -- cannot build CommonFW's host tests."
     exit 3
@@ -66,10 +71,16 @@ try {
         throw "cmake configure of firmware/CommonFW failed (exit $LASTEXITCODE)."
     }
 
-    $bld = & cmake --build $buildDir --target test_diag --config Debug 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $gate = Enter-KilnBuildGate -Label "commonfw_diag_vectors"
+    try {
+        $bld = & cmake --build $buildDir --target test_diag --config Debug 2>&1
+        $bldExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $gate
+    }
+    if ($bldExit -ne 0) {
         $bld | ForEach-Object { Write-Host $_ }
-        throw "cmake --build of CommonFW's test_diag failed (exit $LASTEXITCODE)."
+        throw "cmake --build of CommonFW's test_diag failed (exit $bldExit)."
     }
 
     $exe = Get-ChildItem -Path $buildDir -Filter "test_diag.exe" -Recurse -File |

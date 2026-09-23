@@ -484,15 +484,24 @@ would ride along or trip the sensitive-dirty guard above). A fresh
    set-target esp32s3` explicitly before `build` -- do not rely on a stale
    `sdkconfig` or the tool's own default.
 
-`build_kilnfw()` (`tools/PcTools/src/mcpkit/workbench.py`) always builds the
-MAIN tree's `firmware/KilnFW` and takes no root/worktree parameter -- its own
-docstring now states this plainly and points back here. It
-cannot be pointed at a clean worktree the way `flash_firmware
-(kiln_fw_root=...)` can. Building the worktree itself for that workflow means
-invoking the toolchain directly, the same way
-`check_00_kilnfw_target_build.ps1` does against its own private checkbuild
-worktree: `idf.py -C <worktree>\firmware\KilnFW build` (after `set-target
-esp32s3` on a from-scratch or fullclean'd build dir, per above).
+`build_kilnfw()` (`tools/PcTools/src/mcpkit/workbench.py`) now also takes an
+optional `kiln_fw_root` (absolute path to a `firmware/KilnFW`-shaped
+directory, mirroring `flash_firmware`'s own `kiln_fw_root` and
+`build_saftyfw`'s `saftyfw_root`) so this "build from a clean worktree" flow
+goes through the build gate and the per-directory lock like every other build
+in this repo, instead of the bare `idf.py -C <worktree>\firmware\KilnFW
+build` invocation this section used to tell agents to run directly outside
+either (opus review of 7f6d3db5: that direct call also contradicted
+`docs/agent_rules/COMMON.md`'s "never invoke idf.py/cmake/ninja/cl.exe
+directly" rule). Pass it as
+`build_kilnfw(kiln_fw_root="<worktree>\firmware\KilnFW")`: it derives the
+companion SaftyFW build's root as the sibling `firmware\SaftyFW` under the
+same worktree (so the embedded slot images come from that worktree, not the
+main tree), and on a from-scratch or `fullclean`'d build directory it runs
+the `git submodule update --init components/lvgl` and `idf.py set-target
+esp32s3` steps above itself before building -- neither is a full build, so
+neither goes through the gate. Hand a successful build's directory straight
+to `flash_firmware(kiln_fw_root=...)`.
 
 `build_saftyfw()` is different: it now takes an optional `saftyfw_root`
 (absolute path to a `firmware/SaftyFW`-shaped directory, mirroring

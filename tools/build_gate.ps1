@@ -46,7 +46,7 @@ function Get-KilnBuildGateSlotCount {
     }
     $n = 0
     if (-not [int]::TryParse($raw.Trim(), [ref]$n)) {
-        Write-Host "build gate: KILNCTL_BUILD_GATE_SLOTS='$raw' is not an integer, defaulting to 2" -ForegroundColor Yellow
+        [Console]::Error.WriteLine("build gate: KILNCTL_BUILD_GATE_SLOTS='$raw' is not an integer, defaulting to 2")
         return 2
     }
     return $n
@@ -71,7 +71,7 @@ function Enter-KilnBuildGate {
 
     $slots = Get-KilnBuildGateSlotCount
     if ($slots -le 0) {
-        Write-Host "build gate: disabled (KILNCTL_BUILD_GATE_SLOTS=0) for '$Label'" -ForegroundColor DarkGray
+        [Console]::Error.WriteLine("build gate: disabled (KILNCTL_BUILD_GATE_SLOTS=0) for '$Label'")
         return [PSCustomObject]@{ Disabled = $true; Mutex = $null; SlotIndex = -1; Label = $Label }
     }
 
@@ -94,7 +94,7 @@ function Enter-KilnBuildGate {
             for ($j = 0; $j -lt $mutexes.Count; $j++) {
                 if ($j -ne $i) { $mutexes[$j].Dispose() }
             }
-            Write-Host "build gate: acquired slot $i for '$Label' (slots=$slots)" -ForegroundColor DarkGray
+            [Console]::Error.WriteLine("build gate: acquired slot $i for '$Label' (slots=$slots)")
             return [PSCustomObject]@{ Disabled = $false; Mutex = $mutexes[$i]; SlotIndex = $i; Label = $Label }
         }
     }
@@ -106,7 +106,7 @@ function Enter-KilnBuildGate {
     # waiting line every $PollIntervalSeconds so this looks gated, not hung.
     $elapsed = 0
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host "build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)" -ForegroundColor Yellow
+    [Console]::Error.WriteLine("build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)")
     while ($elapsed -lt $TimeoutSeconds) {
         $chunk = [Math]::Min($PollIntervalSeconds, $TimeoutSeconds - $elapsed)
         # WaitAny returns 0..n-1 on acquisition, or the sentinel
@@ -129,10 +129,10 @@ function Enter-KilnBuildGate {
             for ($j = 0; $j -lt $mutexes.Count; $j++) {
                 if ($j -ne $signaledIndex) { $mutexes[$j].Dispose() }
             }
-            Write-Host "build gate: acquired slot $signaledIndex for '$Label' after ${elapsed}s wait" -ForegroundColor DarkGray
+            [Console]::Error.WriteLine("build gate: acquired slot $signaledIndex for '$Label' after ${elapsed}s wait")
             return [PSCustomObject]@{ Disabled = $false; Mutex = $wonMutex; SlotIndex = $signaledIndex; Label = $Label }
         }
-        Write-Host "build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)" -ForegroundColor Yellow
+        [Console]::Error.WriteLine("build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)")
     }
 
     foreach ($m in $mutexes) { $m.Dispose() }
@@ -149,8 +149,12 @@ function Exit-KilnBuildGate {
     try {
         $Gate.Mutex.ReleaseMutex()
     } catch {
-        # already released/abandoned -- nothing to do
+        # Already released/abandoned by us is harmless, but a genuine
+        # ReleaseMutex failure here strands the slot until the process exits
+        # (or forever, in the long-lived MCP server) -- log it rather than
+        # swallowing it silently (opus review advisory b).
+        [Console]::Error.WriteLine("build gate: WARNING -- ReleaseMutex failed for slot $($Gate.SlotIndex) ('$($Gate.Label)'): $_")
     }
     $Gate.Mutex.Dispose()
-    Write-Host "build gate: released slot $($Gate.SlotIndex) for '$($Gate.Label)'" -ForegroundColor DarkGray
+    [Console]::Error.WriteLine("build gate: released slot $($Gate.SlotIndex) for '$($Gate.Label)'")
 }
