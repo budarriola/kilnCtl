@@ -1632,13 +1632,13 @@ invisible on the page the operator watches.
       after its content exists. If still seen on hardware, suspect touch
       calibration/hit-test drift rather than page-registry wiring.
 
-- [x] **`UART_TASK_ID_WIFI` (11) sometimes doesn''t register at boot** — DONE
+- [x] **`UART_TASK_ID_WIFI` (11) sometimes doesn't register at boot** — DONE
       2026-09-07. Root-caused, not a race and not Wi-Fi-provisioning
       ordering: `uart_protocol_register_task()`
       (`firmware/hwAbstraction/esp/uart/uart_protocol.c`) already retries the
       PSRAM-backed inbox `xQueueCreate` 5x and, on final failure, already
       logged the task id and reason -- but at `ESP_LOGW`, not `ESP_LOGE`.
-      `uart_log_bridge.c`''s boot-burst queue only protects `ESP_LOGE` lines
+      `uart_log_bridge.c`'s boot-burst queue only protects `ESP_LOGE` lines
       from eviction when full (see its own HAZARD comment, which already
       named this exact call site); a WARN during the boot burst this failure
       mode occurs in is silently dropped with no eviction, indistinguishable
@@ -1657,17 +1657,17 @@ invisible on the page the operator watches.
       pre-fix/post-fix line against a full boot-burst queue via the real
       `uart_log_bridge.c` eviction logic and proves W is silently dropped
       while E survives.
-- [x] **`ui_page_temperature.c`''s no-scroll fit depends on relay count per
+- [x] **`ui_page_temperature.c`'s no-scroll fit depends on relay count per
       zone at runtime** — DONE 2026-08-24. The real budget is
-      `ui_theme.h`''s new `UI_THEME_PAGE_CONTENT_BUDGET_PX` (268px, computed
+      `ui_theme.h`'s new `UI_THEME_PAGE_CONTENT_BUDGET_PX` (268px, computed
       from real constants — every prior "~264px" comment across this
       codebase was off by 4px, harmless in practice but now a single
-      source of truth). Re-deriving this page''s worst case turned up a
+      source of truth). Re-deriving this page's worst case turned up a
       LARGER, previously-unnoticed overflow than the relay-count risk this
       item named: `MAX31856_CHANNEL_COUNT` (3) zone cards at the old fixed
       relay-row height (80px, 2 button rows) summed to ~362-380px, ~100px+
       over budget, independent of relay count entirely — the 2026-08-19
-      "relay-count-bound" pass had bounded each card''s own height but
+      "relay-count-bound" pass had bounded each card's own height but
       nobody had summed all the cards against the real page budget. Fixed
       by shrinking `UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX` to one button
       row (40px, still internally scrollable for a zone with more relays
@@ -1675,7 +1675,7 @@ invisible on the page the operator watches.
       `MAX31856_CHANNEL_COUNT` cards + the status label against the real
       budget. Relays-per-zone itself is now `UI_PAGE_TEMPERATURE_MAX_
       RELAYS_PER_ZONE` (`== KILN_IO_RELAY_COUNT`, the true structural
-      ceiling — a zone can''t claim more relays than the board has),
+      ceiling — a zone can't claim more relays than the board has),
       cross-checked by its own `_Static_assert`, with a RUNTIME clamp+log
       in `build_zone_row()` for a corrupted/out-of-range `relay_mask`
       (persisted config data no static assert can see the value of).
@@ -1685,7 +1685,7 @@ invisible on the page the operator watches.
       environment) — arithmetic against real constants, not a pixel-verified
       fit; the one-row relay display (vs. the old 2-row layout) is also an
       unverified real UX narrowing for a zone with several relays.
-- [x] **`ui_page_network.c`''s worst-case fit (~268px against a ~264px
+- [x] **`ui_page_network.c`'s worst-case fit (~268px against a ~264px
       budget) is computed, not hardware-confirmed** — DONE 2026-08-24, via
       the exact remedy this item named: Scan/Saved/Connect/Forget split into
       their own page, `ui_page_network_manage.c`, reachable from a "Manage
@@ -1694,15 +1694,15 @@ invisible on the page the operator watches.
       numbers first (not trusting the old ~268px estimate) found the true
       worst case was worse than documented: the "Change network"/"Show QR"
       button being visible at the SAME TIME as the list block once
-      connected was never summed into any prior pass''s arithmetic. A
+      connected was never summed into any prior pass's arithmetic. A
       SECOND, entirely undocumented ~34px overflow was also found in the
       AP-identity section (`s_ap_section`) while deriving this — nothing in
-      TODO.md or this file''s history ever named it, since every earlier
+      TODO.md or this file's history ever named it, since every earlier
       budget pass here was chasing the Scan/Saved list. Both are fixed:
       `ui_page_network.c` now carries two `_Static_assert`s (STA-connected
       state, AP-mode state — the two real mutually-exclusive states
       `content` can show) and `ui_page_network_manage.c` carries its own,
-      all three checked by `ui_theme.h`''s new `UI_THEME_PAGE_CONTENT_
+      all three checked by `ui_theme.h`'s new `UI_THEME_PAGE_CONTENT_
       BUDGET_PX` and enforced by `check_ui_budget_asserts.ps1`. Still NOT
       hardware-confirmed.
 
@@ -1750,7 +1750,7 @@ configure time (Python `gzip` module, not a Unix binary — avoids the Windows
 dev-machine wrinkle) and embedded pre-compressed; `zones_page.html` is
 deliberately excluded and stays raw (confirmed safe: its handler sends no
 `Content-Encoding` header). Content negotiation (`App/drivers/web_encoding.
-{c,h}`) now serves gzip whenever a client doesn''t explicitly exclude it (per
+{c,h}`) now serves gzip whenever a client doesn't explicitly exclude it (per
 RFC 9110 — a request with no `Accept-Encoding` header legally accepts any
 coding) and returns 406 with an uncompressed body only when a client
 explicitly excludes gzip (`identity`, `q=0` forms). The "compile CSS/JS to
@@ -1763,10 +1763,10 @@ evaluated and **rejected** — LVGL stays the LCD rendering backend.
 
 ### 10.7 Onboard IC temperature sensors
 
-DONE — `App/drivers/board_temps.{c,h}` surfaces the ESP32-S3''s internal die
-temperature and every MAX31856''s cold-junction reading. `GET /api/board_temps`
+DONE — `App/drivers/board_temps.{c,h}` surfaces the ESP32-S3's internal die
+temperature and every MAX31856's cold-junction reading. `GET /api/board_temps`
 (web) and `ui_page_board_health.c` (LCD, reached from the Configuration hub)
-both read the same `board_temps_get_live()` getter (10.1a''s shared-backend
+both read the same `board_temps_get_live()` getter (10.1a's shared-backend
 rule) — deliberately a separate page/route from the main dashboard, since
 this is board-health diagnostic data, not kiln-process data.
 
@@ -1793,7 +1793,7 @@ forget, AP identity display, an on-screen-keyboard connect flow via
 handlers use. QR codes ship on both surfaces: an AP-join QR (`ui_page_
 network.c` and, compact, `ui_page_home.c` while in AP mode) and a
 dashboard-URL QR (`kiln.local` preferred, raw IP fallback) once connected,
-using LVGL''s `lv_qrcode` on the LCD and an embedded client-side JS QR
+using LVGL's `lv_qrcode` on the LCD and an embedded client-side JS QR
 library (no CDN) on the web.
 
 **Recurring hazard found twice this section: `sdkconfig` vs. `sdkconfig.
@@ -1812,22 +1812,22 @@ future menuconfig change.
 DONE — safety-processor thermocouple, enclosure (cold-junction) temperature,
 and power (Frame E, `kilnlink_power.{c,h}`, host-tested) are all plumbed
 into `dashboard_status_t`/`GET /api/status` and a "Safety Processor" card on
-`ui_page_home.c`, per `LINK_PROTOCOL.md` sec 7''s explicit placement (this is
-kiln-process data an operator watches while firing, unlike 10.7''s
+`ui_page_home.c`, per `LINK_PROTOCOL.md` sec 7's explicit placement (this is
+kiln-process data an operator watches while firing, unlike 10.7's
 board-health diagnostics). SaftyFW now sends Frame E too, but guards S3/S4
 are deliberately not wired to it yet — needs the per-channel CT-mapping
 commissioning check on real hardware first (`SaftyFW/docs/CURRENT_SENSE.md`
 sec 5).
 
 - [ ] **Not hardware-verified, and cannot be from this environment.** No
-      ESP32-S3/Pico is attached, and the isolated link doesn''t pass a byte
+      ESP32-S3/Pico is attached, and the isolated link doesn't pass a byte
       end-to-end on the real board (`ROADMAP.md` M0) — every field reads
       `null`/"---" today by design, not by bug. Needs both M0 (link fixed)
       and a live Pico emitting Frame A/Frame E.
 
 ### 10.11 Liveness: 1.5 s fault, 30 s firing-abort (ROADMAP.md M6)
 
-DONE — `LINK_PROTOCOL.md` sec 8''s two-timeout rule. `SAFETY_LINK_STALE_MS`
+DONE — `LINK_PROTOCOL.md` sec 8's two-timeout rule. `SAFETY_LINK_STALE_MS`
 (1500) is a fixed ceiling, decoupled from the configurable poll period (a
 reconfigured period can only make the fault fire sooner, never later). 30s
 of continued silence while a firing is running/paused aborts it via the
@@ -1842,25 +1842,25 @@ records the end) rather than a new mechanism.
 
 ### 10.12 ESP → Pico context broadcast, `SAFETY_CMD_PUSH_CONTEXT` (ROADMAP.md M5)
 
-DONE — `LINK_PROTOCOL.md` sec 4''s 0x07 frame (relay now/recent masks,
+DONE — `LINK_PROTOCOL.md` sec 4's 0x07 frame (relay now/recent masks,
 per-zone measured temp/fault/type/setpoint/active/relay-on/guard-tripped,
 top-level profile-running/any-zone-faulted/heat-requested flags) is built
 from real board state and broadcast every poll period via
 `safety_build_and_send_context()`.
 
 - [ ] **Not verified against a real Pico.** No RP2040 is attached — the frame
-      is built/broadcast and matches the codec''s own contract, but nothing
-      confirms a real SaftyFW build decodes it correctly. SaftyFW''s receive
+      is built/broadcast and matches the codec's own contract, but nothing
+      confirms a real SaftyFW build decodes it correctly. SaftyFW's receive
       side is tracked separately in `firmware/SaftyFW/TODO.md`.
 
 ### 10.13 DIAG / TRIP_EVENT decode + dispatch (ROADMAP.md M5)
 
-DONE — `LINK_PROTOCOL.md` sec 6''s Frame B (`SAFETY_CMD_DIAG`, 0x08) and Frame
+DONE — `LINK_PROTOCOL.md` sec 6's Frame B (`SAFETY_CMD_DIAG`, 0x08) and Frame
 D (`SAFETY_CMD_TRIP_EVENT`, 0x0D) are decoded and cached in `safety_link.c`
 (`safety_apply_diag()`/`safety_apply_trip_event()`, `TRIP_EVENT` deduped on
 `trip_seq`), passed through to `dashboard_status_t`/`GET /api/status`
 (present only once a frame has ever arrived), and a "Last trip" row on
-`ui_page_safety.c` (the only field that fit its no-scroll budget; DIAG''s
+`ui_page_safety.c` (the only field that fit its no-scroll budget; DIAG's
 warn/trip masks are cached and HTTP-exposed but deliberately not added to
 this page — a future dedicated diagnostics page is the better home). Also
 mirrored onto the PC-link SAFETY UART task as two new query subcommands
@@ -1912,7 +1912,7 @@ skipped, not deferred** — all four run/pause/halt/resume entry points
 already wrap their bodies in one correct mutex with no lost-update bug to
 fix; converting a safety-critical state machine to a drop-on-full-queue path
 would be pure regression risk for zero safety gain. Revisit only if Phase
-6''s system-mode gate genuinely needs a choke point the lock can''t provide.
+6's system-mode gate genuinely needs a choke point the lock can't provide.
 
 **Verification**: build-clean under `-Werror` throughout. Phase 4 reached a
 partial hardware data point (flashed, boots, stays running) but the PC-link
@@ -1929,19 +1929,19 @@ suspected to be related to this work, was root-caused separately (also in
 - [ ] **Web side**: `dashboard_http.c`/`zones_http.c`/`profiles_http.c`/
       `rules_http.c`/`ota_http.c`/`wifi_provision_http.c` action-taking POST
       handlers should post commands instead of running inline on
-      `esp_http_server`''s one shared worker task. `ota_http.c`''s transfer
+      `esp_http_server`'s one shared worker task. `ota_http.c`'s transfer
       handlers and `provision_post_handler()` are the highest-value targets
-      (longest/most blocking). OTA''s transfer handlers are explicitly
+      (longest/most blocking). OTA's transfer handlers are explicitly
       out-of-scope for migration — they legitimately need to hold a
       streaming HTTP body open across the whole transfer.
-- [ ] **Debug/PC-link UART side** (explicit user request): `uart_bridge.c`''s
+- [ ] **Debug/PC-link UART side** (explicit user request): `uart_bridge.c`'s
       per-subsystem tasks (THERMO/IO already migrated via the owners above;
       DISPLAY is dead code and should be deleted rather than migrated) post
       commands to an owning task instead of running the dispatch switch
       body inline.
 - [x] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
       owner (1/2/4) each handler calls into — not a separate final phase.
-      Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`''s audit found
+      Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`'s audit found
       four remaining direct-driver-read call sites in `dashboard_http.c` (x2)
       and `ota_http.c` (x2) — `MAX31856_read_all()`/`kiln_io_read()` used
       directly instead of `thermo_owner_command_read_all()`/
@@ -1950,7 +1950,7 @@ suspected to be related to this work, was root-caused separately (also in
       in the same batch; `wifi_provision_http.c` (Phase 4) was already clean.
       `tools/check_no_handler_direct_driver_calls.ps1` now enforces this
       mechanically (zero-entry allowlist for MAX31856/kiln_io, one narrow
-      documented exception for `factory_reset.c`''s driver-storage-reset
+      documented exception for `factory_reset.c`'s driver-storage-reset
       `esp_wifi_restore()`/`esp_wifi_set_storage()` calls).
 - [ ] **Phase 6** (added mid-Phase-1, user request): a **system-mode command
       gate**, distinct from the owner-task pattern above. The owners answer
@@ -1959,17 +1959,17 @@ suspected to be related to this work, was root-caused separately (also in
       e.g. while a profile is firing, stop/pause/modify-this-run is fine, but
       starting a *different* profile, running autotune, or a raw GPIO/SX1509
       debug write should be refused outright. Needs to see
-      `profile_executor`''s and `autotune_engine`''s state, which
+      `profile_executor`'s and `autotune_engine`'s state, which
       `kiln_io_owner`/`thermo_owner` have no business knowing about — a
       policy layer above the owners, consulted by every producer-facing entry
       point before a command is even built. Needs its own design pass before
-      it''s built; do not implement ahead of the phases above landing.
+      it's built; do not implement ahead of the phases above landing.
 - [ ] `profile_executor.c`/`relay_authority.c` gaining the same
       `relay_owner.c`-style queue is a candidate once the web/LCD callers
       that drive them are migrated — not urgent (current call pattern
-      hasn''t been observed to freeze anything).
-- [ ] `ui_page_network.c`''s three job structs are candidates to migrate onto
-      `wifi_prov`''s real owner queue once a shared async shape exists,
+      hasn't been observed to freeze anything).
+- [ ] `ui_page_network.c`'s three job structs are candidates to migrate onto
+      `wifi_prov`'s real owner queue once a shared async shape exists,
       rather than staying page-local one-offs.
 
 ## 11. PC-link command acknowledgement (moved from ROADMAP.md 2026-08-24)
