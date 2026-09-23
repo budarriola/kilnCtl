@@ -447,13 +447,14 @@ class SafetyClient:
 
         Uses :data:`CT_CAL_REPLY_TIMEOUT_S` (5.0), not
         :data:`DEFAULT_REPLY_TIMEOUT_S` (2.0), for the same reason
-        :meth:`get_ct_cal` does: once wired up, GET_PARAM is a live round
+        :meth:`get_ct_cal` does: GET_PARAM is a live round
         trip to the Pico through the ESP's SAFETY_XACT_LOCK_TIMEOUT_MS
         (5000 ms) transaction lock, not an ESP-cached reply, so it needs
         headroom for that lock rather than the shorter cached-reply timeout.
 
         UNLIKE :meth:`get_ct_cal`, a refusal here is not folded into a raised
-        exception. As of KilnFW commit a3c3d825, uart_bridge_safety.c's
+        exception. Since uart_bridge_safety.c's SAFETY_CMD_GET_PARAM case
+        (safety_link_get_param()), uart_bridge_safety.c's
         safety_bridge_task() has a live SAFETY_CMD_GET_PARAM case relaying a
         real Pico round trip, so a refusal now means something the peer
         actually said (e.g. an old Pico predating KILNLINK_PROTOCOL_VERSION

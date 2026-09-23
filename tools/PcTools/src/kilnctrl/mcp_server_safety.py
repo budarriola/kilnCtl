@@ -500,7 +500,8 @@ def safety_get_param(param_id: int) -> str:
     future 0x0505 (config RAM-integrity fail count, landing separately)
     rather than anything already reachable in bulk via GET_CONFIG_PAGE.
 
-    WIRED END TO END as of KilnFW commit a3c3d825: uart_bridge_safety.c's
+    WIRED END TO END since uart_bridge_safety.c's SAFETY_CMD_GET_PARAM case
+    (safety_link_get_param()): uart_bridge_safety.c's
     safety_bridge_task() now has a SAFETY_CMD_GET_PARAM case that relays a
     live Pico round trip (safety_link_get_param() -- CommonFW's
     kilnlink_get_param.c/kilnlink_param.c), so a real request reaches the

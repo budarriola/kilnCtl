@@ -209,8 +209,9 @@ def safety_get_param(param_id: int) -> bytes:
     future 0x0505 (config RAM-integrity fail count) rather than anything
     already reachable in bulk via GET_CONFIG_PAGE.
 
-    Wired into uart_bridge_safety.c's dispatch as of KilnFW commit a3c3d825
-    (see protocol.py's SAFETY_CMD_GET_PARAM doc comment): sending this now
+    Wired into uart_bridge_safety.c's dispatch since uart_bridge_safety.c's
+    SAFETY_CMD_GET_PARAM case (safety_link_get_param()) was added (see
+    protocol.py's SAFETY_CMD_GET_PARAM doc comment): sending this now
     reaches safety_link_get_param() for a live Pico round trip. This encoder
     and :func:`~kilnctrl.devices.parse_safety_response`'s matching decode
     branch are the request/reply pair that wiring relays.
@@ -1205,7 +1206,8 @@ def parse_safety_response(
     if subcommand == SAFETY_CMD_GET_PARAM:
         # This is the REQUEST's id echoed back -- only ever seen when
         # uart_bridge_safety.c's safety_bridge_task() refused the command
-        # outright. As of KilnFW commit a3c3d825 the switch statement has a
+        # outright. Since uart_bridge_safety.c's SAFETY_CMD_GET_PARAM case
+        # (safety_link_get_param()) was added, the switch statement has a
         # real case for SAFETY_CMD_GET_PARAM (safety_link_get_param(), a live
         # Pico round trip), so this is now a genuine but rare refusal path
         # (e.g. a param_id mismatch guard trip or a Pico too old for

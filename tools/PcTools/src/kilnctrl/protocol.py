@@ -436,8 +436,9 @@ SAFETY_CT_CAL_NUM_CHANNELS = 3
 #: (kilnlink_get_param.h's own doc comment says the same of the codec this
 #: mirrors).
 #:
-#: Wired into uart_bridge_safety.c's SAFETY_CMD_* switch as of KilnFW commit
-#: a3c3d825: sending this now reaches safety_link_get_param() and relays a
+#: Wired into uart_bridge_safety.c's SAFETY_CMD_* switch since
+#: uart_bridge_safety.c's SAFETY_CMD_GET_PARAM case (safety_link_get_param()):
+#: sending this now reaches safety_link_get_param() and relays a
 #: real Pico round trip, same as SAFETY_CMD_GET_CT_CAL. SafetyClient.get_param()
 #: still reports a genuine refusal (e.g. a Pico predating KILNLINK_PROTOCOL_
 #: VERSION 7) honestly rather than raising over it.
