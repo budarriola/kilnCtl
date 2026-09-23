@@ -30,6 +30,10 @@ back to the coordinator. You do not push.
 - PcTools tests: `tools\PcTools\.venv\Scripts\python -m pytest <named files>`. Never
   `uv run`, never `pip install` into the shared `.venv`. SaftyFW host tests need a short
   worktree path (`C:\wt\...`).
+- Any firmware C change must be covered by a full `run_all_checks.ps1` pass or an `-Only`
+  regex that explicitly matches the host-test checks (`check_00_kilnfw_host_tests`,
+  `check_00_saftyfw_host_tests`, `check_commonfw_ctest`); a narrower `-Only` can go green
+  while a host-test build/link break ships.
 - Docs: a backticked hex string of 7+ characters is read as a commit id by
   `check_doc_hash_citations.ps1`; leave crash PCs and addresses unbackticked. Editing a file
   that a doc cites by blob reddens that check; grep docs for `blob:<path>` first.
