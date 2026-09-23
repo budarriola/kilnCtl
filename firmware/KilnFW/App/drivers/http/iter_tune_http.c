@@ -26,7 +26,15 @@ _Static_assert(MAX31856_CHANNEL_COUNT <= ITER_TUNE_STORE_MAX_ZONES,
 static esp_err_t iter_tune_status_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr_chunk(req, "{\"zones\":[");
+    uint8_t refused_version = 0;
+    if (iter_tune_store_schema_refused(&refused_version)) {
+        char preamble[80];
+        int pn = snprintf(preamble, sizeof(preamble), "{\"schema_refused_version\":%u,\"zones\":[",
+                           (unsigned)refused_version);
+        httpd_resp_sendstr_chunk(req, (pn > 0 && (size_t)pn < sizeof(preamble)) ? preamble : "{\"zones\":[");
+    } else {
+        httpd_resp_sendstr_chunk(req, "{\"zones\":[");
+    }
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
         iter_tune_store_zone_t st;
         bool present = iter_tune_store_get_zone(z, &st);

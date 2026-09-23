@@ -53,10 +53,30 @@ extern "C" {
 #define ITER_TUNE_STORE_MAX_ZONES 3u
 
 // Bumped only if the stored layout changes. A blob whose version this build
-// does not recognize is treated exactly like a missing key (every zone
-// reads as never-enabled), never partially trusted -- same rule
-// ct_verify_store.c and display_power_cfg.c apply to their own blobs.
-#define ITER_TUNE_STORE_VERSION 1u
+// does not recognize as either the CURRENT version or a known OLD version
+// below is treated exactly like a missing key (every zone reads as
+// never-enabled), never partially trusted -- same rule ct_verify_store.c and
+// display_power_cfg.c apply to their own blobs. A version NEWER than
+// ITER_TUNE_STORE_VERSION is additionally reported loudly (ESP_LOGE plus
+// iter_tune_store_schema_refused(), surfaced by GET /api/iter_tune/status)
+// rather than silently folded into the same "nothing persisted" bucket a
+// truncated or corrupt blob gets -- a newer-than-known version means a
+// downgrade happened, which is worth a boot-time banner, not silence.
+//
+// v1 -> v2 (2026-09-23, plan step 7 acceptance gap 2): BYTE-COMPATIBLE.
+// v1 never used the third `reserved` byte (always zero, per this file's own
+// convention for every reserved field in this tree); v2 names that byte
+// `carry_count` and otherwise changes nothing. A v1 blob is therefore already
+// valid v2 content -- no field shuffling is needed, only re-tagging the
+// version byte -- see migrate_v1_to_current() in iter_tune_store.c. This is
+// the smallest real instance of the general mechanism (read old layout,
+// migrate forward, refuse newer-than-known loudly) the plan's acceptance
+// criteria asked to see exercised; it is deliberately NOT a
+// ZONES_CFG_VERSION bump (this store never participated in that chain, see
+// this file's top-of-file comment and CONFIG_MIGRATION_CHAIN_PLAN.md sec
+// 0.1), so it carries none of that chain's rollback hazard.
+#define ITER_TUNE_STORE_VERSION_V1 1u
+#define ITER_TUNE_STORE_VERSION 2u
 
 // One zone's persisted tuning state. `status`/`stop_reason` hold
 // iter_tune_status_t/iter_tune_stop_reason_t values (iter_tune.h) narrowed
@@ -68,7 +88,13 @@ typedef struct {
     uint8_t has_baseline;
     uint8_t status;
     uint8_t stop_reason;
-    uint8_t reserved[3]; // keeps the floats below naturally aligned; always 0
+    uint8_t carry_count; // v2+: unscored-trial carry count (plan sec 4, "at
+                          // most 3 such carries"); always 0 in a v1 record
+                          // (it was v1's always-zero reserved[0]) and 0 here
+                          // until a future producer writes it -- no writer
+                          // exists yet, same as every other field in this
+                          // struct per this file's top-of-file comment.
+    uint8_t reserved[2]; // keeps the floats below naturally aligned; always 0
     float anchor_kp;
     float anchor_ki;
     float anchor_kd;
@@ -115,6 +141,17 @@ bool iter_tune_store_get_zone(uint8_t zone_index, iter_tune_store_zone_t *out);
 // refuses (and panics on real hardware) -- see hal_kv.h's write-context
 // contract and safety_cfg_store.c's caller_stack_is_external() note.
 esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zone_t *in);
+
+// True if the most recent iter_tune_store_start() saw a blob (NVS or cfg
+// file) whose version field was NEWER than ITER_TUNE_STORE_VERSION -- e.g.
+// this build was downgraded after a newer build wrote the store. That blob
+// is never trusted (every zone reads as never-enabled, same as any other
+// invalid blob), but unlike a truncated/corrupt blob this case is reported:
+// fills *out_version (when non-NULL) with the rejected version number.
+// GET /api/iter_tune/status surfaces this so a downgrade-onto-newer-data
+// situation is visible instead of silently indistinguishable from "never
+// configured". Cleared by iter_tune_store_start()/iter_tune_store_reset_for_test().
+bool iter_tune_store_schema_refused(uint8_t *out_version);
 
 // Test-only: resets in-RAM state to "nothing persisted" without touching
 // NVS/cfg_fs, so host tests get a clean slate between cases without a real

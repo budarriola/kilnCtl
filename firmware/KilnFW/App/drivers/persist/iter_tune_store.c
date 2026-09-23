@@ -32,6 +32,8 @@ NVS_KEY_LEN_CHECK(ITER_TUNE_NVS_KEY_REV);
 static iter_tune_store_blob_t s_blob;
 static bool s_loaded;      // true once iter_tune_store_start() ran (even if it found nothing)
 static uint32_t s_rev;
+static bool s_schema_refused_newer;   // true if a newer-than-known version was seen and refused
+static uint8_t s_schema_refused_version;
 
 static void put_u32_le(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)(v & 0xFF);
@@ -50,7 +52,14 @@ bool iter_tune_store_blob_validate(const void *bytes, size_t len) {
     }
     iter_tune_store_blob_t tmp;
     memcpy(&tmp, bytes, sizeof(tmp));
-    if (tmp.version != ITER_TUNE_STORE_VERSION) {
+    // Accept the current version, and v1 -- byte-compatible per this file's
+    // header comment, migrated forward by migrate_v1_to_current() once a
+    // caller has a blob it can persist back. Any other version (including
+    // newer-than-current) is never trusted here; the newer-than-known case
+    // is additionally reported loudly by the callers below via
+    // note_schema_verdict(), which this function does not do itself since it
+    // is documented PURE (no logging, no globals).
+    if (tmp.version != ITER_TUNE_STORE_VERSION && tmp.version != ITER_TUNE_STORE_VERSION_V1) {
         return false;
     }
     if (tmp.zone_count > ITER_TUNE_STORE_MAX_ZONES) {
@@ -65,6 +74,43 @@ bool iter_tune_store_blob_validate(const void *bytes, size_t len) {
     return true;
 }
 
+// Not pure (logs, touches s_schema_refused_*): called by the two load paths
+// below, right after a validate() failure, to distinguish "newer than this
+// build knows" from ordinary corruption/truncation. Only meaningful when the
+// blob is exactly the right SIZE (a truncated blob's trailing bytes,
+// including a would-be version byte past the copied region, are never
+// examined) -- version and zone_count are the first two bytes of every
+// schema this file has ever shipped and must never move.
+static void note_schema_verdict(const void *bytes, size_t len) {
+    if (bytes == NULL || len != sizeof(iter_tune_store_blob_t)) {
+        return;
+    }
+    uint8_t version = ((const uint8_t *)bytes)[0];
+    if (version > ITER_TUNE_STORE_VERSION) {
+        s_schema_refused_newer = true;
+        s_schema_refused_version = version;
+        ESP_LOGE(TAG,
+                 "iter_tune store version %u is NEWER than this build knows (%u) -- refusing it and "
+                 "falling back to per-zone defaults; this looks like a downgrade onto data a newer "
+                 "build wrote",
+                 (unsigned)version, (unsigned)ITER_TUNE_STORE_VERSION);
+    }
+}
+
+// v1 -> v2 is byte-compatible (see this file's header comment): v1's
+// reserved[0] byte, always zero, becomes v2's carry_count, also zero in
+// every v1 record. Migration is therefore just re-tagging the version byte.
+// Returns true if it changed anything (caller should re-persist).
+static bool migrate_v1_to_current(iter_tune_store_blob_t *blob) {
+    if (blob->version != ITER_TUNE_STORE_VERSION_V1) {
+        return false;
+    }
+    ESP_LOGW(TAG, "iter_tune store migrating v%u -> v%u (byte-compatible, no field shuffling needed)",
+             (unsigned)ITER_TUNE_STORE_VERSION_V1, (unsigned)ITER_TUNE_STORE_VERSION);
+    blob->version = ITER_TUNE_STORE_VERSION;
+    return true;
+}
+
 static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
     hal_kv_handle_t h;
     if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
@@ -75,7 +121,11 @@ static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
     uint32_t rev = 0;
     hal_kv_get_u32(&h, ITER_TUNE_NVS_KEY_REV, &rev);
     hal_kv_close(&h);
-    if (rc != HAL_OK || !iter_tune_store_blob_validate(out, len)) {
+    if (rc != HAL_OK) {
+        return false;
+    }
+    if (!iter_tune_store_blob_validate(out, len)) {
+        note_schema_verdict(out, len);
         return false;
     }
     *out_rev = rev;
@@ -114,6 +164,7 @@ static bool cfg_fs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
     }
     uint32_t rev = get_u32_le(buf);
     if (!iter_tune_store_blob_validate(buf + 4, out_len - 4)) {
+        note_schema_verdict(buf + 4, out_len - 4);
         return false;
     }
     memcpy(out, buf + 4, sizeof(*out));
@@ -136,6 +187,9 @@ static void cfg_fs_save_raw(const iter_tune_store_blob_t *in, uint32_t rev) {
 }
 
 esp_err_t iter_tune_store_start(void) {
+    s_schema_refused_newer = false;
+    s_schema_refused_version = 0;
+
     iter_tune_store_blob_t nvs_blob;
     uint32_t nvs_rev = 0;
     bool nvs_ok = nvs_load_raw(&nvs_blob, &nvs_rev);
@@ -171,7 +225,22 @@ esp_err_t iter_tune_store_start(void) {
         s_rev = 0;
     }
     s_loaded = true;
+
+    // Forward-migrate an old (v1) blob now that a winner has been resolved,
+    // and persist the migrated form so the NEXT boot no longer has to.
+    if (migrate_v1_to_current(&s_blob)) {
+        s_rev++;
+        nvs_save_raw(&s_blob, s_rev);
+        cfg_fs_save_raw(&s_blob, s_rev);
+    }
     return ESP_OK;
+}
+
+bool iter_tune_store_schema_refused(uint8_t *out_version) {
+    if (s_schema_refused_newer && out_version != NULL) {
+        *out_version = s_schema_refused_version;
+    }
+    return s_schema_refused_newer;
 }
 
 bool iter_tune_store_get_zone(uint8_t zone_index, iter_tune_store_zone_t *out) {
@@ -209,4 +278,6 @@ void iter_tune_store_reset_for_test(void) {
     s_blob.version = ITER_TUNE_STORE_VERSION;
     s_rev = 0;
     s_loaded = false;
+    s_schema_refused_newer = false;
+    s_schema_refused_version = 0;
 }

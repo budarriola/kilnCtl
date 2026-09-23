@@ -95,6 +95,14 @@ esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zon
 
 void iter_tune_store_reset_for_test(void) { fake_store_reset(); }
 
+// Fake: this file's http-surface tests never exercise a schema-version
+// refusal (that is test_iter_tune_store.c's job) -- always "not refused".
+bool iter_tune_store_schema_refused(uint8_t *out_version)
+{
+    (void)out_version;
+    return false;
+}
+
 // ---------------------------------------------------------------------
 // Fake zones_config_set_pid()/autotune_engine_is_active_on_zone() -- the
 // two seams the handler decides its whole outcome on.

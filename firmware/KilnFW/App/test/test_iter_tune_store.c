@@ -165,6 +165,100 @@ static void test_nvs_wrong_version_and_truncated(void)
     TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "truncated blob is never trusted");
 }
 
+// Step 7 acceptance gap (2), 2026-09-23: exercises the schema-migration
+// mechanism that previously only existed as a same-version round trip.
+static void test_v1_old_layout_migrates(void)
+{
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    // A v1 record: byte-compatible with the current struct (see
+    // iter_tune_store.h's header comment), just tagged with the OLD version
+    // number and its carry_count byte left at the zero every v1 writer used.
+    iter_tune_store_blob_t v1_blob = {0};
+    v1_blob.version = ITER_TUNE_STORE_VERSION_V1;
+    v1_blob.zone_count = 1;
+    v1_blob.zone[0] = make_zone(15.0f);
+    v1_blob.zone[0].carry_count = 0;
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for v1 fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, &v1_blob, sizeof(v1_blob)) == HAL_OK,
+               "v1 blob written directly, bypassing this build's writer");
+    TEST_CHECK(hal_kv_set_u32(&h, ITER_TUNE_NVS_KEY_REV, 3u) == HAL_OK, "v1 fixture rev written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start loads and migrates a v1 blob");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "a known-old version is not a refusal");
+
+    iter_tune_store_zone_t out;
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 15.0f && out.enabled == 1,
+               "v1 zone content survives migration unchanged");
+    TEST_CHECK(s_blob.version == ITER_TUNE_STORE_VERSION, "in-RAM blob re-tagged to the current version");
+
+    // Reboot again without touching anything: the migrated write from the
+    // first start() must itself load cleanly as a current-version blob, with
+    // no further migration log/rewrite needed.
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start reloads the migrated blob");
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 15.0f,
+               "migrated content survives a second reboot");
+    TEST_CHECK(s_blob.version == ITER_TUNE_STORE_VERSION, "second load is already current-version");
+}
+
+// Step 7 acceptance gap (2): the refusal half of the same mechanism -- a
+// version NEWER than this build knows must be refused (never partially
+// trusted) AND reported loudly via iter_tune_store_schema_refused(), not
+// folded silently into the same bucket as a truncated/corrupt blob.
+static void test_newer_version_refused_and_reported(void)
+{
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    iter_tune_store_blob_t future_blob = {0};
+    future_blob.version = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    future_blob.zone_count = 1;
+    future_blob.zone[0] = make_zone(20.0f);
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for future-version fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, &future_blob, sizeof(future_blob)) == HAL_OK,
+               "future-version blob written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates a newer-than-known blob");
+    TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "newer-than-known blob is never trusted");
+
+    uint8_t reported_version = 0;
+    TEST_CHECK(iter_tune_store_schema_refused(&reported_version), "newer-than-known is reported as a refusal");
+    TEST_CHECK(reported_version == (uint8_t)(ITER_TUNE_STORE_VERSION + 1),
+               "reported version matches the rejected blob's version byte");
+
+    // The truncated-blob case (already covered above) must NOT set this flag
+    // -- only a specifically NEWER version does.
+    iter_tune_store_reset_for_test();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+    iter_tune_store_blob_t ok_blob = {0};
+    ok_blob.version = ITER_TUNE_STORE_VERSION;
+    ok_blob.zone_count = 1;
+    ok_blob.zone[0] = make_zone(1.0f);
+    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for truncated fixture (schema_refused check)");
+    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, &ok_blob, sizeof(ok_blob) - 1) == HAL_OK,
+               "truncated blob written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates a truncated blob (schema_refused check)");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "a truncated blob is corruption, not a version refusal");
+}
+
 static void test_cfg_fs_dual_write_tie_break(void)
 {
     tit_scratch_clean(); // pre-clean: a prior run's crash/abort can leave files behind
@@ -211,5 +305,7 @@ void run_test_iter_tune_store(void)
     test_blob_validate();
     test_nvs_round_trip();
     test_nvs_wrong_version_and_truncated();
+    test_v1_old_layout_migrates();
+    test_newer_version_refused_and_reported();
     test_cfg_fs_dual_write_tie_break();
 }
