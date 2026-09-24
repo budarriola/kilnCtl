@@ -341,6 +341,19 @@ class LcdProfilesPickerTest(unittest.TestCase):
         r = J.judge_lcd_profiles_picker("profiles", [], True, True, None)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
+    def test_no_rows_but_known_positive_profiles_count_fails(self):
+        r = J.judge_lcd_profiles_picker("profiles", [], True, True, None, profiles_count=2)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("profiles_count", r.reason)
+
+    def test_no_rows_with_zero_profiles_count_stays_inconclusive(self):
+        r = J.judge_lcd_profiles_picker("profiles", [], True, True, None, profiles_count=0)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_no_rows_with_unknown_profiles_count_stays_inconclusive(self):
+        r = J.judge_lcd_profiles_picker("profiles", [], True, True, None, profiles_count=None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
 
 class LcdTemperaturePageTest(unittest.TestCase):
     # Round 3 rewrite (item 3): zone rows/safety line are plain labels, not

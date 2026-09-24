@@ -246,11 +246,18 @@ class FakeExecStatus:
 
 
 class FakeProfiles:
-    def __init__(self, status=None):
+    def __init__(self, status=None, summaries=None, list_all_raises=None):
         self._status = status or FakeExecStatus()
+        self._summaries = summaries if summaries is not None else []
+        self._list_all_raises = list_all_raises
 
     def get_exec_status(self):
         return self._status
+
+    def list_all(self):
+        if self._list_all_raises is not None:
+            raise self._list_all_raises
+        return self._summaries
 
 
 class FakeThermoReading:
@@ -665,6 +672,8 @@ class ThemeMirrorDriftTest(unittest.TestCase):
         self.assertEqual(C._ACCENT_1_RGB, self._hex(text, "UI_THEME_ACCENT_1_HEX"))
         self.assertEqual(C._ACCENT_4_RGB, self._hex(text, "UI_THEME_ACCENT_4_HEX"))
         self.assertEqual(C._ACCENT_5_RGB, self._hex(text, "UI_THEME_ACCENT_5_HEX"))
+        self.assertEqual(C._CARD_RGB, self._hex(text, "UI_THEME_COLOR_CARD_HEX"))
+        self.assertEqual(C._TEXT_PRIMARY_RGB, self._hex(text, "UI_THEME_COLOR_TEXT_PRIMARY_HEX"))
 
 
 class _CountingNavUi(PageNavUiTest):
@@ -774,6 +783,53 @@ class Lcd09Test(unittest.TestCase):
     def test_new_icon_missing_fails(self):
         self.assertEqual(self._run_firmware_shaped([1, 2]).verdict, Verdict.FAIL)
 
+    def test_row_located_by_real_firmware_name_not_fixed_prefix(self):
+        # build_row() (ui_page_profile_picker.c) tags no fixed name on a
+        # row's own button -- kiln_ui.c falls back to the button's label
+        # text, i.e. the profile's real name. A row named "Cone 6 Bisque"
+        # (never matching a "profile_row_" prefix) must still be found by
+        # _profile_rows_by_position() and drive a PASS.
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [
+            {"name": "Cone 6 Bisque", "cx": 50, "cy": 150, "hidden": False},
+            {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+            {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        ] + [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in (1, 2, 3)]
+        nav = dict(_PROFILES_NAV)
+        nav["Cone 6 Bisque"] = "profile_detail"
+        ui = PageNavUiTest(page="home", page_targets=page, nav_map=nav)
+        result = C._case_lcd09({"srv": FakeSrvFull(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_no_rows_with_known_positive_profiles_count_fails_not_inconclusive(self):
+        # 2026-09-24 coordinator follow-up: an empty list area used to read
+        # as merely undecidable even when the board itself reports profiles
+        # exist -- that combination is a real stuck/empty-list defect.
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [
+            {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+            {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        ] + [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in (1, 2, 3)]
+        ui = PageNavUiTest(page="home", page_targets=page, nav_map=_PROFILES_NAV)
+        srv = FakeSrvFull(ui, profiles=FakeProfiles(summaries=["cone6", "cone10"]))
+        result = C._case_lcd09({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("profiles_count", result.reason)
+
+    def test_no_rows_with_unknown_profiles_count_stays_inconclusive(self):
+        # list_all() raising (e.g. link busy) must never fabricate a FAIL --
+        # profiles_count stays None and the original undecidable verdict
+        # is preserved.
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [
+            {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+            {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        ] + [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in (1, 2, 3)]
+        ui = PageNavUiTest(page="home", page_targets=page, nav_map=_PROFILES_NAV)
+        srv = FakeSrvFull(ui, profiles=FakeProfiles(list_all_raises=RuntimeError("busy")))
+        result = C._case_lcd09({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
 
 _TEMP_NAV = {"settings": "config", "Temperature": "temperature"}
 _TEMP_PAGE_TARGETS = {
@@ -796,9 +852,19 @@ class Lcd14Test(unittest.TestCase):
                            profiles=FakeProfiles(FakeExecStatus("idle")))
 
         def fake_sample_widget(image_path, cx, cy, repo_root=None):
+            # Realistic model (2026-09-24 contrast-judge follow-up): a
+            # rendered row's TEXT point (near _LCD14_ZONE_TEXT_X) reads
+            # UI_THEME_COLOR_TEXT_PRIMARY against its own CARD background at
+            # the BG-reference point (_LCD14_ROW_X); a MISSING row makes
+            # BOTH points read the page's own BG -- never the bezel, which
+            # neither point is anywhere near in real geometry.
             zone = round((cy - C._LCD14_ZONE_ROW_Y0) / C._LCD14_ZONE_ROW_PITCH)
             on = rendered_zones.get(zone, False)
-            region = (200, 200, 200) if on else (6, 13, 22)  # off case: matches bezel exactly
+            is_text_point = abs(cx - C._LCD14_ZONE_TEXT_X) < abs(cx - C._LCD14_ROW_X)
+            if not on:
+                region = C._BG_RGB
+            else:
+                region = C._TEXT_PRIMARY_RGB if is_text_point else C._CARD_RGB
             return lcd_sampler.RegionSample(region=region, bezel=(6, 13, 22))
 
         with mock.patch.object(lcd_sampler, "capture_full_frame", return_value=None), \
@@ -942,6 +1008,33 @@ _DIAG_PAGE_TARGETS = {
 }
 
 
+class DiagPagingUiTransientRead(DiagPagingUi):
+    """Models the 2026-09-24 race: a hop's own ENTRY read -- used to locate
+    Next before tapping it -- lands right after the PREVIOUS hop's tap and
+    can come back with the topbar's own back/home anchors transiently
+    missing (board mid-redraw). The previous hop's own post-tap read (its
+    boundary wait-for-change poll, or an interior hop's single trust read)
+    is always the FIRST list_tap_targets() call observed at a given
+    ``self.step`` value; the following hop's entry read is the SECOND. This
+    blanks exactly that second read, once, for a chosen step."""
+
+    def __init__(self, *a, blank_once_at_step=None, **kw):
+        super().__init__(*a, **kw)
+        self._blank_once_at_step = blank_once_at_step
+        self._blanked = set()
+        self._step_call_counts: dict = {}
+
+    def list_tap_targets(self):
+        if self._page == "diagnostics":
+            count = self._step_call_counts.get(self.step, 0) + 1
+            self._step_call_counts[self.step] = count
+            if (self.step == self._blank_once_at_step and count == 2
+                    and self.step not in self._blanked):
+                self._blanked.add(self.step)
+                return {"targets": [], "truncated": False}
+        return super().list_tap_targets()
+
+
 class Lcd16Test(unittest.TestCase):
     def test_finally_restores_home_on_exception(self):
         nav_map = {"settings": "config", "Diagnostics": "diag_hub"}
@@ -1018,6 +1111,63 @@ class Lcd16Test(unittest.TestCase):
         result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
         self.assertEqual(result.observed.get("pages_paged"), 0)
+
+    def test_interior_hop_transient_blank_read_recovers_without_extra_tap(self):
+        # 2026-09-24 coordinator follow-up: an interior hop's own ENTRY read
+        # (locating Next before tapping it) lands right after the PREVIOUS
+        # hop's tap and raced the board's redraw, coming back with no
+        # anchors at all -- previously misread as "Next is gone" and
+        # stopped paging after the first hop. The stabilization poll must
+        # recover WITHOUT sending any touch.
+        #
+        # blank_once_at_step=1 blanks step-1 hop's own entry read (step 1 is
+        # interior: not step 0 or step expected_hops-1=6, so it uses
+        # confirm=False and this fix's poll) -- the SECOND
+        # list_tap_targets() call observed at step==1 (the first is step-0
+        # hop's own post-tap wait-for-change read, which already tolerates
+        # a blank reading on its own and must not be the one under test).
+        ui = DiagPagingUiTransientRead(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV,
+                                        blank_once_at_step=1)
+        srv = _diag_srv(ui)
+        result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("pages_paged"), 7)
+        # Exactly one press+release pair per real hop, plus the one
+        # _wake_and_home() wake tap this fake touch double has no
+        # get_state() to satisfy (falls to need_wake=True) -- never a
+        # doubled tap for the interior hop whose read was transiently blank.
+        presses = [t for t in srv._touch.injected if t[2] is True]
+        self.assertEqual(len(presses), 8)
+
+    def test_interior_hop_still_blank_at_timeout_reports_next_missing(self):
+        # Negative-test companion: if the anchors never come back at all
+        # (a genuinely broken page, not merely a transient race), the poll
+        # must give up at timeout_s and report found_next=False (paging
+        # stops) rather than hang or fabricate a recovery.
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+
+        class _AlwaysBlankAfterFirstTap(FakeTouchAdvancesDiag):
+            def inject(self, x, y, pressed):
+                super().inject(x, y, pressed)
+                if not pressed:
+                    self._ui._force_blank = True
+
+        srv = FakeSrvFull(ui)
+        srv._touch = _AlwaysBlankAfterFirstTap(ui)
+        ui._force_blank = False
+        orig_list = ui.list_tap_targets
+
+        def list_tap_targets():
+            if ui._page == "diagnostics" and getattr(ui, "_force_blank", False) and ui.step >= 1:
+                return {"targets": [], "truncated": False}
+            return orig_list()
+
+        ui.list_tap_targets = list_tap_targets
+        with mock.patch.object(C._tap_next_then_targets_change, "__defaults__", (0.05, True)):
+            result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.observed.get("pages_paged"), 1)
+        presses = [t for t in srv._touch.injected if t[2] is True]
+        self.assertEqual(len(presses), 2)
 
     def test_no_touch_transport_is_inconclusive(self):
         ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
@@ -1554,9 +1704,14 @@ class Lcd14PollTest(unittest.TestCase):
     def test_page_flips_one_poll_after_each_click_still_passes(self):
         ui = DelayedPageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV, flips_after=1)
         srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0, 1: 100.0, 2: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
+
+        def fake_sample_widget(image_path, cx, cy, repo_root=None):
+            is_text_point = abs(cx - C._LCD14_ZONE_TEXT_X) < abs(cx - C._LCD14_ROW_X)
+            region = C._TEXT_PRIMARY_RGB if is_text_point else C._CARD_RGB
+            return lcd_sampler.RegionSample(region=region, bezel=(6, 13, 22))
+
         with mock.patch.object(lcd_sampler, "capture_full_frame", return_value=None), \
-             mock.patch.object(lcd_sampler, "sample_widget",
-                                return_value=lcd_sampler.RegionSample(region=(200, 200, 200), bezel=(6, 13, 22))), \
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget), \
              mock.patch.object(lcd_sampler, "frame_corners_look_stale", return_value=False):
             result = C._case_lcd14({"srv": srv})
         self.assertEqual(result.verdict, Verdict.PASS)

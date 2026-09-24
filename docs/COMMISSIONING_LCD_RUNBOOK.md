@@ -610,6 +610,18 @@ list's content.
   count (`MAX31856_CHANNEL_COUNT`, runtime-visible but not re-confirmed this
   pass) times an unmeasured per-row rendered height determines where the
   fixed-height (40px) relay row starts — not resolved to a pixel.
+  **2026-09-24 round-4 addendum:** `cases_lcd.py`'s LCD-14 zone-row presence
+  judge does not need the true per-row height resolved -- it derives a
+  conservative fixed-pitch estimate instead: content y0 = 44 (`scr`'s
+  `pad_all(8)` + topbar `32` + `pad_gap(4)`, the same derivation as
+  `ui_page_profile_picker.c`'s list area used by LCD-09, see below), row
+  pitch `_LCD14_ZONE_ROW_PITCH = 32`, first row `_LCD14_ZONE_ROW_Y0 = 58`.
+  Each row is sampled at two widget-space x positions on the same y: the
+  row's own left-aligned "Zone N" text (`_LCD14_ZONE_TEXT_X = 40.0`, under
+  the label) and a no-text reference at the row's horizontal centre
+  (`_LCD14_ROW_X`, half of `LCD_WIDTH`) -- a rendered row's text and card
+  background read distinctly apart there; a missing row reads the page `BG`
+  at both points and fails the contrast check (`ROW_CONTENT_MIN_CONTRAST`).
 - **`network` page's "Manage networks" button and mode-toggle buttons'
   vertical position** — `status_card` above them is `LV_SIZE_CONTENT`
   height (wraps live Wi-Fi status text of variable length,

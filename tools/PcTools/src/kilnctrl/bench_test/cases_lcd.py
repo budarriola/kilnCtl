@@ -378,6 +378,13 @@ _ACCENT_5_RGB = (0xD6, 0x55, 0x5F)
 _BG_REFERENCE_XY = (5, 5)
 _BG_RGB = (0x1A, 0x1F, 0x2B)
 
+#: Mirrored from UI_THEME_COLOR_CARD_HEX/UI_THEME_COLOR_TEXT_PRIMARY_HEX
+#: (ui_theme.h) -- used only by LCD-14's contrast judge
+#: (`_sample_row_contrast`) and its unit tests, never compared to a sampled
+#: pixel directly (same CLAUDE.md rule the pair above follows).
+_CARD_RGB = (0x24, 0x2A, 0x3A)
+_TEXT_PRIMARY_RGB = (0xF0, 0xF0, 0xF0)
+
 
 def _srv(ctx: dict):
     srv = ctx.get("srv")
@@ -596,6 +603,33 @@ def _sample_widget_off(ctx: dict, image_path: str, target: Optional[dict]) -> Op
         return lcd_sampler.is_off(sample.region, sample.bezel)
     except lcd_sampler.LcdCaptureError:
         return None
+
+
+def _sample_row_contrast(ctx: dict, image_path: str, text_x: float, bg_x: float,
+                          y: float) -> Optional[bool]:
+    """Best-effort per-row content-presence check for LCD-14: sample the
+    row's own text region (text_x) and a local no-text reference in the
+    SAME row band (bg_x), and require they read distinctly different --
+    rather than comparing either alone against the (dark) bezel
+    (_sample_widget_off/is_off), which cannot tell a rendered row's own
+    CARD background (UI_THEME_COLOR_CARD, 0x242a3a) apart from the page's
+    darker BG a MISSING row would sample instead (UI_THEME_COLOR_BG,
+    0x1a1f2b): both read similarly far from bezel, so a bezel-only check
+    reads a missing row as rendered (the round-3-era bug this replaces). A
+    local contrast check is immune to which of those two backgrounds the
+    reference point lands on, since a missing row makes BOTH points read
+    the SAME background (contrast ~0) while a genuinely rendered row's
+    text (UI_THEME_COLOR_TEXT_PRIMARY, 0xf0f0f0) against its own CARD
+    background measures far above lcd_sampler.ROW_CONTENT_MIN_CONTRAST.
+    None on any capture failure -- never a fabricated bool."""
+    try:
+        text = lcd_sampler.sample_widget(image_path, text_x, y, repo_root=ctx.get("repo_root"))
+        bg = lcd_sampler.sample_widget(image_path, bg_x, y, repo_root=ctx.get("repo_root"))
+    except lcd_sampler.LcdCaptureError:
+        return None
+    if text.bezel is None or bg.bezel is None:
+        return None
+    return lcd_sampler.color_distance(text.region, bg.region) >= lcd_sampler.ROW_CONTENT_MIN_CONTRAST
 
 
 def _downgrade_if_corners_stale(ctx: dict, result: CaseResult, image_path: Optional[str]) -> CaseResult:
@@ -844,6 +878,52 @@ def _profiles_topbar_icons(targets: "list[dict]") -> Dict[str, Optional[bool]]:
     return {"paging": paging, "add": add_on}
 
 
+#: `ui_page_profile_picker.c`'s `build()`: scr's own `pad_all`
+#: (`UI_THEME_PADDING_PX`=8) + the topbar (`UI_THEME_STATUS_BAR_HEIGHT_PX`=32)
+#: + scr's own `pad_gap` (`UI_THEME_PADDING_PX`/2=4) puts `rows_col` (the
+#: row list) at widget-space y=44 -- the identical derivation
+#: `_LCD14_ZONE_ROW_Y0` below uses for `ui_page_temperature.c`'s content
+#: area, since both pages build their `scr` from the same theme constants
+#: and a `ui_topbar_create()` call. Anything at or above this y is the
+#: topbar itself (back/home/Prev/Next/New, all at cy ~= 26).
+_PROFILES_LIST_AREA_Y0 = 44.0
+
+
+def _profile_rows_by_position(targets: "list[dict]") -> "list[dict]":
+    """Locate the profiles list's row targets by POSITION, not by a fixed
+    name. `build_row()` (`ui_page_profile_picker.c`) tags no tap name on
+    the per-row name button -- `kiln_ui.c`'s tap walk falls back to the
+    button's own label text, i.e. the profile's real name (same fallback
+    rule `_is_glyph_name()`'s comment documents for the topbar icons) -- so
+    a fixed `profile_row_N` prefix (what this replaced) never matched any
+    real firmware target and made LCD-09 permanently INCONCLUSIVE
+    ("no profile rows").
+
+    A row is any non-hidden, non-glyph target below the list's own
+    content-area boundary (`_PROFILES_LIST_AREA_Y0`), excluding the
+    Delete button's own literal "Delete" label (manage mode only,
+    `build_row()`) -- back/home/Prev/Next/New all sit above that boundary
+    at cy ~= 26 and are excluded by it already; the name/glyph checks are
+    only needed for a target that, for whatever reason, reports a cy in
+    the list band. Returned ordered top-to-bottom by cy, matching on-screen
+    row order (`rows[0]` is the first row `_case_lcd09` taps)."""
+    rows = []
+    for t in targets:
+        if t.get("hidden"):
+            continue
+        name = t.get("name")
+        if _is_glyph_name(name) or name in ("back", "home", "Delete"):
+            continue
+        try:
+            cy = float(t.get("cy"))
+        except (TypeError, ValueError):
+            continue
+        if cy >= _PROFILES_LIST_AREA_Y0:
+            rows.append(t)
+    rows.sort(key=lambda t: float(t["cy"]))
+    return rows
+
+
 def _case_lcd09(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
@@ -858,7 +938,7 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "profiles", tap)
-        rows = [t for t in targets if str(t.get("name", "")).startswith("profile_row_")]
+        rows = _profile_rows_by_position(targets)
         # Round 3 (item 4): "paging"/"new_profile" were fabricated names no
         # firmware target has ever used -- ui_page_profile_picker.c's topbar
         # icons are untagged glyphs (_is_glyph_name()), only locatable by
@@ -872,7 +952,19 @@ def _case_lcd09(ctx: dict) -> CaseResult:
             click3 = ui.click_by_name(rows[0]["name"])
             if click3.get("result") == "ok":
                 detail_page, _ = _wait_for_page_change(ui, page)
-        result = J.judge_lcd_profiles_picker(page, rows, paging_present, new_icon_present, detail_page)
+        # profiles_count is a best-effort cross-check only: when the board
+        # reports at least one profile over the wire but the list area
+        # shows no rows at all, that is a real defect (a stuck/empty list),
+        # not "undecidable" -- see judge_lcd_profiles_picker()'s handling
+        # of `profiles_count`. None (read failure) never fabricates a FAIL.
+        try:
+            profiles_count = len(srv._profiles.list_all())
+        except Exception:
+            profiles_count = None
+        result = J.judge_lcd_profiles_picker(
+            page, rows, paging_present, new_icon_present, detail_page,
+            profiles_count=profiles_count,
+        )
         result.observed = dict(result.observed or {})
         result.observed["page_wait_s"] = round(waited_s, 3)
         return result
@@ -916,6 +1008,20 @@ _LCD14_ZONE_ROW_Y0 = 58
 _LCD14_ZONE_ROW_PITCH = 32
 _LCD14_ROW_X = float(lcd_sampler.LCD_WIDTH) / 2.0
 
+#: Row-content contrast sample points (_sample_row_contrast(), round-3
+#: follow-up): the row is a SPACE_BETWEEN flex row with a left "Zone N" name
+#: label and a right "-- C"/value label, so the left label's own text sits
+#: close to the row's left pad edge (pad_all(UI_THEME_PADDING_PX/2)=4) --
+#: _LCD14_ZONE_TEXT_X samples under that name label's text, never under the
+#: value label (whose width/position varies with the reading's digit
+#: count). _LCD14_ROW_X (the row's horizontal centre) doubles as the local
+#: no-text background reference: a space-between row this short leaves that
+#: midpoint empty in the gap between the two labels for any real zone name/
+#: reading, so it reads the row's own CARD background when the row is
+#: rendered, and the page's BG when the row (and its CARD background) is
+#: simply absent.
+_LCD14_ZONE_TEXT_X = 40.0
+
 
 def _case_lcd14(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
@@ -953,9 +1059,9 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         image_path = _capture(ctx, "lcd14_temperature.jpg")
         if image_path is not None:
             for zone in range(expected_zones):
-                y = _LCD14_ZONE_ROW_Y0 + zone * _LCD14_ZONE_ROW_PITCH
-                off = _sample_widget_off(ctx, image_path, {"cx": _LCD14_ROW_X, "cy": float(y)})
-                zone_rows_rendered[zone] = None if off is None else (not off)
+                y = float(_LCD14_ZONE_ROW_Y0 + zone * _LCD14_ZONE_ROW_PITCH)
+                zone_rows_rendered[zone] = _sample_row_contrast(
+                    ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_ROW_X, y)
         try:
             expect_safety_on = bool(srv._profiles.get_exec_status().state_name == "running")
         except Exception:
@@ -1109,6 +1215,31 @@ def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
     tap = ui.list_tap_targets()
     targets = tap.get("targets", [])
     next_target = _diagnostics_next_target(targets)
+    if next_target is None and not confirm:
+        # 2026-09-24 coordinator follow-up: this ENTRY read -- used to
+        # locate Next before tapping it -- is taken right after the
+        # PREVIOUS hop's own tap, and can race that hop's UI update: a
+        # transiently incomplete target list (missing the back/home
+        # anchors _diagnostics_next_target() itself needs) reads as "Next
+        # is gone" here, which stopped paging after the first interior hop
+        # even though the previous tap had landed cleanly and Next was
+        # still present a moment later. This is a bounded STABILIZATION
+        # poll only -- it never sends a touch and never compares against
+        # prev_sig, so it cannot double-advance the page the way a
+        # signature-based retry (the boundary-hop path below) would if
+        # wrongly applied here (see this function's own docstring for why
+        # that path is deliberately not reused for interior hops). It only
+        # applies when confirm=False: a boundary hop's own
+        # wait-for-signature-change loop already re-polls on this same
+        # condition, so re-polling here too would just duplicate it.
+        start = time.monotonic()
+        while next_target is None:
+            if time.monotonic() - start >= timeout_s:
+                break
+            time.sleep(_PAGE_POLL_INTERVAL_S)
+            tap = ui.list_tap_targets()
+            targets = tap.get("targets", [])
+            next_target = _diagnostics_next_target(targets)
     if next_target is None:
         return None, tap, 0.0, False, False, False
     if touch is None:
@@ -1138,6 +1269,11 @@ def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
             None, 0.0, False, True, False,
         )
     if not confirm:
+        # Only a single touch is sent, and whatever the very next read
+        # shows is returned as-is, ``changed=True`` unconditionally -- the
+        # caller trusts the tap (see this function's docstring). The
+        # transient-blank race is handled above, at entry, for the
+        # FOLLOWING hop's own Next-locating read -- not here.
         tap2 = ui.list_tap_targets()
         return None, tap2, 0.0, True, True, False
     tap2, waited_s = _wait_for_targets_signature_change(ui, prev_sig, timeout_s=timeout_s)

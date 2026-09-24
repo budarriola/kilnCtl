@@ -1008,12 +1008,27 @@ def judge_lcd_home_tripped(strip_visible_before: bool,
 
 def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: Optional[bool],
                                new_icon_present: Optional[bool], detail_page: Optional[str],
-                               max_rows: int = 4) -> CaseResult:
+                               max_rows: int = 4,
+                               profiles_count: Optional[int] = None) -> CaseResult:
     """LCD-09: profiles picker reached by tapping Profiles from the hub.
-    `rows` is the subset of tap targets named `profile_row_*`."""
+    `rows` is the list-area tap targets located by POSITION
+    (cases_lcd.py's `_profile_rows_by_position()`) -- `build_row()`
+    (ui_page_profile_picker.c) tags no fixed name on a row's own button, so
+    there is no `profile_row_*` name to match on real firmware.
+
+    `profiles_count`, when known (ProfilesClient.list_all() over the wire),
+    is a cross-check independent of anything sampled from the screen: if
+    the board itself reports at least one profile but the list area shows
+    no rows at all, that is a real defect (a stuck/empty list), not merely
+    undecidable -- so this turns the previously-blanket INCONCLUSIVE into a
+    FAIL specifically when a positive count is known. `profiles_count is
+    None` (the count could not be read) or `== 0` (genuinely no profiles)
+    both still fall through to the original INCONCLUSIVE, since neither
+    contradicts an empty list area."""
     observed = {
         "page": page, "row_count": len(rows), "paging_present": paging_present,
         "new_icon_present": new_icon_present, "detail_page": detail_page,
+        "profiles_count": profiles_count,
     }
     if page != "profiles":
         return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'profiles'" + BLANKED_SCREEN_HINT, observed=observed)
@@ -1053,6 +1068,12 @@ def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: Opt
             observed=observed,
         )
     if not rows:
+        if profiles_count is not None and profiles_count > 0:
+            return CaseResult(
+                Verdict.FAIL,
+                reason=(f"profiles_count={profiles_count} but the list area shows no rows"),
+                observed=observed,
+            )
         return CaseResult(Verdict.INCONCLUSIVE, reason="no profile rows present to confirm row-tap navigation", observed=observed)
     return CaseResult(Verdict.PASS, observed=observed)
 

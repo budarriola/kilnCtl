@@ -291,6 +291,28 @@ def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
     return sample_region(image_path, fx - w // 2, fy - h // 2, w, h, bezel_x, bezel_y, repo_root)
 
 
+#: Mirrored from UI_THEME_COLOR_BG_HEX (ui_theme.h) -- used only by
+#: frame_corners_look_stale()'s background-plausibility vote below, never
+#: compared to a sampled pixel to judge anything but geometry/panel
+#: soundness (see CLAUDE.md's "judge colors by numeric pixel sampling"
+#: rule). Kept alongside cases_lcd.py's own `_BG_RGB` mirror (same value,
+#: same header) since this module must not import from cases_lcd.py.
+_BG_RGB: Tuple[int, int, int] = (0x1A, 0x1F, 0x2B)
+
+#: Minimum Euclidean RGB distance a CORNER_CHECK_POINTS sample may read from
+#: the theme's own BG color before it counts as a stale-geometry vote in
+#: frame_corners_look_stale(), alongside (not instead of) the bezel check.
+#: 2026-09-24 bench finding: a widget-space (5,5) sample read RGB
+#: [111,205,252] (a light blue) against theme BG [26,31,43] -- nowhere near
+#: bezel-dark, so the bezel-only check missed it entirely, yet nowhere near
+#: a plausible dark background either, meaning the homography was landing
+#: off-panel or on the wrong content for that capture. [111,205,252] is
+#: distance ~279 from BG_RGB; genuine BG-region JPEG noise measured
+#: elsewhere in this module is a few counts per channel, so 90 sits well
+#: above that noise floor and well below an obviously-wrong-content read
+#: like the one that motivated this.
+CORNER_BG_MAX_DISTANCE = 90.0
+
 #: frame_corners_look_stale()'s own gate. Reuses MIN_BEZEL_CONTRAST's value
 #: (defined below) rather than a second constant, but is read at call time
 #: -- module order below is preserved (MIN_BEZEL_CONTRAST is a plain float,
@@ -342,6 +364,19 @@ def frame_corners_look_stale(image_path: str, transform: Optional[AffineTransfor
             return None
         if is_off(sample.region, sample.bezel, tol=threshold):
             stale_votes += 1
+            continue
+        # 2026-09-24 bench finding: a corner point that reads clearly NOT
+        # bezel is not automatically sound geometry -- the bezel-only check
+        # above only catches the homography landing on the dark bezel
+        # itself. A point can just as easily land off-panel or on the wrong
+        # on-screen content and read something implausible for a page
+        # background, e.g. widget-space (5,5) reading [111,205,252] (a
+        # light blue) against theme BG [26,31,43] -- distance ~279, nowhere
+        # near bezel-dark but nowhere near a plausible dark background
+        # either. That combination (not bezel, not BG-like) is itself a
+        # stale-geometry vote.
+        if color_distance(sample.region, _BG_RGB) > CORNER_BG_MAX_DISTANCE:
+            stale_votes += 1
     return stale_votes >= 1
 
 
@@ -365,6 +400,26 @@ MIN_BEZEL_CONTRAST = 25.0
 #: Tolerance for "this region approximately matches this target color",
 #: applied on top of (never instead of) the bezel-contrast check above.
 COLOR_MATCH_TOLERANCE = 45.0
+
+#: Minimum Euclidean RGB distance between a widget's own TEXT region and a
+#: local no-text reference sample in the SAME row band, for that row to be
+#: judged as having rendered content at all -- see cases_lcd.py's
+#: ``_sample_row_contrast()`` (LCD-14). Comparing either sample alone
+#: against the (dark) bezel reference (``is_off()``) cannot tell a rendered
+#: row's own CARD background (``UI_THEME_COLOR_CARD``, 0x242a3a) apart from
+#: a MISSING row's page background (``UI_THEME_COLOR_BG``, 0x1a1f2b): both
+#: read similarly far from bezel (Euclidean distance ~80-90), so a
+#: bezel-only check reads a missing row as "rendered" -- only a fully
+#: dark/blanked panel would ever fail it. A local contrast check is immune
+#: to which of those two backgrounds the reference point lands on, since a
+#: missing row makes BOTH the text point and the reference point read the
+#: *same* background (contrast ~0) while a genuinely rendered row's text
+#: (``UI_THEME_COLOR_TEXT_PRIMARY``, 0xf0f0f0) against its own CARD
+#: background measures ~336. Chosen well below that measured value but
+#: comfortably above JPEG/auto-exposure noise between two same-frame
+#: samples (a few counts per channel, same class of noise
+#: MIN_BEZEL_CONTRAST's own comment measures).
+ROW_CONTENT_MIN_CONTRAST = 60.0
 
 #: Tolerance for the chromaticity fallback below, in normalised (r/sum,
 #: g/sum, b/sum) space -- see matches_color()'s docstring. Chosen from the

@@ -321,6 +321,20 @@ class FrameCornersLookStaleTest(unittest.TestCase):
         with mock.patch.object(S, "sample_widget", boom):
             self.assertIsNone(S.frame_corners_look_stale("x.jpg"))
 
+    # 2026-09-24 coordinator follow-up: a corner point can read clearly NOT
+    # bezel yet still be off-panel/wrong-content -- the bezel-only check
+    # above missed exactly this on a real bench capture. "light blue" is
+    # the actually-observed RGB [111,205,252] from that capture.
+    _LIGHT_BLUE = (111, 205, 252)
+
+    def test_off_panel_light_blue_not_bezel_is_still_stale(self):
+        self.assertIs(self._run([self._LIGHT_BLUE, self._PANEL, self._PANEL, self._PANEL]), True)
+
+    def test_plausible_dark_panel_background_is_not_stale(self):
+        # Negative-test companion: a corner reading close to the theme's own
+        # BG color (not bezel, not implausible) must NOT trip the new vote.
+        self.assertIs(self._run([S._BG_RGB, self._PANEL, self._PANEL, self._PANEL]), False)
+
 
 if __name__ == "__main__":
     unittest.main()
