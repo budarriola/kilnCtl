@@ -755,6 +755,13 @@
 >   saturates the profile-button region (right edge reads RGB 204,87,41;
 >   the neighbouring Start button samples clean green nearby). Needs the
 >   bench light moved for a numeric confirmation.
+> - **Addendum, 2026-09-23:** re-sampling this same button (away from the
+>   glare spot above where possible) found and fixed a global MADCTL R/B
+>   swap -- `.color_order_bit` corrected from RGB (`0x00`) to BGR (`0x08`),
+>   `st7796_panel.c`. Post-fix the button reads blue-dominant, matching the
+>   theme's intent, but not an exact numeric match; the specular-glare
+>   confound noted above is still unresolved and may explain part of the
+>   remaining gap.
 > - **`s_routes` HTTP route-dispatch table moved to PSRAM** `.bss`:
 >   `bde51605` + `cd6073e5` (review nits). `.dram0.bss` 114408 → 95272 B
 >   against the 101000 B ceiling.
@@ -2398,7 +2405,9 @@ soldering session.
       code's own comment had the wire order backwards (`8174db5`). Every
       INVON/BGR experiment run before that fix was confounded and is not
       evidence. With byte order correct, MADCTL was re-measured and set to RGB
-      `0x00` (`f493bf8`) and INVON is deliberately absent (vendor
+      `0x00` (`f493bf8`); **corrected to BGR `0x08` on 2026-09-23** after a
+      strongly R/B-asymmetric colour sample showed the RGB setting was itself
+      swapped (`st7796_panel.c`). INVON is deliberately absent (vendor
       transcription, guarded by `test_st7796_panel.c`). Touch axis mapping now
       lives on `touch_dev_t`, so panel and touch controller select
       independently (`KILNCTL_TOUCH_FT6336U`). ST7796 RDDID reads `0x00 0x00
@@ -3239,7 +3248,10 @@ Owner instruction, 2026-09-21.
    `/api/profile/live`'s five routes. Bench exercise itself still pending.
 4. LCD blue profile button: CLOSED by owner decision, 2026-09-21 — code
    review of `UI_THEME_ACCENT_BLUE` accepted as sufficient given the
-   camera's specular-glare limit on this region.
+   camera's specular-glare limit on this region. **Addendum, 2026-09-23:**
+   numeric sampling of this same button found and fixed a global MADCTL
+   R/B swap (RGB `0x00` -> BGR `0x08`, `st7796_panel.c`); the glare
+   confound on this region is still noted and unresolved.
 5. Zero-caller sweep deletion: DONE (`51effca5`) — 11 keep, 12 delete.
 
 **2026-09-21 landings:**

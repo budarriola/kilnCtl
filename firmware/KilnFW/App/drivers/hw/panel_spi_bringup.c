@@ -8,10 +8,13 @@
 // panel_desc_t descriptor itself. See panel_spi.c's header comment for the
 // full file map and panel_spi_internal.h for the shared declarations.
 //
-// EXTREME CARE (2026-09-04, settled after a long debugging effort): MADCTL
-// color order for the ST7796 is 0x00 (RGB), measured, not assumed (f493bf8).
-// INVON is deliberately absent from the vendor init sequence. SPI write
-// clock is the Kconfig default (20 MHz); an overclock hypothesis was tested
+// EXTREME CARE: MADCTL color order for the ST7796 is 0x08 (BGR), measured,
+// not assumed. Originally set to 0x00 (RGB) on 2026-09-04 (f493bf8) from an
+// A/B that sampled only near-symmetric colors; corrected to 0x08 (BGR) on
+// 2026-09-23 after sampling a strongly R/B-asymmetric colour showed a
+// channel swap under RGB -- see st7796_panel.c's descriptor comment for the
+// full evidence. INVON is deliberately absent from the vendor init sequence.
+// SPI write clock is the Kconfig default (20 MHz); an overclock hypothesis was tested
 // and refuted (07cad60). None of that behavior is touched by this split.
 #include "panel_spi.h"
 #include "panel_spi_internal.h"

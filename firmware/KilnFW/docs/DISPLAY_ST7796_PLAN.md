@@ -603,9 +603,12 @@ any DMA/flush work in Phase 6, still need the real numbers below.)*
       transitions) rather than a fixed per-flush cost.
 - [x] **Write-clock overclock ruled out as the cause of the blue-channel
       bias, measured 2026-09-04.** Background: RGB565 endianness was fixed
-      and MADCTL set to RGB (commit f493bf8); rendering is now correct except
-      that the blue channel reads proportionally elevated everywhere on
-      screen. Camera-response and RGB565-arithmetic causes were already ruled
+      and MADCTL set to RGB (commit f493bf8) -- **corrected to BGR on
+      2026-09-23 after a strongly R/B-asymmetric colour sample showed the
+      RGB setting was itself swapped, see st7796_panel.c; the blue-elevation
+      finding below still needs re-examination under BGR**; rendering is now
+      correct except that the blue channel reads proportionally elevated
+      everywhere on screen. Camera-response and RGB565-arithmetic causes were already ruled
       out (see commit history); the last firmware-testable lead was the
       20 MHz write clock against this module's ~15.15 MHz rated write clock
       (`CONFIG_KILNCTL_DISPLAY_SPI_CLOCK_HZ`, `Kconfig:384`, default

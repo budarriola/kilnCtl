@@ -26,7 +26,10 @@ void panel_codec_rgb565_passthrough(uint16_t color, uint8_t out[2])
      * this codebase's comment had backwards, never bench-verified until a
      * real ST7796 module's colors proved it wrong (2026-09-04 camera
      * capture bisect, DISPLAY_ST7796_PLAN.md: neither BGR nor RGB matched
-     * expected colors -- MADCTL was never the bug). "passthrough" now means
+     * expected colors -- byte order was the 2026-09-04 bug, not MADCTL). The
+     * BGR bit turned out to be a separate, later-found error: it was set to
+     * RGB (0x00) that same day and only corrected to BGR (0x08) on
+     * 2026-09-23 (st7796_panel.c). "passthrough" now means
      * "no channel/gamma transformation", not "identical byte layout to
      * LVGL's buffer" -- the name still fits, RGB565 in is still RGB565 out,
      * just correctly byte-ordered for the wire this panel actually reads. */

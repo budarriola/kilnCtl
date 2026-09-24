@@ -160,26 +160,47 @@ static const panel_desc_t st7796_panel_desc = {
      * same reasoning as ili9488_panel_desc.id_matches above. */
     /* 2026-09-04: the earlier "BGR vs RGB look near-identical" conclusion
      * (see git history) was made by EYE, not by numeric pixel sampling, and
-     * the 2026-09-04 numeric A/B that replaced it (RGB (0x00) adopted) was
-     * itself vacuous: every region it sampled -- bg (theme R26 G31 B43),
-     * Start btn (theme R92 G192 B110), graph card (theme R36 G42 B58) -- has
-     * R and B close enough together that a full channel swap barely moves
-     * the reading. That A/B could not have detected a swap either way.
+     * the 2026-09-04 numeric A/B that replaced it (RGB (0x00) adopted) is
+     * weak evidence, not wrong evidence: every region it sampled -- bg (BGR
+     * R6/B99 vs RGB R26/B71, theme R26 G31 B43), Start btn (theme R92 G192
+     * B110), graph card (BGR B205 vs RGB B154, theme R36 G42 B58) -- has R
+     * and B close enough together that a swap moves the reading only a
+     * little, on top of an already-unexplained blue elevation that affects
+     * both settings (see below) -- together, low asymmetry plus that
+     * confound left the RGB-vs-BGR call under-supported by those regions
+     * alone.
      *
-     * 2026-09-24: sampled the home page's profile button instead, whose
-     * theme color (UI_THEME_ACCENT_BLUE 0x2f6fe4 = R47 G111 B228) is
-     * strongly R/B-asymmetric. Under RGB (0x00, the then-current setting)
-     * it measured R214 G106 B33 -- G matches within 5 (untouched by
-     * MADCTL's BGR bit, as expected), but R and B are swapped: the reading
-     * is (228,111,47) with R and B exchanged, allowing for camera blue
-     * bias. That is a full R/B swap, definitively resolving what the
-     * near-identical dark/green regions above could not.
+     * 2026-09-23: sampled the home page's profile button instead, whose
+     * theme colour (UI_THEME_ACCENT_BLUE 0x2f6fe4 = R47 G111 B228) is
+     * strongly R/B-asymmetric. Under RGB (0x00, the setting in effect at the
+     * time) it measured (214,106,33). Swapped, that triple is (33,106,214)
+     * against the theme's (47,111,228): every channel reads 5-14 BELOW the
+     * theme value, not matching it -- but still a much closer fit than the
+     * unswapped (214,106,33) is, so this reading strongly indicates R/B are
+     * swapped under RGB (0x00), pending a second R/B-asymmetric colour
+     * sampled away from the glare noted next.
      *
-     * Rule going forward: verify MADCTL color order only with a strongly
-     * R/B-asymmetric color (e.g. a saturated blue or red), never a green or
+     * Re-sampled the same button after setting BGR (0x08): (0,166,213) --
+     * blue-dominant, consistent with the theme's blue-dominant intent, but
+     * not a match either (R 0 vs 47, G 166 vs 111). Note G moved 106 -> 166
+     * between the two samples, so these were not like-for-like captures
+     * (region crop, exposure, or glare differed, not just the MADCTL bit).
+     * Confound on record at ROADMAP.md:751-757: a fixed warm specular
+     * reflection saturates this exact button region and previously read
+     * (204,87,41) there -- close to the (214,106,33) "before" reading above
+     * -- so that before reading may itself be partly glare rather than a
+     * clean sample of the true panel colour. Still unexplained under BGR,
+     * same as it was under RGB: the blue channel reads proportionally
+     * elevated across sampled regions, a confound distinct from the R/B
+     * order and not resolved by either MADCTL setting (see
+     * DISPLAY_ST7796_PLAN.md's write-clock-ruled-out entry).
+     *
+     * Rule going forward: verify MADCTL colour order only with a strongly
+     * R/B-asymmetric colour (e.g. a saturated blue or red), never a green or
      * a dark/desaturated neutral -- both leave R and B too close together
-     * for a swap to be numerically distinguishable from noise. */
-    .color_order_bit = 0x08, /* MADCTL D3 set = BGR -- numerically confirmed 2026-09-24 */
+     * for a swap to be numerically distinguishable from noise -- and sample
+     * away from this button's known specular-glare spot. */
+    .color_order_bit = 0x08, /* MADCTL D3 set = BGR -- 2026-09-23 evidence above */
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
 };
