@@ -647,6 +647,35 @@ Owner: unassigned. Everything below is an open suggestion, nothing is done.
       two named in the ROADMAP item). Negative-tested: disabled rule 4's
       check, confirmed 2 of its tests failed, restored — 21/21 host test
       executables and `build_kilnfw` pass.
+      **Correction, 2026-09-24** (see `docs/audits/profile_executor_panic_
+      2026-09-24.md`): the plain `assert()` at the `executor_task_entry`
+      call site was NOT log-only on target as originally documented above —
+      it reboots the board, and did so once in the field mid-firing,
+      dropping the run record, firing history, and the safety-link serial
+      connection (relays were already off; no heat-safety impact). Fixed by
+      owner decision: the call site is now `#if defined(ESP_PLATFORM)` —
+      target calls the new `exec_handle_mode_state_violation()`
+      (`profile_executor.c`, doc comment on `exec_mode_state_check()` in
+      `profile_executor_internal.h`), which logs one `ESP_LOGE` naming the
+      violated rule, forces the executor into FAULTED with heaters off via
+      the same two-call discipline `escalate_guard_trip()`'s GLOBAL branch
+      uses (`force_all_relays_off()` + `release_profile_relay_claim()`),
+      latches (`s_exec.mode_state_fault_latched`, cleared only at the next
+      `profile_executor_start()`) so a persisting violation does not re-log
+      or re-force every tick, and separately increments a lifetime
+      `mode_state_violation_count` (never reset) — both fields reported over
+      the existing `GET /api/profile_exec` route (`dashboard_exec_http.c`),
+      no new URI handler added. Host build keeps the original hard
+      `assert()` (still the only discriminator available; `ESP_PLATFORM` is
+      the sole existing host/target macro in this codebase, per
+      `security_backend_placeholder.c`). New host tests:
+      `test_exec_handle_mode_state_violation_forces_faulted_and_latches`/
+      `_noop_when_clean` in `test_profile_executor_prestart.c`, calling the
+      helper directly (the control task's real tick loop is not callable
+      from a host test, same limitation as `escalate_guard_trip()`'s own
+      tests). Negative-tested: disabled the latch check, confirmed the new
+      "does not re-fire" assertion failed, restored by hand, forced a full
+      rebuild — clean pass after.
 - [x] **No lint against flash/NVS writes outside the flash worker.** Direct
       writes bypassing `kiln_cfg_store.c`'s worker dispatch (`nvs_set_blob` at
       `kiln_cfg_store.c:356`, `kiln_cfg_store_apply()` at `:681`) have panicked

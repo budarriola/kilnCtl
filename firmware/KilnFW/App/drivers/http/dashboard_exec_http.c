@@ -235,10 +235,14 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * (28-char key + 2 quotes + colon + comma); value is "%.2f" at up to 8B
      * ("-1234.56", same worst-case width convention as every other float in
      * this format string) = 40B more, bringing the fixed part's worst case
-     * to 567+40 = 607B -- still real headroom against this 960-byte fixed
-     * allowance (the rest of which covers the run-level line's own escaped
-     * reason plus the "last_run" object at ITS worst case, per the
-     * paragraph above). */
+     * to 567+40 = 607B, plus the "last_run" object at ITS worst case, per the
+     * paragraph above.
+     *
+     * docs/audits/profile_executor_panic_2026-09-24.md: added two more run-
+     * level fields, "mode_state_fault_latched" (bool, ~35B worst case) and
+     * "mode_state_violation_count" (uint32, ~45B worst case at
+     * "4294967295") -- ~80B more, 687B worst case now, still real headroom
+     * against this 960-byte fixed allowance. */
     char *json = heap_caps_malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
         ESP_LOGE(DASH_TAG, "GET /api/profile_exec: malloc(%u) failed for the response buffer",
@@ -255,7 +259,8 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         "\"segment_elapsed_s\":%lu,\"dwell_remaining_s\":%lu,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,\"ramp_stretch_segment_s\":%.2f,\"ramp_stretch_total_s\":%.2f,"
         "\"ramp_dwell_credit_applied_s\":%.2f,"
-        "\"fault_reason\":\"%s\",\"fault_guard\":%u,"
+        "\"fault_reason\":\"%s\",\"fault_guard\":%u,\"mode_state_fault_latched\":%s,"
+        "\"mode_state_violation_count\":%lu,"
         "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
         exec_state_name(st->state), st->profile_id, name_escaped, st->zone_mask, st->segment_index,
         st->segment_count, st->dwelling ? "true" : "false", (double)st->target_c,
@@ -263,6 +268,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         st->ramp_lock_held ? "true" : "false", st->ramp_lock_lagging_mask,
         (double)st->ramp_stretch_segment_s, (double)st->ramp_stretch_total_s,
         (double)st->ramp_dwell_credit_applied_s, reason_escaped, st->fault_guard,
+        st->mode_state_fault_latched ? "true" : "false", (unsigned long)st->mode_state_violation_count,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
     size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE)
                    ? DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1

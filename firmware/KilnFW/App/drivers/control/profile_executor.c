@@ -183,6 +183,63 @@ uint32_t exec_mode_state_check(char *out_first_violation, size_t out_cap)
     return violations;
 }
 
+/* docs/audits/profile_executor_panic_2026-09-24.md, owner decision 2026-09-24:
+ * see exec_mode_state_check()'s doc comment above for the full "why" --
+ * the assert() at this module's real control-loop call site used to reboot
+ * the board in production the one time it fired live (a global thermal
+ * guard tripping mid-dwell). On ESP_PLATFORM that call site calls this
+ * instead. Latched via s_exec.mode_state_fault_latched (cleared at the next
+ * profile_executor_run()) so a violation that persists tick to tick forces
+ * FAULTED/heaters-off/log exactly once per run, not every tick -- a control
+ * loop that force-drops relays and ESP_LOGE's every 100ms forever is its own
+ * kind of harm. mode_state_violation_count is a lifetime-of-this-boot
+ * diagnostics counter (never reset), reported over GET /api/profile_exec,
+ * so this class of violation is visible without grepping the device log
+ * ring (which drops lines silently under volume). Must be called with
+ * s_exec.lock held. */
+void exec_handle_mode_state_violation(uint32_t mode_violations, const char *first_violation)
+{
+    if (mode_violations == 0) {
+        return;
+    }
+    s_exec.mode_state_violation_count++;
+    if (s_exec.mode_state_fault_latched) {
+        /* Already forced FAULTED for this run -- don't re-log or re-force
+         * relays off every tick. */
+        return;
+    }
+    s_exec.mode_state_fault_latched = true;
+    ESP_LOGE(PE_TAG,
+             "exec_mode_state_check found %lu violation(s) -- forcing FAULTED, heaters off, run continues "
+             "(no reboot): %s",
+             (unsigned long)mode_violations, first_violation != NULL ? first_violation : "?");
+    s_exec.state = PROFILE_EXEC_FAULTED;
+    /* Same per-run scratch-flag clearing exec_enter_terminal_state() (a
+     * sibling worktree's fix for the specific dwelling-left-stale sequence,
+     * docs/audits/profile_executor_panic_2026-09-24.md) does -- inlined here
+     * rather than calling that helper because it does not exist in this
+     * worktree's tree; if it lands first, this can call it directly instead
+     * of repeating its two assignments. */
+    s_exec.dwelling = false;
+    s_exec.ramp_lock_held = false;
+    strncpy(s_exec.fault_reason, first_violation != NULL ? first_violation : "exec_mode_state_check violation",
+            sizeof(s_exec.fault_reason) - 1);
+    s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
+    s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE; /* not a thermal_guard_trip_t fault -- see fault_guard's own doc */
+    /* Abnormal stop -- same two-call discipline escalate_guard_trip()'s
+     * GLOBAL branch uses (relay_io.c): force every active zone's relay off
+     * AND release this run's relay claim, so a relay this run touched is not
+     * left refused to /api/relay, the LCD, or the UART bridge as "owned by a
+     * running profile" once no profile is actually running (the exact bug
+     * fixed for guard trips before this -- see release_profile_relay_claim()'s
+     * own doc comment). io_segs_force_all_off() is deliberately NOT called
+     * here -- unlike a genuine guard trip, a mode-state violation says
+     * nothing about relay/IO segments, so leave that machinery to whichever
+     * transition path actually reached this violation. */
+    force_all_relays_off();
+    release_profile_relay_claim();
+}
+
 static int16_t history_pack_temp(float c)
 {
     if (isnan(c)) {
@@ -1804,15 +1861,30 @@ void executor_task_entry(void *arg)
          * There is no reason to make a status request wait behind an erase. */
         /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_
          * internal.h's own doc comment on exec_mode_state_check() for why
-         * this is the one real call site that asserts, and why plain
-         * assert() rather than a project convention (none exists). Placed
-         * here: every field the check reads is final for this tick, and
-         * it must run before the lock is released. */
+         * this is the one real call site that checks it, and why plain
+         * assert() rather than a project convention (none exists) on the
+         * non-ESP_PLATFORM side. Placed here: every field the check reads
+         * is final for this tick, and it must run before the lock is
+         * released.
+         *
+         * Owner decision 2026-09-24 (docs/audits/profile_executor_panic_2026-09-24.md):
+         * the hard assert() used to reboot the board in production the one
+         * time it fired live. On a real target build (ESP_PLATFORM defined
+         * -- this repo's only host/target discriminator, see
+         * security_backend_placeholder.c) a violation now forces FAULTED
+         * with heaters off and the task loop continues; it never reboots.
+         * Host tests and any non-ESP_PLATFORM (debug) build keep the hard
+         * assert so a violation is still caught loudly there. */
         {
             char mode_violation[160];
             uint32_t mode_violations = exec_mode_state_check(mode_violation, sizeof(mode_violation));
+#if defined(ESP_PLATFORM)
+            exec_handle_mode_state_violation(mode_violations, mode_violation);
+#else
             assert(mode_violations == 0 && "exec_mode_state_check found a mode-state violation -- see the ESP_LOGE just above for which rule");
-            (void)mode_violation; /* only read by assert()'s message above on a debug build */
+#endif
+            (void)mode_violation; /* only read by assert()'s message above on a debug build, or by
+                                    * exec_handle_mode_state_violation() on ESP_PLATFORM */
         }
 
         run_snapshot_buf_t tick_snap;

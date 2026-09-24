@@ -8140,6 +8140,88 @@ static void test_mode_state_check_no_violation_after_global_guard_trip_mid_dwell
     reset_relay_claim_test_state();
 }
 
+// ---------------------------------------------------------------------------
+// exec_handle_mode_state_violation() -- 2026-09-24 fix for the panic in
+// docs/audits/profile_executor_panic_2026-09-24.md. On the target build the
+// hard assert() at the executor_task_entry call site is replaced by a call
+// to this helper (gated #if defined(ESP_PLATFORM) -- see profile_executor.c
+// around the exec_mode_state_check() call site). A host build keeps the
+// assert(), so this helper is never reached from the real control loop on
+// host -- these tests call it directly, per this task's own fallback
+// ("otherwise test the check-and-latch helper directly").
+static void reset_mode_state_violation_test_state(void)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    g_relay_claim_calls = 0;
+    g_last_claim_mask = 0;
+    g_last_claim_owner = RELAY_OWNER_NONE;
+    g_relay_release_calls = 0;
+    g_last_release_mask = 0;
+    g_continue_on_zone_trip = false;
+    g_heat_zone_claim_begin_calls = 0;
+    g_heat_zone_claim_end_calls = 0;
+    g_last_heat_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+}
+
+static void test_exec_handle_mode_state_violation_forces_faulted_and_latches(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- forces FAULTED, drops heaters, "
+                 "latches, and does not re-fire on a second call");
+    reset_mode_state_violation_test_state();
+
+    // Reproduce the panic's actual shape: a run mid-dwell (rule 5's illegal
+    // combination is DONE/dwelling, but any nonzero mode_violations value
+    // exercises the same handling path).
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.dwelling = true;
+    s_exec.ramp_lock_held = true;
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x01;
+
+    exec_handle_mode_state_violation(1u, "rule 5: DONE while dwelling");
+
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "a violation must force FAULTED, not reboot");
+    TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared entering the terminal state");
+    TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared entering the terminal state");
+    TEST_CHECK(g_relay_release_calls == 1, "relays/claim must be released exactly once (heaters off)");
+    TEST_CHECK(g_last_release_mask == 0x01, "must release exactly claimed_relay_mask");
+    TEST_CHECK(s_exec.mode_state_fault_latched, "the latch flag must be set so the fault is visible over HTTP");
+    TEST_CHECK(s_exec.mode_state_violation_count == 1, "the lifetime counter must record this violation");
+    TEST_CHECK(strstr(s_exec.fault_reason, "rule 5") != NULL,
+              "fault_reason must name which rule fired, not a generic message");
+
+    // Second call while still latched -- must not re-force or re-release
+    // (this is the "log once per run, keep the flag set" requirement; a
+    // real control tick would call this every tick if the offending state
+    // isn't otherwise cleared, and it must not spam the log or re-release
+    // an already-released claim on every one of those ticks).
+    exec_handle_mode_state_violation(1u, "rule 5: DONE while dwelling");
+    TEST_CHECK(g_relay_release_calls == 1, "a second call while latched must not re-release the claim");
+    TEST_CHECK(s_exec.mode_state_violation_count == 2, "the lifetime counter still counts every occurrence");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must remain FAULTED, not be reassigned again");
+}
+
+static void test_exec_handle_mode_state_violation_noop_when_clean(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- a zero violation mask is a no-op");
+    reset_mode_state_violation_test_state();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+
+    exec_handle_mode_state_violation(0u, NULL);
+
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "no violation must never force a state change");
+    TEST_CHECK(!s_exec.mode_state_fault_latched, "no violation must never set the latch");
+    TEST_CHECK(s_exec.mode_state_violation_count == 0, "no violation must never bump the counter");
+    TEST_CHECK(g_relay_release_calls == 0, "no violation must never touch the relay claim");
+}
+
+static void run_test_exec_handle_mode_state_violation(void)
+{
+    test_exec_handle_mode_state_violation_forces_faulted_and_latches();
+    test_exec_handle_mode_state_violation_noop_when_clean();
+    reset_mode_state_violation_test_state();
+}
+
 static void run_test_exec_mode_state_check(void)
 {
     test_mode_state_check_rule4_idle_with_active_zone();
@@ -8959,6 +9041,11 @@ void run_test_profile_executor_prestart(void)
 
     // ROADMAP.md M15 "Mode-state sprawl" -- exec_mode_state_check().
     run_test_exec_mode_state_check();
+
+    // 2026-09-24 fix -- docs/audits/profile_executor_panic_2026-09-24.md:
+    // exec_handle_mode_state_violation() replaces the reboot-on-assert
+    // production path.
+    run_test_exec_handle_mode_state_violation();
 
     // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule().
     run_test_profile_resolve_on_off_rule();

@@ -387,6 +387,18 @@ typedef struct {
     uint32_t total_elapsed_s;
 
     char     fault_reason[96];   /* only meaningful when state == PROFILE_EXEC_FAULTED (a GLOBAL trip) */
+
+    /* docs/audits/profile_executor_panic_2026-09-24.md: true when THIS run's
+     * FAULTED state (fault_reason/fault_guard above) came from
+     * exec_handle_mode_state_violation() forcing a mode-state-check
+     * violation to FAULTED, rather than an ordinary thermal guard trip --
+     * fault_guard reads THERMAL_GUARD_TRIP_NONE (0) in that case, since this
+     * is not a thermal_guard_trip_t fault. mode_state_violation_count is a
+     * lifetime-of-this-boot diagnostics counter (never reset by a run
+     * start), reported unconditionally so it is visible even once the
+     * board has moved past the run that latched it. */
+    bool     mode_state_fault_latched;
+    uint32_t mode_state_violation_count;
     uint8_t  fault_guard;        /* thermal_guard_trip_t, only meaningful when state == PROFILE_EXEC_FAULTED */
 
     /* Warm-start (PROFILES.md "Warm-start: joining a profile already at

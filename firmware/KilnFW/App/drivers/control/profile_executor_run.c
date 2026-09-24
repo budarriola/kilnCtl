@@ -413,6 +413,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.segment_elapsed_s = 0;
     s_exec.ramp_lock_held = false;
     s_exec.ramp_lock_lagging_mask = 0;
+    /* docs/audits/profile_executor_panic_2026-09-24.md: latched per-run so a
+     * violation forces FAULTED exactly once; a fresh run starts un-latched.
+     * mode_state_violation_count is a lifetime-of-this-boot diagnostics
+     * counter and is deliberately NOT reset here. */
+    s_exec.mode_state_fault_latched = false;
     memset(s_exec.stretch_by_segment_s, 0, sizeof(s_exec.stretch_by_segment_s));
     s_exec.stretch_total_s = 0.0f;
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- a previous run's last

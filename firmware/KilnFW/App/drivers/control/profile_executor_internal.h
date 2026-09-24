@@ -775,6 +775,20 @@ typedef struct {
     bool ramp_lock_held;
     uint8_t ramp_lock_lagging_mask;
 
+    /* docs/audits/profile_executor_panic_2026-09-24.md production hardening:
+     * exec_handle_mode_state_violation() sets this the first time
+     * exec_mode_state_check() finds a violation on a given run, so a
+     * violation that somehow persists tick to tick is forced to FAULTED
+     * once, not re-forced (and re-logged) every tick. Reset false at
+     * profile_executor_run(). mode_state_violation_count is NOT reset at
+     * run start -- it is a lifetime-of-this-boot diagnostics counter,
+     * reported over GET /api/profile_exec, so an operator or a bench script
+     * can tell whether this class of violation has ever fired without
+     * grepping the device log ring (which drops lines silently under
+     * volume -- see CLAUDE.md). */
+    bool mode_state_fault_latched;
+    uint32_t mode_state_violation_count;
+
     /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch. Sec 7.1's ramp-lock
      * (already built) guarantees every ramp endpoint is eventually reached
      * on its own, by holding target_c/segment_elapsed_s still while a zone
@@ -1489,7 +1503,8 @@ void watchdog_task_entry(void *arg);
  * the caller asserts on the return value.
  *
  * The ONE real control-loop call site (profile_executor.c's tick, end of
- * the locked section) additionally does:
+ * the locked section) additionally does, on a host-test or debug (non-
+ * ESP_PLATFORM) build:
  *     assert(exec_mode_state_check(buf, sizeof(buf)) == 0 && buf);
  * making that call site the actual "debug-buildable consistency assertion"
  * the ROADMAP item asks for. This repo has no existing runtime-assert
@@ -1502,14 +1517,39 @@ void watchdog_task_entry(void *arg);
  * exactly what "assert it fires" means for host tests: they call
  * exec_mode_state_check() directly instead of going through the real tick,
  * so they observe the nonzero return/message with TEST_CHECK rather than
- * triggering that abort). On an ESP-IDF target build, whether `assert()`
- * compiles to a real abort depends on the Release optimization-assertion
- * Kconfig setting, same as every other libc `assert()` in this toolchain --
- * this function does not change or override that; if that setting resolves
- * to a no-op on this board's shipped config, this call site degrades to
- * "still ESP_LOGE'd, no board-side abort" for exactly the reason given in
- * the ROADMAP item: "if no convention exists, host-test-only is
- * acceptable." */
+ * triggering that abort).
+ *
+ * **Correction, 2026-09-24 (docs/audits/profile_executor_panic_2026-09-24.md,
+ * owner decision):** on a real ESP-IDF target build (`ESP_PLATFORM` defined
+ * -- the same discriminator security_backend_placeholder.c already uses to
+ * tell a target build from a host/MSVC one; this repo has no dedicated
+ * host-test macro) this call site no longer calls `assert()` at all. A
+ * global thermal guard tripping mid-dwell hit this exact assert live on the
+ * bench and rebooted the board mid-firing -- relays were already off by
+ * then, but the reboot still lost the run record, the firing history entry,
+ * and the serial link. `assert()` on target used to depend on the Release
+ * optimization-assertion Kconfig setting the same as any other libc
+ * `assert()`; this board keeps assertions live
+ * (`CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y`), so that assert really
+ * did reboot the board in production, not merely in theory. On
+ * `ESP_PLATFORM`, exec_handle_mode_state_violation() (below) runs instead: it
+ * forces the run to FAULTED with heaters off through the same relay-off path
+ * every other FAULTED transition in this file uses, latches so a violation
+ * that persists tick to tick is not re-forced or re-logged every tick, and
+ * lets the task loop continue -- never a reboot. The hard `assert()` stays
+ * for host tests and any non-`ESP_PLATFORM` (debug) build, so a violation is
+ * still caught loudly there. */
 uint32_t exec_mode_state_check(char *out_first_violation, size_t out_cap);
+
+/* Production-safe response to a nonzero exec_mode_state_check() result --
+ * see the correction above and profile_executor.c's definition for the full
+ * rationale. Left compiled and callable on every build (host included) so a
+ * host test can drive it directly, even though the real control-loop call
+ * site only reaches it on ESP_PLATFORM (host/debug builds hard-assert
+ * instead). A no-op if mode_violations == 0. Must be called with
+ * s_exec.lock held -- same precondition as exec_mode_state_check() itself,
+ * which only reads state, plus escalate_guard_trip()'s force_all_relays_off()
+ * call this makes. */
+void exec_handle_mode_state_violation(uint32_t mode_violations, const char *first_violation);
 
 #endif /* PROFILE_EXECUTOR_INTERNAL_H */

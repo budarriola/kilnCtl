@@ -267,6 +267,11 @@ void profile_executor_get_status(profile_exec_status_t *out)
 
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     out->state = s_exec.state;
+    /* Unconditional, unlike fault_reason/fault_guard below: a lifetime-of-
+     * this-boot diagnostics counter, meaningful even once the board has
+     * moved past the run that latched it (docs/audits/
+     * profile_executor_panic_2026-09-24.md). */
+    out->mode_state_violation_count = s_exec.mode_state_violation_count;
     if (s_exec.state != PROFILE_EXEC_IDLE) {
         out->profile_id = s_exec.profile_id;
         strncpy(out->profile_name, s_exec.profile.name, sizeof(out->profile_name) - 1);
@@ -389,6 +394,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
         if (s_exec.state == PROFILE_EXEC_FAULTED) {
             strncpy(out->fault_reason, s_exec.fault_reason, sizeof(out->fault_reason) - 1);
             out->fault_guard = (uint8_t)s_exec.fault_guard;
+            out->mode_state_fault_latched = s_exec.mode_state_fault_latched;
         }
     }
     xSemaphoreGive(s_exec.lock);

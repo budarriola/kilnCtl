@@ -119,6 +119,10 @@ static void fill_worst_case_status(profile_exec_status_t *st)
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         fill_worst_case_zone(&st->zones[zi], zi);
     }
+    /* docs/audits/profile_executor_panic_2026-09-24.md: worst-case both new
+     * run-level fields too, same discipline as every other field here. */
+    st->mode_state_fault_latched = true;
+    st->mode_state_violation_count = 0xFFFFFFFFu; /* "%lu" worst case */
 }
 
 /* True iff `json` is a syntactically complete, balanced JSON object: starts
