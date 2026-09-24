@@ -1139,10 +1139,9 @@ def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optiona
     A per-row-only check cannot tell that shape apart from a genuine Nth
     row, since both read as non-background content at the position a
     correctly-rendered Nth row would occupy; `header_rendered is False`
-    catches it directly. `header_rendered is None` (no capture, or
-    `configured_zones` unknown) is never held against the run by itself --
-    it only matters combined with a capture actually being available (see
-    below).
+    catches it directly. `header_rendered is None` with every zone row
+    confirmed is INCONCLUSIVE, never PASS: without it the missing-row shape
+    above is undecidable.
 
     Cannot detect: a zone row rendering a WRONG temperature value, a stale
     (frozen) value, or the Safety line rendering the wrong color/text while
@@ -1187,6 +1186,16 @@ def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optiona
         return CaseResult(
             Verdict.INCONCLUSIVE,
             reason=f"only {sum(1 for v in zone_rows_rendered.values() if v)} of {configured_zones} zone rows were confirmed rendered",
+            observed=observed,
+        )
+    if header_rendered is None:
+        # The header sample is the only thing that tells "N rows" apart from
+        # "N-1 rows, header shifted up" (see above) -- an undecided reading
+        # must not let every-row-looks-fine fall through to PASS.
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="the Relays card header position was not sampled, so a shifted-up header "
+                   "(one fewer zone row rendered than configured) cannot be ruled out",
             observed=observed,
         )
     if header_rendered is False:

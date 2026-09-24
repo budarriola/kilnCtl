@@ -661,9 +661,14 @@ list's content.
   - **Zero-zone case.** `s_zone_count == 0` renders a plain, non-card
     "No zones configured" label directly in `content` rather than any zone
     row or Relays card -- its vertical centre is `content_y(44) +
-    UI_THEME_FONT_LINE_HEIGHT_PX/2(10) = 54` (`_LCD14_ZERO_ZONE_LABEL_Y`),
-    distinct from a real row's 58 offset because it has no card's own top
-    pad. `configured_zones == 0` now samples this label position instead of
+    montserrat_14 line_height/2(8) = 52` (`_LCD14_ZERO_ZONE_LABEL_Y`; the
+    real font line is 16 px, not the 20 px `UI_THEME_FONT_LINE_HEIGHT_PX`
+    budget figure -- rows still pitch 32 because the default theme's 2 px
+    card border on each edge makes up the difference), distinct from a real
+    row's 58 offset because it has no card border or top pad. The header
+    sample's no-text reference point is x=400 (`_LCD14_HEADER_REF_X`), not
+    the rows' x=240: the header label spans x ~14..256, so x=240 sits on
+    its own text. `configured_zones == 0` now samples this label position instead of
     any row/header position and judges PASS/FAIL/INCONCLUSIVE on whether it
     reads as rendered, rather than trivially passing on "0 expected, 0
     rendered."

@@ -458,6 +458,14 @@ class LcdTemperaturePageTest(unittest.TestCase):
             configured_zones=0, zero_zone_label_rendered=None)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
+    def test_header_unsampled_is_inconclusive_never_pass(self):
+        # Every row reads rendered, but without the header sample the
+        # "N-1 rows, header shifted up" shape cannot be ruled out.
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True, 2: True}, {}, None, False,
+            configured_zones=3, header_rendered=None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
 
 class LcdDiagnosticsPagesTest(unittest.TestCase):
     # Round 3 rewrite (item 2): no wire command reads a diagnostics

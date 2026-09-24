@@ -1036,13 +1036,36 @@ _LCD14_ZONE_TEXT_X = 40.0
 #: `s_zone_count == 0` branch) is a PLAIN label dropped directly into
 #: `content` with no card wrapper and no pad_all of its own -- unlike a real
 #: zone row, so it does NOT sit at `_LCD14_ZONE_ROW_Y0` (that offset already
-#: bakes in a card's own top pad + half the font line height). Its vertical
+#: bakes in a card's own border + top pad + half the font line). Its vertical
 #: centre is simply content's own y (44, see the module comment above) plus
-#: half a font line (UI_THEME_FONT_LINE_HEIGHT_PX/2=10): 44+10=54. Sampled at
-#: the same left-ish x as every other row's text column -- the label has no
-#: left pad of its own, but "No zones configured" is wide enough that x=40
-#: still lands under its text.
-_LCD14_ZERO_ZONE_LABEL_Y = 54.0
+#: half of LV_FONT_DEFAULT's REAL line height -- montserrat_14's
+#: `.line_height = 16` (components/lvgl/src/font/lv_font_montserrat_14.c),
+#: NOT UI_THEME_FONT_LINE_HEIGHT_PX (20, a conservative budget figure for
+#: the _Static_asserts, not a rendered height): 44+8=52. Sampled at the same
+#: left-ish x as every other row's text column -- the label starts at x=8
+#: (scr pad_all) and "No zones configured" is ~147 px wide (summed
+#: montserrat_14 advances), so x=40 lands under its text and x=240 on plain
+#: page BG.
+#:
+#: (The zone-row pitch above happens to come out the same either way: the
+#: real row height is border 2 (lv_theme_default's card BORDER_WIDTH at
+#: CONFIG_LV_DPI_DEF=130, applied to every plain lv_obj child that does not
+#: zero it, which build_zone_temp_row()/build_relays_section() do not) +
+#: pad 4 + line 16 + pad 4 + border 2 = 28, identical to the budget
+#: macro's pad 4 + 20 + pad 4. The Relays header centre is likewise card
+#: top + 2 + 4 + 8 = card top + 14, same as a row's centre offset.)
+_LCD14_ZERO_ZONE_LABEL_Y = 52.0
+
+#: Local no-text reference x for the Relays card HEADER sample only. The
+#: zone rows' _LCD14_ROW_X (240) is a gap between a row's left name label
+#: and its right-aligned temperature, but the header line "Relays -- zone
+#: relays are view-only" is one left-aligned label ~242 px wide (summed
+#: montserrat_14 advances) starting at x=14 (card x 8 + border 2 + pad 4),
+#: so it spans x ~14..256 -- x=240 lands ON the header's own text, and a
+#: correctly rendered header would compare text against text (low contrast,
+#: a spurious FAIL). x=400 is inside the card (content ends at x=466) and
+#: past the header's end, so it reads the card's own background there.
+_LCD14_HEADER_REF_X = 400.0
 
 
 def _configured_zone_count(srv) -> "tuple[Optional[int], Optional[str]]":
@@ -1122,14 +1145,24 @@ def _case_lcd14(ctx: dict) -> CaseResult:
                 # board actually rendered ONE FEWER row than
                 # `configured_zones` (the round-3 bug this fixes: a genuine
                 # missing-row defect, not just a wrong guess), the header
-                # shifts up by one full row pitch and this position reads as
-                # plain background instead -- catching exactly the "N-1
-                # rows, header shifted up" failure shape a per-row-only
-                # check cannot distinguish from a real Nth row (both read as
-                # non-background content at the SAME sampled position).
+                # shifts up by one full row pitch and this position lands
+                # 22 px into the relay-button row instead (both sample
+                # points on button background, no header text) -- catching
+                # the "N-1 rows, header shifted up" failure shape a
+                # per-row-only check cannot distinguish from a real Nth row
+                # (both read as non-background content at the SAME sampled
+                # position). Caveat: a relay button lit ON (ACCENT_5) under
+                # exactly one of the two points could still read as
+                # contrast there. The reference point is
+                # _LCD14_HEADER_REF_X, not _LCD14_ROW_X -- see its comment.
+                # Skipped (None, judged INCONCLUSIVE) if the header would
+                # fall off the 320 px panel: unreachable today, since both
+                # GET_ZONES and s_zone_count clamp to MAX31856_CHANNEL_COUNT
+                # (3, header_y <= 154), and N <= 8 would still fit.
                 header_y = float(_LCD14_ZONE_ROW_Y0 + configured_zones * _LCD14_ZONE_ROW_PITCH)
-                header_rendered = _sample_row_contrast(
-                    ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_ROW_X, header_y)
+                if header_y + 4.0 <= float(lcd_sampler.LCD_HEIGHT):
+                    header_rendered = _sample_row_contrast(
+                        ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_HEADER_REF_X, header_y)
         try:
             expect_safety_on = bool(srv._profiles.get_exec_status().state_name == "running")
         except Exception:

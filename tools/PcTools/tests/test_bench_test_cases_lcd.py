@@ -913,6 +913,11 @@ class Lcd14Test(unittest.TestCase):
             zone = round((cy - C._LCD14_ZONE_ROW_Y0) / C._LCD14_ZONE_ROW_PITCH)
             on = rendered.get(zone, False)
             is_text_point = abs(cx - C._LCD14_ZONE_TEXT_X) < abs(cx - C._LCD14_ROW_X)
+            if zone == configured_zones and on:
+                # The Relays header is ONE left-aligned label spanning
+                # x ~14..256 (not a name/value pair with a gap at x=240 like
+                # a zone row) -- any point in that span reads text.
+                is_text_point = 14.0 <= cx <= 256.0
             if not on:
                 region = C._BG_RGB
             else:
