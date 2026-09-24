@@ -1054,6 +1054,23 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     xSemaphoreGive(s_exec.lock);
     (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
 
+    /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING
+     * (0x09) -- outside s_exec.lock, same discipline as the heat_enable
+     * acquire above (a producer call, never held under the exec lock). `p`
+     * is the local, already-committed copy of this run's profile, still in
+     * scope. Fire-and-forget broadcast: a failure here is logged, never
+     * treated as success, and never blocks the firing that has already
+     * started -- S1 simply keeps enforcing whatever ceiling (or none) the
+     * Pico last held, which can only be equal or looser than intended,
+     * never tighter, per abs_max_temp_c's own floor. */
+    float firing_max_c = profile_compute_firing_max_c(&p);
+    esp_err_t ceiling_err = safety_link_send_firing_ceiling(s_exec.safety, firing_max_c);
+    if (ceiling_err != ESP_OK) {
+        ESP_LOGW(PE_TAG,
+                 "profile '%s' (id %u): SET_FIRING_CEILING send failed (err=%s), firing_max_c=%.1f",
+                 p.name, profile_id, esp_err_to_name(ceiling_err), (double)firing_max_c);
+    }
+
     /* First write of this run's breadcrumb, and the one that overwrites any
      * previous run's record in flash. From here on the stored record says a
      * firing is in progress until something records an ending. */

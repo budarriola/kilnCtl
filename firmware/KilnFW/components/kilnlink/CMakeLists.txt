@@ -41,7 +41,7 @@ idf_component_register(
          # wrapper's SRCS list does not track CommonFW/CMakeLists.txt's own
          # add_library(kilnlink ...) automatically, so a new codec is invisible
          # to the ESP-IDF build until it is also listed here. (Several older
-         # kilnlink_*.c files -- status/power/diag/trip/ceiling/set_clock/
+         # kilnlink_*.c files -- status/power/diag/trip/set_clock/
          # get_fw_version/set_log_level -- are ALSO missing from this list,
          # pre-existing gaps this pass did not touch since safety_link.c
          # hand-parses those frames rather than linking their codecs; see that
@@ -67,6 +67,12 @@ idf_component_register(
          # per-field commissioning rejection reason (COMMISSIONING.md sec 3.1).
          "${KILNLINK_DIR}/src/kilnlink_set_log_level.c"
          "${KILNLINK_DIR}/src/kilnlink_commit_config_rejected.c"
+         # SAFETY_CMD_SET_FIRING_CEILING (0x09) now has a real ESP caller
+         # (safety_link_commands.c's safety_link_send_firing_ceiling(),
+         # LINK_PROTOCOL.md:1525's "confirmed still not built" item) so it
+         # moves out of this file's header-comment "pre-existing gap" list
+         # above and into the actually-linked set, same as SET_LOG_LEVEL did.
+         "${KILNLINK_DIR}/src/kilnlink_ceiling.c"
          # SAFETY_CMD_ROLLBACK_RESULT (0x25) -- the missing Pico->ESP reply
          # for a refused SAFETY_CMD_ROLLBACK, safety_link.c decodes this the
          # same way it decodes COMMIT_CONFIG_REJECTED above.

@@ -1458,6 +1458,32 @@ void history_unpack(const history_slot_t *slot, profile_history_entry_t *out);
 /* ---- run() feasibility/warm-start helpers (profile_executor_start.c) ----- */
 bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_zone);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09) --
+ * the raw peak this profile will ever ask a zone to reach, i.e. the highest
+ * `target_c` among its PROFILE_SEG_KIND_ZONE_RAMP segments. RELAY_IO segments
+ * carry no meaningful target_c and are skipped. The +firing_margin_c margin
+ * and the min() against abs_max_temp_c both happen entirely Pico-side
+ * (SaftyFW/src/safety_guards.c) -- this function must NOT add the margin
+ * itself. Returns 0.0f ("no ceiling") for a NULL profile or one with no
+ * ZONE_RAMP segments. Pure function, host-test-callable directly against a
+ * hand-built profile_t, same as profile_zones_have_ceiling() above. */
+static inline float profile_compute_firing_max_c(const profile_t *p)
+{
+    float max_c = 0.0f;
+    if (!p) {
+        return 0.0f;
+    }
+    for (uint8_t i = 0; i < p->segment_count; i++) {
+        if (p->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            continue;
+        }
+        if (p->segments[i].target_c > max_c) {
+            max_c = p->segments[i].target_c;
+        }
+    }
+    return max_c;
+}
+
 /* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored
  * profile_on_off_rule_t (if any) for (zone_index, segment_index) in `p` and
  * translates it into on_off_trigger_decide.h's on_off_trigger_rule_t, the

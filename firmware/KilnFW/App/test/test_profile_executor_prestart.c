@@ -503,6 +503,24 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     return ESP_OK;
 }
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09)
+ * -- this test file #includes profile_executor.c/profile_executor_run.c/
+ * profile_executor_status.c directly (no other seam for the guards those
+ * files test), so their new safety_link_send_firing_ceiling() call sites
+ * need a fake body here, same convention as every other safety_link_send_*
+ * fake in this file. Records the last call's argument and a running count
+ * so a test can assert on both the derivation (firing_max_c) and that a
+ * send happened (or, just as importantly, did NOT happen). */
+static int g_firing_ceiling_send_calls = 0;
+static float g_firing_ceiling_last_c = -1.0f;
+esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
+{
+    (void)link;
+    g_firing_ceiling_send_calls++;
+    g_firing_ceiling_last_c = firing_max_c;
+    return ESP_OK;
+}
+
 /* Puts heat_enable back in the state a RUNNING firing leaves it in: this
  * run holds a granted K4 request. The tests below drive profile_executor's
  * exit paths directly (they set s_exec.state by hand rather than going
@@ -1893,6 +1911,45 @@ static void test_guard9_fault_source_cleared_on_halt(void)
 // "factor the check out so a host test can drive it directly" reasoning as
 // escalate_guard_trip()/guard9_assert_stale_tick_fault() elsewhere in this
 // file.
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09)
+ * -- profile_compute_firing_max_c() (profile_executor_internal.h) is the
+ * ESP-side derivation: the highest target_c among a profile's ZONE_RAMP
+ * segments. Must NOT add firing_margin_c itself (that happens entirely
+ * Pico-side, safety_guards.c) and must skip RELAY_IO segments, which carry
+ * no meaningful target_c. */
+static void test_profile_compute_firing_max_c_picks_highest_zone_ramp_target(void)
+{
+    TEST_SECTION("profile_compute_firing_max_c() -- highest ZONE_RAMP target_c wins, "
+                 "RELAY_IO segments ignored, no margin added");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.segment_count = 3;
+    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    p.segments[0].target_c = 500.0f;
+    p.segments[1].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    p.segments[1].target_c = 9999.0f; /* must be ignored -- not a real target */
+    p.segments[2].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    p.segments[2].target_c = 1250.0f; /* the real peak */
+
+    float got = profile_compute_firing_max_c(&p);
+
+    TEST_CHECK(got == 1250.0f, "picks the higher of the two ZONE_RAMP targets, raw (no +margin)");
+}
+
+static void test_profile_compute_firing_max_c_null_and_empty(void)
+{
+    TEST_SECTION("profile_compute_firing_max_c() -- NULL profile and a profile with no ZONE_RAMP "
+                 "segments both resolve to 0.0f ('no ceiling'), never garbage or a crash");
+    TEST_CHECK(profile_compute_firing_max_c(NULL) == 0.0f, "NULL profile -> 0.0f");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.segment_count = 1;
+    p.segments[0].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    p.segments[0].target_c = 800.0f; /* still must be ignored */
+    TEST_CHECK(profile_compute_firing_max_c(&p) == 0.0f, "no ZONE_RAMP segments -> 0.0f, not the RELAY_IO value");
+}
+
 static void test_profile_zones_have_ceiling_refuses_on_zero(void)
 {
     TEST_SECTION("profile_zones_have_ceiling() -- refuses when a zone that CAN heat has max_temp_c == 0 "
@@ -2497,6 +2554,34 @@ static void test_halt_releases_heat_enable(void)
     profile_executor_halt();
     heat_enable_service_pending_release();
     TEST_CHECK(g_request_enable_false_calls == 1, "a second halt sends nothing more");
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09):
+ * a real operator halt out of RUNNING must clear the Pico's cached ceiling
+ * (0.0f, the documented "no firing / no ceiling known" sentinel) exactly
+ * once -- never left standing, and never sent again on a second, no-op
+ * halt of an already-IDLE executor (the IDLE early-return in
+ * profile_executor_halt() must still refuse to send a second time). */
+static void test_halt_clears_firing_ceiling(void)
+{
+    TEST_SECTION("profile_executor_halt() -- clears the Pico's cached firing ceiling");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x0F;
+    g_firing_ceiling_send_calls = 0;
+    g_firing_ceiling_last_c = -1.0f;
+
+    profile_executor_halt();
+
+    TEST_CHECK(g_firing_ceiling_send_calls == 1, "halt from RUNNING sends exactly one SET_FIRING_CEILING");
+    TEST_CHECK(g_firing_ceiling_last_c == 0.0f, "halt clears the ceiling with the 0.0f sentinel, not a leftover value");
+
+    /* A no-op halt on an already-IDLE executor must send nothing -- same
+     * discipline as g_request_enable_false_calls staying at 1 above. */
+    profile_executor_halt();
+    TEST_CHECK(g_firing_ceiling_send_calls == 1, "a second (no-op) halt sends no additional SET_FIRING_CEILING");
 }
 
 // docs/audits/profile_executor_panic_2026-09-24.md halt-clear follow-up: an
@@ -9328,6 +9413,8 @@ void run_test_profile_executor_prestart(void)
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
+    test_profile_compute_firing_max_c_picks_highest_zone_ramp_target();
+    test_profile_compute_firing_max_c_null_and_empty();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -9343,6 +9430,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();
+    test_halt_clears_firing_ceiling();
     test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();

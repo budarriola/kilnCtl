@@ -1522,13 +1522,23 @@ Two more, driven by the borrowed-thermocouple option:
 - [x] `SIM_PLANT` flag set when built against the simulated plant.
       **2026-09-04**: `safety_link_frames.c:497-498`,
       `#if CONFIG_KILNCTL_SIM_PLANT` sets `KILNLINK_CONTEXT_FLAG_SIM_PLANT`.
-- [ ] `SET_FIRING_CEILING` (0x09) sent at profile start/edit. **Confirmed
-      still not built** (2026-09-04): no call to `kilnlink_ceiling_encode()`
-      anywhere under `App/drivers/`. Doable in software (no hardware
-      dependency), but implementing a new outbound frame + `profile_executor.c`/
-      `profiles_http.c` wiring is out of scope for this triage pass, which
-      prioritized the OTA host-test gap per this task's own instructions;
-      left for a dedicated pass.
+- [x] `SET_FIRING_CEILING` (0x09) sent at profile start/edit/stop. **Built
+      2026-09-24**: `safety_link_send_firing_ceiling()`
+      (`safety_link_commands.c`) wraps `kilnlink_ceiling_encode()` as a
+      fire-and-forget broadcast, same shape as `SET_CONFIG`/`CLEAR_TRIP`.
+      `profile_compute_firing_max_c()` (`profile_executor_internal.h`)
+      derives the raw peak as the highest `target_c` across the profile's
+      `PROFILE_SEG_KIND_ZONE_RAMP` segments (RELAY_IO segments ignored, no
+      margin added — the 100 C `FIRING_MARGIN_C_DEFAULT` margin is applied
+      entirely Pico-side in `safety_guards.c`). Called from
+      `profile_executor_run.c` at profile start, from
+      `reload_live_profile_if_changed()` in `profile_executor.c` after a
+      live-edit decide adopts the edit, and from `profile_executor_halt()`
+      in `profile_executor_status.c` with the `0.0f` sentinel at stop — all
+      three call sites are outside `s_exec.lock` and check/log the returned
+      `esp_err_t`. `kilnlink_ceiling.c` was also added to the ESP-IDF
+      component's `CMakeLists.txt` SRCS list (previously unwired — no ESP
+      caller existed before this).
 - [x] `CLEAR_TRIP` (0x0A) wired to the GUI. **2026-09-04**:
       `dashboard_exec_http.c`'s `safety_clear_trip_post_handler()` (`POST
       /api/safety/clear_trip`) calls `safety_link_send_clear_trip()`
@@ -1545,8 +1555,8 @@ Two more, driven by the borrowed-thermocouple option:
       retry, as `safety_link_poll.c`'s own comment states explicitly.
 - [ ] `SET_CLOCK` (0x0C) — optional, diagnostic only. **Confirmed still not
       built** (2026-09-04): no `kilnlink_set_clock_encode()` call site.
-      Marked optional by the doc itself; left undone, same reasoning as
-      `SET_FIRING_CEILING` above.
+      Marked optional by the doc itself; left undone — `SET_FIRING_CEILING`
+      above is now built.
 - [x] `GET_STATUS` poll loop removed (no ACK'd `DATA` polls remain).
       **2026-09-04**: `safety_exchange()` (`safety_link_inbox.c:667`) sends
       via `uart_protocol_send_broadcast()`, not an ACK'd `DATA` frame — every
