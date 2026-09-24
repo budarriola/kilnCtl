@@ -298,6 +298,20 @@ COLOR_MATCH_TOLERANCE = 45.0
 #: threshold, so a genuinely wrong button color still fails.
 CHROMA_MATCH_TOLERANCE = 0.10
 
+#: Brightness floor for the chromaticity fallback only: the sample's channel
+#: sum must be at least this fraction of the target's own channel sum before
+#: its channel RATIOS are trusted at all. Chromaticity is scale-invariant by
+#: construction, so without this a near-black region -- a blanked panel, an
+#: unlit/hidden button, dark sensor noise with a faint green cast such as
+#: RGB(10,20,12) or RGB(3,6,4) -- has almost exactly ACCENT_4's ratios and
+#: would "match" whenever it clears the bezel-contrast gate (which a dark
+#: region does easily against a mis-exposed bright bezel like the
+#: 2026-09-24 RGB(160,233,253), and even against the normal dark bezel when
+#: the region reads darker than it). The 2026-09-24 genuine sample
+#: RGB(60,138,92) sums to 290, ~0.77 of ACCENT_4's 378, so 0.5 keeps that
+#: evidence passing while rejecting anything dimmer than half-exposure.
+CHROMA_MIN_BRIGHTNESS_RATIO = 0.5
+
 
 def color_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
@@ -327,7 +341,8 @@ def is_off(rgb: Tuple[int, int, int], bezel: Tuple[int, int, int], tol: float = 
 
 def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel: Tuple[int, int, int],
                    tol: float = COLOR_MATCH_TOLERANCE, min_bezel_contrast: float = MIN_BEZEL_CONTRAST,
-                   chroma_tol: float = CHROMA_MATCH_TOLERANCE) -> bool:
+                   chroma_tol: float = CHROMA_MATCH_TOLERANCE,
+                   chroma_min_brightness_ratio: float = CHROMA_MIN_BRIGHTNESS_RATIO) -> bool:
     """True if `rgb` is close to `target` AND distinctly different from
     the bezel -- a region cannot "match" a bright accent color while also
     reading as indistinguishable from the dark bezel (a camera fault or a
@@ -350,9 +365,17 @@ def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel
        absolute tolerance, so (2) is an OR added on top of (1), never a
        replacement for it -- CLAUDE.md's "judge colors by numeric pixel
        sampling, never by eye" still holds: this compares two sampled
-       numbers, never a theme source constant read informally."""
+       numbers, never a theme source constant read informally. (2) only
+       applies once the sample is at least `chroma_min_brightness_ratio` as
+       bright (channel sum) as `target` -- a dark/blanked region has
+       noise-level channel ratios that can mimic any hue."""
     if color_distance(rgb, bezel) < min_bezel_contrast:
         return False
     if color_distance(rgb, target) <= tol:
         return True
+    # Chromaticity is meaningless for a dim sample (see
+    # CHROMA_MIN_BRIGHTNESS_RATIO): a blanked or unlit region must never
+    # reach the scale-invariant comparison below.
+    if sum(rgb) < chroma_min_brightness_ratio * sum(target):
+        return False
     return color_distance(_chromaticity(rgb), _chromaticity(target)) <= chroma_tol

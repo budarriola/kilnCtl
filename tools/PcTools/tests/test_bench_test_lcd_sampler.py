@@ -198,6 +198,38 @@ class ToleranceMathTest(unittest.TestCase):
         sampled = (150, 150, 150)
         self.assertFalse(S.matches_color(sampled, target, bezel))
 
+    def test_matches_color_false_for_blanked_dark_region_with_green_cast(self):
+        # Negative test for the chroma branch's brightness floor: a blanked
+        # or unlit button region reads near-black, and its noise-level
+        # channel ratios can sit almost exactly on ACCENT_4's chromaticity
+        # (these three are all within CHROMA_MATCH_TOLERANCE of it). Each
+        # clears the bezel-contrast gate against BOTH the normal dark bezel
+        # and the 2026-09-24 mis-exposed bright one, so only the brightness
+        # floor stops them "matching" green.
+        target = (0x5C, 0xC0, 0x6E)
+        for bezel in ((26, 31, 43), (160, 233, 253)):
+            for sampled in ((3, 6, 4), (10, 20, 12), (28, 58, 33)):
+                with self.subTest(bezel=bezel, sampled=sampled):
+                    self.assertGreaterEqual(S.color_distance(sampled, bezel), S.MIN_BEZEL_CONTRAST)
+                    self.assertLessEqual(
+                        S.color_distance(S._chromaticity(sampled), S._chromaticity(target)),
+                        S.CHROMA_MATCH_TOLERANCE,
+                    )
+                    self.assertFalse(S.matches_color(sampled, target, bezel))
+
+    def test_matches_color_false_for_same_hue_wrong_saturation(self):
+        # Negative test: green-ish hue but washed out / desaturated (a
+        # pastel or a greyed-out button) -- outside the absolute tolerance
+        # AND outside the chroma tolerance, bright enough to clear the
+        # brightness floor, so it is the chroma comparison itself rejecting it.
+        target = (0x5C, 0xC0, 0x6E)
+        for bezel in ((26, 31, 43), (160, 233, 253)):
+            for sampled in ((170, 210, 180), (120, 150, 125)):
+                with self.subTest(bezel=bezel, sampled=sampled):
+                    self.assertGreater(S.color_distance(sampled, target), S.COLOR_MATCH_TOLERANCE)
+                    self.assertGreaterEqual(sum(sampled), S.CHROMA_MIN_BRIGHTNESS_RATIO * sum(target))
+                    self.assertFalse(S.matches_color(sampled, target, bezel))
+
     def test_chromaticity_zero_sum_never_raises(self):
         self.assertEqual(S._chromaticity((0, 0, 0)), (0.0, 0.0, 0.0))
 

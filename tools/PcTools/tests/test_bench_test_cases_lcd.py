@@ -387,6 +387,47 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(page, "home")
 
 
+class _RecordingNavUi(PageNavUiTest):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.clicked = []
+
+    def click_by_name(self, name):
+        self.clicked.append(name)
+        return super().click_by_name(name)
+
+
+class FirstHopTimeoutCaseTest(unittest.TestCase):
+    """Case-level negative test for the 2026-09-24 LCD-09/14/16 fix: the
+    "settings" click replies 'ok' but the board never leaves home. Each
+    case must FAIL naming that first hop and must never go on to click its
+    second target -- even though (to make the regression observable) the
+    second target is also offered on home and would navigate if clicked."""
+
+    def _run(self, case_fn, second, dest):
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}, {"name": second, "hidden": False}],
+            dest: [],
+        }
+        ui = _RecordingNavUi(page="home", page_targets=page_targets, nav_map={second: dest})
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(C._click_then_page, "__defaults__", (0.05,)):
+            result = case_fn({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("'settings'", result.reason)
+        self.assertIn("'config'", result.reason)
+        self.assertNotIn(second, ui.clicked)
+
+    def test_lcd09(self):
+        self._run(C._case_lcd09, "Profiles", "profiles")
+
+    def test_lcd14(self):
+        self._run(C._case_lcd14, "Temperature", "temperature")
+
+    def test_lcd16(self):
+        self._run(C._case_lcd16, "Diagnostics", "diagnostics")
+
+
 class Lcd09Test(unittest.TestCase):
     def test_passes_with_valid_picker(self):
         ui = PageNavUiTest(page="home", page_targets=_PROFILES_PAGE_TARGETS, nav_map=_PROFILES_NAV)
