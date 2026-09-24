@@ -3113,6 +3113,9 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     reset_owner_recorder();
     s_heat_zone_claim_begin_calls = 0;
     s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+    s_last_zone_claim_mask = 0;
 
     // RED: force the atomic gate itself to refuse, simulating a sweep that
     // won the race and claimed exclusivity in the window between the early
@@ -3125,6 +3128,14 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     TEST_CHECK(strstr(errbuf, "sweep") != NULL, "the refusal must still name the sweep specifically");
     TEST_CHECK(s_claim_calls == 0, "relay_authority_claim_mask() (the actual relay ownership grab) "
                                    "must never be reached when the atomic gate refuses");
+    // The per-zone claim (review of 933a7eec) is taken just BEFORE this gate,
+    // so a refusal here must roll it back -- once, as AUTOTUNE, with the same
+    // zone bit it claimed -- or the zone could never start again until reboot.
+    TEST_CHECK(s_zone_claim_begin_calls == 1, "the per-zone claim is taken before the heat-claim gate");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "a heat-claim-gate refusal must roll the per-zone claim back");
+    TEST_CHECK(s_last_zone_claimant == RELAY_HEAT_ZONE_CLAIM_AUTOTUNE,
+               "the rollback must release as AUTOTUNE, the claimant that took it");
+    TEST_CHECK(s_last_zone_claim_mask == 0x01, "the rollback must release the same zone bit it claimed");
 
     // GREEN: same setup, atomic gate now allows it -- proves the RED result
     // above was really the gate, not some other stub failing closed.

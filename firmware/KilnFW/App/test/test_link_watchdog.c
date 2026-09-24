@@ -171,6 +171,51 @@ static void test_traffic_resets_the_timer(void)
     TEST_CHECK(up_after_traffic, "traffic 10 ticks ago resets the window -- link reads up again");
 }
 
+// Not a watchdog test -- this is simply the one host executable that links the
+// REAL relay_authority.c, so the per-zone profile/autotune claim added in the
+// review of 933a7eec (relay_authority_zone_claim_begin()/_end()) is proven
+// here against the actual test-and-set, not against the call-recording fakes
+// test_profile_executor_prestart.c/test_autotune_engine_prestart.c use for
+// their wiring checks.
+static void test_zone_claim_arbitrates_profile_vs_autotune_per_zone(void)
+{
+    uint8_t conflict = 0xFFu;
+
+    TEST_CHECK(relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE, 0x03u, &conflict),
+               "profile claims zones 0+1 on a clean slate");
+    TEST_CHECK(conflict == 0, "a successful claim reports no conflict");
+
+    conflict = 0;
+    TEST_CHECK(!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u, &conflict),
+               "autotune is refused on zone 1 while a profile holds it");
+    TEST_CHECK(conflict == 0x02u, "the refusal names exactly the contended zone bit");
+
+    TEST_CHECK(relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x04u, NULL),
+               "autotune on a DIFFERENT zone (2) is still allowed alongside the profile");
+
+    conflict = 0;
+    TEST_CHECK(!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE, 0x04u, &conflict),
+               "the other direction is arbitrated too: profile refused on autotune's zone 2");
+    TEST_CHECK(conflict == 0x04u, "reverse refusal names zone 2");
+
+    // A refused claim must not have taken anything: releasing autotune's
+    // zone 2 alone must leave zone 2 free for a profile.
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x04u);
+    TEST_CHECK(relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE, 0x04u, NULL),
+               "zone 2 is free again once autotune released it");
+
+    // _end() only ever clears the caller's OWN side: an autotune release of
+    // zone 1 must not free a zone the profile still holds.
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u);
+    TEST_CHECK(!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u, NULL),
+               "an AUTOTUNE release never clears a PROFILE-held bit");
+
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, 0x07u);
+    TEST_CHECK(relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u, NULL),
+               "after the profile's release, autotune may claim zone 1");
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u);
+}
+
 int main(void)
 {
     test_all_unowned_relays_are_in_the_mask();
@@ -182,6 +227,7 @@ int main(void)
     test_link_down_after_timeout();
     test_never_seen_counts_as_down();
     test_traffic_resets_the_timer();
+    test_zone_claim_arbitrates_profile_vs_autotune_per_zone();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
