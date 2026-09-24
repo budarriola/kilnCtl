@@ -420,16 +420,27 @@ def _case_lcd19(ctx: dict) -> CaseResult:
     ui = srv._ui_test
     keypad_raised = wrong_pin_refused = right_pin_started = stop_not_gated = None
     try:
+        # kiln_ui_click_by_name() (kiln_ui.c) matches with an exact strcmp,
+        # never case-insensitively, and the home fire button's label text is
+        # exactly "Start" when idle/done/faulted or "Stop" while
+        # RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c) -- a
+        # lowercase "start" never matches either label and always returns
+        # NOT_FOUND. This case must never start a firing on its own, so the
+        # first click below only fires when the board is confirmed idle
+        # (no firing_active_with_lock in pin_cfg); when a firing is already
+        # active the case only exercises the Stop-is-never-gated check.
         enter_pin = getattr(ui, "enter_pin", None)
-        click = ui.click_by_name("start")
-        keypad_raised = ui.get_current_page() == "pin_entry" if click.get("result") == "ok" else None
-        if keypad_raised and enter_pin is not None:
-            wrong = enter_pin(pin_cfg.get("wrong_pin", "0000"))
-            wrong_pin_refused = wrong.get("result") != "ok"
-            right = enter_pin(pin_cfg.get("right_pin", ""))
-            right_pin_started = right.get("result") == "ok"
-        if pin_cfg.get("firing_active_with_lock"):
-            stop_click = ui.click_by_name("start")  # widget reads "Stop" while firing
+        firing_active = bool(pin_cfg.get("firing_active_with_lock"))
+        if not firing_active:
+            click = ui.click_by_name("Start")
+            keypad_raised = ui.get_current_page() == "pin_entry" if click.get("result") == "ok" else None
+            if keypad_raised and enter_pin is not None:
+                wrong = enter_pin(pin_cfg.get("wrong_pin", "0000"))
+                wrong_pin_refused = wrong.get("result") != "ok"
+                right = enter_pin(pin_cfg.get("right_pin", ""))
+                right_pin_started = right.get("result") == "ok"
+        else:
+            stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
             stop_not_gated = ui.get_current_page() != "pin_entry" if stop_click.get("result") == "ok" else None
         return J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated)
     finally:

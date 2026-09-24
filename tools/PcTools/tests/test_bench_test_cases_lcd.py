@@ -400,18 +400,39 @@ class Lcd19Test(unittest.TestCase):
         result = C._case_lcd19({"srv": srv})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
 
-    def test_stop_gated_fails(self):
+    def test_idle_click_uses_exact_start_label(self):
+        # kiln_ui_click_by_name() (firmware/KilnFW/App/drivers/ui/kiln_ui.c)
+        # matches with an exact strcmp; the home fire button's label is
+        # exactly "Start" when idle (ui_page_home.c). A lowercase "start"
+        # never matches and always returns NOT_FOUND -- pin the exact string
+        # this case sends so that regresses loudly.
+        ui = FakeUiTest(page="home", targets=_HOME_TARGETS)
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
+            ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+            C._case_lcd19(ctx)
+        spy.assert_any_call("Start")
+        self.assertNotIn(mock.call("start"), spy.call_args_list)
+
+    def test_stop_gated_uses_exact_stop_label_and_fails(self):
+        # The label is exactly "Stop" while RUNNING/PAUSED
+        # (ui_page_home_refresh.c). This case must never start a firing on
+        # its own, so when firing_active_with_lock is set it only ever
+        # clicks "Stop", never "Start".
         class PinUi(FakeUiTest):
             def click_by_name(self, name):
-                if name == "start":
+                if name == "Stop":
                     self._page = "pin_entry"
                     return {"result": "ok"}
                 return super().click_by_name(name)
 
         ui = PinUi(page="home")
         srv = FakeSrvFull(ui)
-        ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
-        result = C._case_lcd19(ctx)
+        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
+            ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
+            result = C._case_lcd19(ctx)
+        self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
+        self.assertNotIn(mock.call("Start"), spy.call_args_list)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("Stop", result.reason)
 
