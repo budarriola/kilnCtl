@@ -14,10 +14,23 @@
 >   every context-shadow poll and making it monotonic within a firing so a
 >   live edit can never raise it back up; `4f7f5998` corrected
 >   `LINK_PROTOCOL.md`'s stale "never sends SET_FIRING_CEILING" note.
->   **Open follow-up:** a cool-down-only profile started on an already-hot
->   kiln trips S1 at start, since the ceiling derives from the profile's own
->   peak target rather than current temperature; a start-time check is in
->   progress (worktree cooldown). **Standing tension, awaiting owner
+>   **Cool-down-on-hot-kiln check landed:** `5840a82c` + review fixes
+>   `341739ab` add a start-time check that refuses (HTTP 400, naming both
+>   the profile's peak and the kiln's current temperature) starting a
+>   cool-down-only profile whose peak reads below the kiln's own temperature;
+>   the LCD profile-detail page shows a Cannot Start modal for the refusal,
+>   the check fails open on invalid/unavailable readings by design, and
+>   `tools/check_firing_ceiling_margin_mirror_drift.ps1` guards the check
+>   against its own mirror drifting. **Open follow-ups from that review:**
+>   (1) the LCD home screen's quick-start path only logs the refused start —
+>   the operator sees nothing (fix in progress, worktree homerefuse);
+>   (2) the check compares against the 100 C default margin, not the Pico's
+>   actually-configured 0x0201 margin/placement mode from `safety_cfg_store`,
+>   so it can over-refuse or pass a start through that the real Pico ceiling
+>   would trip; (3) `profile_executor_run.c`'s baseline SPI read (around
+>   line 832) runs while holding `s_exec.lock`, against this file's own
+>   "never hold a module lock across producer calls" rule. **Standing
+>   tension, awaiting owner
 >   acknowledgement:** the Pico deliberately runs S1 tighter than
 >   `abs_max_temp_c` during a firing, which is in tension with the standing
 >   "Pico ceiling never tighter than the ESP's abs_max" rule and has not yet
