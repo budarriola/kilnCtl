@@ -240,11 +240,15 @@ class BenchTestRunner:
         # Board lock (docs/audits/profile_executor_panic_2026-09-24.md
         # HP-02/HP-05): acquired here, before preflight even runs, for any
         # suite `board_lock.suite_is_mutating()` calls mutating -- a
-        # read-only suite gets `None` back and never creates the lock file,
-        # but is refused too while a live mutating run holds it.
+        # read-only suite never creates the main lock file, but registers a
+        # reader marker (also released below) and is refused while a live
+        # mutating run holds the lock; a mutating suite is refused while a
+        # live read-only reader marker is registered, closing that gap the
+        # other way too.
         # Refuses immediately (never waits) if a live process already holds
-        # it; a stale lock (holder pid confirmed dead) is reclaimed with a
-        # logged notice. Held for the ENTIRE run, released only in the
+        # it; a stale lock (holder pid confirmed dead) is reclaimed
+        # atomically -- at most one of several racing reclaimers can win --
+        # with a logged notice. Held for the ENTIRE run, released only in the
         # `finally` below -- including the case where the MCP client's own
         # 300 s tool timeout fires: the server keeps executing this method
         # regardless of whether the HTTP reply was ever read, so the lock

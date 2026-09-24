@@ -62,6 +62,15 @@ LOCK_FILENAME = ".board_lock"
 #: `lcd` is deliberately NOT here -- see MUTATING_SUITES_DOCUMENTED below.
 READ_ONLY_SUITES = frozenset({"smoke", "static", "stack"})
 
+#: Directory (a sibling of the lock file, under the same logs root) holding
+#: one marker file per LIVE read-only run: `<pid>_<uniq>.json`, same shape as
+#: `LockInfo`. A mutating `acquire()` scans this directory before creating
+#: the main lock file and refuses if any marker names a live process --
+#: closing the second documented gap (a mutating run starting while a
+#: read-only run is already in flight). Read-only runs still never touch
+#: `LOCK_FILENAME` itself.
+READERS_DIRNAME = ".board_readers"
+
 #: Suites confirmed to mutate persistent board state, kept here as
 #: documentation (see `suite_is_mutating` below for the actual, fail-closed
 #: decision rule -- anything NOT in READ_ONLY_SUITES is treated as mutating,
@@ -209,6 +218,100 @@ def _lock_path(logs_root: Optional[str]) -> str:
     return os.path.join(root, LOCK_FILENAME)
 
 
+def _readers_dir(logs_root: Optional[str]) -> str:
+    root = logs_root or report_mod.default_logs_root()
+    return os.path.join(root, READERS_DIRNAME)
+
+
+def _live_readers(logs_root: Optional[str]) -> list:
+    """Best-effort scan of the readers directory. A marker naming a live
+    process (on this host, or any process on another host -- same
+    fail-closed rule as the main lock) is returned; a marker that is
+    unparseable or names a confirmed-dead pid on this host is opportunistically
+    deleted and skipped, so a crashed read-only run's leftover marker never
+    blocks a mutating run forever."""
+    d = _readers_dir(logs_root)
+    live = []
+    try:
+        names = os.listdir(d)
+    except FileNotFoundError:
+        return live
+    for name in names:
+        p = os.path.join(d, name)
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                info = LockInfo.from_json(fh.read())
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            continue  # corrupt/racing-write marker: never block on it
+        if _holder_alive(info):
+            live.append(info)
+        else:
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+    return live
+
+
+def _atomic_reclaim(path: str) -> Optional["LockInfo"]:
+    """Atomically claim a lock file believed stale so at most one of several
+    racing reclaimers can win it.
+
+    The prior implementation reclaimed with a plain `os.remove(path)` after
+    deciding (from an earlier read) that the holder was dead. That decision
+    and the removal were two separate steps: if a second reclaimer's
+    `os.remove` call executed only after a FIRST reclaimer had already
+    removed the stale file AND recreated it with its own fresh, live lock,
+    the second reclaimer's `os.remove` deleted that live lock by name alone
+    (it never re-checked what was actually at `path`), and its own
+    subsequent create then succeeded too -- both callers ended up believing
+    they held the lock.
+
+    This renames whatever is CURRENTLY at `path` to a name unique to this
+    call via `os.replace`, which is atomic: if two reclaimers race, only one
+    `os.replace` can find a source to rename (the loser gets
+    `FileNotFoundError` and must retry from scratch -- it never blindly
+    deletes anything). The winner then re-reads what it actually claimed:
+    if it is still a dead-pid lock, the caller may proceed to create a fresh
+    one at `path`; if it turns out to belong to a live holder (raced into
+    existence between the caller's staleness check and this call), the file
+    is put back atomically and a `BoardLockHeld` is raised instead of ever
+    letting a live lock be discarded.
+
+    Returns the reclaimed `LockInfo` on a successful reclaim, or `None` if
+    this call lost the race for the reclaim itself (the caller should loop
+    and re-read/re-try -- `path` may now be free, or may hold someone else's
+    fresh live lock, either of which the normal O_EXCL create + read path
+    already handles correctly).
+    """
+    tmp_path = f"{path}.reclaim.{os.getpid()}.{id(object())}.{time.time_ns()}"
+    try:
+        os.replace(path, tmp_path)
+    except FileNotFoundError:
+        return None  # someone else already reclaimed or released it first
+    try:
+        with open(tmp_path, "r", encoding="utf-8") as fh:
+            existing = LockInfo.from_json(fh.read())
+    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        # Put back whatever we grabbed, unexamined, rather than discard it.
+        os.replace(tmp_path, path)
+        raise BoardLockHeld(
+            f"board lock file {path} exists but could not be read/parsed ({exc}) "
+            "during an atomic reclaim; refusing rather than guessing -- inspect "
+            "it by hand"
+        ) from exc
+    if _holder_alive(existing):
+        # Raced: a legitimate fresh lock appeared between the caller's
+        # staleness check and this call. Restore it untouched and refuse.
+        os.replace(tmp_path, path)
+        raise BoardLockHeld(
+            f"board lock held by {existing.describe()}; refusing to start "
+            "concurrently -- wait for that run to finish"
+        )
+    os.remove(tmp_path)
+    return existing
+
+
 class BoardLock:
     """A held lock. Release exactly once, in a `finally` -- releasing twice
     is a harmless no-op. Also usable as a context manager."""
@@ -249,17 +352,22 @@ class BoardLock:
 def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = None) -> Optional[BoardLock]:
     """Acquire the board lock for `suite`.
 
-    READ_ONLY_SUITES only READ the lock file, never create or remove it:
-    raises `BoardLockHeld` if a live mutating run holds it (or it is
-    unreadable), otherwise returns `None` -- there is nothing to hold, and a
-    stale file is left for the next mutating run to reclaim.
+    READ_ONLY_SUITES never create or remove the main lock file: raises
+    `BoardLockHeld` if a live mutating run holds it (or it is unreadable),
+    otherwise registers a marker under `READERS_DIRNAME` (so a mutating
+    `acquire()` started while this read-only run is in flight refuses too)
+    and returns a `BoardLock` handle over that marker -- release it exactly
+    like a mutating lock. A stale main-lock file is left untouched for the
+    next mutating run to reclaim.
 
     Any other suite raises `BoardLockHeld`, naming the current holder, if a
-    live process already holds the lock. A lock file whose holder is
-    confirmed dead is reclaimed with a logged notice (the returned
-    `BoardLock.reclaimed_from` carries the prior holder's `LockInfo` so the
-    caller can log it) -- reclaiming is NEVER attempted while the holder
-    pid is alive or unverifiable."""
+    live process already holds the lock, or if a live read-only run's
+    reader marker is registered. A lock file whose holder is confirmed dead
+    is reclaimed atomically (see `_atomic_reclaim`) with a logged notice
+    (the returned `BoardLock.reclaimed_from` carries the prior holder's
+    `LockInfo`) -- reclaiming is NEVER attempted while the holder pid is
+    alive or unverifiable, and at most one of several racing reclaimers can
+    win a given stale file."""
     path = _lock_path(logs_root)
 
     if not suite_is_mutating(suite):
@@ -267,22 +375,43 @@ def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = No
             with open(path, "r", encoding="utf-8") as fh:
                 existing = LockInfo.from_json(fh.read())
         except FileNotFoundError:
-            return None
+            pass
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             raise BoardLockHeld(
                 f"board lock file {path} exists but could not be read/parsed ({exc}); "
                 f"refusing read-only suite {suite!r} rather than guessing whether a "
                 "mutating run owns the board -- inspect it by hand"
             ) from exc
-        if _holder_alive(existing):
-            raise BoardLockHeld(
-                f"board lock held by {existing.describe()}; refusing read-only suite "
-                f"{suite!r} while a mutating run owns the board -- wait for it to finish"
-            )
-        return None
+        else:
+            if _holder_alive(existing):
+                raise BoardLockHeld(
+                    f"board lock held by {existing.describe()}; refusing read-only suite "
+                    f"{suite!r} while a mutating run owns the board -- wait for it to finish"
+                )
+
+        readers_dir = _readers_dir(logs_root)
+        os.makedirs(readers_dir, exist_ok=True)
+        info = LockInfo(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            suite=suite,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            tag=tag,
+        )
+        reader_path = os.path.join(readers_dir, f"{os.getpid()}_{time.time_ns()}.json")
+        with open(reader_path, "w", encoding="utf-8") as fh:
+            fh.write(info.to_json())
+        return BoardLock(reader_path, info)
 
     lock_dir = os.path.dirname(path) or "."
     os.makedirs(lock_dir, exist_ok=True)
+
+    live_readers = _live_readers(logs_root)
+    if live_readers:
+        raise BoardLockHeld(
+            f"a read-only run is in progress ({live_readers[0].describe()}); refusing to "
+            f"start mutating suite {suite!r} concurrently -- wait for it to finish"
+        )
 
     info = LockInfo(
         pid=os.getpid(),
@@ -312,12 +441,14 @@ def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = No
                     f"board lock held by {existing.describe()}; refusing to start suite "
                     f"{suite!r} concurrently -- wait for that run to finish"
                 )
-            # Stale: the holder pid is dead. Reclaim and retry once.
-            reclaimed_from = existing
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
+            # Stale: the holder pid is dead. Reclaim atomically -- at most
+            # one of several racing reclaimers can win this file. A loss
+            # (None) means someone else already claimed/replaced it; loop
+            # and let the normal O_EXCL create + read path sort out whatever
+            # is there now.
+            claimed = _atomic_reclaim(path)
+            if claimed is not None:
+                reclaimed_from = claimed
             continue
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:

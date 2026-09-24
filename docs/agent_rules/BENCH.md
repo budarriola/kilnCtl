@@ -43,7 +43,9 @@ RP2040 safety processor, the bench camera, or the MCP servers.
   already names a live holder (any suite; only `smoke`/`static`/`stack` skip taking the
   lock themselves) — do not remove that file or start a second run to "just
   check"; wait for the named run to finish, or report the refusal (pid/suite/start time) if
-  it looks stale and you did not start it yourself.
+  it looks stale and you did not start it yourself. The refusal is now mutual: a mutating
+  run also refuses while a live `smoke`/`static`/`stack` run has a marker registered under
+  `logs/bench_test/.board_readers/` — do not remove those either.
 - Login attempts: one per verification, at least 30 s apart, form-encoded
   (`application/x-www-form-urlencoded`, `Accept-Encoding: identity`). Never loop on
   credentials. Credential handling per `COMMON.md`.
