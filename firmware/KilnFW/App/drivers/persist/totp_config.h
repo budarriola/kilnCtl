@@ -108,6 +108,29 @@ bool totp_config_ram_last_counter(uint32_t *out);
 // and by host tests needing a clean-slate re-load).
 void totp_config_ram_reset(void);
 
+// --- Verify-and-consume (the one call a verifying route should make) -----
+
+typedef enum {
+    TOTP_CONSUME_OK,           // code valid AND its counter persisted as used
+    TOTP_CONSUME_REJECTED,     // malformed, wrong, outside the window, or replayed
+    TOTP_CONSUME_NOT_ENROLLED, // no secret stored (ABSENT)
+    TOTP_CONSUME_UNAVAILABLE   // secret or counter UNREADABLE, or persisting the
+                               // matched counter failed -- refuse, fail closed
+} totp_consume_result_t;
+
+// Loads the replay counter (RAM fast path) and the secret, runs
+// totp_verify(), and on a match persists the matched counter via
+// totp_config_set_last_counter() BEFORE returning TOTP_CONSUME_OK. The
+// counter is therefore already recorded as used by the time any caller
+// sees success, so a second call with the same code (or an earlier step's
+// code) is refused -- there is no verify-then-persist window for a caller
+// to get wrong. Anything short of a verified persist is not OK. Callers
+// must still check SNTP sync before calling (plan section 3) and must not
+// log `code`. Writes NVS: same write-context rule as the setters above
+// (never from a PSRAM-stacked task). Single caller at a time (see the
+// CONCURRENCY note at the top of this file).
+totp_consume_result_t totp_config_verify_and_consume(const char *code, uint64_t unix_time_s);
+
 #ifdef __cplusplus
 }
 #endif

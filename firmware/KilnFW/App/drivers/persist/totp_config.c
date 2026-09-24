@@ -265,3 +265,37 @@ void totp_config_ram_reset(void)
     s_ram_loaded = false;
     s_ram_last_counter = 0;
 }
+
+// --- Verify-and-consume ------------------------------------------------------
+
+totp_consume_result_t totp_config_verify_and_consume(const char *code, uint64_t unix_time_s)
+{
+    uint32_t last = 0;
+    if (!totp_config_ram_last_counter(&last)) {
+        return TOTP_CONSUME_UNAVAILABLE; // unreadable counter: never treat as 0
+    }
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    totp_config_load_status_t st = totp_config_load_secret(secret);
+    if (st == TOTP_CONFIG_LOAD_ABSENT) {
+        return TOTP_CONSUME_NOT_ENROLLED;
+    }
+    if (st != TOTP_CONFIG_LOAD_OK) {
+        return TOTP_CONSUME_UNAVAILABLE;
+    }
+
+    uint64_t matched = 0;
+    bool ok = totp_verify(secret, sizeof(secret), code, unix_time_s, last, &matched);
+    totp_secure_zero(secret, sizeof(secret));
+    if (!ok) {
+        return TOTP_CONSUME_REJECTED;
+    }
+    if (matched > UINT32_MAX) {
+        return TOTP_CONSUME_UNAVAILABLE; // cannot be recorded, so cannot be accepted
+    }
+    // Record the step as used BEFORE reporting success.
+    if (!totp_config_set_last_counter((uint32_t)matched)) {
+        return TOTP_CONSUME_UNAVAILABLE;
+    }
+    return TOTP_CONSUME_OK;
+}

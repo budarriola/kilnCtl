@@ -4,6 +4,7 @@
 // there for other NVS-backed modules); calls only totp_config.h's public
 // API, no direct #include of the .c file (no static internals this test
 // needs to reach).
+#include <stdio.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -247,6 +248,130 @@ static void test_clear_keeps_counter_when_secret_erase_fails(void)
                "counter NOT erased -- a surviving secret never gets a reset replay guard");
 }
 
+// Local copy of the zlib CRC32 so a test can forge a blob with a VALID CRC
+// but a different version -- proving the version check itself, not the CRC,
+// is what refuses it.
+static uint32_t test_crc32(const uint8_t *p, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; b++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+static void raw_set(const char *key, const void *buf, size_t len)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open namespace for injection");
+    TEST_CHECK(hal_kv_set_blob(&h, key, buf, len) == HAL_OK, "inject raw blob");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static void test_wrong_version_and_oversize_are_unreadable(void)
+{
+    TEST_SECTION("totp_config -- wrong version (valid CRC) / oversize / truncated counter are UNREADABLE");
+    reset_all();
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    memset(secret, 0x5A, sizeof(secret));
+    TEST_CHECK(totp_config_set_secret(secret), "enroll a secret");
+
+    hal_kv_handle_t h;
+    uint8_t blob[64];
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK, "open namespace");
+    TEST_CHECK(hal_kv_get_blob(&h, "totp_secret", blob, &len) == HAL_OK && len == 32, "raw blob is 32 bytes");
+    hal_kv_close(&h);
+
+    blob[0] = 2; // version 2 (little-endian low byte)
+    uint32_t crc = test_crc32(blob, 28);
+    memcpy(blob + 28, &crc, sizeof(crc));
+    raw_set("totp_secret", blob, 32);
+    uint8_t discard[TOTP_SECRET_LEN];
+    TEST_CHECK(totp_config_load_secret(discard) == TOTP_CONFIG_LOAD_UNREADABLE,
+               "unknown version with a valid CRC is UNREADABLE, never ABSENT");
+
+    uint8_t big[40];
+    memset(big, 0, sizeof(big));
+    raw_set("totp_secret", big, sizeof(big));
+    TEST_CHECK(totp_config_load_secret(discard) == TOTP_CONFIG_LOAD_UNREADABLE,
+               "an oversize secret blob is UNREADABLE, never ABSENT");
+
+    uint8_t short_ctr[2] = {7, 0};
+    raw_set("totp_last_ctr", short_ctr, sizeof(short_ctr));
+    totp_config_ram_reset();
+    uint32_t ctr = 42;
+    TEST_CHECK(totp_config_load_last_counter(&ctr) == TOTP_CONFIG_LOAD_UNREADABLE && ctr == 42,
+               "a truncated counter blob is UNREADABLE and leaves *out untouched");
+    TEST_CHECK(!totp_config_ram_last_counter(&ctr), "RAM fast path refuses a truncated counter");
+}
+
+static void code_for(const uint8_t *secret, uint64_t counter, char out[8])
+{
+    snprintf(out, 8, "%06u", (unsigned)totp_hotp_code(secret, TOTP_SECRET_LEN, counter));
+}
+
+static void test_verify_and_consume(void)
+{
+    TEST_SECTION("totp_config_verify_and_consume -- replay guard persisted before success");
+    reset_all();
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    for (unsigned i = 0; i < TOTP_SECRET_LEN; i++) secret[i] = (uint8_t)(0xC0 + i);
+    const uint64_t now = 1700000000;
+    const uint64_t n = totp_counter_for_time(now);
+    char code[8];
+
+    code_for(secret, n, code);
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_NOT_ENROLLED,
+               "no secret -> NOT_ENROLLED");
+
+    TEST_CHECK(totp_config_set_secret(secret), "enroll");
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_OK, "step N accepted");
+    TEST_CHECK(persisted_counter() == (uint32_t)n, "step N is in NVS by the time OK is returned");
+
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_REJECTED,
+               "second call with the same code is refused");
+    totp_config_ram_reset(); // simulated reboot: the guard must come back from NVS
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_REJECTED,
+               "same code still refused after a reboot (NVS-backed guard)");
+    code_for(secret, n - 1, code);
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_REJECTED,
+               "step N-1 refused after N was accepted");
+    code_for(secret, n + 1, code);
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_OK, "step N+1 accepted");
+    TEST_CHECK(persisted_counter() == (uint32_t)(n + 1), "counter advanced to N+1");
+    code_for(secret, n, code);
+    TEST_CHECK(totp_config_verify_and_consume(code, now) == TOTP_CONSUME_REJECTED,
+               "step N refused once N+1 was accepted");
+
+    TEST_CHECK(totp_config_verify_and_consume("12345", now) == TOTP_CONSUME_REJECTED,
+               "malformed code -> REJECTED");
+
+    // Persist failure: never OK.
+    code_for(secret, n + 2, code);
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(totp_config_verify_and_consume(code, now + 30) == TOTP_CONSUME_UNAVAILABLE,
+               "a failed counter write is UNAVAILABLE, never OK");
+    TEST_CHECK(persisted_counter() == (uint32_t)(n + 1), "counter unchanged after the failed write");
+
+    // Unreadable counter: refuse even a valid fresh code.
+    TEST_CHECK(fake_kv_script_corrupt_key(NULL, "kiln_auth", "totp_last_ctr"), "corrupt the counter");
+    totp_config_ram_reset();
+    TEST_CHECK(totp_config_verify_and_consume(code, now + 30) == TOTP_CONSUME_UNAVAILABLE,
+               "unreadable counter -> UNAVAILABLE even for a valid code");
+
+    // Unreadable secret: UNAVAILABLE, not NOT_ENROLLED.
+    reset_all();
+    TEST_CHECK(totp_config_set_secret(secret), "re-enroll");
+    TEST_CHECK(fake_kv_script_corrupt_key(NULL, "kiln_auth", "totp_secret"), "corrupt the secret");
+    TEST_CHECK(totp_config_verify_and_consume(code, now + 30) == TOTP_CONSUME_UNAVAILABLE,
+               "unreadable secret -> UNAVAILABLE, never NOT_ENROLLED");
+}
+
 void run_test_totp_config_persist(void)
 {
     test_absent_by_default();
@@ -259,4 +384,6 @@ void run_test_totp_config_persist(void)
     test_read_error_is_unreadable_not_absent();
     test_unreadable_counter_fails_closed();
     test_clear_keeps_counter_when_secret_erase_fails();
+    test_wrong_version_and_oversize_are_unreadable();
+    test_verify_and_consume();
 }
