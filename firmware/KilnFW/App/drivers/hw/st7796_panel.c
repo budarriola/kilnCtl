@@ -159,35 +159,27 @@ static const panel_desc_t st7796_panel_desc = {
      * wiring -- RDDID cannot distinguish either panel here. Stays NULL,
      * same reasoning as ili9488_panel_desc.id_matches above. */
     /* 2026-09-04: the earlier "BGR vs RGB look near-identical" conclusion
-     * (see git history) was made by EYE, not by numeric pixel sampling --
-     * the same methodological gap the coordinator caught in this session's
-     * "green button is really green" claim (it wasn't verified either).
-     * Redone properly with ffmpeg crop+scale-to-1x1 sampling of matched
-     * regions on BOTH settings, same build otherwise (byte-swap fixed,
-     * no INVON):
+     * (see git history) was made by EYE, not by numeric pixel sampling, and
+     * the 2026-09-04 numeric A/B that replaced it (RGB (0x00) adopted) was
+     * itself vacuous: every region it sampled -- bg (theme R26 G31 B43),
+     * Start btn (theme R92 G192 B110), graph card (theme R36 G42 B58) -- has
+     * R and B close enough together that a full channel swap barely moves
+     * the reading. That A/B could not have detected a swap either way.
      *
-     *              BGR (0x08)        RGB (0x00)        theme intends
-     *   bg         R6  G36  B99      R26 G37  B71      R26 G31 B43
-     *   Start btn  R160 G234 B243    R184 G234 B238    R92 G192 B110
-     *   graph      R1  G116 B205     R56 G116 B154     R36 G42 B58 (card)
+     * 2026-09-24: sampled the home page's profile button instead, whose
+     * theme color (UI_THEME_ACCENT_BLUE 0x2f6fe4 = R47 G111 B228) is
+     * strongly R/B-asymmetric. Under RGB (0x00, the then-current setting)
+     * it measured R214 G106 B33 -- G matches within 5 (untouched by
+     * MADCTL's BGR bit, as expected), but R and B are swapped: the reading
+     * is (228,111,47) with R and B exchanged, allowing for camera blue
+     * bias. That is a full R/B swap, definitively resolving what the
+     * near-identical dark/green regions above could not.
      *
-     * G is invariant between the two settings in every region (expected --
-     * MADCTL's BGR bit only touches R/B), and RGB is measurably closer to
-     * the theme: the background's R channel lands EXACTLY on the intended
-     * value (26) under RGB versus badly crushed (6) under BGR. RGB (0x00)
-     * adopted on that numeric basis, not a guess.
-     *
-     * Still unexplained: B stays elevated above the theme's intended value
-     * in every sampled region even under RGB, roughly proportionally
-     * (not swapped-looking, not channel-order-shaped) -- not resolved by
-     * either MADCTL setting, since both were now tried and measured. The
-     * ST7796's E0/E1 gamma tables set one shared response curve across all
-     * three channels (not per-channel), so a gamma mismatch would not
-     * explain a blue-only bias; a bench webcam's own blue-channel response
-     * under this panel's LED backlight is a real, untested alternative
-     * explanation this session has no way to rule out without a non-camera
-     * reference. Documented rather than guessed away. */
-    .color_order_bit = 0x00, /* MADCTL D3 clear = RGB -- numerically confirmed 2026-09-04 */
+     * Rule going forward: verify MADCTL color order only with a strongly
+     * R/B-asymmetric color (e.g. a saturated blue or red), never a green or
+     * a dark/desaturated neutral -- both leave R and B too close together
+     * for a swap to be numerically distinguishable from noise. */
+    .color_order_bit = 0x08, /* MADCTL D3 set = BGR -- numerically confirmed 2026-09-24 */
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */
 };
