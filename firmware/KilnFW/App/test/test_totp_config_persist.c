@@ -29,8 +29,24 @@ static void test_absent_by_default(void)
     TEST_CHECK(totp_config_load_secret(secret) == TOTP_CONFIG_LOAD_ABSENT,
                "a never-written store reports ABSENT, not UNREADABLE or a stale OK");
     TEST_CHECK(!totp_config_enrolled(), "totp_config_enrolled() is false before any enrollment");
-    TEST_CHECK(totp_config_load_last_counter() == 0, "replay counter defaults to 0 (never accepted)");
-    TEST_CHECK(totp_config_ram_last_counter() == 0, "RAM cache also defaults to 0 on first read");
+    uint32_t ctr = 123;
+    TEST_CHECK(totp_config_load_last_counter(&ctr) == TOTP_CONFIG_LOAD_ABSENT && ctr == 0,
+               "replay counter reports ABSENT and defaults to 0 (never accepted)");
+    ctr = 123;
+    TEST_CHECK(totp_config_ram_last_counter(&ctr) && ctr == 0, "RAM cache also defaults to 0 on first read");
+}
+
+static uint32_t persisted_counter(void)
+{
+    uint32_t ctr = 0xDEADBEEFu;
+    totp_config_load_status_t st = totp_config_load_last_counter(&ctr);
+    return (st == TOTP_CONFIG_LOAD_UNREADABLE) ? 0xDEADBEEFu : ctr;
+}
+
+static uint32_t ram_counter(void)
+{
+    uint32_t ctr = 0xDEADBEEFu;
+    return totp_config_ram_last_counter(&ctr) ? ctr : 0xDEADBEEFu;
 }
 
 static void test_set_and_load_round_trip(void)
@@ -50,7 +66,7 @@ static void test_set_and_load_round_trip(void)
 
     // A fresh enrollment resets the replay counter to 0, even if this were
     // a re-enrollment over an existing one (checked explicitly below).
-    TEST_CHECK(totp_config_load_last_counter() == 0, "a freshly-set secret resets the persisted counter to 0");
+    TEST_CHECK(persisted_counter() == 0, "a freshly-set secret resets the persisted counter to 0");
 }
 
 static void test_reenroll_resets_counter(void)
@@ -62,12 +78,12 @@ static void test_reenroll_resets_counter(void)
     memset(secret1, 0xAA, sizeof(secret1));
     TEST_CHECK(totp_config_set_secret(secret1), "first enrollment succeeds");
     TEST_CHECK(totp_config_set_last_counter(12345), "simulate some codes having been accepted");
-    TEST_CHECK(totp_config_load_last_counter() == 12345, "counter persisted as expected");
+    TEST_CHECK(persisted_counter() == 12345, "counter persisted as expected");
 
     uint8_t secret2[TOTP_SECRET_LEN];
     memset(secret2, 0xBB, sizeof(secret2));
     TEST_CHECK(totp_config_set_secret(secret2), "re-enrollment with a new secret succeeds");
-    TEST_CHECK(totp_config_load_last_counter() == 0,
+    TEST_CHECK(persisted_counter() == 0,
                "re-enrollment resets the counter -- a stale counter from the OLD secret must "
                "never be inherited by the new one");
 
@@ -89,11 +105,11 @@ static void test_ram_cache_lazy_load_and_update(void)
     // Force the RAM cache to look "not yet loaded this boot" by resetting it
     // without touching NVS, then confirm it lazy-loads the persisted value.
     totp_config_ram_reset();
-    TEST_CHECK(totp_config_ram_last_counter() == 500, "RAM cache lazy-loads the persisted counter on first call");
+    TEST_CHECK(ram_counter() == 500, "RAM cache lazy-loads the persisted counter on first call");
 
     // A direct set updates the RAM cache immediately, no reload needed.
     TEST_CHECK(totp_config_set_last_counter(501), "advance the counter");
-    TEST_CHECK(totp_config_ram_last_counter() == 501, "RAM cache reflects the update without a reload");
+    TEST_CHECK(ram_counter() == 501, "RAM cache reflects the update without a reload");
 }
 
 static void test_clear_erases_both_keys(void)
@@ -112,8 +128,10 @@ static void test_clear_erases_both_keys(void)
     uint8_t discard[TOTP_SECRET_LEN];
     TEST_CHECK(totp_config_load_secret(discard) == TOTP_CONFIG_LOAD_ABSENT,
                "secret reads back ABSENT after clear");
-    TEST_CHECK(totp_config_load_last_counter() == 0, "counter reads back to the 0 sentinel after clear");
-    TEST_CHECK(totp_config_ram_last_counter() == 0, "RAM cache is also cleared, not left stale");
+    uint32_t ctr = 1;
+    TEST_CHECK(totp_config_load_last_counter(&ctr) == TOTP_CONFIG_LOAD_ABSENT && ctr == 0,
+               "counter reads back ABSENT (0 sentinel) after clear");
+    TEST_CHECK(ram_counter() == 0, "RAM cache is also cleared, not left stale");
 }
 
 static void test_clear_is_idempotent_on_never_enrolled(void)
@@ -160,6 +178,75 @@ static void test_unreadable_on_corrupt_blob(void)
     TEST_CHECK(!totp_config_enrolled(), "enrolled() is false (fail closed) for an UNREADABLE blob too");
 }
 
+static void test_read_error_is_unreadable_not_absent(void)
+{
+    TEST_SECTION("totp_config -- a read error or wrong-size blob is UNREADABLE, never ABSENT");
+    reset_all();
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    memset(secret, 0x44, sizeof(secret));
+    TEST_CHECK(totp_config_set_secret(secret), "enroll a secret");
+    TEST_CHECK(fake_kv_script_corrupt_key(NULL, "kiln_auth", "totp_secret"),
+               "inject a read error on the committed secret");
+    uint8_t discard[TOTP_SECRET_LEN];
+    TEST_CHECK(totp_config_load_secret(discard) == TOTP_CONFIG_LOAD_UNREADABLE,
+               "an NVS read error on a present secret reports UNREADABLE, not ABSENT");
+
+    // Wrong-size secret blob (e.g. a future/older layout): UNREADABLE.
+    reset_all();
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open namespace");
+    uint8_t short_blob[8] = {1, 0, 0, 0, 9, 9, 9, 9};
+    TEST_CHECK(hal_kv_set_blob(&h, "totp_secret", short_blob, sizeof(short_blob)) == HAL_OK,
+               "write a short secret blob");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(totp_config_load_secret(discard) == TOTP_CONFIG_LOAD_UNREADABLE,
+               "a short secret blob reports UNREADABLE, not ABSENT");
+}
+
+static void test_unreadable_counter_fails_closed(void)
+{
+    TEST_SECTION("totp_config -- an unreadable replay counter never collapses to 0");
+    reset_all();
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    memset(secret, 0x66, sizeof(secret));
+    TEST_CHECK(totp_config_set_secret(secret), "enroll a secret");
+    TEST_CHECK(totp_config_set_last_counter(777), "persist counter 777");
+    totp_config_ram_reset(); // simulate a reboot: RAM cache empty
+
+    TEST_CHECK(fake_kv_script_corrupt_key(NULL, "kiln_auth", "totp_last_ctr"),
+               "inject a read error on the committed counter");
+    uint32_t ctr = 42;
+    TEST_CHECK(totp_config_load_last_counter(&ctr) == TOTP_CONFIG_LOAD_UNREADABLE && ctr == 42,
+               "load reports UNREADABLE and leaves *out untouched (never 0)");
+    ctr = 42;
+    TEST_CHECK(!totp_config_ram_last_counter(&ctr) && ctr == 42,
+               "RAM fast path refuses (false) instead of serving 0 -- the caller must reject the code");
+
+    // Once the counter is rewritten the fast path recovers (nothing cached from the failed read).
+    TEST_CHECK(totp_config_set_last_counter(778), "rewrite the counter");
+    TEST_CHECK(ram_counter() == 778, "RAM fast path serves the rewritten counter");
+}
+
+static void test_clear_keeps_counter_when_secret_erase_fails(void)
+{
+    TEST_SECTION("totp_config_clear -- a failed secret erase leaves the replay counter in place");
+    reset_all();
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    memset(secret, 0x21, sizeof(secret));
+    TEST_CHECK(totp_config_set_secret(secret), "enroll a secret");
+    TEST_CHECK(totp_config_set_last_counter(4242), "persist counter 4242");
+
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(!totp_config_clear(), "clear reports failure when the secret erase fails");
+    TEST_CHECK(totp_config_enrolled(), "secret still enrolled");
+    TEST_CHECK(persisted_counter() == 4242,
+               "counter NOT erased -- a surviving secret never gets a reset replay guard");
+}
+
 void run_test_totp_config_persist(void)
 {
     test_absent_by_default();
@@ -169,4 +256,7 @@ void run_test_totp_config_persist(void)
     test_clear_erases_both_keys();
     test_clear_is_idempotent_on_never_enrolled();
     test_unreadable_on_corrupt_blob();
+    test_read_error_is_unreadable_not_absent();
+    test_unreadable_counter_fails_closed();
+    test_clear_keeps_counter_when_secret_erase_fails();
 }

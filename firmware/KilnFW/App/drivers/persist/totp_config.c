@@ -20,12 +20,20 @@ NVS_KEY_LEN_CHECK(TOTP_KEY_LAST_CTR);
 
 #define TOTP_SECRET_BLOB_VERSION 1u
 
+// Layout is fully explicit -- no compiler-inserted padding: 4 (version) +
+// 20 (secret) + 4 (reserved, always 0) = 28 bytes CRC-covered, crc32 at
+// offset 28, 32 bytes total. The CRC covers the version field. The
+// _Static_asserts pin this so a future field change cannot silently
+// reintroduce an implicit padding byte (the earlier reserved[3] left one
+// compiler-inserted byte inside the CRC-covered range).
 typedef struct {
     uint32_t version;
     uint8_t  secret[TOTP_SECRET_LEN];
-    uint8_t  reserved[3]; // pad to 4-byte alignment before crc32 (20+3=23 -> +1 to 24, see below)
+    uint8_t  reserved[4];
     uint32_t crc32;
 } totp_secret_blob_t;
+_Static_assert(offsetof(totp_secret_blob_t, crc32) == 28u, "totp_secret_blob_t: crc32 must follow 28 packed bytes");
+_Static_assert(sizeof(totp_secret_blob_t) == 32u, "totp_secret_blob_t: no trailing padding expected");
 
 // --- CRC32 (IEEE 802.3 / zlib polynomial), table-less -----------------------
 // Identical construction to web_auth_store.c's crc32_compute() / boot_guard.c's
@@ -93,13 +101,9 @@ static hal_status_t set_blob_verified(const char *key, const void *buf, size_t l
         return HAL_INVALID_SIZE;
     }
     hal_status_t rberr = load_blob(key, readback, len);
-    if (rberr != HAL_OK) {
-        return HAL_VERIFY_FAILED;
-    }
-    if (memcmp(readback, buf, len) != 0) {
-        return HAL_VERIFY_FAILED;
-    }
-    return HAL_OK;
+    bool same = (rberr == HAL_OK) && (memcmp(readback, buf, len) == 0);
+    totp_secure_zero(readback, sizeof(readback));
+    return same ? HAL_OK : HAL_VERIFY_FAILED;
 }
 
 static hal_status_t erase_key(const char *key)
@@ -125,24 +129,30 @@ static hal_status_t erase_key(const char *key)
 totp_config_load_status_t totp_config_load_secret(uint8_t out[TOTP_SECRET_LEN])
 {
     totp_secret_blob_t blob;
+    totp_config_load_status_t st;
     hal_status_t err = load_blob(TOTP_KEY_SECRET, &blob, sizeof(blob));
-    if (err != HAL_OK) {
-        return TOTP_CONFIG_LOAD_ABSENT; // never enrolled -- safe default
+    if (err == HAL_NOT_FOUND) {
+        st = TOTP_CONFIG_LOAD_ABSENT; // never enrolled -- safe default
+    } else if (err != HAL_OK) {
+        st = TOTP_CONFIG_LOAD_UNREADABLE; // read error / wrong size: fail closed
+    } else if (blob.version != TOTP_SECRET_BLOB_VERSION) {
+        st = TOTP_CONFIG_LOAD_UNREADABLE; // fail closed, never reinterpret
+    } else if (secret_blob_crc(&blob) != blob.crc32) {
+        st = TOTP_CONFIG_LOAD_UNREADABLE;
+    } else {
+        memcpy(out, blob.secret, TOTP_SECRET_LEN);
+        st = TOTP_CONFIG_LOAD_OK;
     }
-    if (blob.version != TOTP_SECRET_BLOB_VERSION) {
-        return TOTP_CONFIG_LOAD_UNREADABLE; // fail closed, never reinterpret
-    }
-    if (secret_blob_crc(&blob) != blob.crc32) {
-        return TOTP_CONFIG_LOAD_UNREADABLE;
-    }
-    memcpy(out, blob.secret, TOTP_SECRET_LEN);
-    return TOTP_CONFIG_LOAD_OK;
+    totp_secure_zero(&blob, sizeof(blob));
+    return st;
 }
 
 bool totp_config_enrolled(void)
 {
     uint8_t secret[TOTP_SECRET_LEN];
-    return totp_config_load_secret(secret) == TOTP_CONFIG_LOAD_OK;
+    bool ok = totp_config_load_secret(secret) == TOTP_CONFIG_LOAD_OK;
+    totp_secure_zero(secret, sizeof(secret));
+    return ok;
 }
 
 bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
@@ -154,6 +164,7 @@ bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
     blob.crc32 = secret_blob_crc(&blob);
 
     hal_status_t err = set_blob_verified(TOTP_KEY_SECRET, &blob, sizeof(blob));
+    totp_secure_zero(&blob, sizeof(blob));
     if (err != HAL_OK) {
         return false;
     }
@@ -168,54 +179,60 @@ bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
 
     // Read-back verify the secret itself landed, never trust set_blob_verified
     // alone for the field content (same discipline as web_auth_store.c).
-    totp_secret_blob_t check;
-    memset(&check, 0, sizeof(check));
-    if (load_blob(TOTP_KEY_SECRET, &check, sizeof(check)) != HAL_OK) {
-        return false;
-    }
-    return memcmp(check.secret, secret, TOTP_SECRET_LEN) == 0;
+    uint8_t check[TOTP_SECRET_LEN];
+    bool same = (totp_config_load_secret(check) == TOTP_CONFIG_LOAD_OK) &&
+                (memcmp(check, secret, TOTP_SECRET_LEN) == 0);
+    totp_secure_zero(check, sizeof(check));
+    return same;
 }
 
 bool totp_config_clear(void)
 {
+    // Secret first, and stop if it fails: erasing the counter while the
+    // secret survives would reset the replay guard for a still-live secret.
     hal_status_t secret_err = erase_key(TOTP_KEY_SECRET);
+    if (secret_err != HAL_OK) {
+        return false;
+    }
     hal_status_t ctr_err = erase_key(TOTP_KEY_LAST_CTR);
     totp_config_ram_reset();
-
-    if (secret_err != HAL_OK || ctr_err != HAL_OK) {
+    if (ctr_err != HAL_OK) {
         return false;
     }
 
-    // Read-back verify: both keys must now read ABSENT.
+    // Read-back verify: both keys must now read ABSENT (not merely
+    // "unreadable" -- an erase that did not take can still error on read).
     uint8_t discard_secret[TOTP_SECRET_LEN];
     if (totp_config_load_secret(discard_secret) != TOTP_CONFIG_LOAD_ABSENT) {
+        totp_secure_zero(discard_secret, sizeof(discard_secret));
         return false;
     }
-    totp_secret_blob_t probe;
-    if (load_blob(TOTP_KEY_LAST_CTR, &probe, sizeof(uint32_t)) == HAL_OK) {
-        return false; // still readable -- erase did not really take
-    }
-    return true;
+    uint32_t discard_ctr;
+    return totp_config_load_last_counter(&discard_ctr) == TOTP_CONFIG_LOAD_ABSENT;
 }
 
 // --- Replay-guard counter ----------------------------------------------------
 
-// RAM cache: 0 doubles as both "not yet loaded this boot" and "no counter
-// ever accepted" -- totp_config_ram_last_counter() disambiguates by tracking
-// whether it has loaded at all, so a genuinely-persisted 0 (freshly
-// enrolled) and "haven't checked NVS yet" behave identically anyway: both
-// correctly mean "nothing accepted yet, no candidate counter is <= this."
+// RAM cache: s_ram_loaded distinguishes "not yet loaded this boot" from a
+// loaded value. Only an OK or ABSENT load is ever cached; an UNREADABLE
+// counter is never cached (and never collapsed to 0), so the next call
+// retries NVS and the caller refuses the code meanwhile.
 static bool s_ram_loaded = false;
 static uint32_t s_ram_last_counter = 0;
 
-uint32_t totp_config_load_last_counter(void)
+totp_config_load_status_t totp_config_load_last_counter(uint32_t *out)
 {
     uint32_t counter = 0;
     hal_status_t err = load_blob(TOTP_KEY_LAST_CTR, &counter, sizeof(counter));
-    if (err != HAL_OK) {
-        return 0; // never set -- 0 is the safe "never accepted" sentinel
+    if (err == HAL_NOT_FOUND) {
+        *out = 0; // never set -- 0 is the safe "never accepted" sentinel
+        return TOTP_CONFIG_LOAD_ABSENT;
     }
-    return counter;
+    if (err != HAL_OK) {
+        return TOTP_CONFIG_LOAD_UNREADABLE; // fail closed, never 0
+    }
+    *out = counter;
+    return TOTP_CONFIG_LOAD_OK;
 }
 
 bool totp_config_set_last_counter(uint32_t counter)
@@ -229,13 +246,18 @@ bool totp_config_set_last_counter(uint32_t counter)
     return true;
 }
 
-uint32_t totp_config_ram_last_counter(void)
+bool totp_config_ram_last_counter(uint32_t *out)
 {
     if (!s_ram_loaded) {
-        s_ram_last_counter = totp_config_load_last_counter();
+        uint32_t counter;
+        if (totp_config_load_last_counter(&counter) == TOTP_CONFIG_LOAD_UNREADABLE) {
+            return false;
+        }
+        s_ram_last_counter = counter;
         s_ram_loaded = true;
     }
-    return s_ram_last_counter;
+    *out = s_ram_last_counter;
+    return true;
 }
 
 void totp_config_ram_reset(void)

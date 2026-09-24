@@ -112,10 +112,13 @@ placement idea as the email plan's SMTP block.
 
 ## 3. Verification (ESP-side)
 
-- **HMAC-SHA1 via mbedtls** — already linked (used by existing HTTPS/OTA
-  paths, per the mbedtls-availability note the email plan already
-  established; this plan needs only `mbedtls_md_hmac()` with
-  `MBEDTLS_MD_SHA1`, no new component).
+- **HMAC-SHA1** — implemented in-tree in `drivers/net/totp.c` (hand-rolled
+  SHA-1/HMAC, RFC 3174/2104). The target does have SHA-1 available
+  (`CONFIG_MBEDTLS_SHA1_C=y`, reachable through PSA), but the classic
+  `mbedtls_md_hmac()` API is not the path used here and the host-test PSA
+  stub is non-cryptographic, so the hand-rolled code is kept so that the
+  exact target code is what the host tests validate against RFC 2202 and
+  hashlib vectors.
 - **Window:** accept the current 30 s step and the one immediately before
   and after it (±1 step, i.e. 3 candidate counters), the standard
   RFC 6238 clock-skew allowance.
@@ -268,9 +271,9 @@ WT-A must implement exactly this shape; the fuller reasoning lives in
 ## 7. Work tranches
 
 **WT-A — firmware: TOTP core + NVS + routes.** PARTIAL, `totpfw` worktree:
-core (`totp.c`/`.h`, pure RFC 6238/4226/4648, no mbedtls -- classic HMAC API
-is compiled out and the host PSA stub is non-cryptographic, see `totp.h`'s
-header comment) and `totp_config.c`/`.h` (NVS persistence, write-only-secret
+core (`drivers/net/totp.c`/`.h`, pure RFC 6238/4226/4648, no mbedtls --
+target SHA-1 exists via PSA, but the host PSA stub is non-cryptographic, so
+the hand-rolled code is what both builds run; see `totp.h`'s header comment) and `totp_config.c`/`.h` (NVS persistence, write-only-secret
 discipline, tri-state load status) are DONE and host-tested (WT-D below).
 Routes (`auth_forgot_reset_http.c`, `route_tier_table.h` entries, the QR
 encoder, the settings-page enrollment/disable handlers, and the
@@ -280,7 +283,7 @@ since weakening or half-wiring an auth-adjacent route is worse than leaving
 it unstarted. Sizes: medium-large (new
 crypto-adjacent code, a QR encoder, two new HTTP routes, one additive call
 site in the reset-gesture wiring). Files: new
-`firmware/KilnFW/App/drivers/security/totp.c`/`.h` (RFC 6238 HMAC-SHA1
+`firmware/KilnFW/App/drivers/net/totp.c`/`.h` (RFC 6238 HMAC-SHA1
 compute, base32 encode/decode, counter window check, constant-time
 compare), a vendored small QR-encoder pair (e.g. `qrcodegen.c`/`.h`) plus a
 thin SVG-emission wrapper, new `firmware/KilnFW/App/drivers/persist/

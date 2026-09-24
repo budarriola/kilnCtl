@@ -13,8 +13,14 @@
 // psa/crypto.h host-test stub (App/test/stubs/psa/crypto.h) is an explicit,
 // documented FAKE -- "not a real HMAC/SHA-256 implementation" -- and the
 // classic mbedtls_md_hmac*() API is compiled out of the vendored mbedtls
-// 4.x/TF-PSA-Crypto build (see ota_http.c's hmac_sha256() comment). Neither
-// gives WT-D a path to validate against RFC 6238 Appendix B's exact test
+// 4.x/TF-PSA-Crypto build (see ota_http.c's hmac_sha256() comment). On the
+// TARGET, PSA HMAC-SHA1 itself IS available (CONFIG_MBEDTLS_SHA1_C=y is the
+// IDF default and is set in this build; psa_mac_compute() with
+// PSA_ALG_HMAC(PSA_ALG_SHA_1) is the same path ota_http.c already uses for
+// SHA-256) -- the hand-rolled version is kept so the exact code the target
+// runs is the code the host tests validate, not a second implementation
+// swapped in behind a stub. The host PSA stub gives WT-D no path to validate
+// against RFC 6238 Appendix B's exact test
 // vectors on the host, which this plan's acceptance criteria requires
 // ("RFC 6238 Appendix B vectors pass exactly"). A small, self-contained,
 // RFC 3174 (SHA-1) + RFC 2104 (HMAC) implementation compiled identically on
@@ -44,6 +50,14 @@ extern "C" {
 #define TOTP_DIGITS       6u
 #define TOTP_PERIOD_S     30u
 #define TOTP_WINDOW_STEPS 1u    // accept counter-1, counter, counter+1
+
+// --- Secret hygiene --------------------------------------------------------
+
+// Zeroes `len` bytes through a volatile pointer so the compiler cannot elide
+// the store as dead. Used on every stack buffer in this module and in
+// totp_config.c that held secret or secret-derived bytes (HMAC key blocks,
+// digests, expected-code strings, NVS blob copies).
+void totp_secure_zero(void *buf, size_t len);
 
 // --- SHA-1 / HMAC-SHA1 (RFC 3174 / RFC 2104) ------------------------------
 
@@ -119,9 +133,12 @@ bool totp_verify(const uint8_t *secret, size_t secret_len, const char *code,
 // length (excluding NUL), or 0 if `out_cap` is too small.
 size_t totp_base32_encode(const uint8_t *data, size_t len, char *out, size_t out_cap);
 
-// Decodes an unpadded (or padded -- '=' is skipped) base32 string into
-// `out`. Case-insensitive. Returns the decoded length, or 0 on a malformed
-// input (an alphabet character outside A-Z2-7, ignoring case and '=') or
+// Decodes an unpadded (or '='-padded) base32 string into `out`.
+// Case-insensitive. '=' is accepted only as trailing padding, never between
+// alphabet characters (same rule as PcTools' kilnctrl/totp.py
+// base32_decode(), which strips trailing '=' and rejects any other). Returns
+// the decoded length, or 0 on a malformed input (a character outside
+// A-Z2-7 ignoring case, or an '=' followed by a non-'=' character) or
 // insufficient `out_cap`.
 size_t totp_base32_decode(const char *text, uint8_t *out, size_t out_cap);
 
@@ -129,10 +146,11 @@ size_t totp_base32_decode(const char *text, uint8_t *out, size_t out_cap);
 
 // Writes `otpauth://totp/kilnCtl:<username>?secret=<base32>&issuer=kilnCtl&
 // algorithm=SHA1&digits=6&period=30` into `out`. `username` is assumed
-// already validated/short (WEB_AUTH_USERNAME_MAX-class caller); this
-// function truncates rather than overflows if it doesn't fit. Returns the
-// written length (excluding NUL), or 0 if `out_cap` is too small even for
-// the fixed parts.
+// already validated/short (WEB_AUTH_USERNAME_MAX-class caller) and is
+// inserted verbatim (not percent-encoded) -- callers must not pass a
+// username containing ':', '?', '&', '#', '%' or whitespace. Never
+// truncates: returns the written length (excluding NUL), or 0 if the whole
+// URI does not fit in `out_cap`.
 size_t totp_build_otpauth_uri(const char *username, const uint8_t *secret, size_t secret_len,
                                char *out, size_t out_cap);
 

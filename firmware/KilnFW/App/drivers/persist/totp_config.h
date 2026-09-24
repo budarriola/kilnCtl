@@ -5,12 +5,27 @@
 // Same namespace (kiln_auth) and tri-state load-status discipline as
 // web_auth_store.h -- TOTP enrollment is part of the same administrator-
 // credential concept and gets the SAME backup/restore exclusion treatment
-// (see docs/CONFIG_FILESYSTEM.md / backup_json.c: totp_secret is excluded
-// from whole-board backup/restore and config-package export/import, exactly
-// like the Wi-Fi password and smtp_password).
+// as web_auth_store's records (docs/TOTP_PASSWORD_RESET_PLAN.md section 3):
+// excluded BY OMISSION -- backup_json.c/backup_export.c never open the
+// kiln_auth namespace, so nothing here needs an explicit exclusion entry;
+// a future backup change that starts walking kiln_auth must skip both keys.
 //
 // This module is the I/O glue around hal_kv.h; the pure TOTP math lives in
 // net/totp.h and has no dependency on this file or on NVS.
+//
+// WRITE CONTEXT: totp_config_set_secret(), totp_config_set_last_counter()
+// and totp_config_clear() write NVS, so they inherit hal_kv.h's write-
+// context contract -- never call them from a task on a PSRAM-backed stack
+// (panics on this target). The replay-counter write happens on EVERY
+// accepted code, so the verifying route must run it on an internal-DRAM
+// stack (the httpd worker, as web_auth_store's writers already do) or
+// dispatch it to the flash worker. Reads carry no such restriction.
+//
+// CONCURRENCY: no internal lock. The RAM counter cache and the
+// verify-then-set_last_counter sequence assume one caller at a time (the
+// single httpd worker plus the LCD reset-gesture's clear). A caller that
+// can race another verifier must serialise verify + set itself, or two
+// requests could both accept the same code before either persists it.
 #ifndef KILNCTL_TOTP_CONFIG_H
 #define KILNCTL_TOTP_CONFIG_H
 
@@ -32,8 +47,10 @@ typedef enum {
 } totp_config_load_status_t;
 
 // Loads the enrolled secret into `out[TOTP_SECRET_LEN]`. Returns the
-// tri-state above; `out` is left unmodified unless the return is
-// TOTP_CONFIG_LOAD_OK.
+// tri-state above: ABSENT only when the key (or the namespace) does not
+// exist; any other read error, a wrong-size blob, an unknown version or a
+// CRC mismatch is UNREADABLE. `out` is left unmodified unless the return is
+// TOTP_CONFIG_LOAD_OK. The caller should totp_secure_zero() `out` when done.
 totp_config_load_status_t totp_config_load_secret(uint8_t out[TOTP_SECRET_LEN]);
 
 // True only on TOTP_CONFIG_LOAD_OK -- the convenience check enrollment/reset
@@ -55,15 +72,21 @@ bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN]);
 // web_auth_store_clear_for_physical_reset() -- see auth_reset_gesture_wiring.c.
 // Also clears the RAM-cached replay counter (totp_config_ram_reset()).
 // Safe to call when nothing is enrolled (idempotent, still returns true).
+// The secret is erased first; if that fails the counter is left in place
+// (never a surviving secret with a reset replay counter).
 bool totp_config_clear(void);
 
 // --- Replay-guard counter --------------------------------------------------
 
-// Reads the persisted last-accepted TOTP counter (0 if never set/absent --
-// see totp_verify()'s doc comment on why 0 is a safe "never accepted"
-// sentinel). This is the NVS-backed slow path; totp_config_ram_last_counter()
-// below is the fast path a verifying HTTP handler should actually call.
-uint32_t totp_config_load_last_counter(void);
+// Reads the persisted last-accepted TOTP counter into *out. ABSENT (key
+// never written) sets *out = 0 -- see totp_verify()'s doc comment on why 0
+// is a safe "never accepted" sentinel. UNREADABLE (read error or wrong
+// size) leaves *out untouched and the caller MUST refuse to verify: a
+// counter that cannot be read must never collapse to 0, or every recently
+// used code becomes replayable. This is the NVS-backed slow path;
+// totp_config_ram_last_counter() below is the fast path a verifying HTTP
+// handler should actually call.
+totp_config_load_status_t totp_config_load_last_counter(uint32_t *out);
 
 // Persists `counter` as the new last-accepted counter, read-back-verified.
 // Also updates the RAM cache so a subsequent totp_config_ram_last_counter()
@@ -76,7 +99,10 @@ bool totp_config_set_last_counter(uint32_t counter);
 // without an NVS read on every single verification attempt -- NVS is only
 // touched by totp_config_set_last_counter() when a code is actually
 // accepted, not on every verify attempt (including failed ones).
-uint32_t totp_config_ram_last_counter(void);
+// Returns false (and caches nothing, so the next call retries NVS) when
+// the persisted counter is UNREADABLE; the caller must then refuse the
+// code. On true, *out holds the counter (0 if never set).
+bool totp_config_ram_last_counter(uint32_t *out);
 
 // Clears the RAM cache back to "not yet loaded" (used by totp_config_clear()
 // and by host tests needing a clean-slate re-load).

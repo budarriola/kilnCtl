@@ -5,6 +5,16 @@
 #include <stdio.h>
 #include <string.h>
 
+// --- Secret hygiene ---------------------------------------------------------
+
+void totp_secure_zero(void *buf, size_t len)
+{
+    volatile uint8_t *p = (volatile uint8_t *)buf;
+    while (len--) {
+        *p++ = 0;
+    }
+}
+
 // --- SHA-1 (RFC 3174) -------------------------------------------------------
 
 typedef struct {
@@ -75,6 +85,9 @@ static void sha1_process_block(totp_sha1_ctx_t *ctx, const uint8_t block[64])
     ctx->h[2] += c;
     ctx->h[3] += d;
     ctx->h[4] += e;
+
+    // w[0..15] is the raw block -- for HMAC's first block that is key^ipad.
+    totp_secure_zero(w, sizeof(w));
 }
 
 static void sha1_update(totp_sha1_ctx_t *ctx, const uint8_t *data, size_t len)
@@ -130,6 +143,7 @@ void totp_sha1(const uint8_t *data, size_t len, uint8_t out[TOTP_SHA1_DIGEST_LEN
     sha1_init(&ctx);
     sha1_update(&ctx, data, len);
     sha1_final(&ctx, out);
+    totp_secure_zero(&ctx, sizeof(ctx));
 }
 
 // --- HMAC-SHA1 (RFC 2104) ---------------------------------------------------
@@ -166,6 +180,12 @@ void totp_hmac_sha1(const uint8_t *key, size_t key_len, const uint8_t *msg, size
     sha1_update(&ctx, opad, sizeof(opad));
     sha1_update(&ctx, inner_digest, sizeof(inner_digest));
     sha1_final(&ctx, out);
+
+    totp_secure_zero(block_key, sizeof(block_key));
+    totp_secure_zero(ipad, sizeof(ipad));
+    totp_secure_zero(opad, sizeof(opad));
+    totp_secure_zero(inner_digest, sizeof(inner_digest));
+    totp_secure_zero(&ctx, sizeof(ctx));
 }
 
 // --- HOTP dynamic truncation (RFC 4226 section 5.3) -------------------------
@@ -191,6 +211,7 @@ uint32_t totp_hotp_truncate(const uint8_t *secret, size_t secret_len, uint64_t c
     unsigned offset = hs[TOTP_SHA1_DIGEST_LEN - 1] & 0x0Fu;
     uint32_t p = ((uint32_t)(hs[offset] & 0x7Fu) << 24) | ((uint32_t)hs[offset + 1] << 16) |
                  ((uint32_t)hs[offset + 2] << 8) | (uint32_t)hs[offset + 3];
+    totp_secure_zero(hs, sizeof(hs));
 
     return p % pow10u(digits);
 }
@@ -225,6 +246,9 @@ bool totp_verify(const uint8_t *secret, size_t secret_len, const char *code,
                   uint64_t unix_time_s, uint64_t last_accepted_counter,
                   uint64_t *out_matched_counter)
 {
+    if (secret == NULL || code == NULL) {
+        return false;
+    }
     uint32_t submitted;
     if (!parse_fixed_digits(code, TOTP_DIGITS, &submitted)) {
         return false;
@@ -260,8 +284,10 @@ bool totp_verify(const uint8_t *secret, size_t secret_len, const char *code,
         }
         expected_str[TOTP_DIGITS] = '\0';
 
-        if (totp_constant_time_equal((const uint8_t *)code, (const uint8_t *)expected_str,
-                                      TOTP_DIGITS)) {
+        bool match = totp_constant_time_equal((const uint8_t *)code,
+                                              (const uint8_t *)expected_str, TOTP_DIGITS);
+        totp_secure_zero(expected_str, sizeof(expected_str));
+        if (match) {
             if (out_matched_counter) *out_matched_counter = candidate;
             return true;
         }
@@ -272,7 +298,7 @@ bool totp_verify(const uint8_t *secret, size_t secret_len, const char *code,
 
 // --- Base32 (RFC 4648 section 6, no padding) --------------------------------
 
-static const char BASE32_ALPHABET[32] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+static const char BASE32_ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // 32 chars + NUL
 
 size_t totp_base32_encode(const uint8_t *data, size_t len, char *out, size_t out_cap)
 {
@@ -312,8 +338,13 @@ size_t totp_base32_decode(const char *text, uint8_t *out, size_t out_cap)
     unsigned bit_count = 0;
     size_t out_i = 0;
 
+    bool seen_pad = false;
     for (const char *p = text; *p; ++p) {
-        if (*p == '=') continue;
+        if (*p == '=') {
+            seen_pad = true; // trailing padding only -- see totp.h
+            continue;
+        }
+        if (seen_pad) return 0; // '=' followed by data: malformed
         int v = base32_char_value(*p);
         if (v < 0) return 0; // malformed
         bit_buf = (bit_buf << 5) | (unsigned)v;
@@ -340,6 +371,10 @@ size_t totp_build_otpauth_uri(const char *username, const uint8_t *secret, size_
                             "otpauth://totp/kilnCtl:%s?secret=%s&issuer=kilnCtl&algorithm=SHA1"
                             "&digits=%u&period=%u",
                             username ? username : "admin", b32, TOTP_DIGITS, TOTP_PERIOD_S);
-    if (written < 0 || (size_t)written >= out_cap) return 0;
+    totp_secure_zero(b32, sizeof(b32));
+    if (written < 0 || (size_t)written >= out_cap) {
+        if (out_cap > 0) totp_secure_zero(out, out_cap); // no partial URI (holds the secret)
+        return 0;
+    }
     return (size_t)written;
 }
