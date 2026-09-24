@@ -20,7 +20,9 @@
 // + an error message on stderr on failure.
 //
 // Optional:
-//   --accept-dialogs        answer a native confirm() with OK instead of
+//   --accept-dialogs        answer a confirmation (app.js's in-page
+//                           kcConfirm() modal, or a native confirm() should
+//                           one ever reappear) with OK instead of
 //                           Cancel. Off by default: a row that is not
 //                           classified as a write gets any unexpected
 //                           dialog dismissed, never accepted. Dialogs are
@@ -134,6 +136,10 @@ const QUIET_TIMEOUT_MS = 5000;
 // W8's live run found the profiles list still mid-fetch/render when the
 // delete click fired -- see clickWithRetry()'s own comment below).
 const CLICK_WAIT_TIMEOUT_MS = 5000;
+// Window after each click in which an in-page kcConfirm()/kcAlert() modal
+// is looked for and answered (CdpSession.answerInPageModals). Restarts
+// after each answer, so nested confirms are covered.
+const MODAL_WAIT_MS = 1500;
 // Cap on the `network` field of the final JSON (see main()'s emission code).
 // CdpSession.completed itself stays UNBOUNDED and is never trimmed -- it is
 // what waitForPost()'s postCursor indexes into by position, and dropping
@@ -270,8 +276,11 @@ async function waitForPort(port, timeoutMs, chrome) {
 }
 
 class CdpSession {
-  // `acceptDialogs` decides what a native window.confirm()/alert() gets
-  // answered with. It is NOT a blanket default: web_commission_row.py passes
+  // `acceptDialogs` decides what a confirmation gets answered with -- app.js's
+  // in-page kcConfirm() modal (answerInPageModals() below; every served page
+  // uses it since f9571202 removed the native dialogs) or, as a fallback, a
+  // native window.confirm()/alert() (the Page.javascriptDialogOpening
+  // handler). It is NOT a blanket default: web_commission_row.py passes
   // --accept-dialogs only for a row it already classifies as a write/
   // owner-gated action, so a read-only row that unexpectedly raises a
   // confirm() is DISMISSED (no state change) instead of silently
@@ -337,10 +346,15 @@ class CdpSession {
           });
         }
       } else if (msg.method === 'Page.javascriptDialogOpening') {
+        // Fallback only: since f9571202 app.js's window.kcConfirm() is an
+        // in-page modal (answered by answerInPageModals() below), and
+        // tools/check_no_native_dialogs_in_ui.ps1 forbids native dialogs in
+        // the served pages. Kept because a native dialog that slipped in
+        // would otherwise freeze the renderer.
         // Defect found running the first live class sweep: several controls
         // (e.g. diagnostics_page.html's watchdog-panic toggle, main_page.html's
-        // clear-trip confirm) route through app.js's window.kcConfirm(), which
-        // today is literally window.confirm() -- a native, renderer-blocking
+        // clear-trip confirm) routed through window.kcConfirm(), which was
+        // then literally window.confirm() -- a native, renderer-blocking
         // dialog. Without this handler, the click's Runtime.evaluate never
         // returns (the renderer thread is frozen waiting on the dialog) and
         // every such row hangs for the full CDP_CALL_TIMEOUT_MS before
@@ -405,6 +419,9 @@ class CdpSession {
         this.postCursor = idx + 1;
         return this.completed[idx];
       }
+      // A confirm that opens only after an async pre-check (a fetch) lands
+      // outside clickWithRetry()'s window; answer it here too.
+      await this.answerInPageModalOnce();
       if (Date.now() >= deadline) {
         const inflight = [...this.inFlight.values()].filter(matches).length;
         throw new Error(
@@ -419,9 +436,64 @@ class CdpSession {
   async waitForQuiet(timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (this.inFlight.size > 0 && Date.now() < deadline) {
+      await this.answerInPageModalOnce();
       await new Promise((r) => setTimeout(r, 50));
     }
     return this.inFlight.size === 0;
+  }
+
+  // app.js's kcConfirm()/kcAlert() (f9571202) is an in-page modal, not a
+  // native dialog, so Page.javascriptDialogOpening never fires for it: the
+  // click returns at once and the guarded action simply waits on a Promise
+  // that nobody resolves -- a write row would then time out waiting for its
+  // POST, a read-only row would leave the action pending. This answers the
+  // modal the same way the native handler did: OK only when acceptDialogs
+  // is set (or for an OK-only kcAlert, which has nothing to decline),
+  // Cancel otherwise, always recorded in `dialogs` and on stderr with its
+  // title and text. Returns true when it answered one.
+  async answerInPageModalOnce() {
+    const accept = this.acceptDialogs;
+    const expr = `(() => {
+      const panels = document.querySelectorAll('.kc-confirm-panel');
+      for (const panel of panels) {
+        const overlay = panel.parentElement;
+        if (!overlay || overlay.hasAttribute('hidden')) continue;
+        const cancel = panel.querySelector('.kc-login-cancel');
+        const ok = panel.querySelector('.kc-confirm-ok');
+        const alertOnly = !cancel || cancel.style.display === 'none';
+        const title = (panel.querySelector('#kc-confirm-title') || {}).textContent || '';
+        const text = (panel.querySelector('#kc-confirm-text') || {}).innerText || '';
+        const clickOk = alertOnly || ${accept ? 'true' : 'false'};
+        (clickOk ? ok : cancel).click();
+        return { type: alertOnly ? 'in-page alert' : 'in-page confirm',
+                 message: (title ? title + ': ' : '') + text, accepted: clickOk };
+      }
+      return null;
+    })()`;
+    let res;
+    try {
+      res = await this.send('Runtime.evaluate', { expression: expr, returnByValue: true });
+    } catch (e) {
+      return false;  // page navigating/closing -- nothing left to answer
+    }
+    const v = res && res.result && res.result.value;
+    if (!v) return false;
+    this.dialogs.push(v);
+    console.error(`_web_commission_cdp: ${v.accepted ? 'ACCEPTED' : 'DISMISSED'} ` +
+                  `${v.type}: ${JSON.stringify(v.message)}`);
+    return true;
+  }
+
+  // After a click: keep answering in-page modals for a short window,
+  // restarting it after each answer so a nested confirm (e.g.
+  // main_page.html's start confirm followed by its watchdog confirm) or a
+  // result kcAlert is answered too.
+  async answerInPageModals(windowMs = MODAL_WAIT_MS) {
+    let deadline = Date.now() + windowMs;
+    while (Date.now() < deadline) {
+      if (await this.answerInPageModalOnce()) deadline = Date.now() + windowMs;
+      await new Promise((r) => setTimeout(r, 100));
+    }
   }
 }
 
@@ -521,7 +593,10 @@ async function clickWithRetry(cdp, kind, selector, label, timeoutMs = CLICK_WAIT
   // 0 means "try once, immediately" rather than "never try."
   for (;;) {
     const res = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-    if (res.result.value === 'CLICKED') return;
+    if (res.result.value === 'CLICKED') {
+      await cdp.answerInPageModals();
+      return;
+    }
     if (Date.now() >= deadline) {
       throw new Error(
         `${label}: selector ${JSON.stringify(selector)} (kind=${kind}) not found after waiting ${timeoutMs}ms`
@@ -584,9 +659,9 @@ async function runStep(cdp, step, idx) {
   throw new Error(`${label}: unknown step action ${JSON.stringify(step.action)}`);
 }
 
-// Post-click settle. The dialog (if any) has already been answered by the
-// CdpSession message handler by the time the click's Runtime.evaluate
-// returns; what is still outstanding is the handler's own fetch(). Give the
+// Post-click settle. The dialog (if any) has already been answered --
+// the in-page modal by clickWithRetry()'s answerInPageModals() window, a
+// native one by the CdpSession message handler; what is still outstanding is the handler's own fetch(). Give the
 // handler a moment to issue it, then either wait for the row's declared
 // POST or for the page to go network-quiet -- never just sleep, since the
 // caller kills Chrome immediately after this returns.

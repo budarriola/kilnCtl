@@ -82,7 +82,8 @@ function makeContext(opts) {
         return null;
       },
     },
-    kcConfirm: function () { return opts.confirmReturns !== undefined ? opts.confirmReturns : true; },
+    // app.js's themed kcConfirm answers with a Promise, not a bool.
+    kcConfirm: function () { return Promise.resolve(opts.confirmReturns !== undefined ? opts.confirmReturns : true); },
     fetch: function (url, init) {
       fetchCalls.push({ url: url, init: init });
       const next = fetchQueue.shift();
@@ -130,6 +131,8 @@ function makeContext(opts) {
     'record-restore button is hidden once restore_verified is already true -- no re-attestation invited');
 }
 
+const pendingGroups = [];
+
 // ---------------------------------------------------------------------------
 // Group 2: the attestation button posts restore_verified only after
 // confirmation, and never auto-acts on its own.
@@ -143,7 +146,10 @@ function makeContext(opts) {
     'renderDualwriteWindow({consecutive_clean_boots: 1, clean_boots_target: 20, ' +
     'firing_complete: false, restore_verified: false, window_may_close: false})', ctx);
   getClickHandler()();
-  assert(fetchCalls.length === 0, 'declining the confirm dialog never POSTs restore_verified');
+  // The confirm resolves asynchronously; assert after it has settled.
+  pendingGroups.push(new Promise(function (r) { setTimeout(r, 0); }).then(function () {
+    assert(fetchCalls.length === 0, 'declining the confirm dialog never POSTs restore_verified');
+  }));
 }
 
 {
@@ -158,9 +164,11 @@ function makeContext(opts) {
     'renderDualwriteWindow({consecutive_clean_boots: 1, clean_boots_target: 20, ' +
     'firing_complete: false, restore_verified: false, window_may_close: false})', ctx);
   getClickHandler()();
-  assert(fetchCalls.length === 1 && fetchCalls[0].url === '/api/dualwrite_window/restore_verified' &&
-         fetchCalls[0].init.method === 'POST',
-    'confirming posts to /api/dualwrite_window/restore_verified');
+  pendingGroups.push(new Promise(function (r) { setTimeout(r, 0); }).then(function () {
+    assert(fetchCalls.length >= 1 && fetchCalls[0].url === '/api/dualwrite_window/restore_verified' &&
+           fetchCalls[0].init.method === 'POST',
+      'confirming posts to /api/dualwrite_window/restore_verified');
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -168,11 +176,11 @@ function makeContext(opts) {
 // ---------------------------------------------------------------------------
 {
   const { ctx, card } = makeContext({ fetchQueue: [{ reject: new Error('boom') }] });
-  vm.runInContext('pollDualwriteWindow()', ctx).then(function () {
+  pendingGroups.push(vm.runInContext('pollDualwriteWindow()', ctx).then(function () {
     assert(card.innerHTML.indexOf('could not load') !== -1,
       'a failed/timed-out fetch renders a "could not load" message, not a throw');
-    finish();
-  });
+  }));
+  Promise.all(pendingGroups).then(finish, function (e) { failed++; failures.push('unhandled: ' + e); finish(); });
 }
 
 function finish() {

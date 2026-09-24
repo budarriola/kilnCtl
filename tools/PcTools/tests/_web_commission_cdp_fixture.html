@@ -15,7 +15,35 @@
   <button id="addSegBtn">+ Add segment</button>
   <div id="segments"></div>
   <div id="result"></div>
+  <button id="delBtn">Delete</button>
+  <!-- Same DOM shape app.js buildConfirmModal() creates for kcConfirm()
+       (overlay[hidden] > .kc-confirm-panel with #kc-confirm-title,
+       #kc-confirm-text, .kc-login-cancel, .kc-confirm-ok), so the driver's
+       in-page modal answering is tested against that exact shape. Keep in
+       step with app.js if it changes. -->
+  <div class="kc-login-overlay" id="modal" hidden>
+    <div class="kc-login-panel kc-confirm-panel" role="dialog">
+      <h2 id="kc-confirm-title">Confirm</h2>
+      <div id="kc-confirm-text"><p>Delete profile "Bisque Fast"?</p></div>
+      <button type="button" class="kc-login-cancel">Cancel</button>
+      <button type="button" class="kc-confirm-ok">OK</button>
+    </div>
+  </div>
   <script>
+    function fixtureConfirm() {
+      var m = document.getElementById('modal');
+      m.removeAttribute('hidden');
+      return new Promise(function (resolve) {
+        function done(v) { m.setAttribute('hidden', ''); resolve(v); }
+        m.querySelector('.kc-confirm-ok').onclick = function () { done(true); };
+        m.querySelector('.kc-login-cancel').onclick = function () { done(false); };
+      });
+    }
+    document.getElementById('delBtn').addEventListener('click', function () {
+      fixtureConfirm().then(function (ok) {
+        fetch(ok ? '/api/confirmed_delete' : '/api/declined_delete', { method: 'POST' });
+      });
+    });
     document.getElementById('favBtn').addEventListener('click', function () {
       fetch('/api/fav_toggle', { method: 'POST' });
     });

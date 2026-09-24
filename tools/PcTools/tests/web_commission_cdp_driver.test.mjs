@@ -203,6 +203,41 @@ async function main() {
          `post cursor: --expect-post reports the SECOND POST, not the first (got ${j && j.post && j.post.url})`);
     }
 
+    // 6. In-page kcConfirm() modal (f9571202 replaced every native
+    //    confirm() with one). Page.javascriptDialogOpening never fires for
+    //    it, so without CdpSession.answerInPageModals() the guarded action
+    //    waits forever. --accept-dialogs must click OK; its absence must
+    //    click Cancel (never authorize), and both must be reported.
+    {
+      posts.length = 0;
+      const r = await runDriver(host, [
+        '--route', '/', '--selector-kind', 'id', '--selector', 'delBtn',
+        '--accept-dialogs', '--expect-post', '/api/confirmed_delete',
+      ]);
+      ok(r.code === 0, 'in-page modal accept: driver exits 0');
+      if (r.code !== 0) console.error(r.stderr);
+      ok(posts.includes('/api/confirmed_delete') && !posts.includes('/api/declined_delete'),
+         'in-page modal accept: OK was clicked (server saw confirmed_delete only)');
+      const j = r.code === 0 ? lastJsonLine(r.stdout) : null;
+      ok(!!(j && j.dialogs && j.dialogs.length === 1 && j.dialogs[0].accepted === true &&
+            j.dialogs[0].type === 'in-page confirm' && /Bisque Fast/.test(j.dialogs[0].message)),
+         'in-page modal accept: reported in dialogs with its text');
+    }
+    {
+      posts.length = 0;
+      const r = await runDriver(host, [
+        '--route', '/', '--selector-kind', 'id', '--selector', 'delBtn',
+        '--expect-post', '/api/declined_delete',
+      ]);
+      ok(r.code === 0, 'in-page modal dismiss: driver exits 0');
+      if (r.code !== 0) console.error(r.stderr);
+      ok(posts.includes('/api/declined_delete') && !posts.includes('/api/confirmed_delete'),
+         'in-page modal dismiss: without --accept-dialogs Cancel was clicked, never OK');
+      const j = r.code === 0 ? lastJsonLine(r.stdout) : null;
+      ok(!!(j && j.dialogs && j.dialogs.length === 1 && j.dialogs[0].accepted === false),
+         'in-page modal dismiss: reported as not accepted');
+    }
+
     // 4. Negative case: a --steps fill against a selector that does not
     //    exist must be a hard failure (exit 1), never a silent no-op --
     //    same rule --fills already enforces for the single-shot path.

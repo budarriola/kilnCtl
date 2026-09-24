@@ -110,7 +110,11 @@ function loadContext({ fetchImpl, confirmImpl, fields }) {
   sandbox.window = sandbox;
   sandbox.window.document = document;
   sandbox.window.kcEscapeHtml = (s) => String(s);
-  sandbox.window.confirm = confirmImpl || (() => true);
+  // Themed kcConfirm (a Promise), never the native window.confirm -- which
+  // throws here so a regression back to it fails loudly.
+  const answer = confirmImpl || (() => true);
+  sandbox.window.kcConfirm = (m) => Promise.resolve(answer(m));
+  sandbox.window.confirm = () => { throw new Error('native window.confirm() called -- must use kcConfirm'); };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 

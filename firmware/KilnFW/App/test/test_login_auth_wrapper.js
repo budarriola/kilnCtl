@@ -424,13 +424,14 @@ function flush() {
     const listeners = {};
     const timers = [];
     let nativeConfirmCalls = 0;
+    const nativeConfirmStub = function () { nativeConfirmCalls++; return true; };
     const gctx = {
       Date: { now: function () { return clock; } },
       setTimeout: function (fn) { timers.push(fn); return timers.length; },
       document: { addEventListener: function (type, fn) { (listeners[type] = listeners[type] || []).push(fn); } },
       window: {
         location: { pathname: '/' },
-        confirm: function () { nativeConfirmCalls++; return true; },
+        confirm: nativeConfirmStub,
       },
       String: String,
     };
@@ -449,11 +450,15 @@ function flush() {
     clock += 2;
     assert(!isUser('POST'), 'gesture rules: a POST more than 3 s after a click is not');
     clock += 60000;
-    const answer = gctx.window.confirm('Start firing now?');
-    assert(answer === true && nativeConfirmCalls === 1, 'confirm hook: native dialog called, answer passed through');
+    // No native-dialog hook any more: every confirmation is kcConfirm()'s
+    // in-page modal, answered by a real click that kcNoteGesture() records.
+    assert(gctx.window.confirm === nativeConfirmStub && nativeConfirmCalls === 0,
+      'no window.confirm hook: the native dialog is neither wrapped nor called');
+    listeners.click.forEach((fn) => fn({ target: {} }));  // OK click inside the kcConfirm modal
+    runTimers();
     clock += 500;
-    assert(isUser('POST'), 'confirm hook: a POST right after answering confirm() is user-initiated (dashboard Start)');
-    assert(!isUser('GET'), 'confirm hook: a GET after confirm() is still not');
+    assert(isUser('POST'), 'confirm modal: a POST right after clicking OK is user-initiated (dashboard Start)');
+    assert(!isUser('GET'), 'confirm modal: a GET after clicking OK is still not');
     assert(gctx.__isDash() === true, 'kcPageIsDashboard: "/" is the dashboard');
     gctx.window.location.pathname = '/settings/zones';
     assert(gctx.__isDash() === false, 'kcPageIsDashboard: a gated page is not');

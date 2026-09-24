@@ -727,7 +727,7 @@ def _run_cdp(row: Row, host: str, screenshot_dir: str, cookie: str, *,
         cmd += ["--selector-kind", selector_kind, "--selector", selector]
     # Dialog policy is per row, not global: only a row this module already
     # classifies as a write/owner-gated action (or an explicit override, for
-    # a restore/delete sub-step of one) may ANSWER a native confirm() with
+    # a restore/delete sub-step of one) may ANSWER a confirmation (the in-page kcConfirm() modal) with
     # OK. A read-only row that unexpectedly raises one gets it dismissed --
     # that unhangs the renderer without authorizing whatever the dialog
     # guards, which on these pages includes Danger Mode and the per-relay
@@ -1478,7 +1478,7 @@ def _run_profile_multi_delete(row: Row, host: str, screenshot_dir: str, cookie: 
     """W9: create two scratch profiles, enter delete mode (#modeDeleteBtn),
     tick each one's own per-row checkbox (aria-label 'Select "<name>" for
     delete' -- profiles_page.html's selectionCheckbox()), click
-    #bulkActionBtn (bulkDelete(): one native confirm() then one POST
+    #bulkActionBtn (bulkDelete(): one kcConfirm() modal then one POST
     /api/profile/delete per ticked id, issued together via Promise.all --
     which is why this row's own `expect_post` default is left in place on
     the bulk-delete _run_cdp() call below: the explicit "wait-for-post"

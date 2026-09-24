@@ -18,11 +18,13 @@
 # approach check_no_bench_text_in_ui.ps1 uses -- so a comment merely
 # discussing "confirm()" or "alert()" (there are several) never trips this.
 # Then scan for a bare, lowercase confirm(/alert(/prompt( call, `\b`-bounded.
-# This is deliberately CASE-SENITIVE and requires the literal '(' immediately
+# This is deliberately CASE-SENSITIVE and requires the literal '(' immediately
 # after the word: kcConfirm(/kcAlert() never match (capital C/A), and neither
 # does a comment/identifier like confirmForceProtocol( (no '(' right after
 # "confirm"). window.confirm(/window.alert(/bare confirm(/alert( all match,
-# since `\b` treats '.' as a boundary just like whitespace.
+# since `\b` treats '.' as a boundary just like whitespace. An uncalled
+# reference -- window./global./globalThis./self. followed by confirm/alert/
+# prompt -- also matches, so a native dialog cannot hide behind a variable.
 #
 # Exit: 0 pass, 1 fail (violations printed), 2 usage/setup error.
 #
@@ -38,7 +40,12 @@ $netDir = Join-Path $repoRoot "firmware\KilnFW\App\drivers\net"
 if (-not (Test-Path $httpDir)) { throw "check_no_native_dialogs_in_ui: $httpDir not found -- has it moved?" }
 if (-not (Test-Path $netDir)) { throw "check_no_native_dialogs_in_ui: $netDir not found -- has it moved?" }
 
-$ForbiddenRegex = '\bconfirm\(|\balert\(|\bprompt\('
+# Second alternative: an indirect reference with no call, e.g.
+# `var confirmFn = opts.confirmFn || global.confirm;` -- review of f9571202
+# found commissioning_shared.js still defaulting to the native dialog that
+# way, invisible to the call-only pattern. Safe to forbid outright now that
+# app.js no longer wraps window.confirm at all.
+$ForbiddenRegex = '\bconfirm\(|\balert\(|\bprompt\(|\b(window|global|globalThis|self)\.(confirm|alert|prompt)\b'
 
 # --- C-style comment stripper (// and /* */), reproduced from
 # check_no_bench_text_in_ui.ps1 (itself reproduced from

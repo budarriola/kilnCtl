@@ -2829,8 +2829,13 @@ function proceedToStart(id, startName) {
           // line refused them reads as a broken board, which is precisely the
           // failure this interlock must not introduce.
           if (result.readiness_item) {
-            window.kcAlert(result.error || 'refused by the readiness interlock');
-            window.location.href = '/readiness#' + encodeURIComponent(result.readiness_item);
+            // Navigate only once the operator has dismissed the notice: the
+            // native alert() this replaced blocked until then, and kcAlert()
+            // does not -- navigating straight away would unload the page
+            // before the refusal reason was ever read.
+            window.kcAlert(result.error || 'refused by the readiness interlock').then(function () {
+              window.location.href = '/readiness#' + encodeURIComponent(result.readiness_item);
+            });
             return;
           }
           redirectToReadinessIfBlocked(result.error);

@@ -196,8 +196,26 @@
     });
   }
 
+  // One modal on screen at a time. There is exactly one overlay/panel, so a
+  // second openConfirmModal() while the first is still up would overwrite
+  // its text and attach a second set of button listeners -- one click would
+  // then answer BOTH callers, the first one with a question it was never
+  // shown (e.g. a late kcAlert() from a failed fetch landing on top of an
+  // open "Start firing?" confirm). A request that arrives while one is open
+  // waits for it to close, then opens in turn; the common, uncontended case
+  // still opens synchronously inside the caller's click handler.
+  var confirmTail = null;
+  function enqueueConfirmModal(message, opts) {
+    var run = function () { return openConfirmModal(message, opts); };
+    var p = confirmTail ? confirmTail.then(run) : run();
+    var tail = p.then(function () {}, function () {});
+    confirmTail = tail;
+    tail.then(function () { if (confirmTail === tail) confirmTail = null; });
+    return p;
+  }
+
   window.kcConfirm = function (message, opts) {
-    return openConfirmModal(message, opts || {});
+    return enqueueConfirmModal(message, opts || {});
   };
 
   // Themed replacement for window.alert() -- OK-only, resolves (never
@@ -206,7 +224,7 @@
     var o = { alertOnly: true };
     if (opts && opts.title) o.title = opts.title;
     if (opts && opts.okLabel) o.okLabel = opts.okLabel;
-    return openConfirmModal(message, o).then(function () {});
+    return enqueueConfirmModal(message, o).then(function () {});
   };
 
   // Owner report, 2026-09-24: Cancel on the sign-in modal must reject the
@@ -897,22 +915,16 @@
   ['click', 'submit', 'change', 'keydown'].forEach(function (type) {
     document.addEventListener(type, kcNoteGesture, true);
   });
-  // Answering a native confirm() is a user gesture too, but it dispatches
-  // no DOM event (2026-09-24 second review). The dashboard's Run button
-  // reads the feasibility plan, then asks "Start firing ... now?", then
-  // POSTs /api/profile_exec/start: an operator who took over 3 s on that
-  // dialog had the POST refused quietly -- no modal, and the start catch
-  // stays silent on AuthCancelled -- so Start did nothing at all. The clock
-  // restarts when the dialog returns; kcConfirm resolves window.confirm at
-  // call time, so it is covered as well.
-  var kcNativeConfirm = (typeof window.confirm === 'function') ? window.confirm.bind(window) : null;
-  if (kcNativeConfirm) {
-    window.confirm = function (message) {
-      var answer = kcNativeConfirm(message);
-      kcLastGestureAt = Date.now();
-      return answer;
-    };
-  }
+  // Answering a confirmation is a user gesture too (2026-09-24 second
+  // review): the dashboard's Run button asks "Start firing ... now?", then
+  // POSTs /api/profile_exec/start, and an operator who took over 3 s on
+  // that question must not have the POST refused quietly. This used to
+  // need a window.confirm() hook, since a native dialog dispatches no DOM
+  // event. kcConfirm()'s themed modal is answered by a real click (or an
+  // Enter/Space keydown on its focused button), which kcNoteGesture() above
+  // already records -- the modal is not loginModalEl/forgotModalEl -- so no
+  // hook is needed, and none may be added: no native dialog is ever raised
+  // (tools/check_no_native_dialogs_in_ui.ps1).
   function kcRequestIsUserInitiated(method) {
     if (kcGestureActive) return true;
     var m = String(method || 'GET').toUpperCase();

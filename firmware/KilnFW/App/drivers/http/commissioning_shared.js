@@ -28,7 +28,9 @@
  *     (re-fetching GET /api/safety/commissioning fresh) on top of the
  *     server's own confirm_commit_landed() -- failing LOUDLY, naming the
  *     field, if the two ever disagree. `opts.confirmFn` defaults to
- *     window.confirm; `opts.namePrefix` customises the confirm dialog text.
+ *     app.js's themed window.kcConfirm (never the native window.confirm --
+ *     tools/check_no_native_dialogs_in_ui.ps1); it may return a bool or a
+ *     Promise of one. `opts.namePrefix` customises the confirm dialog text.
  *     Resolves to {ok, message} -- never throws for an ordinary rejection.
  *
  * RETROFITTED 2026-09-08 (review 5d03f8c2): safety_commissioning_page.html
@@ -119,7 +121,7 @@
 
   function commitAndVerify(bodyPairs, criticalChanges, opts) {
     opts = opts || {};
-    var confirmFn = opts.confirmFn || global.confirm;
+    var confirmFn = opts.confirmFn || global.kcConfirm;
     var setMsg = opts.setMsg || function () {};
     // 2026-09-08 retrofit (5d03f8c2): safety_commissioning_page.html's
     // longer-standing wording differs from this module's own defaults in a
@@ -221,16 +223,17 @@
       var lines = criticalChanges.map(function (c) {
         return c.name + ': ' + c.oldDisplay + ' -> ' + c.newDisplay;
       });
-      var confirmed = confirmFn(
+      return Promise.resolve(confirmFn(
         (opts.confirmPrefix ||
           'This WRITES THE SAFETY PROCESSOR\'S (RP2040) FLASH and changes how its independent ' +
           'over-temperature protection interprets its own thermocouple:') +
         '\n\n' + lines.join('\n') + confirmSuffix
-      );
-      if (!confirmed) {
-        return { ok: false, posted: false, message: 'Cancelled -- nothing was written.' };
-      }
-      return doPost();
+      )).then(function (confirmed) {
+        if (!confirmed) {
+          return { ok: false, posted: false, message: 'Cancelled -- nothing was written.' };
+        }
+        return doPost();
+      });
     });
   }
 
@@ -243,17 +246,17 @@
   // way it was," never merely "don't advance."
   function confirmConsequentialChange(lines, opts) {
     opts = opts || {};
-    var confirmFn = opts.confirmFn || global.confirm;
+    var confirmFn = opts.confirmFn || global.kcConfirm;
     if (!lines || !lines.length) return Promise.resolve(true);
 
     function ask() {
-      return confirmFn(
+      return Promise.resolve(confirmFn(
         (opts.confirmPrefix || 'Confirm this change:') + '\n\n' + lines.join('\n') +
         (opts.confirmSuffix || '')
-      );
+      )).then(function (ok) { return !!ok; });
     }
 
-    if (opts.skipBusyCheck) return Promise.resolve(ask());
+    if (opts.skipBusyCheck) return ask();
 
     return checkBusy().then(function (busyReason) {
       if (busyReason) {

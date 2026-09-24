@@ -1069,7 +1069,12 @@ const COMMISSIONING_SHARED_PATH = resolveDriverFile(resolveDriversDir(__dirname)
 
 function loadCommissioningShared(fetchImpl, confirmImpl) {
   const code = fs.readFileSync(COMMISSIONING_SHARED_PATH, 'utf8');
-  const sandbox = { fetch: fetchImpl, confirm: confirmImpl || (() => true), console };
+  // The shared module must answer through app.js's themed kcConfirm (a
+  // Promise), never the native window.confirm -- which throws here so a
+  // regression back to it fails loudly.
+  const answer = confirmImpl || (() => true);
+  const sandbox = { fetch: fetchImpl, kcConfirm: (m) => Promise.resolve(answer(m)), console,
+    confirm: () => { throw new Error('native window.confirm() called -- must use kcConfirm'); } };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
