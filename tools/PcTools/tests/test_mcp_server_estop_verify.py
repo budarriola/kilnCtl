@@ -21,15 +21,14 @@ from kilnctrl import readiness_http_client  # noqa: E402
 from kilnctrl import estop_verify_http_client  # noqa: E402
 
 
-def _readiness(estop_status="not_done", trip_status="ok"):
-    return {
-        "items": [
-            {"key": "safety_trip", "label": "Safety processor trip status",
-             "status": trip_status, "detail": "no trip", "fix_url": ""},
-            {"key": "estop_verified", "label": "E-stop interlock verified",
-             "status": estop_status, "detail": "not yet verified", "fix_url": ""},
-        ]
-    }
+def _readiness(estop_status="not_done", trip_status="ok", include_trip_item=True):
+    items = []
+    if include_trip_item:
+        items.append({"key": "safety_trip", "label": "Safety processor trip status",
+                       "status": trip_status, "detail": "no trip", "fix_url": ""})
+    items.append({"key": "estop_verified", "label": "E-stop interlock verified",
+                  "status": estop_status, "detail": "not yet verified", "fix_url": ""})
+    return {"items": items}
 
 
 class _Base(unittest.TestCase):
@@ -54,6 +53,19 @@ class RefusalTest(_Base):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness",
                                          return_value=_readiness(trip_status="not_done")), \
+             unittest.mock.patch.object(estop_verify_http_client, "post_estop_verify") as post_mock:
+            result = msi.estop_verify(confirm=True)
+        self.assertIn("refused", result.lower())
+        self.assertIn("safety_trip", result)
+        post_mock.assert_not_called()
+
+    def test_refuses_when_safety_trip_item_is_absent(self):
+        """readiness_http.c can drop items when its buffer fills -- a
+        missing safety_trip item must refuse, never be treated as an
+        implicit ok."""
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(readiness_http_client, "get_readiness",
+                                         return_value=_readiness(include_trip_item=False)), \
              unittest.mock.patch.object(estop_verify_http_client, "post_estop_verify") as post_mock:
             result = msi.estop_verify(confirm=True)
         self.assertIn("refused", result.lower())
@@ -94,6 +106,11 @@ class ConfirmedVerifyTest(_Base):
             result = msi.estop_verify(confirm=True)
         post_mock.assert_called_once_with("10.0.0.5")
         self.assertIn("ok - recorded and confirmed", result)
+        # The printed state must be the AFTER read-back (status=ok), not the
+        # stale BEFORE state (status=not_done) -- a success line that shows
+        # not_done would contradict itself.
+        self.assertIn("status='ok'", result)
+        self.assertIn("before: estop_verified status='not_done'", result)
 
     def test_verify_that_does_not_clear_fails_loud(self):
         """The board can answer {"ok":true} to the POST and STILL read back
@@ -108,6 +125,9 @@ class ConfirmedVerifyTest(_Base):
             result = msi.estop_verify(confirm=True)
         self.assertIn("FAILED", result)
         self.assertNotIn("ok - recorded", result)
+        # The re-fetched (after) state, still not_done, must be what is
+        # printed as the primary status.
+        self.assertIn("status='not_done'", result)
 
     def test_post_failure_is_reported(self):
         err = estop_verify_http_client.EstopVerifyHttpError("refused", status=500, detail="failed")

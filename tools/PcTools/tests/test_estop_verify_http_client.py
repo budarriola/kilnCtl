@@ -36,13 +36,17 @@ def _fake_response(body: bytes, status: int = 200):
 
 class RequestShapeTest(unittest.TestCase):
     def test_posts_with_no_body_fields(self):
+        """Patches kilnctrl.http_auth.urlopen -- the ADMIN-session seam this
+        client actually calls -- rather than the underlying
+        urllib.request.urlopen, so this test exercises the real call this
+        client makes rather than bypassing the seam entirely."""
         sent = []
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, no_relogin=False):
             sent.append(req)
             return _fake_response(b'{"ok":true}')
 
-        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+        with unittest.mock.patch.object(ev.http_auth, "urlopen", fake_urlopen):
             result = ev.post_estop_verify("host")
         self.assertEqual(sent[0].get_method(), "POST")
         self.assertEqual(sent[0].data, b"")
@@ -55,23 +59,23 @@ class FailureTest(unittest.TestCase):
         err = urllib.error.HTTPError(
             "u", 500, "Internal Server Error", {},
             io.BytesIO(json.dumps({"ok": False, "error": "ESP_ERR_NVS_NOT_FOUND"}).encode()))
-        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+        with unittest.mock.patch.object(ev.http_auth, "urlopen", unittest.mock.Mock(side_effect=err)):
             with self.assertRaises(ev.EstopVerifyHttpError) as ctx:
                 ev.post_estop_verify("host")
         self.assertEqual(ctx.exception.status, 500)
         self.assertIn("ESP_ERR_NVS_NOT_FOUND", ctx.exception.detail)
 
     def test_unreachable_host_is_refused(self):
-        with unittest.mock.patch(
-                "urllib.request.urlopen",
+        with unittest.mock.patch.object(
+                ev.http_auth, "urlopen",
                 unittest.mock.Mock(side_effect=urllib.error.URLError("no route to host"))):
             with self.assertRaises(ev.EstopVerifyHttpError):
                 ev.post_estop_verify("host")
 
     def test_non_json_body_is_refused(self):
-        with unittest.mock.patch(
-                "urllib.request.urlopen",
-                lambda req, timeout=None: _fake_response(b"<html>nope</html>")):
+        with unittest.mock.patch.object(
+                ev.http_auth, "urlopen",
+                lambda req, timeout=None, no_relogin=False: _fake_response(b"<html>nope</html>")):
             with self.assertRaises(ev.EstopVerifyHttpError):
                 ev.post_estop_verify("host")
 

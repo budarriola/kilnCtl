@@ -428,11 +428,13 @@ def estop_verify(confirm: bool = False, host: Optional[str] = None) -> str:
 
     Always fetches GET /api/readiness FIRST and reports the ``estop_
     verified`` item's current status before doing anything. If the
-    ``safety_trip`` item is not ``ok`` (a trip is latched), this refuses
-    unconditionally, regardless of `confirm` -- an E-stop verification must
-    only ever be recorded with no trip latched, never as a way to paper
-    over one. If readiness itself cannot be read, this errors before
-    touching the write route at all.
+    ``safety_trip`` item is not ``ok`` -- INCLUDING when it is simply
+    absent from the response, since readiness_http.c's item buffer can
+    fill and silently drop entries -- this refuses unconditionally,
+    regardless of `confirm`: an E-stop verification must only ever be
+    recorded with a confirmed-ok safety_trip, never on the assumption that
+    a missing item means no trip. If readiness itself cannot be read, this
+    errors before touching the write route at all.
 
     REFUSES UNLESS ``confirm=True`` (exactly ``True``) -- without it, this
     is a dry run: it reports the current readiness state and says what it
@@ -478,9 +480,11 @@ def estop_verify(confirm: bool = False, host: Optional[str] = None) -> str:
     trip_summary = (f"safety_trip status={trip_item.get('status')!r} detail={trip_item.get('detail')!r}"
                      if trip_item is not None else "safety_trip: item not present in readiness response")
 
-    if trip_item is not None and trip_item.get("status") != "ok":
-        return (f"refused: safety_trip is not ok ({trip_summary}) -- an E-stop verification "
-                f"must never be recorded while a trip is latched (host={resolved})")
+    if trip_item is None or trip_item.get("status") != "ok":
+        return (f"refused: safety_trip is not confirmed ok ({trip_summary}) -- readiness may "
+                f"have dropped the item (its buffer can fill and drop entries, per readiness_"
+                f"http.c's dropped-item notice) or a trip may be latched; an E-stop verification "
+                f"must never be recorded without a confirmed-ok safety_trip (host={resolved})")
 
     if confirm is not True:
         return (
@@ -501,11 +505,15 @@ def estop_verify(confirm: bool = False, host: Optional[str] = None) -> str:
                 f"UNKNOWN, re-check before trusting this")
 
     after_item = _readiness_item(after, "estop_verified")
+    after_summary = (f"estop_verified status={after_item.get('status')!r} "
+                      f"detail={after_item.get('detail')!r}" if after_item is not None
+                      else "estop_verified: item not present in re-fetched readiness response")
     if after_item is not None and after_item.get("status") == "ok":
-        return f"ok - recorded and confirmed by read-back: {estop_summary} (host={resolved})"
+        return (f"ok - recorded and confirmed by read-back: {after_summary} "
+                f"(before: {estop_summary}) (host={resolved})")
     return (f"FAILED: POST /api/estop/verify returned ok, but the re-fetched readiness item "
-            f"still does not read ok -- {estop_summary} (host={resolved}). Do not trust this "
-            f"as recorded.")
+            f"still does not read ok -- {after_summary} (before: {estop_summary}) "
+            f"(host={resolved}). Do not trust this as recorded.")
 
 
 @_srv._tool()
