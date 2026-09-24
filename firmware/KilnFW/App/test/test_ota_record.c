@@ -131,6 +131,40 @@ static void test_compare_unknown_on_unparseable_or_empty(void)
                "no leading digit anywhere -- unknown, not a false SAME");
 }
 
+// The shapes this tree really emits (review of 9ca22048): esp_app_desc_t.version
+// is 31 chars max, so with the repo's 25-char tag the hash and "-dirty" are
+// truncated off entirely. And where a hash IS visible, its digits must never
+// order two builds -- the first comparator read "g9ca22048" as the number 9.
+static void test_compare_real_describe_shapes(void)
+{
+    TEST_SECTION("ota_version_compare -- real truncated describe strings, hashes, dirty, bare hashes");
+    TEST_CHECK(ota_version_compare("V1.0_Purchased_This_Board-3140-",
+                                   "V1.0_Purchased_This_Board-3141-") == OTA_VERSION_CMP_NEWER,
+               "bench shape: higher commit count is newer");
+    TEST_CHECK(ota_version_compare("V1.0_Purchased_This_Board-3141-",
+                                   "V1.0_Purchased_This_Board-3140-") == OTA_VERSION_CMP_OLDER,
+               "bench shape: lower commit count is a downgrade");
+    TEST_CHECK(ota_version_compare("V1.0_Purchased_This_Board-3140-",
+                                   "V1.0_Purchased_This_Board-3140-") == OTA_VERSION_CMP_SAME,
+               "bench shape: identical strings are the same");
+    TEST_CHECK(ota_version_compare("v1.0-5-g9000000", "v1.0-5-g1234567") == OTA_VERSION_CMP_UNKNOWN,
+               "same count, different commits -- unknown, never ordered by hash digits");
+    TEST_CHECK(ota_version_compare("v1.0-5-g1234567", "v1.0-5-g9000000") == OTA_VERSION_CMP_UNKNOWN,
+               "same count, different commits (reversed) -- unknown");
+    TEST_CHECK(ota_version_compare("v1.2-15-gabc1234", "v1.2-15-gabc1234-dirty") == OTA_VERSION_CMP_SAME,
+               "dirty flag alone does not order two builds of one commit");
+    TEST_CHECK(ota_version_compare("v1.0-9-g0000001", "v1.0-10-g9999999") == OTA_VERSION_CMP_NEWER,
+               "count decides, not hash digits");
+    TEST_CHECK(ota_version_compare("v1.0", "v1.0-3-gabc1234") == OTA_VERSION_CMP_NEWER,
+               "exact tag, then commits past it, is newer");
+    TEST_CHECK(ota_version_compare("9ca22048", "42762cb0") == OTA_VERSION_CMP_UNKNOWN,
+               "bare hashes (no tag reachable) -- unknown");
+    TEST_CHECK(ota_version_compare("12345678-dirty", "42762cb0") == OTA_VERSION_CMP_UNKNOWN,
+               "all-digit bare hash is still a hash -- unknown");
+    TEST_CHECK(ota_version_compare("v1.0-7-g1234567-di", "v1.0-7-g1234567") == OTA_VERSION_CMP_SAME,
+               "truncated -dirty suffix is stripped");
+}
+
 static void test_fill_sets_is_downgrade_for_a_real_downgrade(void)
 {
     TEST_SECTION("ota_record_fill -- is_downgrade/version_compare_known wired from ota_version_compare");
@@ -176,6 +210,7 @@ void run_test_ota_record(void)
     test_compare_detects_downgrade();
     test_compare_detects_upgrade_and_same();
     test_compare_unknown_on_unparseable_or_empty();
+    test_compare_real_describe_shapes();
     test_fill_sets_is_downgrade_for_a_real_downgrade();
     test_fill_never_flags_an_upgrade_as_a_downgrade();
     test_fill_is_downgrade_unknown_for_pico_blank_versions();

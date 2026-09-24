@@ -66,6 +66,10 @@
      tight enough to look cramped rather than merely narrow, so `.kv`
      collapses to a single stacked column there -- dt above its dd, both
      full width, no column fight left to lose. */
+  /* The protocol-mismatch confirmation carries a paragraph, not a login
+     form -- wider than .kc-login-panel's 18rem, same max-width clamp. */
+  .ota-confirm-panel { width: 28rem; }
+  .ota-confirm-panel p { margin: 0 0 0.6em 0; color: var(--ui-text-primary); }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15em 0.8em; font-size: 0.92em; }
   .kv dt { color: var(--muted); }
   .kv dd { margin: 0; min-width: 0; word-break: break-all; }
@@ -193,6 +197,24 @@ who can trigger an update, not what an already-authorized update can do.</p>
   <div class="progress-outer"><div id="picoProgressBar" class="progress-inner">0%</div></div>
 </div>
 <p id="picoMsg" class="msg"></p>
+
+<!-- In-page confirmation for the Pico protocol-version-mismatch 409 (see
+     confirmForceProtocol() below). Reuses theme.css's .kc-login-* overlay/
+     panel tokens -- the owner's "popup follows the color theme" rule for
+     app.js's login modal -- rather than a native confirm(), which the
+     browser draws in its own chrome. Cancel, Escape and a backdrop click all
+     decline. -->
+<div id="forceProtoModal" class="kc-login-overlay" hidden>
+  <div class="kc-login-panel ota-confirm-panel" role="dialog" aria-modal="true"
+       aria-labelledby="forceProtoTitle" aria-describedby="forceProtoText">
+    <h2 class="kc-login-title" id="forceProtoTitle">Protocol version mismatch</h2>
+    <div id="forceProtoText"></div>
+    <div class="kc-login-actions">
+      <button type="button" class="kc-login-cancel" id="forceProtoCancel">Cancel</button>
+      <button type="submit" id="forceProtoOk">Relay anyway</button>
+    </div>
+  </div>
+</div>
 
 <script>
 /* ---- OTA challenge/response handshake ------------------------------------
@@ -568,16 +590,61 @@ document.getElementById('recoveryExitBtn').addEventListener('click', function ()
 // refuses this with 409 {"error":"protocol_version_mismatch",...} unless
 // the request carries X-Ota-Force-Version: 1 (see that file's own header
 // comment for why a header, not a body/query field) -- this is the page-
-// side half: catch that specific refusal, show a theme-following confirm()
-// prompt naming both protocol versions (same cancellable-popup convention
-// every other destructive action on this page already uses -- rollback,
-// recovery exit), and only on an explicit OK retry the SAME upload with
-// the force header set. Any OTHER failure (wrong password, staging error,
+// side half: catch that specific refusal, show an in-page, theme-following
+// confirmation (#forceProtoModal, confirmForceProtocol() below) naming both
+// protocol versions, and only on an explicit "Relay anyway" retry the SAME
+// upload with the force header set. The retry goes through pushImage() ->
+// kcOtaAuthedFetch() again, so it fetches a fresh challenge and re-derives
+// X-Ota-Mac rather than replaying the first request's spent nonce. Any OTHER failure (wrong password, staging error,
 // a plain non-JSON body) falls through to the ordinary catch below
 // unchanged -- this only special-cases the one 409 shape this route emits
 // for a protocol mismatch specifically.
 function isProtocolMismatch(e) {
   return e && e.status === 409 && e.body && e.body.error === 'protocol_version_mismatch';
+}
+
+// Resolves true only on "Relay anyway"; Cancel, Escape and a backdrop
+// click resolve false. Never rejects. Focus starts on Cancel (the safe
+// choice), Tab stays inside the panel, and focus returns to whatever had it
+// before -- same behaviour as app.js's login modal.
+function confirmForceProtocol(paragraphs) {
+  var overlay = document.getElementById('forceProtoModal');
+  var text = document.getElementById('forceProtoText');
+  var okBtn = document.getElementById('forceProtoOk');
+  var cancelBtn = document.getElementById('forceProtoCancel');
+  text.textContent = '';
+  paragraphs.forEach(function (t) {
+    var p = document.createElement('p');
+    p.textContent = t;
+    text.appendChild(p);
+  });
+  var previouslyFocused = document.activeElement;
+  overlay.removeAttribute('hidden');
+  cancelBtn.focus();
+  return new Promise(function (resolve) {
+    function finish(ok) {
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKeydown, true);
+      overlay.setAttribute('hidden', '');
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') previouslyFocused.focus();
+      resolve(ok);
+    }
+    function onOk(evt) { evt.preventDefault(); finish(true); }
+    function onCancel(evt) { evt.preventDefault(); finish(false); }
+    function onBackdrop(evt) { if (evt.target === overlay) finish(false); }
+    function onKeydown(evt) {
+      if (evt.key === 'Escape' || evt.keyCode === 27) { evt.preventDefault(); finish(false); return; }
+      if (evt.key !== 'Tab' && evt.keyCode !== 9) return;
+      evt.preventDefault();
+      (document.activeElement === cancelBtn ? okBtn : cancelBtn).focus();
+    }
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKeydown, true);
+  });
 }
 
 document.getElementById('picoUpdateBtn').addEventListener('click', function () {
@@ -594,19 +661,22 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) throw e;
     if (!isProtocolMismatch(e)) throw e;
     var b = e.body;
-    var proceed = confirm(
+    msg.textContent = 'This image speaks a different link protocol -- confirm to relay it anyway.';
+    return confirmForceProtocol([
       'This image declares link protocol ' + b.image_protocol_version +
-      ', but this board currently speaks protocol ' + b.esp_protocol_version + '.\n\n' +
+        ', but this board currently speaks protocol ' + b.esp_protocol_version + '.',
       'Relaying it anyway may leave the safety processor unable to talk to this ESP ' +
-      '(DEGRADED_NO_CONTEXT -- context-dependent guards disabled) until a compatible ' +
-      'image is pushed to one side or the other.\n\n' +
-      'Relay it anyway?');
-    if (!proceed) {
-      msg.textContent = 'Pico update cancelled (protocol version mismatch not confirmed).';
-      throw { __kcHandled: true };
-    }
-    msg.textContent = 'Confirmed -- retrying with the protocol mismatch forced…';
-    return pushImage('/api/ota/pico', 'pico', pw, fileBytes, { 'X-Ota-Force-Version': '1' });
+        '(DEGRADED_NO_CONTEXT -- context-dependent guards disabled) until a compatible ' +
+        'image is pushed to one side or the other.',
+      'Relay it anyway?'
+    ]).then(function (proceed) {
+      if (!proceed) {
+        msg.textContent = 'Pico update cancelled (protocol version mismatch not confirmed).';
+        throw { __kcHandled: true };
+      }
+      msg.textContent = 'Confirmed -- retrying with the protocol mismatch forced…';
+      return pushImage('/api/ota/pico', 'pico', pw, fileBytes, { 'X-Ota-Force-Version': '1' });
+    });
   }).then(function (body) {
     msg.textContent = 'Pico image staged (' + body.bytes + ' bytes, crc32 ' + body.crc32 +
       '), relaying over the safety UART link now -- watch the progress bar below.';

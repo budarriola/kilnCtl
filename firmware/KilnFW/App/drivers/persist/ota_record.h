@@ -130,29 +130,34 @@ typedef struct {
     uint8_t  version_compare_known;                        // 1 if ota_version_compare() could parse both
                                                             // version_before and version_after well enough
                                                             // to compare them (see its header comment for
-                                                            // what "well enough" means); 0 if either string
-                                                            // was empty or had no leading numeric
-                                                            // component, in which case is_downgrade above
-                                                            // is meaningless and must not be shown as a
-                                                            // real answer.
+                                                            // what "well enough" means); 0 when it returned
+                                                            // UNKNOWN, or on a version-2 record (whose
+                                                            // zeroed reserved2 bytes these replaced), in
+                                                            // which case is_downgrade above is meaningless and
+                                                            // must not be shown as a real answer.
     uint8_t  reserved2[1];                                 // pads to a 4-byte-aligned total, same
                                                             // explicit-padding discipline as reserved0/1
                                                             // above rather than relying on invisible
                                                             // compiler tail padding
 } ota_record_t;
 
-// Best-effort, best-effort-parsed dotted/dashed numeric version comparison.
-// version strings in this codebase come from esp_app_desc_t.version, which
-// (with no PROJECT_VER/version.txt set in this tree) is ESP-IDF's own
-// `git describe`-shaped default, e.g. "v1.2-15-gabc1234" or "v1.2-15-gabc1234-dirty"
-// -- NOT a clean semver string. This walks each string left to right, pulling
-// out up to 4 leading-digit numeric runs (skipping any non-digit separator
-// between them, stopping at the first token that has no leading digit at
-// all -- e.g. the "gabc1234" hash suffix), and compares component-wise.
-// Returns OTA_VERSION_CMP_UNKNOWN if either string is empty or yields zero
-// parsed components -- never guesses in that case. This is exactly the same
-// "0/empty means unknown, never treated as a real answer" rule
-// ota_http_pico.c's own link_protocol_version==0 check already follows.
+// Best-effort ordering of two esp_app_desc_t.version strings. With no
+// PROJECT_VER/version.txt in this tree, ESP-IDF fills that field from
+// `git describe --tags --always --dirty`: "<tag>-<count>-g<hash>[-dirty]",
+// truncated to 31 chars. With this repo's one tag
+// ("V1.0_Purchased_This_Board", 25 chars) the truncation drops the hash and
+// "-dirty" entirely, so a real bench value reads "V1.0_Purchased_This_Board-3140-".
+//
+// Parsing strips a trailing "-", a "-dirty" (or a truncated prefix of it),
+// a "-g<hex>" hash (or a truncated one), then a "-<count>", leaving the tag.
+// Same tag: the commit count orders the two; equal counts with two different
+// visible hashes (two branches the same distance from the tag) are UNKNOWN,
+// never ordered by hash digits. Different tags: ordered by the numeric runs
+// inside each tag (up to 4), UNKNOWN if either tag has none or the numbers
+// match. A bare abbreviated hash (no reachable tag, `--always` fallback) is
+// UNKNOWN. An empty string on either side is UNKNOWN (the Pico path passes
+// both blank). UNKNOWN is never shown as a real answer -- same "0/empty
+// means unknown" rule ota_http_pico.c's link_protocol_version==0 check uses.
 typedef enum {
     OTA_VERSION_CMP_UNKNOWN = 0,
     OTA_VERSION_CMP_OLDER,

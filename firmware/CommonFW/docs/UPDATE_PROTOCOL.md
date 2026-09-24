@@ -650,8 +650,11 @@ So the ESP sends `SAFETY_CMD_ANNOUNCE_REBOOT` before it goes:
       (`ota_http_esp.c:531-538`).
 - [x] A downgrade is allowed but logged as such. **2026-09-24**: still
       allowed unconditionally; `ota_record.c`'s new `ota_version_compare()`
-      (best-effort dotted/dashed numeric parse of `esp_app_desc_t.version`
-      strings) stamps `is_downgrade`/`version_compare_known` into
+      (best-effort parse of `esp_app_desc_t.version`'s `git describe`
+      shape: tag, commit count, `-g<hash>`, `-dirty`, including the
+      32-byte-truncated form the bench actually produces; hash digits never
+      order two builds, and bare hashes or same-count/different-hash pairs
+      read UNKNOWN rather than a guess) stamps `is_downgrade`/`version_compare_known` into
       `ota_record_t` at `ota_record_fill()` time, logged and surfaced via
       `GET /api/ota/esp/status`'s `last_update.downgrade_known`/`is_downgrade`.
       ESP path only — the Pico path's before/after strings are both blank,

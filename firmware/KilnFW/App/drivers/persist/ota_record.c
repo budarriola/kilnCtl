@@ -70,16 +70,102 @@ static void copy_str(char *dst, size_t cap, const char *src)
     dst[cap - 1] = '\0';
 }
 
-// Pulls up to `max` leading-digit numeric runs out of `s`, skipping any
-// non-digit separator between them, and stops at (does not error on) the
-// first token with no leading digit at all -- see ota_record.h's header
-// comment on ota_version_compare() for why that's the right place to stop
-// rather than a parse failure. Returns how many components were parsed.
-static int parse_version_components(const char *s, long *out, int max)
+// One side of ota_version_compare(), split out of an esp_app_desc_t.version
+// string of the shape `git describe --tags --always --dirty` produces:
+// "<tag>[-<count>-g<hash>][-dirty]" -- see ota_record.h's header comment on
+// ota_version_compare() for the shapes this tree really emits (including the
+// 31-char truncation that leaves "...-3140-" with no hash at all).
+enum { OTA_VER_MAX_NUMS = 4 };
+typedef struct {
+    char tag[OTA_RECORD_VERSION_STR_MAX];
+    long nums[OTA_VER_MAX_NUMS]; // numeric runs inside the tag, zero-padded
+    int n_nums;
+    long count;                  // commits since the tag, 0 if absent
+    char hash[OTA_RECORD_VERSION_STR_MAX]; // hex after "-g", "" if absent/truncated off
+    bool bare_hash;              // no tag at all: `--always` fell back to a hash
+} ota_ver_parts_t;
+
+static bool all_hex(const char *s)
 {
-    int n = 0;
-    const char *p = s;
-    while (*p != '\0' && n < max) {
+    if (*s == '\0') {
+        return false;
+    }
+    for (; *s; s++) {
+        if (!isxdigit((unsigned char)*s)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool all_digits(const char *s)
+{
+    if (*s == '\0') {
+        return false;
+    }
+    for (; *s; s++) {
+        if (!isdigit((unsigned char)*s)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void strip_trailing_dashes(char *buf)
+{
+    size_t len = strlen(buf);
+    while (len > 0 && buf[len - 1] == '-') {
+        buf[--len] = '\0';
+    }
+}
+
+// Returns a pointer to the token after the last '-' in buf, or NULL if there
+// is no '-' (the whole string is one token).
+static char *last_token(char *buf)
+{
+    char *dash = strrchr(buf, '-');
+    return dash ? dash + 1 : NULL;
+}
+
+static void parse_version_parts(const char *s, ota_ver_parts_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    char buf[OTA_RECORD_VERSION_STR_MAX];
+    copy_str(buf, sizeof(buf), s);
+    strip_trailing_dashes(buf); // truncation can leave "...-3140-"
+
+    // "-dirty", or a truncated prefix of it ("-d", "-dir", ...) that can only
+    // follow a hash token.
+    char *tok = last_token(buf);
+    if (tok && tok[0] != '\0' && strncmp(tok, "dirty", strlen(tok)) == 0) {
+        tok[-1] = '\0';
+        strip_trailing_dashes(buf);
+        tok = last_token(buf);
+    }
+    // "-g<hex>" (possibly truncated, even down to a bare "-g").
+    if (tok && tok[0] == 'g' && (tok[1] == '\0' || all_hex(tok + 1))) {
+        copy_str(out->hash, sizeof(out->hash), tok + 1);
+        tok[-1] = '\0';
+        strip_trailing_dashes(buf);
+        tok = last_token(buf);
+    }
+    // "-<count>" -- only when something precedes it (a tag).
+    if (tok && tok != buf + 1 && all_digits(tok)) {
+        out->count = strtol(tok, NULL, 10);
+        tok[-1] = '\0';
+        strip_trailing_dashes(buf);
+    }
+
+    copy_str(out->tag, sizeof(out->tag), buf);
+    // No tag reachable: `git describe --always` emits just the abbreviated
+    // hash (e.g. "9ca22048"), whose digits mean nothing numerically.
+    if (strchr(out->tag, '.') == NULL && strlen(out->tag) >= 7 && all_hex(out->tag)) {
+        out->bare_hash = true;
+        return;
+    }
+
+    const char *p = out->tag;
+    while (*p != '\0' && out->n_nums < OTA_VER_MAX_NUMS) {
         while (*p != '\0' && !isdigit((unsigned char)*p)) {
             p++;
         }
@@ -87,11 +173,9 @@ static int parse_version_components(const char *s, long *out, int max)
             break;
         }
         char *end = NULL;
-        out[n] = strtol(p, &end, 10);
-        n++;
+        out->nums[out->n_nums++] = strtol(p, &end, 10);
         p = end;
     }
-    return n;
 }
 
 ota_version_cmp_t ota_version_compare(const char *version_before, const char *version_after)
@@ -100,18 +184,40 @@ ota_version_cmp_t ota_version_compare(const char *version_before, const char *ve
         return OTA_VERSION_CMP_UNKNOWN;
     }
 
-    enum { MAX_COMPONENTS = 4 };
-    long before[MAX_COMPONENTS] = { 0 };
-    long after[MAX_COMPONENTS] = { 0 };
-    int n_before = parse_version_components(version_before, before, MAX_COMPONENTS);
-    int n_after = parse_version_components(version_after, after, MAX_COMPONENTS);
-    if (n_before == 0 || n_after == 0) {
+    ota_ver_parts_t b, a;
+    parse_version_parts(version_before, &b);
+    parse_version_parts(version_after, &a);
+    if (b.bare_hash || a.bare_hash) {
         return OTA_VERSION_CMP_UNKNOWN;
     }
 
-    for (int i = 0; i < MAX_COMPONENTS; i++) {
-        if (before[i] != after[i]) {
-            return (after[i] < before[i]) ? OTA_VERSION_CMP_OLDER : OTA_VERSION_CMP_NEWER;
+    if (strcmp(b.tag, a.tag) != 0) {
+        // Different tags: order by the tag's own numbers only (a commit
+        // count is relative to its own tag, so it says nothing across tags).
+        if (b.n_nums == 0 || a.n_nums == 0) {
+            return OTA_VERSION_CMP_UNKNOWN;
+        }
+        for (int i = 0; i < OTA_VER_MAX_NUMS; i++) {
+            if (b.nums[i] != a.nums[i]) {
+                return (a.nums[i] < b.nums[i]) ? OTA_VERSION_CMP_OLDER : OTA_VERSION_CMP_NEWER;
+            }
+        }
+        return OTA_VERSION_CMP_UNKNOWN; // same numbers, differently named tags
+    }
+
+    // Same tag: the commit count orders them.
+    if (b.count != a.count) {
+        return (a.count < b.count) ? OTA_VERSION_CMP_OLDER : OTA_VERSION_CMP_NEWER;
+    }
+    // Same tag and count but two different commits (two branches the same
+    // distance from the tag): no order exists. A hash truncated off either
+    // string cannot be compared, so equal counts then read as SAME -- the
+    // "-dirty" flag never affects the answer.
+    if (b.hash[0] != '\0' && a.hash[0] != '\0') {
+        size_t nb = strlen(b.hash), na = strlen(a.hash);
+        size_t n = (nb < na) ? nb : na;
+        if (strncmp(b.hash, a.hash, n) != 0) {
+            return OTA_VERSION_CMP_UNKNOWN;
         }
     }
     return OTA_VERSION_CMP_SAME;
