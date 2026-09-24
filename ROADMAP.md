@@ -4,6 +4,24 @@
 > violation no longer reboots the board, board-lock and LCD-bench-runner review
 > fixes landed, and the forgot-password design was replaced with TOTP
 > (thirty-eighth sweep) — open items below.
+> - **SET_FIRING_CEILING (0x09) landed: ESP resends the running profile's peak
+>   target plus margin as the Pico's S1 ceiling after every PUSH_CONTEXT
+>   (level-triggered, not edge-only)** — `6f8ed940` wired the initial send at
+>   profile start/live-edit pickup/halt (`profile_compute_firing_max_c()`,
+>   `safety_link_send_firing_ceiling()`); `34f242c3` fixed edge-only sending
+>   (a Pico reboot, lost halt frame, or a DONE/FAULTED exit with no operator
+>   halt could otherwise strand a stale ceiling) by resending the ceiling on
+>   every context-shadow poll and making it monotonic within a firing so a
+>   live edit can never raise it back up; `4f7f5998` corrected
+>   `LINK_PROTOCOL.md`'s stale "never sends SET_FIRING_CEILING" note.
+>   **Open follow-up:** a cool-down-only profile started on an already-hot
+>   kiln trips S1 at start, since the ceiling derives from the profile's own
+>   peak target rather than current temperature; a start-time check is in
+>   progress (worktree cooldown). **Standing tension, awaiting owner
+>   acknowledgement:** the Pico deliberately runs S1 tighter than
+>   `abs_max_temp_c` during a firing, which is in tension with the standing
+>   "Pico ceiling never tighter than the ESP's abs_max" rule and has not yet
+>   been reconciled with it.
 > - **`exec_mode_state_check()` violation now latches FAULTED instead of
 >   rebooting** (`docs/audits/profile_executor_panic_2026-09-24.md` item 4):
 >   `002e71bd` replaces the target-build hard `assert()` at that call site with
