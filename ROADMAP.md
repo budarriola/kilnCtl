@@ -85,6 +85,9 @@
 >   **Known-red pending item:** `check_flash_worker_lint.ps1` is RED on main
 >   because `totp_config.c` (`0f5151f0`) writes NVS outside the lint
 >   allowlist; fix is assigned to the WT-A routes commit.
+> - [ ] **Follow-on, not started:** `docs/TOTP_LOGIN_2FA_PLAN.md` — optional
+>   TOTP as a second factor at ordinary login (reset plan section 5), blocked
+>   on the reset plan's WT-A landing first.
 > - **Lazy login pop-up, landed** (`090aaa9f`, review fixes `58e10e11`):
 >   serves page shells without redirecting to a login page on load, replacing
 >   that with one shared, themed, cancelable login modal instead -- the
