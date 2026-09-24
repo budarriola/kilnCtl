@@ -41,6 +41,26 @@ and ``KILNCTL_WEB_PASSWORD_NEW`` are set in the environment. Neither value
 is ever printed, logged, or included in any ``CaseResult`` field this module
 builds -- only booleans/status codes, mirroring ``totp_reset_password()``'s
 (mcp_server_totp.py) own discipline.
+
+**TP-M01 leaves ``KILNCTL_WEB_PASSWORD`` stale.** A PASS means the board's
+admin password is now the ``KILNCTL_WEB_PASSWORD_NEW`` value and is NOT
+restored afterwards. The rest of the same run keeps working only through
+the session cookie TP-M01's verifying login leaves in ``http_auth``; any
+later re-login (session expiry, a server restart, the next run) uses the
+old ``KILNCTL_WEB_PASSWORD`` and fails. After a PASS the operator must set
+``KILNCTL_WEB_PASSWORD`` (User scope) to the new value, restart the MCP
+servers so they inherit it, and unset or change ``KILNCTL_TOTP_CODE``
+(a code is only valid for about 90 s, so a leftover one makes the next
+TP-M01 FAIL on a 400 reset). registry.py sorts TP-M01 after every other
+case in ``full`` except WEB-SEC-05 for the same reason.
+
+**Login-ladder side effect.** TP-R02 and TP-R03 each POST a wrong code to
+``/api/auth/forgot``, and TP-R03 a wrong token to ``/api/auth/reset``. Both
+routes share ``login_ip_scope.c``'s ladder (plan section 3), so each of
+those requests may count as a failed attempt against the bench PC's
+address. That is acceptable (three attempts, well under the lockout), but
+a run that also includes other bad-login cases can reach the ladder's 429
+sooner, and TP-M01's own forgot may then answer 429 (a FAIL).
 """
 from __future__ import annotations
 
@@ -143,6 +163,15 @@ def _case_tp_r01(ctx: dict) -> CaseResult:
     try:
         data = _totp_status(ctx)
     except thc.TotpHttpError as exc:
+        if getattr(exc, "status", None) in (401, 403):
+            # The ADMIN-tier seam (http_auth login-on-401) failed: this is
+            # about the bench credential, not the route, and never a PASS.
+            return CaseResult(
+                Verdict.FAIL,
+                reason=f"GET /api/auth/totp_status refused the admin session (HTTP {exc.status}) -- "
+                       "check KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD",
+                observed={"status": exc.status},
+            )
         if getattr(exc, "status", None) == 404:
             # The route may not be flashed yet (WT-A landing in parallel) --
             # this is not evidence of a defect, so it is never a FAIL.
@@ -226,12 +255,15 @@ def _case_tp_m01(ctx: dict) -> CaseResult:
 
     from .. import totp_http_client as thc
 
+    # Error reasons below carry the status only, never ``exc`` text:
+    # totp_http_client's parse error quotes the raw body, and a 2xx forgot
+    # body is where the real one-shot reset token lives.
     try:
         forgot_status, forgot_body = _totp_forgot(ctx, username, code)
     except thc.TotpHttpError as exc:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"POST /api/auth/forgot failed: {exc}",
+            reason=f"POST /api/auth/forgot failed (HTTP {getattr(exc, 'status', None)}, {type(exc).__name__})",
             observed={"status": getattr(exc, "status", None)},
         )
 
@@ -246,7 +278,7 @@ def _case_tp_m01(ctx: dict) -> CaseResult:
         except thc.TotpHttpError as exc:
             return CaseResult(
                 Verdict.FAIL,
-                reason=f"POST /api/auth/reset failed: {exc}",
+                reason=f"POST /api/auth/reset failed (HTTP {getattr(exc, 'status', None)}, {type(exc).__name__})",
                 observed={"status": getattr(exc, "status", None)},
             )
         if reset_status == 200:
@@ -254,7 +286,14 @@ def _case_tp_m01(ctx: dict) -> CaseResult:
             origin = f"http://{host}" if host else ""
             login_ok = _totp_login(ctx, origin, new_password)
 
-    return J.judge_totp_reset_roundtrip(forgot_status, reset_token_present, reset_status, login_ok)
+    result = J.judge_totp_reset_roundtrip(forgot_status, reset_token_present, reset_status, login_ok)
+    if reset_status == 200:
+        # The password changed on the board whether or not the verifying
+        # login worked -- say so in the bench log (see module docstring).
+        result.reason = ((result.reason + "; ") if result.reason else "") + (
+            "admin password on the board is now the KILNCTL_WEB_PASSWORD_NEW value: set "
+            "KILNCTL_WEB_PASSWORD to it and restart the MCP servers before the next run")
+    return result
 
 
 #: Wire this suite's cases into the shared REGISTRY (see registry.py's

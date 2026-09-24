@@ -324,5 +324,69 @@ class JudgeFunctionsTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
+# ---------------------------------------------------------------------------
+# Review follow-up (50494adc): vacuous-PASS, leak, and ordering regressions.
+# ---------------------------------------------------------------------------
+
+class ReviewFollowUpTest(unittest.TestCase):
+    def test_tp_r03_inconclusive_when_unreachable(self):
+        def raise_err(*a):
+            raise thc.TotpHttpError("unreachable")
+        ctx = {"totp_forgot_fn": raise_err, "totp_reset_fn": raise_err}
+        self.assertEqual(C._case_tp_r03(ctx).verdict, Verdict.INCONCLUSIVE)
+
+    def test_tp_r03_inconclusive_on_404(self):
+        ctx = {
+            "totp_forgot_fn": lambda u, c: (404, {}),
+            "totp_reset_fn": lambda u, t, p: (400, {}),
+        }
+        self.assertEqual(C._case_tp_r03(ctx).verdict, Verdict.INCONCLUSIVE)
+
+    def test_tp_r03_401_still_fails_even_with_other_404(self):
+        self.assertEqual(J.judge_totp_open_tier(404, 401).verdict, Verdict.FAIL)
+
+    def test_tp_r01_401_is_a_distinct_fail(self):
+        def raise_401():
+            raise thc.TotpHttpError("refused", status=401)
+        result = C._case_tp_r01({"totp_status_fn": raise_401})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("admin session", result.reason)
+
+    def test_judge_totp_status_fail_reason_never_echoes_body_values(self):
+        result = J.judge_totp_status({"secret": "must-not-appear"})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("must-not-appear", result.reason + repr(result.observed))
+
+    def test_tp_m01_error_reason_never_echoes_exception_text(self):
+        def raise_with_body(u, c):
+            raise thc.TotpHttpError("body was 'real-reset-token-value'", status=202)
+        ctx = {
+            "totp_code": "123456", "totp_new_password": "irrelevant-test-value",
+            "username": "bench", "totp_forgot_fn": raise_with_body,
+        }
+        result = C._case_tp_m01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("real-reset-token-value", result.reason)
+
+    def test_tp_m01_reason_names_the_stale_password_after_reset(self):
+        ctx = {
+            "totp_code": "123456", "totp_new_password": "irrelevant-test-value",
+            "username": "bench",
+            "totp_forgot_fn": lambda u, c: (202, {"reset_token": "tok"}),
+            "totp_reset_fn": lambda u, t, p: (200, {"ok": True}),
+            "totp_login_fn": lambda origin, pw: True, "host": "10.0.0.5",
+        }
+        result = C._case_tp_m01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertIn("KILNCTL_WEB_PASSWORD", result.reason)
+        self.assertNotIn("irrelevant-test-value", result.reason)
+
+    def test_tp_m01_sorts_late_in_full(self):
+        from kilnctrl.bench_test.registry import SUITES
+        full = SUITES["full"]
+        self.assertEqual(full[-1], "WEB-SEC-05")
+        self.assertEqual(full[-2], "TP-M01")
+
+
 if __name__ == "__main__":
     unittest.main()

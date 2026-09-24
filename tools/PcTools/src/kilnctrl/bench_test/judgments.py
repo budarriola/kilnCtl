@@ -2538,7 +2538,9 @@ def judge_totp_status(data: Any) -> CaseResult:
     if not isinstance(data, dict) or not isinstance(data.get("enrolled"), bool):
         return CaseResult(
             Verdict.FAIL,
-            reason=f"GET /api/auth/totp_status response is missing a boolean 'enrolled' field: {data!r}",
+            # Key names only, never values: the docstring's promise not to
+            # surface anything else out of `data` covers the FAIL path too.
+            reason="GET /api/auth/totp_status response is missing a boolean 'enrolled' field",
             observed={"body_keys": sorted(data.keys()) if isinstance(data, dict) else None},
         )
     return CaseResult(Verdict.PASS, observed={"enrolled": data["enrolled"]})
@@ -2574,7 +2576,12 @@ def judge_totp_open_tier(forgot_status: Optional[int], reset_status: Optional[in
     """TP-R03: both /api/auth/forgot and /api/auth/reset are ROUTE_TIER_OPEN
     (section 6a) -- the whole point of a forgot-password flow is that it
     works with no session. A 401/403 from either, sent with no session and
-    no cookie, is a tier regression."""
+    no cookie, is a tier regression.
+
+    A missing status (unreachable) or a 404 (route not flashed yet) on
+    either route proves nothing about its tier, so it is INCONCLUSIVE,
+    never a vacuous PASS. A 400/202/429/503 is a PASS: the route answered
+    without demanding a session."""
     violations = []
     if forgot_status in (401, 403):
         violations.append(f"forgot={forgot_status}")
@@ -2584,6 +2591,14 @@ def judge_totp_open_tier(forgot_status: Optional[int], reset_status: Optional[in
         return CaseResult(
             Verdict.FAIL,
             reason=f"OPEN-tier route(s) required a session with none presented: {', '.join(violations)}",
+            observed={"forgot_status": forgot_status, "reset_status": reset_status},
+        )
+    unproven = [f"{name}={st}" for name, st in (("forgot", forgot_status), ("reset", reset_status))
+                if st is None or st == 404]
+    if unproven:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"could not observe an OPEN-tier answer (unreachable or route not flashed): {', '.join(unproven)}",
             observed={"forgot_status": forgot_status, "reset_status": reset_status},
         )
     return CaseResult(Verdict.PASS, observed={"forgot_status": forgot_status, "reset_status": reset_status})

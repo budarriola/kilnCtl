@@ -307,6 +307,13 @@ _ORDER_RANK = {"ST": 0, "FL": 1, "SK": 2, "SP": 3}
 #: new general rule -- exactly one case gets this treatment.
 _ALWAYS_LAST = "WEB-SEC-05"
 
+#: TP-M01 (when its env credentials are set) changes the admin password and
+#: does not restore it, so every later re-login in the same run would use a
+#: stale KILNCTL_WEB_PASSWORD (cases_totp.py's module docstring). It sorts
+#: after every other case, heat included, but still before WEB-SEC-05,
+#: whose lockout would otherwise refuse TP-M01's own verifying login.
+_LATE_MUTATING = frozenset({"TP-M01"})
+
 
 def _fixed_order(ids) -> List[str]:
     """Sort `ids` by the §5.2 fixed order, not alphabetically. Every
@@ -314,9 +321,12 @@ def _fixed_order(ids) -> List[str]:
     ``heat=True``, e.g. OT-E07/OT-E08) sorts after every read-only case
     regardless of area; ties within a bucket fall back to plain id order.
     WEB-SEC-05 is a further, singular exception: it sorts after everything
-    else, heat included (see _ALWAYS_LAST)."""
+    else, heat included (see _ALWAYS_LAST). TP-M01 sorts just before it
+    (see _LATE_MUTATING)."""
     def key(cid: str) -> "tuple":
         if cid == _ALWAYS_LAST:
+            return (3, 0, cid)
+        if cid in _LATE_MUTATING:
             return (2, 0, cid)
         spec = REGISTRY[cid]
         return (1 if spec.heat else 0, _ORDER_RANK.get(spec.area, 7), cid)

@@ -83,12 +83,13 @@ class SuiteTest(unittest.TestCase):
         #     case) must follow what they observe, exactly as
         #     _NIGHTLY_ORDER already spells out by hand for SP-04/LCD-04;
         #   - WEB-SEC-05 (lockout) must run dead last, even after heat
-        #     (registry._ALWAYS_LAST).
+        #     (registry._ALWAYS_LAST), with TP-M01 (password change, not
+        #     restored) immediately before it (registry._LATE_MUTATING).
         # Both exemptions are narrow (a named id, and cases that declare a
         # dependency) and each has its own assertion below, so excluding
         # them here does not hollow out the general rule.
         observers = {c for c in ids if R.get_case(c).depends_on in idx}
-        exempt = observers | {"WEB-SEC-05"}
+        exempt = observers | {"WEB-SEC-05"} | set(R._LATE_MUTATING)
         last_read_only = max(idx[c] for c in ids if not R.get_case(c).heat and c not in exempt)
         first_heat = min(idx[c] for c in ids if R.get_case(c).heat and c not in exempt)
         self.assertLess(last_read_only, first_heat, "every heat case (AT-*/HP-*) must run after every read-only case")

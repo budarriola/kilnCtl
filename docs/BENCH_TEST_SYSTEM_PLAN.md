@@ -267,11 +267,26 @@ it SKIPs, rather than requiring a separate flag, unless both
 environment. Neither credential is ever printed, logged, or included in a
 `CaseResult` field.
 
+A TP-M01 PASS leaves the board's admin password set to the
+`KILNCTL_WEB_PASSWORD_NEW` value; it is not restored. The rest of that run
+keeps working only through the session TP-M01's verifying login leaves
+behind, so `full` sorts TP-M01 after every other case except WEB-SEC-05.
+Before the next run, set `KILNCTL_WEB_PASSWORD` (User scope) to the new
+value, restart the MCP servers so they inherit it, and clear
+`KILNCTL_TOTP_CODE` (a code is valid for about 90 s; a leftover one makes
+the next TP-M01 FAIL on a 400 reset). TP-M01's result reason says this too.
+
+TP-R02 and TP-R03 send a wrong code to `/api/auth/forgot` and TP-R03 a
+wrong token to `/api/auth/reset`. Both routes share the login ladder, so
+each may count as a failed attempt against the bench PC's address. Three
+attempts are well under the lockout, but they add to any other bad-login
+case in the same run.
+
 | id | case | steps | judged by | dur | heat |
 |---|---|---|---|---|---|
-| TP-R01 | `GET /api/auth/totp_status` | admin-session GET | body has a boolean `enrolled` field; `INCONCLUSIVE` (not FAIL) on 404 since the route may not be flashed yet | 5 s | no |
+| TP-R01 | `GET /api/auth/totp_status` | admin-session GET | body has a boolean `enrolled` field; `INCONCLUSIVE` (not FAIL) on 404 since the route may not be flashed yet; 401/403 (admin session refused) FAILs | 5 s | no |
 | TP-R02 | `POST /api/auth/forgot` with a wrong code | fixed literal `"000000"` (not a credential); never calls `/api/auth/reset` | 202 with a non-empty `reset_token`, or 503 (clock unsynced), or 429 (login-ladder rate limit); anything else FAILs | 5 s | no |
-| TP-R03 | OPEN-tier check | `forgot`/`reset` sent with no session, fixed wrong code/token/password literals, reset never completed | neither route answers 401/403 | 5 s | no |
+| TP-R03 | OPEN-tier check | `forgot`/`reset` sent with no session, fixed wrong code/token/password literals, reset never completed | neither route answers 401/403 (400 from reset is a PASS); unreachable or 404 on either is `INCONCLUSIVE` | 5 s | no |
 | TP-M01 | Full reset round trip | `KILNCTL_TOTP_CODE`/`KILNCTL_WEB_PASSWORD_NEW` (opt-in via env, SKIP if either is unset) → forgot → reset → login with the new password | forgot 202 + `reset_token`, reset 200, and a real login with the new password succeeds — a `{"ok": true}` reset response is never trusted alone | 10 s | no |
 
 ## 4. Case counts
