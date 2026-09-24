@@ -3851,7 +3851,7 @@ Owner instruction, 2026-09-21.
   256 B against the `75a5e459` mid_firing baseline (2708 to 2100 B free, still
   OK). Both files record `profile_executor` at CRITICAL (468 B of 4096 B
   worst-since-boot) during the firing; a stack raise is dispatched. **Raised
-  2026-09-24 (this commit):** `profile_executor`'s declared
+  2026-09-24 (`b1f6c127`):** `profile_executor`'s declared
   stack 4096 -> 6144 B (`profile_executor_start.c`, INTERNAL DRAM -- this task
   writes NVS on its tick path and cannot use a PSRAM stack). `info_uart_bridge`
   (976 B/3584 B, 27.2%) and `lvgl` (1968 B/8192 B, 24.0%) also read LOW in the
