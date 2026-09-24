@@ -177,8 +177,8 @@ static const panel_desc_t st7796_panel_desc = {
      * against the theme's (47,111,228): every channel reads 5-14 BELOW the
      * theme value, not matching it -- but still a much closer fit than the
      * unswapped (214,106,33) is, so this reading strongly indicates R/B are
-     * swapped under RGB (0x00), pending a second R/B-asymmetric colour
-     * sampled away from the glare noted next.
+     * swapped under RGB (0x00); confirmed below by a second R/B-asymmetric
+     * colour sampled away from the glare noted next.
      *
      * Re-sampled the same button after setting BGR (0x08): (0,166,213) --
      * blue-dominant, consistent with the theme's blue-dominant intent, but
@@ -199,7 +199,20 @@ static const panel_desc_t st7796_panel_desc = {
      * R/B-asymmetric colour (e.g. a saturated blue or red), never a green or
      * a dark/desaturated neutral -- both leave R and B too close together
      * for a swap to be numerically distinguishable from noise -- and sample
-     * away from this button's known specular-glare spot. */
+     * away from this button's known specular-glare spot.
+     *
+     * 2026-09-23 confirmation: sampled a second, independent R/B-asymmetric
+     * colour, read-only, away from the profile button's glare spot -- the
+     * Profiles (manage) page's per-row Delete button (UI_THEME_ACCENT_5
+     * 0xd6555f = R214 G85 B95; swapped would read (95,85,214)). Least-glare
+     * full-frame capture at (900,260) measured (163,61,67): R much greater
+     * than B, matching the theme's R-dominant intent, the unswapped
+     * direction. A separate re-read of the profile button away from its own
+     * glare spot measured (0,153,213): R much less than B, matching that
+     * theme colour's B-dominant intent, also the unswapped direction. Both
+     * readings confirm BGR (0x08) rather than merely indicating it; the
+     * G/B-reads-high-on-the-blue-token camera effect noted above persists
+     * under both settings and remains a separate, unresolved confound. */
     .color_order_bit = 0x08, /* MADCTL D3 set = BGR -- 2026-09-23 evidence above */
     .id_matches = NULL,
     .blank_via_power_off = false, /* safe default; NEEDS BENCH CONFIRMATION, see above */

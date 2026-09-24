@@ -761,7 +761,10 @@
 >   `st7796_panel.c`. Post-fix the button reads blue-dominant, matching the
 >   theme's intent, but not an exact numeric match; the specular-glare
 >   confound noted above is still unresolved and may explain part of the
->   remaining gap.
+>   remaining gap. **Confirmed same day** with a second, independent
+>   R/B-asymmetric colour (the Profiles page's per-row Delete button,
+>   `UI_THEME_ACCENT_5`) sampled away from glare — both readings match the
+>   BGR direction, closing out the "pending" wording in `st7796_panel.c`.
 > - **`s_routes` HTTP route-dispatch table moved to PSRAM** `.bss`:
 >   `bde51605` + `cd6073e5` (review nits). `.dram0.bss` 114408 → 95272 B
 >   against the 101000 B ceiling.
@@ -3251,7 +3254,9 @@ Owner instruction, 2026-09-21.
    camera's specular-glare limit on this region. **Addendum, 2026-09-23:**
    numeric sampling of this same button found and fixed a global MADCTL
    R/B swap (RGB `0x00` -> BGR `0x08`, `st7796_panel.c`); the glare
-   confound on this region is still noted and unresolved.
+   confound on this region is still noted and unresolved. **Confirmed same
+   day** with a second, independent R/B-asymmetric colour read away from
+   glare, both directions matching BGR.
 5. Zero-caller sweep deletion: DONE (`51effca5`) — 11 keep, 12 delete.
 
 **2026-09-21 landings:**
