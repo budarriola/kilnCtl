@@ -88,16 +88,27 @@ from . import mcp_server as _srv
 # separate, explicit tool call, never something a caller has to guess
 # happened silently underneath these.
 # ---------------------------------------------------------------------------
-def _ota_resolve_host(host: Optional[str]) -> str:
+def _ota_resolve_host_with_source(host: Optional[str]) -> "tuple[str, str]":
+    """Same resolution order as `_ota_resolve_host`, but also reports which
+    branch produced the value ("explicit" / "STA IP" / "default") -- a
+    mutating caller (bench_test_run, ota_matrix_run) should always be able
+    to say which board address it actually targeted, since the "default"
+    branch (`ota_http.OTA_AP_DEFAULT_HOST`, itself
+    `host_resolve.resolve_default_host()` evaluated at import time) can be a
+    stale/cached address rather than the board currently on the bench."""
     if host:
-        return host
+        return host, "explicit"
     try:
         status = _srv._wifi.get_status()
         if status.sta_connected and status.sta_ip:
-            return status.sta_ip
+            return status.sta_ip, "STA IP"
     except WifiUartQueryError:
         pass
-    return ota_http.OTA_AP_DEFAULT_HOST
+    return ota_http.OTA_AP_DEFAULT_HOST, "default"
+
+
+def _ota_resolve_host(host: Optional[str]) -> str:
+    return _ota_resolve_host_with_source(host)[0]
 
 
 KILNCTL_AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"

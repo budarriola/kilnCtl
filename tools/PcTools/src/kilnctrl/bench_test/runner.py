@@ -330,11 +330,17 @@ def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = Fal
               allow_heat: bool = True, ap_password: Optional[str] = None,
               tag: Optional[str] = None, host: Optional[str] = None,
               logs_root: Optional[str] = None) -> RunOutcome:
-    """Convenience entry point -- what mcp_server_bench_test.py's
-    bench_test_run() calls. `ap_password` is accepted for parity with the
-    plan's signature but never stored in ctx beyond this call and never
-    written to summary.json/transcript.md (plan §6 rule 9); wave 0's
-    read-only cases do not need it at all."""
+    """Convenience entry point -- NOT what mcp_server_bench_test.py's
+    bench_test_run() calls; that tool builds its own ctx directly (resolving
+    `host` via `mcp_server_ota._ota_resolve_host_with_source` before it ever
+    reaches `ctx`) and constructs `BenchTestRunner` itself. This function has
+    no caller in this tree today; it passes `host` straight through
+    UNRESOLVED (a `None` here reaches `ctx["host"]` literally, same bug
+    `bench_test_run`/`ota_matrix_run` had before it was fixed) -- resolve it
+    the same way before using this as a real entry point. `ap_password` is
+    accepted for parity with the plan's signature but never stored in ctx
+    beyond this call and never written to summary.json/transcript.md (plan
+    §6 rule 9); wave 0's read-only cases do not need it at all."""
     ctx: Dict[str, Any] = {"host": host, "tag": tag}
     runner = BenchTestRunner(ctx, logs_root=logs_root)
     return runner.run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat, tag=tag)

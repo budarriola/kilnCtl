@@ -234,6 +234,7 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
         return f"error: {exc}"
 
     lines = [f"ota_matrix_run: suite=ota run_id={outcome.run_id} exit_code={outcome.exit_code}",
+             f"host: {ctx.get('host')} ({ctx.get('host_source', 'unknown')})",
              f"ap_password: {'provided' if ctx.get('ap_password_available') else 'not provided'}"]
     if not outcome.preflight_ok:
         lines.append(f"PREFLIGHT FAILED: {outcome.preflight_reason}")
@@ -300,8 +301,16 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
     `ap_password` falls back to the `KILNCTL_AP_PASSWORD` environment
     variable when omitted, mirroring `flash_firmware()`; never logged, and
     this tool's own report never echoes it, only whether one was available.
-    `host`/`tag` pass straight through to the same runner `bench_test_run`
-    uses.
+    `host=None` (the default) is resolved before it ever reaches `ctx` --
+    explicit host wins, else the board's STA IP, else the fallback-AP
+    address (`mcp_server_ota._ota_resolve_host_with_source`), same as
+    `bench_test_run` and `get_heap_status`. `tag` passes straight through to
+    the same runner `bench_test_run` uses. The report always names the
+    resolved host and how it was resolved (`explicit`/`STA IP`/`default`),
+    since the `default` fallback can be a stale cached address rather than
+    the board actually on the bench -- worth knowing before a call that can
+    flash both processors. The resolver is never called when
+    `dry_run=True`: a dry run makes no board contact at all.
 
     Before `BenchTestRunner` is even constructed, this tool runs its own
     fail-closed run-level gate (`_run_level_preflight`): safety relay
@@ -325,11 +334,12 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
             "case list and preconditions with no board access."
         )
     resolved_ap_password = _ota_tool._resolve_ap_password(ap_password)
-    resolved_host = _ota_tool._ota_resolve_host(host)
+    resolved_host, host_source = _ota_tool._ota_resolve_host_with_source(host)
     if not resolved_host:
         return "error: could not resolve a board host (no explicit host, no STA IP, no AP default)"
     ctx = {
         "host": resolved_host,
+        "host_source": host_source,
         "ap_password": resolved_ap_password,
         "ap_password_available": resolved_ap_password is not None,
         "ota_image_path": ota_image_path,

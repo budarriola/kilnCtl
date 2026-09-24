@@ -60,13 +60,19 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     `host=None` (the default) is resolved the same way `get_heap_status()`
     resolves it -- explicit host wins (not applicable here), else the
     board's current STA IP, else the fallback-AP address
-    (`mcp_server_ota._ota_resolve_host`) -- before it is ever put into
-    `ctx`. Without this, every HTTP-using case reads `ctx["host"]` as the
-    literal `None` and fails with a DNS/getaddrinfo error rather than
-    falling back to the board's address."""
-    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    (`mcp_server_ota._ota_resolve_host_with_source`) -- before it is ever put
+    into `ctx`. Without this, every HTTP-using case reads `ctx["host"]` as
+    the literal `None` and fails with a DNS/getaddrinfo error rather than
+    falling back to the board's address. Resolving with no explicit `host`
+    makes one read-only UART `wifi.get_status()` call (to check for a
+    connected STA IP) even under `dry_run=True` -- the only board contact
+    a dry run makes. The report always names the resolved host and how it
+    was resolved (`explicit`/`STA IP`/`default`), since the `default`
+    fallback is a possibly-stale cached address, not necessarily the board
+    actually on the bench right now."""
+    from .mcp_server_ota import _ota_resolve_host_with_source  # local import: avoids a circular import with mcp_server_ota.py
 
-    resolved_host = _ota_resolve_host(host)
+    resolved_host, host_source = _ota_resolve_host_with_source(host)
     if not resolved_host:
         return "error: could not resolve a board host (no explicit host, no STA IP, no AP default)"
     case_list = [c.strip() for c in cases.split(",") if c.strip()] if cases else None
@@ -79,7 +85,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
 
-    lines = [f"bench_test_run: suite={suite} run_id={outcome.run_id} exit_code={outcome.exit_code}"]
+    lines = [f"bench_test_run: suite={suite} run_id={outcome.run_id} exit_code={outcome.exit_code}",
+             f"host: {resolved_host} ({host_source})"]
     if not outcome.preflight_ok:
         lines.append(f"PREFLIGHT FAILED: {outcome.preflight_reason}")
     for cid in outcome.requested:
