@@ -705,7 +705,10 @@ void io_segs_tick(float dt_s)
  *   - force_all_relays_off() iterates active zones -- both DONE call sites
  *     (profile_executor.c) call it right after this, and every later
  *     non-RUNNING tick calls it again; clearing here would make it a no-op
- *     and leave relays commanded on.
+ *     and leave relays commanded on. exec_handle_mode_state_violation()
+ *     (also profile_executor.c) depends on the same behavior on its own
+ *     FAULTED transition -- it calls io_segs_force_all_off(false) right
+ *     after this, the same as every other FAULTED path.
  *   - firing_stats_maybe_finalize() -> firing_stats_build_record() copies
  *     z->active into the persisted record on the NEXT tick; clearing here
  *     would persist an empty record and feed adaptive_tune_run_end() nothing.

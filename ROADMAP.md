@@ -1,9 +1,63 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-24, a real `profile_executor`
-> panic found by the heat rerun (run `20260924T085059Z_heat`), root-caused and
-> fixed, plus a new cross-process bench board lock (thirty-seventh sweep) —
-> open items below.
+> **Status:** planning · **Last reviewed:** 2026-09-24, an `exec_mode_state_check()`
+> violation no longer reboots the board, board-lock and LCD-bench-runner review
+> fixes landed, and the forgot-password design was replaced with TOTP
+> (thirty-eighth sweep) — open items below.
+> - **`exec_mode_state_check()` violation now latches FAULTED instead of
+>   rebooting** (`docs/audits/profile_executor_panic_2026-09-24.md` item 4):
+>   `002e71bd` replaces the target-build hard `assert()` at that call site with
+>   `exec_handle_mode_state_violation()` — logs the violated rule, forces
+>   FAULTED with heaters off via the same sequence `escalate_guard_trip()`'s
+>   GLOBAL branch uses, and continues the task loop; a per-run latch stops a
+>   persisting violation from re-firing, and a lifetime counter plus the latch
+>   are reported over the existing `GET /api/profile_exec` route (no new URI
+>   handler). Host/debug builds keep the original hard assert. `118beb79`
+>   review-fixed it to call `exec_enter_terminal_state()` (rather than an
+>   inlined clear), added the missing `io_segs_force_all_off(false)` every
+>   other FAULTED path already does, and preserved an already-FAULTED run's
+>   guard-trip fault reason.
+> - **`exec_enter_terminal_state()` zone-active clear narrowed to IDLE only**:
+>   `4012f8c7` first routed `profile_executor_halt()` through the helper and
+>   made it clear every zone's `active` flag on every terminal transition
+>   (FAULTED/DONE/IDLE); `fe938ef3` found that too broad — `force_all_relays_off()`,
+>   `firing_stats_maybe_finalize()`, `profile_executor_get_status()`, and
+>   `clear_this_runs_faults()` all iterate active zones after a FAULTED/DONE
+>   transition, so clearing `active` there made them no-ops or dropped data.
+>   The clear now runs only on the IDLE transition (i.e. `halt()`), which
+>   already runs all of the above first.
+> - **Bench board lock hardened**: `8e696d78` fixes a stale-reclaim race (a
+>   third acquirer could win the gap between the lock's rename-aside and
+>   put-back) by serializing reclaimers on an `.board_lock.reclaiming`
+>   O_EXCL file, and closes a reader-vs-mutating ordering gap by having both
+>   sides publish their own claim before checking the other's.
+> - **LCD bench runner: click-then-read race and evidence paths fixed**:
+>   `93355ee9` retries a swallowed click only when the board is still on the
+>   pre-click page (a real page move now fails fast as `wrong_page` instead
+>   of tapping a stale target), and gives each captured frame its own
+>   filename so LCD-04's before/after frames stop overwriting each other.
+>   Rerun of the LCD suite against this fix is still pending.
+> - **Forgot-password design replaced with TOTP, owner change 2026-09-24**
+>   (`84fa2e7b`): `docs/EMAIL_PASSWORD_RESET_PLAN.md` is renamed to
+>   `docs/TOTP_PASSWORD_RESET_PLAN.md` (owner rejected email) — authenticator-app
+>   TOTP (RFC 6238, fixed SHA1/6-digit/30s), server-rendered QR enrollment on
+>   the settings page, ESP-side mbedtls HMAC-SHA1 verification with replay
+>   protection and an SNTP sync gate, and a two-route open-tier reset flow
+>   that fits the existing URI handler cap. **Reset-only, not a login second
+>   factor.** The existing LCD four-corner physical reset gesture
+>   (`auth_reset_gesture.c`) is untouched and stays the independent fallback,
+>   and now also disenrolls TOTP on a successful gesture confirm so a gesture
+>   reset can never leave an orphaned TOTP secret locking the account. Work
+>   tranches: WT-C (PcTools MCP wrappers, `totp_enroll_status`/etc.) is up in
+>   `c7db358a`, in review; WT-A (firmware: TOTP core, NVS, routes) and WT-D
+>   (host tests: RFC 6238 Appendix B vectors) are in progress, not yet landed;
+>   WT-B (web UI: settings-page enrollment with QR, "Forgot password?" in the
+>   login modal) has not started.
+> - **Lazy login pop-up, in review**: `04e4a5a0` (worktree `lazylogin`, not
+>   yet landed on `origin/main`) serves page shells without redirecting to a
+>   login page on load, replacing that with one shared, themed, cancelable
+>   login modal instead -- the surface the TOTP plan's "Forgot password?" link
+>   above is meant to attach to.
 > - **`profile_executor` dwell-fault assert, real defect, fixed 2026-09-24**
 >   (`docs/audits/profile_executor_panic_2026-09-24.md`, `3ce065ca`): HP-07's
 >   global thermal guard tripped while the run was dwelling; `escalate_guard_trip()`
@@ -3752,6 +3806,25 @@ Owner instruction, 2026-09-21.
 - [x] Add a bench board lock so concurrent heat/mutating runs cannot share one
   board — done, 2026-09-24 (`d5bfac19`, `759660c2`; see the top-of-file entry
   above).
+- [x] Stop rebooting on an `exec_mode_state_check()` violation -- done,
+  2026-09-24 (`002e71bd`, review fixes `118beb79`): target builds now latch
+  FAULTED and log instead of asserting; host/debug builds keep the hard
+  assert. See the top-of-file entry above.
+- [x] Narrow `exec_enter_terminal_state()`'s zone-active clear to the IDLE
+  transition only -- done, 2026-09-24 (`4012f8c7` then `fe938ef3`); FAULTED/DONE
+  readers (`force_all_relays_off()`, firing-stats finalize, status JSON, fault
+  clear) all depend on `active` staying set past those transitions. See the
+  top-of-file entry above.
+- [x] Harden the bench board lock -- done, 2026-09-24 (`8e696d78`): serialize
+  reclaimers on an O_EXCL mutex file, publish-then-check ordering on both
+  reader and mutating sides. See the top-of-file entry above.
+- [x] Fix the LCD bench runner click-then-read race and per-frame capture
+  naming -- done, 2026-09-24 (`93355ee9`). **Still pending: rerun** the LCD
+  suite against this fix -- no rerun yet.
+- [x] Replace the email forgot-password design with TOTP -- done, 2026-09-24
+  (`84fa2e7b`, owner change); WT-C PcTools wrappers up for review
+  (`c7db358a`, not landed); WT-A (firmware) and WT-D (host tests) in
+  progress; WT-B (web UI) not started. See the top-of-file entry above.
 
 ---
 
