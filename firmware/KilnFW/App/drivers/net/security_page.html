@@ -393,7 +393,8 @@ password below for at least the administrator account before turning authenticat
                                  !state.user_pin_set && !state.admin_pin_set;
         firstBoot.hidden = !(nothingConfigured && !d.web_enabled && !d.lcd_enabled);
       })
-      .catch(function () {
+      .catch(function (authErr) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         policyStatus.textContent = '(could not load current settings)';
       });
   }
@@ -419,7 +420,7 @@ password below for at least the administrator account before turning authenticat
         setStatus(adminPwStatus, 'Saved. You will be signed out.', false);
         loadCurrent();
       })
-      .catch(function (e) { setStatus(adminPwStatus, 'Save failed: ' + e.message, true); });
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(adminPwStatus, 'Save failed: ' + e.message, true); });
   });
 
   // --- User password ---------------------------------------------------------
@@ -439,7 +440,7 @@ password below for at least the administrator account before turning authenticat
         setStatus(userPwStatus, 'Saved.', false);
         loadCurrent();
       })
-      .catch(function (e) { setStatus(userPwStatus, 'Save failed: ' + e.message, true); });
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(userPwStatus, 'Save failed: ' + e.message, true); });
   });
 
   // --- LCD PINs ----------------------------------------------------------
@@ -458,7 +459,7 @@ password below for at least the administrator account before turning authenticat
         setStatus(statusEl, 'Saved.', false);
         loadCurrent();
       })
-      .catch(function (e) { setStatus(statusEl, 'Save failed: ' + e.message, true); });
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(statusEl, 'Save failed: ' + e.message, true); });
   }
   userPinSave.addEventListener('click', function () { savePin('user', userPin, userPinStatus, adminPin); });
   adminPinSave.addEventListener('click', function () { savePin('admin', adminPin, adminPinStatus, userPin); });
@@ -488,7 +489,7 @@ password below for at least the administrator account before turning authenticat
         setStatus(policyStatus, 'Saved.', false);
         loadCurrent();
       })
-      .catch(function (e) { setStatus(policyStatus, 'Save failed: ' + e.message, true); });
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(policyStatus, 'Save failed: ' + e.message, true); });
   });
 
   var clearCredsBtn = document.getElementById('kcSecClearCreds');
@@ -508,7 +509,7 @@ password below for at least the administrator account before turning authenticat
         setStatus(clearCredsStatus, 'Cleared. You will be signed out.', false);
         loadCurrent();
       })
-      .catch(function (e) { setStatus(clearCredsStatus, 'Clear failed: ' + e.message, true); });
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(clearCredsStatus, 'Clear failed: ' + e.message, true); });
   });
 })();
 </script>

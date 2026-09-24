@@ -152,10 +152,14 @@
   // login_page.html's own form, reports back to that same form instead of
   // opening a second modal on top of itself) and the passive session
   // routes (ROUTE_TIER_OPEN, never 401/403 -- listed defensively only).
+  // /api/auth/logout too (2026-09-24 review): it is USER tier, so logging
+  // out on an already-expired session answers 401 -- asking the operator to
+  // sign in so they can sign out is exactly backwards.
   function isAuthExemptUrl(url) {
     var path = String(url).replace(/^[a-zA-Z][\w+.-]*:\/\/[^/]+/, '').split('?')[0];
     return path === '/api/auth/login' || path === '/api/auth/bootstrap_password' ||
-           path === '/api/auth/session' || path === '/api/auth/session/extend';
+           path === '/api/auth/session' || path === '/api/auth/session/extend' ||
+           path === '/api/auth/logout';
   }
 
   var loginModalEl = null, loginTitleEl = null, loginUserEl = null, loginPassEl = null,
@@ -279,6 +283,7 @@
         setSubmitting(false);
         loginFormEl.removeEventListener('submit', onSubmit);
         loginCancelEl.removeEventListener('click', onCancel);
+        loginModalEl.removeEventListener('click', onBackdrop);
         document.removeEventListener('keydown', onKeydown, true);
         loginModalEl.setAttribute('hidden', '');
         if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
@@ -287,6 +292,17 @@
         resolve(ok);
       }
       function onCancel(evt) {
+        if (submitting) return;
+        evt.preventDefault();
+        finish(false);
+      }
+      // Backdrop cancel (2026-09-24 review): a click that lands on the
+      // overlay itself -- outside the panel -- is the same as Cancel. A
+      // click inside the panel bubbles up with a different target and is
+      // ignored here. Ignored while the login POST is in flight, same A2
+      // rule as Escape/Cancel above.
+      function onBackdrop(evt) {
+        if (evt.target !== loginModalEl) return;
         if (submitting) return;
         evt.preventDefault();
         finish(false);
@@ -353,6 +369,7 @@
       }
       loginFormEl.addEventListener('submit', onSubmit);
       loginCancelEl.addEventListener('click', onCancel);
+      loginModalEl.addEventListener('click', onBackdrop);
       // Review fix, 2026-09-21: this listener is on `document` (capture
       // phase), not on the panel. A click on the overlay backdrop moves
       // focus to <body>, and a keydown bound to the panel would then never
@@ -364,10 +381,58 @@
     });
   }
 
+  // ---- Which refusals may raise the modal (2026-09-24 review) ----------
+  //
+  // The owner's rule is "don't show the login until I do something that
+  // would require it". The dashboard ("/") loads and polls a few gated
+  // routes in the background (/api/zones, /api/autotune every 10 s, the
+  // profile list), so "any 401 opens the modal" meant the modal popped on
+  // page load and again every 10 s after each Cancel. A refusal may open
+  // the modal only when:
+  //   - the request was made while a user gesture (click/submit/change/
+  //     keydown) was being dispatched, or it is a write (non-GET/HEAD)
+  //     issued shortly after one (a click handler that first reads, then
+  //     POSTs); or
+  //   - the tab is on a gated page the operator deliberately navigated to
+  //     (anything but the dashboard) and has not already declined the
+  //     modal on this page load; or
+  //   - a modal is already open (the request just joins that login).
+  // Every other refusal rejects quietly with AuthCancelled (prompted:
+  // false), so the page's own kcIsAuthCancelled() check keeps it silent.
+  var kcGestureActive = false, kcLastGestureAt = 0;
+  var KC_WRITE_AFTER_GESTURE_MS = 3000;
+  function kcNoteGesture(evt) {
+    // Typing/clicking inside the modal itself is not a new page action.
+    if (loginModalEl && evt && evt.target && loginModalEl.contains(evt.target)) return;
+    kcGestureActive = true;
+    kcLastGestureAt = Date.now();
+    setTimeout(function () { kcGestureActive = false; }, 0);
+  }
+  ['click', 'submit', 'change', 'keydown'].forEach(function (type) {
+    document.addEventListener(type, kcNoteGesture, true);
+  });
+  function kcRequestIsUserInitiated(method) {
+    if (kcGestureActive) return true;
+    var m = String(method || 'GET').toUpperCase();
+    return m !== 'GET' && m !== 'HEAD' && (Date.now() - kcLastGestureAt) < KC_WRITE_AFTER_GESTURE_MS;
+  }
+  function kcPageIsDashboard() {
+    return window.location.pathname === '/';
+  }
+
   // Only one modal in flight at a time -- if a second 403 arrives while the
   // operator is still typing into the first prompt, it waits on the SAME
   // login instead of stacking a second overlay on top.
   var pendingLogin = null;
+  // Set once the operator declines the modal on this page load (Cancel,
+  // Escape, backdrop): from then on only an explicit action can raise it
+  // again, so a background poll never re-nags. See kcRequestIsUserInitiated.
+  var authPromptDeclined = false;
+  function authPromptAllowed(userInitiated) {
+    if (pendingLogin) return true;
+    if (userInitiated) return true;
+    return !authPromptDeclined && !kcPageIsDashboard();
+  }
   function ensureAdminLogin(titleText) {
     if (!pendingLogin) {
       pendingLogin = openLoginModal(titleText).then(function (ok) {
@@ -412,6 +477,10 @@
     // generic wrapper stands down and hands the 403 straight back to it,
     // rather than both layers opening a modal for the same failure.
     var callerHandlesAuth = !!(init && init.__kcCallerHandlesAuth);
+    // Decided NOW, at call time: the gesture flag only holds during the
+    // event's synchronous dispatch, long gone by the time a response lands.
+    var reqMethod = (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET';
+    var userInitiated = kcRequestIsUserInitiated(reqMethod);
     function retryOnce() {
       var retryInit = {};
       var src = init || {};
@@ -421,7 +490,7 @@
       retryInit.__kcAuthRetried = true;
       return window.fetch(inputForRetry, retryInit);
     }
-    function authCancelled() {
+    function authCancelled(prompted) {
       // Owner report, 2026-09-24: Cancel on the modal must reject the
       // pending action cleanly, distinguishably, so a caller can tell
       // "the operator declined to sign in" apart from any other failure
@@ -431,7 +500,20 @@
       // kc-auth-cancelled handling added alongside this change.
       var e = new Error('sign-in cancelled');
       e.name = 'AuthCancelled';
+      // false: a background request refused without ever showing the modal
+      // (see authPromptAllowed) -- same quiet handling for callers.
+      e.prompted = prompted !== false;
       throw e;
+    }
+    function promptThenRetry(titleText) {
+      if (!authPromptAllowed(userInitiated)) return authCancelled(false);
+      return ensureAdminLogin(titleText).then(function (ok) {
+        if (!ok) {
+          authPromptDeclined = true;
+          return authCancelled(true);
+        }
+        return retryOnce();
+      });
     }
     return nativeFetch(input, init).then(function (resp) {
       if (!alreadyRetried && !callerHandlesAuth && resp.status === 401) {
@@ -447,10 +529,7 @@
         // rejects with AuthCancelled instead of resolving to the raw 401,
         // so a caller's own .then() never mistakes "declined to sign in"
         // for a real response body to parse.
-        return ensureAdminLogin('Sign in required').then(function (ok) {
-          if (!ok) return authCancelled();
-          return retryOnce();
-        });
+        return promptThenRetry('Sign in required');
       }
       if (!alreadyRetried && !callerHandlesAuth && resp.status === 403 &&
           resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
@@ -489,10 +568,7 @@
         // The 428/no-safety-ack path is unaffected either way:
         // kcFetchWithSafetyAck inspects whatever response this wrapper's
         // promise resolves to, retry included.
-        return ensureAdminLogin('Administrator login required').then(function (ok) {
-          if (!ok) return authCancelled();
-          return retryOnce();
-        });
+        return promptThenRetry('Administrator login required');
       }
       return resp;
     });

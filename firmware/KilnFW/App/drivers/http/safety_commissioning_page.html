@@ -1313,13 +1313,15 @@ function wireCtAutoZeroButtons() {
             result.textContent = 'FAILED: ' + (j2.reason || 'unknown error');
             result.className = 'ct-auto-zero-result crc-mismatch';
           }
-        }).catch(function () {
+        }).catch(function (authErr) {
           btn.disabled = false;
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
           result.textContent = 'FAILED: request error';
           result.className = 'ct-auto-zero-result crc-mismatch';
         });
-      }).catch(function () {
+      }).catch(function (authErr) {
         btn.disabled = false;
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         result.textContent = 'FAILED: request error';
         result.className = 'ct-auto-zero-result crc-mismatch';
       });
@@ -1412,8 +1414,9 @@ function wireCtTrimButtons() {
             result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
             result.className = 'ct-trim-result crc-mismatch';
           }
-        }).catch(function () {
+        }).catch(function (authErr) {
           btn.disabled = false;
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
           result.textContent = 'FAILED: request error';
           result.className = 'ct-trim-result crc-mismatch';
         });
@@ -1455,8 +1458,9 @@ function wireCtCalButtons() {
             result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
             result.className = 'ct-cal-result crc-mismatch';
           }
-        }).catch(function () {
+        }).catch(function (authErr) {
           btn.disabled = false;
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
           result.textContent = 'FAILED: request error';
           result.className = 'ct-cal-result crc-mismatch';
         });
@@ -1717,7 +1721,12 @@ function loadCommissioning() {
     gPrefill(data);
     if (typeof gRenderPreflight === 'function') gRenderPreflight(data);
     if (typeof gRenderLoadFailure === 'function') gRenderLoadFailure();
-  }).catch(function () {
+  }).catch(function (authErr) {
+    // The F5 refusal below is a guard, not just a message: it must latch
+    // even when the operator cancelled sign-in, or the guided flow could
+    // proceed on data it never loaded. Only the error text is suppressed.
+    if (typeof gRenderLoadFailure === 'function') { gLoadFailed = true; gRenderLoadFailure(); }
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('fields').innerHTML = '<p class="empty">Could not load commissioning data.</p>';
     // F5 fix (opus review): on this failure gPrefill() never runs -- so
     // #gMainsSelect stays unpopulated (gMainsValue() would return '' for it,
@@ -1775,7 +1784,7 @@ document.getElementById('relayTypeSelect').addEventListener('change', function (
   }).then(function (r) {
     if (!r.ok) { throw new Error('save failed'); }
     msg.textContent = 'Saved.';
-  }).catch(function () { msg.textContent = 'Save failed -- try again.'; });
+  }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; msg.textContent = 'Save failed -- try again.'; });
 });
 
 document.getElementById('saveBtn').addEventListener('click', function () {
@@ -1876,6 +1885,7 @@ document.getElementById('benchBtn').addEventListener('click', function () {
     msg.textContent = 'Test preset applied -- board remains NOT commissioned (test values only).';
     loadCurrent();
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Test preset failed: ' + e.message;
   });
 });
@@ -2300,6 +2310,7 @@ function gCommit() {
     }
   }).catch(function (e) {
     btn.disabled = false;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Save failed: ' + e.message;
   });
 }

@@ -337,7 +337,8 @@ function pollEspStatus() {
     if (phase === 'writing' || phase === 'verifying' || phase === 'finalizing') {
       setTimeout(pollEspStatus, 1000);
     }
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('espInfo').textContent = 'Could not load ESP status.';
   });
 }
@@ -408,7 +409,8 @@ function pollPicoStatus() {
     if (['begin', 'erasing', 'sending', 'retransmit', 'finishing'].indexOf(phase) !== -1) {
       setTimeout(pollPicoStatus, 1000);
     }
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('picoInfo').textContent = 'Could not load Pico status.';
   });
 }
@@ -427,6 +429,7 @@ document.getElementById('espUpdateBtn').addEventListener('click', function () {
       ', version ' + body.version + '. Reboot the board to run it (stays PENDING_VERIFY until confirmed).';
     pollEspStatus();
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'ESP update failed: ' + e.message;
   });
 });
@@ -449,6 +452,7 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
   }).then(function (body) {
     msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Rollback failed: ' + e.message;
   });
 });
@@ -481,7 +485,8 @@ function pollPicoRollbackStatus() {
     if (body.status === 'pending') {
       setTimeout(pollPicoRollbackStatus, 500);
     }
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     msg.textContent = 'Could not load rollback status.';
   });
 }
@@ -510,6 +515,7 @@ document.getElementById('picoRollbackBtn').addEventListener('click', function ()
     renderPicoRollbackStatus(msg, body);
     setTimeout(pollPicoRollbackStatus, 500);
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Rollback failed: ' + e.message;
   });
 });
@@ -532,6 +538,7 @@ document.getElementById('recoveryExitBtn').addEventListener('click', function ()
   }).then(function () {
     msg.textContent = 'Recovery-mode exit accepted -- board is rebooting now.';
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Recovery-mode exit failed: ' + e.message;
   });
 });
@@ -549,6 +556,7 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
       '), relaying over the safety UART link now -- watch the progress bar below.';
     pollPicoStatus();
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Pico update failed: ' + e.message;
   });
 });

@@ -98,6 +98,9 @@ function makeContext(opts) {
     },
     console: console,
   };
+  // The page's catch sites reference window.kcIsAuthCancelled (sign-in
+  // cancel stays quiet); in a browser window is the global object.
+  ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(FULL_SRC, ctx);
   return { ctx: ctx, card: card, fetchCalls: fetchCalls, getClickHandler: function () { return clickHandler; } };

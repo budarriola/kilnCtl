@@ -276,6 +276,51 @@ class WebX03Test(unittest.TestCase):
                 result = REGISTRY["WEB-X-03"].judge(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    # Lazy login (2026-09-24): a listed page shell answers 200 with no
+    # session by design, auth on or off; its /api rows stay gated.
+    _SHELL_TEXT = "\n".join([
+        'ROUTE_TIER("/settings/zones", HTTP_GET, ROUTE_TIER_ADMIN),',
+        'ROUTE_TIER("/api/zones", HTTP_GET, ROUTE_TIER_ADMIN),',
+        '    PAGE_SHELL_URI("/settings/zones"),',
+    ])
+
+    def _run_shell(self, web_enabled, shell_status, api_status=401):
+        ctx = {"host": "1.2.3.4"}
+        responses = {
+            "/api/auth/config": (200, '{"web_enabled":%s}' % ("true" if web_enabled else "false")),
+            "/settings/zones": (shell_status, "<html></html>" if shell_status == 200 else None),
+            "/api/zones": (api_status, None),
+        }
+        with mock.patch("builtins.open", mock.mock_open(read_data=self._SHELL_TEXT)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                return REGISTRY["WEB-X-03"].judge(ctx)
+
+    def test_page_shell_open_with_auth_enabled_passes(self):
+        self.assertEqual(self._run_shell(True, 200).verdict, Verdict.PASS)
+
+    def test_page_shell_redirect_fails_with_auth_enabled(self):
+        self.assertEqual(self._run_shell(True, 302).verdict, Verdict.FAIL)
+
+    def test_page_shell_refused_fails_even_with_auth_disabled(self):
+        self.assertEqual(self._run_shell(False, 401, api_status=200).verdict, Verdict.FAIL)
+
+    def test_page_shell_does_not_open_its_api_route(self):
+        """The shell being open is never evidence for the data route."""
+        self.assertEqual(self._run_shell(True, 200, api_status=200).verdict, Verdict.FAIL)
+
+    def test_real_table_page_shells_are_all_tabled_gets(self):
+        """Every PAGE_SHELL_URI in the real route_tier_table.h is a non-/api
+        GET with its own ROUTE_TIER row -- the same invariant the firmware
+        host test enforces, checked from the parser this sweep uses."""
+        with open(C._route_tier_table_path({}), "r", encoding="utf-8") as f:
+            text = f.read()
+        shells = C.parse_page_shell_uris(text)
+        self.assertEqual(len(shells), 15)
+        gets = {uri for uri, method, _tier in C.parse_route_tier_table(text) if method == "HTTP_GET"}
+        for uri in shells:
+            self.assertFalse(uri.startswith("/api/"), uri)
+            self.assertIn(uri, gets)
+
     def test_post_routes_are_recorded_but_never_invoked(self):
         text = 'ROUTE_TIER("/api/zones", HTTP_POST, ROUTE_TIER_ADMIN),'
         ctx = {"host": "1.2.3.4"}

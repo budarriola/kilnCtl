@@ -786,7 +786,8 @@ function submitIpConfig(mode) {
       lastIpMode = null; /* force the next poll() to re-render the toggle/fields */
       poll();
     })
-    .catch(function () {
+    .catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">' +
         'Could not save IP configuration (check the address/netmask/gateway)</span></li>';
     });
@@ -895,8 +896,9 @@ function poll() {
     } else {
       polling = false;
     }
-  }).catch(() => {
+  }).catch((authErr) => {
     var rows = document.getElementById('statusRows');
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not reach the board</span></li>';
   });
 }
@@ -929,7 +931,8 @@ function submitConnect() {
       poll();
       fetchNetworks();
     })
-    .catch(() => {
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not submit</span></li>';
     });
 }
@@ -944,7 +947,8 @@ function forgetNetwork(ssid, savedCount) {
   fetch('/forget', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                       body: 'ssid=' + encodeURIComponent(ssid) })
     .then(r => { if (!r.ok) throw new Error('rejected'); poll(); fetchNetworks(); })
-    .catch(() => {
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not forget network</span></li>';
     });
 }
@@ -1049,7 +1053,8 @@ document.getElementById('apForm').addEventListener('submit', function (ev) {
       if (!r.ok) throw new Error('rejected');
       poll();
     })
-    .catch(() => {
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not submit</span></li>';
     });
 });
@@ -1059,7 +1064,8 @@ function postMode(mode) {
   rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Switching…</span></li>';
   fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'mode=' + mode })
     .then(r => { if (!r.ok) throw new Error('rejected'); poll(); })
-    .catch(() => {
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not switch</span></li>';
     });
 }

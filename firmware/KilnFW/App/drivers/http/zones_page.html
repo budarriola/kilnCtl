@@ -2888,6 +2888,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       var parsed = JSON.parse(text);
       if (parsed && parsed.reason) text = parsed.reason;
     } catch (parseErr) { /* not JSON -- show as-is */ }
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Save failed: ' + text;
   });
 });
@@ -3861,10 +3862,11 @@ function pollAdaptiveTune() {
         }).catch(function () { pollAdaptiveTune(); });
       });
     });
-  }).catch(function () {
+  }).catch(function (authErr) {
     // Was silently swallowed before, which left this section stuck on
     // "Loading..." forever on any fetch/parse failure (e.g. the truncated
     // /api/adaptive_tune response) with nothing telling the operator why.
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     el.innerHTML = '<p class="empty">Could not load continuous-tuning status.</p>';
   });
 }

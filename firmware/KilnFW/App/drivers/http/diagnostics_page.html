@@ -882,7 +882,7 @@ here:</p>
         } else {
           renderRampAssistError();
         }
-      }).catch(function () { renderRampAssistError(); });
+      }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
     };
   }
   function renderRampAssistError() {
@@ -900,7 +900,7 @@ here:</p>
       return r.json();
     }).then(function (j) {
       renderRampAssist(!!j.enabled);
-    }).catch(function () { renderRampAssistError(); });
+    }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
   }
 
   function setStale(staleSeconds) {
@@ -991,7 +991,8 @@ here:</p>
     });
   }
   function pollCrash() {
-    return fetch('/api/crash_report').then(function (r) { return r.json(); }).then(renderCrash).catch(function () {
+    return fetch('/api/crash_report').then(function (r) { return r.json(); }).then(renderCrash).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('crashCard').innerHTML = crashRow('Status', 'unable to load crash record');
     });
   }
@@ -1065,7 +1066,8 @@ here:</p>
     return fetchJsonTimeout('/api/partitions', 4000).then(function (j) {
       if (!j || !Array.isArray(j.partitions)) throw new Error('malformed /api/partitions response');
       renderPartitions(j);
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('partitionsSection').innerHTML =
         '<p>Could not load the flash partition table (board unreachable, or the request failed/timed out).</p>';
     });
@@ -1199,7 +1201,8 @@ here:</p>
     return fetchJsonTimeout('/api/cfgfs', 4000).then(function (j) {
       if (!j || typeof j.mounted !== 'boolean') throw new Error('malformed /api/cfgfs response');
       renderCfgFs(j);
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('cfgFsCard').innerHTML =
         '<div class="row"><span class="label">Config filesystem</span><span class="value">' +
         'could not load (board unreachable, or the request failed/timed out)</span></div>';
@@ -1255,7 +1258,8 @@ here:</p>
     return fetchJsonTimeout('/api/dualwrite_window', 4000).then(function (j) {
       if (!j || typeof j.consecutive_clean_boots !== 'number') throw new Error('malformed /api/dualwrite_window response');
       renderDualwriteWindow(j);
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('dualwriteWindowCard').innerHTML =
         '<div class="row"><span class="label">Migration exit window</span><span class="value">' +
         'could not load (board unreachable, or the request failed/timed out)</span></div>';
@@ -1484,7 +1488,7 @@ here:</p>
       renderThermoFaults(results[0], results[1]);
       thermoLastGoodAt = Date.now();
       thermoFailCount = 0;
-    }).catch(function () {
+    }).catch(function (authErr) {
       thermoFailCount++;
       // Requirement: this section must never sit on "Loading" forever. If
       // this is the very first poll (no prior successful render at all),
@@ -1497,6 +1501,7 @@ here:</p>
       // page's own staleBanner gives the rest of this page) rather than
       // wiping them.
       if (thermoLastGoodAt == null) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         document.getElementById('thermoChannels').innerHTML =
           '<p>Could not reach the board (request failed or timed out). Retrying&hellip;</p>';
       }
@@ -1525,9 +1530,10 @@ here:</p>
       lastGoodAt = Date.now();
       failCount = 0;
       setStale(null);
-    }).catch(function () {
+    }).catch(function (authErr) {
       failCount++;
       if (lastGoodAt != null) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         setStale(Math.round((Date.now() - lastGoodAt) / 1000));
       }
     });

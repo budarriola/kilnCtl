@@ -128,9 +128,9 @@ class SecHttpClientGetTest(unittest.TestCase):
     def test_302_is_returned_as_302_and_not_followed(self):
         """The WEB-SEC-03 bug: firmware answers an unauthenticated
         non-/api GET with 302 + Location: /login?return=... . A client that
-        auto-follows lands on the login shell with 200 -- exactly the stale
-        premise that made admin_route_gated pass on a page that was never
-        actually gated. This client must observe the 302 itself."""
+        auto-follows lands on the login shell with 200 -- which would make a
+        redirecting page shell look open (page_shell_open) when it is not.
+        This client must observe the 302 itself."""
         client = C._SecHttpClient("1.2.3.4")
         headers = _FakeHeaders({"Location": "/login?return=/settings/zones"})
 
@@ -192,7 +192,7 @@ class JudgeWebRwToggleTest(unittest.TestCase):
 class JudgeWebSec03Test(unittest.TestCase):
     def _happy(self, **overrides):
         kwargs = dict(
-            pw_ok=True, enabled_ok=True, dashboard_ok=True, admin_route_gated=True,
+            pw_ok=True, enabled_ok=True, dashboard_ok=True, page_shell_open=True,
             api_route_gated=True,
             login_ok=True, session_ok=True, extend_ok=True, restore_ok=True, restore_matches=True,
         )
@@ -218,15 +218,16 @@ class JudgeWebSec03Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("set_web_password", result.reason)
 
-    def test_admin_route_not_gated_fails(self):
-        result = J.judge_web_sec03(**self._happy(admin_route_gated=False))
+    def test_page_shell_not_open_fails(self):
+        result = J.judge_web_sec03(**self._happy(page_shell_open=False))
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
 
     def test_api_route_not_gated_fails_even_if_page_route_is_gated(self):
         """The stale-premise bug this fix closes: a 200 on the data-bearing
         GET /api/zones must FAIL even when /settings/zones correctly
-        redirected -- one gated probe is not evidence for the other."""
+        answered as an open page shell -- one probe is not evidence for the
+        other."""
         result = J.judge_web_sec03(**self._happy(api_route_gated=False))
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("api/zones", result.reason)
@@ -394,7 +395,7 @@ class PolicyFromConfigTest(unittest.TestCase):
 class FakeSecClient:
     def __init__(self, web_enabled=False, lcd_enabled=False, web_timeout_min=30, lcd_timeout_min=30,
                  pw_ok=True, enable_ok=True, dashboard_status=200,
-                 admin_page_status=302, admin_page_location="/login?return=/settings/zones",
+                 admin_page_status=200, admin_page_location=None,
                  api_status=401,
                  login_ok=True, session_ok=True, extend_status=200,
                  login_raises=False, restore_ok=True):
@@ -699,19 +700,21 @@ class WebSec03Test(unittest.TestCase):
         # restore (to False) still attempted
         self.assertIn(False, client.set_policy_calls)
 
-    def test_admin_page_not_gated_fails(self):
-        """The stale premise this fix closes: a real client that auto-follows
-        the 302 would see 200 here. FakeSecClient's get_status_location
-        stands in for that observed (non-followed) status directly."""
-        client = FakeSecClient(admin_page_status=200, admin_page_location=None)
+    def test_page_shell_redirect_to_login_fails(self):
+        """Lazy login (2026-09-24): a page shell redirecting to /login is
+        exactly the behaviour the owner rejected. FakeSecClient's
+        get_status_location stands in for the observed (non-followed)
+        status directly."""
+        client = FakeSecClient(admin_page_status=302, admin_page_location="/login?return=/settings/zones")
         ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
 
-    def test_admin_page_redirect_to_wrong_location_fails(self):
-        """A 302 alone is not enough -- it must point at /login."""
-        client = FakeSecClient(admin_page_status=302, admin_page_location="/some/other/page")
+    def test_page_shell_refused_fails(self):
+        """A 401 on the shell itself (the pre-handler exemption missing)
+        fails too -- only a plain 200 counts."""
+        client = FakeSecClient(admin_page_status=401, admin_page_location=None)
         ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)

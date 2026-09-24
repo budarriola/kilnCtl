@@ -676,8 +676,10 @@ def judge_nav_menu(nav_js_text: Optional[str], href_count: Optional[int], expect
 
 def judge_route_tier_sweep(results: "list[dict]") -> CaseResult:
     """WEB-X-03: every GET route actually exercised (OPEN/SAFETY_REDUCE
-    answering without a session, ADMIN answering 401/redirect-to-login
-    without one when the board currently has web auth enabled, and
+    answering without a session, a listed page shell (route_tier_table.h's
+    kPageShellUris[]) answering 200 without one either way, other ADMIN
+    routes answering 401/403/3xx without one when the board currently has
+    web auth enabled, and
     answering normally when it does not -- see cases_web.py's docstring
     for why an ADMIN route's 200 is not itself a failure on a bench with
     auth off) must have behaved as classified. Non-GET rows are recorded
@@ -1397,22 +1399,23 @@ def judge_web_rw_toggle(field: str, original: Any, test_value: Any, write_ok: bo
 
 
 def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
-                     admin_route_gated: Optional[bool], api_route_gated: Optional[bool],
+                     page_shell_open: Optional[bool], api_route_gated: Optional[bool],
                      login_ok: bool, session_ok: bool,
                      extend_ok: bool, restore_ok: bool, restore_matches: bool,
                      state: Optional[dict] = None) -> CaseResult:
     """WEB-SEC-03: enable web auth with the harness credential, verify the
-    auth surface (dashboard still open, an ADMIN-tier page now redirects to
-    login, the data-bearing ADMIN route answers 401, login + session +
-    extend all work), then disable and confirm the restore round-tripped.
+    auth surface (dashboard still open, an ADMIN-tier page shell still
+    answers 200 with no session, the data-bearing ADMIN route answers 401,
+    login + session + extend all work), then disable and confirm the restore
+    round-tripped.
 
-    ``admin_route_gated`` and ``api_route_gated`` are two separate probes,
-    both required: firmware deliberately answers an unauthenticated non-
-    ``/api`` GET (e.g. ``/settings/zones``) with 302 to ``/login`` rather
-    than a 401/403 page (owner decision 2026-09-21, no bare "authentication
-    required" page), while ``GET /api/zones`` -- the data-bearing route --
-    answers exactly 401. A 200 on either is a real gating failure, not
-    evidence the other is fine.
+    ``page_shell_open`` and ``api_route_gated`` are two separate probes,
+    both required: firmware serves a listed page shell (e.g.
+    ``/settings/zones``, route_tier_table.h's kPageShellUris[]) with 200 and
+    no redirect to an unauthenticated GET (lazy login, owner decision
+    2026-09-24: the web UI never shows a login until an action needs one),
+    while ``GET /api/zones`` -- the data-bearing route -- still answers
+    exactly 401. Neither probe is evidence for the other.
 
     Same "restore failure always FAILs, otherwise the verdict is about the
     write path" shape as :func:`judge_web_rw_toggle`, just with more
@@ -1438,10 +1441,11 @@ def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
         return CaseResult(
             Verdict.FAIL, reason="dashboard '/' did not answer 200 while web auth was enabled", observed=observed
         )
-    if not admin_route_gated:
+    if not page_shell_open:
         return CaseResult(
             Verdict.FAIL,
-            reason="/settings/zones did not answer 302 to /login with no session while web auth was enabled",
+            reason="/settings/zones (a page shell) did not answer 200 without a redirect with no session "
+                   "while web auth was enabled",
             observed=observed,
         )
     if not api_route_gated:

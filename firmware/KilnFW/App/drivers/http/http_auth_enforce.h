@@ -177,6 +177,14 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
 // exists). Any non-ALLOW decision is never activity.
 bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision_t decision);
 
+// True only for a GET whose uri is listed in route_tier_table.h's
+// kPageShellUris[] AND has a GET row in kRouteTierTable. The pre-handler
+// serves such a request's static shell even on a DENY decision (the page's
+// own /api/ fetches keep their tier gate); every other route -- any
+// "/api/..." uri, any non-GET method, any unlisted or untabled uri -- keeps
+// the ordinary 401/403. Pure, host-tested in test_http_auth_enforce.c.
+bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method);
+
 #ifdef __cplusplus
 }
 #endif

@@ -343,7 +343,8 @@ function refreshLive() {
       lastWorkingId = live.working_id;
       return loadWorkingCopy(live.working_id, live.editable_from_segment);
     }
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('statusText').className = 'err';
     document.getElementById('statusText').textContent = 'Could not reach the board.';
   });
@@ -362,7 +363,8 @@ document.getElementById('forkBtn').addEventListener('click', function () {
       msg.textContent = '';
       lastWorkingId = null; // force the next refreshLive() to load the fresh working copy
       refreshLive();
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       msg.innerHTML = '<span class="err">Fork failed -- could not reach the board.</span>';
     });
 });
@@ -389,7 +391,8 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       msg.textContent = 'Saved.';
       lastWorkingId = null;
       refreshLive();
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
     });
 });
@@ -413,7 +416,8 @@ function decide(body) {
       msg.textContent = 'Done.';
       lastWorkingId = null;
       refreshLive();
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       msg.innerHTML = '<span class="err">Could not reach the board.</span>';
     });
 }

@@ -489,7 +489,7 @@ if the Pico's diagnostics are too stale to trust.</p>
         clearMsg.textContent = j.ok ? 'Sent -- watch the row above for it to clear.' :
                                ('Refused: ' + (j.error || 'unknown reason'));
       })
-      .catch(function () { clearMsg.textContent = 'Request failed.'; });
+      .catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; clearMsg.textContent = 'Request failed.'; });
   });
 
   var lastGoodAt = null;
@@ -528,8 +528,9 @@ if the Pico's diagnostics are too stale to trust.</p>
       lastGoodAt = Date.now();
       failCount = 0;
       setStale(null);
-    }).catch(function () {
+    }).catch(function (authErr) {
       failCount++;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       if (lastGoodAt != null) setStale(Math.round((Date.now() - lastGoodAt) / 1000));
     });
     pollDiagDetail();
@@ -544,8 +545,9 @@ if the Pico's diagnostics are too stale to trust.</p>
     fetch('/api/status?diag=1').then(function (r) { return r.json(); }).then(function (j) {
       diagDetail = { state: 'ok', data: j };
       renderDiagCard(lastSafetyStatus);
-    }).catch(function () {
+    }).catch(function (authErr) {
       diagDetail = { state: 'failed', data: null };
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       renderDiagCard(lastSafetyStatus);
     });
   }
@@ -681,7 +683,8 @@ if the Pico's diagnostics are too stale to trust.</p>
       } else {
         renderTcInstalled({ notInstalled: !!j.tc_not_installed, injected: !!j.tc_injected });
       }
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       renderPlacement({ error: 'request failed' });
       renderBorrowed({ error: 'request failed' });
       renderTcInstalled({ error: 'request failed' });

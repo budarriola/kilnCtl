@@ -593,9 +593,12 @@ function extract_js_var_string(src, varName) {
       bad++;
       console.log(`nav.js: the Log out button's click handler does not POST /api/auth/logout.`);
     }
-    if (!/window\.location\.href = '\/login';/.test(src)) {
+    // 2026-09-24: logout lands on the dashboard, never a login page --
+    // opening the web UI must never show a login form (owner report).
+    if (!/window\.location\.href = '\/';/.test(src) || /window\.location\.href = '\/login';/.test(src)) {
       bad++;
-      console.log(`nav.js: the Log out button's click handler does not navigate to /login afterward.`);
+      console.log(`nav.js: the Log out button's click handler must navigate to the dashboard ('/') ` +
+                   `afterward, never to /login.`);
     }
     if (!/function setAuthState\(role, webAuthEnabled\)/.test(src) ||
         !/logoutBtnEl\.hidden = !webAuthEnabled \|\| !role \|\| role === 'none';/.test(src)) {

@@ -169,10 +169,11 @@ browser only.</p>
             'is verified.'
           : 'Applies live to the panel backlight.';
       })
-      .catch(function () {
+      .catch(function (authErr) {
         // Best-effort, same convention as app.js's initial kcUnit fetch --
         // leaves the form at its markup defaults (100%/Never/both off) if
         // the board can't be reached yet.
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         status.textContent = '(could not load current settings)';
       });
   }
@@ -194,7 +195,7 @@ browser only.</p>
         return r.json();
       })
       .then(function () { status.textContent = 'Saved.'; })
-      .catch(function () { status.textContent = 'Save failed -- try again.'; });
+      .catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; status.textContent = 'Save failed -- try again.'; });
   });
 })();
 </script>

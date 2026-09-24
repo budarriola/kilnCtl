@@ -117,3 +117,20 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
     }
     return tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN;
 }
+
+bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
+    if (uri == NULL || method != HTTP_GET || strncmp(uri, "/api/", 5) == 0) {
+        return false;
+    }
+    bool listed = false;
+    for (size_t i = 0; i < PAGE_SHELL_URI_COUNT; i++) {
+        if (kPageShellUris[i] != NULL && strcmp(kPageShellUris[i], uri) == 0) {
+            listed = true;
+            break;
+        }
+    }
+    // Belt and braces: an allowlisted uri with no GET row at all would be an
+    // untabled route (fail-closed ADMIN everywhere else); never treat that
+    // as a shell.
+    return listed && http_auth_lookup_tier(uri, HTTP_GET, NULL);
+}

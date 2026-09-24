@@ -1359,6 +1359,7 @@ function renderStep9() {
             }
           });
         }).catch(function (e) {
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
           resultEl.textContent = 'Not applied: ' + e.message;
           resultEl.className = 's10result werr';
         });
@@ -1828,6 +1829,7 @@ function renderStep1() {
         loadAll();
       }).catch(function (e) {
         // Rejection text rendered verbatim, never paraphrased (plan section 1).
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
       });
     });
@@ -1971,6 +1973,7 @@ function renderStep2() {
         });
         loadAll();
       }).catch(function (e) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
       });
     });
@@ -2084,6 +2087,7 @@ function renderStep3() {
             'NOT marked done until every channel verifies.</p>';
         }
       }).catch(function (e) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
       });
     });
@@ -2220,6 +2224,7 @@ function renderStep4() {
           });
           loadAll();
         }).catch(function (e) {
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
           renderErrList(errEl, [String(e.message || e)]);
         });
       }
@@ -2416,6 +2421,7 @@ function renderStep5() {
         });
         loadAll();
       }).catch(function (e) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
       });
     });
@@ -2534,6 +2540,7 @@ function renderStep6() {
             });
             loadAll();
           }).catch(function (e) {
+            if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
             renderErrList(errEl, [String(e.message || e)]);
           });
         });
@@ -2605,8 +2612,9 @@ function wireStep7CtCalButtons() {
             result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
             result.className = 'ct-cal-result crc-mismatch';
           }
-        }).catch(function () {
+        }).catch(function (authErr) {
           btn.disabled = false;
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
           result.textContent = 'FAILED: request error';
           result.className = 'ct-cal-result crc-mismatch';
         });

@@ -38,7 +38,7 @@ reaches them, rather than 401ing whenever it is already on. The three calls
 that are deliberately still bare and unauthenticated are named explicitly at
 their call sites: ``_SecHttpClient.login()``/``.extend_session()`` (WEB-SEC-03
 is testing the login/session surface itself) and ``.get_status()`` used for
-``admin_route_gated``/``dashboard_ok`` (testing what an unauthenticated
+``page_shell_open``/``dashboard_ok`` (testing what an unauthenticated
 visitor sees is the point of that check). ``ctx["http_get_json"]``/
 ``ctx["http_post_json"]`` let unit tests replace the transport with a fake
 sequencer; ``ctx["sec_client"]`` does the same for WEB-SEC-03's richer client
@@ -404,9 +404,9 @@ class _SecHttpClient:
 
     def get_status_location(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str]]":
         """Like ``get_status`` but also returns the ``Location`` header, for
-        WEB-SEC-03's ``/settings/zones`` probe -- the 302-to-login contract
-        (``http_auth_http.c:307-334``) is only actually confirmed by reading
-        where the redirect points, not merely that the status isn't 200."""
+        WEB-SEC-03's ``/settings/zones`` probe -- a page shell must answer
+        200 itself (lazy login, 2026-09-24), so a redirect is recorded with
+        its target as evidence rather than followed."""
         status, _text, headers = self._get(path, cookie=cookie)
         location = None
         if headers is not None:
@@ -499,7 +499,7 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
     pw_ok = False
     enabled_ok = False
     dashboard_ok: Optional[bool] = None
-    admin_route_gated: Optional[bool] = None
+    page_shell_open: Optional[bool] = None
     api_route_gated: Optional[bool] = None
     login_ok = False
     session_ok = False
@@ -532,17 +532,16 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
                 # show for it.
                 state["dashboard_status"] = dashboard_status
                 state["dashboard_body"] = (dashboard_body[:200] if dashboard_body else dashboard_body)
-                # /settings/zones (a page, not /api/*) gets the deliberate
-                # 302-to-/login answer, never a 401/403 page
-                # (http_auth_http.c:307-334, owner decision 2026-09-21: no
-                # bare "authentication required" page, always show the login
-                # shell) -- confirm both the status AND that Location really
-                # points at /login, not merely that it isn't 200. The
-                # data-bearing ADMIN route (GET /api/zones) is checked
-                # separately and must answer exactly 401: a 200 on either
-                # probe is a real gating failure, not evidence for the other.
+                # /settings/zones is a page shell (route_tier_table.h's
+                # kPageShellUris[], lazy login, owner decision 2026-09-24:
+                # opening the web UI never shows a login, no redirect, no
+                # "authentication required" page) -- it must answer 200
+                # itself with no session, never a redirect. The data-bearing
+                # ADMIN route (GET /api/zones) is checked separately and must
+                # still answer exactly 401: the shell being open is never
+                # evidence the data behind it is.
                 page_status, page_location = client.get_status_location("/settings/zones")
-                admin_route_gated = page_status == 302 and bool(page_location) and page_location.startswith("/login")
+                page_shell_open = page_status == 200 and not page_location
                 state["admin_page_status"] = page_status
                 state["admin_page_location"] = page_location
                 api_status = client.get_status("/api/zones")
@@ -581,7 +580,7 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
 
     return J.judge_web_sec03(
         pw_ok=pw_ok, enabled_ok=enabled_ok, dashboard_ok=dashboard_ok,
-        admin_route_gated=admin_route_gated, api_route_gated=api_route_gated,
+        page_shell_open=page_shell_open, api_route_gated=api_route_gated,
         login_ok=login_ok, session_ok=session_ok,
         extend_ok=extend_ok, restore_ok=state["restore"]["post_ok"],
         restore_matches=state["restore"]["readback_matches"], state=state,

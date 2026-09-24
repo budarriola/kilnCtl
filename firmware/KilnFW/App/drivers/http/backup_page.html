@@ -240,10 +240,12 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
         return r.text().then(function (t) { return { ok: r.ok, text: t }; });
       }).then(function (res) {
         status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
-      }).catch(function () {
+      }).catch(function (authErr) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         status.textContent = 'Upload failed -- check the connection and try again.';
       });
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       status.textContent = 'Could not check the restore plan -- check the connection and try again.';
     });
   };

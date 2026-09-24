@@ -233,7 +233,8 @@ function loadKilnConfigs() {
     var haveAny = data.configs.length > 0;
     wrap.hidden = !haveAny;
     empty.hidden = haveAny;
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('kilnConfigPicker').hidden = true;
     document.getElementById('kilnConfigEmpty').hidden = false;
   });
@@ -319,6 +320,7 @@ document.getElementById('kcApplyBtn').addEventListener('click', function () {
     kcSetMsg('Applying "' + cfg.name + '"... (pushing to the safety processor)', false);
     return pollApplyStatus(cfg);
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     kcSetMsg('Apply failed: ' + (e && e.message ? e.message : 'error'), true);
   });
 });
@@ -495,6 +497,7 @@ document.getElementById('kcDownloadBtn').addEventListener('click', function () {
     URL.revokeObjectURL(url);
     kcSetMsg('Downloaded "' + cfg.name + '".', false);
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     kcSetMsg('Download failed: ' + (e && e.message ? e.message : 'error'), true);
   });
 });
@@ -527,6 +530,7 @@ document.getElementById('kcUploadBtn').addEventListener('click', function () {
     input.value = '';
     loadKilnConfigs();
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     kcSetMsg('Upload failed: ' + (e && e.message ? e.message : 'error'), true);
   });
 });

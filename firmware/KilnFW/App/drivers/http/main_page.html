@@ -1084,8 +1084,9 @@ function applyPidPopup() {
     // both land here and are shown verbatim rather than a generic
     // "failed". There is no interlock refusal to handle any more (see
     // this section's own header comment).
-    msgEl.textContent = 'Not applied: ' + e.message;
     applyBtn.disabled = false;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msgEl.textContent = 'Not applied: ' + e.message;
   });
 }
 

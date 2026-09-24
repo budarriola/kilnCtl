@@ -446,13 +446,16 @@
         .catch(function () {
           // Best-effort: whether the server-side revoke succeeded or the
           // request itself failed (e.g. board unreachable), the caller's own
-          // intent was to stop being logged in here -- navigating to /login
+          // intent was to stop being logged in here -- navigating away
           // either way matches http_auth.py's own "logout is idempotent"
           // stance server-side, and a truly dead session cookie is harmless
           // sent to an OPEN route.
         })
         .then(function () {
-          window.location.href = '/login';
+          // The dashboard, not /login (owner report 2026-09-24: opening
+          // the web UI never shows a login -- the modal asks only when an
+          // action needs it). Same destination as app.js's inactivity lock.
+          window.location.href = '/';
         });
     });
     logoutBtnEl = logoutBtn;

@@ -68,7 +68,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     of every ADMIN-tier page route from "302" into "200 <login page HTML>"
     -- and 200 on an ADMIN route with web auth enabled is exactly what that
     sweep exists to fail on. The sweep's grading already accepts a 3xx as a
-    refusal; it just has to be able to SEE one. No caller here wants the
+    refusal; it just has to be able to SEE one. (2026-09-24, lazy login: the
+    pre-handler no longer redirects at all -- listed page shells answer 200
+    and everything else 401/403 -- but a 3xx must still be observed, never
+    followed, so a regression back to redirecting is graded as one.) No caller here wants the
     redirect followed (the other three call sites are ROUTE_TIER_OPEN routes
     that never redirect), so this opener serves all of them.
     """
@@ -209,6 +212,18 @@ def parse_route_tier_table(text: str) -> List[Tuple[str, str, str]]:
     return [(uri, method, tier) for uri, method, tier in _ROUTE_TIER_ROW_RE.findall(text)]
 
 
+#: route_tier_table.h's kPageShellUris[] entries (2026-09-24, lazy login):
+#: the static HTML shells of gated pages, served to a GET with no session so
+#: opening the web UI never shows a login -- every /api route each page
+#: fetches keeps its own tier. Parsed from the same file, never hardcoded.
+_PAGE_SHELL_RE = re.compile(r'PAGE_SHELL_URI\(\s*"(/[^"]*)"\s*\)')
+
+
+def parse_page_shell_uris(text: str) -> "set[str]":
+    """Every ``PAGE_SHELL_URI("uri")`` entry in route_tier_table.h's text."""
+    return set(_PAGE_SHELL_RE.findall(text))
+
+
 def _route_tier_table_path(ctx: dict) -> str:
     return ctx.get("route_tier_table_path") or os.path.join(
         ctx.get("repo_root") or _repo_root(),
@@ -224,6 +239,7 @@ def _case_web_x03(ctx: dict) -> CaseResult:
     except OSError as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not read {path}: {exc}", observed={})
     rows = parse_route_tier_table(text)
+    page_shells = parse_page_shell_uris(text)
     if not rows:
         return CaseResult(Verdict.FAIL, reason=f"no ROUTE_TIER(...) rows parsed from {path}", observed={})
 
@@ -267,6 +283,13 @@ def _case_web_x03(ctx: dict) -> CaseResult:
             # defect this sweep exists to catch. >=500 (server error) also
             # still fails.
             row["ok"] = status is not None and status not in (401, 403, 404) and status < 500
+        elif tier in _ADMIN_TIERS and method == "HTTP_GET" and uri in page_shells:
+            # A page shell is served without a session by design (the lazy-
+            # login pre-handler exemption, http_auth_is_page_shell_get());
+            # anything but 200 is a defect whether auth is on or off. The
+            # page's own /api fetches are separate rows, still gated.
+            row["detail"] = "page shell: served without a session by design"
+            row["ok"] = status == 200
         elif tier in _ADMIN_TIERS:
             if web_enabled:
                 row["ok"] = status in (401, 403) or (status is not None and 300 <= status < 400)

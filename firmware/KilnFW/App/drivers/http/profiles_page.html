@@ -1368,7 +1368,8 @@ function refreshAll() {
     renderList();
     renderFavorites();
     renderRecent();
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('list').innerHTML = '<p class="empty">Could not load profiles.</p>';
     document.getElementById('favList').innerHTML = '<p class="empty">Could not load favorites.</p>';
   });
@@ -1546,7 +1547,8 @@ function bulkExport(ids) {
     downloadJson(bundle, 'kilnctl_profiles_' + ids.length + '.json');
     msg.textContent = 'Exported ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
     exitSelectMode();
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     msg.innerHTML = '<span class="err">Export failed -- could not reach the board.</span>';
   });
 }
@@ -1581,7 +1583,8 @@ function bulkDelete(ids) {
     }
     exitSelectMode();
     refreshAll();
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     msg.innerHTML = '<span class="err">Delete failed -- could not reach the board.</span>';
   });
 }
@@ -1753,8 +1756,9 @@ function buildProfileItem(p, selectable) {
       loaded = true;
       fetch('/api/profile?id=' + p.id).then(function (r) { return r.json(); }).then(function (full) {
         body.innerHTML = segmentTableHtml(full.segments) + onOffRulesSummaryHtml(full.on_off_rules);
-      }).catch(function () {
+      }).catch(function (authErr) {
         loaded = false; // let a retry happen on the next expand
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         body.innerHTML = '<p class="empty">Could not load steps.</p>';
       });
     });
@@ -1898,7 +1902,8 @@ function copyBuiltin(p) {
       }
       msg.textContent = 'Saved a copy into profile slot ' + res.data.id + '.';
       refreshAll();
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       msg.innerHTML = '<span class="err">Copy failed -- could not reach the board.</span>';
     });
 }
@@ -1926,7 +1931,8 @@ function loadIntoEditor(p) {
 function builtinPost(path, body) {
   return fetch(path, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
-  }).then(function () { refreshAll(); }).catch(function () {
+  }).then(function () { refreshAll(); }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('catMsg').innerHTML = '<span class="err">Could not reach the board.</span>';
   });
 }
@@ -1958,7 +1964,8 @@ function editProfile(id) {
     loadOoRulesIntoEditor(p.on_off_rules || []);
     document.getElementById('msg').innerHTML = '';
     window.scrollTo(0, document.body.scrollHeight);
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('msg').innerHTML = '<span class="err">Could not load that profile.</span>';
   });
 }
@@ -1974,7 +1981,8 @@ function deleteProfile(id) {
     return r.text().then(function (body) {
       document.getElementById('msg').innerHTML = '<span class="err">' + window.kcEscapeHtml(body || (r.status + ' ' + r.statusText)) + '</span>';
     });
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';
   });
 }
@@ -2086,7 +2094,8 @@ document.getElementById('importFile').addEventListener('change', function (evt) 
         }
         msg.textContent = 'Imported into profile slot ' + res.data.id + '.';
         refreshAll();
-      }).catch(function () {
+      }).catch(function (authErr) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
         msg.innerHTML = '<span class="err">Import failed -- could not reach the board.</span>';
       });
   };
@@ -2163,7 +2172,8 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       msg.innerHTML = html;
       editingId = result.data.id;
       refreshAll();
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
     });
 });

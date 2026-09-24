@@ -292,6 +292,7 @@ function loadCurrent() {
   }).catch(function (e) {
     /* Never swallow this: an empty catch here is what turns a failed fetch
        into a page that just sits on "Loading" with no explanation. */
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Could not load the current settings: ' + e.message;
   });
 }
@@ -361,6 +362,7 @@ document.getElementById('save').addEventListener('click', function () {
     msg.textContent = 'Saved.';
     loadCurrent();
   }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Save failed: ' + e.message;
   });
 });

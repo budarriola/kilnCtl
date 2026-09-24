@@ -197,7 +197,8 @@ but it will not stop you.</p>
   function poll() {
     fetch('/api/readiness').then(function (r) { return r.json(); }).then(function (j) {
       render(j.items);
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('items').innerHTML = '<p class="empty">Could not load readiness data.</p>';
     });
   }

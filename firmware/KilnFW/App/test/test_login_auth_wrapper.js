@@ -12,7 +12,12 @@
  *   - concurrent 401/403s share ONE modal (the `pendingLogin` singleton);
  *   - a caller that already handled auth itself (kcOtaAuthedFetch's
  *     __kcCallerHandlesAuth) or is retrying (__kcAuthRetried) is never
- *     re-intercepted, so no infinite loop and no double-signing.
+ *     re-intercepted, so no infinite loop and no double-signing;
+ *   - (2026-09-24 review) a BACKGROUND refusal -- no user gesture, on the
+ *     dashboard, or after the operator already declined on this page --
+ *     never opens the modal; it rejects quietly (AuthCancelled,
+ *     prompted:false). kcRequestIsUserInitiated/kcPageIsDashboard are DOM/
+ *     location helpers outside the extracted range and are stubbed here.
  *
  * Same extraction-by-marker-line approach as test_recovery_banner.js. The
  * modal's own DOM (buildLoginModal/openLoginModal -- focus trap, Escape,
@@ -100,7 +105,21 @@ function makeContext(opts) {
       text: function () { return Promise.resolve(spec.text || ''); },
     };
   }
+  // `state` is mutable by a test between calls: userInitiated is what the
+  // stubbed kcRequestIsUserInitiated() answers, dashboard what
+  // kcPageIsDashboard() answers. Defaults keep the pre-review behaviour
+  // (every request user-initiated, not on the dashboard).
+  const state = {
+    userInitiated: opts.userInitiated === undefined ? true : opts.userInitiated,
+    dashboard: !!opts.dashboard,
+    methodsSeen: [],
+  };
   const ctx = {
+    kcRequestIsUserInitiated: function (method) {
+      state.methodsSeen.push(method);
+      return state.userInitiated;
+    },
+    kcPageIsDashboard: function () { return state.dashboard; },
     window: {
       fetch: function (input, init) {
         fetchCalls.push({ input: input, init: init });
@@ -120,7 +139,7 @@ function makeContext(opts) {
   };
   vm.createContext(ctx);
   vm.runInContext(SRC_UNDER_TEST, ctx);
-  return { ctx, fetchCalls, openLoginModalCalls };
+  return { ctx, fetchCalls, openLoginModalCalls, state };
 }
 
 function flush() {
@@ -257,6 +276,115 @@ function flush() {
     const result = await ctx.window.fetch('/api/auth/login', { method: 'POST' });
     assert(openLoginModalCalls.length === 0, '/api/auth/login itself: never intercepted, even on 401');
     assert(result.status === 401, '/api/auth/login itself: raw response handed straight back');
+  }
+  {
+    const { ctx, openLoginModalCalls } = makeContext({
+      fetchResponses: [{ status: 401 }],
+    });
+    const result = await ctx.window.fetch('/api/auth/logout', { method: 'POST' });
+    assert(openLoginModalCalls.length === 0 && result.status === 401,
+      '/api/auth/logout on an expired session: never asks to sign in just to sign out');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 8 (review, 2026-09-24): retry is ONE-SHOT. A retry that is itself
+  // refused (401 again, or a logged-in viewer still lacking the role) hands
+  // the raw response back -- no second modal, no third request.
+  // -------------------------------------------------------------------
+  {
+    const { ctx, fetchCalls, openLoginModalCalls } = makeContext({
+      loginOutcomes: [true, true],
+      fetchResponses: [{ status: 401 }, { status: 401 }, { status: 200 }],
+    });
+    const result = await ctx.window.fetch('/api/zones');
+    assert(openLoginModalCalls.length === 1, 'retry refused again (401): no second modal');
+    assert(fetchCalls.length === 2, 'retry refused again (401): exactly one retry, never a second');
+    assert(result.status === 401, 'retry refused again (401): raw 401 handed back');
+  }
+  {
+    const denied = { status: 403, headers: { 'X-Kiln-Auth-Reason': 'insufficient_role' } };
+    const { ctx, fetchCalls, openLoginModalCalls } = makeContext({
+      loginOutcomes: [true, true],
+      fetchResponses: [denied, denied, { status: 200 }],
+    });
+    const result = await ctx.window.fetch('/api/zones', { method: 'POST' });
+    assert(openLoginModalCalls.length === 1, 'viewer still insufficient after login: no second modal (no loop)');
+    assert(fetchCalls.length === 2, 'viewer still insufficient after login: exactly one retry');
+    assert(result.status === 403, 'viewer still insufficient after login: raw 403 handed back');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 9: background refusal on the dashboard never opens the modal.
+  // -------------------------------------------------------------------
+  {
+    const { ctx, fetchCalls, openLoginModalCalls } = makeContext({
+      userInitiated: false, dashboard: true,
+      loginOutcomes: [true],
+      fetchResponses: [{ status: 401 }, { status: 403, headers: { 'X-Kiln-Auth-Reason': 'insufficient_role' } }],
+    });
+    let c1 = null, c2 = null;
+    try { await ctx.window.fetch('/api/autotune'); } catch (e) { c1 = e; }
+    try { await ctx.window.fetch('/api/zones'); } catch (e) { c2 = e; }
+    assert(openLoginModalCalls.length === 0, 'dashboard background 401/403: no modal on load or poll');
+    assert(c1 && c1.name === 'AuthCancelled' && c1.prompted === false,
+      'dashboard background 401: rejects quietly (AuthCancelled, prompted:false)');
+    assert(c2 && c2.name === 'AuthCancelled' && c2.prompted === false,
+      'dashboard background 403 insufficient_role: rejects quietly');
+    assert(fetchCalls.length === 2, 'dashboard background refusal: never retried');
+  }
+  {
+    // ...but a click on the dashboard does prompt.
+    const { ctx, openLoginModalCalls } = makeContext({
+      userInitiated: true, dashboard: true,
+      loginOutcomes: [true],
+      fetchResponses: [{ status: 401 }, { status: 200 }],
+    });
+    const r = await ctx.window.fetch('/api/profile_exec/start', { method: 'POST' });
+    assert(openLoginModalCalls.length === 1 && r.status === 200, 'dashboard user action: modal opens, retried on login');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 10: on a gated page the operator navigated to, a background load
+  // may prompt ONCE; after Cancel no background refusal re-prompts, but an
+  // explicit action still does.
+  // -------------------------------------------------------------------
+  {
+    const { ctx, openLoginModalCalls, state } = makeContext({
+      userInitiated: false, dashboard: false,
+      loginOutcomes: [false, true],
+      fetchResponses: [{ status: 401 }, { status: 401 }, { status: 401 }, { status: 200 }],
+    });
+    let c1 = null, c2 = null;
+    try { await ctx.window.fetch('/api/zones'); } catch (e) { c1 = e; }
+    assert(openLoginModalCalls.length === 1, 'gated page load: background refusal prompts once');
+    assert(c1 && c1.name === 'AuthCancelled' && c1.prompted === true, 'gated page load + Cancel: AuthCancelled, prompted:true');
+    try { await ctx.window.fetch('/api/zones'); } catch (e) { c2 = e; }
+    assert(openLoginModalCalls.length === 1, 'after Cancel: the next background poll does NOT re-prompt');
+    assert(c2 && c2.name === 'AuthCancelled' && c2.prompted === false, 'after Cancel: background poll rejects quietly');
+    state.userInitiated = true;
+    const r = await ctx.window.fetch('/api/zones', { method: 'POST' });
+    assert(openLoginModalCalls.length === 2 && r.status === 200, 'after Cancel: an explicit action still prompts');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 11: a background refusal that lands while a modal is already open
+  // joins that login instead of failing, and the method is sampled at call
+  // time.
+  // -------------------------------------------------------------------
+  {
+    const { ctx, openLoginModalCalls, state } = makeContext({
+      userInitiated: true, dashboard: true,
+      loginOutcomes: [true],
+      fetchResponses: [{ status: 401 }, { status: 401 }, { status: 200 }, { status: 200 }],
+    });
+    const p1 = ctx.window.fetch('/api/profile_exec/start', { method: 'POST' });
+    state.userInitiated = false;
+    const p2 = ctx.window.fetch('/api/autotune');
+    const both = await Promise.all([p1, p2]);
+    assert(openLoginModalCalls.length === 1 && both[0].status === 200 && both[1].status === 200,
+      'background refusal during an open modal joins the same login');
+    assert(state.methodsSeen[0] === 'POST' && state.methodsSeen[1] === 'GET',
+      'request method is passed to the user-initiated check at call time (default GET)');
   }
 
   console.log('');

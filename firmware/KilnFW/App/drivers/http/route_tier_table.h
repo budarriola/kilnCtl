@@ -404,4 +404,44 @@ static const route_tier_entry_t kRouteTierTable[] = {
 #define ROUTE_TIER_TABLE_COUNT \
     (sizeof(kRouteTierTable) / sizeof(kRouteTierTable[0]))
 
+/* Page shells served WITHOUT a session even when their own ROUTE_TIER row
+ * above is USER/ADMIN (owner report 2026-09-24: opening the web UI must
+ * never show a login; the login is asked for, in a cancelable modal, only
+ * when an action actually needs it). An explicit allowlist -- NOT "any GET
+ * outside /api/" -- so a future non-/api GET route (a download, an export,
+ * anything that returns board state) still gets the ordinary fail-closed
+ * 401/403 unless someone deliberately adds it here. Every entry must be a
+ * static, compiled-in HTML document whose handler embeds no per-board data
+ * server-side (fw_build, MAC, SSID, hostname, ...): the page's own
+ * /api/... fetches keep their real tier gate unchanged.
+ *
+ * http_auth_is_page_shell_get() (http_auth_enforce.c) is the only reader on
+ * the firmware side; test_http_auth_enforce.c pins the count and that every
+ * entry has a GET row above. PcTools' WEB-X-03 bench case parses every
+ * PAGE_SHELL_URI call with a quoted "/..." argument out of this file's raw
+ * text (comments included), so keep one entry per macro call and never
+ * write that shape in a comment. */
+#define PAGE_SHELL_URI(uri) (uri)
+
+static const char *const kPageShellUris[] = {
+    PAGE_SHELL_URI("/settings"),
+    PAGE_SHELL_URI("/settings/backup"),
+    PAGE_SHELL_URI("/settings/display"),
+    PAGE_SHELL_URI("/settings/zones"),
+    PAGE_SHELL_URI("/settings/kiln_configs"),
+    PAGE_SHELL_URI("/settings/safety"),
+    PAGE_SHELL_URI("/settings/security"),
+    PAGE_SHELL_URI("/safety"),
+    PAGE_SHELL_URI("/safety/commissioning"),
+    PAGE_SHELL_URI("/profiles"),
+    PAGE_SHELL_URI("/live_profile"),
+    PAGE_SHELL_URI("/diagnostics"),
+    PAGE_SHELL_URI("/readiness"),
+    PAGE_SHELL_URI("/setup"),
+    PAGE_SHELL_URI("/ota"),
+};
+
+#define PAGE_SHELL_URI_COUNT \
+    (sizeof(kPageShellUris) / sizeof(kPageShellUris[0]))
+
 #endif /* ROUTE_TIER_TABLE_H */

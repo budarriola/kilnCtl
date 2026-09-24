@@ -260,11 +260,14 @@ bool http_auth_caller_is_admin(httpd_req_t *req) {
 // notices the first 401/403 an actual data/action fetch gets back and opens
 // the shared, cancelable login modal in place -- see app.js.
 //
-// Deliberately narrow: only a GET on a non-"/api/" uri qualifies. A POST
-// (mutating) request, or any "/api/..." route, still falls through to the
+// Deliberately narrow: only a GET on a uri listed in route_tier_table.h's
+// kPageShellUris[] allowlist qualifies (http_auth_is_page_shell_get(),
+// host-tested). A POST (mutating) request, any "/api/..." route, and any
+// non-/api GET NOT on that list (a future download/export route, or an
+// untabled route that fails closed to ADMIN) still falls through to the
 // ordinary 401/403 handling below unchanged.
 static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
-    return ctx->method == HTTP_GET && strncmp(ctx->uri, "/api/", 5) != 0;
+    return http_auth_is_page_shell_get(ctx->uri, ctx->method);
 }
 
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {

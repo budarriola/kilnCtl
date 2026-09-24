@@ -318,7 +318,8 @@ document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', funct
     if (res.ok) {
       document.getElementById('cfgFsFormatBanner').hidden = true;
     }
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     status.textContent = 'Request failed -- check the board is reachable and try again.';
   });
 });
@@ -347,7 +348,8 @@ document.getElementById('swResetBtn').addEventListener('click', function () {
     return r.text().then(function (t) { return { ok: r.ok, text: t }; });
   }).then(function (res) {
     status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
-  }).catch(function () {
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
     status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
   });
 });
@@ -375,7 +377,8 @@ document.querySelectorAll('.danger-btn').forEach(function (b) {
       return r.text().then(function (t) { return { ok: r.ok, text: t }; });
     }).then(function (res) {
       status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
-    }).catch(function () {
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
     });
   });
