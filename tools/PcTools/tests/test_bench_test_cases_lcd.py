@@ -673,6 +673,96 @@ class Lcd16PollTest(unittest.TestCase):
         self.assertEqual(result.observed.get("relay_life_has_reset"), True)
 
 
+class FakeTouchThatWakes:
+    """A TouchClient double: inject() records the call and wakes the
+    SwallowingUiTest it is paired with, modeling `screen_idle.c` treating a
+    real touch_inject press/release as a genuine touch for the idle timer
+    and wake decision."""
+
+    def __init__(self, ui):
+        self._ui = ui
+        self.injected = []
+
+    def inject(self, x, y, pressed):
+        self.injected.append((x, y, pressed))
+        self._ui.wake()
+
+
+class SwallowingUiTest(PageNavUiTest):
+    """Models `screen_idle.c`/`lvgl_port.c`'s touch-swallow: while asleep,
+    `click_by_name()` still replies 'ok' (matching the real firmware's
+    behavior -- it only reports whether a target by that name exists, not
+    whether the tap reached it) but never actually navigates. The first
+    real touch_inject (via `wake()`) clears the asleep flag, same as a real
+    panel waking on a tap."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._asleep = True
+
+    def wake(self):
+        self._asleep = False
+
+    def click_by_name(self, name):
+        if self._asleep:
+            return {"result": "ok", "cx": 0, "cy": 0}
+        return super().click_by_name(name)
+
+
+class FakeSrvWithTouch(FakeSrv):
+    def __init__(self, ui_test):
+        super().__init__(ui_test)
+        self._touch = FakeTouchThatWakes(ui_test)
+
+
+class WakeAndHomeTest(unittest.TestCase):
+    """Covers `_wake_and_home()` itself, plus the negative test required
+    alongside it: a UI double that swallows every click until woken must
+    make the OLD path (no wake step) fail, and the NEW path (with the wake
+    step) pass -- proving the fix actually closes the 2026-09-24 bench
+    race rather than merely adding an unused helper."""
+
+    def test_wake_and_home_injects_touch_before_navigating(self):
+        ui = SwallowingUiTest(page="home", page_targets=_CONFIG_TARGETS and {
+            "home": [], "config": _CONFIG_TARGETS,
+        }, nav_map={"settings": "config"})
+        srv = FakeSrvWithTouch(ui)
+        ctx = {"srv": srv}
+        C._wake_and_home(ctx)
+        self.assertEqual(srv._touch.injected, [(5, 5, True), (5, 5, False)])
+        self.assertFalse(ui._asleep)
+        self.assertEqual(ui.get_current_page(), "home")
+
+    def test_wake_and_home_is_one_shot_per_run(self):
+        ui = SwallowingUiTest(page="home", page_targets={"home": []}, nav_map={})
+        srv = FakeSrvWithTouch(ui)
+        ctx = {"srv": srv}
+        C._wake_and_home(ctx)
+        first_count = len(srv._touch.injected)
+        C._wake_and_home(ctx)
+        self.assertEqual(len(srv._touch.injected), first_count)
+
+    def test_blanked_screen_swallow_old_path_fails_new_path_passes(self):
+        page_targets = {"home": [], "config": _CONFIG_TARGETS}
+        nav_map = {"settings": "config"}
+
+        # OLD path: no wake step at all -- click_by_name('settings') reports
+        # 'ok' (swallowed-but-ok, per screen_idle.c's real behavior) while
+        # the page never actually changes, so LCD-08 must FAIL.
+        ui_old = SwallowingUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
+        srv_old = FakeSrvWithTouch(ui_old)
+        with mock.patch.object(C, "_wake_and_home", lambda ctx: None):
+            result_old = C._case_lcd08({"srv": srv_old})
+        self.assertEqual(result_old.verdict, Verdict.FAIL)
+
+        # NEW path: the real _wake_and_home runs first, sends the wake tap,
+        # and the same case now passes.
+        ui_new = SwallowingUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
+        srv_new = FakeSrvWithTouch(ui_new)
+        result_new = C._case_lcd08({"srv": srv_new})
+        self.assertEqual(result_new.verdict, Verdict.PASS)
+
+
 class Lcd21Test(unittest.TestCase):
     def test_uses_pages_visited_by_earlier_cases(self):
         ctx = {"_lcd_pages_visited": {

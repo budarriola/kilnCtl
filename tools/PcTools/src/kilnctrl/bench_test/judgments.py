@@ -12,7 +12,7 @@ confirms it reports FAIL/INCONCLUSIVE rather than PASS.
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from .registry import CaseResult, Verdict
 
@@ -175,7 +175,24 @@ def judge_stack_margin(report_text: str, min_free_bytes: Optional[int] = None) -
     return CaseResult(Verdict.PASS, observed={"report": report_text})
 
 
-def judge_stack_margin_against_baseline(entries, baseline_by_name: dict, min_free_bytes: Optional[int] = None) -> CaseResult:
+#: SK-02's live 2026-09-24 bench run FAILed on 4-8 B drops against baseline
+#: on tasks nobody touched -- ordinary run-to-run noise (compiler frame-
+#: layout shifts from unrelated code elsewhere in the same translation unit,
+#: and path differences between two runs of the same task, e.g. which branch
+#: of an if/else happened to run deepest) rather than a real regression.
+#: This tolerance absorbs that noise; a drop bigger than this many bytes is
+#: still a hard FAIL (never silently masked -- see the negative test in
+#: test_judgments.py), and a task under its configured absolute floor
+#: (``min_free_bytes``) still FAILs regardless of this tolerance.
+_STACK_MARGIN_NOISE_TOLERANCE_BYTES = 64
+
+
+def judge_stack_margin_against_baseline(
+    entries, baseline_by_name: dict, min_free_bytes: Optional[int] = None,
+    board_fw_commit: Optional[str] = None,
+    baseline_fw_commits: "Optional[Iterable[str]]" = None,
+    tolerance_bytes: int = _STACK_MARGIN_NOISE_TOLERANCE_BYTES,
+) -> CaseResult:
     """SK-01/SK-02 (wave 1d): compares a live ``StackMarginEntry`` reading
     against the committed baseline's worst-case-across-conditions figure
     per task name (``stack_margin_baseline.worst_case_across_conditions()``).
@@ -183,12 +200,23 @@ def judge_stack_margin_against_baseline(entries, baseline_by_name: dict, min_fre
     Per plan §3.3's note: a task with no baseline record at all is
     INCONCLUSIVE for that task (not FAIL -- there is nothing to compare
     against yet) rather than sinking the whole case; a task that regressed
-    below its own committed worst case is FAIL. ``min_free_bytes``, when
-    given (SK-02's absolute floor), FAILs any live task under that many
-    bytes free regardless of what the baseline says -- the httpd stack blob
-    class (project memory project_httpd_stack_blob_class) is exactly a task
-    that looked fine relative to its own history but was dangerously close
-    in absolute terms.
+    below its own committed worst case by more than ``tolerance_bytes``
+    (see :data:`_STACK_MARGIN_NOISE_TOLERANCE_BYTES`) is FAIL. ``min_free_bytes``,
+    when given (SK-02's absolute floor), FAILs any live task under that many
+    bytes free regardless of what the baseline says or the tolerance -- the
+    httpd stack blob class (project memory project_httpd_stack_blob_class) is
+    exactly a task that looked fine relative to its own history but was
+    dangerously close in absolute terms.
+
+    ``board_fw_commit``/``baseline_fw_commits``, when both given, let a drop
+    that fits inside the tolerance be attributed to "different build,
+    unknown whether comparable" rather than silently passed: a tolerance-only
+    miss (drop > 0 but <= ``tolerance_bytes``) downgrades from an implicit
+    PASS to INCONCLUSIVE, with the mismatch named in the reason text, when
+    the board's running commit is not among the baseline's own commits. A
+    drop beyond the tolerance is still FAIL regardless of any commit
+    mismatch -- the mismatch never masks a real regression, only softens the
+    verdict on a difference small enough to plausibly be noise.
 
     A dead (``alive=False``) task is never scored against a byte figure --
     it FAILs outright, since a task that was never created or was deleted
@@ -208,7 +236,8 @@ def judge_stack_margin_against_baseline(entries, baseline_by_name: dict, min_fre
             if e.hwm_bytes < min_free_bytes
         ]
 
-    regressed = []
+    regressed_beyond_tolerance = []
+    regressed_within_tolerance = []
     inconclusive_tasks = []
     for e in entries:
         base = baseline_by_name.get(e.name)
@@ -217,14 +246,28 @@ def judge_stack_margin_against_baseline(entries, baseline_by_name: dict, min_fre
             continue
         if not base.alive:
             continue
-        if e.hwm_bytes < base.hwm_bytes:
-            regressed.append({"task": e.name, "hwm_bytes": e.hwm_bytes, "baseline_hwm_bytes": base.hwm_bytes})
+        drop = base.hwm_bytes - e.hwm_bytes
+        if drop <= 0:
+            continue
+        entry_info = {"task": e.name, "hwm_bytes": e.hwm_bytes, "baseline_hwm_bytes": base.hwm_bytes, "drop_bytes": drop}
+        if drop > tolerance_bytes:
+            regressed_beyond_tolerance.append(entry_info)
+        else:
+            regressed_within_tolerance.append(entry_info)
+
+    baseline_commits_set = set(baseline_fw_commits) if baseline_fw_commits else set()
+    commit_mismatch = bool(board_fw_commit) and bool(baseline_commits_set) and board_fw_commit not in baseline_commits_set
 
     observed = {
         "entries": [{"name": e.name, "hwm_bytes": e.hwm_bytes, "configured_stack_bytes": e.configured_stack_bytes} for e in entries],
         "below_floor": below_floor,
-        "regressed": regressed,
+        "regressed_beyond_tolerance": regressed_beyond_tolerance,
+        "regressed_within_tolerance": regressed_within_tolerance,
         "no_baseline": inconclusive_tasks,
+        "tolerance_bytes": tolerance_bytes,
+        "board_fw_commit": board_fw_commit,
+        "baseline_fw_commits": sorted(baseline_commits_set),
+        "commit_mismatch": commit_mismatch,
     }
 
     if below_floor:
@@ -233,11 +276,23 @@ def judge_stack_margin_against_baseline(entries, baseline_by_name: dict, min_fre
             reason=f"{len(below_floor)} task(s) below the {min_free_bytes} B absolute floor",
             observed=observed,
         )
-    if regressed:
-        names = ", ".join(r["task"] for r in regressed)
+    if regressed_beyond_tolerance:
+        names = ", ".join(r["task"] for r in regressed_beyond_tolerance)
         return CaseResult(
             Verdict.FAIL,
-            reason=f"{len(regressed)} task(s) below their committed baseline: {names}",
+            reason=f"{len(regressed_beyond_tolerance)} task(s) dropped more than the {tolerance_bytes} B noise "
+                   f"tolerance below their committed baseline: {names}",
+            observed=observed,
+        )
+    if regressed_within_tolerance and commit_mismatch:
+        names = ", ".join(r["task"] for r in regressed_within_tolerance)
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(
+                f"fw_commit mismatch (board={board_fw_commit!r}, baseline={sorted(baseline_commits_set)!r}): "
+                f"{len(regressed_within_tolerance)} task(s) within the {tolerance_bytes} B noise tolerance "
+                f"cannot be scored against a different build: {names}"
+            ),
             observed=observed,
         )
     if inconclusive_tasks:
@@ -599,6 +654,24 @@ def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResul
 # list_tap_targets() returns: [{"name","cx","cy","hidden"}, ...].
 # ---------------------------------------------------------------------------
 
+#: Appended to a page-mismatch FAIL reason (the case waited for a specific
+#: page after a click_by_name() that itself replied "ok") so a screen-idle
+#: swallow is named as a likely cause rather than a reader having to already
+#: know about it: screen_idle.c/lvgl_port.c's touch_swallow path wakes the
+#: panel on a tap but swallows that same tap, so click_by_name() still
+#: replies "ok" while nothing actually navigated. cases_lcd.py's
+#: `_wake_and_home()` runs once per run before the first case that clicks a
+#: named target, so this should be rare after that fix, but a case can still
+#: race a NEW idle-blank between two of its own clicks (e.g. LCD-09/14/16's
+#: multi-hop navigation), which that one-shot wake does not cover.
+BLANKED_SCREEN_HINT = (
+    " (if spurious: the panel may have auto-blanked and swallowed this tap "
+    "-- screen_idle.c/lvgl_port.c's touch_swallow path wakes the screen on "
+    "a tap but swallows that same tap, so click_by_name() still replies "
+    "'ok' while nothing actually navigated)"
+)
+
+
 def _find_target(targets: "list[dict]", name: str) -> "Optional[dict]":
     """Case-insensitive lookup: firmware labels are Title Case (e.g.
     ui_page_home.c's "Start") while callers here pass lowercase literals
@@ -623,7 +696,7 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
     """
     observed = {"page": page, "targets": targets}
     if page != "home":
-        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'home'", observed=observed)
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'home'" + BLANKED_SCREEN_HINT, observed=observed)
     start = _find_target(targets, "start")
     if start is None or start.get("hidden"):
         return CaseResult(Verdict.FAIL, reason="Start target missing or hidden on home/idle", observed=observed)
@@ -658,7 +731,7 @@ def judge_lcd_config_hub(page: str, targets: "list[dict]",
     callers that know the board has it should pass the 5-tuple."""
     observed = {"page": page, "targets": targets}
     if page != "config":
-        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'config'", observed=observed)
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'config'" + BLANKED_SCREEN_HINT, observed=observed)
     names = {t.get("name") for t in targets if not t.get("hidden")}
     missing = [t for t in expected_tiles if t not in names]
     if missing:
@@ -820,7 +893,7 @@ def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: boo
         "new_icon_present": new_icon_present, "detail_page": detail_page,
     }
     if page != "profiles":
-        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'profiles'", observed=observed)
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'profiles'" + BLANKED_SCREEN_HINT, observed=observed)
     if len(rows) > max_rows:
         return CaseResult(Verdict.FAIL, reason=f"{len(rows)} rows shown, expected <= {max_rows}", observed=observed)
     favorites = [r for r in rows if r.get("starred")]
@@ -854,7 +927,7 @@ def judge_lcd_temperature_page(page: str, zone_rows: "dict[int, float]",
         "safety_on": safety_on, "expect_safety_on": expect_safety_on,
     }
     if page != "temperature":
-        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'temperature'", observed=observed)
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'temperature'" + BLANKED_SCREEN_HINT, observed=observed)
     if not zone_rows:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no zone rows with a numeric value were reported", observed=observed)
     mismatches = {}

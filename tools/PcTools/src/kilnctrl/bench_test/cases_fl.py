@@ -141,7 +141,11 @@ def _judge_against_baseline(ctx: dict, condition: str, min_free_bytes: Optional[
     info_dead = _dead_by_design_names(ctx, entries)
     scored_entries = [e for e in entries if e.name not in info_dead] if info_dead else entries
 
-    result = J.judge_stack_margin_against_baseline(scored_entries, baseline_by_name, min_free_bytes=min_free_bytes)
+    baseline_fw_commits = {r.fw_commit for r in committed if r.fw_commit}
+    result = J.judge_stack_margin_against_baseline(
+        scored_entries, baseline_by_name, min_free_bytes=min_free_bytes,
+        board_fw_commit=fw_version.commit, baseline_fw_commits=baseline_fw_commits,
+    )
     if info_dead:
         if result.observed is None:
             result.observed = {}

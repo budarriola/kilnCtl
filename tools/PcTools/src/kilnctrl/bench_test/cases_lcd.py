@@ -39,6 +39,55 @@ from .registry import CaseResult, Verdict, get_case
 _PAGE_POLL_TIMEOUT_S = 2.0
 _PAGE_POLL_INTERVAL_S = 0.1
 
+#: A SECOND, distinct race from the one above: `screen_idle.c`'s auto-blank
+#: state machine can put the panel to sleep between bench-test cases (or
+#: even between preflight and the first LCD case), and firmware's injected-
+#: touch path (`lvgl_port.c:556-579`) calls `screen_idle_touch_swallow()`
+#: *before* hit-testing a synthetic tap -- so a `click_by_name()` that
+#: arrives while the panel is blanked WAKES the screen but the tap itself is
+#: swallowed, while `kiln_ui_click_by_name()` (`kiln_ui.c:782-797`) still
+#: replies "ok" (it only reports whether a target by that name existed, not
+#: whether the resulting tap actually reached it). This is exactly the
+#: 2026-09-24 bench failure shape for LCD-01/08/09/14/16: click_by_name()
+#: said ok, but the page never changed because the first tap only woke the
+#: panel. `_wake_and_home()` below sends one real touch_inject press/release
+#: (which the idle state machine treats as a real touch and uses to reset
+#: its timer and wake the panel, same as a finger) and confirms the home
+#: page before any case starts tapping named targets for real.
+_WAKE_TOUCH_XY = (5, 5)
+
+#: judgments.py's page-mismatch FAIL reasons (judge_lcd_home_idle,
+#: judge_lcd_config_hub, judge_lcd_profiles_picker, judge_lcd_temperature_page)
+#: append `judgments.BLANKED_SCREEN_HINT` to name this same race as a likely
+#: cause when the page a case waited for never arrived -- see that module
+#: for the hint text (kept there, not here, since this module would
+#: otherwise need a reason string round trip through judgments.py just to
+#: reuse a constant).
+
+
+def _wake_and_home(ctx: dict) -> None:
+    """One-shot per run (``ctx["_lcd_woken"]``): wake the panel via a real
+    ``touch_inject`` press+release, then navigate back to home and confirm
+    it via the existing page-poll helper. Best-effort -- a TOUCH-task query
+    failure (board not wired for touch injection, transport hiccup) must
+    never crash a case; if the wake itself fails, the case's own
+    click/page-wait logic still runs and fails honestly on its own terms
+    rather than this helper manufacturing a false precondition failure."""
+    if ctx.get("_lcd_woken"):
+        return
+    ctx["_lcd_woken"] = True
+    srv = _srv(ctx)
+    touch = getattr(srv, "_touch", None)
+    if touch is not None:
+        try:
+            x, y = _WAKE_TOUCH_XY
+            touch.inject(x, y, True)
+            touch.inject(x, y, False)
+        except Exception:
+            pass
+    ui = srv._ui_test
+    _navigate_home(ui)
+
 
 def _wait_for_page(ui, expected: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
                     interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[str, float]":
@@ -155,6 +204,7 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
 # ---------------------------------------------------------------------------
 
 def _case_lcd01(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
     page = ui.get_current_page()
@@ -177,6 +227,7 @@ def _case_lcd01(ctx: dict) -> CaseResult:
 # ---------------------------------------------------------------------------
 
 def _case_lcd08(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
     click = ui.click_by_name("settings")
@@ -370,6 +421,7 @@ def _case_lcd04(ctx: dict) -> CaseResult:
 # ---------------------------------------------------------------------------
 
 def _case_lcd09(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
     try:
@@ -406,6 +458,7 @@ def _case_lcd09(ctx: dict) -> CaseResult:
 # ---------------------------------------------------------------------------
 
 def _case_lcd14(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
     try:
@@ -451,6 +504,7 @@ def _case_lcd14(ctx: dict) -> CaseResult:
 # ---------------------------------------------------------------------------
 
 def _case_lcd16(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
     titles_seen = []

@@ -141,6 +141,65 @@ class StackMarginAgainstBaselineTest(unittest.TestCase):
         r = J.judge_stack_margin_against_baseline([], {}, min_free_bytes=None)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_drop_within_tolerance_same_commit_passes(self):
+        """4-8 B drops on an unchanged commit are ordinary run-to-run noise
+        (2026-09-24 bench finding) -- must not FAIL."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=794)]  # 6 B drop, well under the 64 B tolerance
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_drop_beyond_tolerance_fails(self):
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=700)]  # 100 B drop, beyond the 64 B tolerance
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("thermo_task", r.reason)
+
+    def test_drop_within_tolerance_cross_commit_is_inconclusive(self):
+        """The same 6 B drop, but the baseline was captured on a different
+        commit than the one currently running -- cannot tell noise from a
+        real (small) regression on a different build, so this downgrades to
+        INCONCLUSIVE rather than a silent PASS or a FAIL."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=794)]
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit="1112222", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("mismatch", r.reason)
+        self.assertIn("thermo_task", r.reason)
+
+    def test_tolerance_cannot_mask_a_beyond_tolerance_drop_cross_commit(self):
+        """Negative test: a commit mismatch must never turn a real,
+        beyond-tolerance regression into anything softer than FAIL."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=700)]  # 100 B drop, beyond tolerance
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit="1112222", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_floor_fails_regardless_of_tolerance(self):
+        """A task under its configured warn threshold FAILs even when its
+        drop from baseline is within the noise tolerance."""
+        baseline = {"httpd_worker": _entry("httpd_worker", hwm=520)}
+        entries = [_entry("httpd_worker", hwm=500)]  # 20 B drop (within tolerance), below 512 B floor
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=512,
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("floor", r.reason)
+
 
 class Fl09ProjectDescriptionTest(unittest.TestCase):
     def test_no_match_still_fails(self):
