@@ -448,7 +448,13 @@
 >   `wifi_provision_http.c`'s blob moved again (`b7bc31d2`, twenty-seventh
 >   sweep's heap move), reddening `check_doc_hash_citations.ps1` against the
 >   old 8fc84030 citation; the underlying claim still held, so the citation
->   was updated to blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`06e191a4` and the old one marked superseded.
+>   was updated to blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c
+>   06e191a4 (not backtick-quoted, per this doc's own convention for a
+>   superseded citation) and the old one marked superseded.
+>   That 06e191a4 citation is itself now superseded by a further unrelated
+>   edit to the file; the underlying claim (the `max_uri_handlers` cap-vs-
+>   route-count guard) still holds, so it was refreshed to
+>   blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`f22fcfff` (citation refreshed 2026-09-24).
 > - **Pending:** `cfg_fs_list`'s scratch heap move is still in review.
 > - **Bench commission flash still blocked, and now on a second, independent
 >   gap**: `check_00_kilnfw_target_build.ps1` publishes only

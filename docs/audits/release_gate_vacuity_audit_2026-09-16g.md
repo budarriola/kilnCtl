@@ -131,8 +131,14 @@ statement inside `json_escape()` in
 `firmware/KilnFW/App/drivers/http/dashboard_json.c`. Result: FAILED, naming
 the file:line and the exact unauthorized call. Restored via exact
 string-replace; `git diff --quiet` empty; `git hash-object` (first 8 chars
-blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`cc9dfc29`) matched
-HEAD. Re-run: PASS.
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c
+cc9dfc29 (not backtick-quoted here, per this repo's superseded-citation
+convention), since superseded
+by later unrelated edits to the file; the underlying finding -- that
+`json_escape()` is where the negative test was inserted and that the
+restore was byte-exact -- is unchanged, so the citation is refreshed to
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`827811aa` (citation
+refreshed 2026-09-24)) matched HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
@@ -148,7 +154,13 @@ and `profile_executor_status.c` (lines 59, 153). Result: FAILED —
 "profile_executor ... no heat_enable_release() call...". Restored via sed
 removing the prefix; `git diff --quiet` empty on both files;
 `git hash-object` (first 8 chars
-blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`489bc22c`
+blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
+489bc22c (not backtick-quoted here, per this repo's superseded-citation
+convention), since superseded by a later unrelated edit; line 505 still holds the same
+`heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
+targeted, so the citation is refreshed to
+blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`1cebc8aa`
+(citation refreshed 2026-09-24))
 and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
 -- that file has since changed, so its blob id is no longer cited as
 resolvable against current HEAD) matched HEAD on both at audit time. Re-run:
@@ -177,9 +189,11 @@ here for the same reason), then commit ca202dbf's revert of an unnecessary
 citation 8fc84030, prefix not backtick-quoted here for the same reason),
 then commit b7bc31d2's move of `networks_get_handler`'s JSON buffer off the
 stack to heap scratch, unrelated to this check's subject (the auth/gate
-logic the negative test exercises is unchanged) --
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`06e191a4`
-is the current one; see check_doc_hash_citations.ps1). Re-run at that time:
+logic the negative test exercises is unchanged), then a further unrelated
+edit that superseded citation 06e191a4 too --
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`f22fcfff`
+is the current one (citation refreshed 2026-09-24); see
+check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3
 spare slots for 137 routes against a cap of 140. That cap/count pair is
 itself now stale (superseded, like the blob above, by ordinary route/cap

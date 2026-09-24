@@ -437,7 +437,7 @@ Board: 192.168.1.156 (COM14), ESP `05f1ab1f` (owner-designated
 `ab4ccb36`-equivalent for this pass), Pico `987050f6`, web auth ON. MCP
 servers restarted first to shed staleness and match HEAD exactly
 (`kilnctrl` was 4 commits stale at `05f1ab1f`->`ab4ccb36`, `kicad` already
-fresh); both reported `fresh` at `ab4ccb36`/`39ddbde` before any board call.
+fresh); both reported `fresh` at `ab4ccb36`/sub:mykicadMcp`39ddbde` before any board call (mykicadMcp submodule commit; tag added 2026-09-24, no change of fact).
 
 **Preflight.** No firing running (`profiles_get_exec_status` state=0).
 `get_readiness`: 16 ok, 2 not_done (`safety_commissioned` 6/68 unset,

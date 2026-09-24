@@ -63,12 +63,15 @@ silent PASS or a SKIP).
 `git hash-object firmware/SaftyFW/src/tasks/link_frame.c` —
 matched the pre-sabotage hash taken before the edit at the time of this
 audit. The file has since been edited for unrelated reasons (2026-09-23,
-`cc060a5c`), so the blob citation below is refreshed to HEAD's current
-content rather than the 2026-09-17 value, per this repo's standing
-blob-citation-staleness practice — this does not change the finding, which
-was that the restored file's hash matched its own pre-sabotage hash, not
-any particular fixed value:
-blob:firmware/SaftyFW/src/tasks/link_frame.c`e934d1359ca7bddb3bfe5c2e431fd5007999a39c`.
+`cc060a5c`), so the blob citation below was refreshed once already to
+HEAD's current content at that time rather than the 2026-09-17 value, per
+this repo's standing blob-citation-staleness practice — this does not
+change the finding, which was that the restored file's hash matched its
+own pre-sabotage hash, not any particular fixed value. That refreshed
+citation is itself now superseded by a further unrelated edit, so it is
+refreshed again:
+blob:firmware/SaftyFW/src/tasks/link_frame.c`7bf1ad16` (citation refreshed
+2026-09-24).
 
 **Forced full rebuild:** deleted `firmware/SaftyFW/build` entirely (not a
 reconfigure-in-place) and re-ran the check from scratch. **PASS**, exit 0,
