@@ -110,6 +110,50 @@ independent corner-by-corner re-measurement to the same precision as the
 Captures saved to the scratchpad only (`C:\Users\budar\AppData\Local\Temp\claude\lcd_full_20260921.jpg`,
 `...\lcd_crop_20260921.jpg`), not the repo.
 
+## Camera aim (2026-09-24, round 3): `lcd_sampler.FRAME_CORNERS` re-derived
+
+Round 2's review found `lcd_sampler.py`'s `FRAME_CORNERS` stale: on capture
+`logs/bench_test/20260924T162517Z_lcd/captures/lcd01_start_pause.jpg`,
+`widget_to_frame(5,5)` mapped to frame `(171,63)`, which samples as bezel
+`RGB(6,13,22)`, and `(423,289)` landed on the Start button's own edge instead
+of clear background.
+
+Re-derived by numeric luminance/color edge scans (PIL pixel sampling against
+that same capture, never by eye): scanning horizontal and vertical lines
+looking for the single biggest luminance step (`0.299*R+0.587*G+0.114*B`)
+between bezel and panel content. The top-right and bottom-right corners fall
+in a region contaminated by an overexposed glare band (near-white RGB ~250+
+fading gradually into the theme's dark-blue background around `y=100-140`
+for `x=950-1100`), where a direct step-scan is unreliable; those two corners
+were instead obtained by a linear fit through the clean part of the same
+edge (top edge `x=190-630`; right edge `y=300-550`) extrapolated outward,
+cross-checked against the point in the noisy region where raw RGB actually
+transitions into the theme's characteristic bluish background tone
+(`y~=100-120`) — both methods agreed on `y~=121-123` for the top-right
+corner.
+
+Result, in the bench camera's full 1280x720 frame:
+- top-left corner: `(180, 69)`
+- top-right corner: `(1038, 121)`
+- bottom-left corner: `(178, 627)`
+- bottom-right corner: `(985, 628)`
+
+Verified against the reported symptom: with these corners,
+`widget_to_frame(5,5)` maps to frame `(190,79)`, which samples as
+`RGB(109,213,248)` — clearly panel content, not bezel.
+
+Because a stale-corner regression like this fails silently as ordinary color
+FAILs rather than loudly, `lcd_sampler.frame_corners_look_stale()` now
+samples the four expected-background widget-space corners (`(5,5)` etc.) at
+runtime and reports `True` only if *all four* read as bezel relative to
+their own locally-sampled bezel reference (never an absolute threshold,
+since the theme's own darkest background is not far from bezel darkness).
+`cases_lcd.py`'s `_downgrade_if_corners_stale()` uses this to downgrade an
+existing color-judgment `FAIL` to `INCONCLUSIVE` with reason "frame corners
+stale" — but only a `FAIL`, and only on a definite `True`, never on `False`
+(background reads as background: a real mismatch is real) or `None`
+(capture/sample failure: stays whatever it already was).
+
 ## Navigation graph (from source, `kiln_ui_show()` call sites)
 
 ```

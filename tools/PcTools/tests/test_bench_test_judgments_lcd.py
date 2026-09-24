@@ -343,68 +343,76 @@ class LcdProfilesPickerTest(unittest.TestCase):
 
 
 class LcdTemperaturePageTest(unittest.TestCase):
-    def test_matching_values_pass(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 100.4}, True, True)
+    # Round 3 rewrite (item 3): zone rows/safety line are plain labels, not
+    # tap targets, so the judge is now driven by per-zone render-or-not
+    # booleans from capture sampling, never by a value comparison against
+    # a thermo reading (readings are passed through only for observed{}
+    # context, never gate the verdict).
+    def test_all_rows_rendered_pass(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True)
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_wrong_page_fails(self):
-        r = J.judge_lcd_temperature_page("home", {0: 100.0}, {0: 100.0}, True, True)
+        r = J.judge_lcd_temperature_page("home", {0: True}, {0: 100.0}, None, True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_value_mismatch_fails(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 110.0}, True, True)
+    def test_missing_row_fails(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: False, 2: True}, {0: 100.0}, None, True,
+                                          expected_zones=3)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_safety_line_mismatch_fails(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 100.0}, False, True)
-        self.assertEqual(r.verdict, Verdict.FAIL)
-
-    def test_no_safety_line_is_inconclusive_not_fail(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: 100.0}, {0: 100.0}, None, True)
+    def test_no_zone_rows_sampled_is_inconclusive(self):
+        r = J.judge_lcd_temperature_page("temperature", {}, {0: 100.0}, None, True)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
-    def test_no_zone_rows_is_inconclusive(self):
-        r = J.judge_lcd_temperature_page("temperature", {}, {0: 100.0}, True, True)
+    def test_undecided_rows_are_inconclusive_not_pass(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: None, 2: True}, {0: 100.0}, None, True,
+                                          expected_zones=3)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_safety_line_definitely_absent_during_firing_fails(self):
+        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: True, 2: True}, {0: 100.0}, False, True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_safety_line_undetermined_never_blocks_pass(self):
+        # The Safety (K4) line's y-position is dynamic (it sits after a
+        # wrapped relay-button row inside a separate card), so it is
+        # sampled best-effort only -- a None reading must never hold up an
+        # otherwise-passing zone-row result.
+        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True)
+        self.assertEqual(r.verdict, Verdict.PASS)
 
 
 class LcdDiagnosticsPagesTest(unittest.TestCase):
-    def test_all_titles_in_order_passes(self):
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 2.0)
+    # Round 3 rewrite (item 2): no wire command reads a diagnostics
+    # sub-page's title text at all, so the judge is now driven by
+    # paging-hop count, Next's disabled state at the last page, where the
+    # Crash Report Acknowledge button was seen, and whether Relay Life's
+    # (removed) Reset button reappeared -- never by a title list.
+    def test_full_paging_with_ack_at_last_step_passes(self):
+        r = J.judge_lcd_diagnostics_pages(7, 7, True, 7, False)
         self.assertEqual(r.verdict, Verdict.PASS)
 
-    def test_wrong_order_fails(self):
-        titles = list(J._DIAG_TITLES)
-        titles[0], titles[1] = titles[1], titles[0]
-        r = J.judge_lcd_diagnostics_pages(titles, False, 0, 2.0)
+    def test_relay_life_reset_present_fails(self):
+        r = J.judge_lcd_diagnostics_pages(7, 7, True, 7, True)
         self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("Reset", r.reason)
 
-    def test_relay_life_reset_button_present_fails(self):
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), True, 0, 2.0)
+    def test_ack_seen_at_wrong_step_fails(self):
+        r = J.judge_lcd_diagnostics_pages(7, 7, True, 3, False)
         self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("Acknowledge", r.reason)
 
-    def test_crash_report_visible_entries_fails(self):
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 1, 2.0)
-        self.assertEqual(r.verdict, Verdict.FAIL)
-
-    def test_heap_diff_too_large_fails(self):
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 25.0)
-        self.assertEqual(r.verdict, Verdict.FAIL)
-
-    def test_dead_tab_bar_is_inconclusive_not_pass(self):
-        # Every click said 'ok' but no title changed the tap-target set:
-        # no tab content was ever observed, so this must never PASS even
-        # with otherwise-passing values.
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 2.0, titles_changed=[])
+    def test_paging_stopped_early_is_inconclusive(self):
+        r = J.judge_lcd_diagnostics_pages(3, 7, None, None, False)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
-        self.assertIn("no sub-tab content", r.reason)
 
-    def test_some_tabs_changed_can_pass(self):
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 2.0, titles_changed=["Relay Life"])
-        self.assertEqual(r.verdict, Verdict.PASS)
+    def test_next_still_enabled_at_last_page_fails(self):
+        r = J.judge_lcd_diagnostics_pages(7, 7, False, 7, False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_unparseable_heap_is_inconclusive_not_pass(self):
-        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, None)
+    def test_next_disabled_state_undetermined_is_inconclusive(self):
+        r = J.judge_lcd_diagnostics_pages(7, 7, None, 7, False)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
 

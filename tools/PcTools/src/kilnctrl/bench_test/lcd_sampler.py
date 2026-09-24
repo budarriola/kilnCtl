@@ -50,25 +50,50 @@ WIDGET_CORNERS: Tuple[Tuple[float, float], ...] = (
     (float(LCD_WIDTH), float(LCD_HEIGHT)),
 )
 
-#: The same four corners, in the bench camera's full 1280x720 frame, per
-#: CLAUDE.md's "Camera aim (2026-09-24)" numeric edge scan (never re-typed
-#: from a screenshot -- these are the exact values quoted there):
-#:   top-left corner:     (160, 52)
-#:   top-right corner:    (1044, 116)
-#:   bottom-left corner:  (161, 645)
-#:   bottom-right corner: (983, 624)
-#: The geometry is a perspective skew, not a simple rotation: the right
-#: edge is shorter than the left (~14%) and slants (~61px lower at the top
-#: than at the bottom vs the left edge's near-vertical run), while the top
-#: edge is longer than the bottom (~8%). This has changed shape since
-#: 2026-09-19, not just direction.
-#: Superseded 2026-09-19 corners, kept for history: TL=(298,86) TR=(1145,60)
-#: BL=(323,635) BR=(1147,617).
+#: The same four corners, in the bench camera's full 1280x720 frame.
+#: Re-derived 2026-09-24 (round 3 of the LCD bench-runner fixes) from
+#: ``logs/bench_test/20260924T162517Z_lcd/captures/lcd01_start_pause.jpg``
+#: by numeric luminance edge scans (PIL pixel sampling, never by eye): the
+#: previous corners below made ``widget_to_frame(5, 5)`` land at frame pixel
+#: (171, 63), which reads as bezel RGB (6, 13, 22) rather than the home
+#: page's background -- the panel had moved again since that measurement.
+#: Method: scan luminance (0.299 R + 0.587 G + 0.114 B) along rows/columns
+#: near each expected edge, take the largest single-step jump as the
+#: bezel/screen boundary, fit a line through several such crossings along
+#: each edge, and intersect adjacent edges' fitted lines for each corner
+#: (the top-right and bottom-right crossings fall outside the low-signal
+#: region near the corners themselves, where the topbar's own gradient and
+#: an overexposed glare band above the panel mask the true edge, so those
+#: two corners are extrapolated from the clean part of each edge's fit
+#: rather than read directly):
+#:   top-left corner:     (180, 69)
+#:   top-right corner:    (1038, 121)
+#:   bottom-left corner:  (178, 627)
+#:   bottom-right corner: (985, 628)
+#: Geometry is still a perspective skew, not a simple rotation: the right
+#: edge remains shorter than the left and slants, while the left edge runs
+#: near-vertical (x ~= 178-181 across y = 100..600).
+#: Superseded 2026-09-24 (first pass) corners, kept for history: TL=(160,52)
+#: TR=(1044,116) BL=(161,645) BR=(983,624). Superseded 2026-09-19 corners:
+#: TL=(298,86) TR=(1145,60) BL=(323,635) BR=(1147,617).
 FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
-    (160.0, 52.0),
-    (1044.0, 116.0),
-    (161.0, 645.0),
-    (983.0, 624.0),
+    (180.0, 69.0),
+    (1038.0, 121.0),
+    (178.0, 627.0),
+    (985.0, 628.0),
+)
+
+#: Four points, inset from the widget-space corners toward the panel's
+#: centre, used only to sanity-check at runtime that FRAME_CORNERS (and
+#: thus DEFAULT_TRANSFORM) has not gone stale again the way the corners
+#: above just had. Each maps, through the transform, to a small patch of
+#: the home/idle page's own dark background (never covered by a widget on
+#: any LCD page this runner visits) -- see frame_corners_look_stale().
+CORNER_CHECK_POINTS: Tuple[Tuple[float, float], ...] = (
+    (5.0, 5.0),
+    (float(LCD_WIDTH) - 5.0, 5.0),
+    (5.0, float(LCD_HEIGHT) - 5.0),
+    (float(LCD_WIDTH) - 5.0, float(LCD_HEIGHT) - 5.0),
 )
 
 
@@ -264,6 +289,51 @@ def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
     # Sample a small box centred on the mapped point, same convention as
     # sample_lcd_region.ps1's own X/Y (top-left of the box).
     return sample_region(image_path, fx - w // 2, fy - h // 2, w, h, bezel_x, bezel_y, repo_root)
+
+
+#: frame_corners_look_stale()'s own gate. Reuses MIN_BEZEL_CONTRAST's value
+#: (defined below) rather than a second constant, but is read at call time
+#: -- module order below is preserved (MIN_BEZEL_CONTRAST is a plain float,
+#: no forward-reference issue at import time since this function's body
+#: only reads the name at *call* time).
+def frame_corners_look_stale(image_path: str, transform: Optional[AffineTransform] = None,
+                              repo_root: Optional[str] = None,
+                              min_bezel_contrast: Optional[float] = None) -> Optional[bool]:
+    """Runtime self-check for FRAME_CORNERS/DEFAULT_TRANSFORM going stale
+    again the way the 2026-09-24 round-3 fix found them (widget_to_frame(5,5)
+    landing on bezel instead of the home page's own background).
+
+    Samples the four CORNER_CHECK_POINTS (widget-space points just inside
+    each corner, over a patch of background no LCD page in this suite ever
+    covers with a widget) together with each point's own separately-sampled
+    bezel reference. Returns True only when ALL FOUR read indistinguishable
+    from their own bezel reference (i.e. the transform is landing on actual
+    bezel, not screen content) -- a single point reading as background is
+    enough to call the geometry sound, so a real color mismatch on one
+    widget can never be masked by this check. Returns False when at least
+    one point reads as background. Returns None if any sample could not be
+    taken at all (capture/parse failure) -- callers must not treat None as
+    either stale or sound.
+
+    A fixed absolute luminance threshold was considered and rejected: the
+    theme's own darkest background color is not much brighter than the
+    bezel itself (see MIN_BEZEL_CONTRAST's own comment), so a point that is
+    legitimately on-screen-but-dark could false-positive against an
+    absolute threshold. Comparing each point to its own locally-sampled
+    bezel reference avoids that ambiguity.
+    """
+    threshold = MIN_BEZEL_CONTRAST if min_bezel_contrast is None else min_bezel_contrast
+    stale_votes = 0
+    for cx, cy in CORNER_CHECK_POINTS:
+        try:
+            sample = sample_widget(image_path, cx, cy, transform=transform, repo_root=repo_root)
+        except LcdCaptureError:
+            return None
+        if sample.bezel is None:
+            return None
+        if is_off(sample.region, sample.bezel, tol=threshold):
+            stale_votes += 1
+    return stale_votes == len(CORNER_CHECK_POINTS)
 
 
 # ---------------------------------------------------------------------------

@@ -896,10 +896,11 @@ def judge_lcd_no_scroll_budget(pages_targets: "dict[str, dict]") -> CaseResult:
 # sampling via lcd_sampler.py).
 # ---------------------------------------------------------------------------
 
-_DIAG_TITLES = (
-    "Safety & Board Health", "Thermocouple Faults", "Trip Detail",
-    "Relay Life", "Crash Report",
-)
+#: ui_page_diagnostics.c's UI_PAGE_DIAGNOSTICS_PAGE_COUNT (8 sub-pages,
+#: index 0 Firmware .. index 7 Crash Report -- the round-3 rewrite of
+#: LCD-16 no longer looks these up by a title-click that was never a real
+#: button (see judge_lcd_diagnostics_pages()'s docstring for why).
+DIAGNOSTICS_PAGE_COUNT = 8
 
 
 def judge_lcd_home_firing(page: str, targets: "list[dict]",
@@ -1056,97 +1057,124 @@ def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: Opt
     return CaseResult(Verdict.PASS, observed=observed)
 
 
-def judge_lcd_temperature_page(page: str, zone_rows: "dict[int, float]",
+def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optional[bool]]",
                                 readings: "dict[int, float]",
-                                safety_on: Optional[bool], expect_safety_on: bool,
-                                tolerance_c: float = 1.0) -> CaseResult:
-    """LCD-14: three zone rows within `tolerance_c` of `thermo_read()`, and
-    (post-rework) the Safety (K4) line matching whether a firing is active.
-    A pre-rework board with no Safety line target degrades that half to
-    INCONCLUSIVE rather than FAIL (plan: "[pre: line absent]")."""
+                                safety_line_rendered: Optional[bool],
+                                expect_safety_on: bool,
+                                expected_zones: int = 3) -> CaseResult:
+    """LCD-14 (round 3 rewrite): the temperature page's zone-temp and Safety
+    (K4) labels are plain, non-clickable `lv_label`s (`ui_page_temperature.c`
+    never tap-tags them), so they never appear in `list_tap_targets()` at
+    all -- the old `zone_temp_*`/`safety_line` name lookups this replaces
+    could only ever return not-found. `thermo_read()` values are real, but
+    they read the SAME underlying MAX31856 channels the LCD's own labels are
+    fed from over the internal SPI bus, not the rendered pixels, so
+    comparing one against the other can only prove "the firmware's own read
+    path returns something", not "the panel is displaying it correctly" --
+    that half is dropped rather than kept as a fake confirmation.
+
+    What this can actually judge: whether `expected_zones` distinct zone-row
+    regions render as non-background content by webcam capture
+    (`zone_rows_rendered`, keyed by zone index, True/False/None per region --
+    see docs/COMMISSIONING_LCD_RUNBOOK.md for the sampled row geometry), and
+    the same presence check for the Safety (K4) line
+    (`safety_line_rendered`) cross-checked only for SANITY against whether a
+    firing is active (`expect_safety_on`) -- rendered-or-not, never a color
+    or value match, since neither is derivable from a plain label over the
+    wire. `readings` is carried in `observed` for a human reviewer's
+    reference only and never gates the verdict, since it proves nothing
+    about what the panel renders.
+
+    Cannot detect: a zone row rendering a WRONG temperature value, a stale
+    (frozen) value, or the Safety line rendering the wrong color/text while
+    still being present -- only presence/absence of rendered content at
+    each row's known position."""
     observed = {
-        "page": page, "zone_rows": zone_rows, "readings": readings,
-        "safety_on": safety_on, "expect_safety_on": expect_safety_on,
+        "page": page, "zone_rows_rendered": zone_rows_rendered, "readings": readings,
+        "safety_line_rendered": safety_line_rendered, "expect_safety_on": expect_safety_on,
     }
     if page != "temperature":
         return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'temperature'" + BLANKED_SCREEN_HINT, observed=observed)
-    if not zone_rows:
-        return CaseResult(Verdict.INCONCLUSIVE, reason="no zone rows with a numeric value were reported", observed=observed)
-    mismatches = {}
-    for zone, shown in zone_rows.items():
-        actual = readings.get(zone)
-        if shown is None or actual is None:
-            continue
-        if abs(shown - actual) > tolerance_c:
-            mismatches[zone] = (shown, actual)
-    if mismatches:
+    if not zone_rows_rendered:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no zone-row regions were sampled (no camera capture)", observed=observed)
+    missing = [z for z, rendered in zone_rows_rendered.items() if rendered is False]
+    if missing:
+        return CaseResult(Verdict.FAIL, reason=f"zone row(s) {missing} render as background (no content)", observed=observed)
+    if len(zone_rows_rendered) < expected_zones or any(v is None for v in zone_rows_rendered.values()):
         return CaseResult(
-            Verdict.FAIL,
-            reason=f"zone value(s) differ from thermo_read() by more than {tolerance_c}C: {mismatches}",
+            Verdict.INCONCLUSIVE,
+            reason=f"only {sum(1 for v in zone_rows_rendered.values() if v)} of {expected_zones} zone rows were confirmed rendered",
             observed=observed,
         )
-    if safety_on is None:
-        return CaseResult(Verdict.INCONCLUSIVE, reason="no Safety (K4) line state reported (pre-rework LCD)", observed=observed)
-    if bool(safety_on) != bool(expect_safety_on):
+    # safety_line_rendered is frequently None -- its y-position is dynamic
+    # (it sits inside the Relays card, after a wrapped row whose height
+    # depends on how many relay buttons wrapped), unlike the zone rows'
+    # fixed top-of-page stack, so it is sampled best-effort only and a miss
+    # here is never held against the run: a real absence is only checked
+    # when a definite reading came back.
+    if safety_line_rendered is False and expect_safety_on:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"Safety (K4) line reads on={safety_on}, expected {expect_safety_on}",
+            reason="Safety (K4) line does not render while a firing is active",
             observed=observed,
         )
     return CaseResult(Verdict.PASS, observed=observed)
 
 
-def judge_lcd_diagnostics_pages(titles_seen: "list[str]", relay_life_has_reset: Optional[bool],
-                                 crash_report_visible_entries: Optional[int],
-                                 heap_diff_pct: Optional[float],
-                                 expected_titles: "tuple[str, ...]" = _DIAG_TITLES,
-                                 max_heap_diff_pct: float = 10.0,
-                                 titles_changed: "Optional[list[str]]" = None) -> CaseResult:
-    """LCD-16: the 5 diagnostics sub-pages reached in order, Relay Life has
-    no Reset button (post-rework), Crash Report shows none, and the LCD's
-    own reported heap value is within `max_heap_diff_pct` of
-    `get_heap_status()`.
+def judge_lcd_diagnostics_pages(pages_paged: int, expected_pages: int,
+                                 next_disabled_at_end: Optional[bool],
+                                 crash_report_step: Optional[int],
+                                 relay_life_has_reset: Optional[bool]) -> CaseResult:
+    """LCD-16 (round 3 rewrite): ui_page_diagnostics.c's 8 sub-pages have no
+    buttons named after their titles -- they are reached only by the
+    topbar's untagged Next/Prev glyph icons, and the sub-page title itself
+    (built by update_title() as "Diagnostics: %s  %u of %u") is not
+    readable over the wire at all (ui_test_client.py has no label-read
+    command) -- only a webcam capture could confirm it, which this case
+    does not take. The old title-click loop this replaces was therefore
+    unconditionally broken (NOT_FOUND on its very first click) and the old
+    heap-value cross-check read a plain, non-clickable label
+    (build_stat_row()) that was never a real tap target either.
 
-    `titles_changed` (when given) lists the titles whose tap actually
-    changed the tap-target set. `titles_seen` only proves each click said
-    'ok'; a dead tab bar says 'ok' too. If no title ever changed the set,
-    no tab content was observed at all and the verdict can never be PASS."""
+    What IS honestly observable over the wire: `cases_lcd.py` pages forward
+    with a raw coordinate touch at the Next icon's own position (position,
+    not name, since Prev and Next share one undecodable glyph name and
+    click_by_name() answers AMBIGUOUS for it on a live board), counting how
+    many of the `expected_pages` forward hops actually changed the
+    tap-target set (`pages_paged`); whether Next reads disabled once the
+    last page is reached (`next_disabled_at_end`); at which hop (if any) the
+    Crash Report page's "Acknowledge" button was seen (`crash_report_step`,
+    only ever present when the board actually has an unacknowledged crash --
+    its absence on a healthy board is normal and never at fault); and
+    whether the Relay Life page still shows a Reset button
+    (`relay_life_has_reset` -- UI_PLAN.md section 6.4 removed it, so any
+    True here is a regression)."""
     observed = {
-        "titles_seen": titles_seen, "relay_life_has_reset": relay_life_has_reset,
-        "crash_report_visible_entries": crash_report_visible_entries,
-        "heap_diff_pct": heap_diff_pct, "titles_changed": titles_changed,
+        "pages_paged": pages_paged, "expected_pages": expected_pages,
+        "next_disabled_at_end": next_disabled_at_end,
+        "crash_report_step": crash_report_step,
+        "relay_life_has_reset": relay_life_has_reset,
     }
-    if list(titles_seen) != list(expected_titles):
-        return CaseResult(
-            Verdict.FAIL,
-            reason=f"diagnostics titles seen {titles_seen!r}, expected {list(expected_titles)!r}",
-            observed=observed,
-        )
-    if titles_changed is not None and not titles_changed:
-        return CaseResult(
-            Verdict.INCONCLUSIVE,
-            reason=("every diagnostics title click answered 'ok' but none changed the "
-                    "tap-target set -- no sub-tab content was ever observed"),
-            observed=observed,
-        )
     if relay_life_has_reset:
         return CaseResult(Verdict.FAIL, reason="Relay Life page still shows a Reset button (pre-rework only)", observed=observed)
-    if crash_report_visible_entries:
+    if crash_report_step is not None and crash_report_step != expected_pages:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"Crash Report page shows {crash_report_visible_entries} visible entrie(s), expected none",
+            reason=f"Crash Report's Acknowledge button seen at paging step {crash_report_step}, expected the last step ({expected_pages})",
             observed=observed,
         )
-    if heap_diff_pct is None:
+    if pages_paged < expected_pages:
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason="could not compare the board-health page's heap value to get_heap_status()",
+            reason=f"paging stopped after {pages_paged}/{expected_pages} forward hops -- Next may be broken or a tap was swallowed",
             observed=observed,
         )
-    if heap_diff_pct > max_heap_diff_pct:
+    if next_disabled_at_end is False:
+        return CaseResult(Verdict.FAIL, reason="Next is still enabled on the last diagnostics sub-page", observed=observed)
+    if next_disabled_at_end is None:
         return CaseResult(
-            Verdict.FAIL,
-            reason=f"board-health heap value differs from get_heap_status() by {heap_diff_pct:.1f}%, expected <= {max_heap_diff_pct:.0f}%",
+            Verdict.INCONCLUSIVE,
+            reason="could not determine whether Next is disabled on the last diagnostics sub-page",
             observed=observed,
         )
     return CaseResult(Verdict.PASS, observed=observed)

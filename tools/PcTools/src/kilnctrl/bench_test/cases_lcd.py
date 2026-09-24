@@ -520,7 +520,8 @@ def _case_lcd01(ctx: dict) -> CaseResult:
         # Wrong page entirely -- no point spending a webcam capture on it.
         return J.judge_lcd_home_idle(page, targets, None, None)
     start_matches_accent4, pause_is_hidden, color_debug = _try_capture_and_sample(ctx, targets)
-    return J.judge_lcd_home_idle(page, targets, start_matches_accent4, pause_is_hidden, color_debug=color_debug)
+    result = J.judge_lcd_home_idle(page, targets, start_matches_accent4, pause_is_hidden, color_debug=color_debug)
+    return _downgrade_if_corners_stale(ctx, result, color_debug.get("capture_path"))
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +596,30 @@ def _sample_widget_off(ctx: dict, image_path: str, target: Optional[dict]) -> Op
         return lcd_sampler.is_off(sample.region, sample.bezel)
     except lcd_sampler.LcdCaptureError:
         return None
+
+
+def _downgrade_if_corners_stale(ctx: dict, result: CaseResult, image_path: Optional[str]) -> CaseResult:
+    """Downgrade a FAIL to INCONCLUSIVE when lcd_sampler.frame_corners_look_stale()
+    finds FRAME_CORNERS/DEFAULT_TRANSFORM landing on bezel instead of screen
+    background at all four corner-check points -- the same symptom the
+    2026-09-24 round-3 fix found and re-derived the corners for (see
+    lcd_sampler.py's FRAME_CORNERS comment). Never touches a PASS, or an
+    already-INCONCLUSIVE/NOT_RUN/SKIP verdict, and never masks a genuine
+    color mismatch: only ALL FOUR corner points reading as bezel proves the
+    *geometry*, not the color judgment, is at fault -- a single point
+    reading as background leaves the original FAIL untouched."""
+    if result.verdict != Verdict.FAIL or not image_path:
+        return result
+    try:
+        stale = lcd_sampler.frame_corners_look_stale(image_path, repo_root=ctx.get("repo_root"))
+    except Exception:
+        stale = None
+    if stale is not True:
+        return result
+    observed = dict(result.observed or {})
+    observed["frame_corners_stale"] = True
+    observed["original_fail_reason"] = result.reason
+    return CaseResult(Verdict.INCONCLUSIVE, reason="frame corners stale", observed=observed, evidence=result.evidence)
 
 
 def _capture(ctx: dict, name: str) -> Optional[str]:
@@ -688,7 +713,7 @@ def _case_lcd02(ctx: dict) -> CaseResult:
     )
     if image_path:
         result.evidence = list(result.evidence or []) + [image_path]
-    return result
+    return _downgrade_if_corners_stale(ctx, result, image_path)
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +770,7 @@ def _case_lcd04(ctx: dict) -> CaseResult:
     strip_off_after_clear = _sample_widget_off(ctx, image_path2, strip_after) if image_path2 else None
     result = J.judge_lcd_home_tripped(strip_visible_before, strip_matches_accent5_before, strip_off_after_clear)
     result.evidence = list(result.evidence or []) + [p for p in (image_path, image_path2) if p]
-    return result
+    return _downgrade_if_corners_stale(ctx, result, image_path2 or image_path)
 
 
 # ---------------------------------------------------------------------------
@@ -831,9 +856,14 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "profiles", tap)
         rows = [t for t in targets if str(t.get("name", "")).startswith("profile_row_")]
+        # Round 3 (item 4): "paging"/"new_profile" were fabricated names no
+        # firmware target has ever used -- ui_page_profile_picker.c's topbar
+        # icons are untagged glyphs (_is_glyph_name()), only locatable by
+        # position via _profiles_topbar_icons(). The literal-name lookups
+        # this replaced could only ever return not-found.
         icons = _profiles_topbar_icons(targets)
-        paging_present = True if _find(targets, "paging") is not None else icons["paging"]
-        new_icon_present = True if _find(targets, "new_profile") is not None else icons["add"]
+        paging_present = icons["paging"]
+        new_icon_present = icons["add"]
         detail_page = None
         if rows:
             click3 = ui.click_by_name(rows[0]["name"])
@@ -848,9 +878,41 @@ def _case_lcd09(ctx: dict) -> CaseResult:
 
 
 # ---------------------------------------------------------------------------
-# LCD-14 -- temperature page: three zone rows vs. thermo_read(), and (post-
-# rework) the Safety (K4) line vs. whether a firing is active.
+# LCD-14 -- temperature page: zone rows and the Safety (K4) line are plain,
+# non-clickable lv_labels (ui_page_temperature.c never tap-tags them -- the
+# old zone_temp_*/safety_line name lookups this replaces could only ever
+# return not-found). Round 3 (item 3) judges by capture instead: sample
+# each zone row's own position for presence of rendered (non-background)
+# content, and cross-check thermo_read() only for sanity (finite, in a
+# plausible range), never pixel-value-vs-reading equality, since neither
+# is derivable from a plain label over the wire.
 # ---------------------------------------------------------------------------
+
+#: Zone-row geometry, derived (not guessed) from ui_page_temperature.c's own
+#: layout constants: scr's own pad_all (UI_THEME_PADDING_PX=8) + the topbar
+#: (UI_THEME_STATUS_BAR_HEIGHT_PX=32) + the scr->content pad_gap
+#: (UI_THEME_PADDING_PX/2=4) puts `content` at widget-space y=44. Each zone
+#: row is UI_PAGE_TEMPERATURE_ZONE_ROW_HEIGHT_PX tall
+#: ((UI_THEME_PADDING_PX/2*2) + UI_THEME_FONT_LINE_HEIGHT_PX(20) = 28px),
+#: stacked with content's own pad_gap (4px) between them, so row i's
+#: vertical centre is 44 + i*(28+4) + 14 = 58 + i*32. Horizontal centre is
+#: the row's own midpoint (LCD_WIDTH/2=240) -- a space-between flex row so
+#: the very centre pixel can fall between the two labels, but the row's own
+#: CARD-colored background (UI_THEME_COLOR_CARD, distinctly non-bezel) still
+#: fills it, so this only confirms the row rendered AT ALL, never that its
+#: text is legible or its value correct. Documented alongside the camera-
+#: aim geometry in docs/COMMISSIONING_LCD_RUNBOOK.md.
+#:
+#: The Safety (K4) line is NOT geometrically derived this way: it sits
+#: inside the Relays card, after a relay-button row whose height depends on
+#: how many buttons wrapped (ROW_WRAP, dynamic) -- there is no fixed offset
+#: to compute without also modelling that wrap, so this case does not
+#: attempt to sample it at all; judge_lcd_temperature_page() treats a None
+#: reading here as informational, never a gate.
+_LCD14_ZONE_ROW_Y0 = 58
+_LCD14_ZONE_ROW_PITCH = 32
+_LCD14_ROW_X = float(lcd_sampler.LCD_WIDTH) / 2.0
+
 
 def _case_lcd14(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
@@ -863,30 +925,7 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         fail, page, waited_s = _click_then_page(ui, "Temperature", "temperature")
         if fail is not None:
             return fail
-        def _zone_rows_from(targets: "list[dict]") -> Dict[int, float]:
-            rows: Dict[int, float] = {}
-            for t in targets:
-                name = str(t.get("name", ""))
-                if name.startswith("zone_temp_") and t.get("value") is not None:
-                    try:
-                        rows[int(name.rsplit("_", 1)[-1])] = float(t["value"])
-                    except (TypeError, ValueError):
-                        pass
-            return rows
-
         tap = ui.list_tap_targets()
-        targets = tap.get("targets", [])
-        zone_rows = _zone_rows_from(targets)
-        # Bounded poll (<=3s): the zone rows are populated by the same LVGL
-        # ~30ms task poll _click_then_page's module docstring describes for
-        # page transitions -- an immediate read right after the page arrives
-        # can still see rows not yet filled in.
-        poll_start = time.monotonic()
-        while not zone_rows and time.monotonic() - poll_start < 3.0:
-            time.sleep(_PAGE_POLL_INTERVAL_S)
-            tap = ui.list_tap_targets()
-            targets = tap.get("targets", [])
-            zone_rows = _zone_rows_from(targets)
         _remember_page_targets(ctx, "temperature", tap)
         thermo_error: Optional[str] = None
         try:
@@ -894,7 +933,10 @@ def _case_lcd14(ctx: dict) -> CaseResult:
             # actual API (2026-09-24 bench root cause: the old
             # srv._thermo.read_all() call always raised AttributeError,
             # silently swallowed by a bare except, which mislabeled this as
-            # "no zone rows reported" instead of a coding bug).
+            # "no zone rows reported" instead of a coding bug). Readings are
+            # kept only as a sanity cross-check (finite values), never
+            # compared pixel-value-to-number -- see this case's module
+            # comment for why.
             readings = {
                 int(r.channel): float(r.temperature_c)
                 for r in srv._thermo.read(THERMO_CHANNEL_ALL)
@@ -903,92 +945,268 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         except Exception as exc:
             readings = {}
             thermo_error = f"{type(exc).__name__}: {exc}"
-        safety_target = _find(targets, "safety_line")
-        safety_on = safety_target.get("on") if safety_target is not None else None
+        expected_zones = max(len(readings), 3) if readings else 3
+        zone_rows_rendered: Dict[int, Optional[bool]] = {}
+        image_path = _capture(ctx, "lcd14_temperature.jpg")
+        if image_path is not None:
+            for zone in range(expected_zones):
+                y = _LCD14_ZONE_ROW_Y0 + zone * _LCD14_ZONE_ROW_PITCH
+                off = _sample_widget_off(ctx, image_path, {"cx": _LCD14_ROW_X, "cy": float(y)})
+                zone_rows_rendered[zone] = None if off is None else (not off)
         try:
             expect_safety_on = bool(srv._profiles.get_exec_status().state_name == "running")
         except Exception:
             expect_safety_on = False
-        result = J.judge_lcd_temperature_page(page, zone_rows, readings, safety_on, expect_safety_on)
+        # Safety (K4) line position is not geometrically derivable (see the
+        # module comment above) -- always reported None (unsampled), never
+        # guessed.
+        safety_line_rendered: Optional[bool] = None
+        result = J.judge_lcd_temperature_page(
+            page, zone_rows_rendered, readings, safety_line_rendered, expect_safety_on,
+            expected_zones=expected_zones,
+        )
         result.observed = dict(result.observed or {})
         result.observed["page_wait_s"] = round(waited_s, 3)
         if thermo_error is not None:
             result.observed["thermo_error"] = thermo_error
-        return result
+        if image_path:
+            result.evidence = list(result.evidence or []) + [image_path]
+        return _downgrade_if_corners_stale(ctx, result, image_path)
     finally:
         _navigate_home(ui)
 
 
 # ---------------------------------------------------------------------------
-# LCD-16 -- diagnostics sub-pages, visited in order.
+# LCD-16 -- diagnostics sub-pages, visited in order. Round 3 rewrite (item
+# 2): the 8 sub-pages (ui_page_diagnostics.c's UI_PAGE_DIAGNOSTICS_PAGE_*,
+# UI_PAGE_DIAGNOSTICS_PAGE_COUNT=8) have no buttons named after their
+# titles -- they are reached ONLY by the generic topbar's Prev/Next glyph
+# icons, and the sub-page title text itself (update_title()'s
+# "Diagnostics: %s  %u of %u") is not readable over the wire at all
+# (ui_test_client.py has no label-read command) -- only a webcam capture
+# could confirm it, which this case does not take. The old per-title
+# click_by_name(title) loop this replaces was therefore unconditionally
+# broken: none of J._DIAG_TITLES was ever a real tap target, so the very
+# first click always answered not_found.
 # ---------------------------------------------------------------------------
+
+def _diagnostics_next_target(targets: "list[dict]") -> Optional[dict]:
+    """Locate the diagnostics topbar's untagged Next icon by position --
+    same slot arithmetic as _profiles_topbar_icons() (Back, Home, Prev,
+    Next in that order, ui_topbar.c's build_icon() left-to-right order
+    comment), since Prev and Next share one undecodable glyph name
+    (_is_glyph_name()) and click_by_name() answers AMBIGUOUS for it on a
+    live board -- only a raw coordinate touch can target Next specifically.
+    Returns Next's own tap-target dict (for its cx/cy) or None when it is
+    disabled (last page, or a genuinely single-page diagnostics build) or
+    the Back/Home anchors are missing."""
+    back = _find(targets, "back")
+    home = _find(targets, "home")
+    if back is None or home is None:
+        return None
+    try:
+        pitch = float(home["cx"]) - float(back["cx"])
+        home_cx = float(home["cx"])
+        home_cy = float(home["cy"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if pitch <= 0:
+        return None
+    next_cx = home_cx + 2 * pitch
+    for t in targets:
+        if not _is_glyph_name(t.get("name")) or t.get("hidden"):
+            continue
+        try:
+            if (abs(float(t.get("cx", -1000)) - next_cx) <= pitch / 4
+                    and abs(float(t.get("cy", -1000)) - home_cy) <= pitch / 4):
+                return t
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _targets_signature(targets: "list[dict]") -> tuple:
+    """A richer, order-independent signature than a bare set of names --
+    ui_topbar.c's Prev/Next/New icons all decode to the SAME name
+    (_is_glyph_name(), three replacement chars regardless of which glyph),
+    so a diagnostics sub-page whose only change is Prev appearing/Next
+    disappearing has an UNCHANGED name *set* even though the actual
+    target list changed. Comparing (name, rounded cx, rounded cy, hidden)
+    tuples, counted, catches that; a bare name set does not."""
+    def _key(t: dict) -> tuple:
+        try:
+            cx = round(float(t.get("cx", -1)))
+        except (TypeError, ValueError):
+            cx = None
+        try:
+            cy = round(float(t.get("cy", -1)))
+        except (TypeError, ValueError):
+            cy = None
+        return (t.get("name"), cx, cy, bool(t.get("hidden")))
+    return tuple(sorted((_key(t) for t in targets), key=repr))
+
+
+def _wait_for_targets_signature_change(ui, before_sig: tuple,
+                                        timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                                        interval_s: float = _PAGE_POLL_INTERVAL_S
+                                        ) -> "tuple[dict, float]":
+    """Same polling shape as :func:`_wait_for_targets_change`, but keyed on
+    :func:`_targets_signature` rather than a bare name set -- see that
+    function's docstring for why a name set is blind to a Prev/Next-only
+    change."""
+    start = time.monotonic()
+    tap = ui.list_tap_targets()
+    sig = _targets_signature(tap.get("targets", []))
+    while sig == before_sig:
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        tap = ui.list_tap_targets()
+        sig = _targets_signature(tap.get("targets", []))
+    return tap, time.monotonic() - start
+
+
+def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
+                                   timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                                   confirm: bool = True,
+                                   ) -> "tuple[Optional[CaseResult], Optional[dict], float, bool, bool]":
+    """Raw-touch analogue of :func:`_click_then_targets_change`, for the
+    diagnostics topbar's Next icon specifically -- click_by_name() cannot
+    target it (see _diagnostics_next_target()'s docstring), so this locates
+    Next by position and injects a raw press+release touch at its own
+    cx/cy via ``srv._touch.inject()``, the same mechanism _wake_and_home()
+    already uses for its wake tap. This is deliberately NOT added to any
+    name-based safe-target allowlist (item 5): it never calls
+    click_by_name() at all, so it cannot be confused with a retry-tap on
+    Start/Stop/Confirm/PIN/toggle.
+
+    ``prev_sig`` is a :func:`_targets_signature`, not a bare name set (see
+    that function's docstring for why).
+
+    ``confirm=False`` (an interior diagnostics hop, per _case_lcd16's
+    boundary-hop distinction) skips the wait-for-change/retry-tap dance
+    entirely: ui_topbar.c's Prev/Next icon positions never move between
+    interior sub-pages, so a "no change" read there is not evidence of a
+    swallowed tap the way it is at a boundary hop, and blindly retrying a
+    second tap on that false suspicion would double-advance a page that
+    the first tap already turned. Only a single touch is sent, and
+    whatever the very next read shows is returned as-is, ``changed=True``
+    unconditionally (the caller trusts the tap; see _case_lcd16).
+
+    Returns ``(fail, tap, waited_s, changed, found_next)``. ``found_next``
+    is False when Next could not be located at all (disabled/last page, or
+    missing anchors) -- distinct from a located-but-swallowed tap, so a
+    caller can tell "done paging" from "navigation broke"."""
+    srv = _srv(ctx)
+    touch = getattr(srv, "_touch", None)
+    tap = ui.list_tap_targets()
+    targets = tap.get("targets", [])
+    next_target = _diagnostics_next_target(targets)
+    if next_target is None:
+        return None, tap, 0.0, False, False
+    if touch is None:
+        return (
+            CaseResult(Verdict.INCONCLUSIVE, reason="no touch-inject transport available for Next", observed={}),
+            None, 0.0, False, True,
+        )
+    try:
+        x, y = float(next_target["cx"]), float(next_target["cy"])
+    except (KeyError, TypeError, ValueError):
+        return (
+            CaseResult(Verdict.FAIL, reason="located Next icon has no numeric cx/cy", observed={"next_target": next_target}),
+            None, 0.0, False, True,
+        )
+
+    def _tap() -> bool:
+        try:
+            touch.inject(x, y, True)
+            touch.inject(x, y, False)
+            return True
+        except Exception:
+            return False
+
+    if not _tap():
+        return (
+            CaseResult(Verdict.FAIL, reason="touch inject failed for the Next icon", observed={}),
+            None, 0.0, False, True,
+        )
+    if not confirm:
+        tap2 = ui.list_tap_targets()
+        return None, tap2, 0.0, True, True
+    tap2, waited_s = _wait_for_targets_signature_change(ui, prev_sig, timeout_s=timeout_s)
+    sig2 = _targets_signature(tap2.get("targets", []))
+    if sig2 == prev_sig:
+        if _tap():
+            tap3, waited_s2 = _wait_for_targets_signature_change(ui, prev_sig, timeout_s=timeout_s)
+            waited_s += waited_s2
+            tap2 = tap3
+    changed = _targets_signature(tap2.get("targets", [])) != prev_sig
+    return None, tap2, waited_s, changed, True
+
 
 def _case_lcd16(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
-    titles_seen = []
-    titles_changed = []
+    pages_paged = 0
+    crash_report_step: Optional[int] = None
     relay_life_has_reset: Optional[bool] = None
-    crash_report_visible_entries: Optional[int] = None
-    board_heap_value: Optional[float] = None
+    next_disabled_at_end: Optional[bool] = None
+    expected_hops = J.DIAGNOSTICS_PAGE_COUNT - 1
     try:
         fail, _config_page, _ = _click_then_page(ui, "settings", "config")
         if fail is not None:
             return fail
-        # ui_page_diagnostics.c's sub-tabs never change kiln_ui's top-level
-        # page name (they are one page's own internal s_pages[], see
-        # _wait_for_targets_change's docstring) -- but the initial
-        # config -> diagnostics hop IS a real top-level page switch, so it
-        # gets the same checked click-then-page-wait as every other hop;
-        # each per-title tap below is followed by a tap-target-set wait
-        # instead, since those don't change the page name at all.
+        # The config -> diagnostics hop IS a real top-level page switch
+        # (kiln_ui's own page registry), so it gets the same checked
+        # click-then-page-wait as every other hop; sub-page transitions
+        # below never change the page name at all (ui_page_diagnostics.c's
+        # sub-tabs are its own internal s_pages[], see
+        # _targets_signature's docstring), so those are tracked by a
+        # richer tap-target signature instead.
         fail, _diag_page, _ = _click_then_page(ui, "Diagnostics", "diagnostics")
         if fail is not None:
             return fail
-        prev_names = {t.get("name") for t in ui.list_tap_targets().get("targets", [])}
-        for title in J._DIAG_TITLES:
-            fail, tap, _, changed = _click_then_targets_change(ui, title, prev_names)
-            if fail is not None:
+        targets = ui.list_tap_targets().get("targets", [])
+        prev_sig = _targets_signature(targets)
+        for step in range(J.DIAGNOSTICS_PAGE_COUNT):
+            if _find(targets, "Reset") is not None:
+                relay_life_has_reset = True
+            if _find(targets, "Acknowledge") is not None:
+                crash_report_step = step
+            if step + 1 >= J.DIAGNOSTICS_PAGE_COUNT:
+                next_disabled_at_end = _diagnostics_next_target(targets) is None
                 break
-            targets = tap.get("targets", [])
-            prev_names = {t.get("name") for t in targets}
-            page_title = ui.get_current_page()
-            titles_seen.append(title)
-            if not changed:
-                # Unchanged target set: this read is the previous tab's
-                # content (or a dead tab bar that says 'ok' and does
-                # nothing), so no per-tab value may be taken from it --
-                # otherwise a dead tab bar would "confirm" every tab.
-                continue
-            titles_changed.append(title)
-            if title == "Relay Life":
-                relay_life_has_reset = _find(targets, "reset") is not None
-                heap_target = _find(targets, "board_heap_free")
-                if heap_target is not None:
-                    try:
-                        board_heap_value = float(heap_target.get("value"))
-                    except (TypeError, ValueError):
-                        board_heap_value = None
-            if title == "Crash Report":
-                entries = [t for t in targets if str(t.get("name", "")).startswith("crash_entry_")]
-                crash_report_visible_entries = len(entries)
-            del page_title
-        heap_diff_pct: Optional[float] = None
-        if board_heap_value is not None:
-            try:
-                import re
-                status_text = srv.get_heap_status()
-                match = re.search(r"free[^0-9]*([0-9]+)", status_text, re.IGNORECASE)
-                if match:
-                    reported = float(match.group(1))
-                    if reported:
-                        heap_diff_pct = abs(board_heap_value - reported) / reported * 100.0
-            except Exception:
-                heap_diff_pct = None
+            # A "boundary" hop (leaving step 0, or leaving the
+            # second-to-last step into the last one) has a structurally
+            # decidable signature change: Prev appears for the first time,
+            # or Next disappears for good (ui_topbar.c's icon slots).
+            # Every interior hop does not: the topbar's icon positions
+            # never move between interior sub-pages, and most diagnostics
+            # sub-pages carry no tap targets of their own at all, so an
+            # interior hop legitimately produces the exact same signature
+            # on success as it would if nothing happened -- see
+            # _targets_signature's docstring. Only a boundary hop's failure
+            # to change is real evidence Next is unresponsive; an interior
+            # hop is not waited/retried at all (see
+            # _tap_next_then_targets_change's confirm=False docstring).
+            is_boundary_hop = step == 0 or step == expected_hops - 1
+            fail, tap, _, changed, found_next = _tap_next_then_targets_change(
+                ctx, ui, prev_sig, confirm=is_boundary_hop)
+            if fail is not None:
+                return fail
+            if not found_next:
+                # Next disappeared before reaching the last page -- paging
+                # broke; stop here rather than looping with nothing to tap.
+                break
+            if not changed and is_boundary_hop:
+                break
+            pages_paged += 1
+            targets = tap.get("targets", []) if tap else targets
+            prev_sig = _targets_signature(targets)
         return J.judge_lcd_diagnostics_pages(
-            titles_seen, relay_life_has_reset, crash_report_visible_entries, heap_diff_pct,
-            titles_changed=titles_changed,
+            pages_paged, expected_hops, next_disabled_at_end,
+            crash_report_step, relay_life_has_reset,
         )
     finally:
         _navigate_home(ui)
@@ -1065,19 +1283,45 @@ def _lcd19_overlay_names(ui) -> Optional[set]:
 
 
 def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                             interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[Optional[set], float]":
+                             interval_s: float = _PAGE_POLL_INTERVAL_S,
+                             baseline: Optional[set] = None) -> "tuple[Optional[set], float]":
     """Same click-then-read race as :func:`_wait_for_page`, for LCD-19's
     top-layer popups: both the PIN keypad and the Confirm Start/Confirm
     Stop dialogs are lv_msgbox popups raised asynchronously off the same
     LVGL-task touch poll as any page switch (see kiln_ui_click_by_name()'s
     comment), so an immediate tap-target read after Start/Stop/Cancel can
-    still see the pre-click set. `present=True` waits for a non-empty set
-    (after opening a popup); `present=False` waits for empty (after
-    dismissing one). Never raises; a popup that never (dis)appears is still
-    reported honestly via whatever the last poll saw."""
+    still see the pre-click set.
+
+    `present=False` (after dismissing a popup via Cancel) waits for an
+    empty set, as before.
+
+    `present=True` (after opening a popup) does NOT wait for a bare
+    non-empty set: the home page's own Start/nav buttons are *already*
+    non-empty before the popup ever appears, so `bool(names)` is
+    trivially true on the very first read, before LVGL has processed the
+    click at all -- this was a real bug (root-caused after an LCD-19 FAIL
+    that finished in 0.92s against a 2.0s timeout, far too fast to have
+    actually waited for anything). Instead, when `present=True`, pass the
+    pre-click ``baseline`` set: this waits until the read set differs from
+    `baseline` (the popup's own digit/OK/Cancel or confirm/Cancel names
+    joining it), not merely until it is non-empty. `baseline=None` with
+    `present=True` falls back to the old bare-non-empty wait -- callers
+    opening a popup must pass their own pre-click baseline.
+
+    Never raises; a popup that never (dis)appears, or a set that never
+    diverges from `baseline`, is still reported honestly via whatever the
+    last poll saw."""
     start = time.monotonic()
     names = _lcd19_overlay_names(ui)
-    while names is not None and bool(names) != present:
+
+    def _satisfied(n: Optional[set]) -> bool:
+        if n is None:
+            return True  # can't poll further -- stop and report honestly
+        if present and baseline is not None:
+            return n != baseline
+        return bool(n) == present
+
+    while not _satisfied(names):
         if time.monotonic() - start >= timeout_s:
             break
         time.sleep(interval_s)
@@ -1195,9 +1439,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             # while RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c).
             firing_active = bool(pin_cfg.get("firing_active_with_lock"))
             if not firing_active:
+                baseline = _lcd19_overlay_names(ui)
                 click = ui.click_by_name("Start")
                 if click.get("result") == "ok":
-                    names, _ = _wait_for_overlay_names(ui, present=True)
+                    names, _ = _wait_for_overlay_names(ui, present=True, baseline=baseline)
+                    state["after_start_click_names"] = sorted(names) if names is not None else None
                     keypad_raised = names is not None and "OK" in names and "Cancel" in names
                 if keypad_raised:
                     wrong_pin = pin_cfg.get("wrong_pin")
@@ -1225,9 +1471,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                 names is not None and "OK" not in names and "Cancel" in names
                             )
             else:
+                baseline = _lcd19_overlay_names(ui)
                 stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
                 if stop_click.get("result") == "ok":
-                    names, _ = _wait_for_overlay_names(ui, present=True)
+                    names, _ = _wait_for_overlay_names(ui, present=True, baseline=baseline)
+                    state["after_stop_click_names"] = sorted(names) if names is not None else None
                     if names is not None:
                         has_cancel = "Cancel" in names
                         has_ok = "OK" in names

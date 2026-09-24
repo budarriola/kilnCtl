@@ -491,13 +491,21 @@ class Lcd04Test(unittest.TestCase):
 
 
 _PROFILES_NAV = {"settings": "config", "Profiles": "profiles", "profile_row_0": "profile_detail"}
+# Round 3 (item 4): "paging"/"new_profile" were fabricated names no
+# firmware target has ever used -- ui_page_profile_picker.c's topbar
+# icons are untagged glyphs, located only by position via
+# _profiles_topbar_icons() (back/home anchors + a glyph in the New slot).
+_PROFILES_GLYPH = "���"
 _PROFILES_PAGE_TARGETS = {
     "home": [{"name": "settings", "cx": 10, "cy": 10, "hidden": False}],
     "config": [{"name": "Profiles", "cx": 100, "cy": 100, "hidden": False}],
     "profiles": [
         {"name": "profile_row_0", "cx": 50, "cy": 150, "hidden": False, "starred": False},
-        {"name": "paging", "cx": 400, "cy": 300, "hidden": False},
-        {"name": "new_profile", "cx": 400, "cy": 10, "hidden": False},
+        {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+        {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        {"name": _PROFILES_GLYPH, "cx": 180 + 40, "cy": 26, "hidden": False},   # Prev
+        {"name": _PROFILES_GLYPH, "cx": 180 + 80, "cy": 26, "hidden": False},   # Next
+        {"name": _PROFILES_GLYPH, "cx": 180 + 120, "cy": 26, "hidden": False},  # New
     ],
     "profile_detail": [],
 }
@@ -593,11 +601,14 @@ class ClickThenPageTest(unittest.TestCase):
 
     def test_every_call_site_is_a_pure_navigation_target(self):
         # A retried click is a second real tap. Pin EVERY call site of both
-        # retrying helpers (_click_then_page and _click_then_targets_change)
-        # so a Start/Stop/Confirm/PIN/toggle target can't be added without
-        # revisiting the retry. A literal name must be in the allowlist; the
-        # only non-literal argument allowed is `title` iterating
-        # J._DIAG_TITLES, whose entries are checked against unsafe words.
+        # name-based retrying helpers (_click_then_page and
+        # _click_then_targets_change -- the latter now unused by any case
+        # since round 3's LCD-16 rewrite moved to a raw-touch retry instead,
+        # but is checked here too in case a future case reintroduces it) so
+        # a Start/Stop/Confirm/PIN/toggle target can't be added without
+        # revisiting the retry. Every argument here must be a literal name
+        # in the allowlist -- round 3 removed the one non-literal case
+        # (`title` iterating J._DIAG_TITLES).
         import inspect
         import re
         src = inspect.getsource(C)
@@ -607,18 +618,29 @@ class ClickThenPageTest(unittest.TestCase):
         for helper, arg in calls:
             arg = arg.strip()
             m = re.fullmatch(r'"([^"]+)"', arg)
-            if m:
-                literals.add(m.group(1))
-            else:
-                self.assertEqual((helper, arg), ("_click_then_targets_change", "title"),
-                                 f"non-literal retried click target {arg!r} in {helper}()")
+            self.assertIsNotNone(m, f"non-literal retried click target {arg!r} in {helper}()")
+            literals.add(m.group(1))
         self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics"})
-        self.assertIn("for title in J._DIAG_TITLES:", src)
         unsafe = ("start", "stop", "confirm", "pin", "toggle", "cancel", "ack", "reset", "clear", "ok")
-        for title in J._DIAG_TITLES + tuple(literals):
+        for title in literals:
             words = re.findall(r"[a-z]+", title.lower())
             for word in unsafe:
                 self.assertNotIn(word, words, f"retried click target {title!r} contains {word!r}")
+
+    def test_next_touch_retry_never_uses_click_by_name(self):
+        # Round 3 (item 5): the diagnostics topbar's Next icon is paged via
+        # a raw coordinate touch (_tap_next_then_targets_change()), never
+        # click_by_name() -- Prev/Next share one undecodable glyph name
+        # (_is_glyph_name()) and click_by_name() answers AMBIGUOUS for it on
+        # a live board, so this call site must never be added to (or
+        # confused with) the name-based retry allowlist above.
+        import inspect
+        import re
+        src = inspect.getsource(C._tap_next_then_targets_change)
+        # Match a call/attribute-access, not the docstring's prose mentions
+        # of click_by_name() explaining why it is deliberately avoided.
+        self.assertNotRegex(src, r'\.click_by_name\s*\(')
+        self.assertIn("touch.inject", src)
 
 
 class ThemeMirrorDriftTest(unittest.TestCase):
@@ -754,30 +776,51 @@ class Lcd09Test(unittest.TestCase):
 
 
 _TEMP_NAV = {"settings": "config", "Temperature": "temperature"}
+_TEMP_PAGE_TARGETS = {
+    "home": [{"name": "settings", "hidden": False}],
+    "config": [{"name": "Temperature", "hidden": False}],
+    "temperature": [],
+}
 
 
 class Lcd14Test(unittest.TestCase):
-    def test_matching_values_pass(self):
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Temperature", "hidden": False}],
-            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
-        }
-        ui = PageNavUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV)
-        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
-        result = C._case_lcd14({"srv": srv})
+    # Round 3 rewrite (item 3): zone_temp_/safety_line are not real tap
+    # targets -- ui_page_temperature.c's zone rows and the Safety (K4) line
+    # are plain, non-clickable labels, so LIST_TAP_TARGETS never reports
+    # them. The judge is now driven by capture-based region sampling
+    # (_sample_widget_off) against the fixed zone-row geometry derived from
+    # ui_page_temperature.c's layout constants, not by named-target lookup.
+    def _run_with_rows(self, rendered_zones, thermo=None):
+        ui = PageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV)
+        srv = FakeSrvFull(ui, thermo=thermo or FakeThermo({0: 100.0, 1: 100.0, 2: 100.0}),
+                           profiles=FakeProfiles(FakeExecStatus("idle")))
+
+        def fake_sample_widget(image_path, cx, cy, repo_root=None):
+            zone = round((cy - C._LCD14_ZONE_ROW_Y0) / C._LCD14_ZONE_ROW_PITCH)
+            on = rendered_zones.get(zone, False)
+            region = (200, 200, 200) if on else (6, 13, 22)  # off case: matches bezel exactly
+            return lcd_sampler.RegionSample(region=region, bezel=(6, 13, 22))
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value=None), \
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget), \
+             mock.patch.object(lcd_sampler, "frame_corners_look_stale", return_value=False):
+            return C._case_lcd14({"srv": srv})
+
+    def test_all_rows_rendered_pass(self):
+        result = self._run_with_rows({0: True, 1: True, 2: True})
         self.assertEqual(result.verdict, Verdict.PASS)
 
-    def test_value_mismatch_fails(self):
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Temperature", "hidden": False}],
-            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
-        }
-        ui = PageNavUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV)
-        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 150.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
-        result = C._case_lcd14({"srv": srv})
+    def test_missing_row_fails(self):
+        result = self._run_with_rows({0: True, 1: False, 2: True})
         self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("1", result.reason)
+
+    def test_no_capture_is_inconclusive(self):
+        ui = PageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV)
+        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd14({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
     def test_finally_restores_home_on_exception(self):
         page_targets = {
@@ -790,140 +833,140 @@ class Lcd14Test(unittest.TestCase):
             C._case_lcd14({"srv": srv})
         self.assertGreaterEqual(ui.home_calls, 1)
 
-    def test_thermo_read_exception_is_recorded_not_swallowed(self):
-        # 2026-09-24 bench root cause: srv._thermo.read_all() never existed
-        # on the real ThermoClient (only .read(channel)), so this call always
-        # raised AttributeError and a bare `except Exception: readings = {}`
-        # swallowed it -- reporting the misleading "no zone rows with a
-        # numeric value were reported" INCONCLUSIVE instead of the real
-        # coding bug. Fixed to call .read() and to record the exception
-        # text into observed["thermo_error"] rather than discard it.
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Temperature", "hidden": False}],
-            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
-        }
-        ui = PageNavUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV)
-        srv = FakeSrvFull(ui, thermo=FakeThermo(raises=RuntimeError("no reply")),
-                           profiles=FakeProfiles(FakeExecStatus("idle")))
-        result = C._case_lcd14({"srv": srv})
-        self.assertIn("thermo_error", result.observed)
-        self.assertIn("no reply", result.observed["thermo_error"])
 
-    def test_zone_rows_arriving_one_poll_late_are_still_read(self):
-        # Bounded (<=3s) poll for zone_temp_* targets, same class of race as
-        # _click_then_page's page-name poll: the first read right after the
-        # page arrives can still see rows not yet populated.
-        class DelayedZoneRowsUi(PageNavUiTest):
-            def __init__(self, *a, **kw):
-                super().__init__(*a, **kw)
-                self._temp_reads = 0
+_DIAG_GLYPH = "���"
+_DIAG_BACK = {"name": "back", "cx": 140, "cy": 26, "hidden": False}
+_DIAG_HOME = {"name": "home", "cx": 180, "cy": 26, "hidden": False}
+_DIAG_PITCH = 40.0
+_DIAG_NEXT = {"name": _DIAG_GLYPH, "cx": 180 + 2 * _DIAG_PITCH, "cy": 26, "hidden": False}
 
-            def list_tap_targets(self):
-                if self._page == "temperature":
-                    self._temp_reads += 1
-                    if self._temp_reads == 1:
-                        return {"targets": [{"name": "safety_line", "on": False}], "truncated": False}
-                return super().list_tap_targets()
 
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Temperature", "hidden": False}],
-            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
-        }
-        ui = DelayedZoneRowsUi(page="home", page_targets=page_targets, nav_map=_TEMP_NAV)
-        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
-        with mock.patch.object(C.time, "sleep"):
-            result = C._case_lcd14({"srv": srv})
-        self.assertEqual(result.verdict, Verdict.PASS)
-        self.assertEqual(result.observed.get("zone_rows"), {0: 100.0})
+class DiagPagingUi(PageNavUiTest):
+    """Models ui_page_diagnostics.c's 8 sub-pages, reached only by the
+    topbar's untagged Next icon (position-located, never click_by_name --
+    see _diagnostics_next_target()'s docstring). ``step_content`` maps a
+    sub-page index to the extra targets that page shows (e.g. an
+    Acknowledge button on Crash Report, a still-present Reset on Relay
+    Life for the regression check)."""
+
+    def __init__(self, *a, step_content=None, page_count=8, swallow_step=None, **kw):
+        super().__init__(*a, **kw)
+        self.step = 0
+        self._step_content = step_content or {}
+        self._page_count = page_count
+        self._swallow_step = swallow_step
+        self._swallowed_once = set()
+
+    def list_tap_targets(self):
+        if self._page != "diagnostics":
+            return super().list_tap_targets()
+        targets = [_DIAG_BACK, _DIAG_HOME]
+        if self.step > 0:
+            targets.append({"name": _DIAG_GLYPH, "cx": 180 + 1 * _DIAG_PITCH, "cy": 26, "hidden": False})
+        if self.step + 1 < self._page_count:
+            targets.append(_DIAG_NEXT)
+        targets.extend(self._step_content.get(self.step, []))
+        return {"targets": targets, "truncated": False}
+
+
+class FakeTouchAdvancesDiag:
+    """A TouchClient double: inject()ing a press+release at Next's own
+    cx/cy advances DiagPagingUi.step, exactly the raw-coordinate path
+    _tap_next_then_targets_change() uses (click_by_name() cannot target
+    Next -- Prev/Next share one undecodable glyph name)."""
+
+    def __init__(self, ui):
+        self._ui = ui
+        self.injected = []
+
+    def inject(self, x, y, pressed):
+        self.injected.append((x, y, pressed))
+        if not pressed and abs(x - _DIAG_NEXT["cx"]) < 1 and abs(y - _DIAG_NEXT["cy"]) < 1:
+            if self._ui._swallow_step == self._ui.step and self._ui.step not in self._ui._swallowed_once:
+                self._ui._swallowed_once.add(self._ui.step)
+                return  # swallowed once: step does not advance
+            if self._ui.step + 1 < self._ui._page_count:
+                self._ui.step += 1
+
+
+def _diag_srv(ui):
+    srv = FakeSrvFull(ui)
+    srv._touch = FakeTouchAdvancesDiag(ui)
+    return srv
+
+
+_DIAG_NAV = {"settings": "config", "Diagnostics": "diagnostics"}
+_DIAG_PAGE_TARGETS = {
+    "home": [{"name": "settings", "hidden": False}],
+    "config": [{"name": "Diagnostics", "hidden": False}],
+}
 
 
 class Lcd16Test(unittest.TestCase):
     def test_finally_restores_home_on_exception(self):
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Diagnostics", "hidden": False}],
-        }
         nav_map = {"settings": "config", "Diagnostics": "diag_hub"}
-        ui = RaisingUiTest(page="home", page_targets=page_targets, nav_map=nav_map, raise_on_call=2)
+        ui = RaisingUiTest(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=nav_map, raise_on_call=2)
         srv = FakeSrvFull(ui)
         with self.assertRaises(RuntimeError):
             C._case_lcd16({"srv": srv})
         self.assertGreaterEqual(ui.home_calls, 1)
 
     def test_menu_tap_failure_fails(self):
-        targets = [{"name": "settings", "hidden": False}]
-        ui = FakeUiTest(page="home", targets=targets, click_result="not_found")
+        ui = PageNavUiTest(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV, click_result="not_found")
         srv = FakeSrvFull(ui)
         result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.verdict, Verdict.FAIL)
 
-    def test_sub_tab_retries_once_on_swallowed_tap_then_all_titles_seen(self):
-        # 2026-09-24 fix: the per-title loop used to break on any non-'ok'
-        # click result with no retry, and separately never even checked
-        # whether the tap-target set actually changed after an 'ok' click --
-        # so a swallowed tap on the FIRST sub-tab silently reused the
-        # previous (config-hub) targets and looked like a legitimate,
-        # empty diagnostics tab instead of a failed hop. Migrated to
-        # _click_then_targets_change(), which retries once when the set is
-        # unchanged.
-        class SwallowOnceDiagUi(PageNavUiTest):
-            def __init__(self, *a, tab_targets=None, **kw):
-                super().__init__(*a, **kw)
-                self._tab_targets = tab_targets or {}
-                self._current_tab_targets: "list" = []
-                self._swallowed_once = set()
+    def test_full_paging_with_ack_at_last_step_passes(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV,
+                           step_content={7: [{"name": "Acknowledge", "cx": 240, "cy": 280, "hidden": False}]})
+        srv = _diag_srv(ui)
+        result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("pages_paged"), 7)
+        self.assertEqual(result.observed.get("crash_report_step"), 7)
 
-            def click_by_name(self, name):
-                if self._click_result != "ok":
-                    return {"result": self._click_result, "cx": 0, "cy": 0}
-                dest = self._nav_map.get(name)
-                if dest is not None:
-                    self._page = dest
-                    return {"result": "ok", "cx": 0, "cy": 0}
-                if name in self._tab_targets:
-                    if name not in self._swallowed_once:
-                        self._swallowed_once.add(name)
-                        return {"result": "ok", "cx": 0, "cy": 0}  # swallowed: set unchanged
-                    self._current_tab_targets = self._tab_targets[name]
-                return {"result": "ok", "cx": 0, "cy": 0}
+    def test_relay_life_reset_still_present_fails(self):
+        # Relay Life's own Reset control was fully removed
+        # (UI_PLAN.md section 6.4) -- a reappearing Reset target is a
+        # regression, not a pass.
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV,
+                           step_content={3: [{"name": "Reset", "cx": 240, "cy": 280, "hidden": False}]})
+        srv = _diag_srv(ui)
+        result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("Reset", result.reason)
 
-            def list_tap_targets(self):
-                if self._page not in ("config", "home"):
-                    return {"targets": self._current_tab_targets, "truncated": False}
-                return {"targets": self._page_targets.get(self._page, []), "truncated": False}
+    def test_swallowed_next_tap_retries_once_then_passes(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV, swallow_step=0)
+        srv = _diag_srv(ui)
+        result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("pages_paged"), 7)
 
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Diagnostics", "hidden": False}],
-        }
-        nav_map = {"settings": "config", "Diagnostics": "diagnostics"}
-        tab_targets = {t: [{"name": f"marker_{i}"}] for i, t in enumerate(J._DIAG_TITLES)}
-        ui = SwallowOnceDiagUi(page="home", page_targets=page_targets, nav_map=nav_map, tab_targets=tab_targets)
+    def test_next_stuck_after_retry_is_inconclusive(self):
+        class StuckDiagUi(DiagPagingUi):
+            pass
+
+        ui = StuckDiagUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
         srv = FakeSrvFull(ui)
-        with mock.patch.object(C._click_then_targets_change, "__defaults__", (0.05,)):
-            result = C._case_lcd16({"srv": srv})
-        self.assertEqual(result.observed.get("titles_seen"), list(J._DIAG_TITLES))
-        self.assertEqual(result.observed.get("titles_changed"), list(J._DIAG_TITLES))
 
-    def test_dead_tab_bar_is_inconclusive_not_pass(self):
-        # Every sub-tab click answers 'ok' but nothing changes. The static
-        # diagnostics targets happen to include a parseable heap value that
-        # agrees with get_heap_status() -- before the review fix of
-        # ff55bda2 that read was taken off the stale set and the case
-        # PASSed with no tab content ever observed.
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Diagnostics", "hidden": False}],
-            "diagnostics": [{"name": "board_heap_free", "value": "100000", "hidden": False}],
-        }
-        nav_map = {"settings": "config", "Diagnostics": "diagnostics"}
-        ui = PageNavUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
-        srv = FakeSrvFull(ui)
-        with mock.patch.object(C._click_then_targets_change, "__defaults__", (0.05,)):
-            result = C._case_lcd16({"srv": srv})
-        self.assertEqual(result.observed.get("titles_changed"), [])
+        class StuckTouch:
+            def __init__(self):
+                self.injected = []
+
+            def inject(self, x, y, pressed):
+                self.injected.append((x, y, pressed))  # never advances ui.step
+
+        srv._touch = StuckTouch()
+        result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(result.observed.get("pages_paged"), 0)
+
+    def test_no_touch_transport_is_inconclusive(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        srv = FakeSrvFull(ui)  # no _touch attribute at all
+        result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
 
@@ -1057,6 +1100,67 @@ class FakeLcd19SecClient:
         self._cfg["web_timeout_min"] = web_timeout_min
         self._cfg["lcd_timeout_min"] = lcd_timeout_min
         return 200, {"ok": True}
+
+
+class DelayedOverlayUiTest(FakeUiTest):
+    """``list_tap_targets`` returns ``pre`` for the first ``stale_reads``
+    reads, then ``post`` -- models the real LCD-19 click-then-read race:
+    home's own Start/nav buttons are non-empty (``pre``) even before LVGL
+    has processed the click, and the popup's own buttons only replace them
+    a couple of polls later (``post``)."""
+
+    def __init__(self, pre, post, stale_reads=1):
+        super().__init__(page="home", targets=[])
+        self._pre = pre
+        self._post = post
+        self._stale_reads = stale_reads
+        self._reads = 0
+
+    def list_tap_targets(self):
+        self._reads += 1
+        names = self._pre if self._reads <= self._stale_reads else self._post
+        return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
+
+
+class WaitForOverlayNamesBaselineTest(unittest.TestCase):
+    """Unit tests for the LCD-19 baseline-wait fix: _wait_for_overlay_names
+    used to treat `present=True` as "wait for a non-empty set", which the
+    home page's own Start/nav buttons already satisfy before the popup
+    ever appears -- a real bug found from a suspiciously fast (0.92s vs a
+    2.0s timeout) LCD-19 FAIL. It must instead wait for the set to differ
+    from a caller-supplied pre-click baseline."""
+
+    def test_present_true_waits_past_stale_nonempty_baseline(self):
+        ui = DelayedOverlayUiTest(pre={"Start", "settings"},
+                                   post={"Start", "settings", "OK", "Cancel"},
+                                   stale_reads=2)
+        baseline = C._lcd19_overlay_names(ui)  # consumes one read, itself "pre"
+        names, _waited = C._wait_for_overlay_names(ui, present=True, baseline=baseline,
+                                                     timeout_s=1.0, interval_s=0.01)
+        self.assertIsNotNone(names)
+        self.assertIn("OK", names)
+        self.assertIn("Cancel", names)
+
+    def test_present_true_never_diverging_from_baseline_times_out_honestly(self):
+        # A popup that never actually appears (baseline == post) must not
+        # be reported as "present" just because the timeout elapsed --
+        # the function returns the last (unsatisfying) read, not a lie.
+        same = {"Start", "settings"}
+        ui = DelayedOverlayUiTest(pre=same, post=same, stale_reads=0)
+        baseline = C._lcd19_overlay_names(ui)
+        names, waited = C._wait_for_overlay_names(ui, present=True, baseline=baseline,
+                                                    timeout_s=0.05, interval_s=0.01)
+        self.assertEqual(names, same)
+        self.assertGreaterEqual(waited, 0.05)
+
+    def test_present_true_without_baseline_falls_back_to_bare_nonempty(self):
+        # Documents the fallback for a caller that omits `baseline`: the
+        # OLD, buggy-for-LCD-19 bare-non-empty behavior. _case_lcd19 itself
+        # always passes a baseline now; this is not an endorsement.
+        ui = DelayedOverlayUiTest(pre={"Start", "settings"},
+                                   post={"Start", "settings", "OK", "Cancel"})
+        names, _waited = C._wait_for_overlay_names(ui, present=True, timeout_s=1.0, interval_s=0.01)
+        self.assertEqual(names, {"Start", "settings"})  # returns immediately, stale
 
 
 class Lcd19Test(unittest.TestCase):
@@ -1373,68 +1477,30 @@ class Lcd09PollTest(unittest.TestCase):
 
 class Lcd14PollTest(unittest.TestCase):
     def test_page_flips_one_poll_after_each_click_still_passes(self):
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Temperature", "hidden": False}],
-            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
-        }
-        ui = DelayedPageNavUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV, flips_after=1)
-        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
-        result = C._case_lcd14({"srv": srv})
+        ui = DelayedPageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV, flips_after=1)
+        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0, 1: 100.0, 2: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value=None), \
+             mock.patch.object(lcd_sampler, "sample_widget",
+                                return_value=lcd_sampler.RegionSample(region=(200, 200, 200), bezel=(6, 13, 22))), \
+             mock.patch.object(lcd_sampler, "frame_corners_look_stale", return_value=False):
+            result = C._case_lcd14({"srv": srv})
         self.assertEqual(result.verdict, Verdict.PASS)
 
 
-class DelayedDiagUiTest(PageNavUiTest):
-    """LCD-16's diagnostics sub-tabs never change the top-level page name
-    (ui_page_diagnostics.c's own internal s_pages[]), so the race there
-    shows up in list_tap_targets(), not get_current_page(). Models a
-    per-title tap-target set that only updates `flips_after` polls after
-    the tab's click_by_name()."""
-
-    def __init__(self, *a, tab_targets=None, flips_after=1, **kw):
-        super().__init__(*a, **kw)
-        self._tab_targets = tab_targets or {}
-        self._flips_after = flips_after
-        self._pending_tab = None
-        self._current_tab_targets: "list" = []
-        self._poll_count = 0
-
-    def click_by_name(self, name):
-        if self._click_result != "ok":
-            return {"result": self._click_result, "cx": 0, "cy": 0}
-        dest = self._nav_map.get(name)
-        if dest is not None:
-            self._page = dest
-        if name in self._tab_targets:
-            self._pending_tab = name
-            self._poll_count = 0
-        return {"result": "ok", "cx": 0, "cy": 0}
-
-    def list_tap_targets(self):
-        if self._pending_tab is not None and self._flips_after is not None:
-            self._poll_count += 1
-            if self._poll_count > self._flips_after:
-                self._current_tab_targets = self._tab_targets[self._pending_tab]
-                self._pending_tab = None
-        if self._page != "config" and self._page != "home":
-            return {"targets": self._current_tab_targets, "truncated": False}
-        return {"targets": self._page_targets.get(self._page, []), "truncated": False}
-
-
 class Lcd16PollTest(unittest.TestCase):
-    def test_relay_life_tab_targets_arrive_one_poll_late(self):
-        page_targets = {
-            "home": [{"name": "settings", "hidden": False}],
-            "config": [{"name": "Diagnostics", "hidden": False}],
-        }
-        nav_map = {"settings": "config", "Diagnostics": "diagnostics"}
-        tab_targets = {t: [] for t in J._DIAG_TITLES}
-        tab_targets["Relay Life"] = [{"name": "reset", "hidden": False}]
-        ui = DelayedDiagUiTest(page="home", page_targets=page_targets, nav_map=nav_map,
-                                tab_targets=tab_targets, flips_after=1)
-        srv = FakeSrvFull(ui)
+    def test_relay_life_reset_seen_after_a_swallowed_next_tap_still_fails(self):
+        # Same "poll one step late" race as Lcd14PollTest, expressed through
+        # DiagPagingUi's swallow_step: a Next tap on step 3 (Relay Life) is
+        # swallowed once, so the retry path must still be the one that
+        # observes the reappeared Reset control rather than silently
+        # skipping past it.
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV,
+                           step_content={3: [{"name": "Reset", "cx": 240, "cy": 280, "hidden": False}]},
+                           swallow_step=2)
+        srv = _diag_srv(ui)
         result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.observed.get("relay_life_has_reset"), True)
+        self.assertEqual(result.verdict, Verdict.FAIL)
 
 
 class FakeTouchThatWakes:
