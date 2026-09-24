@@ -26,6 +26,21 @@
 >   transition, so clearing `active` there made them no-ops or dropped data.
 >   The clear now runs only on the IDLE transition (i.e. `halt()`), which
 >   already runs all of the above first.
+> - **Autotune now aborted on a rule-1 mode-state violation** (`5821eeec`,
+>   review-fixed `933a7eec`): `exec_handle_mode_state_violation()` forced the
+>   run FAULTED and released its own relay claim, but left a driving autotune
+>   session's separate claims (`RELAY_OWNER_AUTOTUNE`,
+>   `HEAT_ENABLE_CLAIMANT_AUTOTUNE`) untouched, so autotune kept heating the
+>   zone through the fault. It now re-derives rule 1's own "actively driving"
+>   condition and calls `autotune_engine_abort()` (`s_at.lock` only, so the
+>   `s_exec.lock` -> `s_at.lock` order is preserved) when it holds. The review
+>   fix corrected the re-derivation to sample `zones[].active` before
+>   `exec_enter_terminal_state()` clears it, since a FAULTED run's zone stays
+>   active until IDLE and autotune's own start check
+>   (`profile_executor_zone_is_active()`) allows starting one on it. **Open
+>   advisory:** autotune-start and profile-start each cross-check the other
+>   before taking their own lock, so simultaneous starts can both pass --
+>   being fixed in a parallel worktree.
 > - **Bench board lock hardened**: `8e696d78` fixes a stale-reclaim race (a
 >   third acquirer could win the gap between the lock's rename-aside and
 >   put-back) by serializing reclaimers on an `.board_lock.reclaiming`
@@ -36,7 +51,13 @@
 >   pre-click page (a real page move now fails fast as `wrong_page` instead
 >   of tapping a stale target), and gives each captured frame its own
 >   filename so LCD-04's before/after frames stop overwriting each other.
->   Rerun of the LCD suite against this fix is still pending.
+>   **Round 2 landed** (`2484b813`): LCD-01 is now diagnostic-only (a cast
+>   reference, never a FAIL), LCD-09 pages Prev/Next by tab position rather
+>   than name, LCD-16 reports INCONCLUSIVE rather than FAIL on an unchanged
+>   tab set, and a theme-mirror drift test was added. **Round 3 in progress,
+>   not yet landed:** stale `FRAME_CORNERS` (camera moved again per this
+>   file's own 2026-09-24 camera-aim note), LCD-16 Prev/Next paging, an
+>   LCD-14 redesign, and cases naming nonexistent widgets.
 > - **Forgot-password design replaced with TOTP, owner change 2026-09-24**
 >   (`84fa2e7b`): `docs/EMAIL_PASSWORD_RESET_PLAN.md` is renamed to
 >   `docs/TOTP_PASSWORD_RESET_PLAN.md` (owner rejected email) — authenticator-app
@@ -48,16 +69,34 @@
 >   (`auth_reset_gesture.c`) is untouched and stays the independent fallback,
 >   and now also disenrolls TOTP on a successful gesture confirm so a gesture
 >   reset can never leave an orphaned TOTP secret locking the account. Work
->   tranches: WT-C (PcTools MCP wrappers, `totp_enroll_status`/etc.) is up in
->   `c7db358a`, in review; WT-A (firmware: TOTP core, NVS, routes) and WT-D
->   (host tests: RFC 6238 Appendix B vectors) are in progress, not yet landed;
+>   tranches: **WT-C landed** (PcTools MCP wrappers `totp_enroll_status`/
+>   `totp_reset_password`, review-fixed `c4d752df` -- tool count now 190,
+>   plan section 6a specifies 503 on an unsynced board clock and a plain-text
+>   429 body); live-board verification still pending WT-A. **WT-A firmware
+>   core landed in part** (`0f5151f0`, `totp.c`/`totp_config.c`: RFC 6238
+>   core plus NVS persistence, `totp_config_verify_and_consume()` persists
+>   the matched replay-counter step before returning OK) -- its routes
+>   (`auth_forgot_reset_http.c`, settings-page enrollment, the reset-gesture
+>   disenroll call) are still pending, in worktree `C:\wt\totpfw_2yhb0w`.
+>   WT-D (host tests: RFC 6238 Appendix B vectors) landed alongside the core.
 >   WT-B (web UI: settings-page enrollment with QR, "Forgot password?" in the
->   login modal) has not started.
-> - **Lazy login pop-up, in review**: `04e4a5a0` (worktree `lazylogin`, not
->   yet landed on `origin/main`) serves page shells without redirecting to a
->   login page on load, replacing that with one shared, themed, cancelable
->   login modal instead -- the surface the TOTP plan's "Forgot password?" link
->   above is meant to attach to.
+>   login modal) is in progress, not yet landed.
+> - **Lazy login pop-up, landed** (`090aaa9f`, review fixes `58e10e11`):
+>   serves page shells without redirecting to a login page on load, replacing
+>   that with one shared, themed, cancelable login modal instead -- the
+>   surface the TOTP plan's "Forgot password?" link above is meant to attach
+>   to. An explicit `PAGE_SHELL_URI` allowlist (15 entries,
+>   `route_tier_table.h`, `http_auth_is_page_shell_get()`) replaced an
+>   any-non-`/api`-GET match so a future untabled GET still fails closed to
+>   ADMIN. `58e10e11` then fixed three further gesture-gated gaps: Dashboard
+>   Start's `window.confirm()` no longer silently drops the 3 s write window;
+>   the long-press PID popup read (fired from a background timer) can now
+>   prompt via an opt-in `__kcUserAction` flag; and a cancelled sign-in no
+>   longer leaves stale "Applying.../Uploading.../Saving.../Loading..." text
+>   on the PID popup, backup restore, display settings, or safety config
+>   pages. **Open advisory, not addressed:** no page-load prompt once on a
+>   gated non-dashboard page, and some "Loading..." text is still left after
+>   a cancel in `live_profile`'s `refreshLive`/`pollAdaptiveTune`.
 > - **`profile_executor` dwell-fault assert, real defect, fixed 2026-09-24**
 >   (`docs/audits/profile_executor_panic_2026-09-24.md`, `3ce065ca`): HP-07's
 >   global thermal guard tripped while the run was dwelling; `escalate_guard_trip()`
