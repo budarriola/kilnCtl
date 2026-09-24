@@ -504,9 +504,12 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
  * entry is at most ~80 bytes (id+name up to ~24 chars+type+set+value), times
  * SAFETY_CFG_PARAM_COUNT, plus a small fixed header -- generous headroom
  * over the ~57*80 + 128 ~= 4700 bytes a full response actually needs. */
-/* 2026-09-24: +2560u covers fault_source_edges (<=16 entries, ~110 bytes
- * each) and fault_source_counts (6 entries, ~70 bytes each) with headroom,
- * same "generous fixed upper bound" discipline as the rest of this macro. */
+/* 2026-09-24: +2560u is for fault_source_edges (<=16 entries, <=138 bytes
+ * each at worst-case field widths) and fault_source_counts (6 entries, <=76
+ * bytes each) -- ~2.8 KB at worst, slightly more than 2560 on its own, but
+ * the params/diff terms above are sized well past their own worst case:
+ * test_safety_cfg_http.c's test_build_json_worst_case_fits() measures a
+ * whole worst-case body at 11822 of 13440 bytes and fails if it stops fitting. */
 #define SAFETY_CFG_JSON_MAX \
     (SAFETY_CFG_PARAM_COUNT * 128u + SAFETY_CFG_STORE_DIFF_MAX * 128u + 256u + 2560u)
 

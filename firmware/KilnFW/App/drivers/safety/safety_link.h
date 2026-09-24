@@ -829,7 +829,7 @@ typedef enum {
 #define SAFETY_LINK_FAULT_SRC_BIT_COUNT   6u
 
 typedef struct {
-    uint32_t uptime_ms;          /* esp_timer-derived, monotonic, immune to SNTP steps */
+    uint32_t uptime_ms;          /* xTaskGetTickCount()-derived, monotonic, immune to SNTP steps */
     uint32_t unix_time_s;        /* wall clock at record time, 0 if SNTP never synced
                                    * this boot -- same "0 means unsynced, never a fake
                                    * near-1970 date" convention as profile_executor_run.c's

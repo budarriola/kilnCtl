@@ -951,6 +951,130 @@ static void test_build_json_last_diff_empty_when_nothing_changed(void)
                "an all-zero snapshot renders an explicitly empty diff, not an omitted field");
 }
 
+// 2026-09-24 fault-edge instrumentation review: build_commissioning_json()'s
+// new fault_source_edges/fault_source_counts section, rendered from a
+// hand-built snapshot (commissioning_get_handler() fills it from
+// safety_link_get_fault_edges(), whose ring logic test_safety_link_compile.c
+// covers against the real safety_link.c).
+static void test_build_json_fault_edges_render(void)
+{
+    TEST_SECTION("build_commissioning_json -- fault_source_edges/fault_source_counts render the snapshot");
+    reset_all();
+    static safety_cfg_http_snapshot_t snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.current_fault_sources_known = true;
+    snap.current_fault_sources = SAFETY_FAULT_SRC_APP;
+    snap.fault_edges.count = 2;
+    snap.fault_edges.total_recorded = 7;
+    snap.fault_edges.entries[0].uptime_ms = 1234;
+    snap.fault_edges.entries[0].unix_time_s = 0; // unsynced
+    snap.fault_edges.entries[0].source_mask_before = 0;
+    snap.fault_edges.entries[0].source_mask_after = SAFETY_FAULT_SRC_SAFETY_LINK;
+    snap.fault_edges.entries[0].first_set_bit = 3;
+    snap.fault_edges.entries[1].uptime_ms = 5678;
+    snap.fault_edges.entries[1].unix_time_s = 1790000000u;
+    snap.fault_edges.entries[1].source_mask_before = SAFETY_FAULT_SRC_SAFETY_LINK;
+    snap.fault_edges.entries[1].source_mask_after = 0;
+    snap.fault_edges.entries[1].first_set_bit = 0xFFu;
+    snap.fault_edges.counts.rising_count[3] = 2;
+    snap.fault_edges.counts.last_rising_uptime_ms[3] = 1234;
+    snap.fault_edges.counts.last_rising_valid[3] = true;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"current_fault_sources_known\":true,\"current_fault_sources\":16") != NULL,
+               "live fault_sources mask is reported when known");
+    TEST_CHECK(strstr(json, "\"fault_source_edges\":[{\"uptime_ms\":1234,\"unix_time_s\":null,"
+                            "\"source_mask_before\":0,\"source_mask_after\":8,"
+                            "\"first_set_source\":\"safety_link\"},{\"uptime_ms\":5678,"
+                            "\"unix_time_s\":1790000000,\"source_mask_before\":8,"
+                            "\"source_mask_after\":0,\"first_set_source\":null}]") != NULL,
+               "both edges render oldest-first, unsynced time as null, a pure clear as null source");
+    TEST_CHECK(strstr(json, "\"fault_source_edge_total_recorded\":7") != NULL, "total_recorded reported");
+    TEST_CHECK(strstr(json, "\"safety_link\":{\"rising_count\":2,\"last_rising_uptime_ms\":1234}") != NULL,
+               "a source that rose reports its count and last-rising uptime");
+    TEST_CHECK(strstr(json, "\"manual\":{\"rising_count\":0,\"last_rising_uptime_ms\":null}") != NULL,
+               "a source that never rose reports null, not 0");
+    TEST_CHECK(len >= 2 && strcmp(json + len - 2, "}}") == 0,
+               "the response still closes both the counts object and the top-level object");
+}
+
+// Worst-case sizing: every field at its widest printable value, all
+// SAFETY_CFG_PARAM_COUNT params set as F32 with names longer than any real
+// one (the longest real name is 22 chars), a full diff, a full 16-entry edge
+// ring and every counter saturated. build_commissioning_json() returns 0
+// (-> a 500) rather than truncating, so this proves SAFETY_CFG_JSON_MAX still
+// holds a complete body after the fault-edge section was added.
+static void test_build_json_worst_case_fits(void)
+{
+    TEST_SECTION("build_commissioning_json -- a worst-case snapshot fits SAFETY_CFG_JSON_MAX");
+    reset_all();
+    static const char *long_name = "worst_case_param_name_padded_32c";
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
+        s_stub_params[i].param_id = 0xFFFFu;
+        s_stub_params[i].name = long_name;
+        s_stub_params[i].type = KILNLINK_PARAM_TYPE_F32;
+        s_stub_params[i].set = true;
+        s_stub_params[i].value.f32_val = -1.17549435e-38f;
+    }
+    static safety_cfg_http_snapshot_t snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.link_up = true;
+    snap.live_crc_known = true;
+    snap.live_crc = 0xFFFFu;
+    snap.cached_crc = 0xFFFEu;
+    snap.fetched_ms_ago_or_neg1 = INT64_MAX;
+    snap.unset_reliable = true;
+    snap.borrowed_known = true;
+    snap.borrowed = true;
+    snap.borrowed_zone_index = 200;
+    snap.tc_config_reasserted_known = true;
+    for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {
+        snap.ct_cal_has_value[ch] = true;
+        snap.ct_cal_a_fs[ch] = -1.17549435e-38f;
+        snap.ct_cal_zero_mv[ch] = -1.17549435e-38f;
+        snap.ct_cal_trim_offset_a[ch] = -1.17549435e-38f;
+        snap.ct_cal_trim_gain[ch] = -1.17549435e-38f;
+    }
+    snap.rate_guard_has_provenance = true;
+    snap.rate_guard_value = -1.17549435e-38f;
+    snap.diff_count = SAFETY_CFG_STORE_DIFF_MAX;
+    snap.diff_from_crc = 0xFFFFu;
+    snap.diff_to_crc = 0xFFFFu;
+    for (size_t i = 0; i < SAFETY_CFG_STORE_DIFF_MAX; i++) {
+        snap.diff_entries[i].name = long_name;
+        snap.diff_entries[i].type = KILNLINK_PARAM_TYPE_F32;
+        snap.diff_entries[i].old_set = true;
+        snap.diff_entries[i].old_value.f32_val = -1.17549435e-38f;
+        snap.diff_entries[i].new_set = true;
+        snap.diff_entries[i].new_value.f32_val = -1.17549435e-38f;
+    }
+    snap.current_fault_sources_known = true;
+    snap.current_fault_sources = UINT32_MAX;
+    snap.fault_edges.count = SAFETY_LINK_FAULT_EDGE_RING_LEN;
+    snap.fault_edges.total_recorded = UINT32_MAX;
+    for (size_t i = 0; i < SAFETY_LINK_FAULT_EDGE_RING_LEN; i++) {
+        snap.fault_edges.entries[i].uptime_ms = UINT32_MAX;
+        snap.fault_edges.entries[i].unix_time_s = UINT32_MAX;
+        snap.fault_edges.entries[i].source_mask_before = 0xFFu;
+        snap.fault_edges.entries[i].source_mask_after = 0xFFu;
+        snap.fault_edges.entries[i].first_set_bit = 5; // "thermal_sanity", the longest name
+    }
+    for (size_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+        snap.fault_edges.counts.rising_count[b] = UINT16_MAX;
+        snap.fault_edges.counts.last_rising_uptime_ms[b] = UINT32_MAX;
+        snap.fault_edges.counts.last_rising_valid[b] = true;
+    }
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    printf("    worst-case commissioning JSON: %zu of %u bytes\n", len, (unsigned)SAFETY_CFG_JSON_MAX);
+    TEST_CHECK(len > 0, "a worst-case body still fits -- the builder did not refuse for lack of room");
+    TEST_CHECK(len >= 2 && strcmp(json + len - 2, "}}") == 0, "and it is a complete, closed object");
+    memset(s_stub_params, 0, sizeof(s_stub_params));
+}
+
 // 2026-09-03, TASK 1/2: the live status-frame flags (BORROWED, TC_NOT_
 // INSTALLED, TC_INJECTED) commissioning_get_handler() now folds into this
 // same JSON. build_commissioning_json() is the pure half that host-tests
@@ -2483,6 +2607,8 @@ int main(void)
     test_build_json_set_param_includes_value();
     test_build_json_last_diff_reports_named_mismatch();
     test_build_json_last_diff_empty_when_nothing_changed();
+    test_build_json_fault_edges_render();
+    test_build_json_worst_case_fits();
     test_build_json_borrowed_unknown();
     test_build_json_borrowed_known_true_with_zone();
     test_build_json_borrowed_known_true_zone_unknown();
