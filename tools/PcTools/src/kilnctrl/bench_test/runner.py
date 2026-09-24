@@ -246,8 +246,8 @@ class BenchTestRunner:
         # live read-only reader marker is registered, closing that gap the
         # other way too.
         # Refuses immediately (never waits) if a live process already holds
-        # it; a stale lock (holder pid confirmed dead) is reclaimed
-        # atomically -- at most one of several racing reclaimers can win --
+        # it; a stale lock (holder pid confirmed dead) is reclaimed under
+        # exclusion -- at most one of several racing reclaimers can win --
         # with a logged notice. Held for the ENTIRE run, released only in the
         # `finally` below -- including the case where the MCP client's own
         # 300 s tool timeout fires: the server keeps executing this method

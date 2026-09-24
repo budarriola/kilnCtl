@@ -202,31 +202,30 @@ class AcquireReleaseTest(unittest.TestCase):
 
 
 class StaleReclaimRaceTest(unittest.TestCase):
-    """Deterministic repro of the stale-reclaim race documented in
-    board_lock.py's module docstring history: two mutating acquire() calls
-    that both find the same dead-pid lock file at once must never both end
-    up believing they hold it.
+    """Deterministic repro of the stale-reclaim race: two mutating
+    acquire() calls that both read the same dead-pid lock file must never
+    both end up believing they hold it.
 
-    The pre-fix implementation reclaimed a stale lock with a plain,
-    unconditional `os.remove(path)` after an earlier read decided the
-    holder was dead. This test forces thread B's reclaim step to execute
-    only AFTER thread A has already reclaimed the file and written its own
-    fresh, live lock in its place -- on the pre-fix code, B's blind
-    `os.remove`/`os.replace` call destroys A's live lock by name alone, and
-    B's subsequent create then also succeeds: both `acquire()` calls return
-    successfully. Run against the pre-fix source, this test fails (two
-    winners); against the fix (`_atomic_reclaim`, which re-checks exactly
-    what it claimed via `os.replace` before ever discarding it), exactly
-    one of the two calls succeeds.
+    Ordering is forced with events, not sleeps: thread B reads the stale
+    file and decides its holder is dead (the first `_holder_alive` call on
+    B's thread), then parks; only then does thread A start, reclaim the
+    stale file and create its own live lock; only after A has returned does
+    B resume into its reclaim step. The original implementation's blind
+    `os.remove(path)` at that point deletes A's live lock by name and B's
+    create then succeeds too -- two winners. The fix re-verifies under an
+    exclusive reclaim mutex that the file is still the stale one it read,
+    finds A's lock instead, removes nothing, and refuses.
     """
+
+    WAIT_S = 10
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="board_lock_race_test_")
         self.path = os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)
-        dead = board_lock.LockInfo(pid=_dead_pid(), hostname=socket.gethostname(), suite="heat",
-                                    started_at="2020-01-01T00:00:00Z", tag=None)
+        self.dead = board_lock.LockInfo(pid=_dead_pid(), hostname=socket.gethostname(),
+                                        suite="heat", started_at="2020-01-01T00:00:00Z", tag=None)
         with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write(dead.to_json())
+            fh.write(self.dead.to_json())
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -235,28 +234,25 @@ class StaleReclaimRaceTest(unittest.TestCase):
         import threading
         from unittest import mock
 
+        b_decided_stale = threading.Event()
         a_done = threading.Event()
-        b_may_destroy = threading.Event()
-        real_remove = os.remove
-        real_replace = os.replace
-        state = {"b_thread": None}
+        real_holder_alive = board_lock._holder_alive
+        b_state = {"thread": None, "gated": False}
+        waits = []
 
-        def delayed_if_b(real_fn):
-            def wrapper(src, *args, **kwargs):
-                if src == self.path and threading.current_thread() is state["b_thread"]:
-                    # Force B's destructive step (whichever function the
-                    # implementation actually uses -- os.remove on the
-                    # pre-fix code, os.replace on the fix) to happen only
-                    # after A has already fully reclaimed and re-created
-                    # the lock file.
-                    a_done.wait(timeout=5)
-                    b_may_destroy.wait(timeout=5)
-                return real_fn(src, *args, **kwargs)
-            return wrapper
+        def gated_holder_alive(info):
+            alive = real_holder_alive(info)
+            if (threading.current_thread() is b_state["thread"] and not b_state["gated"]
+                    and not alive):
+                b_state["gated"] = True
+                b_decided_stale.set()
+                waits.append(a_done.wait(timeout=self.WAIT_S))
+            return alive
 
         results = {}
 
         def run_a():
+            waits.append(b_decided_stale.wait(timeout=self.WAIT_S))
             try:
                 results["a"] = board_lock.acquire("heat", logs_root=self.tmpdir)
             except board_lock.BoardLockHeld as exc:
@@ -270,22 +266,16 @@ class StaleReclaimRaceTest(unittest.TestCase):
             except board_lock.BoardLockHeld as exc:
                 results["b"] = exc
 
-        t_b = threading.Thread(target=run_b)
-        state["b_thread"] = t_b
         t_a = threading.Thread(target=run_a)
-
-        with mock.patch("os.remove", side_effect=delayed_if_b(real_remove)), \
-             mock.patch("os.replace", side_effect=delayed_if_b(real_replace)):
-            t_a.start()
+        t_b = threading.Thread(target=run_b)
+        b_state["thread"] = t_b
+        with mock.patch.object(board_lock, "_holder_alive", side_effect=gated_holder_alive):
             t_b.start()
-            # Let A run to completion (its own remove/replace calls are on
-            # the main thread's identity, so they are never delayed), then
-            # release B's gate so its destructive step fires last.
-            a_done.wait(timeout=5)
-            b_may_destroy.set()
-            t_a.join(timeout=5)
-            t_b.join(timeout=5)
+            t_a.start()
+            t_a.join(timeout=self.WAIT_S * 2)
+            t_b.join(timeout=self.WAIT_S * 2)
 
+        self.assertEqual(waits, [True, True], "forced ordering did not happen")
         winners = [v for v in results.values() if isinstance(v, board_lock.BoardLock)]
         for w in winners:
             self.addCleanup(w.release)
@@ -293,6 +283,153 @@ class StaleReclaimRaceTest(unittest.TestCase):
             len(winners), 1,
             f"expected exactly one winner of the racing reclaim, got {len(winners)}: {results}",
         )
+        self.assertIsInstance(results["a"], board_lock.BoardLock)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["suite"], "heat")  # A's lock survived intact
+
+    def test_reclaim_never_empties_the_path_while_a_live_lock_exists(self):
+        """The first fix renamed whatever was at the path aside and renamed
+        it back if live; a third acquirer could create in that gap and the
+        put-back overwrote it. Drive the reclaim step directly against a
+        LIVE lock, attempt a third acquire from inside its re-verification
+        step (while the reclaim mutex is held), and require that the third acquire is refused and the live lock is
+        untouched."""
+        os.remove(self.path)
+        a = board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.addCleanup(a.release)
+        real_same_holder = board_lock._same_holder
+        third = {}
+
+        def hooked(a_info, b_info):
+            if "c" not in third:
+                try:
+                    third["c"] = board_lock.acquire("ota", logs_root=self.tmpdir)
+                except board_lock.BoardLockHeld as exc:
+                    third["c"] = exc
+            return real_same_holder(a_info, b_info)
+
+        from unittest import mock
+        with mock.patch.object(board_lock, "_same_holder", side_effect=hooked):
+            # The caller believed the file held `self.dead` (stale read).
+            self.assertIsNone(board_lock._reclaim_stale(self.path, self.dead))
+        if isinstance(third.get("c"), board_lock.BoardLock):
+            self.addCleanup(third["c"].release)
+        self.assertIsInstance(third.get("c"), board_lock.BoardLockHeld)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["started_at"], a.info.started_at)
+
+    def test_orphaned_reclaim_mutex_from_a_dead_pid_does_not_block_forever(self):
+        mutex = self.path + board_lock.RECLAIM_MUTEX_SUFFIX
+        with open(mutex, "w", encoding="utf-8") as fh:
+            fh.write(self.dead.to_json())
+        lock = board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.addCleanup(lock.release)
+        self.assertIsNotNone(lock.reclaimed_from)
+        self.assertFalse(os.path.exists(mutex))
+
+    def test_reclaim_mutex_held_by_a_live_process_refuses_and_leaves_the_lock(self):
+        mutex = self.path + board_lock.RECLAIM_MUTEX_SUFFIX
+        live = board_lock.LockInfo(pid=os.getpid(), hostname=socket.gethostname(),
+                                   suite="reclaim", started_at="2026-01-01T00:00:00Z", tag=None)
+        with open(mutex, "w", encoding="utf-8") as fh:
+            fh.write(live.to_json())
+        with self.assertRaises(board_lock.BoardLockHeld):
+            board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.assertTrue(os.path.exists(mutex))
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["pid"], self.dead.pid)  # stale lock untouched
+
+
+class ReaderWriterOrderingTest(unittest.TestCase):
+    """Each side publishes its own claim before checking for the other's,
+    so a reader registering while a mutating run starts can never let both
+    proceed. Driven deterministically by running the other side's acquire()
+    from inside this side's check step."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="board_lock_rw_test_")
+        self.readers_dir = os.path.join(self.tmpdir, board_lock.READERS_DIRNAME)
+        self.lock_path = os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_mutating_run_starting_during_reader_registration_is_refused(self):
+        from unittest import mock
+        real_check = board_lock._refuse_reader_if_mutating_holder
+        inner = {}
+
+        def hooked(path, suite):
+            try:
+                inner["m"] = board_lock.acquire("heat", logs_root=self.tmpdir)
+            except board_lock.BoardLockHeld as exc:
+                inner["m"] = exc
+            return real_check(path, suite)
+
+        with mock.patch.object(board_lock, "_refuse_reader_if_mutating_holder", side_effect=hooked):
+            reader = board_lock.acquire("smoke", logs_root=self.tmpdir)
+        self.addCleanup(reader.release)
+        self.assertIsInstance(inner["m"], board_lock.BoardLockHeld)
+        self.assertFalse(os.path.exists(self.lock_path))
+
+    def test_reader_registering_during_mutating_acquire_is_refused_and_cleans_up(self):
+        from unittest import mock
+        real_scan = board_lock._live_readers
+        inner = {}
+
+        def hooked(logs_root):
+            try:
+                inner["r"] = board_lock.acquire("smoke", logs_root=self.tmpdir)
+            except board_lock.BoardLockHeld as exc:
+                inner["r"] = exc
+            return real_scan(logs_root)
+
+        with mock.patch.object(board_lock, "_live_readers", side_effect=hooked):
+            lock = board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.addCleanup(lock.release)
+        self.assertIsInstance(inner["r"], board_lock.BoardLockHeld)
+        self.assertEqual(os.listdir(self.readers_dir), [])  # refused reader removed its marker
+
+    def test_unparseable_reader_marker_refuses_a_mutating_run(self):
+        os.makedirs(self.readers_dir)
+        with open(os.path.join(self.readers_dir, "1_x.json"), "w", encoding="utf-8") as fh:
+            fh.write("not json")
+        with self.assertRaises(board_lock.BoardLockHeld):
+            board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.assertFalse(os.path.exists(self.lock_path))
+
+    def test_reader_marker_on_another_host_counts_as_live(self):
+        os.makedirs(self.readers_dir)
+        other = board_lock.LockInfo(pid=_dead_pid(), hostname="some-other-host", suite="smoke",
+                                    started_at="2026-01-01T00:00:00Z", tag=None)
+        with open(os.path.join(self.readers_dir, "1_y.json"), "w", encoding="utf-8") as fh:
+            fh.write(other.to_json())
+        with self.assertRaises(board_lock.BoardLockHeld):
+            board_lock.acquire("heat", logs_root=self.tmpdir)
+
+    def test_leftover_tmp_marker_is_ignored(self):
+        os.makedirs(self.readers_dir)
+        with open(os.path.join(self.readers_dir, "1_z.tmp"), "w", encoding="utf-8") as fh:
+            fh.write("")
+        lock = board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.addCleanup(lock.release)
+
+    def test_release_retries_through_a_transient_sharing_violation(self):
+        from unittest import mock
+        reader = board_lock.acquire("smoke", logs_root=self.tmpdir)
+        real_remove = os.remove
+        calls = {"n": 0}
+
+        def flaky(path, *a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(32, "sharing violation")
+            return real_remove(path, *a, **k)
+
+        with mock.patch("os.remove", side_effect=flaky):
+            reader.release()
+        self.assertEqual(os.listdir(self.readers_dir), [])
+        self.assertGreaterEqual(calls["n"], 2)
 
 
 class PidAliveTest(unittest.TestCase):
@@ -413,7 +550,9 @@ class RunnerLockIntegrationTest(unittest.TestCase):
         runner = BenchTestRunner(self._ctx(), logs_root=self.tmpdir)
         with self.assertRaises(board_lock.BoardLockHeld):
             runner.run(suite="smoke", cases=["ST-05"])
-        self.assertEqual(os.listdir(self.tmpdir), [board_lock.LOCK_FILENAME])
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)))
+        # The refused reader backed its own marker out again.
+        self.assertEqual(os.listdir(os.path.join(self.tmpdir, board_lock.READERS_DIRNAME)), [])
 
     def test_lcd_run_takes_the_lock(self):
         held = board_lock.acquire("heat", logs_root=self.tmpdir)

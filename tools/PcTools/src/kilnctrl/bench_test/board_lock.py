@@ -30,6 +30,7 @@ import json
 import os
 import socket
 import time
+import uuid
 from typing import Optional
 
 from . import report as report_mod
@@ -47,10 +48,10 @@ LOCK_FILENAME = ".board_lock"
 #: samples, so it lets a read-only run through between a heat run's cases or
 #: during an ota/flash/web/safety/lcd run that never starts a profile --
 #: exactly while the state these cases assert about is changing underneath
-#: them. (The reverse -- a mutating run starting while a read-only run is
-#: already in flight -- is not blocked, since read-only runs leave no trace
-#: in the lock file. That costs at most a spurious read-only verdict, never
-#: a board action, so it is accepted rather than adding reader bookkeeping.)
+#: them. The reverse -- a mutating run starting while a read-only run is
+#: already in flight -- is blocked too, via a per-run reader marker under
+#: READERS_DIRNAME (see `acquire()` for the publish-then-check ordering that
+#: keeps the two sides from both slipping through).
 #:
 #:   smoke  -- cases_smoke.py: reads only (thermo, link stats, ...)
 #:   static -- cases_smoke.py's ST-* rows: static/doc-derived checks, no board call
@@ -70,6 +71,16 @@ READ_ONLY_SUITES = frozenset({"smoke", "static", "stack"})
 #: read-only run is already in flight). Read-only runs still never touch
 #: `LOCK_FILENAME` itself.
 READERS_DIRNAME = ".board_readers"
+
+#: Sibling of the lock file, created O_EXCL for the few syscalls a stale
+#: reclaim takes (see `_reclaim_stale`). Never the lock itself: nothing but
+#: `_reclaim_stale`/`_clear_orphaned_reclaim_mutex` ever reads it.
+RECLAIM_MUTEX_SUFFIX = ".reclaiming"
+
+#: An UNPARSEABLE reclaim mutex (a reclaimer died between its O_EXCL create
+#: and its write) is treated as orphaned only once it is at least this old;
+#: a live reclaimer holds it for milliseconds.
+_ORPHAN_MUTEX_MIN_AGE_S = 10.0
 
 #: Suites confirmed to mutate persistent board state, kept here as
 #: documentation (see `suite_is_mutating` below for the actual, fail-closed
@@ -223,93 +234,173 @@ def _readers_dir(logs_root: Optional[str]) -> str:
     return os.path.join(root, READERS_DIRNAME)
 
 
+def _new_info(suite: str, tag: Optional[str]) -> "LockInfo":
+    return LockInfo(
+        pid=os.getpid(),
+        hostname=socket.gethostname(),
+        suite=suite,
+        started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        tag=tag,
+    )
+
+
+def _read_info(path: str) -> "LockInfo":
+    with open(path, "r", encoding="utf-8") as fh:
+        return LockInfo.from_json(fh.read())
+
+
+def _same_holder(a: "LockInfo", b: "LockInfo") -> bool:
+    return (a.pid, a.hostname, a.suite, a.started_at, a.tag) == (
+        b.pid, b.hostname, b.suite, b.started_at, b.tag)
+
+
+def _remove_retrying(path: str, timeout_s: float = 5.0) -> None:
+    """`os.remove`, tolerating a brief Windows sharing violation.
+
+    CPython's `open()` on Windows does not pass FILE_SHARE_DELETE, so
+    deleting a lock/marker file fails with PermissionError for as long as
+    another process has it open to READ it (every acquirer reads these
+    files). Those reads last microseconds, so retry briefly rather than
+    either leaking a live-pid file (which would block every later run until
+    this process exits) or failing a release in a `finally`. The sleep is a
+    retry backoff only, never an ordering mechanism."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 def _live_readers(logs_root: Optional[str]) -> list:
-    """Best-effort scan of the readers directory. A marker naming a live
-    process (on this host, or any process on another host -- same
-    fail-closed rule as the main lock) is returned; a marker that is
-    unparseable or names a confirmed-dead pid on this host is opportunistically
-    deleted and skipped, so a crashed read-only run's leftover marker never
-    blocks a mutating run forever."""
+    """Scan the readers directory with the SAME fail-closed rules as the
+    main lock: a marker naming a live process (on this host, or any process
+    on another host) is returned; a marker naming a confirmed-dead pid on
+    this host is opportunistically deleted and skipped, so a crashed
+    read-only run's leftover marker never blocks a mutating run forever; a
+    marker that exists but cannot be read or parsed raises `BoardLockHeld`
+    rather than being guessed about. Markers are published by an atomic
+    rename (see `acquire()`), so a `.json` name never holds a half-written
+    body -- only `.json` names are considered; a `.tmp` left by a reader
+    that died mid-publish is ignored."""
     d = _readers_dir(logs_root)
     live = []
     try:
         names = os.listdir(d)
     except FileNotFoundError:
         return live
-    for name in names:
+    for name in sorted(names):
+        if not name.endswith(".json"):
+            continue
         p = os.path.join(d, name)
         try:
-            with open(p, "r", encoding="utf-8") as fh:
-                info = LockInfo.from_json(fh.read())
-        except (OSError, json.JSONDecodeError, KeyError, ValueError):
-            continue  # corrupt/racing-write marker: never block on it
+            info = _read_info(p)
+        except FileNotFoundError:
+            continue  # released between listdir and open
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            raise BoardLockHeld(
+                f"reader marker {p} exists but could not be read/parsed ({exc}); refusing "
+                "rather than guessing whether a read-only run is in flight -- inspect it by hand"
+            ) from exc
         if _holder_alive(info):
             live.append(info)
         else:
             try:
                 os.remove(p)
-            except FileNotFoundError:
-                pass
+            except OSError:
+                pass  # someone else is reading/removing it; it is dead either way
     return live
 
 
-def _atomic_reclaim(path: str) -> Optional["LockInfo"]:
-    """Atomically claim a lock file believed stale so at most one of several
-    racing reclaimers can win it.
+def _clear_orphaned_reclaim_mutex(mutex: str) -> None:
+    """Remove a reclaim mutex whose holder died inside `_reclaim_stale`'s
+    few-syscall critical section, so such an orphan cannot block every later
+    reclaim forever. Only removed when its recorded pid is confirmed dead on
+    this host, or (unparseable: died between create and write) when it is
+    older than `_ORPHAN_MUTEX_MIN_AGE_S`. A mutex held by a live or
+    unverifiable process is left alone -- the caller just retries/refuses.
 
-    The prior implementation reclaimed with a plain `os.remove(path)` after
-    deciding (from an earlier read) that the holder was dead. That decision
-    and the removal were two separate steps: if a second reclaimer's
-    `os.remove` call executed only after a FIRST reclaimer had already
-    removed the stale file AND recreated it with its own fresh, live lock,
-    the second reclaimer's `os.remove` deleted that live lock by name alone
-    (it never re-checked what was actually at `path`), and its own
-    subsequent create then succeeded too -- both callers ended up believing
-    they held the lock.
-
-    This renames whatever is CURRENTLY at `path` to a name unique to this
-    call via `os.replace`, which is atomic: if two reclaimers race, only one
-    `os.replace` can find a source to rename (the loser gets
-    `FileNotFoundError` and must retry from scratch -- it never blindly
-    deletes anything). The winner then re-reads what it actually claimed:
-    if it is still a dead-pid lock, the caller may proceed to create a fresh
-    one at `path`; if it turns out to belong to a live holder (raced into
-    existence between the caller's staleness check and this call), the file
-    is put back atomically and a `BoardLockHeld` is raised instead of ever
-    letting a live lock be discarded.
-
-    Returns the reclaimed `LockInfo` on a successful reclaim, or `None` if
-    this call lost the race for the reclaim itself (the caller should loop
-    and re-read/re-try -- `path` may now be free, or may hold someone else's
-    fresh live lock, either of which the normal O_EXCL create + read path
-    already handles correctly).
-    """
-    tmp_path = f"{path}.reclaim.{os.getpid()}.{id(object())}.{time.time_ns()}"
+    Accepted residual race (documented, not closed): two reclaimers that
+    both observe the SAME orphan could both remove it, the second removal
+    landing on the first one's fresh mutex. That needs a process to die
+    inside a sub-millisecond window AND two new reclaimers to race within
+    microseconds of each other afterward."""
     try:
-        os.replace(path, tmp_path)
+        info = _read_info(mutex)
     except FileNotFoundError:
-        return None  # someone else already reclaimed or released it first
+        return
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        try:
+            age = time.time() - os.path.getmtime(mutex)
+        except OSError:
+            return
+        if age < _ORPHAN_MUTEX_MIN_AGE_S:
+            return
+    else:
+        if _holder_alive(info):
+            return
     try:
-        with open(tmp_path, "r", encoding="utf-8") as fh:
-            existing = LockInfo.from_json(fh.read())
-    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        # Put back whatever we grabbed, unexamined, rather than discard it.
-        os.replace(tmp_path, path)
-        raise BoardLockHeld(
-            f"board lock file {path} exists but could not be read/parsed ({exc}) "
-            "during an atomic reclaim; refusing rather than guessing -- inspect "
-            "it by hand"
-        ) from exc
-    if _holder_alive(existing):
-        # Raced: a legitimate fresh lock appeared between the caller's
-        # staleness check and this call. Restore it untouched and refuse.
-        os.replace(tmp_path, path)
-        raise BoardLockHeld(
-            f"board lock held by {existing.describe()}; refusing to start "
-            "concurrently -- wait for that run to finish"
-        )
-    os.remove(tmp_path)
-    return existing
+        os.remove(mutex)
+    except OSError:
+        pass
+
+
+def _reclaim_stale(path: str, expected: "LockInfo") -> Optional["LockInfo"]:
+    """Remove the lock file at `path` iff it is STILL the dead-holder lock
+    `expected` the caller just read. Returns the removed holder's
+    `LockInfo` on success, `None` when this call removed nothing (the
+    caller loops and re-reads).
+
+    The original implementation reclaimed with a plain `os.remove(path)`
+    after an earlier read decided the holder was dead: a second reclaimer
+    whose `os.remove` ran after a first reclaimer had already removed the
+    stale file and created its own live lock deleted that live lock by name
+    alone, so both believed they held the board. A first fix (rename the
+    file aside with `os.replace`, re-read it, rename it back if live) still
+    moved a LIVE lock out of `path` for a moment: a third acquirer could
+    O_EXCL-create in that gap, and the put-back `os.replace` then silently
+    overwrote the third acquirer's lock -- two holders again; a reclaimer
+    killed between the two renames also lost a live lock outright.
+
+    This version never moves or deletes anything it has not just re-verified
+    under exclusion. Reclaimers serialize on an O_EXCL-created sibling mutex
+    (`path + RECLAIM_MUTEX_SUFFIX`); while it is held, the file at `path`
+    can only be changed by (a) another reclaimer -- excluded, (b) an O_EXCL
+    create -- impossible while the file exists, or (c) its owner's
+    `release()` -- the owner is confirmed dead. So once the re-read still
+    shows `expected` with a dead holder, removing `path` can only remove
+    that stale file. `path` is never empty while a live lock exists, and a
+    reclaimer killed mid-way leaves at worst the mutex, which
+    `_clear_orphaned_reclaim_mutex` removes once its holder reads dead."""
+    mutex = path + RECLAIM_MUTEX_SUFFIX
+    try:
+        fd = os.open(mutex, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except (FileExistsError, PermissionError):
+        # Another reclaimer is mid-reclaim (or its orphan, or on Windows a
+        # delete-pending mutex, is in the way). Never wait it out here.
+        _clear_orphaned_reclaim_mutex(mutex)
+        return None
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(_new_info("reclaim", None).to_json())
+        try:
+            current = _read_info(path)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            return None  # gone, or changed into something the caller must re-read
+        if not _same_holder(current, expected) or _holder_alive(current):
+            return None
+        try:
+            os.remove(path)
+        except (FileNotFoundError, PermissionError):
+            return None  # vanished, or a reader has it open this instant: retry
+        return current
+    finally:
+        _remove_retrying(mutex)
 
 
 class BoardLock:
@@ -336,10 +427,7 @@ class BoardLock:
         # lost track (should not happen under normal use, but never delete
         # a lock we do not recognize as our own).
         if current.pid == self.info.pid and current.started_at == self.info.started_at:
-            try:
-                os.remove(self._path)
-            except FileNotFoundError:
-                pass
+            _remove_retrying(self._path)
 
     def __enter__(self) -> "BoardLock":
         return self
@@ -363,73 +451,57 @@ def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = No
     Any other suite raises `BoardLockHeld`, naming the current holder, if a
     live process already holds the lock, or if a live read-only run's
     reader marker is registered. A lock file whose holder is confirmed dead
-    is reclaimed atomically (see `_atomic_reclaim`) with a logged notice
+    is reclaimed under exclusion (see `_reclaim_stale`) with a logged notice
     (the returned `BoardLock.reclaimed_from` carries the prior holder's
     `LockInfo`) -- reclaiming is NEVER attempted while the holder pid is
     alive or unverifiable, and at most one of several racing reclaimers can
     win a given stale file."""
     path = _lock_path(logs_root)
 
-    if not suite_is_mutating(suite):
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                existing = LockInfo.from_json(fh.read())
-        except FileNotFoundError:
-            pass
-        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-            raise BoardLockHeld(
-                f"board lock file {path} exists but could not be read/parsed ({exc}); "
-                f"refusing read-only suite {suite!r} rather than guessing whether a "
-                "mutating run owns the board -- inspect it by hand"
-            ) from exc
-        else:
-            if _holder_alive(existing):
-                raise BoardLockHeld(
-                    f"board lock held by {existing.describe()}; refusing read-only suite "
-                    f"{suite!r} while a mutating run owns the board -- wait for it to finish"
-                )
+    # Ordering between the two sides (a reader registering while a mutating
+    # run starts): each side PUBLISHES its own claim first and only then
+    # CHECKS for the other's -- a reader writes its marker, then reads the
+    # main lock; a mutating run O_EXCL-creates the main lock, then scans the
+    # markers -- and backs its own claim out if it finds the other. Whichever
+    # side publishes second is therefore guaranteed to see the first, so the
+    # two can never both proceed; the worst case is that both refuse (both
+    # published before either checked), which is fail-closed and retryable.
 
+    if not suite_is_mutating(suite):
         readers_dir = _readers_dir(logs_root)
         os.makedirs(readers_dir, exist_ok=True)
-        info = LockInfo(
-            pid=os.getpid(),
-            hostname=socket.gethostname(),
-            suite=suite,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            tag=tag,
-        )
-        reader_path = os.path.join(readers_dir, f"{os.getpid()}_{time.time_ns()}.json")
-        with open(reader_path, "w", encoding="utf-8") as fh:
+        info = _new_info(suite, tag)
+        base = f"{info.pid}_{uuid.uuid4().hex}"
+        tmp_path = os.path.join(readers_dir, base + ".tmp")
+        reader_path = os.path.join(readers_dir, base + ".json")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             fh.write(info.to_json())
-        return BoardLock(reader_path, info)
+        os.replace(tmp_path, reader_path)  # publish atomically: never a half-written .json
+        marker = BoardLock(reader_path, info)
+        try:
+            _refuse_reader_if_mutating_holder(path, suite)
+        except BaseException:
+            marker.release()
+            raise
+        return marker
 
     lock_dir = os.path.dirname(path) or "."
     os.makedirs(lock_dir, exist_ok=True)
 
-    live_readers = _live_readers(logs_root)
-    if live_readers:
-        raise BoardLockHeld(
-            f"a read-only run is in progress ({live_readers[0].describe()}); refusing to "
-            f"start mutating suite {suite!r} concurrently -- wait for it to finish"
-        )
-
-    info = LockInfo(
-        pid=os.getpid(),
-        hostname=socket.gethostname(),
-        suite=suite,
-        started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        tag=tag,
-    )
+    info = _new_info(suite, tag)
 
     reclaimed_from: Optional[LockInfo] = None
-    # One retry after a stale-reclaim; a live holder never loops here.
-    for _attempt in range(2):
+    # A live holder never loops here; the extra attempts cover a stale
+    # reclaim (reclaim, then create) plus one lost reclaim race or orphaned
+    # reclaim-mutex cleanup.
+    for _attempt in range(3):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    existing = LockInfo.from_json(fh.read())
+                existing = _read_info(path)
+            except FileNotFoundError:
+                continue  # released/reclaimed between our create and read
             except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
                 raise BoardLockHeld(
                     f"board lock file {path} exists but could not be read/parsed ({exc}); "
@@ -441,17 +513,59 @@ def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = No
                     f"board lock held by {existing.describe()}; refusing to start suite "
                     f"{suite!r} concurrently -- wait for that run to finish"
                 )
-            # Stale: the holder pid is dead. Reclaim atomically -- at most
-            # one of several racing reclaimers can win this file. A loss
-            # (None) means someone else already claimed/replaced it; loop
-            # and let the normal O_EXCL create + read path sort out whatever
-            # is there now.
-            claimed = _atomic_reclaim(path)
+            # Stale: the holder pid is dead. Reclaim under exclusion (see
+            # `_reclaim_stale`); `None` means we removed nothing -- loop and
+            # re-read whatever is there now.
+            claimed = _reclaim_stale(path, existing)
             if claimed is not None:
                 reclaimed_from = claimed
             continue
+        except PermissionError as exc:
+            # Windows: the lock file is delete-pending (its holder is
+            # releasing it this instant). Refuse rather than spin.
+            raise BoardLockHeld(
+                f"board lock file {path} is being removed by another process ({exc}); "
+                f"refusing suite {suite!r} for now -- retry shortly"
+            ) from exc
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(info.to_json())
-            return BoardLock(path, info, reclaimed_from=reclaimed_from)
-    raise BoardLockHeld(f"could not acquire board lock at {path} after a stale-reclaim retry")
+            lock = BoardLock(path, info, reclaimed_from=reclaimed_from)
+            try:
+                live_readers = _live_readers(logs_root)
+            except BaseException:
+                lock.release()
+                raise
+            if live_readers:
+                lock.release()
+                raise BoardLockHeld(
+                    f"a read-only run is in progress ({live_readers[0].describe()}); refusing "
+                    f"to start mutating suite {suite!r} concurrently -- wait for it to finish"
+                )
+            return lock
+    raise BoardLockHeld(
+        f"could not acquire board lock at {path}: a stale-lock reclaim did not settle "
+        f"(another reclaimer may hold {path + RECLAIM_MUTEX_SUFFIX}) -- retry shortly"
+    )
+
+
+def _refuse_reader_if_mutating_holder(path: str, suite: str) -> None:
+    """Read-only side of `acquire()`: raise `BoardLockHeld` if a live
+    mutating run holds the main lock, or if the lock file exists but cannot
+    be read/parsed (a mutating run may be mid-write). A stale main-lock file
+    is left untouched for the next mutating run to reclaim."""
+    try:
+        existing = _read_info(path)
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        raise BoardLockHeld(
+            f"board lock file {path} exists but could not be read/parsed ({exc}); "
+            f"refusing read-only suite {suite!r} rather than guessing whether a "
+            "mutating run owns the board -- inspect it by hand"
+        ) from exc
+    if _holder_alive(existing):
+        raise BoardLockHeld(
+            f"board lock held by {existing.describe()}; refusing read-only suite "
+            f"{suite!r} while a mutating run owns the board -- wait for it to finish"
+        )
