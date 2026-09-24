@@ -252,6 +252,28 @@ WEB-DASH-01 render (`profileSelect`, `runBtn`, zone cards) · WEB-DASH-02 profil
 | SP-10 | CT / S9 / S14 / S15 | read `safety_get_commissioning` CT fields and guard states | recorded; `INCONCLUSIVE` by definition on this fixture (S14/S15 dormant, `i_normal_a` unset below the 0.045 A floor) | 5 s | no |
 | SP-11 | Pico stack margins | = SK-03 | — | — | no |
 
+### 3.10 Suite TP — TOTP password reset
+
+Unit-tested against a fake board only (`cases_totp.py`); the WT-A firmware
+routes were being landed in parallel and are written against strictly the
+wire contract in section 4/6a/6b, not against observed firmware behaviour.
+TP-R01/R02/R03 are read-only: none of the three ever completes a real
+`/api/auth/reset` round trip (TP-R02 never calls `/api/auth/reset` at all;
+TP-R03 sends only fixed, deliberately-wrong token/password literals). TP-M01
+is the one mutating case, and is opt-in the same way OT-E01's
+`ap_password`/image-path gate and WEB-SEC-03/04's env-var gate are opt-in:
+it SKIPs, rather than requiring a separate flag, unless both
+`KILNCTL_TOTP_CODE` and `KILNCTL_WEB_PASSWORD_NEW` are set in the
+environment. Neither credential is ever printed, logged, or included in a
+`CaseResult` field.
+
+| id | case | steps | judged by | dur | heat |
+|---|---|---|---|---|---|
+| TP-R01 | `GET /api/auth/totp_status` | admin-session GET | body has a boolean `enrolled` field; `INCONCLUSIVE` (not FAIL) on 404 since the route may not be flashed yet | 5 s | no |
+| TP-R02 | `POST /api/auth/forgot` with a wrong code | fixed literal `"000000"` (not a credential); never calls `/api/auth/reset` | 202 with a non-empty `reset_token`, or 503 (clock unsynced), or 429 (login-ladder rate limit); anything else FAILs | 5 s | no |
+| TP-R03 | OPEN-tier check | `forgot`/`reset` sent with no session, fixed wrong code/token/password literals, reset never completed | neither route answers 401/403 | 5 s | no |
+| TP-M01 | Full reset round trip | `KILNCTL_TOTP_CODE`/`KILNCTL_WEB_PASSWORD_NEW` (opt-in via env, SKIP if either is unset) → forgot → reset → login with the new password | forgot 202 + `reset_token`, reset 200, and a real login with the new password succeeds — a `{"ok": true}` reset response is never trusted alone | 10 s | no |
+
 ## 4. Case counts
 
 | suite | cases | of which heat | of which operator-only / blocked |
@@ -265,7 +287,8 @@ WEB-DASH-01 render (`profileSelect`, `runBtn`, zone cards) · WEB-DASH-02 profil
 | WEB | 119 (DASH 13, PROF 11, ZONE 13, SAF 4, STIM 2, COMM 7, RDY 4, WIZ 11, DIAG 11, OTA 8, WIFI 6, SEC 6, BAK 4, KCFG 5, SET 4, DISP 4, LOG 3, X 3) | 0 own heat (several observe HP/AT) | WIFI-06 operator |
 | LCD | 21 | 0 own heat (observe HP) | LCD-20 only under OT-E11 |
 | SP | 11 | 1 (SP-09) | SP-08/09 operator; SP-10 INCONCLUSIVE by design |
-| **total** | **203** | **9 heat-originating** | |
+| TP | 4 | 0 | TP-M01 opt-in via env credentials |
+| **total** | **207** | **9 heat-originating** | |
 
 ## 5. Routine subsets, ordering, interdependence
 

@@ -221,6 +221,19 @@ _SP = [
     ("SP-09", "Link-loss"), ("SP-10", "CT / S9 / S14 / S15"),
     ("SP-11", "Pico stack margins"),
 ]
+#: TOTP password-reset routes (docs/TOTP_PASSWORD_RESET_PLAN.md sections 4/
+#: 6a). Unit-tested against a fake board only -- see cases_totp.py's module
+#: docstring. TP-M01 is the one mutating case: it is opt-in the same way
+#: OT-E01's ap_password/image-path gate and WEB-SEC-03/04's credential-
+#: presence gate are opt-in -- it SKIPs unless KILNCTL_TOTP_CODE and
+#: KILNCTL_WEB_PASSWORD_NEW are both set in the environment, never a
+#: separate boolean flag.
+_TP = [
+    ("TP-R01", "GET /api/auth/totp_status has a boolean 'enrolled' field"),
+    ("TP-R02", "POST /api/auth/forgot with a wrong code still answers 202/503/429"),
+    ("TP-R03", "forgot/reset never require an admin session (OPEN tier)"),
+    ("TP-M01", "Full TOTP reset round trip, opt-in via env credentials"),
+]
 
 for cid, desc in _ST:
     register(_c(cid, "ST", desc))
@@ -275,6 +288,8 @@ for cid, desc in _SP:
         cid, "SP", desc, heat=(cid == "SP-09"), operator_only=cid in ("SP-08", "SP-09"),
         depends_on=_SP_DEPENDS_ON.get(cid),
     ))
+for cid, desc in _TP:
+    register(_c(cid, "TP", desc))
 
 #: Fixed run-order ranks for `nightly`/`full` (plan §5.2): ST first, then
 #: FL (read-only), then the fixed SK-01/03/04 subset, then SP (read-only),
@@ -383,6 +398,7 @@ SUITES["heat"] = [c for c in REGISTRY if c.startswith("HP-")]
 SUITES["web"] = list(_WEB_IDS)
 SUITES["lcd"] = list(_LCD_IDS)
 SUITES["safety"] = [c for c in REGISTRY if c.startswith("SP-")]
+SUITES["totp"] = [c for c in REGISTRY if c.startswith("TP-")]
 # nightly/full memberships per plan §5.1 -- wave 2 implements the harness
 # ordering for the full §5.1 nightly membership; some of these ids still
 # report NOT_RUN: not_implemented until the WEB/LCD/OTA case wave(s) land

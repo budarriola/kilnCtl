@@ -2521,3 +2521,110 @@ def judge_login_lockout(status_codes: "list[Optional[int]]") -> CaseResult:
         reason=f"no 429 seen across {len(status_codes)} bad-login attempts -- lockout did not engage",
         observed={"status_codes": status_codes},
     )
+
+
+# ---------------------------------------------------------------------------
+# TOTP password-reset suite (docs/TOTP_PASSWORD_RESET_PLAN.md sections 4/6a).
+# Unit-tested against a fake board only -- see cases_totp.py's module
+# docstring.
+# ---------------------------------------------------------------------------
+
+def judge_totp_status(data: Any) -> CaseResult:
+    """TP-R01: GET /api/auth/totp_status (ROUTE_TIER_ADMIN, section 6a) must
+    answer with a JSON object carrying a boolean `enrolled` field. Never
+    surfaces any other key out of `data` -- section 6a promises this route
+    carries no secret/seed/QR payload, and this judge would refuse to print
+    one even if the board's JSON grew one later."""
+    if not isinstance(data, dict) or not isinstance(data.get("enrolled"), bool):
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"GET /api/auth/totp_status response is missing a boolean 'enrolled' field: {data!r}",
+            observed={"body_keys": sorted(data.keys()) if isinstance(data, dict) else None},
+        )
+    return CaseResult(Verdict.PASS, observed={"enrolled": data["enrolled"]})
+
+
+def judge_totp_forgot_probe(status: Optional[int], body: Any) -> CaseResult:
+    """TP-R02: POST /api/auth/forgot with a syntactically valid but wrong
+    6-digit code. Per section 6a's always-202 anti-oracle contract, a
+    well-formed request answers HTTP 202 with a `reset_token` field
+    regardless of whether the code matched; a board whose clock is not
+    SNTP-synced answers 503 (section 6a's one deliberate exception to
+    always-202), and the shared login-ladder rate limit answers 429. Any
+    other status is a contract violation."""
+    if status == 202:
+        token = body.get("reset_token") if isinstance(body, dict) else None
+        if isinstance(token, str) and token:
+            return CaseResult(Verdict.PASS, observed={"status": 202, "reset_token_present": True})
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"POST /api/auth/forgot returned HTTP 202 but no reset_token in the body: {body!r}",
+            observed={"status": 202},
+        )
+    if status in (503, 429):
+        return CaseResult(Verdict.PASS, observed={"status": status})
+    return CaseResult(
+        Verdict.FAIL,
+        reason=f"POST /api/auth/forgot returned unexpected HTTP {status}, expected 202/503/429",
+        observed={"status": status},
+    )
+
+
+def judge_totp_open_tier(forgot_status: Optional[int], reset_status: Optional[int]) -> CaseResult:
+    """TP-R03: both /api/auth/forgot and /api/auth/reset are ROUTE_TIER_OPEN
+    (section 6a) -- the whole point of a forgot-password flow is that it
+    works with no session. A 401/403 from either, sent with no session and
+    no cookie, is a tier regression."""
+    violations = []
+    if forgot_status in (401, 403):
+        violations.append(f"forgot={forgot_status}")
+    if reset_status in (401, 403):
+        violations.append(f"reset={reset_status}")
+    if violations:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"OPEN-tier route(s) required a session with none presented: {', '.join(violations)}",
+            observed={"forgot_status": forgot_status, "reset_status": reset_status},
+        )
+    return CaseResult(Verdict.PASS, observed={"forgot_status": forgot_status, "reset_status": reset_status})
+
+
+def judge_totp_reset_roundtrip(
+    forgot_status: Optional[int], reset_token_present: bool,
+    reset_status: Optional[int], login_ok: bool,
+) -> CaseResult:
+    """TP-M01: the full forgot -> reset -> verify-by-login round trip.
+    Mirrors `totp_reset_password()`'s own verification discipline
+    (mcp_server_totp.py): a `{"ok": true}` reset response is never trusted
+    alone -- only a real login with the new credential counts (CLAUDE.md's
+    boot_guard write-lies section: an unverified success report is exactly
+    the failure class this project has been bitten by before)."""
+    if forgot_status != 202:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"POST /api/auth/forgot returned HTTP {forgot_status}, expected 202",
+            observed={"forgot_status": forgot_status},
+        )
+    if not reset_token_present:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="POST /api/auth/forgot returned HTTP 202 but no reset_token in the body",
+            observed={"forgot_status": forgot_status},
+        )
+    if reset_status != 200:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"POST /api/auth/reset returned HTTP {reset_status}, expected 200",
+            observed={"forgot_status": forgot_status, "reset_status": reset_status},
+        )
+    if not login_ok:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="POST /api/auth/reset reported success but a login attempt with the new "
+                   "password did not succeed -- do not trust the reset as complete",
+            observed={"forgot_status": forgot_status, "reset_status": reset_status, "login_ok": False},
+        )
+    return CaseResult(
+        Verdict.PASS,
+        observed={"forgot_status": forgot_status, "reset_status": reset_status, "login_ok": True},
+    )

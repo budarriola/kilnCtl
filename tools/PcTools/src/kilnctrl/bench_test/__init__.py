@@ -28,6 +28,7 @@ from . import cases_fl as _cases_fl  # noqa: F401 - import wires judge functions
 from . import cases_web_rw as _cases_web_rw  # noqa: F401 - import wires WEB read/write round-trip judge functions into REGISTRY
 from . import cases_ota as _cases_ota  # noqa: F401 - import wires OTA judge functions into REGISTRY
 from . import cases_autotune as _cases_autotune  # noqa: F401 - import wires AT-01..05 judge functions into REGISTRY
+from . import cases_totp as _cases_totp  # noqa: F401 - import wires TP-R01..M01 judge functions into REGISTRY
 from .runner import BenchTestRunner, run_suite
 
 __all__ = [
