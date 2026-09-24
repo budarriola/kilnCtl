@@ -627,8 +627,12 @@ static void reload_live_profile_if_changed(void)
              * safety_link sends are producer calls and must never happen
              * while s_exec.lock is held, same discipline as the run() commit
              * point in profile_executor_run.c. */
+            /* Monotonic within one firing: never LOWER the ceiling -- see
+             * profile_firing_ceiling_after_live_edit()'s comment. */
+            s_exec.firing_ceiling_c =
+                profile_firing_ceiling_after_live_edit(s_exec.firing_ceiling_c, &s_exec.profile);
             ceiling_resend = true;
-            ceiling_firing_max_c = profile_compute_firing_max_c(&s_exec.profile);
+            ceiling_firing_max_c = s_exec.firing_ceiling_c;
         } else {
             /* MEDIUM-3 (review): recorded, not just logged, so pass 2's
              * planned GET /api/profile/live has something to read. */

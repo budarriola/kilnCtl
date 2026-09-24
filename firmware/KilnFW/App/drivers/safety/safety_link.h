@@ -2061,7 +2061,17 @@ esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level);
  * never replies on the wire, so ESP_OK is proof the frame was handed to the
  * UART, not proof the Pico accepted it. Returns ESP_ERR_INVALID_ARG for an
  * out-of-range value, ESP_ERR_INVALID_STATE if the driver isn't
- * initialized. Safe to call from any task. */
+ * initialized. Safe to call from any task.
+ *
+ * These edge sends (start, live-edit pickup, halt) are not the only path:
+ * the Pico keeps the ceiling in RAM only and never ACKs it, so
+ * safety_build_and_send_context() (safety_link_frames.c) also resends
+ * profile_executor_get_status()'s firing_ceiling_c after EVERY PUSH_CONTEXT
+ * ("repeated in every context frame's shadow", LINK_PROTOCOL.md sec 4).
+ * That value is 0.0f unless the executor is RUNNING/PAUSED, so a Pico
+ * reboot mid-firing regains its ceiling within one poll, and a stale ceiling
+ * (lost halt frame, ESP reboot mid-firing, DONE/FAULTED end of run) is
+ * cleared within one poll instead of tightening S1 for a later autotune. */
 esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c);
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --

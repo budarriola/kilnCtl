@@ -40,6 +40,7 @@
 
 #include "profile_executor.h"
 
+#include <math.h>    /* isfinite() -- profile_compute_firing_max_c() below */
 #include <stdbool.h>
 #include <stddef.h> /* offsetof() -- profile_firing_history_blob_t layout asserts below */
 #include <stdint.h>
@@ -899,6 +900,17 @@ typedef struct {
      * first tick because live_profile_generation() already differs from 0. */
     uint32_t live_edit_generation;
 
+    /* SAFETY_CMD_SET_FIRING_CEILING (0x09, CommonFW/docs/LINK_PROTOCOL.md
+     * sec 4): this run's firing_max_c as handed to the Pico. Set by
+     * profile_executor_run() from profile_compute_firing_max_c(), only ever
+     * RAISED by a live-edit pickup (reload_live_profile_if_changed() keeps
+     * max(old, new): lowering it mid-firing below a temperature the kiln
+     * already legitimately reached would make the Pico latch an S1 OVERTEMP
+     * trip over an edit the ESP accepted), zeroed by halt. Reported by
+     * profile_executor_get_status() only while RUNNING/PAUSED (0 otherwise),
+     * which is what safety_build_and_send_context() resends every poll. */
+    float    firing_ceiling_c;
+
     /* MEDIUM-3 (review): the last DEFINITIVE live-edit refusal this run has
      * seen -- window or HARD-validate (never "not applicable"/malloc/not-
      * running, none of which are definitive, see profile_live_pickup_
@@ -1477,11 +1489,30 @@ static inline float profile_compute_firing_max_c(const profile_t *p)
         if (p->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
             continue;
         }
-        if (p->segments[i].target_c > max_c) {
+        /* isfinite(): a NaN target already loses every compare below, but
+         * +Infinity would win it and then be refused by
+         * safety_link_send_firing_ceiling()'s own range check -- skip
+         * non-finite targets so this only ever returns a finite value >= 0.
+         * Negative targets never beat the 0.0f seed. */
+        if (isfinite(p->segments[i].target_c) && p->segments[i].target_c > max_c) {
             max_c = p->segments[i].target_c;
         }
     }
     return max_c;
+}
+
+/* The firing ceiling to adopt after a live edit is picked up mid-firing:
+ * monotonic, never LOWER than the one already in force. The live-edit window
+ * rule (live_edit_check_window()) lets the running segment's target_c drop,
+ * possibly below a temperature the kiln already reached legitimately under
+ * the old profile; lowering firing_max_c to match would make the Pico latch
+ * an S1 OVERTEMP trip (S1_OVER_CEILING_STREAK_TO_TRIP consecutive readings
+ * over new max + firing_margin_c) for an edit the ESP itself accepted. A
+ * raise is adopted at once. Pure, host-test-callable. */
+static inline float profile_firing_ceiling_after_live_edit(float current_c, const profile_t *edited)
+{
+    float new_max_c = profile_compute_firing_max_c(edited);
+    return (new_max_c > current_c) ? new_max_c : current_c;
 }
 
 /* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored

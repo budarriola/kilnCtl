@@ -408,6 +408,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
     s_exec.profile = p;
     s_exec.profile_id = profile_id;
+    /* SET_FIRING_CEILING (0x09): only reported (and so only resent by the
+     * safety poll task) once state is RUNNING/PAUSED -- a refusal below
+     * leaves state untouched and this value unobserved. */
+    s_exec.firing_ceiling_c = profile_compute_firing_max_c(&p);
     s_exec.segment_index = 0;
     s_exec.dwelling = false;
     s_exec.segment_elapsed_s = 0;
@@ -1060,9 +1064,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * is the local, already-committed copy of this run's profile, still in
      * scope. Fire-and-forget broadcast: a failure here is logged, never
      * treated as success, and never blocks the firing that has already
-     * started -- S1 simply keeps enforcing whatever ceiling (or none) the
-     * Pico last held, which can only be equal or looser than intended,
-     * never tighter, per abs_max_temp_c's own floor. */
+     * started. This immediate send is only the fast path -- the value is
+     * level-triggered: safety_build_and_send_context() resends
+     * profile_executor_get_status()'s firing_ceiling_c every poll period, so
+     * a lost frame or a Pico reboot mid-firing heals within one period. In
+     * the gap the Pico runs S1 on abs_max_temp_c alone (looser, never
+     * tighter). */
     float firing_max_c = profile_compute_firing_max_c(&p);
     esp_err_t ceiling_err = safety_link_send_firing_ceiling(s_exec.safety, firing_max_c);
     if (ceiling_err != ESP_OK) {

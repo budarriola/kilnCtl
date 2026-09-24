@@ -1950,6 +1950,81 @@ static void test_profile_compute_firing_max_c_null_and_empty(void)
     TEST_CHECK(profile_compute_firing_max_c(&p) == 0.0f, "no ZONE_RAMP segments -> 0.0f, not the RELAY_IO value");
 }
 
+static void test_profile_compute_firing_max_c_skips_non_finite_and_negative(void)
+{
+    TEST_SECTION("profile_compute_firing_max_c() -- NaN/+Inf/negative ZONE_RAMP targets never win; "
+                 "the result is always finite and >= 0");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.segment_count = 4;
+    for (int i = 0; i < 4; i++) {
+        p.segments[i].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    }
+    p.segments[0].target_c = NAN;
+    p.segments[1].target_c = INFINITY; /* would win a plain '>' and then be refused by the send path */
+    p.segments[2].target_c = -40.0f;
+    p.segments[3].target_c = 900.0f;
+    TEST_CHECK(profile_compute_firing_max_c(&p) == 900.0f, "only the finite 900 C target counts");
+
+    p.segments[3].target_c = -5.0f;
+    TEST_CHECK(profile_compute_firing_max_c(&p) == 0.0f, "all non-finite/negative -> 0.0f ('no ceiling')");
+}
+
+static void test_firing_ceiling_after_live_edit_is_monotonic(void)
+{
+    TEST_SECTION("profile_firing_ceiling_after_live_edit() -- a live edit may RAISE the Pico's firing "
+                 "ceiling but never lower it mid-firing (a lowered running-segment target below the "
+                 "kiln's current temperature must not become an S1 trip)");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.segment_count = 1;
+    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+
+    p.segments[0].target_c = 700.0f; /* edit lowered the peak from 1000 */
+    TEST_CHECK(profile_firing_ceiling_after_live_edit(1000.0f, &p) == 1000.0f,
+               "a lowered peak keeps the ceiling already in force");
+
+    p.segments[0].target_c = 1100.0f; /* edit raised the peak */
+    TEST_CHECK(profile_firing_ceiling_after_live_edit(1000.0f, &p) == 1100.0f, "a raised peak is adopted at once");
+
+    TEST_CHECK(profile_firing_ceiling_after_live_edit(1000.0f, NULL) == 1000.0f,
+               "a NULL/empty edited profile never clears the ceiling mid-firing");
+}
+
+static void test_get_status_reports_firing_ceiling_only_while_running_or_paused(void)
+{
+    TEST_SECTION("profile_executor_get_status() -- firing_ceiling_c is reported only while RUNNING/PAUSED; "
+                 "IDLE/DONE/FAULTED report 0.0f so safety_poll's per-poll resend clears a stale Pico ceiling");
+    SemaphoreHandle_t saved_lock = s_exec.lock;
+    profile_exec_state_t saved_state = s_exec.state;
+    float saved_ceiling = s_exec.firing_ceiling_c;
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.firing_ceiling_c = 1250.0f;
+
+    const struct {
+        profile_exec_state_t state;
+        float expect;
+        const char *msg;
+    } cases[] = {
+        {PROFILE_EXEC_RUNNING, 1250.0f, "RUNNING reports the ceiling"},
+        {PROFILE_EXEC_PAUSED, 1250.0f, "PAUSED reports the ceiling (a paused firing can resume heat)"},
+        {PROFILE_EXEC_DONE, 0.0f, "DONE reports 0.0f even though s_exec still holds the old value"},
+        {PROFILE_EXEC_FAULTED, 0.0f, "FAULTED reports 0.0f (a later autotune must run on abs_max alone)"},
+        {PROFILE_EXEC_IDLE, 0.0f, "IDLE reports 0.0f"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        s_exec.state = cases[i].state;
+        profile_exec_status_t out;
+        memset(&out, 0xAA, sizeof(out));
+        profile_executor_get_status(&out);
+        TEST_CHECK(out.firing_ceiling_c == cases[i].expect, cases[i].msg);
+    }
+
+    s_exec.lock = saved_lock;
+    s_exec.state = saved_state;
+    s_exec.firing_ceiling_c = saved_ceiling;
+}
+
 static void test_profile_zones_have_ceiling_refuses_on_zero(void)
 {
     TEST_SECTION("profile_zones_have_ceiling() -- refuses when a zone that CAN heat has max_temp_c == 0 "
@@ -2570,6 +2645,7 @@ static void test_halt_clears_firing_ceiling(void)
     s_exec.lock = xSemaphoreCreateMutex();
     s_exec.state = PROFILE_EXEC_RUNNING;
     s_exec.claimed_relay_mask = 0x0F;
+    s_exec.firing_ceiling_c = 1250.0f; /* as profile_executor_run() would have set it */
     g_firing_ceiling_send_calls = 0;
     g_firing_ceiling_last_c = -1.0f;
 
@@ -2577,6 +2653,8 @@ static void test_halt_clears_firing_ceiling(void)
 
     TEST_CHECK(g_firing_ceiling_send_calls == 1, "halt from RUNNING sends exactly one SET_FIRING_CEILING");
     TEST_CHECK(g_firing_ceiling_last_c == 0.0f, "halt clears the ceiling with the 0.0f sentinel, not a leftover value");
+    TEST_CHECK(s_exec.firing_ceiling_c == 0.0f,
+               "halt also zeroes s_exec.firing_ceiling_c, so the per-poll resend cannot re-raise it");
 
     /* A no-op halt on an already-IDLE executor must send nothing -- same
      * discipline as g_request_enable_false_calls staying at 1 above. */
@@ -9415,6 +9493,9 @@ void run_test_profile_executor_prestart(void)
     test_guard9_fault_source_cleared_on_halt();
     test_profile_compute_firing_max_c_picks_highest_zone_ramp_target();
     test_profile_compute_firing_max_c_null_and_empty();
+    test_profile_compute_firing_max_c_skips_non_finite_and_negative();
+    test_firing_ceiling_after_live_edit_is_monotonic();
+    test_get_status_reports_firing_ceiling_only_while_running_or_paused();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();

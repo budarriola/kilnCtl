@@ -267,8 +267,15 @@ esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level)
  * an unchecked return as success (CLAUDE.md's "logging unchecked success"
  * class). Returns ESP_ERR_INVALID_ARG for an out-of-range value,
  * ESP_ERR_INVALID_STATE if the driver isn't initialized. Safe to call from
- * any task, same as safety_link_send_clear_trip(). */
-esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
+ * any task, same as safety_link_send_clear_trip().
+ *
+ * Level-triggered, not edge-only: safety_build_and_send_context() also
+ * resends the executor's current value (0.0f unless a firing is RUNNING/
+ * PAUSED) every poll period via safety_link_resend_firing_ceiling() below --
+ * LINK_PROTOCOL.md sec 4's "repeated in every context frame's shadow". The
+ * Pico holds the ceiling in RAM only, so this is what restores it after a
+ * Pico reboot mid-firing and clears a stale one after an ESP reboot. */
+static esp_err_t safety_link_send_firing_ceiling_impl(SafetyLinkClass *link, float firing_max_c, bool log_send)
 {
     if (!link) {
         return ESP_ERR_INVALID_ARG;
@@ -297,12 +304,26 @@ esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_ma
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "set_firing_ceiling: sending, firing_max_c=%f", (double)firing_max_c);
+    if (log_send) {
+        ESP_LOGI(TAG, "set_firing_ceiling: sending, firing_max_c=%f", (double)firing_max_c);
+    }
     /* Same (dst_device, dst_task, src_task) triple as SET_LOG_LEVEL's own
      * broadcast call site above -- fire-and-forget, no ACK expected
      * (link_task_handle_set_firing_ceiling() never replies on the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
+}
+
+esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
+{
+    return safety_link_send_firing_ceiling_impl(link, firing_max_c, true);
+}
+
+/* Poll-task resend (safety_link_internal.h) -- identical frame, no per-send
+ * INFO line (it runs every poll period). */
+esp_err_t safety_link_resend_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
+{
+    return safety_link_send_firing_ceiling_impl(link, firing_max_c, false);
 }
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --

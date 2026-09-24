@@ -1538,7 +1538,18 @@ Two more, driven by the borrowed-thermocouple option:
       three call sites are outside `s_exec.lock` and check/log the returned
       `esp_err_t`. `kilnlink_ceiling.c` was also added to the ESP-IDF
       component's `CMakeLists.txt` SRCS list (previously unwired — no ESP
-      caller existed before this).
+      caller existed before this). **Review follow-up 2026-09-24**: the
+      edge sends alone did not match this doc's "repeated in every context
+      frame's shadow" (the Pico's copy is RAM-only and never ACKed, so a
+      Pico reboot lost it and a lost halt frame / ESP reboot / DONE-FAULTED
+      end of run left a stale one that could tighten S1 for a later
+      autotune). `safety_build_and_send_context()` now resends
+      `profile_exec_status_t.firing_ceiling_c` after every `PUSH_CONTEXT`;
+      that field is the run's ceiling only while RUNNING/PAUSED and `0.0f`
+      otherwise. A live edit may raise the ceiling but never lower it
+      mid-firing (`profile_firing_ceiling_after_live_edit()`), since the
+      window rule lets the running segment's target drop below the kiln's
+      current temperature and a lowered ceiling would latch S1.
 - [x] `CLEAR_TRIP` (0x0A) wired to the GUI. **2026-09-04**:
       `dashboard_exec_http.c`'s `safety_clear_trip_post_handler()` (`POST
       /api/safety/clear_trip`) calls `safety_link_send_clear_trip()`

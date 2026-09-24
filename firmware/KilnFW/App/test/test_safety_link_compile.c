@@ -81,7 +81,16 @@ esp_err_t MAX31856_get_config(MAX31856Class *ch, MAX31856Config *out_cfg)
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
 { (void)bus; (void)out; (void)max_readings; (void)out_count; return ESP_FAIL; }
 uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io) { (void)io; return 0; }
-void profile_executor_get_status(profile_exec_status_t *out) { (void)out; }
+// Scriptable firing_ceiling_c for test_context_push_resends_firing_ceiling()
+// below; every other field stays at the zeroed (IDLE) value it always had.
+static float s_fake_status_firing_ceiling_c = 0.0f;
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->firing_ceiling_c = s_fake_status_firing_ceiling_c;
+    }
+}
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc)
 { (void)link; (void)live_config_crc; return false; }
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
@@ -390,10 +399,27 @@ static uart_proto_message_t s_stub_broadcast_reply_msg;
 // loop keeps waiting past it instead of giving up after the first frame.
 static bool s_stub_broadcast_leading_push = false;
 static uart_proto_message_t s_stub_broadcast_leading_msg;
+// Every broadcast payload's first byte (command id), length and a copy of
+// the most recent one -- test_context_push_resends_firing_ceiling() asserts
+// on what went out, not just that something did. Recorded before the
+// success gate so a send that the stub then fails is still visible.
+#define STUB_BROADCAST_LOG_MAX 8
+static unsigned s_stub_broadcast_count = 0;
+static uint8_t s_stub_broadcast_cmd[STUB_BROADCAST_LOG_MAX];
+static uint8_t s_stub_broadcast_last_payload[64];
+static size_t s_stub_broadcast_last_len = 0;
 esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device_t dst_device,
                                         uint8_t dst_task, uint8_t src_task,
                                         const uint8_t *payload, size_t length)
-{ (void)proto; (void)dst_device; (void)dst_task; (void)src_task; (void)payload; (void)length;
+{ (void)proto; (void)dst_device; (void)dst_task; (void)src_task;
+  if (s_stub_broadcast_count < STUB_BROADCAST_LOG_MAX) {
+      s_stub_broadcast_cmd[s_stub_broadcast_count] = (payload && length) ? payload[0] : 0u;
+  }
+  s_stub_broadcast_count++;
+  s_stub_broadcast_last_len = length;
+  if (payload && length <= sizeof(s_stub_broadcast_last_payload)) {
+      memcpy(s_stub_broadcast_last_payload, payload, length);
+  }
   if (!s_stub_broadcast_send_succeeds) {
       return ESP_FAIL;
   }
@@ -2434,6 +2460,50 @@ static void test_fault_edge_uninitialized_link_refuses(void)
 int g_test_failures = 0;
 int g_test_count = 0;
 
+// SAFETY_CMD_SET_FIRING_CEILING (0x09), LINK_PROTOCOL.md sec 4: "repeated in
+// every context frame's shadow". The Pico keeps the ceiling in RAM only and
+// never ACKs it, so the only thing that restores it after a Pico reboot
+// mid-firing -- or clears a stale one after an ESP reboot -- is this
+// per-poll resend of profile_executor_get_status()'s firing_ceiling_c.
+static void test_context_push_resends_firing_ceiling(void)
+{
+    TEST_SECTION("safety_build_and_send_context() -- every PUSH_CONTEXT is followed by a "
+                 "SET_FIRING_CEILING carrying the executor's live firing_ceiling_c");
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = false;
+    s_stub_broadcast_leading_push = false;
+
+    s_fake_status_firing_ceiling_c = 1234.5f;
+    s_stub_broadcast_count = 0;
+    safety_build_and_send_context(&link);
+    TEST_CHECK(s_stub_broadcast_count == 2, "two broadcasts per poll: PUSH_CONTEXT then SET_FIRING_CEILING");
+    TEST_CHECK(s_stub_broadcast_cmd[0] == 0x07u, "first broadcast is PUSH_CONTEXT (0x07)");
+    TEST_CHECK(s_stub_broadcast_cmd[1] == KILNLINK_CEILING_CMD, "second broadcast is SET_FIRING_CEILING (0x09)");
+    kilnlink_ceiling_t got;
+    memset(&got, 0, sizeof(got));
+    TEST_CHECK(kilnlink_ceiling_decode(s_stub_broadcast_last_payload, s_stub_broadcast_last_len, &got) ==
+                   KILNLINK_CEILING_OK,
+               "the resent frame decodes as a well-formed SET_FIRING_CEILING");
+    TEST_CHECK(got.firing_max_c == 1234.5f, "carries the executor's firing_ceiling_c unmodified (no margin added)");
+
+    /* Executor not RUNNING/PAUSED -> 0.0f: the resend is what clears a stale
+     * Pico ceiling (e.g. after an ESP reboot mid-firing). */
+    s_fake_status_firing_ceiling_c = 0.0f;
+    s_stub_broadcast_count = 0;
+    safety_build_and_send_context(&link);
+    memset(&got, 0xFF, sizeof(got));
+    TEST_CHECK(s_stub_broadcast_count == 2 && s_stub_broadcast_cmd[1] == KILNLINK_CEILING_CMD,
+               "an idle executor still gets a SET_FIRING_CEILING every poll");
+    TEST_CHECK(kilnlink_ceiling_decode(s_stub_broadcast_last_payload, s_stub_broadcast_last_len, &got) ==
+                       KILNLINK_CEILING_OK &&
+                   got.firing_max_c == 0.0f,
+               "idle resend carries the 0.0f 'no ceiling' sentinel");
+
+    s_stub_broadcast_send_succeeds = false;
+}
+
 int main(void)
 {
     TEST_SECTION("safety_link.c host build -- safety_apply_status() / safety_link_versions_compatible()");
@@ -2484,6 +2554,8 @@ int main(void)
     test_fault_edge_multi_bit_assert_reports_lowest_first_set_bit();
     test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order();
     test_fault_edge_uninitialized_link_refuses();
+
+    test_context_push_resends_firing_ceiling();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
