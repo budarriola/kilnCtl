@@ -230,6 +230,17 @@ ZERO_CALLER_ALLOWLIST = {
     # a future caller wiring up whole-board (rather than per-source) load
     # estimation would reach for exactly this function.
     ("tools/PcTools/src/kilnctrl/load_estimator.py", "estimate_all_zones"),
+    # docs/TOTP_PASSWORD_RESET_PLAN.md WT-C, 2026-09-24: pure-Python RFC 6238
+    # reference implementation deliberately kept unwired -- the PC-side
+    # totp_reset_password() MCP tool only forwards an operator-entered code
+    # to the board and never computes one itself. Provided so WT-D's
+    # not-yet-written firmware host tests have an independent, RFC Appendix B
+    # -verified implementation to check their own HMAC/counter/truncation math
+    # against by hand. Exercised only by test_totp.py today.
+    ("tools/PcTools/src/kilnctrl/totp.py", "totp"),
+    ("tools/PcTools/src/kilnctrl/totp.py", "verify_totp"),
+    ("tools/PcTools/src/kilnctrl/totp.py", "base32_encode"),
+    ("tools/PcTools/src/kilnctrl/totp.py", "base32_decode"),
 }
 
 # Found genuinely zero-caller by this check's first full-coverage run

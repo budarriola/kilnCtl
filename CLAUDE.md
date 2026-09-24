@@ -22,9 +22,35 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (188 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `estop_verify` was
-added -- an MCP tool wrapping `POST /api/estop/verify`
+the rest behind a search facade (190 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-24, when `totp_enroll_status`/
+`totp_reset_password` were added -- MCP tools for
+`docs/TOTP_PASSWORD_RESET_PLAN.md`'s WT-C tranche, wrapping the OPEN-tier
+`POST /api/auth/forgot`/`POST /api/auth/reset` TOTP password-reset routes
+and the ADMIN-tier `GET /api/auth/totp_status` read, all against WT-A
+firmware routes that do not exist yet -- WT-C chose and recorded the
+request/response contract (always-202 `/forgot`, generic 400/`{"ok":false}`
+`/reset`, `{"enrolled":bool}` `/totp_status`) in the plan doc's new section
+6a for WT-A to follow. `totp_enroll_status` is READ-ONLY (enrolled bool
+plus board clock/SNTP-sync state, never a secret).
+`totp_reset_password(confirm=True)` takes the operator's live 6-digit code
+from `KILNCTL_TOTP_CODE` and the new password from
+`KILNCTL_WEB_PASSWORD_NEW` -- never as call parameters, and deliberately
+not the same variable as `KILNCTL_WEB_PASSWORD` -- refuses unless
+`confirm is True` exactly, refuses naming only whichever of
+username/code/new-password environment variable is missing, reports
+outcomes as booleans/status codes only (never the board's raw response
+body, which could carry the opaque reset token), and after a reported
+success re-verifies by attempting an actual login with the new credential
+via the existing `http_auth` seam, failing loud if that login does not
+succeed -- same write-lies discipline as `estop_verify()`. Enrollment
+itself stays a settings-page-only flow by owner decision; no MCP tool can
+mint or replace the board's TOTP secret. A new
+`tools/PcTools/src/kilnctrl/totp.py` also landed as a pure-Python RFC 6238
+helper (HMAC-SHA1, 6 digits, 30 s, base32), validated against RFC 6238
+Appendix B's own SHA1 test vectors, for the not-yet-written WT-D firmware
+host tests to be checked against by hand. The one before it was
+`estop_verify`, 2026-09-23 -- an MCP tool wrapping `POST /api/estop/verify`
 (`diagnostics_http.c`'s `estop_verify_post_handler()`, ROUTE_TIER_ADMIN),
 recording that a HUMAN has physically verified the E-stop interlock per
 `firmware/SaftyFW/README.md`'s bench procedure -- never inferred from a GPIO

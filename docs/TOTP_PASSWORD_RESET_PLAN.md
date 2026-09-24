@@ -233,6 +233,33 @@ contract silently. Implementation is additive only: at the point
 NVS clear — no change to `auth_reset_gesture.c`'s state machine, corner
 order, or timing constants.
 
+## 6a. WT-A/WT-C wire contract (decided by WT-C, 2026-09-24, pending WT-A)
+
+WT-C (`tools/PcTools/src/kilnctrl/totp_http_client.py`) landed before WT-A
+(the firmware routes themselves, not yet written), so it had to choose the
+fields section 4 above left unspecified rather than guess at call sites.
+WT-A must implement exactly this shape; the fuller reasoning lives in
+`totp_http_client.py`'s own module docstring:
+
+- `POST /api/auth/forgot` body: form-urlencoded `{"username","code"}`.
+  Response is **always** HTTP 202 with JSON `{"reset_token": "<opaque
+  string>"}` — a token-shaped value is present whether or not the code
+  actually matched (a wrong/unenrolled code gets a token that simply will
+  not later verify), so the response shape itself carries no oracle.
+- `POST /api/auth/reset` body: form-urlencoded
+  `{"username","reset_token","new_password"}`. Success: HTTP 200, JSON
+  `{"ok": true}`. Any failure (expired/wrong/reused token, password policy
+  rejection): HTTP 400, JSON `{"ok": false}` — deliberately generic, never
+  distinguishing which of the two failed. A rate-limit refusal from the
+  shared `login_ip_scope.c` ladder is HTTP 429, reused as-is rather than
+  remapped to 400.
+- `GET /api/auth/totp_status` (ROUTE_TIER_ADMIN, unlike the two OPEN routes
+  above): JSON `{"enrolled": bool}`, plus WT-C's PC-side tool additionally
+  reads and reports `board_time_utc`/`sntp_synced` fields **if present** —
+  WT-A does not have to add them for WT-C's tool to keep working, but
+  adding them lets `totp_enroll_status()` warn on an unsynced clock per
+  section 3's requirement; their absence is tolerated, not required.
+
 ## 7. Work tranches
 
 **WT-A — firmware: TOTP core + NVS + routes.** Sizes: medium-large (new
@@ -267,7 +294,8 @@ Acceptance: QR renders and scans correctly from a real phone app at
 320-390px width without scrolling; forgot-password flow shows only generic
 messages to an unauthenticated caller.
 
-**WT-C — PcTools MCP wrappers.** Sizes: small. Files: new
+**WT-C — PcTools MCP wrappers. DONE 2026-09-24 (code side; live-board
+verification still pending WT-A).** Sizes: small. Files: new
 `tools/PcTools/src/kilnctrl/totp_http_client.py`, MCP registration for two
 tools: `totp_enroll_status` (read-only — reports `{"enrolled": bool}` only,
 never a secret, ADMIN session) and `totp_reset_password(confirm=True)` —

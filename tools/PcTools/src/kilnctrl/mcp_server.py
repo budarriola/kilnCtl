@@ -483,6 +483,7 @@ from .mcp_server_zones_current_sweep import *  # noqa: F401,F403
 from .mcp_server_codec import *  # noqa: F401,F403
 from .mcp_server_info import *  # noqa: F401,F403
 from .mcp_server_web_auth import *  # noqa: F401,F403
+from .mcp_server_totp import *  # noqa: F401,F403
 from .mcp_server_actions import *  # noqa: F401,F403
 from .mcp_server_log_analysis import *  # noqa: F401,F403
 from .mcp_server_repo_grep import *  # noqa: F401,F403
