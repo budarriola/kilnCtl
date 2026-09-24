@@ -459,6 +459,66 @@ class PopupUiTest(FakeUiTest):
         return {"result": "not_found"}
 
 
+class PinKeypadUiTest(FakeUiTest):
+    """Models the real ui_lcd_keypad.c/ui_confirm.c state machine for
+    LCD-19's idle-branch happy path, closely enough for enter_pin() to be
+    exercised meaningfully: Start opens the keypad (digits 0-9 + "OK" +
+    "Cancel"); submitting a wrong PIN resets the entry but leaves the
+    keypad open ("OK" still present, same as lcd_keypad_state_submit()'s
+    LCD_KEYPAD_SUBMIT_DENIED path); submitting the right PIN closes the
+    keypad and opens the Confirm Start dialog ("OK" gone, "Start"/"Cancel"
+    only)."""
+
+    def __init__(self, right_pin: str, wrong_pin: str):
+        super().__init__(page="home", targets=[])
+        self._right_pin = right_pin
+        self._wrong_pin = wrong_pin
+        self._state = "idle"  # idle -> keypad -> confirm
+        self._entry = ""
+
+    def list_tap_targets(self):
+        if self._state == "keypad":
+            names = [str(d) for d in range(10)] + ["OK", "Cancel"]
+        elif self._state == "confirm":
+            names = ["Start", "Cancel"]
+        else:
+            names = []
+        return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
+
+    def click_by_name(self, name):
+        if self._state == "idle":
+            if name == "Start":
+                self._state = "keypad"
+                self._entry = ""
+                return {"result": "ok"}
+            return {"result": "not_found"}
+        if self._state == "keypad":
+            if name in "0123456789":
+                self._entry += name
+                return {"result": "ok"}
+            if name == "OK":
+                if self._entry == self._right_pin:
+                    self._state = "confirm"
+                else:
+                    self._entry = ""
+                return {"result": "ok"}
+            if name == "Cancel":
+                self._state = "idle"
+                return {"result": "ok"}
+            return {"result": "not_found"}
+        if self._state == "confirm":
+            if name == "Cancel":
+                self._state = "idle"
+                return {"result": "ok"}
+            return {"result": "not_found"}
+        return {"result": "not_found"}
+
+    def enter_pin(self, pin):
+        digit_results = [self.click_by_name(ch) for ch in pin]
+        ok_result = self.click_by_name("OK")
+        return {"digit_results": digit_results, "ok_result": ok_result}
+
+
 class Lcd19Test(unittest.TestCase):
     def test_not_run_when_no_pin_configured(self):
         srv = FakeSrvFull(FakeUiTest(page="home"))
@@ -474,7 +534,7 @@ class Lcd19Test(unittest.TestCase):
         # a top-layer popup -- current_page stays "home", so the keypad must
         # be detected from tap-target names, never a page name (no page is
         # ever named "pin_entry").
-        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "2", "3", "OK", "Cancel"])
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
         srv = FakeSrvFull(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
             ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
@@ -482,13 +542,31 @@ class Lcd19Test(unittest.TestCase):
         spy.assert_any_call("Start")
         self.assertNotIn(mock.call("start"), spy.call_args_list)
         self.assertEqual(result.observed.get("keypad_raised"), True)
-        # No enter_pin() on UiTestClient today -- this case can reach at
-        # most INCONCLUSIVE, never PASS, until that wiring lands.
+        # enter_pin() now drives the keypad: a wrong PIN is refused (keypad
+        # stays open) and the right PIN opens Confirm Start. stop_not_gated
+        # is never observed on the idle branch, so the case still tops out
+        # at INCONCLUSIVE, not PASS -- see judge_lcd_pin_lock.
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), True)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
-        # The keypad must not be left open on the board afterward.
+        # The Confirm Start dialog left open by the right PIN must not be
+        # left open on the board afterward.
         self.assertEqual(result.observed["overlay_dismiss"]["present"], True)
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
         self.assertEqual(ui.list_tap_targets()["targets"], [])
+
+    def test_wrong_pin_actually_granted_fails(self):
+        # Negative test: if a wrong PIN were incorrectly accepted (keypad
+        # closes to Confirm Start instead of staying open), this must FAIL,
+        # not read as refused. Model that by making the fake's "right_pin"
+        # equal to the configured wrong_pin -- i.e. the board grants entry
+        # on the wrong PIN.
+        ui = PinKeypadUiTest(right_pin="0000", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("wrong_pin_refused"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_stop_opens_confirm_dialog_directly_not_gated(self):
         # A Confirm Stop dialog (ui_confirm.c) has only its confirm_label

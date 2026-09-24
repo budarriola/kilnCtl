@@ -450,6 +450,97 @@ class FakeSecClientWithBody(FakeSecClient):
         return self.dashboard_status, "<html>dashboard</html>"
 
 
+class FakeSec04Client:
+    """Minimal fake for WEB-SEC-04: only the calls that case makes
+    (get_config/set_lcd_pin/set_policy), tracking lcd_enabled so the
+    restore-round-trip check is real rather than trivially true."""
+
+    def __init__(self, admin_pin_set=False, web_enabled=False, lcd_enabled=False,
+                 web_timeout_min=30, lcd_timeout_min=30,
+                 set_lcd_pin_ok=True, enable_ok=True, restore_ok=True):
+        self._cfg = {
+            "web_enabled": web_enabled, "lcd_enabled": lcd_enabled,
+            "web_timeout_min": web_timeout_min, "lcd_timeout_min": lcd_timeout_min,
+            "admin_pin_set": admin_pin_set,
+        }
+        self.set_lcd_pin_ok = set_lcd_pin_ok
+        self.enable_ok = enable_ok
+        self.restore_ok = restore_ok
+        self.set_lcd_pin_calls = []
+        self.set_policy_calls = []
+
+    def get_config(self):
+        return 200, dict(self._cfg)
+
+    def set_lcd_pin(self, role, pin):
+        self.set_lcd_pin_calls.append((role, pin))
+        return (200, {"ok": True}) if self.set_lcd_pin_ok else (200, {"ok": False})
+
+    def set_policy(self, web_enabled, lcd_enabled, web_timeout_min, lcd_timeout_min):
+        self.set_policy_calls.append(lcd_enabled)
+        if lcd_enabled and not self.enable_ok:
+            return 200, {"ok": False}
+        if not lcd_enabled and not self.restore_ok:
+            return 200, {"ok": False}
+        self._cfg["web_enabled"] = web_enabled
+        self._cfg["lcd_enabled"] = lcd_enabled
+        self._cfg["web_timeout_min"] = web_timeout_min
+        self._cfg["lcd_timeout_min"] = lcd_timeout_min
+        return 200, {"ok": True}
+
+
+class WebSec04Test(unittest.TestCase):
+    def test_skips_when_admin_pin_already_configured(self):
+        client = FakeSec04Client(admin_pin_set=True)
+        result = C._case_web_sec04({"sec_client": client})
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(client.set_lcd_pin_calls, [])
+        self.assertEqual(client.set_policy_calls, [])
+
+    def test_happy_path_passes_and_restores(self):
+        client = FakeSec04Client(admin_pin_set=False, lcd_enabled=False)
+        ctx = {"sec_client": client}
+        result = C._case_web_sec04(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(client.set_lcd_pin_calls, [("admin", C._TEST_LCD_ADMIN_PIN)])
+        # lcd_enabled must be back to its original (False) value afterward.
+        self.assertEqual(client._cfg["lcd_enabled"], False)
+        # A confirmed PASS hands the test PIN pair to ctx for LCD-19.
+        self.assertEqual(ctx["_lcd_pin"], {"right_pin": C._TEST_LCD_ADMIN_PIN, "wrong_pin": C._TEST_LCD_WRONG_PIN})
+
+    def test_set_lcd_pin_not_confirmed_fails_and_never_enables(self):
+        client = FakeSec04Client(set_lcd_pin_ok=False)
+        ctx = {"sec_client": client}
+        result = C._case_web_sec04(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        # never enabled (True) -- the only set_policy call is the finally
+        # block's restore-to-original (False, the fixture's original value).
+        self.assertEqual(client.set_policy_calls, [False])
+        self.assertNotIn("_lcd_pin", ctx)
+
+    def test_enable_not_confirmed_fails(self):
+        client = FakeSec04Client(enable_ok=False)
+        ctx = {"sec_client": client}
+        result = C._case_web_sec04(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("_lcd_pin", ctx)
+
+    def test_restore_failure_fails_even_if_everything_else_passed(self):
+        client = FakeSec04Client(restore_ok=False)
+        ctx = {"sec_client": client}
+        result = C._case_web_sec04(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("restore", result.reason)
+        self.assertNotIn("_lcd_pin", ctx)
+
+    def test_initial_get_failure_fails(self):
+        class BrokenClient:
+            def get_config(self):
+                return 500, None
+        result = C._case_web_sec04({"sec_client": BrokenClient()})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+
 class WebSec03Test(unittest.TestCase):
     def setUp(self):
         os.environ.pop("KILNCTL_WEB_USERNAME", None)
@@ -575,7 +666,7 @@ class WebSec03Test(unittest.TestCase):
 
 class RegistryWiringTest(unittest.TestCase):
     def test_all_wave2_web_ids_wired(self):
-        for cid in ("WEB-DASH-13", "WEB-DIAG-07", "WEB-DIAG-08", "WEB-SEC-03"):
+        for cid in ("WEB-DASH-13", "WEB-DIAG-07", "WEB-DIAG-08", "WEB-SEC-03", "WEB-SEC-04"):
             self.assertIsNotNone(REGISTRY[cid].judge, f"{cid} has no judge wired")
 
     def test_ids_present_in_nightly_suite(self):
@@ -583,6 +674,14 @@ class RegistryWiringTest(unittest.TestCase):
 
         for cid in ("WEB-DASH-13", "WEB-DIAG-07", "WEB-DIAG-08", "WEB-SEC-03"):
             self.assertIn(cid, SUITES["nightly"])
+
+    def test_web_sec04_not_in_nightly_only_full(self):
+        # LCD-19's PIN producer -- registry.py's _NIGHTLY_ORDER comment
+        # block deliberately excludes it; only reachable via `full`/`web`.
+        from kilnctrl.bench_test.registry import SUITES
+
+        self.assertNotIn("WEB-SEC-04", SUITES["nightly"])
+        self.assertIn("WEB-SEC-04", SUITES["full"])
 
 
 if __name__ == "__main__":

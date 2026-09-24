@@ -164,6 +164,32 @@ class UiTestClient:
             raise UiTestResponseError(f"unknown CLICK_BY_NAME result code {result_code}")
         return {"result": result, "cx": cx, "cy": cy}
 
+    def enter_pin(self, pin: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
+        """Type ``pin``'s digits into an already-open PIN keypad overlay
+        (``ui_lcd_keypad.c``) via :meth:`click_by_name`, then press "OK".
+
+        Each digit and "OK" are individual buttonmatrix keys, each its own
+        named tap target (``kiln_ui.c``'s buttonmatrix walk reports the key's
+        own text as its name, e.g. "0".."9", "OK") -- so this is just a
+        sequence of ordinary click_by_name() calls, not a new wire command.
+        This method does not itself poll for the keypad appearing first or
+        for the submit's effect afterward (closing on a correct PIN,
+        resetting the dot count on a wrong one, or a lockout message) --
+        same click-then-read race as any other click_by_name() use here, so
+        callers must poll with their own ``_wait_for_*`` helper before
+        trusting the result of an entry, exactly as they already do around
+        any other click_by_name().
+
+        Returns ``{"digit_results": [...], "ok_result": {...}}``, each entry
+        shaped like click_by_name()'s own return value. A caller can inspect
+        ``digit_results`` for a "not_found"/"hidden"/"ambiguous" entry (e.g.
+        the keypad closed mid-entry) without this method itself raising or
+        guessing what that means for the case's verdict.
+        """
+        digit_results = [self.click_by_name(ch, timeout=timeout) for ch in pin]
+        ok_result = self.click_by_name("OK", timeout=timeout)
+        return {"digit_results": digit_results, "ok_result": ok_result}
+
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> bytes:
         with self._query_lock:
             pending = _Pending(subcommand)

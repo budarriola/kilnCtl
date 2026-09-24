@@ -609,13 +609,14 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 # (ui_confirm.c) -- no "OK". So "Cancel" present + "OK" present == keypad;
 # "Cancel" present + no "OK" == a confirm dialog.
 #
-# UiTestClient has no enter_pin() today (that PIN-entry wiring is WEB-SEC-04's
-# to add), so wrong_pin_refused/right_pin_started can never be observed here
-# and stay None -- meaning judge_lcd_pin_lock can reach at most INCONCLUSIVE
-# on any given run, never PASS, until that wiring lands. "right_pin_started"
-# is a placeholder name kept for judgments.py's existing signature; entering
-# the right PIN only opens the Confirm Start dialog, it does not itself start
-# a firing.
+# UiTestClient.enter_pin() (2026-09-24) types a PIN's digits then "OK" via
+# click_by_name(); wrong_pin_refused/right_pin_started are now observed from
+# the keypad's own reaction: a wrong PIN resets the entry but leaves the
+# keypad open ("OK" still present), a right PIN closes the keypad in favour
+# of the Confirm Start dialog ("OK" gone, "Start"/"Cancel" only).
+# "right_pin_started" is a placeholder name kept for judgments.py's existing
+# signature; entering the right PIN only opens the Confirm Start dialog, it
+# does not itself start a firing -- this case never presses Confirm Start.
 #
 # This case must never actually start or stop a firing itself: on the idle
 # branch it only ever taps "Start" (which opens the PIN keypad, not the
@@ -647,6 +648,26 @@ def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIM
     start = time.monotonic()
     names = _lcd19_overlay_names(ui)
     while names is not None and bool(names) != present:
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        names = _lcd19_overlay_names(ui)
+    return names, time.monotonic() - start
+
+
+def _wait_for_overlay_predicate(ui, predicate, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                                 interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[Optional[set], float]":
+    """Same click-then-read race as :func:`_wait_for_overlay_names`, but for
+    a caller that needs something more specific than "present"/"absent" --
+    e.g. LCD-19's post-``enter_pin`` checks: a wrong PIN leaves the keypad
+    open (``"OK"`` still present, just re-reset), and a right PIN closes it
+    in favour of the Confirm Start dialog (``"OK"`` gone). ``predicate``
+    takes the current name set (or ``None`` on a read failure) and returns
+    whether the wait is satisfied. Never raises; a predicate that never
+    becomes true is still reported honestly via whatever the last poll saw."""
+    start = time.monotonic()
+    names = _lcd19_overlay_names(ui)
+    while not predicate(names):
         if time.monotonic() - start >= timeout_s:
             break
         time.sleep(interval_s)
@@ -696,8 +717,27 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             if click.get("result") == "ok":
                 names, _ = _wait_for_overlay_names(ui, present=True)
                 keypad_raised = names is not None and "OK" in names and "Cancel" in names
-            # wrong_pin_refused / right_pin_started stay None: UiTestClient
-            # has no enter_pin() to drive the keypad any further.
+            if keypad_raised:
+                wrong_pin = pin_cfg.get("wrong_pin")
+                right_pin = pin_cfg.get("right_pin")
+                if wrong_pin:
+                    ui.enter_pin(wrong_pin)
+                    # A wrong PIN resets the digit entry but never closes
+                    # the keypad -- "OK" must still be present. Poll rather
+                    # than reading once, same click-then-read race as any
+                    # other click_by_name()-driven transition here.
+                    names, _ = _wait_for_overlay_predicate(
+                        ui, lambda n: n is not None and "OK" in n)
+                    wrong_pin_refused = names is not None and "OK" in names and "Cancel" in names
+                if wrong_pin_refused and right_pin:
+                    ui.enter_pin(right_pin)
+                    # A correct PIN closes the keypad in favour of the
+                    # Confirm Start dialog -- "OK" disappears.
+                    names, _ = _wait_for_overlay_predicate(
+                        ui, lambda n: n is not None and "OK" not in n)
+                    right_pin_started = (
+                        names is not None and "OK" not in names and "Cancel" in names
+                    )
         else:
             stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
             if stop_click.get("result") == "ok":

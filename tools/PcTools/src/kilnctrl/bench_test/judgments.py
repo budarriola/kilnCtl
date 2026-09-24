@@ -1397,6 +1397,43 @@ def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
     return CaseResult(Verdict.PASS, observed=observed)
 
 
+def judge_web_sec04(pin_set_ok: bool, enabled_ok: bool, readback_enabled: Optional[bool],
+                     restore_ok: bool, restore_matches: bool,
+                     state: Optional[dict] = None) -> CaseResult:
+    """WEB-SEC-04: set a harness LCD admin PIN, enable ``lcd_enabled``,
+    confirm the readback shows it on, then restore ``lcd_enabled`` (and the
+    timeouts) to their original values. Unlike WEB-SEC-03's web password,
+    an LCD PIN is one-way hashed with no read-back and no "clear just this
+    PIN" route -- the case's caller refuses to even attempt this (SKIP)
+    whenever a PIN was already configured, so this judge is only ever
+    reached when the PIN this case set is a fresh one it is fine to leave
+    behind; the restore here only ever concerns the ``lcd_enabled``/timeout
+    policy fields, never the PIN hash itself.
+
+    Same "restore failure always FAILs first" shape as
+    :func:`judge_web_sec03`."""
+    observed = dict(state or {})
+    if not restore_ok or not restore_matches:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="lcd_enabled policy restore did not round-trip -- board may be left with lcd_enabled changed",
+            observed=observed,
+        )
+    if not pin_set_ok:
+        return CaseResult(
+            Verdict.FAIL, reason="set_lcd_pin did not confirm ok:true for the harness admin PIN", observed=observed
+        )
+    if not enabled_ok:
+        return CaseResult(Verdict.FAIL, reason="set_policy(lcd_enabled=1) did not report ok:true", observed=observed)
+    if not readback_enabled:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="GET /api/auth/config did not show lcd_enabled:true after enabling it",
+            observed=observed,
+        )
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
 def judge_dual_reset_trip(
     link_up: bool,
     trip_reason: Optional[int],

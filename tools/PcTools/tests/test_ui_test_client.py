@@ -207,5 +207,56 @@ class ClickByNameTest(unittest.TestCase):
         self.assertEqual(self.link.sent, [])
 
 
+class EnterPinTest(unittest.TestCase):
+    def setUp(self):
+        self.link = FakeLink()
+        self.client = UiTestClient(self.link)
+
+    def tearDown(self):
+        self.client.close()
+
+    def _reply(self, code: int, cx: int = 1, cy: int = 1) -> None:
+        payload = struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + struct.pack("<Bhh", code, cx, cy)
+        self.link.push_reply(UART_TASK_ID_UI_TEST, payload)
+
+    def test_clicks_each_digit_then_ok_in_order(self):
+        for _ in range(4):
+            self._reply(UI_TEST_CLICK_OK)
+        self._reply(UI_TEST_CLICK_OK)
+        self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(
+            self.link.sent,
+            [struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + digit.encode("ascii")
+             for digit in ["1", "2", "3", "4", "OK"]],
+        )
+
+    def test_returns_per_digit_and_ok_results(self):
+        for _ in range(4):
+            self._reply(UI_TEST_CLICK_OK)
+        self._reply(UI_TEST_CLICK_OK)
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(len(result["digit_results"]), 4)
+        self.assertTrue(all(r["result"] == "ok" for r in result["digit_results"]))
+        self.assertEqual(result["ok_result"]["result"], "ok")
+
+    def test_a_not_found_digit_click_does_not_raise_and_still_presses_ok(self):
+        # A stale/closed keypad or a mistyped digit name must surface as
+        # data (not_found), not an exception -- callers detect wrong-PIN vs.
+        # no-keypad by polling tap-target names afterward, not by exception.
+        self._reply(UI_TEST_CLICK_NOT_FOUND)
+        for _ in range(3):
+            self._reply(UI_TEST_CLICK_OK)
+        self._reply(UI_TEST_CLICK_OK)
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][0]["result"], "not_found")
+        self.assertEqual(len(self.link.sent), 5)  # all 4 digits + OK still sent
+
+    def test_empty_pin_still_presses_ok_only(self):
+        self._reply(UI_TEST_CLICK_OK)
+        result = self.client.enter_pin("", timeout=1.0)
+        self.assertEqual(result["digit_results"], [])
+        self.assertEqual(self.link.sent, [struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + b"OK"])
+
+
 if __name__ == "__main__":
     unittest.main()

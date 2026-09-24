@@ -349,6 +349,15 @@ class _SecHttpClient:
         }, timeout=self.timeout)
         return status, _parse_json(text)
 
+    def set_lcd_pin(self, role: str, pin: str) -> "Tuple[Optional[int], Optional[dict]]":
+        # ROUTE_TIER_ADMIN, same reasoning as get_config() above. Never
+        # logs or persists `pin` -- callers only ever pass a fixed harness
+        # test literal, never a real credential.
+        status, text = _http_post_raw_authed(self.host, "/api/auth/security", {
+            "cmd": "set_lcd_pin", "role": role, "pin": pin,
+        }, timeout=self.timeout)
+        return status, _parse_json(text)
+
     def set_policy(self, web_enabled: bool, lcd_enabled: bool, web_timeout_min: int,
                    lcd_timeout_min: int) -> "Tuple[Optional[int], Optional[dict]]":
         # ROUTE_TIER_ADMIN, same reasoning as get_config() above.
@@ -557,12 +566,101 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# WEB-SEC-04 -- LCD PIN policy toggle round trip. Sets a harness admin LCD
+# PIN, enables `lcd_enabled`, confirms the readback, then restores
+# `lcd_enabled`/the timeouts (never the PIN itself: `set_lcd_pin` is
+# one-way-hashed on the board with no read-back and no "clear just this
+# PIN" route, so this case SKIPs outright rather than overwrite any admin
+# PIN already configured -- see judge_web_sec04's docstring). On PASS, it
+# hands the fixed test PIN pair to ctx["_lcd_pin"] so LCD-19 (depends_on
+# WEB-SEC-04, registry.py) can drive the keypad via UiTestClient.enter_pin().
+# ---------------------------------------------------------------------------
+
+#: Fixed harness literals -- never a real credential, never logged.
+_TEST_LCD_ADMIN_PIN = "9137"
+_TEST_LCD_WRONG_PIN = "0000"
+
+
+def _case_web_sec04(ctx: dict) -> CaseResult:
+    client = _sec_client(ctx)
+
+    status0, cfg0 = client.get_config()
+    if status0 != 200 or cfg0 is None:
+        return CaseResult(
+            Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed={"status": status0}
+        )
+    if cfg0.get("admin_pin_set"):
+        return CaseResult(
+            Verdict.SKIP,
+            reason="an admin LCD PIN is already configured on this board; set_lcd_pin is one-way hashed with no "
+                   "read-back, so this case refuses to overwrite it rather than risk an unrecoverable change",
+            observed={"admin_pin_set": True},
+        )
+
+    orig = {
+        "web_enabled": bool(cfg0.get("web_enabled")),
+        "lcd_enabled": bool(cfg0.get("lcd_enabled")),
+        "web_timeout_min": cfg0.get("web_timeout_min") if (cfg0.get("web_timeout_min") or 0) > 0 else 30,
+        "lcd_timeout_min": cfg0.get("lcd_timeout_min") if (cfg0.get("lcd_timeout_min") or 0) > 0 else 30,
+    }
+
+    pin_set_ok = False
+    enabled_ok = False
+    readback_enabled: Optional[bool] = None
+    state: Dict[str, Any] = {"orig": orig}
+
+    try:
+        pin_status, pin_resp = client.set_lcd_pin("admin", _TEST_LCD_ADMIN_PIN)
+        pin_set_ok = pin_status == 200 and bool(pin_resp) and pin_resp.get("ok") is True
+        state["set_lcd_pin_status"] = pin_status
+        if pin_set_ok:
+            en_status, en_resp = client.set_policy(
+                orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
+            enabled_ok = en_status == 200 and bool(en_resp) and en_resp.get("ok") is True
+            state["set_policy_enable_status"] = en_status
+            if enabled_ok:
+                rb_status, cfg1 = client.get_config()
+                readback_enabled = rb_status == 200 and cfg1 is not None and bool(cfg1.get("lcd_enabled")) is True
+                state["readback_status"] = rb_status
+    finally:
+        # Unconditional, even on an exception above -- only the policy
+        # fields are restorable here (see module comment); the PIN this
+        # case set stays on the board.
+        restore_status, restore_resp = client.set_policy(
+            orig["web_enabled"], orig["lcd_enabled"], orig["web_timeout_min"], orig["lcd_timeout_min"])
+        restore_post_ok = restore_status == 200 and bool(restore_resp) and restore_resp.get("ok") is True
+        readback_status, cfg_after = client.get_config()
+        restore_matches = (
+            readback_status == 200 and cfg_after is not None and
+            bool(cfg_after.get("lcd_enabled")) == orig["lcd_enabled"]
+        )
+        state["restore"] = {
+            "post_status": restore_status, "post_ok": restore_post_ok,
+            "readback_status": readback_status, "readback_matches": restore_matches,
+        }
+
+    result = J.judge_web_sec04(
+        pin_set_ok=pin_set_ok, enabled_ok=enabled_ok, readback_enabled=readback_enabled,
+        restore_ok=state["restore"]["post_ok"], restore_matches=state["restore"]["readback_matches"],
+        state=state,
+    )
+    if result.verdict == Verdict.PASS:
+        # LCD-19 (registry.py depends_on WEB-SEC-04) reads this to drive
+        # UiTestClient.enter_pin() -- never populated on anything less than
+        # a confirmed PASS here, so LCD-19 never acts on a PIN that might
+        # not actually be live on the board.
+        ctx["_lcd_pin"] = {"right_pin": _TEST_LCD_ADMIN_PIN, "wrong_pin": _TEST_LCD_WRONG_PIN}
+    return result
+
+
 #: Wire this wave's judge functions into the shared REGISTRY (same
 #: convention as cases_web.py's own tail).
 _CASE_FUNCS = {
     "WEB-DASH-13": _case_dash13,
     "WEB-DIAG-07": _case_diag07,
     "WEB-DIAG-08": _case_diag08,
+    "WEB-SEC-04": _case_web_sec04,
     "WEB-SEC-03": _case_web_sec03,
 }
 
