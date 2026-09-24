@@ -46,7 +46,18 @@ static void nav_cb(lv_event_t *e)
  * as a touch group (ui_theme_register_touch_group()) so that even the thin
  * sliver where two icons' compact-expanded boxes still meet resolves by
  * nearest real center instead of z-order, as defense in depth. */
-static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb, void *user_data)
+/* tap_name, when non-NULL, is stashed in the button's own lv_obj user data
+ * (lv_obj_set_user_data() -- distinct from the *event* user_data set two
+ * lines below, which is per-icon event payload such as the page string
+ * nav_cb() reads and already varies per caller; this field is otherwise
+ * unused on a button anywhere in this file -- ui_confirm.c is the only
+ * other user of the same lv_obj field, on a msgbox, not a button).
+ * kiln_ui.c's log_tap_targets()/kiln_ui_collect_tap_targets() prefer this
+ * override over a button's label text: for an icon-only button (no visible
+ * caption, e.g. the gear) the label text is an opaque LVGL symbol glyph
+ * (LV_SYMBOL_SETTINGS et al.), not a human/test-harness-readable name. */
+static lv_obj_t *build_icon_named(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb,
+                                   void *user_data, const char *tap_name)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, UI_TOPBAR_ICON_W_PX, UI_TOPBAR_ICON_H_PX);
@@ -54,6 +65,9 @@ static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t 
     lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+    if (tap_name) {
+        lv_obj_set_user_data(btn, (void *)tap_name);
+    }
 
     lv_obj_t *label = lv_label_create(btn);
     lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -63,6 +77,11 @@ static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t 
     lv_obj_update_layout(btn);
     ui_theme_apply_touch_area(btn, true);
     return btn;
+}
+
+static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb, void *user_data)
+{
+    return build_icon_named(parent, symbol, cb, user_data, NULL);
 }
 
 /* Non-clickable indicator icon (the relay-life warning). Same fixed size and
@@ -197,7 +216,11 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
             out->add_btn = build_icon(icons, LV_SYMBOL_FILE, cfg->add_cb, NULL);
         }
         if (cfg->gear_cb) {
-            out->gear_btn = build_icon(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL);
+            /* "settings" tap name: the 2026-08-20 Menu-button removal left
+             * this icon-only gear with no readable label (see
+             * build_icon_named()'s comment) -- a bench test harness needs a
+             * name to click by. */
+            out->gear_btn = build_icon_named(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL, "settings");
         }
 
         /* Every icon here got its click area extended toward

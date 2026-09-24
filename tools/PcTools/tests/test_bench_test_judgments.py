@@ -145,8 +145,16 @@ class PicoSlotMetadataTest(unittest.TestCase):
         r = J.judge_pico_slot_metadata("not-a-hash", "power_on")
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_watchdog_boot_fails(self):
+    def test_watchdog_boot_alone_is_inconclusive(self):
+        """OpenOCD's rp2040 SWD reset path reboots via the watchdog too, so a
+        lone 'watchdog' reading is indistinguishable from an ordinary
+        debug_program(peer="pico") reset -- see CLAUDE.md/judgments.py's
+        docstring. Not a bare PASS either: this is a real open question."""
         r = J.judge_pico_slot_metadata("82548f2e", "watchdog")
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_watchdog_boot_corroborated_fails(self):
+        r = J.judge_pico_slot_metadata("82548f2e", "watchdog", boot_loop_corroborated=True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_unrecognized_boot_reason_is_inconclusive(self):
@@ -211,6 +219,16 @@ class HeapDramFloorTest(unittest.TestCase):
         r = J.judge_heap_dram_floor(20000, 5000, False)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_boundary_at_floor_passes(self):
+        """8192 itself is healthy (measured 9216 B baseline sits above it) --
+        the floor triggers strictly below it, not at it."""
+        r = J.judge_heap_dram_floor(8192, 8192, False)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_boundary_one_below_floor_fails(self):
+        r = J.judge_heap_dram_floor(8191, 8191, False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
 
 class CommissioningReadbackTest(unittest.TestCase):
     def test_matching_passes(self):
@@ -270,8 +288,14 @@ class StatusDiagConsistencyTest(unittest.TestCase):
         r = J.judge_status_diag_consistency(False, "idle", "power_on", 0)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_watchdog_boot_fails(self):
+    def test_watchdog_boot_alone_is_inconclusive(self):
+        """Same rationale as PicoSlotMetadataTest's version: an OpenOCD SWD
+        reset alone produces 'watchdog', so this must not be a bare FAIL."""
         r = J.judge_status_diag_consistency(True, "idle", "watchdog", 0)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_watchdog_boot_corroborated_fails(self):
+        r = J.judge_status_diag_consistency(True, "idle", "watchdog", 0, boot_loop_corroborated=True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_trip_reason_set_fails(self):

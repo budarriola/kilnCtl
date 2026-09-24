@@ -499,6 +499,17 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                 }
             }
 
+            /* An explicit tap-name override (ui_topbar.c's build_icon_named())
+             * wins over the label text above: an icon-only button's caption
+             * is an opaque LVGL symbol glyph, not something a test harness
+             * can usefully click by name. Only a non-NULL, non-empty
+             * override is honoured, so a button with no override keeps
+             * reporting its real label text exactly as before. */
+            const char *name_override = (const char *)lv_obj_get_user_data(child);
+            if (name_override && name_override[0] != '\0') {
+                text = name_override;
+            }
+
             /* Restored to INFO alongside the keyboard-key case above -- see
              * that comment; the flood is now handled by gating the automatic
              * call site, not by deleting this log level. */

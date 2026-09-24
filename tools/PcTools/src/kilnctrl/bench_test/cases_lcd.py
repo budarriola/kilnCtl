@@ -47,8 +47,10 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
     """Best-effort: capture one -Full frame and sample the 'start'/'pause'
     tap targets' regions. Returns (start_sample_or_None, pause_is_hidden)
     -- both None/absent on any capture failure (camera busy etc.)."""
-    start = next((t for t in targets if t.get("name") == "start"), None)
-    pause = next((t for t in targets if t.get("name") == "pause"), None)
+    # Case-insensitive: firmware's label is Title Case ("Start"/"Pause");
+    # see judgments._find_target's docstring for why this can't just be "==".
+    start = J._find_target(targets, "start")
+    pause = J._find_target(targets, "pause")
     if start is None and pause is None:
         return None, None
     tmpdir = ctx.get("_lcd_capture_dir") or tempfile.gettempdir()
@@ -95,17 +97,20 @@ def _case_lcd01(ctx: dict) -> CaseResult:
 
 
 # ---------------------------------------------------------------------------
-# LCD-08 -- config hub (tap Menu from home).
+# LCD-08 -- config hub (tap the topbar gear, tap name "settings", from home).
+# The old "Menu" button was removed 2026-08-20; the gear is icon-only and has
+# no visible label, so ui_topbar.c's build_icon_named() stashes "settings" as
+# a tap-name override for it (kiln_ui.c's log_tap_targets()).
 # ---------------------------------------------------------------------------
 
 def _case_lcd08(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
-    click = ui.click_by_name("Menu")
+    click = ui.click_by_name("settings")
     if click.get("result") != "ok":
         return CaseResult(
             Verdict.FAIL,
-            reason=f"click_by_name('Menu') returned {click.get('result')!r}, expected 'ok'",
+            reason=f"click_by_name('settings') returned {click.get('result')!r}, expected 'ok'",
             observed={"click": click},
         )
     page = ui.get_current_page()
@@ -277,9 +282,9 @@ def _case_lcd09(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
     try:
-        click = ui.click_by_name("Menu")
+        click = ui.click_by_name("settings")
         if click.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('Menu') returned {click.get('result')!r}", observed={"click": click})
+            return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
         click2 = ui.click_by_name("Profiles")
         if click2.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('Profiles') returned {click2.get('result')!r}", observed={"click": click2})
@@ -309,9 +314,9 @@ def _case_lcd14(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
     try:
-        click = ui.click_by_name("Menu")
+        click = ui.click_by_name("settings")
         if click.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('Menu') returned {click.get('result')!r}", observed={"click": click})
+            return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
         click2 = ui.click_by_name("Temperature")
         if click2.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('Temperature') returned {click2.get('result')!r}", observed={"click": click2})
@@ -354,9 +359,9 @@ def _case_lcd16(ctx: dict) -> CaseResult:
     crash_report_visible_entries: Optional[int] = None
     board_heap_value: Optional[float] = None
     try:
-        click = ui.click_by_name("Menu")
+        click = ui.click_by_name("settings")
         if click.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('Menu') returned {click.get('result')!r}", observed={"click": click})
+            return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
         click2 = ui.click_by_name("Diagnostics")
         if click2.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('Diagnostics') returned {click2.get('result')!r}", observed={"click": click2})

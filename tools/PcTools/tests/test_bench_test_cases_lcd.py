@@ -301,9 +301,9 @@ class Lcd04Test(unittest.TestCase):
         self.assertTrue(srv.clear_trip_called)
 
 
-_PROFILES_NAV = {"Menu": "config", "Profiles": "profiles", "profile_row_0": "profile_detail"}
+_PROFILES_NAV = {"settings": "config", "Profiles": "profiles", "profile_row_0": "profile_detail"}
 _PROFILES_PAGE_TARGETS = {
-    "home": [{"name": "Menu", "cx": 10, "cy": 10, "hidden": False}],
+    "home": [{"name": "settings", "cx": 10, "cy": 10, "hidden": False}],
     "config": [{"name": "Profiles", "cx": 100, "cy": 100, "hidden": False}],
     "profiles": [
         {"name": "profile_row_0", "cx": 50, "cy": 150, "hidden": False, "starred": False},
@@ -335,13 +335,13 @@ class Lcd09Test(unittest.TestCase):
         self.assertGreaterEqual(ui.home_calls, 1)
 
 
-_TEMP_NAV = {"Menu": "config", "Temperature": "temperature"}
+_TEMP_NAV = {"settings": "config", "Temperature": "temperature"}
 
 
 class Lcd14Test(unittest.TestCase):
     def test_matching_values_pass(self):
         page_targets = {
-            "home": [{"name": "Menu", "hidden": False}],
+            "home": [{"name": "settings", "hidden": False}],
             "config": [{"name": "Temperature", "hidden": False}],
             "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
         }
@@ -352,7 +352,7 @@ class Lcd14Test(unittest.TestCase):
 
     def test_value_mismatch_fails(self):
         page_targets = {
-            "home": [{"name": "Menu", "hidden": False}],
+            "home": [{"name": "settings", "hidden": False}],
             "config": [{"name": "Temperature", "hidden": False}],
             "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
         }
@@ -363,7 +363,7 @@ class Lcd14Test(unittest.TestCase):
 
     def test_finally_restores_home_on_exception(self):
         page_targets = {
-            "home": [{"name": "Menu", "hidden": False}],
+            "home": [{"name": "settings", "hidden": False}],
             "config": [{"name": "Temperature", "hidden": False}],
         }
         ui = RaisingUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV, raise_on_call=2)
@@ -376,10 +376,10 @@ class Lcd14Test(unittest.TestCase):
 class Lcd16Test(unittest.TestCase):
     def test_finally_restores_home_on_exception(self):
         page_targets = {
-            "home": [{"name": "Menu", "hidden": False}],
+            "home": [{"name": "settings", "hidden": False}],
             "config": [{"name": "Diagnostics", "hidden": False}],
         }
-        nav_map = {"Menu": "config", "Diagnostics": "diag_hub"}
+        nav_map = {"settings": "config", "Diagnostics": "diag_hub"}
         ui = RaisingUiTest(page="home", page_targets=page_targets, nav_map=nav_map, raise_on_call=2)
         srv = FakeSrvFull(ui)
         with self.assertRaises(RuntimeError):
@@ -387,7 +387,7 @@ class Lcd16Test(unittest.TestCase):
         self.assertGreaterEqual(ui.home_calls, 1)
 
     def test_menu_tap_failure_fails(self):
-        targets = [{"name": "Menu", "hidden": False}]
+        targets = [{"name": "settings", "hidden": False}]
         ui = FakeUiTest(page="home", targets=targets, click_result="not_found")
         srv = FakeSrvFull(ui)
         result = C._case_lcd16({"srv": srv})

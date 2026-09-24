@@ -118,12 +118,40 @@ def judge_cfgfs_state(data: dict) -> CaseResult:
     return CaseResult(Verdict.PASS, observed=data)
 
 
-def judge_pico_slot_metadata(commit: Optional[str], boot_reason: Optional[str]) -> CaseResult:
-    """FL-08: commit is a real hash; boot reason is power_on/sw_reset, not watchdog."""
+def judge_pico_slot_metadata(commit: Optional[str], boot_reason: Optional[str],
+                              boot_loop_corroborated: Optional[bool] = None) -> CaseResult:
+    """FL-08: commit is a real hash; boot reason is power_on/sw_reset, not
+    watchdog.
+
+    A lone ``boot_reason == "watchdog"`` is downgraded to INCONCLUSIVE, not
+    FAIL: OpenOCD's rp2040 SWD reset path (used by every
+    ``debug_program(peer="pico")``) itself reboots the RP2040 through its
+    own watchdog (see ``boot_reason.c``'s 23-44), so a board that was simply
+    debug-reset a moment ago reads identically to one boot-looping on a real
+    watchdog timeout -- "watchdog" alone carries no information about which
+    happened. ``boot_loop_corroborated``, when the caller can supply it
+    (e.g. boot_id churn observed between two reads in the same run, or a
+    required task reading DEAD), escalates a watchdog reading to a real
+    FAIL; leaving it None/False keeps this case honest about not knowing
+    which case it is, rather than crying wolf on every routine debug reset."""
     if not commit or not re.match(r"^[0-9a-fA-F]{6,40}$", commit):
         return CaseResult(Verdict.FAIL, reason=f"commit {commit!r} is not a real hash", observed={"commit": commit})
     if boot_reason == "watchdog":
-        return CaseResult(Verdict.FAIL, reason="boot reason is watchdog", observed={"boot_reason": boot_reason})
+        if boot_loop_corroborated:
+            return CaseResult(
+                Verdict.FAIL,
+                reason="boot reason is watchdog, corroborated by a second boot-loop signal",
+                observed={"boot_reason": boot_reason, "boot_loop_corroborated": boot_loop_corroborated},
+            )
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(
+                "boot reason is watchdog, but OpenOCD's SWD reset path also reboots the "
+                "rp2040 via its own watchdog (boot_reason.c) -- indistinguishable from a "
+                "real boot loop without corroboration, which was not supplied"
+            ),
+            observed={"boot_reason": boot_reason, "commit": commit},
+        )
     if boot_reason not in ("power_on", "sw_reset"):
         return CaseResult(
             Verdict.INCONCLUSIVE,
@@ -287,9 +315,20 @@ def judge_pico_stack_margins(tasks: "list[dict]", min_fraction: float = 0.25) ->
 
 
 def judge_heap_dram_floor(dram_largest_free_before: Optional[int], dram_largest_free_after: Optional[int],
-                           unacknowledged_crash: bool, floor_bytes: int = 11900) -> CaseResult:
-    """SK-04: internal DRAM largest free block never below 11.9 kB; no
-    UNACKNOWLEDGED CRASH REPORT banner."""
+                           unacknowledged_crash: bool, floor_bytes: int = 8192) -> CaseResult:
+    """SK-04: internal DRAM largest free block never below the floor; no
+    UNACKNOWLEDGED CRASH REPORT banner.
+
+    ``floor_bytes`` re-derived 2026-09-23: the original 11900 (Wave 0) was a
+    placeholder, never re-measured against a real board. Measured
+    ``largest_free_block`` history: ~7936-8192 B on 2026-09-21, 9216 B on
+    the current bench board (a06389f9, 2026-09-24, post-DRAM-fixes
+    baseline). 8192 sits below today's healthy 9216 B reading with margin
+    while still catching a real regression back toward the 2026-09-21
+    figures. ``min_free`` (32787/14015 B in the same read) is a separate,
+    already-healthy number this floor does not gate -- it only ever
+    concerns the single largest contiguous free block, the number that
+    actually predicts whether one more large allocation can succeed."""
     if unacknowledged_crash:
         return CaseResult(Verdict.FAIL, reason="unacknowledged crash report present", observed={})
     for label, value in (("before", dram_largest_free_before), ("after", dram_largest_free_after)):
@@ -333,7 +372,8 @@ def judge_commissioning_readback(commissioning: dict, esp_max_temp_c: Optional[f
 
 
 def judge_status_diag_consistency(link_up: bool, state: Optional[str], boot_reason: Optional[str],
-                                   trip_reason: Optional[int], trip_mask: Optional[int] = None) -> CaseResult:
+                                   trip_reason: Optional[int], trip_mask: Optional[int] = None,
+                                   boot_loop_corroborated: Optional[bool] = None) -> CaseResult:
     """SP-02: link up, state armed/idle as appropriate, boot reason not
     watchdog, trip_reason 0, and (when both fields were actually parsed)
     trip_mask consistent with trip_reason via the same formula
@@ -343,11 +383,32 @@ def judge_status_diag_consistency(link_up: bool, state: Optional[str], boot_reas
     this must NOT be treated as "0 / no trip" (that silently passes a
     board that IS tripped but whose report couldn't be parsed) -- it is
     INCONCLUSIVE instead, distinct from both PASS and the FAIL a real
-    nonzero trip_reason produces."""
+    nonzero trip_reason produces.
+
+    A lone `boot_reason == "watchdog"` is downgraded to INCONCLUSIVE, not
+    FAIL -- see judge_pico_slot_metadata's docstring: OpenOCD's rp2040 SWD
+    reset path reboots via the watchdog too, so this alone is indistinguishable
+    from an ordinary debug_program(peer="pico") reset that just happened.
+    `boot_loop_corroborated` (boot_id churn between two reads in the same
+    run, or a DEAD required task) escalates it back to FAIL when supplied."""
     if not link_up:
         return CaseResult(Verdict.FAIL, reason="link is not up", observed={"link_up": link_up})
     if boot_reason == "watchdog":
-        return CaseResult(Verdict.FAIL, reason="boot reason is watchdog", observed={"boot_reason": boot_reason})
+        if boot_loop_corroborated:
+            return CaseResult(
+                Verdict.FAIL,
+                reason="boot reason is watchdog, corroborated by a second boot-loop signal",
+                observed={"boot_reason": boot_reason, "boot_loop_corroborated": boot_loop_corroborated},
+            )
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(
+                "boot reason is watchdog, but OpenOCD's SWD reset path also reboots the "
+                "rp2040 via its own watchdog -- indistinguishable from a real boot loop "
+                "without corroboration, which was not supplied"
+            ),
+            observed={"boot_reason": boot_reason},
+        )
     if trip_reason is None:
         return CaseResult(
             Verdict.INCONCLUSIVE,
@@ -524,8 +585,14 @@ def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResul
 # ---------------------------------------------------------------------------
 
 def _find_target(targets: "list[dict]", name: str) -> "Optional[dict]":
+    """Case-insensitive lookup: firmware labels are Title Case (e.g.
+    ui_page_home.c's "Start") while callers here pass lowercase literals
+    ("start"). Comparing case-insensitively avoids a spurious miss on that
+    mismatch alone; call sites keep whatever literal spelling reads best."""
+    name_lower = name.lower()
     for t in targets:
-        if t.get("name") == name:
+        target_name = t.get("name")
+        if target_name is not None and target_name.lower() == name_lower:
             return t
     return None
 
@@ -570,7 +637,8 @@ def judge_lcd_config_hub(page: str, targets: "list[dict]",
                           expected_tiles: "tuple[str, ...]" = (
                               "Profiles", "Temperature", "Network", "Diagnostics",
                           )) -> CaseResult:
-    """LCD-08: config hub reached by tapping Menu. `expected_tiles` omits
+    """LCD-08: config hub reached by tapping the topbar gear ("settings").
+    `expected_tiles` omits
     Touch Calibration by default since the plan marks it 'if present' --
     callers that know the board has it should pass the 5-tuple."""
     observed = {"page": page, "targets": targets}

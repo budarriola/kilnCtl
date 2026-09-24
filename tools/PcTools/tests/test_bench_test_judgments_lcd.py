@@ -24,6 +24,31 @@ _HOME_TARGETS = [
 ]
 
 
+class FindTargetCaseInsensitiveTest(unittest.TestCase):
+    """ui_page_home.c's real button label is Title Case ("Start"), while
+    callers here pass lowercase literals ("start") -- _find_target must
+    match across that case difference, not just exact-string match."""
+
+    def test_lowercase_query_matches_titlecase_name(self):
+        targets = [{"name": "Start", "cx": 1, "cy": 2, "hidden": False}]
+        t = J._find_target(targets, "start")
+        self.assertIsNotNone(t)
+        self.assertEqual(t["name"], "Start")
+
+    def test_titlecase_query_matches_lowercase_name(self):
+        targets = [{"name": "start", "cx": 1, "cy": 2, "hidden": False}]
+        t = J._find_target(targets, "Start")
+        self.assertIsNotNone(t)
+
+    def test_no_match_returns_none(self):
+        targets = [{"name": "Start", "cx": 1, "cy": 2, "hidden": False}]
+        self.assertIsNone(J._find_target(targets, "pause"))
+
+    def test_missing_name_field_does_not_raise(self):
+        targets = [{"cx": 1, "cy": 2, "hidden": False}]
+        self.assertIsNone(J._find_target(targets, "start"))
+
+
 class LcdHomeIdleTest(unittest.TestCase):
     def test_passes_with_camera_data(self):
         r = J.judge_lcd_home_idle("home", _HOME_TARGETS, True, True)
