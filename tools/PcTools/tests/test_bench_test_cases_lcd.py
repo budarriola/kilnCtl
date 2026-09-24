@@ -679,9 +679,16 @@ class FakeTouchThatWakes:
     real touch_inject press/release as a genuine touch for the idle timer
     and wake decision."""
 
-    def __init__(self, ui):
+    def __init__(self, ui, idle_ms=0, state_error=None):
         self._ui = ui
         self.injected = []
+        self.idle_ms = idle_ms
+        self.state_error = state_error
+
+    def get_state(self):
+        if self.state_error is not None:
+            raise self.state_error
+        return mock.Mock(screen_on=not self._ui._asleep, idle_ms=self.idle_ms)
 
     def inject(self, x, y, pressed):
         self.injected.append((x, y, pressed))
@@ -733,14 +740,45 @@ class WakeAndHomeTest(unittest.TestCase):
         self.assertFalse(ui._asleep)
         self.assertEqual(ui.get_current_page(), "home")
 
-    def test_wake_and_home_is_one_shot_per_run(self):
+    def test_wake_runs_per_case_after_a_re_blank(self):
+        """The panel can blank again between cases (shortest timeout is
+        1 min): a second call after a re-blank must wake it again, not be
+        skipped as already-done-this-run."""
         ui = SwallowingUiTest(page="home", page_targets={"home": []}, nav_map={})
         srv = FakeSrvWithTouch(ui)
         ctx = {"srv": srv}
         C._wake_and_home(ctx)
-        first_count = len(srv._touch.injected)
+        self.assertEqual(len(srv._touch.injected), 2)
+        ui._asleep = True  # re-blanked between cases
         C._wake_and_home(ctx)
-        self.assertEqual(len(srv._touch.injected), first_count)
+        self.assertEqual(len(srv._touch.injected), 4)
+        self.assertFalse(ui._asleep)
+
+    def test_no_wake_tap_on_an_awake_recently_active_panel(self):
+        """On an awake panel the (5,5) tap would be delivered for real
+        (home's top-left auth-reset corner) -- skip it when not needed."""
+        ui = SwallowingUiTest(page="home", page_targets={"home": []}, nav_map={})
+        ui._asleep = False
+        srv = FakeSrvWithTouch(ui)
+        srv._touch.idle_ms = 1000
+        C._wake_and_home({"srv": srv})
+        self.assertEqual(srv._touch.injected, [])
+
+    def test_wake_tap_sent_when_awake_but_idle_long(self):
+        ui = SwallowingUiTest(page="home", page_targets={"home": []}, nav_map={})
+        ui._asleep = False
+        srv = FakeSrvWithTouch(ui)
+        srv._touch.idle_ms = C._WAKE_IDLE_MS_THRESHOLD
+        C._wake_and_home({"srv": srv})
+        self.assertEqual(len(srv._touch.injected), 2)
+
+    def test_wake_tap_sent_when_state_unreadable(self):
+        ui = SwallowingUiTest(page="home", page_targets={"home": []}, nav_map={})
+        srv = FakeSrvWithTouch(ui)
+        srv._touch.state_error = RuntimeError("GET_STATE timed out")
+        C._wake_and_home({"srv": srv})
+        self.assertEqual(len(srv._touch.injected), 2)
+        self.assertFalse(ui._asleep)
 
     def test_blanked_screen_swallow_old_path_fails_new_path_passes(self):
         page_targets = {"home": [], "config": _CONFIG_TARGETS}

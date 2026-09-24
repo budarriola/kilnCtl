@@ -56,6 +56,13 @@ _PAGE_POLL_INTERVAL_S = 0.1
 #: page before any case starts tapping named targets for real.
 _WAKE_TOUCH_XY = (5, 5)
 
+#: The shortest persisted display timeout is 1 minute
+#: (display_power_policy.c's DISPLAY_TIMEOUT_1_MIN), so a panel that reads
+#: on with less idle time than this still has >= 30 s before it can blank.
+#: Past this, the wake tap is sent even though the panel reads on, so the
+#: idle timer is reset before the case starts clicking.
+_WAKE_IDLE_MS_THRESHOLD = 30_000
+
 #: judgments.py's page-mismatch FAIL reasons (judge_lcd_home_idle,
 #: judge_lcd_config_hub, judge_lcd_profiles_picker, judge_lcd_temperature_page)
 #: append `judgments.BLANKED_SCREEN_HINT` to name this same race as a likely
@@ -66,25 +73,43 @@ _WAKE_TOUCH_XY = (5, 5)
 
 
 def _wake_and_home(ctx: dict) -> None:
-    """One-shot per run (``ctx["_lcd_woken"]``): wake the panel via a real
-    ``touch_inject`` press+release, then navigate back to home and confirm
-    it via the existing page-poll helper. Best-effort -- a TOUCH-task query
-    failure (board not wired for touch injection, transport hiccup) must
-    never crash a case; if the wake itself fails, the case's own
-    click/page-wait logic still runs and fails honestly on its own terms
-    rather than this helper manufacturing a false precondition failure."""
-    if ctx.get("_lcd_woken"):
-        return
-    ctx["_lcd_woken"] = True
+    """Runs before EVERY click-driven LCD case, not once per run: the
+    shortest persisted display timeout is 1 minute, and the gaps between
+    LCD cases (camera captures, other suites' cases in between) routinely
+    exceed that, so a panel woken once at the start of the run can blank
+    again before a later case.
+
+    Wakes the panel via a real ``touch_inject`` press+release, then
+    navigates back to home via the existing page-poll helper. The wake tap
+    is only sent when ``touch.get_state()`` reports the panel blanked, has
+    been idle for ``_WAKE_IDLE_MS_THRESHOLD`` ms or more, or cannot be read:
+    on a blanked panel the tap is swallowed (lvgl_port.c/screen_idle.c) so
+    (5,5) hits nothing, while on an awake panel it WOULD be delivered --
+    on home that is the top-left auth-reset gesture corner
+    (ui_page_home.c), inert without E-stop asserted and the full
+    four-corner sequence, but not something to tap for no reason.
+
+    Best-effort -- a TOUCH-task query failure (board not wired for touch
+    injection, transport hiccup) must never crash a case; if the wake
+    itself fails, the case's own click/page-wait logic still runs and fails
+    honestly on its own terms rather than this helper manufacturing a false
+    precondition failure."""
     srv = _srv(ctx)
     touch = getattr(srv, "_touch", None)
     if touch is not None:
+        need_wake = True
         try:
-            x, y = _WAKE_TOUCH_XY
-            touch.inject(x, y, True)
-            touch.inject(x, y, False)
+            state = touch.get_state()
+            need_wake = (not state.screen_on) or state.idle_ms >= _WAKE_IDLE_MS_THRESHOLD
         except Exception:
-            pass
+            need_wake = True
+        if need_wake:
+            try:
+                x, y = _WAKE_TOUCH_XY
+                touch.inject(x, y, True)
+                touch.inject(x, y, False)
+            except Exception:
+                pass
     ui = srv._ui_test
     _navigate_home(ui)
 

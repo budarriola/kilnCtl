@@ -186,6 +186,11 @@ def judge_stack_margin(report_text: str, min_free_bytes: Optional[int] = None) -
 #: (``min_free_bytes``) still FAILs regardless of this tolerance.
 _STACK_MARGIN_NOISE_TOLERANCE_BYTES = 64
 
+#: Commit strings that mean "the build did not report one" (info.py /
+#: stack_margin_baseline.py placeholders) -- treated as unknown, never as a
+#: match, by judge_stack_margin_against_baseline().
+_UNKNOWN_FW_COMMITS = frozenset({"", "?", "unknown"})
+
 
 def judge_stack_margin_against_baseline(
     entries, baseline_by_name: dict, min_free_bytes: Optional[int] = None,
@@ -216,7 +221,10 @@ def judge_stack_margin_against_baseline(
     the board's running commit is not among the baseline's own commits. A
     drop beyond the tolerance is still FAIL regardless of any commit
     mismatch -- the mismatch never masks a real regression, only softens the
-    verdict on a difference small enough to plausibly be noise.
+    verdict on a difference small enough to plausibly be noise. A missing
+    or placeholder commit (None, "", "?", "unknown") on EITHER side is never
+    treated as a match: a within-tolerance drop then reads INCONCLUSIVE
+    ("fw_commit unknown") too, not PASS.
 
     A dead (``alive=False``) task is never scored against a byte figure --
     it FAILs outright, since a task that was never created or was deleted
@@ -256,7 +264,13 @@ def judge_stack_margin_against_baseline(
             regressed_within_tolerance.append(entry_info)
 
     baseline_commits_set = set(baseline_fw_commits) if baseline_fw_commits else set()
-    commit_mismatch = bool(board_fw_commit) and bool(baseline_commits_set) and board_fw_commit not in baseline_commits_set
+    # A missing/placeholder commit on EITHER side is "unverified", never
+    # "same": without a known pair there is no basis for calling a
+    # within-tolerance drop noise on an identical build.
+    board_commit_known = bool(board_fw_commit) and board_fw_commit not in _UNKNOWN_FW_COMMITS
+    known_baseline_commits = {c for c in baseline_commits_set if c and c not in _UNKNOWN_FW_COMMITS}
+    commit_unverified = not board_commit_known or not known_baseline_commits
+    commit_mismatch = (not commit_unverified) and board_fw_commit not in known_baseline_commits
 
     observed = {
         "entries": [{"name": e.name, "hwm_bytes": e.hwm_bytes, "configured_stack_bytes": e.configured_stack_bytes} for e in entries],
@@ -268,6 +282,7 @@ def judge_stack_margin_against_baseline(
         "board_fw_commit": board_fw_commit,
         "baseline_fw_commits": sorted(baseline_commits_set),
         "commit_mismatch": commit_mismatch,
+        "commit_unverified": commit_unverified,
     }
 
     if below_floor:
@@ -292,6 +307,17 @@ def judge_stack_margin_against_baseline(
                 f"fw_commit mismatch (board={board_fw_commit!r}, baseline={sorted(baseline_commits_set)!r}): "
                 f"{len(regressed_within_tolerance)} task(s) within the {tolerance_bytes} B noise tolerance "
                 f"cannot be scored against a different build: {names}"
+            ),
+            observed=observed,
+        )
+    if regressed_within_tolerance and commit_unverified:
+        names = ", ".join(r["task"] for r in regressed_within_tolerance)
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(
+                f"fw_commit unknown (board={board_fw_commit!r}, baseline={sorted(baseline_commits_set)!r}): "
+                f"{len(regressed_within_tolerance)} task(s) within the {tolerance_bytes} B noise tolerance "
+                f"cannot be confirmed as same-build noise: {names}"
             ),
             observed=observed,
         )
@@ -660,10 +686,10 @@ def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResul
 #: know about it: screen_idle.c/lvgl_port.c's touch_swallow path wakes the
 #: panel on a tap but swallows that same tap, so click_by_name() still
 #: replies "ok" while nothing actually navigated. cases_lcd.py's
-#: `_wake_and_home()` runs once per run before the first case that clicks a
-#: named target, so this should be rare after that fix, but a case can still
-#: race a NEW idle-blank between two of its own clicks (e.g. LCD-09/14/16's
-#: multi-hop navigation), which that one-shot wake does not cover.
+#: `_wake_and_home()` runs before each case that clicks a named target, so
+#: this should be rare after that fix, but a case can still race a NEW
+#: idle-blank between two of its own clicks (e.g. LCD-09/14/16's multi-hop
+#: navigation) if one of its steps takes longer than the display timeout.
 BLANKED_SCREEN_HINT = (
     " (if spurious: the panel may have auto-blanked and swallowed this tap "
     "-- screen_idle.c/lvgl_port.c's touch_swallow path wakes the screen on "

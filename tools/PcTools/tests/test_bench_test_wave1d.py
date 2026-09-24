@@ -188,6 +188,27 @@ class StackMarginAgainstBaselineTest(unittest.TestCase):
         )
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_drop_within_tolerance_unknown_commit_is_inconclusive(self):
+        """A missing/placeholder commit on either side is never treated as
+        'same build' -- a within-tolerance drop must not silently PASS."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=794)]
+        for board, base in ((None, {"abcdef1"}), ("abcdef1", None), ("abcdef1", set()),
+                            ("unknown", {"unknown"}), ("", {"abcdef1"}), ("abcdef1", {"?"})):
+            with self.subTest(board=board, base=base):
+                r = J.judge_stack_margin_against_baseline(
+                    entries, baseline, min_free_bytes=None,
+                    board_fw_commit=board, baseline_fw_commits=base,
+                )
+                self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+                self.assertIn("unknown", r.reason)
+
+    def test_no_drop_unknown_commit_still_passes(self):
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=800)]
+        r = J.judge_stack_margin_against_baseline(entries, baseline, min_free_bytes=None)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
     def test_floor_fails_regardless_of_tolerance(self):
         """A task under its configured warn threshold FAILs even when its
         drop from baseline is within the noise tolerance."""
