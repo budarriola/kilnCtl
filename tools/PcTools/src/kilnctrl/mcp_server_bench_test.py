@@ -55,9 +55,22 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     independent of `attended`, since a flash needs no operator present.
 
     No case in this wave heats, flashes, writes config, or touches Wi-Fi,
-    unless it was explicitly opted into as above."""
+    unless it was explicitly opted into as above.
+
+    `host=None` (the default) is resolved the same way `get_heap_status()`
+    resolves it -- explicit host wins (not applicable here), else the
+    board's current STA IP, else the fallback-AP address
+    (`mcp_server_ota._ota_resolve_host`) -- before it is ever put into
+    `ctx`. Without this, every HTTP-using case reads `ctx["host"]` as the
+    literal `None` and fails with a DNS/getaddrinfo error rather than
+    falling back to the board's address."""
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
+    resolved_host = _ota_resolve_host(host)
+    if not resolved_host:
+        return "error: could not resolve a board host (no explicit host, no STA IP, no AP default)"
     case_list = [c.strip() for c in cases.split(",") if c.strip()] if cases else None
-    ctx = {"host": host, "ap_password": ap_password, "tag": tag,
+    ctx = {"host": resolved_host, "ap_password": ap_password, "tag": tag,
            "attended": attended, "allow_flash": allow_flash}
     runner = BenchTestRunner(ctx)
     try:

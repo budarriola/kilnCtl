@@ -325,8 +325,11 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
             "case list and preconditions with no board access."
         )
     resolved_ap_password = _ota_tool._resolve_ap_password(ap_password)
+    resolved_host = _ota_tool._ota_resolve_host(host)
+    if not resolved_host:
+        return "error: could not resolve a board host (no explicit host, no STA IP, no AP default)"
     ctx = {
-        "host": host,
+        "host": resolved_host,
         "ap_password": resolved_ap_password,
         "ap_password_available": resolved_ap_password is not None,
         "ota_image_path": ota_image_path,
