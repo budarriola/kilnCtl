@@ -618,6 +618,23 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     return ESP_OK;
 }
 
+// 2026-09-24 fault-edge instrumentation (safety_link.c): this file links its
+// own fakes for the safety_link surface rather than the real safety_link.c
+// (see this file's header comment), so commissioning_get_handler()'s two new
+// calls need fakes here too, same as every other safety_link_* symbol above.
+uint32_t safety_link_get_fault_sources(SafetyLinkClass *link)
+{
+    (void)link;
+    return 0u;
+}
+
+esp_err_t safety_link_get_fault_edges(SafetyLinkClass *link, safety_fault_edge_snapshot_t *out)
+{
+    (void)link;
+    if (out) memset(out, 0, sizeof(*out));
+    return ESP_OK;
+}
+
 // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler()'s own
 // dependencies, same "own stub, real definitions link into other
 // executables" reasoning as everything else in this file.

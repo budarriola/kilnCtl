@@ -224,6 +224,106 @@ class PreviouslyUnprintedParamsTest(unittest.TestCase):
         self.assertNotIn("mains_voltage_v", out)
 
 
+class FaultEdgeRenderTest(unittest.TestCase):
+    """2026-09-24 fault-edge instrumentation: safety_link.c's fault-source
+    transition ring/counters, piggybacked onto this same GET /api/safety/
+    commissioning response (safety_cfg_http.c's build_commissioning_json())
+    rather than a new route. These tests use fake response payloads only --
+    no real socket, no board -- and prove the parser/renderer actually
+    surfaces the new fields for a bench agent root-causing a latched S6a."""
+
+    def _sample_with_edges(self, **overrides):
+        data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=0)
+        data["current_fault_sources_known"] = True
+        data["current_fault_sources"] = 0
+        data["fault_source_edges"] = [
+            {"uptime_ms": 1000, "unix_time_s": None, "source_mask_before": 0,
+             "source_mask_after": 4, "first_set_source": "thermo"},
+            {"uptime_ms": 2000, "unix_time_s": 1732000000, "source_mask_before": 4,
+             "source_mask_after": 0, "first_set_source": None},
+        ]
+        data["fault_source_edge_total_recorded"] = 2
+        data["fault_source_counts"] = {
+            "manual": {"rising_count": 0, "last_rising_uptime_ms": None},
+            "pc_link": {"rising_count": 0, "last_rising_uptime_ms": None},
+            "thermo": {"rising_count": 1, "last_rising_uptime_ms": 1000},
+            "safety_link": {"rising_count": 0, "last_rising_uptime_ms": None},
+            "app": {"rising_count": 0, "last_rising_uptime_ms": None},
+            "thermal_sanity": {"rising_count": 0, "last_rising_uptime_ms": None},
+        }
+        data.update(overrides)
+        return data
+
+    def test_current_fault_sources_rendered_as_hex(self):
+        data = self._sample_with_edges(current_fault_sources=4)
+        out = mss._describe_commissioning(data)
+        self.assertIn("current_fault_sources=0x04", out)
+
+    def test_edge_list_renders_each_entry_with_unsynced_time(self):
+        data = self._sample_with_edges()
+        out = mss._describe_commissioning(data)
+        self.assertIn("fault_source_edges: 2 entries (total_recorded=2)", out)
+        self.assertIn("uptime_ms=1000 unix_time_s=unsynced", out)
+        self.assertIn("before=0x00 after=0x04 first_set_source=thermo", out)
+
+    def test_edge_with_synced_time_renders_the_unix_timestamp(self):
+        data = self._sample_with_edges()
+        out = mss._describe_commissioning(data)
+        self.assertIn("uptime_ms=2000 unix_time_s=1732000000", out)
+
+    def test_pure_clear_edge_renders_clear_only_not_a_stale_source_name(self):
+        data = self._sample_with_edges()
+        out = mss._describe_commissioning(data)
+        self.assertIn("before=0x04 after=0x00 first_set_source=(clear only)", out)
+
+    def test_counts_render_rising_count_and_last_rising(self):
+        data = self._sample_with_edges()
+        out = mss._describe_commissioning(data)
+        self.assertIn("thermo: rising_count=1 last_rising=uptime_ms=1000", out)
+        self.assertIn("manual: rising_count=0 last_rising=never", out)
+
+    def test_absent_fault_edge_fields_render_nothing(self):
+        # An older firmware's response (or this same field simply not yet
+        # built) has none of the new keys at all -- the renderer must not
+        # fabricate a "fault_source_edges: 0 entries" line out of nothing.
+        data = _sample_get(commissioned=True, abs_max_temp_c=80.0, ct_installed=0)
+        out = mss._describe_commissioning(data)
+        self.assertNotIn("fault_source_edges", out)
+        self.assertNotIn("current_fault_sources", out)
+
+
+class FaultEdgeNegativeTest(unittest.TestCase):
+    """Mandatory negative test for the fault-edge rendering: break the
+    first_set_source null-handling the way an easy mistake would (treat a
+    pure-clear edge's null as the STRING "None" instead of the sentinel
+    "(clear only)"), confirm the positive test above would have caught it,
+    then restore."""
+
+    def test_broken_null_handling_would_be_caught(self):
+        real = mss._describe_commissioning
+
+        def broken(data):
+            edges = data.get("fault_source_edges") or []
+            lines = []
+            for e in edges:
+                lines.append(f"first_set_source={e.get('first_set_source')}")
+            return "\n".join(lines)
+
+        mss._describe_commissioning = broken
+        try:
+            data = FaultEdgeRenderTest()._sample_with_edges()
+            out = mss._describe_commissioning(data)
+            self.assertIn("first_set_source=None", out)  # the broken behaviour
+            real_out = real(data)
+            self.assertNotIn("first_set_source=None", real_out)
+            self.assertIn("first_set_source=(clear only)", real_out)
+        finally:
+            mss._describe_commissioning = real
+            data = FaultEdgeRenderTest()._sample_with_edges()
+            out = mss._describe_commissioning(data)
+            self.assertIn("first_set_source=(clear only)", out)
+
+
 class NegativeTest(unittest.TestCase):
     """Mandatory negative test: prove the armed/dormant check can actually
     fail, by breaking it the exact way the firmware comments warn against

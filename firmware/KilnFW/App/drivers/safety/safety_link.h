@@ -815,6 +815,58 @@ typedef enum {
     SAFETY_FAULT_SRC_THERMAL_SANITY  = 0x20u,
 } safety_fault_source_t;
 
+/* 2026-09-24 (fault-source instrumentation, root-causing the 18:03-19:11Z
+ * unattributed S6a trip): a small ring of fault_sources TRANSITIONS, kept
+ * purely so a mainFault the Pico latched can be traced back to which ESP
+ * source flipped, and when, after the fact -- the device log ring had
+ * already rotated past that window the one time this mattered. Fixed size,
+ * static, no heap, no growth tied to any capacity constant (internal DRAM is
+ * tight, CLAUDE.md's DRAM notes). SAFETY_LINK_FAULT_SRC_BIT_COUNT is the
+ * number of bits in safety_fault_source_t above (bit index 0..5); it must be
+ * bumped by hand if that enum ever grows a bit past 0x20, same "must be kept
+ * in sync by hand" contract as SAFETY_FAULT_SRC_ALL itself. */
+#define SAFETY_LINK_FAULT_EDGE_RING_LEN   16u
+#define SAFETY_LINK_FAULT_SRC_BIT_COUNT   6u
+
+typedef struct {
+    uint32_t uptime_ms;          /* esp_timer-derived, monotonic, immune to SNTP steps */
+    uint32_t unix_time_s;        /* wall clock at record time, 0 if SNTP never synced
+                                   * this boot -- same "0 means unsynced, never a fake
+                                   * near-1970 date" convention as profile_executor_run.c's
+                                   * run_started_unix_s */
+    uint8_t  source_mask_before; /* fault_sources immediately before this transition */
+    uint8_t  source_mask_after;  /* fault_sources immediately after this transition */
+    uint8_t  first_set_bit;      /* bit index (0..SAFETY_LINK_FAULT_SRC_BIT_COUNT-1) of the
+                                   * lowest-numbered source that went 0->1 this edge, or
+                                   * 0xFFu if this edge was a pure clear (no source rose) */
+} safety_fault_edge_t;
+
+/* One entry per bit of safety_fault_source_t: how many times that source has
+ * transitioned 0->1 this boot, and when it last did. rising_count saturates
+ * at UINT16_MAX rather than wrapping (a wrapped counter reading a small
+ * number would look like "barely happened" for a source that actually
+ * fired tens of thousands of times). */
+typedef struct {
+    uint16_t rising_count[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
+    uint32_t last_rising_uptime_ms[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
+    bool     last_rising_valid[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
+} safety_fault_edge_counts_t;
+
+/* Snapshot handed to a caller by safety_link_get_fault_edges() -- a plain
+ * copy taken under state_lock, same convention as safety_link_get_stats().
+ * entries[0..count-1] are in OLDEST-to-NEWEST order regardless of where the
+ * ring's write head currently sits (the getter rotates them before copying
+ * out, so a caller never has to reason about the ring geometry itself).
+ * total_recorded is the lifetime (this-boot) count of edges seen, which can
+ * exceed SAFETY_LINK_FAULT_EDGE_RING_LEN -- compare it against count to tell
+ * whether the ring has wrapped and older entries were overwritten. */
+typedef struct {
+    safety_fault_edge_t        entries[SAFETY_LINK_FAULT_EDGE_RING_LEN];
+    uint32_t                   count;          /* valid entries, <= SAFETY_LINK_FAULT_EDGE_RING_LEN */
+    uint32_t                   total_recorded; /* lifetime edge count this boot, may exceed count */
+    safety_fault_edge_counts_t counts;
+} safety_fault_edge_snapshot_t;
+
 /* Snapshot of the last status the Pico sent, plus how old it is. Everything
  * here is a copy: reading it cannot block on, or be invalidated by, the far
  * side. */
@@ -1463,6 +1515,23 @@ typedef struct {
     bool                push_gap_baseline_valid;
 
     uint32_t fault_sources;        /* bitwise OR of safety_fault_source_t */
+
+    /* 2026-09-24 fault-edge instrumentation (see safety_fault_edge_t's
+     * comment above). Ring is a plain fixed array; fault_edge_ring_head is
+     * the index the NEXT recorded edge will be written to (i.e. one past the
+     * most-recently-written slot, mod the ring length -- the usual circular-
+     * buffer convention). All fields here are read/written only under
+     * state_lock, from inside safety_apply_fault_locked()'s caller
+     * (safety_link_set_fault_source()), same lock discipline as fault_sources
+     * itself. */
+    safety_fault_edge_t fault_edge_ring[SAFETY_LINK_FAULT_EDGE_RING_LEN];
+    uint32_t            fault_edge_ring_head;
+    uint32_t            fault_edge_ring_count;   /* min(fault_edge_total_recorded, RING_LEN) */
+    uint32_t            fault_edge_total_recorded;
+    uint16_t            fault_edge_rising_count[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
+    uint32_t            fault_edge_last_rising_uptime_ms[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
+    bool                fault_edge_last_rising_valid[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
+
     bool     fault_on_link_loss;   /* policy: raise SAFETY_FAULT_SRC_SAFETY_LINK
                                     * from the poll task when this link is down
                                     * OR a peer version mismatch is known (see
@@ -1788,6 +1857,16 @@ bool      safety_link_get_fault(SafetyLinkClass *link);
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_mask,
                                         bool assert_fault);
 uint32_t  safety_link_get_fault_sources(SafetyLinkClass *link);
+
+/* 2026-09-24 fault-edge instrumentation: copies out the fault-source
+ * transition ring plus the per-source rising-edge counters, under
+ * state_lock, in oldest-to-newest order (see safety_fault_edge_snapshot_t's
+ * comment). Returns ESP_ERR_INVALID_ARG for a NULL link/out, ESP_ERR_INVALID_
+ * STATE if the link was never started (out is left zeroed either way, so a
+ * caller that ignores the return code still gets an honest "nothing
+ * recorded" rather than garbage). Never blocks on the far side -- this reads
+ * only local, already-applied state, same as safety_link_get_fault_sources(). */
+esp_err_t safety_link_get_fault_edges(SafetyLinkClass *link, safety_fault_edge_snapshot_t *out);
 
 /* Tells this driver that app_main's own bring-up this boot found nothing
  * wrong (boot_fault_sources == 0) -- i.e. the isolated fault line was never

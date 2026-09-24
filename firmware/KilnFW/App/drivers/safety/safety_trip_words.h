@@ -344,6 +344,28 @@ static inline const char *safety_fault_source_words(uint32_t mask, char *buf, si
     return buf;
 }
 
+/* Short, JSON-key-safe (lowercase, underscore-separated) name for one bit
+ * index (0..SAFETY_LINK_FAULT_SRC_BIT_COUNT-1, safety_link.h) of
+ * safety_fault_source_t -- distinct from safety_fault_source_words() above,
+ * which produces an operator-facing sentence for a whole MASK, not a
+ * machine-stable key for one bit. Used by safety_cfg_http.c's
+ * "fault_source_counts" object (2026-09-24 fault-edge instrumentation) so a
+ * PC-side parser has a stable key to look up rather than parsing prose.
+ * Returns "unknown_bitN" for a bit past the end of the known table, same
+ * "never silently misname a future bit" discipline as safety_fault_source_
+ * words()'s "unrecognised warn bits" fallback above. */
+static inline const char *safety_fault_source_short_name(uint8_t bit_index, char *buf, size_t buf_len)
+{
+    static const char *const names[] = {
+        "manual", "pc_link", "thermo", "safety_link", "app", "thermal_sanity",
+    };
+    if (bit_index < (sizeof(names) / sizeof(names[0]))) {
+        return names[bit_index];
+    }
+    snprintf(buf, buf_len, "unknown_bit%u", (unsigned)bit_index);
+    return buf;
+}
+
 /* Per-source remedy for the S6a "identify the source, then act" flow --
  * safety_trip_words_remedy(6) above defers to this for detail. Some sources
  * are not operator-actionable from the kiln at all (SAFETY_LINK: this

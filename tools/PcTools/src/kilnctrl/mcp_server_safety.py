@@ -881,6 +881,40 @@ def _describe_commissioning(data: dict) -> str:
     if tc_type_line:
         lines.append(tc_type_line)
 
+    # 2026-09-24 fault-edge instrumentation: safety_link.c's fault-source
+    # transition ring, riding on this same ADMIN-tier route rather than a
+    # new one (the URI handler cap has no headroom -- CLAUDE.md). Read this
+    # before calling safety_clear_trip() on a latched S6a: it is the only
+    # record of WHICH ESP-side source (SAFETY_FAULT_SRC_*) asserted and
+    # WHEN, since a transient assertion otherwise latches on the Pico while
+    # the ESP itself kept no history.
+    if "current_fault_sources_known" in data:
+        lines.append("")
+        if data.get("current_fault_sources_known"):
+            lines.append(f"current_fault_sources=0x{int(data.get('current_fault_sources', 0)):02x}")
+        edges = data.get("fault_source_edges")
+        if isinstance(edges, list):
+            total = data.get("fault_source_edge_total_recorded")
+            total_note = f" (total_recorded={total})" if total is not None else ""
+            lines.append(f"fault_source_edges: {len(edges)} entries{total_note}")
+            for e in edges:
+                ts = e.get("unix_time_s")
+                ts_str = str(ts) if ts is not None else "unsynced"
+                src = e.get("first_set_source")
+                src_str = src if src is not None else "(clear only)"
+                lines.append(
+                    f"  uptime_ms={e.get('uptime_ms')} unix_time_s={ts_str} "
+                    f"before=0x{int(e.get('source_mask_before', 0)):02x} "
+                    f"after=0x{int(e.get('source_mask_after', 0)):02x} "
+                    f"first_set_source={src_str}")
+        counts = data.get("fault_source_counts")
+        if isinstance(counts, dict):
+            lines.append("fault_source_counts:")
+            for name, c in counts.items():
+                last = c.get("last_rising_uptime_ms")
+                last_str = f"uptime_ms={last}" if last is not None else "never"
+                lines.append(f"  {name}: rising_count={c.get('rising_count')} last_rising={last_str}")
+
     return "\n".join(lines)
 
 

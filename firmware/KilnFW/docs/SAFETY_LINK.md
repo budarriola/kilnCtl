@@ -457,6 +457,64 @@ protocol stack, registers
 *local* side is up; it cannot tell you whether anything is listening. That only
 shows up as `link_up`.
 
+## Fault-source transition history (2026-09-24)
+
+The ESP drives `SAFETY_FAULT_IO` (GPIO6, the mainFault line into the Pico's
+S6a guard) whenever any bit of `fault_sources` is nonzero
+(`safety_apply_fault_locked()`). Before this instrumentation, a transient
+assertion of one bit -- e.g. `safety_link_poll.c` setting
+`SAFETY_FAULT_SRC_SAFETY_LINK` on staleness, or `profile_executor_relay_io.c`'s
+`guard9_assert_stale_tick_fault()` setting `SAFETY_FAULT_SRC_APP` -- latched
+S6a permanently on the Pico side while the ESP kept no record of which source
+had fired or when. A trip on 2026-09-24 between 18:03Z and 19:11Z during a
+firing stop could not be attributed for exactly this reason (the device log
+ring had also rotated).
+
+`safety_link.c` now keeps, inside the same lock that guards `fault_sources`:
+
+* A fixed 16-entry ring of `safety_fault_edge_t`
+  (`SAFETY_LINK_FAULT_EDGE_RING_LEN`), one entry per **change** of
+  `fault_sources` (never one per poll) -- `{uptime_ms, unix_time_s (0 if
+  SNTP unsynced, same `>= 2020-01-01` convention as
+  `profile_executor_run.c`'s `run_started_unix_s`), source_mask_before,
+  source_mask_after, first_set_bit}`. `first_set_bit` is `0xFF` for a pure
+  clear (no bit rose) -- never a stale/leftover bit index. When a single
+  call asserts more than one bit, ONE ring entry is recorded and
+  `first_set_bit` reports the LOWEST bit that rose; every bit that rose
+  still gets its own counter increment below.
+* A per-source-bit rising-edge counter (`uint16_t[6]`) and last-rising
+  uptime (`uint32_t[6]`) -- these span the ENTIRE run, including transitions
+  the ring itself has since overwritten. A `total_recorded` lifetime count
+  on the snapshot tells you whether the ring has wrapped (`total_recorded >
+  count` means it has).
+
+All static, no heap, no growth with any capacity constant -- this is
+deliberately small (internal DRAM is tight) and is a debugging aid, not a
+full audit log. Recording happens inside `state_lock`; nothing here ever
+logs from inside that lock (`ESP_LOGW` calls, if any, happen after
+`safety_unlock()`).
+
+```c
+esp_err_t safety_link_get_fault_edges(SafetyLinkClass *link,
+                                       safety_fault_edge_snapshot_t *out);
+```
+
+Read it via `GET /api/safety/commissioning` (ROUTE_TIER_ADMIN,
+`safety_cfg_http.c`) -- deliberately reusing this existing route rather than
+adding a new one, since the URI handler cap has essentially no headroom left
+(see the root `CLAUDE.md`). The response gains `current_fault_sources`
+(the live bitmask, only when `current_fault_sources_known` is true),
+`fault_source_edges` (the ring, oldest first), `fault_source_edge_total_recorded`,
+and `fault_source_counts` (keyed by the same short, stable names
+`safety_fault_source_short_name()` returns in `safety_trip_words.h`:
+`manual`, `pc_link`, `thermo`, `safety_link`, `app`, `thermal_sanity`).
+
+On the PC side, `kilnctrl.mcp_server_safety.safety_get_commissioning()`
+(`tools/PcTools/src/kilnctrl/mcp_server_safety.py`) renders all of this in
+one call -- **read this before calling `safety_clear_trip()` on a latched
+S6a**, since it is the only surviving record of which source asserted and
+when.
+
 ### Polling and staleness
 
 The poll task sends `GET_STATUS` every `poll_period_ms` (default

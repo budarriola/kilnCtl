@@ -34,6 +34,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
@@ -903,6 +904,50 @@ esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_kno
     return ESP_OK;
 }
 
+/* 2026-09-24 fault-edge instrumentation (safety_link.h's safety_fault_edge_t
+ * comment). Called only from inside safety_link_set_fault_source(), already
+ * holding state_lock, with before/after already computed and known to
+ * differ -- never logs (COMMON.md/CLAUDE.md: never log inside a spinlock),
+ * only records. */
+static void safety_record_fault_edge_locked(SafetyLinkClass *link, uint32_t before, uint32_t after)
+{
+    uint32_t rising = after & ~before;
+    uint8_t first_set_bit = 0xFFu;
+    for (uint8_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+        uint32_t bit = (1u << b);
+        if ((rising & bit) == 0u) {
+            continue;
+        }
+        if (first_set_bit == 0xFFu) {
+            first_set_bit = b;
+        }
+        if (link->fault_edge_rising_count[b] < UINT16_MAX) {
+            link->fault_edge_rising_count[b]++;
+        }
+        link->fault_edge_last_rising_uptime_ms[b] =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        link->fault_edge_last_rising_valid[b] = true;
+    }
+
+    safety_fault_edge_t *e = &link->fault_edge_ring[link->fault_edge_ring_head];
+    e->uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    time_t now = time(NULL);
+    /* time(NULL) before SNTP sync reads as a small epoch offset (ESP-IDF
+     * boots the RTC near 0), not a plausible 2020s+ date -- same "treat
+     * anything before 2020-01-01 UTC as unsynced, store 0" convention as
+     * profile_executor_run.c's run_started_unix_s. */
+    e->unix_time_s = (now >= (time_t)1577836800) ? (uint32_t)now : 0u;
+    e->source_mask_before = (uint8_t)before;
+    e->source_mask_after = (uint8_t)after;
+    e->first_set_bit = first_set_bit;
+
+    link->fault_edge_ring_head = (link->fault_edge_ring_head + 1u) % SAFETY_LINK_FAULT_EDGE_RING_LEN;
+    if (link->fault_edge_ring_count < SAFETY_LINK_FAULT_EDGE_RING_LEN) {
+        link->fault_edge_ring_count++;
+    }
+    link->fault_edge_total_recorded++;
+}
+
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_mask,
                                         bool assert_fault)
 {
@@ -925,6 +970,9 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
         link->fault_sources &= ~source_mask;
     }
     uint32_t after = link->fault_sources;
+    if (after != before) {
+        safety_record_fault_edge_locked(link, before, after);
+    }
     safety_apply_fault_locked(link);
     safety_unlock(link);
 
@@ -967,6 +1015,43 @@ uint32_t safety_link_get_fault_sources(SafetyLinkClass *link)
     uint32_t sources = link->fault_sources;
     safety_unlock(link);
     return sources;
+}
+
+esp_err_t safety_link_get_fault_edges(SafetyLinkClass *link, safety_fault_edge_snapshot_t *out)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    out->count = link->fault_edge_ring_count;
+    out->total_recorded = link->fault_edge_total_recorded;
+    /* Rotate ring[] into entries[] oldest-first so the caller never has to
+     * reason about where the write head currently sits. When the ring has
+     * not wrapped yet (count < RING_LEN), the oldest entry is simply index 0
+     * and head is one past the newest -- the same formula below reduces to
+     * that case correctly since (head - count) wraps to 0 via the unsigned
+     * modulo when head == count. */
+    for (uint32_t i = 0; i < out->count; i++) {
+        uint32_t src = (link->fault_edge_ring_head + SAFETY_LINK_FAULT_EDGE_RING_LEN - out->count + i) %
+                       SAFETY_LINK_FAULT_EDGE_RING_LEN;
+        out->entries[i] = link->fault_edge_ring[src];
+    }
+    memcpy(out->counts.rising_count, link->fault_edge_rising_count, sizeof(out->counts.rising_count));
+    memcpy(out->counts.last_rising_uptime_ms, link->fault_edge_last_rising_uptime_ms,
+           sizeof(out->counts.last_rising_uptime_ms));
+    memcpy(out->counts.last_rising_valid, link->fault_edge_last_rising_valid,
+           sizeof(out->counts.last_rising_valid));
+    safety_unlock(link);
+    return ESP_OK;
 }
 
 esp_err_t safety_link_fault_on_link_loss(SafetyLinkClass *link, bool enable)

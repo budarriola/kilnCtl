@@ -28,6 +28,7 @@
                                   * only includes safety_ceiling_policy.h/safety_link.h, never this file. */
 #include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- 2026-09-10 opus review finding */
 #include "safety_cfg_store.h"
+#include "safety_trip_words.h" /* safety_fault_source_short_name() -- 2026-09-24 fault-edge instrumentation */
 #include "safety_cfg_write.h" /* safety_cfg_post_pair_t + the stage/commit/confirm-by-
                                * read-back primitive. It moved to drivers/safety/ on
                                * 2026-09-16: writing a safety parameter over the safety
@@ -194,6 +195,17 @@ typedef struct {
     bool diff_truncated;
     uint16_t diff_from_crc;
     uint16_t diff_to_crc;
+
+    /* 2026-09-24 fault-edge instrumentation (CLAUDE.md's "S6a mainFault" MCP
+     * tool history, ROADMAP.md): this ESP's OWN fault_sources bitmask and its
+     * transition ring/counters -- ESP-local state, never fetched from the
+     * Pico, same "always known once s_link exists" reasoning as relay_type
+     * above. current_fault_sources_known false only when there is no
+     * SafetyLinkClass at all (never started this boot), same convention as
+     * every other field this file gates on s_link presence. */
+    bool current_fault_sources_known;
+    uint32_t current_fault_sources;
+    safety_fault_edge_snapshot_t fault_edges;
 } safety_cfg_http_snapshot_t;
 
 static const char *ct_cal_source_name(safety_ct_cal_source_t s)
@@ -433,7 +445,56 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
         }
         APPEND("}");
     }
-    APPEND("]}}");
+    APPEND("]}");
+
+    /* 2026-09-24 fault-edge instrumentation: this ESP's own fault_sources
+     * bitmask (live, not the at-trip snapshot dashboard_http.c's
+     * trip_fault_sources reports) plus the transition ring and per-source
+     * rising-edge counters -- see safety_link.h's safety_fault_edge_t comment
+     * for why this exists (an S6a trip that could not be attributed after the
+     * fact once the device log ring had rotated). */
+    APPEND(",\"current_fault_sources_known\":%s", s->current_fault_sources_known ? "true" : "false");
+    if (s->current_fault_sources_known) {
+        APPEND(",\"current_fault_sources\":%u", (unsigned)s->current_fault_sources);
+    }
+    APPEND(",\"fault_source_edges\":[");
+    for (uint32_t i = 0; i < s->fault_edges.count; i++) {
+        const safety_fault_edge_t *e = &s->fault_edges.entries[i];
+        APPEND("%s{\"uptime_ms\":%lu", i == 0 ? "" : ",", (unsigned long)e->uptime_ms);
+        if (e->unix_time_s != 0u) {
+            APPEND(",\"unix_time_s\":%lu", (unsigned long)e->unix_time_s);
+        } else {
+            APPEND(",\"unix_time_s\":null");
+        }
+        APPEND(",\"source_mask_before\":%u,\"source_mask_after\":%u",
+               (unsigned)e->source_mask_before, (unsigned)e->source_mask_after);
+        if (e->first_set_bit != 0xFFu) {
+            char name_buf[24];
+            APPEND(",\"first_set_source\":\"%s\"",
+                   safety_fault_source_short_name(e->first_set_bit, name_buf, sizeof(name_buf)));
+        } else {
+            APPEND(",\"first_set_source\":null");
+        }
+        APPEND("}");
+    }
+    APPEND("]");
+    APPEND(",\"fault_source_edge_total_recorded\":%lu", (unsigned long)s->fault_edges.total_recorded);
+    APPEND(",\"fault_source_counts\":{");
+    for (uint8_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+        char name_buf[24];
+        const char *name = safety_fault_source_short_name(b, name_buf, sizeof(name_buf));
+        APPEND("%s\"%s\":{\"rising_count\":%u", b == 0 ? "" : ",", name,
+               (unsigned)s->fault_edges.counts.rising_count[b]);
+        if (s->fault_edges.counts.last_rising_valid[b]) {
+            APPEND(",\"last_rising_uptime_ms\":%lu",
+                   (unsigned long)s->fault_edges.counts.last_rising_uptime_ms[b]);
+        } else {
+            APPEND(",\"last_rising_uptime_ms\":null");
+        }
+        APPEND("}");
+    }
+    APPEND("}");
+    APPEND("}");
 
 #undef APPEND
     return o;
@@ -443,8 +504,11 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
  * entry is at most ~80 bytes (id+name up to ~24 chars+type+set+value), times
  * SAFETY_CFG_PARAM_COUNT, plus a small fixed header -- generous headroom
  * over the ~57*80 + 128 ~= 4700 bytes a full response actually needs. */
+/* 2026-09-24: +2560u covers fault_source_edges (<=16 entries, ~110 bytes
+ * each) and fault_source_counts (6 entries, ~70 bytes each) with headroom,
+ * same "generous fixed upper bound" discipline as the rest of this macro. */
 #define SAFETY_CFG_JSON_MAX \
-    (SAFETY_CFG_PARAM_COUNT * 128u + SAFETY_CFG_STORE_DIFF_MAX * 128u + 256u)
+    (SAFETY_CFG_PARAM_COUNT * 128u + SAFETY_CFG_STORE_DIFF_MAX * 128u + 256u + 2560u)
 
 static esp_err_t commissioning_get_handler(httpd_req_t *req)
 {
@@ -480,6 +544,12 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
         (void)safety_link_get_peer_version_status(s_link, &peer_version_known, &peer_version_compatible,
                                                     &peer_protocol_version, NULL);
         snap.unset_reliable = peer_reports_unset_reliably(peer_version_known, peer_protocol_version);
+
+        /* 2026-09-24: ESP-local, not fetched from the peer -- see the
+         * snapshot field's own comment. */
+        snap.current_fault_sources = safety_link_get_fault_sources(s_link);
+        snap.current_fault_sources_known = true;
+        (void)safety_link_get_fault_edges(s_link, &snap.fault_edges);
     }
     snap.relay_type = safety_cfg_store_get_safety_relay_type();
     for (size_t ch = 0; ch < SAFETY_CT_CAL_CHANNELS; ch++) {

@@ -2294,6 +2294,143 @@ static void test_recapture_cannot_stall_the_heartbeat_task(void)
     s_stub_recapture_pending = false;
 }
 
+// --------------------------------------------------------------------------
+// 2026-09-24 fault-edge instrumentation (safety_link.h's safety_fault_edge_t
+// comment): the ring/counters that let a latched S6a mainFault be traced
+// back to which ESP source flipped, and when, after the fact. These drive
+// the real, compiled safety_link_set_fault_source()/safety_link_get_fault_
+// edges() -- not a re-implementation of the ring logic.
+// --------------------------------------------------------------------------
+
+static void test_fault_edge_records_a_single_transition(void)
+{
+    TEST_SECTION("safety_link_get_fault_edges -- one assert then one clear records two edges");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_THERMO, true) == ESP_OK,
+               "asserting THERMO succeeds");
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_THERMO, false) == ESP_OK,
+               "clearing THERMO succeeds");
+
+    safety_fault_edge_snapshot_t snap;
+    TEST_CHECK(safety_link_get_fault_edges(&link, &snap) == ESP_OK, "get_fault_edges succeeds");
+    TEST_CHECK(snap.count == 2, "exactly two transitions recorded");
+    TEST_CHECK(snap.total_recorded == 2, "total_recorded matches count when the ring has not wrapped");
+
+    TEST_CHECK(snap.entries[0].source_mask_before == 0u, "edge 0 before == 0");
+    TEST_CHECK(snap.entries[0].source_mask_after == SAFETY_FAULT_SRC_THERMO, "edge 0 after == THERMO");
+    TEST_CHECK(snap.entries[0].first_set_bit == 2u,
+               "edge 0's first_set_bit is bit index 2 (SAFETY_FAULT_SRC_THERMO == 0x04)");
+
+    TEST_CHECK(snap.entries[1].source_mask_before == SAFETY_FAULT_SRC_THERMO, "edge 1 before == THERMO");
+    TEST_CHECK(snap.entries[1].source_mask_after == 0u, "edge 1 after == 0");
+    TEST_CHECK(snap.entries[1].first_set_bit == 0xFFu,
+               "edge 1 is a pure clear -- first_set_bit reports 0xFF, not a stale bit index");
+
+    TEST_CHECK(snap.counts.rising_count[2] == 1, "THERMO's rising-edge counter is 1 (one assert only)");
+    TEST_CHECK(snap.counts.last_rising_valid[2] == true, "THERMO's last-rising timestamp is now valid");
+    TEST_CHECK(snap.counts.rising_count[0] == 0, "an untouched source's rising counter stays 0");
+    TEST_CHECK(snap.counts.last_rising_valid[0] == false,
+               "an untouched source's last-rising-valid flag stays false");
+}
+
+static void test_fault_edge_no_op_set_does_not_record(void)
+{
+    TEST_SECTION("safety_link_get_fault_edges -- a no-op set (already at that state) records nothing");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, false) == ESP_OK,
+               "clearing an already-clear source succeeds (it's a no-op, not an error)");
+
+    safety_fault_edge_snapshot_t snap;
+    TEST_CHECK(safety_link_get_fault_edges(&link, &snap) == ESP_OK, "get_fault_edges succeeds");
+    TEST_CHECK(snap.count == 0, "no transition recorded for a mask that did not actually change");
+    TEST_CHECK(snap.total_recorded == 0, "total_recorded agrees");
+}
+
+static void test_fault_edge_multi_bit_assert_reports_lowest_first_set_bit(void)
+{
+    TEST_SECTION("safety_link_get_fault_edges -- asserting two sources in one call reports the "
+                 "LOWEST bit as first_set_bit and counts BOTH rising edges");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP, true) ==
+                   ESP_OK,
+               "asserting two sources in one call succeeds");
+
+    safety_fault_edge_snapshot_t snap;
+    TEST_CHECK(safety_link_get_fault_edges(&link, &snap) == ESP_OK, "get_fault_edges succeeds");
+    TEST_CHECK(snap.count == 1, "one edge recorded for one call, even though two bits rose");
+    TEST_CHECK(snap.entries[0].first_set_bit == 1u,
+               "first_set_bit is PC_LINK's bit index (1), the lower of the two that rose (APP is bit 4)");
+    TEST_CHECK(snap.counts.rising_count[1] == 1, "PC_LINK's own rising counter incremented");
+    TEST_CHECK(snap.counts.rising_count[4] == 1, "APP's own rising counter ALSO incremented");
+}
+
+static void test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order(void)
+{
+    TEST_SECTION("safety_link_get_fault_edges -- wraparound: more than RING_LEN transitions keeps "
+                 "only the most recent RING_LEN, in oldest-to-newest order, while total_recorded "
+                 "keeps counting past the ring's capacity");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    // Alternate MANUAL on/off. Each call is one transition (one edge), so
+    // driving this SAFETY_LINK_FAULT_EDGE_RING_LEN + 5 times wraps the ring
+    // by exactly 5 entries.
+    uint32_t total_transitions = SAFETY_LINK_FAULT_EDGE_RING_LEN + 5u;
+    for (uint32_t i = 0; i < total_transitions; i++) {
+        bool assert_now = (i % 2u) == 0u;
+        TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_MANUAL, assert_now) == ESP_OK,
+                   "each alternating transition succeeds");
+    }
+
+    safety_fault_edge_snapshot_t snap;
+    TEST_CHECK(safety_link_get_fault_edges(&link, &snap) == ESP_OK, "get_fault_edges succeeds");
+    TEST_CHECK(snap.count == SAFETY_LINK_FAULT_EDGE_RING_LEN,
+               "count caps at the ring length once more transitions than that have occurred");
+    TEST_CHECK(snap.total_recorded == total_transitions,
+               "total_recorded keeps the true lifetime count, proving 5 older entries were "
+               "overwritten rather than the ring silently growing");
+
+    // The oldest kept entry is transition index 5 (0-indexed: transitions
+    // 0..4 were overwritten). Transition i asserts iff i is even, so
+    // transition 5 is a CLEAR (before=MANUAL, after=0).
+    TEST_CHECK(snap.entries[0].source_mask_before == SAFETY_FAULT_SRC_MANUAL,
+               "oldest surviving entry is transition #5, a clear (before == MANUAL)");
+    TEST_CHECK(snap.entries[0].source_mask_after == 0u, "oldest surviving entry's after == 0");
+    // The newest entry is the very last transition driven above (index
+    // total_transitions-1 == 20, which is EVEN -- an assert, since even
+    // indices assert).
+    TEST_CHECK(snap.entries[snap.count - 1].source_mask_after == SAFETY_FAULT_SRC_MANUAL,
+               "newest entry is the last transition driven (an assert, since index 20 is even)");
+    TEST_CHECK(snap.counts.rising_count[0] == (total_transitions + 1u) / 2u,
+               "MANUAL's rising-edge counter reflects every assert across the whole run, "
+               "including the ones the ring itself no longer holds -- the counters never wrap "
+               "along with the ring");
+}
+
+static void test_fault_edge_uninitialized_link_refuses(void)
+{
+    TEST_SECTION("safety_link_get_fault_edges -- an uninitialized link refuses rather than "
+                 "returning garbage, and still zeroes *out");
+
+    SafetyLinkClass link = make_link(); // initialized left false
+    safety_fault_edge_snapshot_t snap;
+    memset(&snap, 0xAA, sizeof(snap)); // poison, so a leftover garbage read is visible
+
+    TEST_CHECK(safety_link_get_fault_edges(&link, &snap) == ESP_ERR_INVALID_STATE,
+               "an uninitialized link is refused with ESP_ERR_INVALID_STATE");
+    TEST_CHECK(snap.count == 0, "out is zeroed even on refusal -- never left holding poison/garbage");
+}
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -2341,6 +2478,12 @@ int main(void)
     test_link_reply_us_not_recorded_when_nothing_answers();
     test_exchange_timeout_is_reported_even_when_link_reads_up();
     test_recapture_cannot_stall_the_heartbeat_task();
+
+    test_fault_edge_records_a_single_transition();
+    test_fault_edge_no_op_set_does_not_record();
+    test_fault_edge_multi_bit_assert_reports_lowest_first_set_bit();
+    test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order();
+    test_fault_edge_uninitialized_link_refuses();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
