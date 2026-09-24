@@ -266,6 +266,17 @@ class Sp07Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
         self.assertIn("status=500", result.reason)
 
+    def test_real_tool_output_format_parses(self):
+        """safety_get_rate_guard()'s actual text shape (safety_get_param /
+        GET_PARAM 0x23 wrapper), not the ad hoc "key: value" shorthand the
+        other tests above use -- confirms the regex still matches the real
+        MCP tool's format, e.g. "S8 max_rate_c_per_min=10C/min (ARMED)"."""
+        srv = FakeSrv(safety_get_rate_guard=lambda: "S8 max_rate_c_per_min=10C/min (ARMED)")
+        body = {"ok": True, "current_set": True, "current_c_per_min": 10.0}
+        with mock.patch.object(C, "_http_get_json", return_value=(200, body)):
+            result = C._case_sp07({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.PASS)
+
 
 class RepoRootTest(unittest.TestCase):
     def test_resolved_root_contains_firmware_regardless_of_cwd(self):

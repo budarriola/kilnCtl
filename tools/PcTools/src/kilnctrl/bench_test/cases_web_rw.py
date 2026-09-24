@@ -53,6 +53,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from typing import Any, Dict, Optional, Tuple
 
 from . import cases_web
@@ -295,7 +296,14 @@ class _SecHttpClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read()
                 if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
-                    raw = gzip.decompress(raw)
+                    try:
+                        raw = gzip.decompress(raw)
+                    except (EOFError, zlib.error, OSError):
+                        # A Content-Encoding: gzip header with a body that
+                        # doesn't actually decompress (truncated read,
+                        # misbehaving proxy) must not crash the case --
+                        # report "no body", not an unhandled exception.
+                        return resp.getcode(), None, resp.headers
                 return resp.getcode(), raw.decode("utf-8", errors="replace"), resp.headers
         except urllib.error.HTTPError as exc:
             try:
@@ -303,6 +311,8 @@ class _SecHttpClient:
                 if (exc.headers.get("Content-Encoding") or "").lower() == "gzip":
                     raw = gzip.decompress(raw)
                 detail = raw.decode("utf-8", errors="replace")
+            except (EOFError, zlib.error, OSError):
+                detail = None
             except Exception:  # noqa: BLE001
                 detail = None
             return exc.code, detail, exc.headers

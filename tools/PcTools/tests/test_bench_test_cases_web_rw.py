@@ -8,9 +8,12 @@ Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_web_rw.py -
 """
 from __future__ import annotations
 
+import gzip
+import io
 import os
 import sys
 import unittest
+import urllib.error
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -18,6 +21,109 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kilnctrl.bench_test import cases_web_rw as C  # noqa: E402
 from kilnctrl.bench_test import judgments as J  # noqa: E402
 from kilnctrl.bench_test.registry import REGISTRY, Verdict  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# _SecHttpClient._get -- Accept-Encoding: gzip header + gzip decode
+# (2026-09-24 review follow-up: nothing previously exercised this at the
+# urllib layer -- every existing WEB-SEC-03 test injects a fake client via
+# ctx["sec_client"] and never goes near urllib.request.urlopen, so dropping
+# the header entirely left every test green.)
+# ---------------------------------------------------------------------------
+
+class _FakeHeaders(dict):
+    def get_all(self, name, default=None):
+        v = self.get(name)
+        return [v] if v is not None else default
+
+
+class _FakeHttpResponse:
+    def __init__(self, status, body_bytes, headers):
+        self._status = status
+        self._body = body_bytes
+        self.headers = _FakeHeaders(headers)
+
+    def getcode(self):
+        return self._status
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class SecHttpClientGetTest(unittest.TestCase):
+    def test_sends_accept_encoding_gzip(self):
+        client = C._SecHttpClient("1.2.3.4")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["header"] = req.get_header("Accept-encoding")
+            return _FakeHttpResponse(200, b"plain body", {})
+
+        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+            status, text, _headers = client._get("/")
+        self.assertEqual(captured["header"], "gzip")
+        self.assertEqual(status, 200)
+        self.assertEqual(text, "plain body")
+
+    def test_decodes_gzip_content_encoding(self):
+        client = C._SecHttpClient("1.2.3.4")
+        payload = gzip.compress(b"<html>hello</html>")
+
+        def fake_urlopen(req, timeout=None):
+            return _FakeHttpResponse(200, payload, {"Content-Encoding": "gzip"})
+
+        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+            status, text, _headers = client._get("/")
+        self.assertEqual(status, 200)
+        self.assertEqual(text, "<html>hello</html>")
+
+    def test_malformed_gzip_body_does_not_crash_and_returns_no_body(self):
+        """Advisory fix: a Content-Encoding: gzip header on a body that
+        doesn't actually decompress must not raise out of _get()."""
+        client = C._SecHttpClient("1.2.3.4")
+
+        def fake_urlopen(req, timeout=None):
+            return _FakeHttpResponse(200, b"not actually gzip", {"Content-Encoding": "gzip"})
+
+        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+            status, text, _headers = client._get("/")
+        self.assertEqual(status, 200)
+        self.assertIsNone(text)
+
+    def test_http_error_branch_decodes_gzip_body_and_reports_status(self):
+        client = C._SecHttpClient("1.2.3.4")
+        payload = gzip.compress(b'{"ok": false, "reason": "forbidden"}')
+        headers = _FakeHeaders({"Content-Encoding": "gzip"})
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="http://1.2.3.4/", code=403, msg="Forbidden", hdrs=headers, fp=io.BytesIO(payload)
+            )
+
+        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+            status, text, _headers = client._get("/")
+        self.assertEqual(status, 403)
+        self.assertEqual(text, '{"ok": false, "reason": "forbidden"}')
+
+    def test_http_error_branch_without_gzip_reports_plain_body(self):
+        client = C._SecHttpClient("1.2.3.4")
+        headers = _FakeHeaders({})
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="http://1.2.3.4/", code=401, msg="Unauthorized", hdrs=headers, fp=io.BytesIO(b"nope")
+            )
+
+        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+            status, text, _headers = client._get("/")
+        self.assertEqual(status, 401)
+        self.assertEqual(text, "nope")
 
 
 # ---------------------------------------------------------------------------
