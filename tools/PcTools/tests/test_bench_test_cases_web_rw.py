@@ -604,6 +604,71 @@ class WebSec04Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
+class WebSec04PinFormatAndLeakTest(unittest.TestCase):
+    """The PIN is a real credential (KILNCTL_LCD_PIN): it must never reach a
+    CaseResult's reason or observed (both land in summary.json/
+    transcript.md), on any path, and a malformed value must be refused
+    before it is used for anything."""
+
+    _PIN = "8642097"  # distinctive, so a substring hit can't be a coincidence
+
+    def setUp(self):
+        os.environ.pop(C._LCD_PIN_ENV, None)
+
+    def tearDown(self):
+        os.environ.pop(C._LCD_PIN_ENV, None)
+
+    def _assert_no_leak(self, result, *secrets):
+        import json
+        blob = (result.reason or "") + json.dumps(result.observed or {}, default=str)
+        for secret in secrets:
+            self.assertNotIn(secret, blob)
+
+    def test_pin_never_in_result_on_any_path(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
+        wrong = C._derive_wrong_lcd_pin(self._PIN)
+        variants = [
+            dict(),
+            dict(admin_pin_set=True),
+            dict(set_lcd_pin_ok=False),
+            dict(enable_ok=False),
+            dict(restore_ok=False),
+        ]
+        for kw in variants:
+            with self.subTest(**kw):
+                result = C._case_web_sec04({"sec_client": FakeSec04Client(**kw)})
+                self._assert_no_leak(result, self._PIN, wrong)
+
+    def test_leak_check_is_not_vacuous(self):
+        # Negative control: the same check does catch a PIN that is present.
+        from kilnctrl.bench_test.registry import CaseResult
+        leaky = CaseResult(Verdict.FAIL, reason="x", observed={"pin": self._PIN})
+        with self.assertRaises(AssertionError):
+            self._assert_no_leak(leaky, self._PIN)
+
+    def test_malformed_pin_fails_without_writing_or_echoing(self):
+        for bad in ["98x7", "123", "123456789", "12 4", "\u0661\u0662\u0663\u0664"]:
+            with self.subTest(bad=bad):
+                os.environ[C._LCD_PIN_ENV] = bad
+                client = FakeSec04Client(admin_pin_set=False)
+                ctx = {"sec_client": client}
+                result = C._case_web_sec04(ctx)
+                self.assertEqual(result.verdict, Verdict.FAIL)
+                self.assertIn(C._LCD_PIN_ENV, result.reason)
+                self._assert_no_leak(result, bad)
+                self.assertEqual(client.set_lcd_pin_calls, [])
+                self.assertEqual(client.set_policy_calls, [])
+                self.assertNotIn("_lcd_pin", ctx)
+
+    def test_never_timeout_passes_through_restore(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
+        client = FakeSec04Client(web_timeout_min=-1, lcd_timeout_min=-1)
+        result = C._case_web_sec04({"sec_client": client})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(client._cfg["web_timeout_min"], -1)
+        self.assertEqual(client._cfg["lcd_timeout_min"], -1)
+
+
 class WebSec03Test(unittest.TestCase):
     def setUp(self):
         os.environ.pop("KILNCTL_WEB_USERNAME", None)

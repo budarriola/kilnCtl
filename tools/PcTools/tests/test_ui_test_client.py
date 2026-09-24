@@ -207,9 +207,25 @@ class ClickByNameTest(unittest.TestCase):
         self.assertEqual(self.link.sent, [])
 
 
+class _ReplyPerSendLink(FakeLink):
+    """Delivers one queued reply per send(), i.e. only once the client has a
+    query pending. Pre-pushing several replies races UiTestClient's consumer
+    thread, which drops any reply that arrives with nothing outstanding."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replies: "list[bytes]" = []
+
+    def send(self, dst_task, src_task, payload=b"", dst_device=Device.ESP, timeout=None):
+        result = super().send(dst_task, src_task, payload, dst_device, timeout)
+        if self.replies:
+            self.push_reply(UART_TASK_ID_UI_TEST, self.replies.pop(0))
+        return result
+
+
 class EnterPinTest(unittest.TestCase):
     def setUp(self):
-        self.link = FakeLink()
+        self.link = _ReplyPerSendLink()
         self.client = UiTestClient(self.link)
 
     def tearDown(self):
@@ -217,7 +233,7 @@ class EnterPinTest(unittest.TestCase):
 
     def _reply(self, code: int, cx: int = 1, cy: int = 1) -> None:
         payload = struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + struct.pack("<Bhh", code, cx, cy)
-        self.link.push_reply(UART_TASK_ID_UI_TEST, payload)
+        self.link.replies.append(payload)
 
     def test_clicks_each_digit_then_ok_in_order(self):
         for _ in range(4):

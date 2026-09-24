@@ -1400,15 +1400,14 @@ def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
 def judge_web_sec04(pin_set_ok: bool, enabled_ok: bool, readback_enabled: Optional[bool],
                      restore_ok: bool, restore_matches: bool,
                      state: Optional[dict] = None) -> CaseResult:
-    """WEB-SEC-04: set a harness LCD admin PIN, enable ``lcd_enabled``,
-    confirm the readback shows it on, then restore ``lcd_enabled`` (and the
-    timeouts) to their original values. Unlike WEB-SEC-03's web password,
-    an LCD PIN is one-way hashed with no read-back and no "clear just this
-    PIN" route -- the case's caller refuses to even attempt this (SKIP)
-    whenever a PIN was already configured, so this judge is only ever
-    reached when the PIN this case set is a fresh one it is fine to leave
-    behind; the restore here only ever concerns the ``lcd_enabled``/timeout
-    policy fields, never the PIN hash itself.
+    """WEB-SEC-04: ensure the admin LCD PIN from ``KILNCTL_LCD_PIN`` is
+    configured (written only when ``admin_pin_set`` was false; otherwise
+    ``pin_set_ok`` is passed True without a write), enable ``lcd_enabled``,
+    confirm the readback shows it on, then restore all four policy fields
+    to their original values. Unlike WEB-SEC-03's web password, an LCD PIN
+    is one-way hashed with no read-back and no "clear just this PIN" route,
+    so the restore here only ever concerns the policy fields, never the PIN
+    hash itself.
 
     Same "restore failure always FAILs first" shape as
     :func:`judge_web_sec03`."""

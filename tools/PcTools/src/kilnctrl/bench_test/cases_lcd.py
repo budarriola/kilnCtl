@@ -837,7 +837,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             result.observed = dict(result.observed or {})
             result.observed.update(state)
     finally:
-        overlay = _dismiss_lcd19_overlay(ui)
+        # The overlay dismiss goes over the UART UI_TEST link and can raise
+        # (UiTestQueryError on a lost reply); the policy restore below is
+        # HTTP and must run regardless, so never let the dismiss abort it.
+        try:
+            overlay = _dismiss_lcd19_overlay(ui)
+        except Exception as exc:  # noqa: BLE001
+            overlay = {"checked": False, "error": type(exc).__name__}
         restore_status, restore_resp = client.set_policy(
             orig["web_enabled"], orig["lcd_enabled"], orig["web_timeout_min"], orig["lcd_timeout_min"])
         restore_post_ok = restore_status == 200 and bool(restore_resp) and restore_resp.get("ok") is True

@@ -351,8 +351,8 @@ class _SecHttpClient:
 
     def set_lcd_pin(self, role: str, pin: str) -> "Tuple[Optional[int], Optional[dict]]":
         # ROUTE_TIER_ADMIN, same reasoning as get_config() above. Never
-        # logs or persists `pin` -- callers only ever pass a fixed harness
-        # test literal, never a real credential.
+        # logs or persists `pin` -- the only caller (WEB-SEC-04) passes the
+        # KILNCTL_LCD_PIN environment value, a real credential.
         status, text = _http_post_raw_authed(self.host, "/api/auth/security", {
             "cmd": "set_lcd_pin", "role": role, "pin": pin,
         }, timeout=self.timeout)
@@ -624,6 +624,23 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
 
 _LCD_PIN_ENV = "KILNCTL_LCD_PIN"
 
+#: security_http_core.h's SECURITY_HTTP_PIN_MIN/MAX -- security_pin_is_valid()
+#: accepts 4-8 ASCII digits only.
+_LCD_PIN_MIN_LEN = 4
+_LCD_PIN_MAX_LEN = 8
+
+
+def _lcd_pin_well_formed(pin: str) -> bool:
+    """4-8 ASCII digits, matching the firmware's own PIN validator. Checked
+    before the PIN is used for anything, so a malformed value can never
+    reach int()/click_by_name()'s exception messages (both of which echo
+    the offending character) or be written to the board."""
+    return (
+        isinstance(pin, str)
+        and _LCD_PIN_MIN_LEN <= len(pin) <= _LCD_PIN_MAX_LEN
+        and all(c in "0123456789" for c in pin)
+    )
+
 
 def _derive_wrong_lcd_pin(right_pin: str) -> str:
     """Flip the right PIN's last digit (mod 10) so the wrong PIN this case
@@ -642,6 +659,13 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
         return CaseResult(
             Verdict.SKIP,
             reason=f"{_LCD_PIN_ENV} not set in the environment",
+            observed={},
+        )
+    if not _lcd_pin_well_formed(right_pin):
+        # Never echo the value (or its length) -- name the variable only.
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"{_LCD_PIN_ENV} is set but is not {_LCD_PIN_MIN_LEN}-{_LCD_PIN_MAX_LEN} ASCII digits",
             observed={},
         )
     wrong_pin = _derive_wrong_lcd_pin(right_pin)

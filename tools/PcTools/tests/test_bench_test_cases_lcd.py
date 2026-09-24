@@ -470,10 +470,15 @@ class PinKeypadUiTest(FakeUiTest):
     keypad and opens the Confirm Start dialog ("OK" gone, "Start"/"Cancel"
     only)."""
 
-    def __init__(self, right_pin: str, wrong_pin: str):
+    def __init__(self, right_pin: str, wrong_pin: str, policy_fn=None, cancel_raises=False):
         super().__init__(page="home", targets=[])
         self._right_pin = right_pin
         self._wrong_pin = wrong_pin
+        # policy_fn() -> lcd_enabled: when given, Start with the policy off
+        # goes straight to Confirm Start with no keypad, as
+        # ui_lcd_lock_has_role() does on the real board.
+        self._policy_fn = policy_fn
+        self._cancel_raises = cancel_raises
         self._state = "idle"  # idle -> keypad -> confirm
         self._entry = ""
 
@@ -487,8 +492,13 @@ class PinKeypadUiTest(FakeUiTest):
         return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
 
     def click_by_name(self, name):
+        if name == "Cancel" and self._cancel_raises:
+            raise RuntimeError("simulated UI_TEST reply lost")
         if self._state == "idle":
             if name == "Start":
+                if self._policy_fn is not None and not self._policy_fn():
+                    self._state = "confirm"
+                    return {"result": "ok"}
                 self._state = "keypad"
                 self._entry = ""
                 return {"result": "ok"}
@@ -623,6 +633,46 @@ class Lcd19Test(unittest.TestCase):
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
         self.assertEqual(ui.list_tap_targets()["targets"], [])
 
+    def test_restore_runs_even_if_overlay_dismiss_raises(self):
+        # The dismiss is a UART round trip that can raise; the HTTP policy
+        # restore must still run so lcd_enabled is never left on.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000", cancel_raises=True)
+        srv = FakeSrvFull(ui)
+        sec = FakeLcd19SecClient(lcd_enabled=False)
+        ctx = {"srv": srv, "sec_client": sec, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(sec._cfg["lcd_enabled"], False)
+        self.assertTrue(result.observed["restore"]["readback_matches"])
+        self.assertEqual(result.observed["overlay_dismiss"].get("checked"), False)
+
+    def test_pins_never_in_result(self):
+        import json
+        right, wrong = "8642097", "8642098"
+        for ui in (PinKeypadUiTest(right_pin=right, wrong_pin=wrong),
+                   PinKeypadUiTest(right_pin=wrong, wrong_pin=wrong)):
+            srv = FakeSrvFull(ui)
+            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+                   "_lcd_pin": {"right_pin": right, "wrong_pin": wrong}}
+            result = C._case_lcd19(ctx)
+            blob = (result.reason or "") + json.dumps(result.observed or {}, default=str)
+            self.assertNotIn(right, blob)
+            self.assertNotIn(wrong, blob)
+
+    def test_keypad_that_ignores_ok_never_passes_right_pin(self):
+        # Vacuity guard: a keypad that never reacts to OK leaves the button
+        # set unchanged for BOTH PINs. The wrong-PIN read alone can't tell
+        # that apart from a refusal, so right_pin_started must be False
+        # (keypad still open), never True -- the right-PIN close is the
+        # signal that distinguishes the two verdicts.
+        ui = PinKeypadUiTest(right_pin="never-matches", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
     def test_wrong_pin_actually_granted_fails(self):
         # Negative test: if a wrong PIN were incorrectly accepted (keypad
         # closes to Confirm Start instead of staying open), this must FAIL,
@@ -732,7 +782,10 @@ class WebSec04ThenLcd19Test(unittest.TestCase):
             self.assertEqual(sec._cfg["lcd_enabled"], False)
             self.assertIn("_lcd_pin", ctx)
 
-            ui = PinKeypadUiTest(right_pin="1234", wrong_pin=ctx["_lcd_pin"]["wrong_pin"])
+            # The fake only raises the keypad while the SHARED board state has
+            # lcd_enabled on, so this passes only if LCD-19 enables it itself.
+            ui = PinKeypadUiTest(right_pin="1234", wrong_pin=ctx["_lcd_pin"]["wrong_pin"],
+                                 policy_fn=lambda: sec._cfg["lcd_enabled"])
             ctx["srv"] = FakeSrvFull(ui)
             lcd19_result = C._case_lcd19(ctx)
 
