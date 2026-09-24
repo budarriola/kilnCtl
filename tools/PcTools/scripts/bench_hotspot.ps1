@@ -50,6 +50,39 @@ function Wait-WinRtOperation($WinRtOperation, $ResultType) {
     return $netTask.Result
 }
 
+$IcssvcRegPath = 'HKLM:\SYSTEM\ControlSet001\Services\icssvc\Settings'
+$IcssvcRegName = 'PeerlessTimeoutEnabled'
+
+function Test-AutoOffDisabled {
+    # DWORD 0 disables Windows' "turn off hotspot when no devices are connected"
+    # power-saving feature. Absent (the default) or non-zero means auto-off is
+    # still enabled.
+    $val = (Get-ItemProperty -Path $IcssvcRegPath -Name $IcssvcRegName -ErrorAction SilentlyContinue).$IcssvcRegName
+    return ($null -ne $val) -and ($val -eq 0)
+}
+
+function Disable-AutoOffIfPossible {
+    # No non-admin knob exists for this: NetworkOperatorTetheringManager exposes only
+    # ClientCount, MaxClientCount, TetheringOperationalState on this Windows build
+    # (11 Pro 26200) -- no PowerSavingEnabled / IsNoConnectionsTimeoutEnabled property.
+    # The only known knob is the icssvc registry value below, and writing under HKLM
+    # requires admin. Try it; if denied, tell the operator the exact one-time command
+    # rather than silently continuing with auto-off still enabled.
+    if (Test-AutoOffDisabled) {
+        return
+    }
+    try {
+        New-ItemProperty -Path $IcssvcRegPath -Name $IcssvcRegName -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null
+        Restart-Service icssvc -ErrorAction Stop
+        Write-Output "hotspot idle auto-off: disabled ($IcssvcRegName=0, icssvc restarted)"
+    } catch {
+        Write-Output "hotspot idle auto-off: NOT disabled (no admin rights from this session)."
+        Write-Output "Windows turns the hotspot off after ~10 minutes with no client connected."
+        Write-Output "Run this ONCE from an elevated PowerShell, then re-run 'start':"
+        Write-Output "  New-ItemProperty -Path '$IcssvcRegPath' -Name $IcssvcRegName -PropertyType DWord -Value 0 -Force; Restart-Service icssvc"
+    }
+}
+
 switch ($Action) {
     'start' {
         $ssid = [Environment]::GetEnvironmentVariable('KILNCTL_HOTSPOT_SSID', 'User')
@@ -58,6 +91,7 @@ switch ($Action) {
             Write-Error "KILNCTL_HOTSPOT_SSID / KILNCTL_HOTSPOT_PASSWORD are not both set in User scope."
             exit 1
         }
+        Disable-AutoOffIfPossible
         $tm = Get-TetheringManager
         $config = New-Object Windows.Networking.NetworkOperators.NetworkOperatorTetheringAccessPointConfiguration
         $config.Ssid = $ssid
@@ -78,6 +112,7 @@ switch ($Action) {
         $pwSet = -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('KILNCTL_HOTSPOT_PASSWORD', 'User'))
         Write-Output "TetheringOperationalState=$($tm.TetheringOperationalState)"
         Write-Output "ssid_env_set=$ssidSet password_env_set=$pwSet"
+        Write-Output "auto_off_disabled=$(Test-AutoOffDisabled)"
         Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.InterfaceAlias -like '*Local Area Connection*' } |
             Format-Table InterfaceAlias, IPAddress, PrefixLength -AutoSize

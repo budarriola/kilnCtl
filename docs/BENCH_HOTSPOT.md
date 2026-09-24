@@ -33,8 +33,34 @@ powershell -ExecutionPolicy Bypass -File tools\PcTools\scripts\bench_hotspot.ps1
 ```
 
 `status` reports `TetheringOperationalState` (On/Off), whether the two credential env vars
-are set (booleans only), and the IPv4 address bound to the "Microsoft Wi-Fi Direct Virtual
-Adapter" (the hotspot's own gateway address, typically `192.168.137.1/24`).
+are set (booleans only), `auto_off_disabled` ([bool], see below), and the IPv4 address bound
+to the "Microsoft Wi-Fi Direct Virtual Adapter" (the hotspot's own gateway address, typically
+`192.168.137.1/24`).
+
+## Idle auto-off
+
+Windows' Mobile Hotspot has a power-saving feature that turns the hotspot off after roughly
+ten minutes with no client connected — confirmed on this machine (first hotspot session,
+2026-09-23, turned itself `Off` unattended within about ten minutes of `start` with no
+device joined). The `NetworkOperatorTetheringManager` WinRT API this script drives has no
+software-facing knob for it: on this Windows build (11 Pro 26200) the manager exposes only
+`ClientCount`, `MaxClientCount`, and `TetheringOperationalState` — no `PowerSavingEnabled` or
+`IsNoConnectionsTimeoutEnabled` property exists to flip from PowerShell. The only known knob
+is a registry value read by the `icssvc` service:
+`HKLM:\SYSTEM\ControlSet001\Services\icssvc\Settings\PeerlessTimeoutEnabled` (DWORD `0`
+disables the timeout), and writing under `HKLM` requires admin rights.
+
+`bench_hotspot.ps1 -Action start` now tries this write itself, and restarts `icssvc` if it
+succeeds. From a non-admin session (the normal case), the write is denied and the script
+prints the exact one-time elevated command to run instead:
+
+```powershell
+New-ItemProperty -Path 'HKLM:\SYSTEM\ControlSet001\Services\icssvc\Settings' -Name PeerlessTimeoutEnabled -PropertyType DWord -Value 0 -Force; Restart-Service icssvc
+```
+
+Run that once from an elevated PowerShell, then `-Action start` again. `-Action status`
+reports the current state as `auto_off_disabled=True`/`False` so a session can tell whether
+the fix is already in place without needing admin rights itself.
 
 ## How this will be used
 
