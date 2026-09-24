@@ -367,6 +367,30 @@ class Diag08Test(unittest.TestCase):
 # WEB-SEC-03 -- case-function tests via a fake ctx["sec_client"].
 # ---------------------------------------------------------------------------
 
+class PolicyFromConfigTest(unittest.TestCase):
+    """Fix 3: a timeout of -1 (security_http_core.c's "never expire"
+    sentinel) is a valid value that must pass through unchanged, never be
+    coerced to the 30-minute default reserved for missing/invalid values."""
+
+    def test_negative_one_timeout_passes_through_unchanged(self):
+        cfg = {"web_enabled": True, "lcd_enabled": False, "web_timeout_min": -1, "lcd_timeout_min": -1}
+        self.assertEqual(C._policy_from_config(cfg), {
+            "web_enabled": True, "lcd_enabled": False, "web_timeout_min": -1, "lcd_timeout_min": -1,
+        })
+
+    def test_missing_timeout_defaults_to_30(self):
+        cfg = {"web_enabled": False, "lcd_enabled": False}
+        out = C._policy_from_config(cfg)
+        self.assertEqual(out["web_timeout_min"], 30)
+        self.assertEqual(out["lcd_timeout_min"], 30)
+
+    def test_positive_timeout_passes_through(self):
+        cfg = {"web_enabled": False, "lcd_enabled": False, "web_timeout_min": 15, "lcd_timeout_min": 45}
+        out = C._policy_from_config(cfg)
+        self.assertEqual(out["web_timeout_min"], 15)
+        self.assertEqual(out["lcd_timeout_min"], 45)
+
+
 class FakeSecClient:
     def __init__(self, web_enabled=False, lcd_enabled=False, web_timeout_min=30, lcd_timeout_min=30,
                  pw_ok=True, enable_ok=True, dashboard_status=200,
@@ -490,25 +514,60 @@ class FakeSec04Client:
 
 
 class WebSec04Test(unittest.TestCase):
-    def test_skips_when_admin_pin_already_configured(self):
+    _PIN = "1234"
+    _WRONG = "1235"  # last digit flipped, matches _derive_wrong_lcd_pin("1234")
+
+    def setUp(self):
+        os.environ.pop(C._LCD_PIN_ENV, None)
+
+    def tearDown(self):
+        os.environ.pop(C._LCD_PIN_ENV, None)
+
+    def test_skips_naming_the_variable_when_unset(self):
         client = FakeSec04Client(admin_pin_set=True)
         result = C._case_web_sec04({"sec_client": client})
         self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertIn(C._LCD_PIN_ENV, result.reason)
         self.assertEqual(client.set_lcd_pin_calls, [])
         self.assertEqual(client.set_policy_calls, [])
 
+    def test_admin_pin_already_set_never_writes_but_still_passes(self):
+        # admin_pin_set=True + var set (fix 2 branch): write nothing, hand
+        # the PIN to LCD-19 -- only the enable/readback/restore round trip
+        # is exercised, never a set_lcd_pin call.
+        os.environ[C._LCD_PIN_ENV] = self._PIN
+        client = FakeSec04Client(admin_pin_set=True, lcd_enabled=False)
+        ctx = {"sec_client": client}
+        result = C._case_web_sec04(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(client.set_lcd_pin_calls, [])
+        self.assertEqual(ctx["_lcd_pin"]["right_pin"], self._PIN)
+
     def test_happy_path_passes_and_restores(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(admin_pin_set=False, lcd_enabled=False)
         ctx = {"sec_client": client}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
-        self.assertEqual(client.set_lcd_pin_calls, [("admin", C._TEST_LCD_ADMIN_PIN)])
+        self.assertEqual(client.set_lcd_pin_calls, [("admin", self._PIN)])
         # lcd_enabled must be back to its original (False) value afterward.
         self.assertEqual(client._cfg["lcd_enabled"], False)
-        # A confirmed PASS hands the test PIN pair to ctx for LCD-19.
-        self.assertEqual(ctx["_lcd_pin"], {"right_pin": C._TEST_LCD_ADMIN_PIN, "wrong_pin": C._TEST_LCD_WRONG_PIN})
+        # A confirmed PASS hands the PIN pair (sourced from the env var, and
+        # a derived wrong PIN that differs by exactly the last digit) to ctx
+        # for LCD-19 -- never a hardcoded literal.
+        self.assertEqual(ctx["_lcd_pin"], {"right_pin": self._PIN, "wrong_pin": self._WRONG})
+        self.assertNotEqual(ctx["_lcd_pin"]["right_pin"], ctx["_lcd_pin"]["wrong_pin"])
+
+    def test_ctx_literal_pin_used_without_env_var(self):
+        # ctx["lcd_admin_pin"] takes priority over the environment.
+        client = FakeSec04Client(admin_pin_set=False, lcd_enabled=False)
+        ctx = {"sec_client": client, "lcd_admin_pin": self._PIN}
+        result = C._case_web_sec04(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(client.set_lcd_pin_calls, [("admin", self._PIN)])
 
     def test_set_lcd_pin_not_confirmed_fails_and_never_enables(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(set_lcd_pin_ok=False)
         ctx = {"sec_client": client}
         result = C._case_web_sec04(ctx)
@@ -519,6 +578,7 @@ class WebSec04Test(unittest.TestCase):
         self.assertNotIn("_lcd_pin", ctx)
 
     def test_enable_not_confirmed_fails(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(enable_ok=False)
         ctx = {"sec_client": client}
         result = C._case_web_sec04(ctx)
@@ -526,6 +586,7 @@ class WebSec04Test(unittest.TestCase):
         self.assertNotIn("_lcd_pin", ctx)
 
     def test_restore_failure_fails_even_if_everything_else_passed(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(restore_ok=False)
         ctx = {"sec_client": client}
         result = C._case_web_sec04(ctx)
@@ -534,6 +595,8 @@ class WebSec04Test(unittest.TestCase):
         self.assertNotIn("_lcd_pin", ctx)
 
     def test_initial_get_failure_fails(self):
+        os.environ[C._LCD_PIN_ENV] = self._PIN
+
         class BrokenClient:
             def get_config(self):
                 return 500, None

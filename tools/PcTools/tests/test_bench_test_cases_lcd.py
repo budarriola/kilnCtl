@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl.bench_test import cases_lcd as C  # noqa: E402
+from kilnctrl.bench_test import cases_web_rw as CW  # noqa: E402
 from kilnctrl.bench_test import judgments as J  # noqa: E402
 from kilnctrl.bench_test import lcd_sampler  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict  # noqa: E402
@@ -519,11 +520,78 @@ class PinKeypadUiTest(FakeUiTest):
         return {"digit_results": digit_results, "ok_result": ok_result}
 
 
+class FakeLcd19SecClient:
+    """Minimal fake for LCD-19's own lcd_enabled on/off toggle (fix 1):
+    tracks policy state across get_config/set_policy so the enable-before,
+    restore-after round trip is real, not trivially true. Defaults to the
+    bench's normal off state (web_enabled=False, lcd_enabled=False)."""
+
+    def __init__(self, web_enabled=False, lcd_enabled=False,
+                 web_timeout_min=30, lcd_timeout_min=30,
+                 enable_ok=True, restore_ok=True):
+        self._cfg = {
+            "web_enabled": web_enabled, "lcd_enabled": lcd_enabled,
+            "web_timeout_min": web_timeout_min, "lcd_timeout_min": lcd_timeout_min,
+        }
+        self.enable_ok = enable_ok
+        self.restore_ok = restore_ok
+        self.set_policy_calls = []
+
+    def get_config(self):
+        return 200, dict(self._cfg)
+
+    def set_policy(self, web_enabled, lcd_enabled, web_timeout_min, lcd_timeout_min):
+        self.set_policy_calls.append(lcd_enabled)
+        if lcd_enabled and not self.enable_ok:
+            return 200, {"ok": False}
+        if not lcd_enabled and not self.restore_ok:
+            return 200, {"ok": False}
+        self._cfg["web_enabled"] = web_enabled
+        self._cfg["lcd_enabled"] = lcd_enabled
+        self._cfg["web_timeout_min"] = web_timeout_min
+        self._cfg["lcd_timeout_min"] = lcd_timeout_min
+        return 200, {"ok": True}
+
+
 class Lcd19Test(unittest.TestCase):
     def test_not_run_when_no_pin_configured(self):
         srv = FakeSrvFull(FakeUiTest(page="home"))
         result = C._case_lcd19({"srv": srv})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
+
+    def test_owns_its_own_lcd_enabled_toggle_and_restores_it_off(self):
+        # Fix 1: LCD-19 must not depend on WEB-SEC-04 leaving lcd_enabled on
+        # -- it turns the policy on itself before driving the keypad and
+        # restores the original (off) value afterward, verified by readback.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        sec = FakeLcd19SecClient(lcd_enabled=False)
+        ctx = {"srv": srv, "sec_client": sec, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        # True while the keypad was being driven, then restored to False.
+        self.assertIn(True, sec.set_policy_calls)
+        self.assertEqual(sec.set_policy_calls[-1], False)
+        self.assertEqual(sec._cfg["lcd_enabled"], False)
+        self.assertTrue(result.observed["restore"]["readback_matches"])
+
+    def test_enable_not_confirmed_fails_without_touching_keypad(self):
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        sec = FakeLcd19SecClient(enable_ok=False)
+        ctx = {"srv": srv, "sec_client": sec, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
+            result = C._case_lcd19(ctx)
+        spy.assert_not_called()
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_restore_failure_fails_even_if_keypad_flow_passed(self):
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        sec = FakeLcd19SecClient(restore_ok=False)
+        ctx = {"srv": srv, "sec_client": sec, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("restore", result.reason)
 
     def test_idle_click_uses_exact_start_label_and_detects_keypad(self):
         # kiln_ui_click_by_name() (firmware/KilnFW/App/drivers/ui/kiln_ui.c)
@@ -537,7 +605,7 @@ class Lcd19Test(unittest.TestCase):
         ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
         srv = FakeSrvFull(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
-            ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
             result = C._case_lcd19(ctx)
         spy.assert_any_call("Start")
         self.assertNotIn(mock.call("start"), spy.call_args_list)
@@ -563,7 +631,7 @@ class Lcd19Test(unittest.TestCase):
         # on the wrong PIN.
         ui = PinKeypadUiTest(right_pin="0000", wrong_pin="0000")
         srv = FakeSrvFull(ui)
-        ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
         result = C._case_lcd19(ctx)
         self.assertEqual(result.observed.get("wrong_pin_refused"), False)
         self.assertEqual(result.verdict, Verdict.FAIL)
@@ -576,7 +644,7 @@ class Lcd19Test(unittest.TestCase):
         ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
         srv = FakeSrvFull(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
-            ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
+            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
             result = C._case_lcd19(ctx)
         self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
         self.assertNotIn(mock.call("Start"), spy.call_args_list)
@@ -593,7 +661,7 @@ class Lcd19Test(unittest.TestCase):
         ui = PopupUiTest(trigger_name="Stop", overlay_names=["1", "2", "3", "OK", "Cancel"])
         srv = FakeSrvFull(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
-            ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
+            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
             result = C._case_lcd19(ctx)
         self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
         self.assertNotIn(mock.call("Start"), spy.call_args_list)
@@ -606,9 +674,78 @@ class Lcd19Test(unittest.TestCase):
         # Simulate a click that reports ok but raises nothing (defensive):
         ui._trigger_name = None  # click never opens an overlay
         srv = FakeSrvFull(ui)
-        ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
         result = C._case_lcd19(ctx)
         self.assertEqual(result.observed["overlay_dismiss"], {"checked": True, "present": False})
+
+
+class _SharedBoardSecClient:
+    """One fake board's policy/PIN state, shared across both WEB-SEC-04 and
+    LCD-19 in :class:`WebSec04ThenLcd19Test` -- proves the fix-1 sequencing
+    actually works end to end: WEB-SEC-04 restores lcd_enabled to its
+    original (off) value in its own finally, and LCD-19 must then be able to
+    turn it back on for its own run and restore it off again afterward,
+    against the SAME underlying state rather than two independent fakes."""
+
+    def __init__(self):
+        self._cfg = {
+            "web_enabled": False, "lcd_enabled": False,
+            "web_timeout_min": 30, "lcd_timeout_min": 30,
+            "admin_pin_set": False,
+        }
+        self.set_lcd_pin_calls = []
+        self.set_policy_calls = []
+
+    def get_config(self):
+        return 200, dict(self._cfg)
+
+    def set_lcd_pin(self, role, pin):
+        self.set_lcd_pin_calls.append((role, pin))
+        self._cfg["admin_pin_set"] = True
+        return 200, {"ok": True}
+
+    def set_policy(self, web_enabled, lcd_enabled, web_timeout_min, lcd_timeout_min):
+        self.set_policy_calls.append(lcd_enabled)
+        self._cfg["web_enabled"] = web_enabled
+        self._cfg["lcd_enabled"] = lcd_enabled
+        self._cfg["web_timeout_min"] = web_timeout_min
+        self._cfg["lcd_timeout_min"] = lcd_timeout_min
+        return 200, {"ok": True}
+
+
+class WebSec04ThenLcd19Test(unittest.TestCase):
+    """Fix 1's required test: run WEB-SEC-04 then LCD-19 against ONE shared
+    fake board state, proving lcd_enabled ends up off after WEB-SEC-04 (its
+    own restore), gets turned on by LCD-19 for its own run, and ends up off
+    again after LCD-19 (its own restore) -- never relying on one case's
+    leftover policy state for the other's keypad to appear."""
+
+    def test_lcd19_turns_policy_on_itself_after_web_sec04_restores_it_off(self):
+        os.environ[CW._LCD_PIN_ENV] = "1234"
+        try:
+            sec = _SharedBoardSecClient()
+            ctx = {"sec_client": sec}
+
+            sec04_result = CW._case_web_sec04(ctx)
+            self.assertEqual(sec04_result.verdict, Verdict.PASS)
+            # WEB-SEC-04 must leave lcd_enabled exactly as it found it (off).
+            self.assertEqual(sec._cfg["lcd_enabled"], False)
+            self.assertIn("_lcd_pin", ctx)
+
+            ui = PinKeypadUiTest(right_pin="1234", wrong_pin=ctx["_lcd_pin"]["wrong_pin"])
+            ctx["srv"] = FakeSrvFull(ui)
+            lcd19_result = C._case_lcd19(ctx)
+
+            # LCD-19 must have turned lcd_enabled on for its own run (else
+            # the keypad could never have appeared) and restored it off
+            # again afterward -- against the SAME shared board state.
+            self.assertIn(True, sec.set_policy_calls)
+            self.assertEqual(sec._cfg["lcd_enabled"], False)
+            self.assertTrue(lcd19_result.observed["restore"]["readback_matches"])
+            self.assertEqual(lcd19_result.observed.get("wrong_pin_refused"), True)
+            self.assertEqual(lcd19_result.observed.get("right_pin_started"), True)
+        finally:
+            os.environ.pop(CW._LCD_PIN_ENV, None)
 
 
 class DelayedPageNavUiTest(PageNavUiTest):

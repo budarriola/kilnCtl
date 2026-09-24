@@ -610,13 +610,40 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 # "Cancel" present + no "OK" == a confirm dialog.
 #
 # UiTestClient.enter_pin() (2026-09-24) types a PIN's digits then "OK" via
-# click_by_name(); wrong_pin_refused/right_pin_started are now observed from
-# the keypad's own reaction: a wrong PIN resets the entry but leaves the
-# keypad open ("OK" still present), a right PIN closes the keypad in favour
-# of the Confirm Start dialog ("OK" gone, "Start"/"Cancel" only).
+# click_by_name(); wrong_pin_refused/right_pin_started are observed from the
+# keypad's own reaction: a wrong PIN resets the entry but leaves the keypad
+# open (the digit/"OK"/"Cancel" button set is unchanged -- there is no
+# "OK"-disappears signal for a refusal the way there is for an accept), a
+# right PIN closes the keypad in favour of the Confirm Start dialog ("OK"
+# gone, "Start"/"Cancel" only). Because a wrong-PIN button set never visibly
+# changes, `_wait_stable_names` debounces two matching reads instead of
+# waiting for a specific target state, and `_entry_all_clicked_ok` requires
+# every digit click AND the trailing "OK" click to have actually landed
+# (result "ok") before either boolean is set from the read that follows --
+# a not_found/ambiguous/hidden click anywhere in the PIN leaves the boolean
+# at None (INCONCLUSIVE) rather than a false conclusion about a PIN that was
+# never actually typed as intended. The board exposes no separate signal:
+# ui_lcd_keypad.c's "Wrong PIN" status text is a plain (non-clickable)
+# lv_label, never walked into kiln_ui.c's tap-target list (only
+# LV_OBJ_FLAG_CLICKABLE objects and buttonmatrix keys are, log_tap_targets()
+# around kiln_ui.c:482) -- so it cannot be read by name at all.
 # "right_pin_started" is a placeholder name kept for judgments.py's existing
 # signature; entering the right PIN only opens the Confirm Start dialog, it
 # does not itself start a firing -- this case never presses Confirm Start.
+#
+# This case owns its own `lcd_enabled` on/off around its run (rather than
+# relying on WEB-SEC-04 to leave it on): WEB-SEC-04 fully restores
+# `lcd_enabled` to whatever it found in `finally`, which is normally false
+# on this bench, and `ui_lcd_lock_has_role()` (ui_lcd_lock.c) returns true
+# whenever the policy is off -- `ui_lcd_lock_run_gated()` then goes straight
+# to Confirm Start with no keypad at all (ui_page_home_actions.c), so a case
+# that assumed WEB-SEC-04 left the policy on could never see a keypad.
+# LCD-19 turns `lcd_enabled` on immediately before driving the keypad and
+# restores the original four policy fields (web_enabled, lcd_enabled,
+# web_timeout_min, lcd_timeout_min) in `finally`, over the same
+# `_SecHttpClient`/`ctx["sec_client"]` seam WEB-SEC-03/04 use -- verified by
+# a full config read-back, hard-FAILing regardless of the keypad verdict if
+# that restore doesn't round-trip on all four fields.
 #
 # This case must never actually start or stop a firing itself: on the idle
 # branch it only ever taps "Start" (which opens the PIN keypad, not the
@@ -655,24 +682,55 @@ def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIM
     return names, time.monotonic() - start
 
 
-def _wait_for_overlay_predicate(ui, predicate, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                                 interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[Optional[set], float]":
-    """Same click-then-read race as :func:`_wait_for_overlay_names`, but for
-    a caller that needs something more specific than "present"/"absent" --
-    e.g. LCD-19's post-``enter_pin`` checks: a wrong PIN leaves the keypad
-    open (``"OK"`` still present, just re-reset), and a right PIN closes it
-    in favour of the Confirm Start dialog (``"OK"`` gone). ``predicate``
-    takes the current name set (or ``None`` on a read failure) and returns
-    whether the wait is satisfied. Never raises; a predicate that never
-    becomes true is still reported honestly via whatever the last poll saw."""
+def _wait_stable_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                        interval_s: float = _PAGE_POLL_INTERVAL_S,
+                        stable_reads: int = 2) -> "tuple[Optional[set], float]":
+    """Poll :func:`_lcd19_overlay_names` until the same set is read
+    ``stable_reads`` times in a row, or `timeout_s` elapses. Unlike
+    :func:`_wait_for_overlay_names`, this does not wait for a *specific*
+    target state -- it debounces the click-then-read race for a submit
+    whose expected good outcome is often "no visible change" (a wrong PIN
+    resets digit entry but the keypad's own button set -- digits, "OK",
+    "Cancel" -- never changes while it stays open, so there is no
+    "OK"-appears/disappears signal to wait for the way there is for a page
+    switch). Reading the name set exactly once right after the click would
+    trivially "confirm" the pre-submission state, which was the bug this
+    replaces: two matching reads spaced by `interval_s` at least rule out
+    catching a genuinely in-flight LVGL transition. Never raises; a set
+    that never stabilizes within `timeout_s` is still returned honestly."""
     start = time.monotonic()
-    names = _lcd19_overlay_names(ui)
-    while not predicate(names):
+    last = _lcd19_overlay_names(ui)
+    count = 1
+    while count < stable_reads:
         if time.monotonic() - start >= timeout_s:
             break
         time.sleep(interval_s)
-        names = _lcd19_overlay_names(ui)
-    return names, time.monotonic() - start
+        cur = _lcd19_overlay_names(ui)
+        if cur == last:
+            count += 1
+        else:
+            last = cur
+            count = 1
+    return last, time.monotonic() - start
+
+
+def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
+    """True only if every digit click_by_name AND the trailing "OK" click
+    from :meth:`UiTestClient.enter_pin` reported ``result: "ok"``. A
+    not_found/ambiguous/hidden click on any digit means the PIN typed on
+    the board was NOT what the caller intended (or the keypad wasn't even
+    open), so the caller must not draw any refused/accepted conclusion from
+    the overlay state that follows -- this is what makes that case leave
+    its boolean at ``None`` (INCONCLUSIVE) instead of trusting the read."""
+    if not entry:
+        return False
+    digit_results = entry.get("digit_results") or []
+    if not digit_results:
+        return False
+    if not all(d.get("result") == "ok" for d in digit_results):
+        return False
+    ok_result = entry.get("ok_result") or {}
+    return ok_result.get("result") == "ok"
 
 
 def _dismiss_lcd19_overlay(ui) -> Dict[str, Any]:
@@ -703,61 +761,109 @@ def _case_lcd19(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.NOT_RUN, reason="no PIN was configured in this session (ctx['_lcd_pin'] absent, owned by WEB-SEC-04)")
     srv = _srv(ctx)
     ui = srv._ui_test
+    from . import cases_web_rw as _web  # local import: avoids a module-load cycle with cases_web_rw
+
+    client = _web._sec_client(ctx)
+    status0, cfg0 = client.get_config()
+    if status0 != 200 or cfg0 is None:
+        return CaseResult(Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed={"status": status0})
+    orig = _web._policy_from_config(cfg0)
+
     keypad_raised = wrong_pin_refused = right_pin_started = stop_not_gated = None
     result: Optional[CaseResult] = None
-    overlay: Optional[Dict[str, Any]] = None
+    state: Dict[str, Any] = {"orig": orig}
     try:
-        # kiln_ui_click_by_name() (kiln_ui.c) matches with an exact strcmp,
-        # never case-insensitively, and the home fire button's label text is
-        # exactly "Start" when idle/done/faulted or "Stop" while
-        # RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c).
-        firing_active = bool(pin_cfg.get("firing_active_with_lock"))
-        if not firing_active:
-            click = ui.click_by_name("Start")
-            if click.get("result") == "ok":
-                names, _ = _wait_for_overlay_names(ui, present=True)
-                keypad_raised = names is not None and "OK" in names and "Cancel" in names
-            if keypad_raised:
-                wrong_pin = pin_cfg.get("wrong_pin")
-                right_pin = pin_cfg.get("right_pin")
-                if wrong_pin:
-                    ui.enter_pin(wrong_pin)
-                    # A wrong PIN resets the digit entry but never closes
-                    # the keypad -- "OK" must still be present. Poll rather
-                    # than reading once, same click-then-read race as any
-                    # other click_by_name()-driven transition here.
-                    names, _ = _wait_for_overlay_predicate(
-                        ui, lambda n: n is not None and "OK" in n)
-                    wrong_pin_refused = names is not None and "OK" in names and "Cancel" in names
-                if wrong_pin_refused and right_pin:
-                    ui.enter_pin(right_pin)
-                    # A correct PIN closes the keypad in favour of the
-                    # Confirm Start dialog -- "OK" disappears.
-                    names, _ = _wait_for_overlay_predicate(
-                        ui, lambda n: n is not None and "OK" not in n)
-                    right_pin_started = (
-                        names is not None and "OK" not in names and "Cancel" in names
-                    )
+        # WEB-SEC-04 always restores `lcd_enabled` to whatever it found
+        # (normally false on this bench) -- this case must turn it on
+        # itself before the keypad can ever appear (module comment above).
+        en_status, en_resp = client.set_policy(orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
+        enable_ok = en_status == 200 and bool(en_resp) and en_resp.get("ok") is True
+        state["enable_status"] = en_status
+        if not enable_ok:
+            result = CaseResult(
+                Verdict.FAIL,
+                reason="could not enable lcd_enabled before driving the PIN keypad -- set_policy did not confirm ok:true",
+                observed=dict(state),
+            )
         else:
-            stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
-            if stop_click.get("result") == "ok":
-                names, _ = _wait_for_overlay_names(ui, present=True)
-                if names is not None:
-                    has_cancel = "Cancel" in names
-                    has_ok = "OK" in names
-                    if has_cancel and not has_ok:
-                        stop_not_gated = True  # Confirm Stop shown directly, no PIN keypad
-                    elif has_cancel and has_ok:
-                        stop_not_gated = False  # PIN keypad appeared -- Stop was gated
-                    # else: neither popup present -- leave None (INCONCLUSIVE)
-        result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated)
-        return result
+            # kiln_ui_click_by_name() (kiln_ui.c) matches with an exact
+            # strcmp, never case-insensitively, and the home fire button's
+            # label text is exactly "Start" when idle/done/faulted or "Stop"
+            # while RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c).
+            firing_active = bool(pin_cfg.get("firing_active_with_lock"))
+            if not firing_active:
+                click = ui.click_by_name("Start")
+                if click.get("result") == "ok":
+                    names, _ = _wait_for_overlay_names(ui, present=True)
+                    keypad_raised = names is not None and "OK" in names and "Cancel" in names
+                if keypad_raised:
+                    wrong_pin = pin_cfg.get("wrong_pin")
+                    right_pin = pin_cfg.get("right_pin")
+                    if wrong_pin:
+                        entry = ui.enter_pin(wrong_pin)
+                        if _entry_all_clicked_ok(entry):
+                            # A wrong PIN resets digit entry but the keypad's
+                            # own button set never changes -- debounce two
+                            # stable reads rather than trusting one
+                            # immediate (tautologically "OK present") read.
+                            names, _ = _wait_stable_names(ui)
+                            wrong_pin_refused = names is not None and "OK" in names and "Cancel" in names
+                        # else: leave wrong_pin_refused at None -- the PIN
+                        # typed on the board wasn't actually the intended
+                        # one, so no conclusion can be drawn from what
+                        # follows.
+                    if wrong_pin_refused and right_pin:
+                        entry = ui.enter_pin(right_pin)
+                        if _entry_all_clicked_ok(entry):
+                            # A correct PIN closes the keypad in favour of
+                            # the Confirm Start dialog -- "OK" disappears.
+                            names, _ = _wait_stable_names(ui)
+                            right_pin_started = (
+                                names is not None and "OK" not in names and "Cancel" in names
+                            )
+            else:
+                stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
+                if stop_click.get("result") == "ok":
+                    names, _ = _wait_for_overlay_names(ui, present=True)
+                    if names is not None:
+                        has_cancel = "Cancel" in names
+                        has_ok = "OK" in names
+                        if has_cancel and not has_ok:
+                            stop_not_gated = True  # Confirm Stop shown directly, no PIN keypad
+                        elif has_cancel and has_ok:
+                            stop_not_gated = False  # PIN keypad appeared -- Stop was gated
+                        # else: neither popup present -- leave None (INCONCLUSIVE)
+            result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated)
+            result.observed = dict(result.observed or {})
+            result.observed.update(state)
     finally:
         overlay = _dismiss_lcd19_overlay(ui)
-        if result is not None:
-            result.observed = dict(result.observed or {})
-            result.observed["overlay_dismiss"] = overlay
+        restore_status, restore_resp = client.set_policy(
+            orig["web_enabled"], orig["lcd_enabled"], orig["web_timeout_min"], orig["lcd_timeout_min"])
+        restore_post_ok = restore_status == 200 and bool(restore_resp) and restore_resp.get("ok") is True
+        readback_status, cfg_after = client.get_config()
+        restore_matches = (
+            readback_status == 200 and cfg_after is not None and
+            _web._policy_from_config(cfg_after) == orig
+        )
+        restore_state = {
+            "post_status": restore_status, "post_ok": restore_post_ok,
+            "readback_status": readback_status, "readback_matches": restore_matches,
+        }
+        if result is None:
+            result = CaseResult(Verdict.FAIL, reason="LCD-19 aborted before a verdict was reached", observed=dict(state))
+        result.observed = dict(result.observed or {})
+        result.observed["overlay_dismiss"] = overlay
+        result.observed["restore"] = restore_state
+        if not restore_post_ok or not restore_matches:
+            # Unconditional override, same as WEB-SEC-03/04's own finally:
+            # a failed policy restore is a hard FAIL regardless of what the
+            # keypad verdict above found -- the board may be left with
+            # lcd_enabled changed from what this run found.
+            result.verdict = Verdict.FAIL
+            result.reason = "lcd_enabled policy restore did not round-trip after LCD-19 -- board may be left with lcd_enabled changed"
         _navigate_home(ui)
+    return result
 
 
 _CASE_FUNCS = {

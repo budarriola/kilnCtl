@@ -414,6 +414,29 @@ class _SecHttpClient:
         return status, location
 
 
+def _policy_from_config(cfg: dict) -> Dict[str, Any]:
+    """Extract the four ``set_policy`` fields from a ``GET /api/auth/config``
+    body. A timeout of ``-1`` is a valid, deliberate "never expire" value
+    (``security_http_core.c:26-31`` returns it as-is) and must pass through
+    unchanged -- only a missing/zero/negative-other-than--1 value falls back
+    to a default of 30 minutes. Used by every case in this module that reads
+    a policy snapshot before writing a test value, so a restore always
+    writes back exactly what was read, `-1` included."""
+    def _timeout(v: Any) -> int:
+        if v is None:
+            return 30
+        if v == -1:
+            return -1
+        return v if v > 0 else 30
+
+    return {
+        "web_enabled": bool(cfg.get("web_enabled")),
+        "lcd_enabled": bool(cfg.get("lcd_enabled")),
+        "web_timeout_min": _timeout(cfg.get("web_timeout_min")),
+        "lcd_timeout_min": _timeout(cfg.get("lcd_timeout_min")),
+    }
+
+
 def _sec_client(ctx: dict) -> Any:
     client = ctx.get("sec_client")
     if client is not None:
@@ -471,12 +494,7 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
             observed={"status": status0},
         )
 
-    orig = {
-        "web_enabled": bool(cfg0.get("web_enabled")),
-        "lcd_enabled": bool(cfg0.get("lcd_enabled")),
-        "web_timeout_min": cfg0.get("web_timeout_min") if (cfg0.get("web_timeout_min") or 0) > 0 else 30,
-        "lcd_timeout_min": cfg0.get("lcd_timeout_min") if (cfg0.get("lcd_timeout_min") or 0) > 0 else 30,
-    }
+    orig = _policy_from_config(cfg0)
 
     pw_ok = False
     enabled_ok = False
@@ -548,9 +566,13 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
             orig["web_enabled"], orig["lcd_enabled"], orig["web_timeout_min"], orig["lcd_timeout_min"])
         restore_post_ok = restore_status == 200 and bool(restore_resp) and restore_resp.get("ok") is True
         readback_status, cfg_after = client.get_config()
+        # Compare all four fields, not just web_enabled: this restore's own
+        # set_policy call carries lcd_enabled/both timeouts too, and a
+        # mismatch on any of them is just as much a hazard left on the
+        # board as web_enabled itself would be.
         restore_matches = (
             readback_status == 200 and cfg_after is not None and
-            bool(cfg_after.get("web_enabled")) == orig["web_enabled"]
+            _policy_from_config(cfg_after) == orig
         )
         state["restore"] = {
             "post_status": restore_status, "post_ok": restore_post_ok,
@@ -567,53 +589,88 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
 
 
 # ---------------------------------------------------------------------------
-# WEB-SEC-04 -- LCD PIN policy toggle round trip. Sets a harness admin LCD
-# PIN, enables `lcd_enabled`, confirms the readback, then restores
-# `lcd_enabled`/the timeouts (never the PIN itself: `set_lcd_pin` is
-# one-way-hashed on the board with no read-back and no "clear just this
-# PIN" route, so this case SKIPs outright rather than overwrite any admin
-# PIN already configured -- see judge_web_sec04's docstring). On PASS, it
-# hands the fixed test PIN pair to ctx["_lcd_pin"] so LCD-19 (depends_on
-# WEB-SEC-04, registry.py) can drive the keypad via UiTestClient.enter_pin().
+# WEB-SEC-04 -- LCD PIN policy toggle round trip. Reads the admin LCD PIN
+# from the KILNCTL_LCD_PIN environment variable (User scope, same convention
+# as KILNCTL_WEB_USERNAME/PASSWORD) -- SKIPs, naming the variable, if it is
+# unset, since there is no other sanctioned way to learn or choose a PIN
+# that is safe to write to a shared bench board. `set_lcd_pin` is one-way
+# hashed on the board with no read-back and no "clear just this PIN" route,
+# so a fixed literal committed to this file would either collide with an
+# operator's real PIN or, once written, could never be removed short of
+# `clear_credentials` (which also wipes the web password) -- so this case
+# never invents or hardcodes a PIN value:
+#   - `admin_pin_set` already true on the board: nothing is written (an
+#     unconditional overwrite risks losing access to a PIN nobody can read
+#     back); this case trusts KILNCTL_LCD_PIN already matches whatever is
+#     configured and only verifies the enable/readback round trip.
+#   - `admin_pin_set` false: this case performs a Class C C16 credential
+#     write, setting the board's admin LCD PIN from KILNCTL_LCD_PIN via
+#     `cmd=set_lcd_pin`.
+# Either way it then enables `lcd_enabled`, confirms the readback, and
+# always restores the original four policy fields (never the PIN itself) in
+# `finally`, hard-FAILing on any restore mismatch regardless of the rest.
+# `set_lcd_pin` also ends every admin web session (`security_backend_web_auth.c:313-340`);
+# `_SecHttpClient`'s calls all go through `http_auth`'s authenticated seam,
+# which transparently re-logs in on the next request's 401, so this needs no
+# special handling here. On a confirmed PASS, this hands the PIN pair to
+# `ctx["_lcd_pin"]` so LCD-19 (depends_on WEB-SEC-04, registry.py) can drive
+# the keypad via `UiTestClient.enter_pin()`. The wrong PIN is derived by
+# flipping the right PIN's last digit, never a fixed literal like "0000",
+# so it can never coincide with an operator-chosen right PIN by
+# construction. The PIN value itself is never printed, logged, or persisted
+# anywhere in `summary.json`/`transcript.md` -- only its presence, as
+# `[bool]`.
 # ---------------------------------------------------------------------------
 
-#: Fixed harness literals -- never a real credential, never logged.
-_TEST_LCD_ADMIN_PIN = "9137"
-_TEST_LCD_WRONG_PIN = "0000"
+_LCD_PIN_ENV = "KILNCTL_LCD_PIN"
+
+
+def _derive_wrong_lcd_pin(right_pin: str) -> str:
+    """Flip the right PIN's last digit (mod 10) so the wrong PIN this case
+    hands to LCD-19 can never equal the right one by construction -- unlike
+    a fixed literal, which could coincide with whatever KILNCTL_LCD_PIN
+    happens to hold."""
+    last = right_pin[-1]
+    flipped = str((int(last) + 1) % 10)
+    return right_pin[:-1] + flipped
 
 
 def _case_web_sec04(ctx: dict) -> CaseResult:
     client = _sec_client(ctx)
+    right_pin = ctx.get("lcd_admin_pin") or os.environ.get(_LCD_PIN_ENV)
+    if not right_pin:
+        return CaseResult(
+            Verdict.SKIP,
+            reason=f"{_LCD_PIN_ENV} not set in the environment",
+            observed={},
+        )
+    wrong_pin = _derive_wrong_lcd_pin(right_pin)
 
     status0, cfg0 = client.get_config()
     if status0 != 200 or cfg0 is None:
         return CaseResult(
             Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed={"status": status0}
         )
-    if cfg0.get("admin_pin_set"):
-        return CaseResult(
-            Verdict.SKIP,
-            reason="an admin LCD PIN is already configured on this board; set_lcd_pin is one-way hashed with no "
-                   "read-back, so this case refuses to overwrite it rather than risk an unrecoverable change",
-            observed={"admin_pin_set": True},
-        )
 
-    orig = {
-        "web_enabled": bool(cfg0.get("web_enabled")),
-        "lcd_enabled": bool(cfg0.get("lcd_enabled")),
-        "web_timeout_min": cfg0.get("web_timeout_min") if (cfg0.get("web_timeout_min") or 0) > 0 else 30,
-        "lcd_timeout_min": cfg0.get("lcd_timeout_min") if (cfg0.get("lcd_timeout_min") or 0) > 0 else 30,
-    }
+    orig = _policy_from_config(cfg0)
+    admin_pin_already_set = bool(cfg0.get("admin_pin_set"))
 
     pin_set_ok = False
     enabled_ok = False
     readback_enabled: Optional[bool] = None
-    state: Dict[str, Any] = {"orig": orig}
+    state: Dict[str, Any] = {"orig": orig, "admin_pin_set_before": admin_pin_already_set}
 
     try:
-        pin_status, pin_resp = client.set_lcd_pin("admin", _TEST_LCD_ADMIN_PIN)
-        pin_set_ok = pin_status == 200 and bool(pin_resp) and pin_resp.get("ok") is True
-        state["set_lcd_pin_status"] = pin_status
+        if admin_pin_already_set:
+            # Never overwrite an existing admin PIN (module comment above)
+            # -- trust that KILNCTL_LCD_PIN already matches what's on the
+            # board and only verify the enable/readback round trip.
+            pin_set_ok = True
+            state["set_lcd_pin_skipped"] = "admin_pin_set was already true"
+        else:
+            pin_status, pin_resp = client.set_lcd_pin("admin", right_pin)
+            pin_set_ok = pin_status == 200 and bool(pin_resp) and pin_resp.get("ok") is True
+            state["set_lcd_pin_status"] = pin_status
         if pin_set_ok:
             en_status, en_resp = client.set_policy(
                 orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
@@ -626,14 +683,14 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
     finally:
         # Unconditional, even on an exception above -- only the policy
         # fields are restorable here (see module comment); the PIN this
-        # case set stays on the board.
+        # case may have set stays on the board.
         restore_status, restore_resp = client.set_policy(
             orig["web_enabled"], orig["lcd_enabled"], orig["web_timeout_min"], orig["lcd_timeout_min"])
         restore_post_ok = restore_status == 200 and bool(restore_resp) and restore_resp.get("ok") is True
         readback_status, cfg_after = client.get_config()
         restore_matches = (
             readback_status == 200 and cfg_after is not None and
-            bool(cfg_after.get("lcd_enabled")) == orig["lcd_enabled"]
+            _policy_from_config(cfg_after) == orig
         )
         state["restore"] = {
             "post_status": restore_status, "post_ok": restore_post_ok,
@@ -650,7 +707,7 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
         # UiTestClient.enter_pin() -- never populated on anything less than
         # a confirmed PASS here, so LCD-19 never acts on a PIN that might
         # not actually be live on the board.
-        ctx["_lcd_pin"] = {"right_pin": _TEST_LCD_ADMIN_PIN, "wrong_pin": _TEST_LCD_WRONG_PIN}
+        ctx["_lcd_pin"] = {"right_pin": right_pin, "wrong_pin": wrong_pin}
     return result
 
 

@@ -1414,9 +1414,19 @@ def judge_web_sec04(pin_set_ok: bool, enabled_ok: bool, readback_enabled: Option
     :func:`judge_web_sec03`."""
     observed = dict(state or {})
     if not restore_ok or not restore_matches:
+        # Name the first failing step too, when there was one, so a reader
+        # doesn't have to guess whether the restore failure is the whole
+        # story or the write path was already broken before it ran.
+        prefix = ""
+        if not pin_set_ok:
+            prefix = "set_lcd_pin did not confirm ok:true for the harness admin PIN, and "
+        elif not enabled_ok:
+            prefix = "set_policy(lcd_enabled=1) did not report ok:true, and "
+        elif not readback_enabled:
+            prefix = "GET /api/auth/config did not show lcd_enabled:true after enabling it, and "
         return CaseResult(
             Verdict.FAIL,
-            reason="lcd_enabled policy restore did not round-trip -- board may be left with lcd_enabled changed",
+            reason=prefix + "lcd_enabled policy restore did not round-trip -- board may be left with lcd_enabled changed",
             observed=observed,
         )
     if not pin_set_ok:
