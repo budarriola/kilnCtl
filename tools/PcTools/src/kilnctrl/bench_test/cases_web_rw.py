@@ -46,8 +46,10 @@ sequencer; ``ctx["sec_client"]`` does the same for WEB-SEC-03's richer client
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +59,14 @@ from . import cases_web
 from . import judgments as J
 from .. import http_auth
 from .registry import CaseResult, Verdict, get_case
+
+#: WEB-SEC-03's dashboard-after-enable probe retries this many times with
+#: this backoff before failing (2026-09-24 fix): a single-worker httpd
+#: (project memory project_httpd_single_worker_static_buffers_by_design) can
+#: still be busy moments after the set_policy(web_enabled=1) write that just
+#: preceded it.
+_DASHBOARD_PROBE_ATTEMPTS = 3
+_DASHBOARD_PROBE_BACKOFF_S = 1.5
 
 _http_get_raw = cases_web._http_get_raw
 
@@ -269,15 +279,30 @@ class _SecHttpClient:
 
     def _get(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str], Any]":
         url = f"http://{self.host}{path}"
-        req = urllib.request.Request(url, method="GET")
+        # Advertise gzip like a real browser (and like curl, which offers
+        # "Accept-Encoding: gzip, deflate" by default) -- urllib's own
+        # default is "Accept-Encoding: identity", which
+        # web_client_accepts_gzip() reads as an explicit exclusion of gzip
+        # and answers 406 for the dashboard's gzip-only embedded page (same
+        # root cause cases_web.py's _http_get_raw already works around).
+        # This was WEB-SEC-03's real bug: `curl http://<host>/` (gzip by
+        # default) got 200 seconds after this client's bare identity request
+        # got a non-200 for the same route.
+        req = urllib.request.Request(url, method="GET", headers={"Accept-Encoding": "gzip"})
         if cookie:
             req.add_header("Cookie", f"kiln_sid={cookie}")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return resp.getcode(), resp.read().decode("utf-8", errors="replace"), resp.headers
+                raw = resp.read()
+                if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+                    raw = gzip.decompress(raw)
+                return resp.getcode(), raw.decode("utf-8", errors="replace"), resp.headers
         except urllib.error.HTTPError as exc:
             try:
-                detail = exc.read().decode("utf-8", errors="replace")
+                raw = exc.read()
+                if (exc.headers.get("Content-Encoding") or "").lower() == "gzip":
+                    raw = gzip.decompress(raw)
+                detail = raw.decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 detail = None
             return exc.code, detail, exc.headers
@@ -337,6 +362,13 @@ class _SecHttpClient:
         status, _text, _headers = self._get(path, cookie=cookie)
         return status
 
+    def get_status_body(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str]]":
+        """Like ``get_status`` but also returns the body, for WEB-SEC-03's
+        dashboard probe -- so a FAIL there records recoverable evidence
+        (status + a body snippet) instead of an empty ``observed`` dict."""
+        status, text, _headers = self._get(path, cookie=cookie)
+        return status, text
+
 
 def _sec_client(ctx: dict) -> Any:
     client = ctx.get("sec_client")
@@ -348,6 +380,31 @@ def _sec_client(ctx: dict) -> Any:
 
         host = mcp_server_ota._ota_resolve_host(None)
     return _SecHttpClient(host)
+
+
+def _probe_dashboard(client: Any) -> "Tuple[Optional[int], Optional[str]]":
+    """Retries the unauthenticated dashboard GET up to
+    ``_DASHBOARD_PROBE_ATTEMPTS`` times with ``_DASHBOARD_PROBE_BACKOFF_S``
+    backoff (2026-09-24 fix, see the module-level comment above): a
+    single-worker httpd can still be busy in the moment right after the
+    ``set_policy(web_enabled=1)`` write that preceded this call.
+
+    Falls back to ``client.get_status()`` (status only, no body) when a
+    fake client (or an older real one) has no ``get_status_body`` -- keeps
+    every pre-existing ``FakeSecClient``-based test passing unmodified."""
+    get_body = getattr(client, "get_status_body", None)
+    status: Optional[int] = None
+    body: Optional[str] = None
+    for attempt in range(_DASHBOARD_PROBE_ATTEMPTS):
+        if get_body is not None:
+            status, body = get_body("/")
+        else:
+            status, body = client.get_status("/"), None
+        if status == 200:
+            break
+        if attempt < _DASHBOARD_PROBE_ATTEMPTS - 1:
+            time.sleep(_DASHBOARD_PROBE_BACKOFF_S)
+    return status, body
 
 
 def _case_web_sec03(ctx: dict) -> CaseResult:
@@ -402,7 +459,16 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
             state["set_policy_enable_status"] = en_status
 
             if enabled_ok:
-                dashboard_ok = client.get_status("/") == 200
+                dashboard_status, dashboard_body = _probe_dashboard(client)
+                dashboard_ok = dashboard_status == 200
+                # Record the evidence regardless of verdict (never a
+                # credential or Set-Cookie value -- this route is the
+                # unauthenticated dashboard, and the snippet is capped well
+                # short of anything auth-page-shaped) so a FAIL here is
+                # reviewable instead of leaving `observed` with nothing to
+                # show for it.
+                state["dashboard_status"] = dashboard_status
+                state["dashboard_body"] = (dashboard_body[:200] if dashboard_body else dashboard_body)
                 admin_route_gated = client.get_status("/settings/zones") in (302, 401, 403)
                 login_status, cookie = client.login(username, password)
                 login_ok = login_status == 200 and bool(cookie)

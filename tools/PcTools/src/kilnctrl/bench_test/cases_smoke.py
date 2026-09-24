@@ -323,16 +323,50 @@ def _case_sp05(ctx: dict) -> CaseResult:
 
 
 def _case_sp07(ctx: dict) -> CaseResult:
+    """SP-07: consistent max_rate_c_per_min read-back between the safety
+    side (srv.safety_get_rate_guard(), Pico-sourced) and the ESP side
+    (GET /api/safety/rate_guard/auto).
+
+    2026-09-24 fix: this used to report "rate guard fields missing on one
+    side" for two unrelated reasons collapsed into one generic message --
+    (a) srv.safety_get_rate_guard() itself returning an "error: ..." string
+    (link/hub unavailable) and (b) GET /api/safety/rate_guard/auto legitimately
+    answering ``{"ok": false, "reason": "..."}`` whenever no zone has a usable
+    identification yet (safety_cfg_http.c's rate_guard_auto_get_handler() --
+    the S8 auto-calc estimate needs at least one autotuned zone; this is the
+    live bench's normal state, not a parser failure). Both are now surfaced
+    as their own INCONCLUSIVE reason instead of the generic one. Separately,
+    the route's SUCCESS shape reports the ESP's current value under
+    ``current_c_per_min`` -- not ``max_rate_c_per_min`` -- so the previous
+    parser could never have matched it even on an ``ok:true`` reply."""
     srv = _srv(ctx)
 
     text = srv.safety_get_rate_guard()
+    if text.startswith("error"):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=text,
+            observed={"safety_get_rate_guard": text},
+        )
     safety_side: dict = {}
     m = re.search(r"max_rate_c_per_min[:=]\s*([\d.]+)", text)
     if m:
         safety_side["max_rate_c_per_min"] = float(m.group(1))
     host = ctx["host"]
     status, body = _http_get_json(host, "/api/safety/rate_guard/auto")
-    esp_side = body if status == 200 and isinstance(body, dict) else {}
+    if status != 200 or not isinstance(body, dict):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"GET /api/safety/rate_guard/auto: status={status}",
+            observed={"safety_side": safety_side, "status": status, "body": body},
+        )
+    if not body.get("ok"):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"/api/safety/rate_guard/auto: {body.get('reason', 'ok:false with no reason given')}",
+            observed={"safety_side": safety_side, "esp_side": body},
+        )
+    esp_side = {"max_rate_c_per_min": body.get("current_c_per_min")}
     return J.judge_rate_guard_consistency(safety_side, esp_side)
 
 

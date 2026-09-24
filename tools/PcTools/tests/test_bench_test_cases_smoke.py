@@ -218,17 +218,53 @@ class Sp05Test(unittest.TestCase):
 
 
 class Sp07Test(unittest.TestCase):
+    """2026-09-24 fix: GET /api/safety/rate_guard/auto reports the ESP's
+    current value under ``current_c_per_min`` (only present when
+    ``ok:true``), never under ``max_rate_c_per_min`` -- and answers
+    ``{"ok": false, "reason": "..."}`` whenever no zone has a usable
+    identification yet (the live bench's normal state), which must surface
+    as that named reason, not a generic 'fields missing' complaint."""
+
     def test_matching_rate_guard_passes(self):
         srv = FakeSrv(safety_get_rate_guard=lambda: "max_rate_c_per_min: 10.0")
-        with mock.patch.object(C, "_http_get_json", return_value=(200, {"max_rate_c_per_min": 10.0})):
+        body = {"ok": True, "current_set": True, "current_c_per_min": 10.0}
+        with mock.patch.object(C, "_http_get_json", return_value=(200, body)):
             result = C._case_sp07({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.PASS)
 
     def test_mismatched_rate_guard_fails(self):
         srv = FakeSrv(safety_get_rate_guard=lambda: "max_rate_c_per_min: 10.0")
-        with mock.patch.object(C, "_http_get_json", return_value=(200, {"max_rate_c_per_min": 12.0})):
+        body = {"ok": True, "current_set": True, "current_c_per_min": 12.0}
+        with mock.patch.object(C, "_http_get_json", return_value=(200, body)):
             result = C._case_sp07({"srv": srv, "host": "1.2.3.4"})
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_no_zone_identification_is_inconclusive_with_named_reason(self):
+        """The observed live-bench evidence (2026-09-24 run
+        20260924T062123Z_safety): the route answers ok:false with this exact
+        reason. Must report that reason, never 'fields missing'."""
+        srv = FakeSrv(safety_get_rate_guard=lambda: "max_rate_c_per_min: 33.3")
+        body = {"ok": False, "reason": "no zone has a usable identification yet (run autotune on at least one zone first)"}
+        with mock.patch.object(C, "_http_get_json", return_value=(200, body)):
+            result = C._case_sp07({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("no zone has a usable identification", result.reason)
+        self.assertNotIn("fields missing", result.reason)
+
+    def test_safety_get_rate_guard_error_string_is_reported_verbatim(self):
+        error_text = "error reading safety commissioning over HTTP (host=1.2.3.4): timed out"
+        srv = FakeSrv(safety_get_rate_guard=lambda: error_text)
+        with mock.patch.object(C, "_http_get_json", return_value=(200, {"ok": True, "current_c_per_min": 1.0})):
+            result = C._case_sp07({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(result.reason, error_text)
+
+    def test_non_200_esp_side_is_inconclusive_not_fields_missing(self):
+        srv = FakeSrv(safety_get_rate_guard=lambda: "max_rate_c_per_min: 10.0")
+        with mock.patch.object(C, "_http_get_json", return_value=(500, None)):
+            result = C._case_sp07({"srv": srv, "host": "1.2.3.4"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("status=500", result.reason)
 
 
 class RepoRootTest(unittest.TestCase):

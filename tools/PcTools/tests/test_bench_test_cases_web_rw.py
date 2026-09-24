@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -272,6 +273,28 @@ class FakeSecClient:
         return self.admin_status
 
 
+class FakeSecClientWithBody(FakeSecClient):
+    """Extends FakeSecClient with get_status_body, so _probe_dashboard takes
+    the evidence-recording path (2026-09-24 WEB-SEC-03 fix) instead of the
+    status-only fallback every plain FakeSecClient-based test above uses."""
+
+    def __init__(self, dashboard_bodies=None, **kwargs):
+        super().__init__(**kwargs)
+        # A queue of (status, body) pairs consumed one per probe attempt;
+        # once exhausted, repeats the last entry.
+        self._bodies = list(dashboard_bodies) if dashboard_bodies else None
+        self.get_status_body_calls = 0
+
+    def get_status_body(self, path, cookie=None):
+        self.get_status_body_calls += 1
+        if path != "/":
+            return self.admin_status, None
+        if self._bodies:
+            idx = min(self.get_status_body_calls - 1, len(self._bodies) - 1)
+            return self._bodies[idx]
+        return self.dashboard_status, "<html>dashboard</html>"
+
+
 class WebSec03Test(unittest.TestCase):
     def setUp(self):
         os.environ.pop("KILNCTL_WEB_USERNAME", None)
@@ -308,6 +331,52 @@ class WebSec03Test(unittest.TestCase):
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
+
+    def test_dashboard_probe_records_status_and_body_on_success(self):
+        """2026-09-24 fix: `observed` must carry dashboard_status/body, not
+        be empty, even on the happy path -- this is the evidence the live
+        bench failure lacked."""
+        client = FakeSecClientWithBody()
+        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        result = C._case_web_sec03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("dashboard_status"), 200)
+        self.assertIn("dashboard", result.observed.get("dashboard_body") or "")
+
+    def test_dashboard_probe_retries_then_succeeds(self):
+        """The live bug: a single-worker httpd can still be busy right after
+        set_policy(web_enabled=1); the probe must retry before failing."""
+        client = FakeSecClientWithBody(dashboard_bodies=[(503, "busy"), (503, "busy"), (200, "<html>ok</html>")])
+        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        with mock.patch.object(C, "time") as fake_time:
+            result = C._case_web_sec03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(client.get_status_body_calls, 3)
+        self.assertEqual(fake_time.sleep.call_count, 2)
+        self.assertEqual(result.observed.get("dashboard_status"), 200)
+
+    def test_dashboard_probe_exhausts_retries_and_fails_with_evidence(self):
+        client = FakeSecClientWithBody(dashboard_bodies=[(503, "busy1"), (503, "busy2"), (503, "busy3")])
+        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        with mock.patch.object(C, "time") as fake_time:
+            result = C._case_web_sec03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(client.get_status_body_calls, C._DASHBOARD_PROBE_ATTEMPTS)
+        # observed still carries the last attempt's status/body -- never empty
+        self.assertEqual(result.observed.get("dashboard_status"), 503)
+        self.assertIn("busy3", result.observed.get("dashboard_body") or "")
+
+    def test_plain_fake_client_without_get_status_body_still_works(self):
+        """Backward compatibility: every pre-existing FakeSecClient-based
+        test above (no get_status_body) must keep passing via the
+        status-only fallback in _probe_dashboard."""
+        client = FakeSecClient()
+        self.assertFalse(hasattr(client, "get_status_body"))
+        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        result = C._case_web_sec03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("dashboard_status"), 200)
+        self.assertIsNone(result.observed.get("dashboard_body"))
 
     def test_exception_mid_flow_still_restores(self):
         """finally-discipline: a raising login() must not prevent the

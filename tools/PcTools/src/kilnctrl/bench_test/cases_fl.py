@@ -89,6 +89,38 @@ def _write_esp_capture(ctx: dict, condition: str, entries, fw_version, notes: st
         return None
 
 
+def _dead_by_design_names(ctx: dict, entries) -> "tuple[str, ...]":
+    """Names among ``entries`` that are ``alive=False`` but tagged something
+    other than ``always`` in ``check_stack_margin_registration.ps1``'s
+    ``$requiredNames`` list (2026-09-24 SK-01/SK-02 fix).
+
+    ``task_liveness.py`` already carries this classification for
+    ``check_task_liveness`` (a boot-once task like ``pico_auto_update``
+    self-deletes after boot by design; DEAD there is informational, not a
+    fault) -- SK-01/SK-02 previously never consulted it, so
+    ``judge_stack_margin_against_baseline`` (which has no tag awareness at
+    all -- it treats every non-alive entry as a hard FAIL) reported
+    ``task(s) not running: pico_auto_update`` on every ordinary run.
+
+    Best-effort: any parse failure (missing/malformed script) degrades to
+    "no names classified as dead-by-design" so a broken parse FAILs the
+    same names it always would have, rather than silently exempting
+    everything or crashing the case."""
+    from .. import task_liveness as tl
+
+    repo_root = ctx.get("repo_root") or _repo_root()
+    script_path = tl.default_check_script_path(repo_root)
+    try:
+        specs = tl.load_required_task_specs(script_path)
+    except (tl.TaskLivenessParseError, OSError):
+        return ()
+    tags = {s.name: s.tag for s in specs}
+    return tuple(
+        e.name for e in entries
+        if not e.alive and tags.get(e.name, "always") != "always"
+    )
+
+
 def _judge_against_baseline(ctx: dict, condition: str, min_free_bytes: Optional[int]) -> CaseResult:
     from .. import stack_margin_baseline as smb
 
@@ -102,7 +134,19 @@ def _judge_against_baseline(ctx: dict, condition: str, min_free_bytes: Optional[
     committed = smb.load_records(_baseline_dir(ctx))
     baseline_by_name = smb.worst_case_across_conditions(committed)
 
-    return J.judge_stack_margin_against_baseline(entries, baseline_by_name, min_free_bytes=min_free_bytes)
+    # Exclude by-design-dead tasks (e.g. pico_auto_update, boot-once, self-
+    # deletes after boot) from the entries scored against the baseline --
+    # judge_stack_margin_against_baseline has no tag awareness and FAILs any
+    # non-alive entry outright. They are still recorded, just not scored.
+    info_dead = _dead_by_design_names(ctx, entries)
+    scored_entries = [e for e in entries if e.name not in info_dead] if info_dead else entries
+
+    result = J.judge_stack_margin_against_baseline(scored_entries, baseline_by_name, min_free_bytes=min_free_bytes)
+    if info_dead:
+        if result.observed is None:
+            result.observed = {}
+        result.observed["dead_by_design"] = list(info_dead)
+    return result
 
 
 def _case_sk01(ctx: dict) -> CaseResult:
