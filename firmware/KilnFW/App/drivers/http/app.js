@@ -159,11 +159,18 @@
     var path = String(url).replace(/^[a-zA-Z][\w+.-]*:\/\/[^/]+/, '').split('?')[0];
     return path === '/api/auth/login' || path === '/api/auth/bootstrap_password' ||
            path === '/api/auth/session' || path === '/api/auth/session/extend' ||
-           path === '/api/auth/logout';
+           path === '/api/auth/logout' ||
+           // TOTP password-reset routes (docs/TOTP_PASSWORD_RESET_PLAN.md
+           // section 6a): both are ROUTE_TIER_OPEN by design -- a locked-out
+           // operator with no session must be able to call them -- so, same
+           // reasoning as /api/auth/login above, they must never trigger
+           // this wrapper's own login-escalation modal on a 4xx.
+           path === '/api/auth/forgot' || path === '/api/auth/reset';
   }
 
   var loginModalEl = null, loginTitleEl = null, loginUserEl = null, loginPassEl = null,
-      loginErrorEl = null, loginFormEl = null, loginCancelEl = null, loginSubmitEl = null;
+      loginErrorEl = null, loginFormEl = null, loginCancelEl = null, loginSubmitEl = null,
+      loginForgotEl = null;
 
   function buildLoginModal() {
     var overlay = document.createElement('div');
@@ -189,6 +196,9 @@
       '<div class="kc-login-actions">' +
       '<button type="button" class="kc-login-cancel">Cancel</button>' +
       '<button type="submit">Log in</button>' +
+      '</div>' +
+      '<div class="kc-login-forgot">' +
+      '<button type="button" class="kc-login-forgot-link">Forgot password?</button>' +
       '</div>';
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
@@ -200,6 +210,19 @@
     loginErrorEl = panel.querySelector('#kc-login-error');
     loginCancelEl = panel.querySelector('.kc-login-cancel');
     loginSubmitEl = panel.querySelector('button[type="submit"]');
+    loginForgotEl = panel.querySelector('.kc-login-forgot-link');
+    loginForgotEl.addEventListener('click', function (evt) {
+      evt.preventDefault();
+      // Same themed overlay/panel classes as the login modal (owner
+      // requirement: the popup follows the color theme) but its own
+      // element -- this one hides the login panel underneath rather than
+      // stacking. Cancel/close returns to a plain closed state; nothing
+      // here retries the original request that opened the login modal, so
+      // that promise still resolves the same way a Cancel on the login
+      // modal itself would.
+      loginModalEl.setAttribute('hidden', '');
+      openForgotPasswordModal();
+    });
     return overlay;
   }
 
@@ -379,6 +402,238 @@
       // no-op), so no listener outlives the modal.
       document.addEventListener('keydown', onKeydown, true);
     });
+  }
+
+  // ---- Forgot-password reset flow (docs/TOTP_PASSWORD_RESET_PLAN.md) -----
+  //
+  // Same themed overlay/panel idiom as the login modal above (owner
+  // requirement: the popup follows the color theme), reached only from the
+  // "Forgot password?" link inside it. Two steps in one panel, swapped by
+  // toggling `hidden` on two <div> sections rather than two modals:
+  //   1. username + 6-digit authenticator code -> POST /api/auth/forgot.
+  //      Always 202 with {"reset_token"} per section 6a UNLESS the board's
+  //      clock is not SNTP-synced (503) or the shared login-ladder rate
+  //      limit is tripped (429, PLAIN TEXT body, not JSON -- never call
+  //      resp.json() on that path, only resp.text() if displayed at all).
+  //   2. new password (twice, must match) -> POST /api/auth/reset with the
+  //      token from step 1. 200 {"ok":true} success; any other status is
+  //      the SAME generic failure text as an invalid code, on purpose --
+  //      this flow must never reveal whether TOTP is enrolled for the
+  //      typed username (enumeration channel).
+  // The code is never logged (not even to console on error) and the reset
+  // token is held only in a closure variable -- never localStorage/
+  // sessionStorage, and it is discarded (set back to null) on every close.
+  var forgotModalEl = null, forgotPanelEl = null, forgotStep1El = null, forgotStep2El = null,
+      forgotUserEl = null, forgotCodeEl = null, forgotErrorEl = null,
+      forgotNewPassEl = null, forgotNewPass2El = null, forgotErrorEl2 = null,
+      forgotSubmit1El = null, forgotSubmit2El = null;
+  var forgotResetToken = null;
+  var forgotListenersWired = false;
+
+  function buildForgotModal() {
+    var overlay = document.createElement('div');
+    overlay.className = 'kc-login-overlay';
+    overlay.setAttribute('hidden', '');
+    var panel = document.createElement('div');
+    panel.className = 'kc-login-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'kc-forgot-title');
+    panel.innerHTML =
+      '<h2 class="kc-login-title" id="kc-forgot-title">Reset password</h2>' +
+      '<form class="kc-forgot-step" id="kc-forgot-step1">' +
+      '<label for="kc-forgot-username">Username</label>' +
+      '<input id="kc-forgot-username" type="text" autocomplete="username" required>' +
+      '<label for="kc-forgot-code">6-digit authenticator code</label>' +
+      '<input id="kc-forgot-code" type="text" inputmode="numeric" pattern="[0-9]{6}" ' +
+      'maxlength="6" autocomplete="one-time-code" required>' +
+      '<div class="kc-login-error" id="kc-forgot-error"></div>' +
+      '<div class="kc-login-actions">' +
+      '<button type="button" class="kc-login-cancel" id="kc-forgot-cancel1">Cancel</button>' +
+      '<button type="submit" id="kc-forgot-submit1">Continue</button>' +
+      '</div>' +
+      '</form>' +
+      '<form class="kc-forgot-step" id="kc-forgot-step2" hidden>' +
+      '<label for="kc-forgot-newpass">New password</label>' +
+      '<input id="kc-forgot-newpass" type="password" autocomplete="new-password" required>' +
+      '<label for="kc-forgot-newpass2">New password (again)</label>' +
+      '<input id="kc-forgot-newpass2" type="password" autocomplete="new-password" required>' +
+      '<div class="kc-login-error" id="kc-forgot-error2"></div>' +
+      '<div class="kc-login-actions">' +
+      '<button type="button" class="kc-login-cancel" id="kc-forgot-cancel2">Cancel</button>' +
+      '<button type="submit" id="kc-forgot-submit2">Reset password</button>' +
+      '</div>' +
+      '</form>';
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    forgotModalEl = overlay;
+    forgotPanelEl = panel;
+    forgotStep1El = panel.querySelector('#kc-forgot-step1');
+    forgotStep2El = panel.querySelector('#kc-forgot-step2');
+    forgotUserEl = panel.querySelector('#kc-forgot-username');
+    forgotCodeEl = panel.querySelector('#kc-forgot-code');
+    forgotErrorEl = panel.querySelector('#kc-forgot-error');
+    forgotNewPassEl = panel.querySelector('#kc-forgot-newpass');
+    forgotNewPass2El = panel.querySelector('#kc-forgot-newpass2');
+    forgotErrorEl2 = panel.querySelector('#kc-forgot-error2');
+    forgotSubmit1El = panel.querySelector('#kc-forgot-submit1');
+    forgotSubmit2El = panel.querySelector('#kc-forgot-submit2');
+    return overlay;
+  }
+
+  // Generic, enumeration-safe failure text -- used for every non-success
+  // status on both routes except the two the plan calls out by name (503
+  // clock-not-synced, 429 rate limit), which get their own, more useful
+  // wording since neither one reveals anything about a specific account.
+  var KC_FORGOT_GENERIC_FAIL = 'Could not reset the password. Check the code and try again.';
+
+  function kcForgotStatusMessage(status, bodyText) {
+    if (status === 503) return 'Board clock is not synced yet -- codes will not validate. Try again shortly.';
+    if (status === 429) {
+      // Plain-text ladder body (section 6a review correction) -- never
+      // parsed as JSON. Shown verbatim if present (it already carries a
+      // human-readable "try again in Ns" message), else a generic fallback.
+      return (bodyText && String(bodyText).trim()) || 'Too many attempts -- try again later.';
+    }
+    return KC_FORGOT_GENERIC_FAIL;
+  }
+
+  function closeForgotModal() {
+    if (!forgotModalEl) return;
+    forgotModalEl.setAttribute('hidden', '');
+    forgotResetToken = null; // never persisted anywhere else -- discard now
+    if (forgotCodeEl) forgotCodeEl.value = '';
+    if (forgotNewPassEl) forgotNewPassEl.value = '';
+    if (forgotNewPass2El) forgotNewPass2El.value = '';
+    if (forgotErrorEl) forgotErrorEl.textContent = '';
+    if (forgotErrorEl2) forgotErrorEl2.textContent = '';
+    forgotStep1El.hidden = false;
+    forgotStep2El.hidden = true;
+  }
+
+  function openForgotPasswordModal() {
+    if (!forgotModalEl) buildForgotModal();
+    forgotStep1El.hidden = false;
+    forgotStep2El.hidden = true;
+    forgotErrorEl.textContent = '';
+    forgotErrorEl2.textContent = '';
+    forgotUserEl.value = '';
+    forgotCodeEl.value = '';
+    forgotResetToken = null;
+    forgotModalEl.removeAttribute('hidden');
+    forgotUserEl.focus();
+    if (forgotListenersWired) return;
+    forgotListenersWired = true;
+
+    function onCancel(evt) {
+      evt.preventDefault();
+      closeForgotModal();
+    }
+    function onBackdrop(evt) {
+      if (evt.target !== forgotModalEl) return;
+      closeForgotModal();
+    }
+    function onKeydown(evt) {
+      if (evt.key === 'Escape' || evt.keyCode === 27) {
+        evt.preventDefault();
+        closeForgotModal();
+      }
+    }
+    forgotModalEl.querySelector('#kc-forgot-cancel1').addEventListener('click', onCancel);
+    forgotModalEl.querySelector('#kc-forgot-cancel2').addEventListener('click', onCancel);
+    forgotModalEl.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKeydown, true);
+
+    function onStep1Submit(evt) {
+      evt.preventDefault();
+      forgotErrorEl.textContent = '';
+      forgotSubmit1El.disabled = true;
+      var body = 'username=' + encodeURIComponent(forgotUserEl.value) +
+                 '&code=' + encodeURIComponent(forgotCodeEl.value);
+      nativeFetch('/api/auth/forgot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+      }).then(function (resp) {
+        if (resp.status === 202) {
+          return resp.json().then(function (data) {
+            forgotResetToken = (data && data.reset_token) || null;
+            if (!forgotResetToken) {
+              forgotErrorEl.textContent = KC_FORGOT_GENERIC_FAIL;
+              return;
+            }
+            forgotStep1El.hidden = true;
+            forgotStep2El.hidden = false;
+            forgotNewPassEl.value = '';
+            forgotNewPass2El.value = '';
+            forgotNewPassEl.focus();
+          });
+        }
+        if (resp.status === 429) {
+          return resp.text().then(function (text) {
+            forgotErrorEl.textContent = kcForgotStatusMessage(429, text);
+          });
+        }
+        forgotErrorEl.textContent = kcForgotStatusMessage(resp.status, null);
+      }).catch(function () {
+        forgotErrorEl.textContent = 'Network error.';
+      }).then(function () {
+        forgotSubmit1El.disabled = false;
+      });
+    }
+
+    function onStep2Submit(evt) {
+      evt.preventDefault();
+      forgotErrorEl2.textContent = '';
+      if (forgotNewPassEl.value !== forgotNewPass2El.value) {
+        forgotErrorEl2.textContent = 'Passwords do not match.';
+        return;
+      }
+      if (!forgotResetToken) {
+        // Token was discarded (e.g. modal reopened) -- restart at step 1
+        // rather than POSTing a reset with nothing to authorize it.
+        forgotErrorEl2.textContent = KC_FORGOT_GENERIC_FAIL;
+        forgotStep1El.hidden = false;
+        forgotStep2El.hidden = true;
+        return;
+      }
+      forgotSubmit2El.disabled = true;
+      var body = 'username=' + encodeURIComponent(forgotUserEl.value) +
+                 '&reset_token=' + encodeURIComponent(forgotResetToken) +
+                 '&new_password=' + encodeURIComponent(forgotNewPassEl.value);
+      nativeFetch('/api/auth/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+      }).then(function (resp) {
+        if (resp.status === 200) {
+          return resp.json().then(function (data) {
+            if (data && data.ok === true) {
+              closeForgotModal();
+              // Re-open the login modal so the operator can sign in with
+              // the password they just set -- same overlay class, no extra
+              // step needed.
+              openLoginModal('Administrator login required');
+              return;
+            }
+            forgotErrorEl2.textContent = KC_FORGOT_GENERIC_FAIL;
+          });
+        }
+        if (resp.status === 429) {
+          return resp.text().then(function (text) {
+            forgotErrorEl2.textContent = kcForgotStatusMessage(429, text);
+          });
+        }
+        forgotErrorEl2.textContent = kcForgotStatusMessage(resp.status, null);
+      }).catch(function () {
+        forgotErrorEl2.textContent = 'Network error.';
+      }).then(function () {
+        forgotSubmit2El.disabled = false;
+      });
+    }
+
+    forgotStep1El.addEventListener('submit', onStep1Submit);
+    forgotStep2El.addEventListener('submit', onStep2Submit);
   }
 
   // ---- Which refusals may raise the modal (2026-09-24 review) ----------

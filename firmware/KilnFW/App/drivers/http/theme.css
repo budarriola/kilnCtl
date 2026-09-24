@@ -479,6 +479,16 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
 .kc-login-actions button[type="submit"] { background: var(--ui-accent-1); color: #fff; }
 .kc-login-actions button.kc-login-cancel { background: transparent; color: var(--fg);
                                              border: 1px solid var(--border); }
+/* Forgot-password link under the login form, and its own reset-flow panel
+   (docs/TOTP_PASSWORD_RESET_PLAN.md, WT-B) -- deliberately reuses every
+   .kc-login-* token above rather than introducing new colors, per the
+   owner's "popup follows the color theme" requirement. */
+.kc-login-forgot { text-align: center; margin-top: 0.2em; }
+.kc-login-forgot-link { background: none; border: none; padding: 0; cursor: pointer;
+                         color: var(--ui-accent-1); font-size: 0.85em; text-decoration: underline;
+                         min-height: var(--ui-touch, 40px); }
+.kc-forgot-step[hidden] { display: none; }
+.kc-forgot-step { display: flex; flex-direction: column; gap: 0.6em; }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
    item 4's "dim its values" wording. Every *_page.html now annotates its
    live device-reading elements with .kc-live-value (temperatures, relay/

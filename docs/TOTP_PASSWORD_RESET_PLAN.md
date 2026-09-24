@@ -268,6 +268,44 @@ WT-A must implement exactly this shape; the fuller reasoning lives in
   adding them lets `totp_enroll_status()` warn on an unsynced clock per
   section 3's requirement; their absence is tolerated, not required.
 
+## 6b. WT-B's chosen enrollment/disable field names (2026-09-24, pending WT-A)
+
+Same situation as 6a: WT-B (`security_page.html`'s new "Two-factor reset"
+card) landed before WT-A, so it had to pick the enrollment/disable field
+names section 2/7 left open. **WT-A must implement exactly this shape.**
+Chosen design: reuse the *existing* `POST /api/auth/security` `cmd=`
+dispatch (already used for `set_web_password`/`set_lcd_pin`/`set_policy`/
+`clear_credentials`) rather than three new routes — this repo's
+`check_uri_handler_cap.ps1` was, as of the same day, down to single-digit
+spare `httpd_uri_t` slots, so spending zero new routes on a feature that can
+ride an existing one was a deliberate constraint, not just a style choice.
+
+- `cmd=totp_enroll_begin` (no other fields): generates a new pending
+  secret (NOT committed to NVS — see below) and returns JSON
+  `{"secret_base32", "otpauth_uri", "board_time_utc", "sntp_synced"}`. A
+  second call before confirming replaces the still-pending secret (no
+  accumulation of abandoned attempts).
+- `cmd=totp_enroll_confirm&code=NNNNNN`: validates `code` against the
+  pending secret from the most recent `totp_enroll_begin` and, only on a
+  match, commits it as the enrolled secret (NVS `totp_secret`/
+  `totp_last_ctr`, per section 7's WT-A file list). Returns
+  `{"ok": bool}`; no other field — the page treats any `ok:false` as
+  "incorrect code, try again" without distinguishing "no pending secret" or
+  "wrong code" (same generic-failure principle as section 4's reset route).
+- `cmd=totp_disable&code=NNNNNN`: requires a currently-valid TOTP code (not
+  merely the admin session already required by this route's
+  `ROUTE_TIER_ADMIN` tier) — a hijacked web session alone must not be able
+  to silently remove a locked-out owner's only non-admin-session recovery
+  path. Returns `{"ok": bool}`.
+
+All three respond through the same JSON body shape whether the underlying
+transport error is a bad code, no pending enrollment, or a board-clock
+issue — `security_page.html`'s script surfaces only "incorrect code" /
+"could not start enrollment" text, matching the enumeration-safety
+principle sections 4/6a already established for the reset routes (this
+surface is ADMIN-gated, so the concern here is a stolen-session attacker
+brute-forcing disable, not the same anonymous-caller oracle as `/forgot`).
+
 ## 7. Work tranches
 
 **WT-A — firmware: TOTP core + NVS + routes.** PARTIAL, `totpfw` worktree:
