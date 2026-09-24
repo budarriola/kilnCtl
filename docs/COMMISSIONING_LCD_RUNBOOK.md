@@ -210,6 +210,50 @@ quoted, `RGB(47,178,128)`, are not what the runner samples. See CLAUDE.md's
 "Camera aim (2026-09-24, round 4)" note and `lcd_sampler.py`'s
 `FRAME_CORNERS` comment for the method.
 
+**Fix (2026-09-24, round 5): sample off the button's label, not on it.**
+Every `ui_home_build_button()`-style button (`ui_page_home_actions.c`) does
+`lv_button_create()` + `lv_label_create()` + `lv_obj_center(label)` -- the
+caption is drawn dead-centre on the button, and `list_tap_targets()`
+(`kiln_ui.c`'s `log_tap_targets()`) reports only a clickable widget's own
+bounding-box centre, never its width or height. So the reported centre point
+IS the label's own centre, and a color sample taken exactly there risks
+landing on the label glyph rather than the button's fill -- exactly the
+Start-button case above (`RGB(98,204,184)` on the white "Start" text, FAIL,
+vs. the button body's `RGB(59,157,116)`, PASS).
+
+`lcd_sampler.sample_widget_body()` (new) samples `LABEL_AVOID_OFFSET_PX`
+(10 widget-space px) below the given centre instead of on it -- a vertical
+offset, not horizontal, since a horizontal offset of similar magnitude was
+inconsistent across captures (some points still failed tolerance or landed
+near the button's rounded-corner edge anti-aliasing) while a vertical one
+was reliable on both `20260924T191429Z_lcd` and `20260924T162517Z_lcd`:
+
+| capture | dead-centre RGB | RGB distance | `matches_color()` | offset(+10) RGB | RGB distance | `matches_color()` |
+|---|---|---|---|---|---|---|
+| `20260924T191429Z_lcd` | `(100,193,164)` | 54.6 | FAIL (chroma distance 0.104, also over tolerance) | `(67,181,132)` | 35.9 | PASS |
+| `20260924T162517Z_lcd` | `(100,205,157)` | 49.4 | PASS (RGB distance over tolerance, but chroma distance 0.077 is under `CHROMA_MATCH_TOLERANCE`, so the OR-fallback saves it on this capture) | `(68,192,130)` | 31.2 | PASS |
+
+Only the first capture demonstrates the bug outright; the second shows the
+fix is harmless where the bug happened not to bite -- the offset sample
+still reads closer to target on a plain RGB basis (31.2 vs. 49.4), so it is
+the more robust of the two results to rely on regardless.
+
+10px is safe against every button height in the app that uses this pattern:
+`ui_page_home.c`'s Start/Pause buttons are the shortest at 36px, the profile
+builder's "Next" button is 44px, and touch-cal's "Back" button is
+`UI_THEME_MIN_TOUCH_TARGET_PX` (72px).
+
+`cases_lcd.py`'s LCD-01 (Start) and LCD-02 (Pause-matches-accent1, via the
+new `_sample_button_bool()` helper) now use `sample_widget_body()`. LCD-04's
+`trip_strip` sample is deliberately UNCHANGED and must stay on
+`_sample_widget_bool()`/`sample_widget()`: it is a bare `lv_label_create()`
+whose own box is only as tall as its text (not a padded button), so the same
+offset there could walk the sample past the widget's own short edge instead
+of off a label. LCD-08/16/21 do not sample color today; any future color
+check added to a labelled button on those pages should use
+`sample_widget_body()`/`_sample_button_bool()` from the start, and a check
+added to a non-button label (a strip, a status line) should not.
+
 ## Navigation graph (from source, `kiln_ui_show()` call sites)
 
 ```

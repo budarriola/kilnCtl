@@ -80,6 +80,33 @@ class Lcd01Test(unittest.TestCase):
             C._case_lcd01(ctx)
         self.assertIn("home", ctx["_lcd_pages_visited"])
 
+    def test_start_sample_uses_label_avoid_offset_not_raw_centre(self):
+        # 2026-09-24 round 5 regression: the Start button's tap-target centre
+        # sits on its own centred label (lv_obj_center(label)), so the case
+        # must sample cy + LABEL_AVOID_OFFSET_PX, never the raw cy, or the
+        # sample lands on the label glyph. Assert the actual (x, y) passed to
+        # sample_widget by way of sample_widget_body.
+        srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        fake_sample = lcd_sampler.RegionSample(region=(0x5C, 0xC0, 0x6E), bezel=(26, 31, 43))
+        seen_xy = []
+
+        def fake_sample_widget(image_path, x, y, *args, **kwargs):
+            seen_xy.append((x, y))
+            return fake_sample
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="fake.jpg"), \
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
+            C._case_lcd01({"srv": srv})
+        start_target = _HOME_TARGETS[0]
+        # Pause legitimately shares Start's raw (cx, cy) in this fixture and
+        # is sampled unoffset by unchanged code, so a bare assertNotIn on the
+        # raw coordinate would collide with that legitimate call. Assert
+        # precisely what changed instead: Start's OWN sample used the offset.
+        self.assertIn(
+            (start_target["cx"], start_target["cy"] + lcd_sampler.LABEL_AVOID_OFFSET_PX),
+            seen_xy,
+        )
+
     def test_capture_lands_under_run_dir_captures_and_evidence_recorded(self, ):
         # 2026-09-24 fix: ctx["_lcd_capture_dir"] was never set anywhere, so
         # a captured frame always fell back to the OS tempdir and never
@@ -118,7 +145,7 @@ class Lcd01Test(unittest.TestCase):
         red = lcd_sampler.RegionSample(region=(0xD6, 0x20, 0x20), bezel=(26, 31, 43))
         bg = lcd_sampler.RegionSample(region=C._BG_RGB, bezel=(26, 31, 43))
 
-        def fake_sample_widget(image_path, x, y, repo_root=None):
+        def fake_sample_widget(image_path, x, y, *args, **kwargs):
             # No color cast in this capture: only the widget itself reads
             # wrong, so the bg-reference sanity check must not fire and
             # mask a genuine defect as INCONCLUSIVE.
@@ -126,8 +153,16 @@ class Lcd01Test(unittest.TestCase):
                 return bg
             return red
 
+        # frame_corners_look_stale() gets its own coverage in
+        # SampleWidgetBodyTest/FrameCornersLookStaleTest; it is stubbed out
+        # here because CORNER_CHECK_POINTS[0] coincidentally equals
+        # _BG_REFERENCE_XY ((5, 5)), so this test's single-value fake would
+        # otherwise feed the corner-staleness loop the same bezel-matching
+        # sample used for the (unrelated) bg-reference sanity check above and
+        # spuriously downgrade this genuine color FAIL to INCONCLUSIVE.
         with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="x.jpg"), \
-             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget), \
+             mock.patch.object(C, "_downgrade_if_corners_stale", side_effect=lambda ctx, result, path: result):
             result = C._case_lcd01({"srv": srv, "_lcd_capture_dir": "/cap"})
         self.assertEqual(result.verdict, Verdict.FAIL)
         dbg = result.observed["color_debug"]["start"]
@@ -455,6 +490,30 @@ class Lcd02Test(unittest.TestCase):
              mock.patch.object(lcd_sampler, "sample_widget", return_value=fake_sample):
             result = C._case_lcd02({"srv": srv, "_hp01": hp01})
         self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_pause_sample_uses_label_avoid_offset_not_raw_centre(self):
+        # Same class of regression as Lcd01Test's Start check: Pause is also
+        # a ui_home_build_button() button with a centred caption, and now
+        # goes through _sample_button_bool -> sample_widget_body.
+        targets = [
+            {"name": "start", "cx": 240, "cy": 280, "hidden": False, "label": "Stop"},
+            {"name": "pause", "cx": 200, "cy": 280, "hidden": False},
+            {"name": "profile_name", "cx": 240, "cy": 30, "hidden": False},
+        ]
+        srv = FakeSrvFull(FakeUiTest(page="home", targets=targets))
+        hp01 = {"progress_samples": [1.0, 90.0], "profile_name_greyed": True, "profile_name_tap_noop": True}
+        fake_sample = lcd_sampler.RegionSample(region=(0xE8, 0x97, 0x4E), bezel=(26, 31, 43))
+        seen_xy = []
+
+        def fake_sample_widget(image_path, x, y, *args, **kwargs):
+            seen_xy.append((x, y))
+            return fake_sample
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="fake.jpg"), \
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
+            C._case_lcd02({"srv": srv, "_hp01": hp01})
+        self.assertIn((200, 280 + lcd_sampler.LABEL_AVOID_OFFSET_PX), seen_xy)
+        self.assertNotIn((200, 280), seen_xy)
 
 
 class Lcd03Test(unittest.TestCase):

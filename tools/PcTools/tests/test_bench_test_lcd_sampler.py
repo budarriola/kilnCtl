@@ -291,6 +291,67 @@ class SampleRegionSubprocessTest(unittest.TestCase):
                     S.capture_full_frame("out.jpg")
 
 
+class SampleWidgetBodyTest(unittest.TestCase):
+    """sample_widget_body(): offsets the sample point downward in widget
+    space by LABEL_AVOID_OFFSET_PX before mapping through the transform, so
+    it lands off a centred button caption. Regression for the 2026-09-24
+    round-5 fix: the Start button's dead-centre sample landed on the white
+    "Start" label glyph and FAILed color match; the offset sample lands on
+    the button's own fill and PASSes -- reproduced here with the exact
+    measured RGB tuples from both bench captures, via a fake sample_region
+    subprocess so this test never touches ffmpeg or a real capture."""
+
+    def _run_sample_region(self, region_rgb, bezel_rgb=(6, 11, 15)):
+        fake = mock.Mock(
+            returncode=0,
+            stdout='{"region":{"X":1,"Y":2,"W":8,"H":8,"R":%d,"G":%d,"B":%d},'
+                   '"bezel":{"X":100,"Y":100,"W":8,"H":8,"R":%d,"G":%d,"B":%d}}'
+                   % (region_rgb + bezel_rgb),
+            stderr="",
+        )
+        return mock.patch.object(S, "_run", return_value=fake)
+
+    def test_offsets_cy_by_label_avoid_offset_before_mapping(self):
+        """sample_widget_body(cx, cy) must call widget_to_frame with
+        cy + LABEL_AVOID_OFFSET_PX, not the raw cy -- verified by comparing
+        the frame coordinates sample_region() is invoked with (captured via
+        the fake _run's call args aren't available, so instead compare
+        against an explicit sample_widget() call at the offset point)."""
+        transform = S.AffineTransform.fit(S.WIDGET_CORNERS, S.FRAME_CORNERS)
+        with self._run_sample_region((1, 2, 3)):
+            got = S.sample_widget_body("fake.jpg", 423, 289, transform=transform)
+            want = S.sample_widget("fake.jpg", 423, 289 + S.LABEL_AVOID_OFFSET_PX, transform=transform)
+        self.assertEqual(got, want)
+
+    def test_start_button_dead_centre_fails_but_offset_passes_20260924T191429Z(self):
+        # Dead-centre sample on the white "Start" label glyph.
+        centre = self._run_sample_region((100, 193, 164))
+        with centre:
+            centre_sample = S.sample_widget("fake.jpg", 423, 289)
+        self.assertFalse(S.matches_color(centre_sample.region, (0x5C, 0xC0, 0x6E), centre_sample.bezel))
+
+        # Offset sample on the button's own fill.
+        offset = self._run_sample_region((67, 181, 132))
+        with offset:
+            offset_sample = S.sample_widget_body("fake.jpg", 423, 289)
+        self.assertTrue(S.matches_color(offset_sample.region, (0x5C, 0xC0, 0x6E), offset_sample.bezel))
+
+    def test_start_button_offset_passes_20260924T162517Z(self):
+        # On this capture the dead-centre sample happens to pass anyway
+        # (its RGB distance to target is over COLOR_MATCH_TOLERANCE, but
+        # its chromaticity still falls inside CHROMA_MATCH_TOLERANCE, so
+        # matches_color()'s OR-fallback saves it) -- unlike the
+        # 20260924T191429Z_lcd capture above, where the label sample fails
+        # both checks. This capture still demonstrates the fix is not
+        # harmful: the offset sample, off the label, also passes and reads
+        # closer to target on a plain RGB basis (31.2 vs. dead-centre's
+        # 49.4), which is the more robust of the two results to rely on.
+        offset = self._run_sample_region((68, 192, 130))
+        with offset:
+            offset_sample = S.sample_widget_body("fake.jpg", 423, 289)
+        self.assertTrue(S.matches_color(offset_sample.region, (0x5C, 0xC0, 0x6E), offset_sample.bezel))
+
+
 class FrameCornersLookStaleTest(unittest.TestCase):
     """frame_corners_look_stale(): ANY corner-check point reading as bezel
     is stale (the motivating capture put only two of four on bezel)."""

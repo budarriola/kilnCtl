@@ -298,6 +298,53 @@ def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
     return sample_region(image_path, fx - w // 2, fy - h // 2, w, h, bezel_x, bezel_y, repo_root)
 
 
+#: LVGL button/label pattern (ui_home_build_button(), ui_page_home_actions.c):
+#: lv_button_create() + lv_label_create() + lv_obj_center(label) -- the
+#: caption is drawn dead-centre on the button, so list_tap_targets()'s
+#: reported centre point (kiln_ui.c's log_tap_targets(), which only reports
+#: a clickable widget's own bounding-box centre, never its width/height) is
+#: exactly the label's own centre, not just the button's. A sample taken
+#: exactly there risks landing on the label's (differently-coloured) text
+#: rather than the button's own fill.
+#:
+#: Measured on both 2026-09-24 LCD-01 captures (Start button, target
+#: (423, 289)): sampling dead-centre reads RGB(100,193,164) on
+#: 20260924T191429Z_lcd (color_distance to _ACCENT_4_RGB (0x5C,0xC0,0x6E) =
+#: 54.6, FAIL against COLOR_MATCH_TOLERANCE=45.0) and RGB(100,205,157) on
+#: 20260924T162517Z_lcd (distance 49.4, also FAIL) -- both land on the white
+#: "Start" label glyph. Offsetting 10 widget-space px downward (away from
+#: the label, still inside the button's own fill) reads RGB(67,181,132)
+#: (distance 35.9, PASS) and RGB(68,192,130) (distance 31.2, PASS)
+#: respectively. A horizontal offset of similar magnitude was tried and
+#: rejected: it was inconsistent across the two captures (some points still
+#: failed tolerance, or landed near the button's rounded-corner edge
+#: anti-aliasing), where a vertical offset was reliable on both.
+#:
+#: 10px is safe against every button height in the app that uses this
+#: pattern: ui_page_home.c's Start/Pause buttons are the shortest at 36px
+#: (ui_home_build_button(..., 36, ...)), ui_page_profile_builder_zones.c's
+#: "Next" button is 44px, and ui_page_touch_cal.c's "Back" button is
+#: UI_THEME_MIN_TOUCH_TARGET_PX (72px) -- a 10px offset from centre stays
+#: well inside even the 36px case's own padded fill.
+LABEL_AVOID_OFFSET_PX = 10.0
+
+
+def sample_widget_body(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
+                        bezel_x: int = 100, bezel_y: int = 100,
+                        transform: Optional[AffineTransform] = None,
+                        repo_root: Optional[str] = None,
+                        offset_px: float = LABEL_AVOID_OFFSET_PX) -> RegionSample:
+    """Like sample_widget(), but for a button whose caption is centred on it
+    (see LABEL_AVOID_OFFSET_PX's comment) -- samples ``offset_px`` below the
+    given centre in widget space instead of exactly on it, so the sample
+    lands on the button's own fill colour rather than its label text. Never
+    use this for a widget whose caption is NOT centred on the tap target
+    (e.g. a full-width status strip whose own box is only as tall as its
+    text -- ui_page_home.c's trip strip), since the same offset there can
+    walk the sample straight past the widget's own short edge."""
+    return sample_widget(image_path, cx, cy + offset_px, w, h, bezel_x, bezel_y, transform, repo_root)
+
+
 #: frame_corners_look_stale()'s own gate. Reuses MIN_BEZEL_CONTRAST's value
 #: (defined below) rather than a second constant, but is read at call time
 #: -- module order below is preserved (MIN_BEZEL_CONTRAST is a plain float,

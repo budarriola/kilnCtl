@@ -447,11 +447,12 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
     pause_hidden: Optional[bool] = None
     try:
         if start is not None and not start.get("hidden"):
-            sample = lcd_sampler.sample_widget(image_path, start["cx"], start["cy"], repo_root=ctx.get("repo_root"))
+            sample = lcd_sampler.sample_widget_body(image_path, start["cx"], start["cy"], repo_root=ctx.get("repo_root"))
             if sample.bezel is not None:
                 start_matches = lcd_sampler.matches_color(sample.region, _ACCENT_4_RGB, sample.bezel)
                 color_debug["start"] = {
                     "region_xy": (start["cx"], start["cy"]),
+                    "sample_offset_px": lcd_sampler.LABEL_AVOID_OFFSET_PX,
                     "sampled_rgb": sample.region,
                     "bezel_rgb": sample.bezel,
                     "target_rgb": _ACCENT_4_RGB,
@@ -586,6 +587,26 @@ def _sample_widget_bool(ctx: dict, image_path: str, target: Optional[dict],
         return None
     try:
         sample = lcd_sampler.sample_widget(image_path, target["cx"], target["cy"], repo_root=ctx.get("repo_root"))
+        if sample.bezel is None:
+            return None
+        return lcd_sampler.matches_color(sample.region, color, sample.bezel)
+    except lcd_sampler.LcdCaptureError:
+        return None
+
+
+def _sample_button_bool(ctx: dict, image_path: str, target: Optional[dict],
+                         color: "tuple[int, int, int]") -> Optional[bool]:
+    """Like _sample_widget_bool(), but for a button whose caption is
+    centred on it (Pause/Resume, Start/Stop) -- uses sample_widget_body()
+    to sample off the label rather than on it. See
+    lcd_sampler.LABEL_AVOID_OFFSET_PX's comment. Do not use this for a
+    non-button labelled widget (e.g. the home page's trip strip, whose own
+    box is only as tall as its text) -- _sample_widget_bool is still
+    correct for those."""
+    if target is None or target.get("hidden"):
+        return None
+    try:
+        sample = lcd_sampler.sample_widget_body(image_path, target["cx"], target["cy"], repo_root=ctx.get("repo_root"))
         if sample.bezel is None:
             return None
         return lcd_sampler.matches_color(sample.region, color, sample.bezel)
@@ -738,7 +759,7 @@ def _case_lcd02(ctx: dict) -> CaseResult:
     profile_name = _find(targets, "profile_name")
     start_reads_stop = bool(start and str(start.get("label", "")).lower() == "stop")
     image_path = _capture(ctx, "lcd02_home_firing.jpg")
-    pause_matches_accent1 = _sample_widget_bool(ctx, image_path, pause, _ACCENT_1_RGB) if image_path else None
+    pause_matches_accent1 = _sample_button_bool(ctx, image_path, pause, _ACCENT_1_RGB) if image_path else None
     progress_samples = hp01.get("progress_samples", [])
     profile_name_greyed = hp01.get("profile_name_greyed")
     profile_name_tap_noop = hp01.get("profile_name_tap_noop")
