@@ -287,9 +287,36 @@ MIN_BEZEL_CONTRAST = 25.0
 #: applied on top of (never instead of) the bezel-contrast check above.
 COLOR_MATCH_TOLERANCE = 45.0
 
+#: Tolerance for the chromaticity fallback below, in normalised (r/sum,
+#: g/sum, b/sum) space -- see matches_color()'s docstring. Chosen from the
+#: 2026-09-24 bench evidence: a genuinely-lit ACCENT_4 (green Start button)
+#: sampled at RGB(60,138,92) against the theme's RGB(92,192,110) reference
+#: is only chroma-distance ~0.048 away (the camera's under-exposure/white-
+#: balance scaled all three channels together, which chromaticity cancels),
+#: while a wrong-hue red RGB(200,60,60) is ~0.50 away and a colorless grey
+#: RGB(150,150,150) is ~0.19 away -- both comfortably outside this
+#: threshold, so a genuinely wrong button color still fails.
+CHROMA_MATCH_TOLERANCE = 0.10
+
 
 def color_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _chromaticity(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+    """Normalise `rgb` to (r/sum, g/sum, b/sum) -- a uniform-scale-invariant
+    "hue+saturation" descriptor. A camera's auto-exposure/white-balance
+    gain multiplies every channel by roughly the same factor (that is what
+    "under-exposed" or "warmer/cooler white balance" means physically), so
+    this cancels that factor out while a genuine hue difference (a red or
+    grey button instead of green) still survives it. Never used in place of
+    the absolute bezel-contrast floor -- a near-black sample's channel
+    ratios are noise, not signal, which is exactly why is_off()/
+    min_bezel_contrast still gate on the raw distance first."""
+    total = sum(rgb)
+    if total <= 0:
+        return (0.0, 0.0, 0.0)
+    return (rgb[0] / total, rgb[1] / total, rgb[2] / total)
 
 
 def is_off(rgb: Tuple[int, int, int], bezel: Tuple[int, int, int], tol: float = MIN_BEZEL_CONTRAST) -> bool:
@@ -299,12 +326,33 @@ def is_off(rgb: Tuple[int, int, int], bezel: Tuple[int, int, int], tol: float = 
 
 
 def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel: Tuple[int, int, int],
-                   tol: float = COLOR_MATCH_TOLERANCE, min_bezel_contrast: float = MIN_BEZEL_CONTRAST) -> bool:
+                   tol: float = COLOR_MATCH_TOLERANCE, min_bezel_contrast: float = MIN_BEZEL_CONTRAST,
+                   chroma_tol: float = CHROMA_MATCH_TOLERANCE) -> bool:
     """True if `rgb` is close to `target` AND distinctly different from
     the bezel -- a region cannot "match" a bright accent color while also
     reading as indistinguishable from the dark bezel (a camera fault or a
     badly mis-measured region would otherwise pass by accident if only the
-    target-distance half were checked)."""
+    target-distance half were checked).
+
+    "Close to `target`" is checked two ways, either sufficient once the
+    bezel-contrast gate above has passed:
+
+    1. The original absolute Euclidean RGB distance (`tol`) -- fine when
+       the camera's white balance happens to be neutral.
+    2. A chromaticity (hue/saturation, exposure-cancelled) distance
+       (`chroma_tol`) -- 2026-09-24 bench evidence (CLAUDE.md's ST7796
+       colour-order history) showed a real, correctly-lit ACCENT_4 button
+       sampled well outside `tol` under this camera's actual white balance
+       (the bezel reference itself sampled as sky-blue, not black, that
+       same run), while still being unmistakably green by hue. Only (1) can
+       tell a genuinely wrong hue (red, grey) apart from a merely exposure-
+       shifted correct one when both would otherwise pass a loose enough
+       absolute tolerance, so (2) is an OR added on top of (1), never a
+       replacement for it -- CLAUDE.md's "judge colors by numeric pixel
+       sampling, never by eye" still holds: this compares two sampled
+       numbers, never a theme source constant read informally."""
     if color_distance(rgb, bezel) < min_bezel_contrast:
         return False
-    return color_distance(rgb, target) <= tol
+    if color_distance(rgb, target) <= tol:
+        return True
+    return color_distance(_chromaticity(rgb), _chromaticity(target)) <= chroma_tol

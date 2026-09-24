@@ -169,6 +169,58 @@ def _wait_for_targets_change(ui, before_names: "set",
         names = {t.get("name") for t in tap.get("targets", [])}
     return tap, time.monotonic() - start
 
+
+def _click_then_page(ui, name: str, expected_page: str,
+                      timeout_s: float = _PAGE_POLL_TIMEOUT_S) -> "tuple[Optional[CaseResult], str, float]":
+    """Click a tap target by name, then wait for the page to become
+    `expected_page`, and -- unlike a bare ``ui.click_by_name()`` +
+    ``_wait_for_page()`` with the wait's return value left unchecked --
+    actually stop and FAIL here if either step didn't land, instead of
+    letting a caller march on to click a target that cannot exist on
+    whatever page the board is really parked on.
+
+    This is the 2026-09-24 bench root cause for LCD-09/14/16: each of
+    those cases clicked "settings", called ``_wait_for_page(ui, "config")``
+    but discarded its return value, and then unconditionally clicked the
+    next target ("Profiles"/"Temperature"/"Diagnostics") even when the wait
+    had actually timed out with the board still on "home" -- so the SECOND
+    click's "not_found" was a symptom of the FIRST hop never being
+    confirmed, not a defect in the second click's own target name.
+
+    Returns ``(None, page, waited_s)`` on success (click replied 'ok' AND
+    the page arrived within `timeout_s`). On any failure, the first element
+    is a ready-to-return FAIL :class:`CaseResult` -- naming the click's own
+    result when the click itself failed, or the page the board is actually
+    on (plus the blanked-screen hint, since a swallowed wake tap reads
+    identically to this) when the click said 'ok' but the page never
+    changed."""
+    click = ui.click_by_name(name)
+    if click.get("result") != "ok":
+        return (
+            CaseResult(
+                Verdict.FAIL,
+                reason=f"click_by_name({name!r}) returned {click.get('result')!r}",
+                observed={"click": click},
+            ),
+            "",
+            0.0,
+        )
+    page, waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
+    if page != expected_page:
+        return (
+            CaseResult(
+                Verdict.FAIL,
+                reason=(
+                    f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
+                    f"expected {expected_page!r}" + J.BLANKED_SCREEN_HINT
+                ),
+                observed={"click": click, "page": page, "page_wait_s": round(waited_s, 3)},
+            ),
+            page,
+            waited_s,
+        )
+    return None, page, waited_s
+
 #: Mirrored from firmware/KilnFW/App/drivers/ui/ui_theme.h -- reference
 #: values ONLY. Per CLAUDE.md ("never by matching theme source constants"),
 #: a sampled region is judged against these plus a live bezel sample
@@ -341,8 +393,22 @@ def _navigate_home(ui) -> None:
             # followed by _wait_for_page(), not an immediate read, for the
             # same click-then-read race this file documents above
             # (_PAGE_POLL_TIMEOUT_S).
-            ui.click_by_name("home")
-            page, _ = _wait_for_page(ui, "home")
+            # Only wait out the poll timeout when the "home" click actually
+            # landed on something (result 'ok') -- a page with no Home icon
+            # at all (the config hub, show_home=false) makes click_by_name()
+            # return 'not_found' immediately, and blindly polling the full
+            # _PAGE_POLL_TIMEOUT_S here anyway (as this used to) burns up to
+            # 2s of the case's own budget for nothing before ever trying
+            # "back", which is what actually gets a from-config board home.
+            # That wasted time was eating into the shortest display-timeout
+            # margin (_WAKE_IDLE_MS_THRESHOLD) and left less slack before a
+            # later click in the same case risked landing on a re-blanked
+            # panel -- part of the 2026-09-24 bench failure class this file
+            # documents at _click_then_page().
+            click = ui.click_by_name("home")
+            page = ui.get_current_page()
+            if click.get("result") == "ok":
+                page, _ = _wait_for_page(ui, "home")
             if page != "home":
                 ui.click_by_name("back")
                 _wait_for_page(ui, "home")
@@ -450,14 +516,12 @@ def _case_lcd09(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
     try:
-        click = ui.click_by_name("settings")
-        if click.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
-        _wait_for_page(ui, "config")
-        click2 = ui.click_by_name("Profiles")
-        if click2.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('Profiles') returned {click2.get('result')!r}", observed={"click": click2})
-        page, waited_s = _wait_for_page(ui, "profiles")
+        fail, _config_page, _ = _click_then_page(ui, "settings", "config")
+        if fail is not None:
+            return fail
+        fail, page, waited_s = _click_then_page(ui, "Profiles", "profiles")
+        if fail is not None:
+            return fail
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "profiles", tap)
@@ -487,14 +551,12 @@ def _case_lcd14(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
     try:
-        click = ui.click_by_name("settings")
-        if click.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
-        _wait_for_page(ui, "config")
-        click2 = ui.click_by_name("Temperature")
-        if click2.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('Temperature') returned {click2.get('result')!r}", observed={"click": click2})
-        page, waited_s = _wait_for_page(ui, "temperature")
+        fail, _config_page, _ = _click_then_page(ui, "settings", "config")
+        if fail is not None:
+            return fail
+        fail, page, waited_s = _click_then_page(ui, "Temperature", "temperature")
+        if fail is not None:
+            return fail
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "temperature", tap)
@@ -537,19 +599,19 @@ def _case_lcd16(ctx: dict) -> CaseResult:
     crash_report_visible_entries: Optional[int] = None
     board_heap_value: Optional[float] = None
     try:
-        click = ui.click_by_name("settings")
-        if click.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
-        config_page, _ = _wait_for_page(ui, "config")
-        click2 = ui.click_by_name("Diagnostics")
-        if click2.get("result") != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"click_by_name('Diagnostics') returned {click2.get('result')!r}", observed={"click": click2})
+        fail, _config_page, _ = _click_then_page(ui, "settings", "config")
+        if fail is not None:
+            return fail
         # ui_page_diagnostics.c's sub-tabs never change kiln_ui's top-level
         # page name (they are one page's own internal s_pages[], see
-        # _wait_for_targets_change's docstring), so waiting for a page name
-        # here only ever catches config -> diagnostics; each per-title tap
-        # below is followed by a tap-target-set wait instead.
-        _wait_for_page_change(ui, config_page)
+        # _wait_for_targets_change's docstring) -- but the initial
+        # config -> diagnostics hop IS a real top-level page switch, so it
+        # gets the same checked click-then-page-wait as every other hop;
+        # each per-title tap below is followed by a tap-target-set wait
+        # instead, since those don't change the page name at all.
+        fail, _diag_page, _ = _click_then_page(ui, "Diagnostics", "diagnostics")
+        if fail is not None:
+            return fail
         prev_names = {t.get("name") for t in ui.list_tap_targets().get("targets", [])}
         for title in J._DIAG_TITLES:
             click3 = ui.click_by_name(title)

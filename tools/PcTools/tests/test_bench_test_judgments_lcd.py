@@ -98,7 +98,7 @@ class LcdHomeIdleTest(unittest.TestCase):
 _CONFIG_TARGETS = [
     {"name": "Profiles", "cx": 100, "cy": 100, "hidden": False},
     {"name": "Temperature", "cx": 200, "cy": 100, "hidden": False},
-    {"name": "Network", "cx": 300, "cy": 100, "hidden": False},
+    {"name": "Network / Wi-Fi", "cx": 300, "cy": 100, "hidden": False},
     {"name": "Diagnostics", "cx": 100, "cy": 200, "hidden": False},
 ]
 
@@ -119,9 +119,21 @@ class LcdConfigHubTest(unittest.TestCase):
         self.assertIn("Diagnostics", r.reason)
 
     def test_hidden_tile_counts_as_missing(self):
-        targets = [dict(t, hidden=True) if t["name"] == "Network" else t for t in _CONFIG_TARGETS]
+        targets = [dict(t, hidden=True) if t["name"] == "Network / Wi-Fi" else t for t in _CONFIG_TARGETS]
         r = J.judge_lcd_config_hub("config", targets)
         self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_stale_shortened_network_label_fails(self):
+        # Negative test for the 2026-09-24 LCD-08 fix: the button's real
+        # firmware label is "Network / Wi-Fi" (ui_page_config.c's
+        # build_nav_item() call); a page offering only the old, shortened
+        # "Network" literal must still be reported as missing the real tile
+        # -- proving the comparison wasn't loosened to a bare substring
+        # match that would let the stale name silently pass.
+        targets = [dict(t, name="Network") if t["name"] == "Network / Wi-Fi" else t for t in _CONFIG_TARGETS]
+        r = J.judge_lcd_config_hub("config", targets)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("Network / Wi-Fi", r.reason)
 
 
 class LcdNoScrollBudgetTest(unittest.TestCase):

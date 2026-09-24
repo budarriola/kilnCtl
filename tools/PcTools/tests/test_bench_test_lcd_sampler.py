@@ -166,6 +166,41 @@ class ToleranceMathTest(unittest.TestCase):
         sampled = (200, 20, 20)  # distinct from bezel, but not the target
         self.assertFalse(S.matches_color(sampled, target, bezel))
 
+    def test_matches_color_true_via_chroma_fallback_under_exposure_shift(self):
+        # Exact 2026-09-24 bench numbers (LCD-01): a genuinely-lit green
+        # Start button read well outside the absolute tolerance (65.3 > 45)
+        # because this camera's white balance/exposure scaled all three
+        # channels down together -- the bezel reference sampled that same
+        # run as sky-blue RGB(160,233,253), not black, confirming the
+        # camera's own colour response was off, not the button. The
+        # chromaticity fallback must still pass this case.
+        bezel = (160, 233, 253)
+        target = (0x5C, 0xC0, 0x6E)
+        sampled = (60, 138, 92)
+        self.assertGreater(S.color_distance(sampled, target), S.COLOR_MATCH_TOLERANCE)
+        self.assertTrue(S.matches_color(sampled, target, bezel))
+
+    def test_matches_color_false_for_wrong_hue_red_despite_exposure_shift(self):
+        # Negative test for the chroma fallback itself: a red button run
+        # through the same kind of exposure scaling as the case above must
+        # still fail -- it is a genuinely wrong colour, not merely dim.
+        bezel = (26, 31, 43)
+        target = (0x5C, 0xC0, 0x6E)
+        sampled = (200, 60, 60)
+        self.assertFalse(S.matches_color(sampled, target, bezel))
+
+    def test_matches_color_false_for_grey_despite_exposure_shift(self):
+        # Second negative test: a colourless (desaturated) grey button --
+        # chroma distance alone rejects it even though it is neither
+        # bezel-dark nor a clear opposite hue.
+        bezel = (26, 31, 43)
+        target = (0x5C, 0xC0, 0x6E)
+        sampled = (150, 150, 150)
+        self.assertFalse(S.matches_color(sampled, target, bezel))
+
+    def test_chromaticity_zero_sum_never_raises(self):
+        self.assertEqual(S._chromaticity((0, 0, 0)), (0.0, 0.0, 0.0))
+
 
 class ParseSampleJsonTest(unittest.TestCase):
     def test_parses_region_and_bezel(self):

@@ -749,10 +749,16 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
 
 def judge_lcd_config_hub(page: str, targets: "list[dict]",
                           expected_tiles: "tuple[str, ...]" = (
-                              "Profiles", "Temperature", "Network", "Diagnostics",
+                              "Profiles", "Temperature", "Network / Wi-Fi", "Diagnostics",
                           )) -> CaseResult:
     """LCD-08: config hub reached by tapping the topbar gear ("settings").
-    `expected_tiles` omits
+    `expected_tiles` must match the firmware's exact button-label text
+    (`build_nav_item()` calls in ui_page_config.c, e.g. "Network / Wi-Fi",
+    not a shortened "Network" -- `kiln_ui_click_by_name()`
+    (firmware/KilnFW/App/drivers/ui/kiln_ui.c) matches tap names with an
+    exact `strcmp()`, so a literal that drifts from the button's real label
+    both fails this presence check AND could never be clicked by name
+    either. `expected_tiles` omits
     Touch Calibration by default since the plan marks it 'if present' --
     callers that know the board has it should pass the 5-tuple."""
     observed = {"page": page, "targets": targets}

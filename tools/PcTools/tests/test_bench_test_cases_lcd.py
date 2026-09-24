@@ -84,7 +84,7 @@ class Lcd01Test(unittest.TestCase):
 _CONFIG_TARGETS = [
     {"name": "Profiles", "cx": 100, "cy": 100, "hidden": False},
     {"name": "Temperature", "cx": 200, "cy": 100, "hidden": False},
-    {"name": "Network", "cx": 300, "cy": 100, "hidden": False},
+    {"name": "Network / Wi-Fi", "cx": 300, "cy": 100, "hidden": False},
     {"name": "Diagnostics", "cx": 100, "cy": 200, "hidden": False},
 ]
 
@@ -349,6 +349,42 @@ _PROFILES_PAGE_TARGETS = {
     ],
     "profile_detail": [],
 }
+
+
+class ClickThenPageTest(unittest.TestCase):
+    """Direct unit tests for _click_then_page() itself (2026-09-24 LCD-09/
+    14/16 fix): a bare click_by_name() + _wait_for_page() with the wait's
+    return value discarded let a case march on to click a target that could
+    not exist on whatever page the board was really parked on. These tests
+    exercise the helper directly, independent of any one case, including
+    the timeout-not-checked regression the fix specifically closes."""
+
+    def test_success_returns_none_fail_and_the_arrived_page(self):
+        ui = PageNavUiTest(page="home", page_targets={"home": [], "config": []},
+                            nav_map={"settings": "config"})
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config")
+        self.assertIsNone(fail)
+        self.assertEqual(page, "config")
+
+    def test_click_itself_not_found_fails_without_polling(self):
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config")
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertIn("not_found", fail.reason)
+
+    def test_click_ok_but_page_never_arrives_fails(self):
+        # This is the exact regression the 2026-09-24 fix closes: without
+        # checking _wait_for_page()'s return value, a click that replies
+        # 'ok' but never actually lands on the destination page would be
+        # treated as a successful hop -- and a caller would go on to click
+        # a target that cannot exist on the page the board is really on.
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})  # "settings" click has no nav_map entry
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertIn("config", fail.reason)
+        self.assertEqual(page, "home")
 
 
 class Lcd09Test(unittest.TestCase):
