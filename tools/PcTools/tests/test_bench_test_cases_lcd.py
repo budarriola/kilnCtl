@@ -113,6 +113,27 @@ class Lcd01Test(unittest.TestCase):
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 
+    def test_wrong_color_still_fails_with_numeric_evidence(self):
+        srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        red = lcd_sampler.RegionSample(region=(0xD6, 0x20, 0x20), bezel=(26, 31, 43))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="x.jpg"), \
+             mock.patch.object(lcd_sampler, "sample_widget", return_value=red):
+            result = C._case_lcd01({"srv": srv, "_lcd_capture_dir": "/cap"})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        dbg = result.observed["color_debug"]["start"]
+        self.assertFalse(dbg["matches"])
+        self.assertEqual(dbg["sampled_rgb"], (0xD6, 0x20, 0x20))
+        self.assertGreater(dbg["distance"], dbg["distance_tolerance"])
+        self.assertEqual(len(result.evidence), 1)
+
+    def test_readonly_run_dir_never_fails_the_case(self):
+        srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        with mock.patch.object(C.os, "makedirs", side_effect=PermissionError("ro")), \
+             mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")) as cap:
+            result = C._case_lcd01({"srv": srv, "run_dir": "/ro/run"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertFalse(cap.call_args[0][0].startswith(os.path.join("/ro/run", "captures")))
+
     def test_explicit_lcd_capture_dir_overrides_run_dir(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
         with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")) as cap:
@@ -377,6 +398,19 @@ class Lcd04Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertTrue(srv.clear_trip_called)
 
+    def test_before_and_after_frames_get_distinct_paths(self):
+        # Both frames land in evidence; a shared filename would make the
+        # after-clear frame overwrite the before-clear one.
+        strip_targets = [{"name": "trip_strip", "cx": 240, "cy": 10, "hidden": False}]
+        srv = FakeSrvFull(FakeUiTest(page="home", targets=strip_targets), safety=FakeSafety(FakeSafetyDiag(trip_reason=6)))
+        region_sample = lcd_sampler.RegionSample(region=(0xD6, 0x55, 0x5F), bezel=(26, 31, 43))
+        off_sample = lcd_sampler.RegionSample(region=(26, 31, 43), bezel=(26, 31, 43))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="fake.jpg"), \
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=[region_sample, off_sample]):
+            result = C._case_lcd04({"srv": srv, "_lcd_capture_dir": "/cap"})
+        self.assertEqual(len(result.evidence), 2)
+        self.assertEqual(len(set(result.evidence)), 2)
+
 
 _PROFILES_NAV = {"settings": "config", "Profiles": "profiles", "profile_row_0": "profile_detail"}
 _PROFILES_PAGE_TARGETS = {
@@ -450,18 +484,54 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(ui.calls, 2)
 
     def test_retry_exhausted_fails_naming_the_retry(self):
-        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})
+        ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={})
         fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("retried once", fail.reason)
         self.assertEqual(fail.observed.get("attribution"), "swallowed_or_wrong_page")
+        # Exactly one retry: two real taps, never more.
+        self.assertEqual(ui.clicks, ["settings", "settings"])
+        self.assertIn("retry_click", fail.observed)
 
     def test_not_found_attribution_never_retries(self):
-        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
+        ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
         fail, page, waited_s = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.observed.get("attribution"), "not_found")
+        self.assertEqual(ui.clicks, ["settings"])
+
+    def test_page_moved_elsewhere_is_never_retried(self):
+        # The first tap DID move the board, just not to the expected page.
+        # A second tap by the same name would land on a different page's
+        # widget, so it must never be sent.
+        ui = _CountingNavUi(page="home", page_targets={"home": [], "diagnostics": []},
+                            nav_map={"settings": "diagnostics"})
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(ui.clicks, ["settings"])
+        self.assertEqual(fail.observed.get("attribution"), "wrong_page")
+        self.assertEqual(page, "diagnostics")
+
+    def test_every_call_site_is_a_pure_navigation_target(self):
+        # A retried click is a second real tap. Pin the set of names routed
+        # through _click_then_page() so a Start/Stop/Confirm/PIN/toggle
+        # target can't be added without revisiting the retry.
+        import inspect
+        import re
+        src = inspect.getsource(C)
+        names = set(re.findall(r'_click_then_page\(ui, "([^"]+)"', src))
+        self.assertEqual(names, {"settings", "Profiles", "Temperature", "Diagnostics"})
+
+
+class _CountingNavUi(PageNavUiTest):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.clicks = []
+
+    def click_by_name(self, name):
+        self.clicks.append(name)
+        return super().click_by_name(name)
 
 
 class _RecordingNavUi(PageNavUiTest):

@@ -223,7 +223,15 @@ def _click_then_page(ui, name: str, expected_page: str,
     result when the click itself failed, or the page the board is actually
     on (plus the blanked-screen hint, since a swallowed wake tap reads
     identically to this) when the click said 'ok' but the page never
-    changed."""
+    changed.
+
+    Worst case: two clicks plus two full `timeout_s` page waits (~4 s at
+    the 2 s default) when both the first click and its one retry are
+    swallowed; a not_found click fails immediately with no wait at all."""
+    try:
+        page_before = ui.get_current_page()
+    except Exception:
+        page_before = None
     click = ui.click_by_name(name)
     if click.get("result") != "ok":
         return (
@@ -247,26 +255,48 @@ def _click_then_page(ui, name: str, expected_page: str,
         # own tap cannot itself be a NEW wake edge) either recovers cleanly
         # or proves the hop is genuinely stuck -- retried once, not looped,
         # so a real defect still fails within a bounded time.
-        retry_click = ui.click_by_name(name)
-        if retry_click.get("result") == "ok":
-            retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
-            if retry_page == expected_page:
-                return None, retry_page, waited_s + retry_waited_s
-            page, waited_s = retry_page, waited_s + retry_waited_s
-            click = retry_click
+        #
+        # Retried ONLY when the board is still on the exact page it was on
+        # before the first click (the swallow shape: nothing happened). If
+        # the page moved somewhere else (a late or wrong transition), a
+        # second tap by the same name would land on a DIFFERENT page's
+        # widget of that name -- never do that; fail without a second tap.
+        # Every current caller clicks a pure navigation target (settings,
+        # Profiles, Temperature, Diagnostics), so a double tap on the
+        # unchanged source page is harmless; never route a Start/Stop/
+        # Confirm/PIN-digit/toggle click through this helper.
+        retry_click = None
+        if page_before is not None and page == page_before:
+            retry_click = ui.click_by_name(name)
+            if retry_click.get("result") == "ok":
+                retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
+                if retry_page == expected_page:
+                    return None, retry_page, waited_s + retry_waited_s
+                page, waited_s = retry_page, waited_s + retry_waited_s
+        observed = {
+            "click": click,
+            "page_before": page_before,
+            "page": page,
+            "page_wait_s": round(waited_s, 3),
+            "attribution": (
+                "swallowed_or_wrong_page" if retry_click is not None
+                else "wrong_page" if page_before is not None
+                else "page_before_unreadable"
+            ),
+        }
+        if retry_click is not None:
+            observed["retry_click"] = retry_click
         return (
             CaseResult(
                 Verdict.FAIL,
                 reason=(
                     f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
-                    f"expected {expected_page!r} (retried once)" + J.BLANKED_SCREEN_HINT
+                    f"expected {expected_page!r}"
+                    + (" (retried once)" if retry_click is not None
+                       else f" (page moved from {page_before!r}; not retried)")
+                    + J.BLANKED_SCREEN_HINT
                 ),
-                observed={
-                    "click": click,
-                    "page": page,
-                    "page_wait_s": round(waited_s, 3),
-                    "attribution": "swallowed_or_wrong_page",
-                },
+                observed=observed,
             ),
             page,
             waited_s,
@@ -352,6 +382,10 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                     "sampled_rgb": sample.region,
                     "bezel_rgb": sample.bezel,
                     "target_rgb": _ACCENT_4_RGB,
+                    # matches_color()'s first gate: a region too close to
+                    # the bezel never matches, whatever its hue.
+                    "bezel_distance": round(lcd_sampler.color_distance(sample.region, sample.bezel), 2),
+                    "min_bezel_contrast": lcd_sampler.MIN_BEZEL_CONTRAST,
                     "distance": round(lcd_sampler.color_distance(sample.region, _ACCENT_4_RGB), 2),
                     "distance_tolerance": lcd_sampler.COLOR_MATCH_TOLERANCE,
                     "chroma_distance": round(
@@ -468,8 +502,12 @@ def _sample_widget_off(ctx: dict, image_path: str, target: Optional[dict]) -> Op
         return None
 
 
-def _capture(ctx: dict) -> Optional[str]:
-    image_path = os.path.join(_capture_dir(ctx), "bench_test_lcd_full.jpg")
+def _capture(ctx: dict, name: str) -> Optional[str]:
+    """`name` must be unique per capture within a run: every frame's path
+    is recorded in CaseResult.evidence, so a shared filename (LCD-04's
+    before/after pair, LCD-02 vs LCD-04) would silently overwrite an
+    earlier case's evidence with a later frame."""
+    image_path = os.path.join(_capture_dir(ctx), name)
     try:
         lcd_sampler.capture_full_frame(image_path, repo_root=ctx.get("repo_root"))
     except lcd_sampler.LcdCaptureError:
@@ -542,7 +580,7 @@ def _case_lcd02(ctx: dict) -> CaseResult:
     pause = _find(targets, "pause")
     profile_name = _find(targets, "profile_name")
     start_reads_stop = bool(start and str(start.get("label", "")).lower() == "stop")
-    image_path = _capture(ctx)
+    image_path = _capture(ctx, "lcd02_home_firing.jpg")
     pause_matches_accent1 = _sample_widget_bool(ctx, image_path, pause, _ACCENT_1_RGB) if image_path else None
     progress_samples = hp01.get("progress_samples", [])
     profile_name_greyed = hp01.get("profile_name_greyed")
@@ -591,7 +629,7 @@ def _case_lcd04(ctx: dict) -> CaseResult:
     targets_before = ui.list_tap_targets().get("targets", [])
     strip_before = _find(targets_before, "trip_strip")
     strip_visible_before = bool(strip_before and not strip_before.get("hidden"))
-    image_path = _capture(ctx)
+    image_path = _capture(ctx, "lcd04_trip_before_clear.jpg")
     strip_matches_accent5_before = (
         _sample_widget_bool(ctx, image_path, strip_before, _ACCENT_5_RGB) if image_path else None
     )
@@ -608,7 +646,7 @@ def _case_lcd04(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"safety_clear_trip() raised: {exc}")
     targets_after = ui.list_tap_targets().get("targets", [])
     strip_after = _find(targets_after, "trip_strip")
-    image_path2 = _capture(ctx)
+    image_path2 = _capture(ctx, "lcd04_trip_after_clear.jpg")
     strip_off_after_clear = _sample_widget_off(ctx, image_path2, strip_after) if image_path2 else None
     result = J.judge_lcd_home_tripped(strip_visible_before, strip_matches_accent5_before, strip_off_after_clear)
     result.evidence = list(result.evidence or []) + [p for p in (image_path, image_path2) if p]
