@@ -241,11 +241,18 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
       }).then(function (res) {
         status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
       }).catch(function (authErr) {
-        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        // Quiet note, never a stale "Uploading...".
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+          status.textContent = 'Sign-in cancelled -- nothing was restored.';
+          return;
+        }
         status.textContent = 'Upload failed -- check the connection and try again.';
       });
     }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+        status.textContent = 'Sign-in cancelled -- nothing was restored.';
+        return;
+      }
       status.textContent = 'Could not check the restore plan -- check the connection and try again.';
     });
   };

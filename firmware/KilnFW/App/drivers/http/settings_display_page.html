@@ -195,7 +195,14 @@ browser only.</p>
         return r.json();
       })
       .then(function () { status.textContent = 'Saved.'; })
-      .catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; status.textContent = 'Save failed -- try again.'; });
+      .catch(function (authErr) {
+        // Quiet note, never a stale "Saving...".
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+          status.textContent = 'Sign-in cancelled -- not saved.';
+          return;
+        }
+        status.textContent = 'Save failed -- try again.';
+      });
   });
 })();
 </script>

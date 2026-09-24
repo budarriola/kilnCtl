@@ -396,7 +396,11 @@
   //   - the tab is on a gated page the operator deliberately navigated to
   //     (anything but the dashboard) and has not already declined the
   //     modal on this page load; or
-  //   - a modal is already open (the request just joins that login).
+  //   - a modal is already open (the request just joins that login); or
+  //   - the caller passed `__kcUserAction: true` in init: a read the
+  //     operator's own action issues outside the gesture's synchronous
+  //     dispatch (the dashboard's long-press PID popup fires from a
+  //     setTimeout, so no click/keydown is on the stack when it fetches).
   // Every other refusal rejects quietly with AuthCancelled (prompted:
   // false), so the page's own kcIsAuthCancelled() check keeps it silent.
   var kcGestureActive = false, kcLastGestureAt = 0;
@@ -411,6 +415,22 @@
   ['click', 'submit', 'change', 'keydown'].forEach(function (type) {
     document.addEventListener(type, kcNoteGesture, true);
   });
+  // Answering a native confirm() is a user gesture too, but it dispatches
+  // no DOM event (2026-09-24 second review). The dashboard's Run button
+  // reads the feasibility plan, then asks "Start firing ... now?", then
+  // POSTs /api/profile_exec/start: an operator who took over 3 s on that
+  // dialog had the POST refused quietly -- no modal, and the start catch
+  // stays silent on AuthCancelled -- so Start did nothing at all. The clock
+  // restarts when the dialog returns; kcConfirm resolves window.confirm at
+  // call time, so it is covered as well.
+  var kcNativeConfirm = (typeof window.confirm === 'function') ? window.confirm.bind(window) : null;
+  if (kcNativeConfirm) {
+    window.confirm = function (message) {
+      var answer = kcNativeConfirm(message);
+      kcLastGestureAt = Date.now();
+      return answer;
+    };
+  }
   function kcRequestIsUserInitiated(method) {
     if (kcGestureActive) return true;
     var m = String(method || 'GET').toUpperCase();
@@ -480,7 +500,7 @@
     // Decided NOW, at call time: the gesture flag only holds during the
     // event's synchronous dispatch, long gone by the time a response lands.
     var reqMethod = (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET';
-    var userInitiated = kcRequestIsUserInitiated(reqMethod);
+    var userInitiated = !!(init && init.__kcUserAction) || kcRequestIsUserInitiated(reqMethod);
     function retryOnce() {
       var retryInit = {};
       var src = init || {};

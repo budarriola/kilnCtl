@@ -62,6 +62,14 @@ const RANGE_B = extractRange(
   '  // ---- kcFetchWithSafetyAck ------------------------------------------'
 );
 const SRC_UNDER_TEST = RANGE_A + '\n' + RANGE_B;
+// Range C (2026-09-24 second review): the REAL gesture bookkeeping that
+// ranges A/B stub out -- kcNoteGesture, kcRequestIsUserInitiated, the
+// window.confirm hook and kcPageIsDashboard -- run against a fake document,
+// clock and timer queue.
+const RANGE_C = extractRange(
+  '  var kcGestureActive = false, kcLastGestureAt = 0;',
+  '  // Only one modal in flight at a time -- if a second 403 arrives while the'
+);
 
 function assert_sanity() {
   if (SRC_UNDER_TEST.indexOf('function ensureAdminLogin(') === -1) {
@@ -385,6 +393,70 @@ function flush() {
       'background refusal during an open modal joins the same login');
     assert(state.methodsSeen[0] === 'POST' && state.methodsSeen[1] === 'GET',
       'request method is passed to the user-initiated check at call time (default GET)');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 12: __kcUserAction marks a read the operator's own action issued
+  // outside any gesture dispatch (the dashboard long-press PID popup): it
+  // prompts on the dashboard where an unmarked background read stays quiet.
+  // -------------------------------------------------------------------
+  {
+    const { ctx, fetchCalls, openLoginModalCalls } = makeContext({
+      userInitiated: false, dashboard: true,
+      loginOutcomes: [true],
+      fetchResponses: [{ status: 401 }, { status: 200 }, { status: 401 }],
+    });
+    let r = null;
+    try { r = await ctx.window.fetch('/api/zones', { __kcUserAction: true }); } catch (e) { r = null; }
+    assert(openLoginModalCalls.length === 1 && r && r.status === 200 && fetchCalls.length === 2,
+      '__kcUserAction read on the dashboard: modal opens, retried once on login');
+    let c = null;
+    try { await ctx.window.fetch('/api/zones'); } catch (e) { c = e; }
+    assert(openLoginModalCalls.length === 1 && c && c.name === 'AuthCancelled' && c.prompted === false,
+      'unmarked background read on the dashboard: still quiet');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 13: the real gesture rules (range C), not the stub.
+  // -------------------------------------------------------------------
+  {
+    let clock = 1000000;
+    const listeners = {};
+    const timers = [];
+    let nativeConfirmCalls = 0;
+    const gctx = {
+      Date: { now: function () { return clock; } },
+      setTimeout: function (fn) { timers.push(fn); return timers.length; },
+      document: { addEventListener: function (type, fn) { (listeners[type] = listeners[type] || []).push(fn); } },
+      window: {
+        location: { pathname: '/' },
+        confirm: function () { nativeConfirmCalls++; return true; },
+      },
+      String: String,
+    };
+    vm.createContext(gctx);
+    vm.runInContext('var loginModalEl = null;\n' + RANGE_C +
+      '\nthis.__isUser = kcRequestIsUserInitiated; this.__isDash = kcPageIsDashboard;', gctx);
+    const isUser = gctx.__isUser;
+    const runTimers = () => { while (timers.length) timers.shift()(); };
+    assert(!isUser('GET') && !isUser('POST'), 'gesture rules: nothing is user-initiated before any gesture');
+    listeners.click.forEach((fn) => fn({ target: {} }));
+    assert(isUser('GET') && isUser('POST'), 'gesture rules: any request during click dispatch is user-initiated');
+    runTimers();
+    assert(!isUser('GET'), 'gesture rules: a GET after the dispatch ends is not');
+    clock += 2999;
+    assert(isUser('POST'), 'gesture rules: a POST within 3 s of a click is');
+    clock += 2;
+    assert(!isUser('POST'), 'gesture rules: a POST more than 3 s after a click is not');
+    clock += 60000;
+    const answer = gctx.window.confirm('Start firing now?');
+    assert(answer === true && nativeConfirmCalls === 1, 'confirm hook: native dialog called, answer passed through');
+    clock += 500;
+    assert(isUser('POST'), 'confirm hook: a POST right after answering confirm() is user-initiated (dashboard Start)');
+    assert(!isUser('GET'), 'confirm hook: a GET after confirm() is still not');
+    assert(gctx.__isDash() === true, 'kcPageIsDashboard: "/" is the dashboard');
+    gctx.window.location.pathname = '/settings/zones';
+    assert(gctx.__isDash() === false, 'kcPageIsDashboard: a gated page is not');
   }
 
   console.log('');

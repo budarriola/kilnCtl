@@ -958,12 +958,17 @@ function openPidPopup(zoneIndex) {
   var box = document.getElementById('pidPopupBox');
   box.innerHTML = '<h3>' + zoneName(zoneIndex) + ' -- PID</h3><p>Loading current config&hellip;</p>';
   overlay.removeAttribute('hidden');
-  fetch('/api/zones').then(function (r) { return r.json(); }).then(function (cfg) {
+  // __kcUserAction: a long-press fires from a timer, outside any gesture
+  // dispatch, so without it app.js treats this read as a background poll and
+  // refuses it quietly on the dashboard instead of asking the operator to
+  // sign in (2026-09-24 second review).
+  fetch('/api/zones', { __kcUserAction: true }).then(function (r) { return r.json(); }).then(function (cfg) {
     if (pidPopupZone !== zoneIndex) return; // closed/reopened on a different zone while this was in flight
     renderPidPopup(cfg.zones[zoneIndex]);
-  }).catch(function () {
+  }).catch(function (err) {
+    var cancelled = window.kcIsAuthCancelled && window.kcIsAuthCancelled(err);
     box.innerHTML = '<h3>' + zoneName(zoneIndex) + ' -- PID</h3>' +
-      '<p class="warn">Could not read current config.</p>' +
+      (cancelled ? '<p>Sign-in cancelled.</p>' : '<p class="warn">Could not read current config.</p>') +
       '<div class="btnrow"><button type="button" onclick="closePidPopup()">Close</button></div>';
   });
 }
@@ -1085,7 +1090,11 @@ function applyPidPopup() {
     // "failed". There is no interlock refusal to handle any more (see
     // this section's own header comment).
     applyBtn.disabled = false;
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    // Quiet note, not an error -- but never leave "Applying..." standing.
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) {
+      msgEl.textContent = 'Sign-in cancelled -- not applied.';
+      return;
+    }
     msgEl.textContent = 'Not applied: ' + e.message;
   });
 }
