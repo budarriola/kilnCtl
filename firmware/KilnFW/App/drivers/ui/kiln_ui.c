@@ -502,12 +502,21 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
             /* An explicit tap-name override (ui_topbar.c's build_icon_named())
              * wins over the label text above: an icon-only button's caption
              * is an opaque LVGL symbol glyph, not something a test harness
-             * can usefully click by name. Only a non-NULL, non-empty
-             * override is honoured, so a button with no override keeps
-             * reporting its real label text exactly as before. */
-            const char *name_override = (const char *)lv_obj_get_user_data(child);
-            if (name_override && name_override[0] != '\0') {
-                text = name_override;
+             * can usefully click by name. Gated on lv_obj_check_type(...,
+             * &lv_button_class) first: user_data on a clickable object is NOT
+             * reserved for this purpose in general -- ui_confirm.c's msgbox
+             * (also clickable, also walked here via lv_layer_top()) stores a
+             * heap ui_confirm_ctx_t* in the same field, and reading that as a
+             * kiln_ui_tap_name_tag_t while a confirm dialog is open would be
+             * an over-read of unrelated heap memory. Only a button can carry
+             * this tag, and the magic word is checked before `name` is
+             * trusted as a second, independent guard. */
+            if (lv_obj_check_type(child, &lv_button_class)) {
+                const kiln_ui_tap_name_tag_t *tag =
+                    (const kiln_ui_tap_name_tag_t *)lv_obj_get_user_data(child);
+                if (tag && tag->magic == KILN_UI_TAP_NAME_MAGIC && tag->name && tag->name[0] != '\0') {
+                    text = tag->name;
+                }
             }
 
             /* Restored to INFO alongside the keyboard-key case above -- see

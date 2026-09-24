@@ -124,6 +124,26 @@ typedef struct {
     bool hidden;
 } kiln_ui_tap_target_t;
 
+/* Tag wrapper for an optional tap-name override stashed in a button's own
+ * lv_obj user data (ui_topbar.c's build_icon_named()). Deliberately not a
+ * bare `const char *`: log_tap_targets() (kiln_ui.c) would otherwise have to
+ * read user_data off every clickable object it walks, including non-button
+ * ones whose user_data holds something else entirely -- ui_confirm.c's
+ * msgbox stores a heap `ui_confirm_ctx_t *` there, and while the reader below
+ * additionally *only* looks at this field on an object confirmed to be
+ * `&lv_button_class` (the msgbox never is), the magic word is checked too as
+ * defence in depth before `name` is ever trusted, in case a future button
+ * reuses user_data for something else. Lives in this shared header, not
+ * kiln_ui.c or ui_topbar.c alone, because both files must agree on the exact
+ * layout. Instances live in rodata (`static const`), never .bss/.data --
+ * zero RAM cost, unlike CONFIG_LV_USE_OBJ_NAME's per-lv_obj pointer, which
+ * this deliberately avoids enabling. */
+#define KILN_UI_TAP_NAME_MAGIC 0x4B54414Eu /* "KTAN" */
+typedef struct {
+    uint32_t magic;
+    const char *name;
+} kiln_ui_tap_name_tag_t;
+
 /* Walks the same tree log_all_tap_targets() does (active screen + top/sys
  * layers) and fills `out` with up to `max` targets, returning the number
  * written. If the walk finds more than `max` targets, `*truncated` (may be

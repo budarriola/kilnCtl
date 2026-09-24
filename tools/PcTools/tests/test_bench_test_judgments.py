@@ -148,8 +148,10 @@ class PicoSlotMetadataTest(unittest.TestCase):
     def test_watchdog_boot_alone_is_inconclusive(self):
         """OpenOCD's rp2040 SWD reset path reboots via the watchdog too, so a
         lone 'watchdog' reading is indistinguishable from an ordinary
-        debug_program(peer="pico") reset -- see CLAUDE.md/judgments.py's
-        docstring. Not a bare PASS either: this is a real open question."""
+        debug_program(peer="pico") reset -- observed directly in
+        docs/audits/short_proof_run_completed_2026-09-09.md:33-36 (a
+        deliberate SWD reset reported boot reason 'watchdog'). Not a bare
+        PASS either: this is a real open question."""
         r = J.judge_pico_slot_metadata("82548f2e", "watchdog")
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
@@ -220,13 +222,14 @@ class HeapDramFloorTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_boundary_at_floor_passes(self):
-        """8192 itself is healthy (measured 9216 B baseline sits above it) --
-        the floor triggers strictly below it, not at it."""
-        r = J.judge_heap_dram_floor(8192, 8192, False)
+        """8704 is firmware's own KILN_DRAM_LARGEST_ALARM_BYTES
+        (dram_margin.h) -- the floor triggers strictly below it, not at it.
+        The measured 9216 B baseline still sits comfortably above it."""
+        r = J.judge_heap_dram_floor(8704, 8704, False)
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_boundary_one_below_floor_fails(self):
-        r = J.judge_heap_dram_floor(8191, 8191, False)
+        r = J.judge_heap_dram_floor(8703, 8703, False)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 

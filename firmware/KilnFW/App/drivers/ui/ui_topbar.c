@@ -46,18 +46,28 @@ static void nav_cb(lv_event_t *e)
  * as a touch group (ui_theme_register_touch_group()) so that even the thin
  * sliver where two icons' compact-expanded boxes still meet resolves by
  * nearest real center instead of z-order, as defense in depth. */
-/* tap_name, when non-NULL, is stashed in the button's own lv_obj user data
+/* tap_tag, when non-NULL, is stashed in the button's own lv_obj user data
  * (lv_obj_set_user_data() -- distinct from the *event* user_data set two
  * lines below, which is per-icon event payload such as the page string
- * nav_cb() reads and already varies per caller; this field is otherwise
- * unused on a button anywhere in this file -- ui_confirm.c is the only
- * other user of the same lv_obj field, on a msgbox, not a button).
- * kiln_ui.c's log_tap_targets()/kiln_ui_collect_tap_targets() prefer this
- * override over a button's label text: for an icon-only button (no visible
- * caption, e.g. the gear) the label text is an opaque LVGL symbol glyph
- * (LV_SYMBOL_SETTINGS et al.), not a human/test-harness-readable name. */
+ * nav_cb() reads and already varies per caller). kiln_ui.c's
+ * log_tap_targets()/kiln_ui_collect_tap_targets() prefer this override over
+ * a button's label text: for an icon-only button (no visible caption, e.g.
+ * the gear) the label text is an opaque LVGL symbol glyph
+ * (LV_SYMBOL_SETTINGS et al.), not a human/test-harness-readable name.
+ *
+ * A raw `const char *` was deliberately rejected here: user_data on a
+ * clickable lv_obj is NOT this file's field alone to use -- ui_confirm.c
+ * stashes a heap `ui_confirm_ctx_t *` in the same field on its msgbox, which
+ * is also clickable and also reachable by kiln_ui.c's walk (via
+ * lv_layer_top()). kiln_ui_tap_name_tag_t's magic word (kiln_ui.h) lets the
+ * reader tell "this is really one of my tags" apart from "this is someone
+ * else's unrelated pointer" before ever treating it as a string; the reader
+ * additionally only looks at this field on a confirmed lv_button_class
+ * object (the msgbox never is one) as a second, independent guard. Callers
+ * pass a `static const kiln_ui_tap_name_tag_t` (rodata, not .bss/.data --
+ * zero RAM cost) rather than building one per call. */
 static lv_obj_t *build_icon_named(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb,
-                                   void *user_data, const char *tap_name)
+                                   void *user_data, const kiln_ui_tap_name_tag_t *tap_tag)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, UI_TOPBAR_ICON_W_PX, UI_TOPBAR_ICON_H_PX);
@@ -65,8 +75,8 @@ static lv_obj_t *build_icon_named(lv_obj_t *parent, const char *symbol, lv_event
     lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
-    if (tap_name) {
-        lv_obj_set_user_data(btn, (void *)tap_name);
+    if (tap_tag) {
+        lv_obj_set_user_data(btn, (void *)tap_tag);
     }
 
     lv_obj_t *label = lv_label_create(btn);
@@ -83,6 +93,14 @@ static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t 
 {
     return build_icon_named(parent, symbol, cb, user_data, NULL);
 }
+
+/* "settings" tap name for the topbar gear -- see build_icon_named()'s
+ * comment for why this is a tagged struct, not a bare string, and why it
+ * lives at file scope in rodata rather than being built per call. */
+static const kiln_ui_tap_name_tag_t kUiTopbarGearTapName = {
+    .magic = KILN_UI_TAP_NAME_MAGIC,
+    .name = "settings",
+};
 
 /* Non-clickable indicator icon (the relay-life warning). Same fixed size and
  * card background as build_icon()'s buttons so it sits in the row without
@@ -220,7 +238,7 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
              * this icon-only gear with no readable label (see
              * build_icon_named()'s comment) -- a bench test harness needs a
              * name to click by. */
-            out->gear_btn = build_icon_named(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL, "settings");
+            out->gear_btn = build_icon_named(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL, &kUiTopbarGearTapName);
         }
 
         /* Every icon here got its click area extended toward

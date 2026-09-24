@@ -126,7 +126,10 @@ def judge_pico_slot_metadata(commit: Optional[str], boot_reason: Optional[str],
     A lone ``boot_reason == "watchdog"`` is downgraded to INCONCLUSIVE, not
     FAIL: OpenOCD's rp2040 SWD reset path (used by every
     ``debug_program(peer="pico")``) itself reboots the RP2040 through its
-    own watchdog (see ``boot_reason.c``'s 23-44), so a board that was simply
+    own watchdog -- observed directly, not inferred:
+    ``docs/audits/short_proof_run_completed_2026-09-09.md``:33-36 records a
+    deliberate SWD reset reporting ``boot reason: watchdog``, not power_on or
+    a real watchdog event -- so a board that was simply
     debug-reset a moment ago reads identically to one boot-looping on a real
     watchdog timeout -- "watchdog" alone carries no information about which
     happened. ``boot_loop_corroborated``, when the caller can supply it
@@ -147,8 +150,9 @@ def judge_pico_slot_metadata(commit: Optional[str], boot_reason: Optional[str],
             Verdict.INCONCLUSIVE,
             reason=(
                 "boot reason is watchdog, but OpenOCD's SWD reset path also reboots the "
-                "rp2040 via its own watchdog (boot_reason.c) -- indistinguishable from a "
-                "real boot loop without corroboration, which was not supplied"
+                "rp2040 via its own watchdog (docs/audits/short_proof_run_completed_"
+                "2026-09-09.md:33-36) -- indistinguishable from a real boot loop "
+                "without corroboration, which was not supplied"
             ),
             observed={"boot_reason": boot_reason, "commit": commit},
         )
@@ -315,20 +319,30 @@ def judge_pico_stack_margins(tasks: "list[dict]", min_fraction: float = 0.25) ->
 
 
 def judge_heap_dram_floor(dram_largest_free_before: Optional[int], dram_largest_free_after: Optional[int],
-                           unacknowledged_crash: bool, floor_bytes: int = 8192) -> CaseResult:
+                           unacknowledged_crash: bool, floor_bytes: int = 8704) -> CaseResult:
     """SK-04: internal DRAM largest free block never below the floor; no
     UNACKNOWLEDGED CRASH REPORT banner.
 
-    ``floor_bytes`` re-derived 2026-09-23: the original 11900 (Wave 0) was a
-    placeholder, never re-measured against a real board. Measured
-    ``largest_free_block`` history: ~7936-8192 B on 2026-09-21, 9216 B on
-    the current bench board (a06389f9, 2026-09-24, post-DRAM-fixes
-    baseline). 8192 sits below today's healthy 9216 B reading with margin
-    while still catching a real regression back toward the 2026-09-21
-    figures. ``min_free`` (32787/14015 B in the same read) is a separate,
-    already-healthy number this floor does not gate -- it only ever
-    concerns the single largest contiguous free block, the number that
-    actually predicts whether one more large allocation can succeed."""
+    ``floor_bytes`` re-derived 2026-09-23, then corrected in review the same
+    day: the original 11900 (Wave 0) was never actually a largest-free-block
+    figure at all -- it was firmware's own
+    ``KILN_DRAM_FREE_ALARM_BYTES`` (11903, a *total-free* alarm,
+    ``firmware/KilnFW/App/drivers/common/dram_margin.h``), misapplied here to
+    a *largest-contiguous-block* reading. The correct anchor is firmware's
+    own largest-block alarm, ``KILN_DRAM_LARGEST_ALARM_BYTES = 8704``
+    (``dram_margin.h``, the largest-free-block value at which a real failure
+    happened 2026-08-22) -- a first re-derivation attempt set this to 8192
+    (a 2026-09-21 measured reading, ROADMAP.md) without checking it against
+    that alarm, which would have let a board firmware itself calls
+    largest-block-low pass this case. Measured ``largest_free_block``
+    history: ~7936-8192 B on 2026-09-21 (below today's floor -- expected,
+    that was the regressed reading the alarm exists for), 9216 B on the
+    current bench board (a06389f9, 2026-09-24, post-DRAM-fixes baseline --
+    still comfortably above 8704). ``min_free`` (32787/14015 B in the same
+    read) is a separate, already-healthy number this floor does not gate --
+    it only ever concerns the single largest contiguous free block, the
+    number that actually predicts whether one more large allocation can
+    succeed."""
     if unacknowledged_crash:
         return CaseResult(Verdict.FAIL, reason="unacknowledged crash report present", observed={})
     for label, value in (("before", dram_largest_free_before), ("after", dram_largest_free_after)):
@@ -404,7 +418,8 @@ def judge_status_diag_consistency(link_up: bool, state: Optional[str], boot_reas
             Verdict.INCONCLUSIVE,
             reason=(
                 "boot reason is watchdog, but OpenOCD's SWD reset path also reboots the "
-                "rp2040 via its own watchdog -- indistinguishable from a real boot loop "
+                "rp2040 via its own watchdog (docs/audits/short_proof_run_completed_"
+                "2026-09-09.md:33-36) -- indistinguishable from a real boot loop "
                 "without corroboration, which was not supplied"
             ),
             observed={"boot_reason": boot_reason},

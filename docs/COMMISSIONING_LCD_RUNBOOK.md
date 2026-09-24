@@ -517,6 +517,11 @@ question doesn't apply (home has no Home icon, it IS home), and the
 "Menu button" reached by the nav graph is the Gear above, not a separate
 undiscovered widget.
 
+The gear's tap-target *name*, as `list_tap_targets`/`click_by_name` see it, is
+`settings` -- an explicit override (`ui_topbar.c`'s `build_icon_named()`),
+not its label text, since an icon-only button's caption is an opaque LVGL
+glyph. The old "Menu" button this replaced was removed 2026-08-20.
+
 ### Table 4 — list-page row geometry (fixed row height, page-relative; absolute row identity is data-dependent)
 
 These pages page a live list into fixed-height rows; the *row slot*
