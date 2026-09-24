@@ -114,10 +114,29 @@ class StackMarginAgainstBaselineTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_regression_below_baseline_fails(self):
+        """A same, known-commit regression beyond tolerance is a hard FAIL.
+        No commit info at all is "unverified" (same as a mismatch) per
+        judge_stack_margin_against_baseline()'s commit-aware rule -- see
+        test_beyond_tolerance_drop_unknown_commit_is_inconclusive_not_fail
+        for that case -- so this test supplies a matching commit on both
+        sides to isolate the "real regression on an unchanged build" case."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=200)]
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("thermo_task", r.reason)
+
+    def test_regression_below_baseline_no_commit_info_is_inconclusive(self):
+        """Same regression, but the caller supplied no commit info at all --
+        that is "unknown", not "same build", so this must be INCONCLUSIVE,
+        never a silent FAIL that looks like a confirmed regression."""
         baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
         entries = [_entry("thermo_task", hwm=200)]
         r = J.judge_stack_margin_against_baseline(entries, baseline, min_free_bytes=None)
-        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
         self.assertIn("thermo_task", r.reason)
 
     def test_dead_task_fails_outright(self):
@@ -177,16 +196,60 @@ class StackMarginAgainstBaselineTest(unittest.TestCase):
         self.assertIn("mismatch", r.reason)
         self.assertIn("thermo_task", r.reason)
 
-    def test_tolerance_cannot_mask_a_beyond_tolerance_drop_cross_commit(self):
-        """Negative test: a commit mismatch must never turn a real,
-        beyond-tolerance regression into anything softer than FAIL."""
+    def test_beyond_tolerance_drop_cross_commit_is_inconclusive_not_fail(self):
+        """A cross-commit comparison can only ever be INCONCLUSIVE (unless
+        the absolute floor is breached): two different firmware builds
+        legitimately differ, so a beyond-tolerance drop there is not
+        evidence of a regression. The numbers must still be visible in the
+        reason (both the task and both commits), never silently dropped."""
         baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
         entries = [_entry("thermo_task", hwm=700)]  # 100 B drop, beyond tolerance
         r = J.judge_stack_margin_against_baseline(
             entries, baseline, min_free_bytes=None,
             board_fw_commit="1112222", baseline_fw_commits={"abcdef1"},
         )
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("thermo_task", r.reason)
+        self.assertIn("1112222", r.reason)
+        self.assertIn("abcdef1", r.reason)
+
+    def test_beyond_tolerance_drop_unknown_commit_is_inconclusive_not_fail(self):
+        """Same rule when the commit is simply unverified (missing/placeholder
+        on either side), not a positive mismatch."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=700)]  # 100 B drop, beyond tolerance
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit=None, baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("thermo_task", r.reason)
+
+    def test_beyond_tolerance_drop_same_commit_still_fails(self):
+        """Negative test: a same-commit, beyond-tolerance drop must still be
+        a hard FAIL -- the cross-commit softening above must never leak into
+        the same-build case."""
+        baseline = {"thermo_task": _entry("thermo_task", hwm=800)}
+        entries = [_entry("thermo_task", hwm=700)]  # 100 B drop, beyond tolerance
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=None,
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"},
+        )
         self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("thermo_task", r.reason)
+
+    def test_floor_breach_still_fails_on_commit_mismatch(self):
+        """Negative test: the absolute floor must FAIL even when the commit
+        also mismatches and the drop is beyond tolerance -- the floor is
+        never softened by a commit difference."""
+        baseline = {"httpd_worker": _entry("httpd_worker", hwm=800)}
+        entries = [_entry("httpd_worker", hwm=100)]  # huge drop, below the 512 B floor
+        r = J.judge_stack_margin_against_baseline(
+            entries, baseline, min_free_bytes=512,
+            board_fw_commit="1112222", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("floor", r.reason)
 
     def test_drop_within_tolerance_unknown_commit_is_inconclusive(self):
         """A missing/placeholder commit on either side is never treated as

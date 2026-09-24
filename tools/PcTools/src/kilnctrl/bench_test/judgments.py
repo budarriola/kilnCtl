@@ -181,9 +181,14 @@ def judge_stack_margin(report_text: str, min_free_bytes: Optional[int] = None) -
 #: and path differences between two runs of the same task, e.g. which branch
 #: of an if/else happened to run deepest) rather than a real regression.
 #: This tolerance absorbs that noise; a drop bigger than this many bytes is
-#: still a hard FAIL (never silently masked -- see the negative test in
-#: test_judgments.py), and a task under its configured absolute floor
-#: (``min_free_bytes``) still FAILs regardless of this tolerance.
+#: a hard FAIL on a same, known commit (never silently masked -- see the
+#: negative test in test_bench_test_wave1d.py), but only ever INCONCLUSIVE
+#: across a commit mismatch or an unverified commit -- a different build
+#: legitimately differs, so a bigger-than-tolerance drop there is not
+#: evidence of a regression, just evidence the comparison isn't
+#: apples-to-apples. A task under its configured absolute floor
+#: (``min_free_bytes``) still FAILs regardless of this tolerance or any
+#: commit mismatch.
 _STACK_MARGIN_NOISE_TOLERANCE_BYTES = 64
 
 #: Commit strings that mean "the build did not report one" (info.py /
@@ -213,18 +218,30 @@ def judge_stack_margin_against_baseline(
     exactly a task that looked fine relative to its own history but was
     dangerously close in absolute terms.
 
-    ``board_fw_commit``/``baseline_fw_commits``, when both given, let a drop
-    that fits inside the tolerance be attributed to "different build,
-    unknown whether comparable" rather than silently passed: a tolerance-only
-    miss (drop > 0 but <= ``tolerance_bytes``) downgrades from an implicit
-    PASS to INCONCLUSIVE, with the mismatch named in the reason text, when
-    the board's running commit is not among the baseline's own commits. A
-    drop beyond the tolerance is still FAIL regardless of any commit
-    mismatch -- the mismatch never masks a real regression, only softens the
-    verdict on a difference small enough to plausibly be noise. A missing
-    or placeholder commit (None, "", "?", "unknown") on EITHER side is never
-    treated as a match: a within-tolerance drop then reads INCONCLUSIVE
-    ("fw_commit unknown") too, not PASS.
+    ``board_fw_commit``/``baseline_fw_commits``, when both given, let any
+    drop be scored against whether the comparison is even apples-to-apples:
+
+      * same, known commit on both sides: within tolerance is PASS
+        (ordinary run-to-run noise), beyond tolerance is FAIL (a real
+        regression against a build that hasn't changed).
+      * commit mismatch, or an unverified/missing/placeholder commit
+        (None, "", "?", "unknown") on either side: INCONCLUSIVE regardless
+        of how large the drop is. Two different firmware builds legitimately
+        differ in stack usage, so a beyond-tolerance drop across a commit
+        change is not evidence of a regression at all -- it can only ever be
+        INCONCLUSIVE, never FAIL, unless the absolute floor below is also
+        breached. The reason text still names every task whose drop exceeded
+        tolerance and both commits, so the numbers stay visible even though
+        the verdict is softened.
+
+    ``min_free_bytes`` (SK-02's absolute floor) is the one check this commit
+    logic never touches: it FAILs any live task under that many bytes free
+    regardless of what the baseline says, the tolerance, OR any commit
+    mismatch -- a task with almost no headroom is dangerous whatever build
+    produced it (the httpd stack blob class, project memory
+    project_httpd_stack_blob_class, is exactly a task that looked fine
+    relative to its own history but was dangerously close in absolute
+    terms).
 
     A dead (``alive=False``) task is never scored against a byte figure --
     it FAILs outright, since a task that was never created or was deleted
@@ -286,11 +303,39 @@ def judge_stack_margin_against_baseline(
     }
 
     if below_floor:
+        # The absolute floor FAILs regardless of commit: a task with almost
+        # no headroom is dangerous whatever the baseline says, and a commit
+        # mismatch never softens this the way it does the tolerance checks
+        # below.
         return CaseResult(
             Verdict.FAIL,
             reason=f"{len(below_floor)} task(s) below the {min_free_bytes} B absolute floor",
             observed=observed,
         )
+    # A cross-commit (or unverified-commit) comparison can only ever be
+    # INCONCLUSIVE: two different firmware builds legitimately differ in
+    # stack usage, so a drop beyond tolerance there is not evidence of a
+    # regression -- only evidence that the comparison isn't apples-to-apples.
+    # Every task whose drop exceeded tolerance is still named in the reason,
+    # alongside both commits, so the numbers stay visible even though the
+    # verdict is softened from FAIL.
+    if regressed_beyond_tolerance and (commit_mismatch or commit_unverified):
+        names = ", ".join(r["task"] for r in regressed_beyond_tolerance)
+        commit_desc = (
+            f"fw_commit mismatch (board={board_fw_commit!r}, baseline={sorted(baseline_commits_set)!r})"
+            if commit_mismatch
+            else f"fw_commit unknown (board={board_fw_commit!r}, baseline={sorted(baseline_commits_set)!r})"
+        )
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(
+                f"{commit_desc}: {len(regressed_beyond_tolerance)} task(s) dropped more than the "
+                f"{tolerance_bytes} B noise tolerance below their committed baseline, but a cross-build "
+                f"comparison cannot be scored as a regression: {names}"
+            ),
+            observed=observed,
+        )
+    # Same, known commit: a beyond-tolerance drop IS a real regression.
     if regressed_beyond_tolerance:
         names = ", ".join(r["task"] for r in regressed_beyond_tolerance)
         return CaseResult(
