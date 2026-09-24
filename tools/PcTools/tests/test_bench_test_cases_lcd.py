@@ -394,39 +394,89 @@ class Lcd16Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
+class PopupUiTest(FakeUiTest):
+    """A UiTestClient double for LCD-19: both the PIN keypad and the Confirm
+    Start/Confirm Stop dialogs are top-layer popups that never change
+    current_page (kiln_ui.c) -- this fake models that by keeping `_page`
+    fixed at "home" and instead tracking an overlay's tap-target names,
+    which appear only after `trigger_name` is clicked and disappear once
+    "Cancel" is clicked (never any other button -- the case must never
+    press the popup's own confirm button)."""
+
+    def __init__(self, trigger_name, overlay_names):
+        super().__init__(page="home", targets=[])
+        self._trigger_name = trigger_name
+        self._overlay_names = overlay_names
+        self._overlay_open = False
+
+    def list_tap_targets(self):
+        names = self._overlay_names if self._overlay_open else []
+        return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
+
+    def click_by_name(self, name):
+        if name == self._trigger_name and not self._overlay_open:
+            self._overlay_open = True
+            return {"result": "ok"}
+        if name == "Cancel" and self._overlay_open:
+            self._overlay_open = False
+            return {"result": "ok"}
+        return {"result": "not_found"}
+
+
 class Lcd19Test(unittest.TestCase):
     def test_not_run_when_no_pin_configured(self):
         srv = FakeSrvFull(FakeUiTest(page="home"))
         result = C._case_lcd19({"srv": srv})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
 
-    def test_idle_click_uses_exact_start_label(self):
+    def test_idle_click_uses_exact_start_label_and_detects_keypad(self):
         # kiln_ui_click_by_name() (firmware/KilnFW/App/drivers/ui/kiln_ui.c)
         # matches with an exact strcmp; the home fire button's label is
         # exactly "Start" when idle (ui_page_home.c). A lowercase "start"
-        # never matches and always returns NOT_FOUND -- pin the exact string
-        # this case sends so that regresses loudly.
-        ui = FakeUiTest(page="home", targets=_HOME_TARGETS)
+        # never matches and always returns NOT_FOUND. Tapping "Start" opens
+        # the PIN keypad (ui_lcd_keypad.c: digit buttons + "OK" + "Cancel"),
+        # a top-layer popup -- current_page stays "home", so the keypad must
+        # be detected from tap-target names, never a page name (no page is
+        # ever named "pin_entry").
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "2", "3", "OK", "Cancel"])
         srv = FakeSrvFull(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
             ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
-            C._case_lcd19(ctx)
+            result = C._case_lcd19(ctx)
         spy.assert_any_call("Start")
         self.assertNotIn(mock.call("start"), spy.call_args_list)
+        self.assertEqual(result.observed.get("keypad_raised"), True)
+        # No enter_pin() on UiTestClient today -- this case can reach at
+        # most INCONCLUSIVE, never PASS, until that wiring lands.
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        # The keypad must not be left open on the board afterward.
+        self.assertEqual(result.observed["overlay_dismiss"]["present"], True)
+        self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
+        self.assertEqual(ui.list_tap_targets()["targets"], [])
 
-    def test_stop_gated_uses_exact_stop_label_and_fails(self):
-        # The label is exactly "Stop" while RUNNING/PAUSED
-        # (ui_page_home_refresh.c). This case must never start a firing on
-        # its own, so when firing_active_with_lock is set it only ever
-        # clicks "Stop", never "Start".
-        class PinUi(FakeUiTest):
-            def click_by_name(self, name):
-                if name == "Stop":
-                    self._page = "pin_entry"
-                    return {"result": "ok"}
-                return super().click_by_name(name)
+    def test_stop_opens_confirm_dialog_directly_not_gated(self):
+        # A Confirm Stop dialog (ui_confirm.c) has only its confirm_label
+        # ("Stop") + "Cancel" -- no "OK" -- distinguishing it from the PIN
+        # keypad. Stop landing directly on Confirm Stop (no keypad) means
+        # Stop was correctly never gated.
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
+            ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
+            result = C._case_lcd19(ctx)
+        self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
+        self.assertNotIn(mock.call("Start"), spy.call_args_list)
+        # Dismissal in `finally` must use "Cancel" only, never the dialog's
+        # own confirm button.
+        self.assertEqual(spy.call_args_list[-1], mock.call("Cancel"))
+        self.assertEqual(result.observed.get("stop_not_gated"), True)
+        self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
 
-        ui = PinUi(page="home")
+    def test_stop_gated_behind_keypad_fails(self):
+        # If the PIN keypad ("OK" present) appears instead of Confirm Stop
+        # directly, Stop was gated -- a safety regression -- and this must
+        # be a real FAIL, not vacuously always True.
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["1", "2", "3", "OK", "Cancel"])
         srv = FakeSrvFull(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
             ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
@@ -435,6 +485,16 @@ class Lcd19Test(unittest.TestCase):
         self.assertNotIn(mock.call("Start"), spy.call_args_list)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("Stop", result.reason)
+        self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
+
+    def test_dismiss_overlay_not_needed_when_nothing_open(self):
+        ui = PopupUiTest(trigger_name="Start", overlay_names=[])
+        # Simulate a click that reports ok but raises nothing (defensive):
+        ui._trigger_name = None  # click never opens an overlay
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed["overlay_dismiss"], {"checked": True, "present": False})
 
 
 class Lcd21Test(unittest.TestCase):

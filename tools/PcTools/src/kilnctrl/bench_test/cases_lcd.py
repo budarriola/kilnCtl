@@ -410,7 +410,63 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 # ctx["_lcd_pin"] dict; NOT_RUN if absent, since this wave does not own
 # wiring that key -- and Stop-is-never-gated is checked without assuming any
 # particular shape for the rest.
+#
+# Both the PIN keypad (ui_lcd_keypad.c) and the Confirm Start/Confirm Stop
+# dialogs (ui_confirm.c) are top-layer lv_msgbox popups, not pages -- current
+# page/get_current_page() stays "home" the whole time, so this case can never
+# use a page name to detect either one, and no page named "pin_entry" exists
+# anywhere in the firmware. Both popups are identified from the tap-target
+# list instead: the keypad has digit buttons + an "OK" footer button + a
+# "Cancel" footer button (ui_lcd_keypad.c); a Confirm Start/Confirm Stop
+# dialog has only its confirm_label ("Start" or "Stop") + "Cancel"
+# (ui_confirm.c) -- no "OK". So "Cancel" present + "OK" present == keypad;
+# "Cancel" present + no "OK" == a confirm dialog.
+#
+# UiTestClient has no enter_pin() today (that PIN-entry wiring is WEB-SEC-04's
+# to add), so wrong_pin_refused/right_pin_started can never be observed here
+# and stay None -- meaning judge_lcd_pin_lock can reach at most INCONCLUSIVE
+# on any given run, never PASS, until that wiring lands. "right_pin_started"
+# is a placeholder name kept for judgments.py's existing signature; entering
+# the right PIN only opens the Confirm Start dialog, it does not itself start
+# a firing.
+#
+# This case must never actually start or stop a firing itself: on the idle
+# branch it only ever taps "Start" (which opens the PIN keypad, not the
+# firing); on the firing-active branch it only ever taps "Stop" (which opens
+# Confirm Stop, never the confirm button itself). Whichever popup this
+# leaves open is dismissed via "Cancel" in `finally`, never via the popup's
+# own confirm button.
 # ---------------------------------------------------------------------------
+
+def _lcd19_overlay_names(ui) -> Optional[set]:
+    try:
+        targets = ui.list_tap_targets().get("targets", [])
+    except Exception:
+        return None
+    return {t.get("name") for t in targets if not t.get("hidden")}
+
+
+def _dismiss_lcd19_overlay(ui) -> Dict[str, Any]:
+    """Best-effort: dismiss a PIN keypad or Confirm Start/Confirm Stop dialog
+    left open by this case, via "Cancel" only -- never the dialog's own
+    confirm button. Returns a dict recording what was found and whether the
+    dismiss actually took (verified by re-listing tap targets), for
+    inclusion in the case's `observed`."""
+    before = _lcd19_overlay_names(ui)
+    if before is None:
+        return {"checked": False}
+    if "Cancel" not in before:
+        return {"checked": True, "present": False}
+    click = ui.click_by_name("Cancel")
+    after = _lcd19_overlay_names(ui)
+    dismissed = after is not None and "Cancel" not in after
+    return {
+        "checked": True,
+        "present": True,
+        "cancel_click_result": click.get("result"),
+        "dismissed": dismissed,
+    }
+
 
 def _case_lcd19(ctx: dict) -> CaseResult:
     pin_cfg = ctx.get("_lcd_pin")
@@ -419,31 +475,40 @@ def _case_lcd19(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
     keypad_raised = wrong_pin_refused = right_pin_started = stop_not_gated = None
+    result: Optional[CaseResult] = None
+    overlay: Optional[Dict[str, Any]] = None
     try:
         # kiln_ui_click_by_name() (kiln_ui.c) matches with an exact strcmp,
         # never case-insensitively, and the home fire button's label text is
         # exactly "Start" when idle/done/faulted or "Stop" while
-        # RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c) -- a
-        # lowercase "start" never matches either label and always returns
-        # NOT_FOUND. This case must never start a firing on its own, so the
-        # first click below only fires when the board is confirmed idle
-        # (no firing_active_with_lock in pin_cfg); when a firing is already
-        # active the case only exercises the Stop-is-never-gated check.
-        enter_pin = getattr(ui, "enter_pin", None)
+        # RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c).
         firing_active = bool(pin_cfg.get("firing_active_with_lock"))
         if not firing_active:
             click = ui.click_by_name("Start")
-            keypad_raised = ui.get_current_page() == "pin_entry" if click.get("result") == "ok" else None
-            if keypad_raised and enter_pin is not None:
-                wrong = enter_pin(pin_cfg.get("wrong_pin", "0000"))
-                wrong_pin_refused = wrong.get("result") != "ok"
-                right = enter_pin(pin_cfg.get("right_pin", ""))
-                right_pin_started = right.get("result") == "ok"
+            if click.get("result") == "ok":
+                names = _lcd19_overlay_names(ui)
+                keypad_raised = names is not None and "OK" in names and "Cancel" in names
+            # wrong_pin_refused / right_pin_started stay None: UiTestClient
+            # has no enter_pin() to drive the keypad any further.
         else:
             stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
-            stop_not_gated = ui.get_current_page() != "pin_entry" if stop_click.get("result") == "ok" else None
-        return J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated)
+            if stop_click.get("result") == "ok":
+                names = _lcd19_overlay_names(ui)
+                if names is not None:
+                    has_cancel = "Cancel" in names
+                    has_ok = "OK" in names
+                    if has_cancel and not has_ok:
+                        stop_not_gated = True  # Confirm Stop shown directly, no PIN keypad
+                    elif has_cancel and has_ok:
+                        stop_not_gated = False  # PIN keypad appeared -- Stop was gated
+                    # else: neither popup present -- leave None (INCONCLUSIVE)
+        result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated)
+        return result
     finally:
+        overlay = _dismiss_lcd19_overlay(ui)
+        if result is not None:
+            result.observed = dict(result.observed or {})
+            result.observed["overlay_dismiss"] = overlay
         _navigate_home(ui)
 
 
