@@ -230,5 +230,30 @@ class UiTestClient:
         pending.event.set()
 
 
+#: uart_bridge_ui_test.c's CLICK_BY_NAME handler copies the name into a local
+#: `char name[32]` and null-terminates it, so the wire name must fit in 31
+#: bytes -- one byte short of the buffer -- or the firmware would otherwise
+#: truncate it silently. Refuse here instead of shipping a truncated name.
+_MAX_CLICK_NAME_BYTES = 31
+
+
 def _pack_click_request(name: str) -> bytes:
-    return struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + _pack_str8(name)
+    """Encode a CLICK_BY_NAME request.
+
+    uart_task_ids.h's CLICK_BY_NAME layout is ``byte0 = subcommand,
+    bytes1..(length-1) = ASCII target name, NOT null-terminated`` -- unlike
+    every reply on this task (GET_CURRENT_PAGE/LIST_TAP_TARGETS), the request
+    carries no length-prefix byte of its own: the frame's own `length` field
+    is the only length. A length-prefixed encoding here (as
+    :func:`_pack_str8` produces) silently corrupts the name on the wire --
+    the firmware reads the prefix byte as the first character of the name
+    and everything shifts by one.
+    """
+    encoded = name.encode("ascii", errors="replace")
+    if len(encoded) > _MAX_CLICK_NAME_BYTES:
+        raise ValueError(
+            f"target name too long: {len(encoded)} bytes > {_MAX_CLICK_NAME_BYTES} "
+            "(uart_bridge_ui_test.c's CLICK_BY_NAME name buffer is 32 bytes "
+            "including the NUL terminator)"
+        )
+    return struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + encoded

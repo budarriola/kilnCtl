@@ -158,16 +158,38 @@ class ClickByNameTest(unittest.TestCase):
         self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "hidden")
 
     def test_request_carries_name(self):
+        # uart_task_ids.h's CLICK_BY_NAME request is raw ASCII with NO
+        # length-prefix byte (bytes1..(length-1) = name, "NOT
+        # null-terminated") -- unlike every reply on this task. The frame's
+        # own `length` field is the only length; a length-prefix byte here
+        # would be read by uart_bridge_ui_test.c as the first character of
+        # the name, shifting everything by one.
         self._reply(UI_TEST_CLICK_OK)
         self.client.click_by_name("Start", timeout=1.0)
         sent = self.link.sent[-1]
-        self.assertEqual(sent, struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + struct.pack("<B", 5) + b"Start")
+        self.assertEqual(sent, struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + b"Start")
 
     def test_unknown_result_code_raises(self):
         payload = struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + struct.pack("<Bhh", 99, 0, 0)
         self.link.push_reply(UART_TASK_ID_UI_TEST, payload)
         with self.assertRaises(UiTestResponseError):
             self.client.click_by_name("Start", timeout=1.0)
+
+    def test_name_at_max_length_is_sent_unprefixed(self):
+        # uart_bridge_ui_test.c copies into `char name[32]` and NUL-terminates,
+        # so 31 ASCII bytes is the largest name that survives intact.
+        self._reply(UI_TEST_CLICK_OK)
+        name = "x" * 31
+        self.client.click_by_name(name, timeout=1.0)
+        sent = self.link.sent[-1]
+        self.assertEqual(sent, struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + name.encode("ascii"))
+
+    def test_name_over_max_length_raises_without_sending(self):
+        with self.assertRaises(ValueError):
+            self.client.click_by_name("x" * 32, timeout=1.0)
+        # Refused before ever touching the link -- never let the firmware
+        # silently truncate a name that doesn't fit its buffer.
+        self.assertEqual(self.link.sent, [])
 
 
 if __name__ == "__main__":
