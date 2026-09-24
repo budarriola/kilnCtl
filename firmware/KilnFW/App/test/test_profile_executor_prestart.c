@@ -358,6 +358,49 @@ void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who)
     g_last_heat_zone_claimant = who;
 }
 
+/* The NEW per-zone atomic claim (relay_authority.h), added to close the
+ * peek-then-commit race found in review of 933a7eec:
+ * profile_executor_run() checks autotune_engine_is_active_on_zone() and
+ * autotune_begin_run_locked() checks profile_executor_zone_is_active(), but
+ * each peek runs before its own module lock, so two starts on the same zone
+ * can both pass. This fake defaults to "always succeeds, no conflict" so
+ * every existing test is unaffected; s_test_zone_claim_refused lets
+ * test_run_refuses_at_atomic_zone_claim_gate() below prove
+ * profile_executor_run() is refused when the EARLY autotune_engine_is_
+ * active_on_zone() peek passed but autotune won the atomic claim underneath
+ * it -- the exact race window this claim exists to close. */
+static bool s_test_zone_claim_refused = false;
+static uint8_t s_test_zone_claim_conflict_mask = 0;
+static int g_zone_claim_begin_calls = 0;
+static int g_zone_claim_end_calls = 0;
+static relay_heat_zone_claimant_t g_last_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+static uint8_t g_last_zone_claim_mask = 0;
+
+bool relay_authority_zone_claim_begin(relay_heat_zone_claimant_t who, uint8_t zone_mask,
+                                       uint8_t *conflict_mask_out)
+{
+    g_zone_claim_begin_calls++;
+    g_last_zone_claimant = who;
+    g_last_zone_claim_mask = zone_mask;
+    if (s_test_zone_claim_refused) {
+        if (conflict_mask_out) {
+            *conflict_mask_out = s_test_zone_claim_conflict_mask ? s_test_zone_claim_conflict_mask : zone_mask;
+        }
+        return false;
+    }
+    if (conflict_mask_out) {
+        *conflict_mask_out = 0;
+    }
+    return true;
+}
+
+void relay_authority_zone_claim_end(relay_heat_zone_claimant_t who, uint8_t zone_mask)
+{
+    g_zone_claim_end_calls++;
+    g_last_zone_claimant = who;
+    g_last_zone_claim_mask = zone_mask;
+}
+
 esp_err_t relay_cycles_init(void)
 {
     return ESP_OK;
@@ -1659,6 +1702,10 @@ static void reset_relay_claim_test_state(void)
     g_heat_zone_claim_begin_calls = 0;
     g_heat_zone_claim_end_calls = 0;
     g_last_heat_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+    g_zone_claim_begin_calls = 0;
+    g_zone_claim_end_calls = 0;
+    g_last_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+    g_last_zone_claim_mask = 0;
 }
 
 static void test_escalate_guard_trip_global_releases_relay_claim(void)
@@ -2302,6 +2349,79 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;
     s_test_heat_zone_claim_refused = false;
+}
+
+// Review of 933a7eec: autotune start peeks profile_executor_zone_is_active()
+// and profile start peeks autotune_engine_is_active_on_zone(), but each peek
+// runs BEFORE the caller's own module lock, so two starts on the same zone
+// at the same moment can both pass the peek. This test models side B (an
+// autotune run) winning the atomic relay_authority_zone_claim_begin() race
+// in the window between side A's (a profile start) early peek and its own
+// atomic claim attempt -- side A must then be refused, never reach RUNNING,
+// and never reach the real relay claim.
+static void test_run_refuses_at_atomic_zone_claim_gate(void)
+{
+    TEST_SECTION("profile_executor_run() -- the atomic per-zone claim refuses even when the EARLY "
+                 "autotune_engine_is_active_on_zone() peek passed (the race window it exists to close)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].ramp_c_per_hr = 0.0f; /* dwell -- skips the ramp-ceiling check */
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    // RED: the early autotune_engine_is_active_on_zone() stub above always
+    // returns false, so the cheap early peek passes -- but force the atomic
+    // claim itself to refuse, simulating autotune having taken zone 0 in the
+    // window between that peek and this call.
+    s_test_zone_claim_refused = true;
+    s_test_zone_claim_conflict_mask = 0x01;
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "the atomic zone-claim gate alone must be able to refuse a run the early peek let through");
+    TEST_CHECK(strstr(err, "autotune") != NULL, "the refusal must name autotune, not a sweep");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a run refused at the atomic zone-claim gate must never reach RUNNING");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay_authority_claim_mask() must never be reached when the "
+                                        "atomic zone-claim gate refuses");
+    TEST_CHECK(g_heat_zone_claim_begin_calls == 0, "the whole-board sweep claim must not even be attempted "
+                                                   "once the per-zone claim has already refused");
+    TEST_CHECK(g_zone_claim_end_calls == 0, "a refused claim must not be released -- it was never held");
+
+    // GREEN: same setup, atomic zone claim now allows it -- proves the RED
+    // result above was really this gate, not some other stub failing closed.
+    s_test_zone_claim_refused = false;
+    s_exec.state = PROFILE_EXEC_IDLE;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "with the atomic zone-claim gate allowing it, the identical setup must succeed");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "a successful run must reach RUNNING");
+    TEST_CHECK(g_zone_claim_begin_calls == 2, "the gate is attempted exactly once per profile_executor_run() call");
+    TEST_CHECK(g_last_zone_claimant == RELAY_HEAT_ZONE_CLAIM_PROFILE,
+              "profile_executor_run() must claim as PROFILE, not AUTOTUNE");
+    TEST_CHECK(g_last_zone_claim_mask == 0x01, "the claimed mask must be the profile's own zone_mask");
+
+    profile_executor_halt();
+    TEST_CHECK(g_zone_claim_end_calls >= 1, "halt() must release the per-zone claim it just took");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    s_test_zone_claim_refused = false;
+    s_test_zone_claim_conflict_mask = 0;
 }
 
 
@@ -9212,6 +9332,7 @@ void run_test_profile_executor_prestart(void)
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();
     test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active();

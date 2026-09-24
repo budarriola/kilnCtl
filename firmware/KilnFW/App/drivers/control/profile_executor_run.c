@@ -947,6 +947,47 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.history_count = 0;
     s_exec.history_head = 0;
 
+    /* Cross-module zone-ownership race close (review of 933a7eec,
+     * docs/audits/profile_executor_panic_2026-09-24.md follow-up): the
+     * per-zone autotune_engine_is_active_on_zone() loop far above is a
+     * plain, non-atomic peek made BEFORE s_exec.lock was even taken --
+     * autotune_engine_run()/autotune_engine_run_relay() can commit on one of
+     * this profile's zones in the window between that peek and this
+     * function's own commit, and those functions have the exact same problem
+     * in the other direction (their own profile_executor_zone_is_active()
+     * peek, made before s_at.lock). relay_authority_zone_claim_begin() is the
+     * atomic close: a single spinlock-protected test-and-set against
+     * autotune_begin_run_locked()'s matching call, keyed by this profile's
+     * zone_mask. Deliberately NOT the RELAY_HEAT_ZONE_CLAIM_* pair used a few
+     * lines below -- see relay_authority_zone_claim_begin()'s own doc comment
+     * (relay_authority.h) for why that pair is the wrong arbiter for this
+     * question. s_exec.lock has been held continuously since the "already
+     * running"/"faulted" checks confirmed this is a genuine start, so
+     * release_profile_relay_claim()'s unconditional
+     * relay_authority_zone_claim_end() call is safe, same reasoning as the
+     * heat claim below. On conflict, name the lowest-numbered contended zone
+     * -- the same message shape the early, non-atomic loop above already
+     * uses for the common (non-race) case. */
+    {
+        uint8_t conflict_mask = 0;
+        if (!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask, &conflict_mask)) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                uint8_t conflict_zone = 0;
+                for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+                    if (conflict_mask & (1u << zi)) {
+                        conflict_zone = zi;
+                        break;
+                    }
+                }
+                snprintf(err_msg, err_cap, "zone %u has an autotune run active -- it cannot run at the "
+                                           "same time as a profile (TODO.md 6A.5)",
+                         conflict_zone);
+            }
+            return false;
+        }
+    }
+
     /* The atomic gate (relay_authority.h's heat-claim doc comment): this
      * function's own zones_current_sweep_is_active() check far above is a
      * plain, non-atomic read of zones_http.c's state, made before s_exec.lock
@@ -962,6 +1003,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * SAME message the early check already reports for the common
      * (non-race) case. */
     if (!relay_authority_heat_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE)) {
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
         xSemaphoreGive(s_exec.lock);
         if (err_msg) {
             snprintf(err_msg, err_cap,

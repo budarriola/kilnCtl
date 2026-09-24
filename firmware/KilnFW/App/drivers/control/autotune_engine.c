@@ -1159,6 +1159,38 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         return false;
     }
 
+    /* Cross-module zone-ownership race close (review of 933a7eec,
+     * docs/audits/profile_executor_panic_2026-09-24.md follow-up):
+     * profile_executor_zone_is_active(zone_index), the early "refuse before
+     * any heating starts" check above, is a plain, non-atomic peek made
+     * BEFORE s_at.lock was even taken -- profile_executor_run() can commit on
+     * this same zone in the window between that peek and this function's own
+     * commit, and profile_executor_run() has the exact same problem in the
+     * other direction (this function's state_is_running() check, right
+     * above, is ITS peek). relay_authority_zone_claim_begin() is the atomic
+     * close: a single spinlock-protected test-and-set against
+     * profile_executor_run()'s matching call, keyed by zone bit.
+     * Deliberately NOT the RELAY_HEAT_ZONE_CLAIM_* pair used a few lines
+     * below -- see relay_authority_zone_claim_begin()'s own doc comment
+     * (relay_authority.h) for why that pair is the wrong arbiter for this
+     * question (it only ever serializes the whole-board current sweep;
+     * profile and autotune are legitimately concurrent with each other on
+     * different zones). s_at.lock has been held continuously since
+     * state_is_running() confirmed this is a genuine start, not a reentrant
+     * call on an already-running instance, so force_relays_off()'s
+     * unconditional relay_authority_zone_claim_end() call is safe, same
+     * reasoning as the heat claim below. */
+    uint8_t zone_bit = (uint8_t)(1u << zone_index);
+    if (!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit, NULL)) {
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "a profile is running on zone %u -- autotune cannot run on it at "
+                                       "the same time",
+                     zone_index);
+        }
+        return false;
+    }
+
     /* The atomic gate (relay_authority.h's heat-claim doc comment): the
      * zones_current_sweep_is_active() check above is a plain, non-atomic
      * read made before s_at.lock was even taken -- a sweep can start in the
@@ -1172,6 +1204,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * profile_executor.c's matching gates. Refused with the SAME message
      * the early check already reports for the common (non-race) case. */
     if (!relay_authority_heat_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE)) {
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
         xSemaphoreGive(s_at.lock);
         if (err_msg) {
             snprintf(err_msg, err_cap,

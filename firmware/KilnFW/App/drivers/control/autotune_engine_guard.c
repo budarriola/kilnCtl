@@ -149,6 +149,13 @@ void force_relays_off(void)
     if (zones_config_get_relay_mask(s_at.zone_index, &owned_mask) && owned_mask != 0) {
         relay_authority_release_mask(owned_mask);
     }
+    /* The per-zone claim (relay_authority.h) taken atomically in
+     * autotune_begin_run_locked(), right before the whole-board heat claim
+     * just below -- see that call site's own doc comment for why it exists
+     * and why it must be released here too. Safe unconditionally, same
+     * no-op-if-never-held reasoning as the calls above/below: clearing a bit
+     * already clear changes nothing. */
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, (uint8_t)(1u << s_at.zone_index));
     /* The shared heat claim (relay_authority.h) taken atomically in
      * autotune_begin_run_locked(), right after state_is_running() confirmed this was
      * a genuine start. Safe unconditionally: a no-op if this run never

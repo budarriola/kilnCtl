@@ -188,8 +188,8 @@ typedef enum {
 /* Claims zone-heat authority for `who`. Fails (returns false) only while the
  * sweep's exclusive claim is held; profile and autotune never refuse each
  * other here (see this header's doc comment above -- that arbitration is
- * per-zone and already handled by profile_executor_zone_is_active()/
- * autotune_engine_is_active_on_zone()). Call only once state has already been
+ * per-zone, and is the job of relay_authority_zone_claim_begin() below, not
+ * this function). Call only once state has already been
  * confirmed (under the caller's own lock) to be a genuine start, not a
  * reentrant call on an already-running instance -- see this header's doc
  * comment for why that makes the matching _end() safe to call
@@ -200,6 +200,37 @@ bool relay_authority_heat_zone_claim_begin(relay_heat_zone_claimant_t who);
  * it (a no-op in that case) -- callers are expected to call this
  * unconditionally from their single "run is over" cleanup path. */
 void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who);
+
+/* Per-zone arbitration between a profile and an autotune session, closing a
+ * race the review of 933a7eec found (docs/audits/profile_executor_panic_2026-
+ * 09-24.md follow-up): profile_executor_zone_is_active()/autotune_engine_
+ * is_active_on_zone() are each a plain, non-atomic peek made BEFORE the
+ * caller's OWN module lock (s_exec.lock / s_at.lock) is taken -- two starts on
+ * the same zone, each passing its own peek before the other has committed,
+ * could both proceed. This pair is the atomic close, keyed per zone bit
+ * (bit i = zone i) rather than sharing the whole-board RELAY_HEAT_ZONE_CLAIM_*
+ * pair above -- deliberately NOT the same arbiter: profile and autotune are
+ * legitimately concurrent with each other on DIFFERENT zones (that pair only
+ * ever arbitrates the whole-board current sweep, see this header's doc
+ * comment above), so folding this into it would wrongly serialize every
+ * profile/autotune pair board-wide instead of only a genuinely double-owned
+ * zone. Backed by the same leaf portMUX spinlock as the pair above -- no
+ * blocking call inside either function, so this adds no new lock ordering.
+ * Call only once the caller's own lock has confirmed this is a genuine start
+ * (never a reentrant call on an already-running instance), same convention as
+ * relay_authority_heat_zone_claim_begin() -- so the matching _end() below is
+ * safe to call unconditionally from that subsystem's single "run is over"
+ * cleanup path.
+ *
+ * relay_authority_zone_claim_begin() fails (returns false) only when at least
+ * one bit of `zone_mask` is already claimed by the OTHER claimant; on failure,
+ * if `conflict_mask_out` is non-NULL, it is filled with exactly those
+ * conflicting bits (0 on success) so the caller can name the offending zone
+ * in its own refusal message without re-reading shared state outside this
+ * lock. */
+bool relay_authority_zone_claim_begin(relay_heat_zone_claimant_t who, uint8_t zone_mask,
+                                       uint8_t *conflict_mask_out);
+void relay_authority_zone_claim_end(relay_heat_zone_claimant_t who, uint8_t zone_mask);
 
 typedef enum {
     RELAY_HEAT_SWEEP_CLAIM_OK = 0,

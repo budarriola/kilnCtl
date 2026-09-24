@@ -481,6 +481,16 @@ void force_all_relays_off(void)
 void release_profile_relay_claim(void)
 {
     relay_authority_release_mask(s_exec.claimed_relay_mask);
+    /* The per-zone claim (relay_authority.h) taken atomically in
+     * profile_executor_run(), right before the whole-board heat claim just
+     * below -- see that call site's own doc comment for why it exists and
+     * why it must be released here too. s_exec.profile.zone_mask is still
+     * this run's own zone_mask (unchanged since profile_executor_run() set
+     * it; a live edit can change segment content but never zone_mask -- see
+     * live_edit_check_window()). Safe unconditionally, same no-op-if-never-
+     * held reasoning as the call below: clearing a bit already clear changes
+     * nothing. */
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, s_exec.profile.zone_mask);
     /* The shared heat claim (relay_authority.h) taken atomically right
      * before this run's s_exec.state was set to RUNNING -- see
      * profile_executor_run()'s own comment at that call site. Safe to call

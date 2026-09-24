@@ -139,6 +139,43 @@ void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who)
     portEXIT_CRITICAL(&s_heat_claim_mux);
 }
 
+/* Per-zone arbitration (relay_authority.h's own doc comment above these two
+ * declarations has the full "why" -- closes the profile/autotune same-zone
+ * race the review of 933a7eec found). Indexed by relay_heat_zone_claimant_t,
+ * bit i = zone i claimed. Shares s_heat_claim_mux above rather than a second
+ * spinlock: same leaf, no blocking call inside either critical section, so
+ * one mutex covers both without adding any new lock ordering. */
+static uint8_t s_zone_owner_mask[2] = {0, 0};
+
+bool relay_authority_zone_claim_begin(relay_heat_zone_claimant_t who, uint8_t zone_mask,
+                                       uint8_t *conflict_mask_out)
+{
+    bool ok;
+    uint8_t conflict;
+    relay_heat_zone_claimant_t other =
+        (who == RELAY_HEAT_ZONE_CLAIM_AUTOTUNE) ? RELAY_HEAT_ZONE_CLAIM_PROFILE : RELAY_HEAT_ZONE_CLAIM_AUTOTUNE;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    conflict = (uint8_t)(zone_mask & s_zone_owner_mask[other]);
+    if (conflict != 0) {
+        ok = false;
+    } else {
+        s_zone_owner_mask[who] = (uint8_t)(s_zone_owner_mask[who] | zone_mask);
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    if (conflict_mask_out) {
+        *conflict_mask_out = ok ? 0 : conflict;
+    }
+    return ok;
+}
+
+void relay_authority_zone_claim_end(relay_heat_zone_claimant_t who, uint8_t zone_mask)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_zone_owner_mask[who] = (uint8_t)(s_zone_owner_mask[who] & (uint8_t)~zone_mask);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
 relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void)
 {
     relay_heat_sweep_claim_result_t result;

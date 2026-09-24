@@ -53,6 +53,12 @@ void profile_executor_halt(void)
      * Safe unconditionally, same no-op-if-never-held reasoning as
      * release_profile_relay_claim()'s call. */
     relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+    /* ...and the per-zone claim (relay_authority.h) too, for the same
+     * "halt() is self-contained" reason the two calls above are inline
+     * rather than routed through release_profile_relay_claim() -- see that
+     * function's own matching call for why s_exec.profile.zone_mask is the
+     * right mask and why this is safe unconditionally. */
+    relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, s_exec.profile.zone_mask);
     /* ...and K4, inline for the same reason the two calls above are inline
      * rather than routed through release_profile_relay_claim(). After
      * force_all_relays_off() above, never before it. */
