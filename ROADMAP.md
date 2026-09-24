@@ -3841,9 +3841,13 @@ Owner instruction, 2026-09-21.
 - [x] Capture the `idle`-load stack-margin baseline at the currently running
   commit — done, 2026-09-24 (`5c44ae95`,
   `docs/stack_margin_baseline/stack_margin_idle_111b1b6f_20260924T175921Z.json`).
-- [ ] Capture the `mid_firing` and `web_ui_open` stack-margin baselines at the
-  currently running commit (`111b1b6f`/`6bb41fe1`) — both still only exist at
-  the older `75a5e459`.
+- [x] Capture the `mid_firing` and `web_ui_open` stack-margin baselines at the
+  currently running commit (`111b1b6f`/`6bb41fe1`) — done, 2026-09-24
+  (`e18c645d`; `web_ui_open` had never been committed before, so this is its
+  first baseline, not a recapture). Only `kiln_io_owner` shrank more than
+  256 B against the `75a5e459` mid_firing baseline (2708 to 2100 B free, still
+  OK). Both files record `profile_executor` at CRITICAL (468 B of 4096 B
+  worst-since-boot) during the firing; a stack raise is dispatched.
 - [ ] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
   timeout did not raise the PIN keypad", `keypad_raised=false`) root-caused
   2026-09-24 as a runner defect, not firmware: `_wait_for_overlay_names(present=True)`
