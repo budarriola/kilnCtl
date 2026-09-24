@@ -267,7 +267,17 @@ WT-A must implement exactly this shape; the fuller reasoning lives in
 
 ## 7. Work tranches
 
-**WT-A — firmware: TOTP core + NVS + routes.** Sizes: medium-large (new
+**WT-A — firmware: TOTP core + NVS + routes.** PARTIAL, `totpfw` worktree:
+core (`totp.c`/`.h`, pure RFC 6238/4226/4648, no mbedtls -- classic HMAC API
+is compiled out and the host PSA stub is non-cryptographic, see `totp.h`'s
+header comment) and `totp_config.c`/`.h` (NVS persistence, write-only-secret
+discipline, tri-state load status) are DONE and host-tested (WT-D below).
+Routes (`auth_forgot_reset_http.c`, `route_tier_table.h` entries, the QR
+encoder, the settings-page enrollment/disable handlers, and the
+`auth_reset_gesture_wiring.c` additive clear call) are NOT done -- deferred
+to a follow-up pass rather than rushed under this session's time budget,
+since weakening or half-wiring an auth-adjacent route is worse than leaving
+it unstarted. Sizes: medium-large (new
 crypto-adjacent code, a QR encoder, two new HTTP routes, one additive call
 site in the reset-gesture wiring). Files: new
 `firmware/KilnFW/App/drivers/security/totp.c`/`.h` (RFC 6238 HMAC-SHA1
@@ -313,8 +323,20 @@ refuses without `confirm=True` and refuses if `KILNCTL_TOTP_CODE` is unset
 or empty, reporting presence as `[bool]` only; both tools callable via
 `kiln_find`/`kiln_call` after a server restart.
 
-**WT-D — host tests: RFC 6238 Appendix B vectors + code lifecycle.**
-Sizes: small-medium. HTTP handlers are target-build only (per
+**WT-D — host tests: RFC 6238 Appendix B vectors + code lifecycle.** DONE,
+`totpfw` worktree: `test_totp.c` (Appendix B 8-digit vectors truncated to
+each's own digit count directly via `totp_hotp_truncate(secret, len, ctr,
+digits)`, SHA1/HMAC-SHA1 known vectors, +-1 window, replay refusal, base32
+round trip incl. RFC 4648 SS10 examples, otpauth URI) and
+`test_totp_config_persist.c` (absent/OK/UNREADABLE tri-state, re-enroll
+resets counter, RAM cache lazy-load, clear erases + read-back verifies,
+idempotent clear, corrupt-CRC->UNREADABLE never ABSENT) both join the main
+combined host-test executable. Negative-tested: flipped the dynamic-
+truncation mask (`0x7Fu` -> `0xFFu`) in `totp_hotp_truncate()`, reran
+`check_00_kilnfw_host_tests.ps1`, confirmed 4 Appendix-B vectors FAIL,
+restored the source by hand from a byte copy (never `git checkout`/stash),
+then forced a rebuild and confirmed 9-of-9 local sub-suites + the combined
+executable pass clean again. Sizes: small-medium. HTTP handlers are target-build only (per
 `project_http_handlers_are_target_build_only`) — do not attempt to
 host-test the routes themselves. Host-testable pieces: the HMAC-SHA1 TOTP
 compute itself, validated directly against **RFC 6238 Appendix B's**

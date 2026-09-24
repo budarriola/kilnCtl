@@ -173,6 +173,12 @@ try {
         # ESP-IDF dependency, joins this combined executable rather than
         # needing its own.
         (Join-Path $testDir "test_web_auth_login.c"),
+        # docs/TOTP_PASSWORD_RESET_PLAN.md WT-D: totp.c/totp_config.c above
+        # are both linked in for real (no ESP-IDF dependency, no fake needed)
+        # -- joins this combined executable, same convention as
+        # test_http_auth_enforce.c/test_web_auth_login.c just above.
+        (Join-Path $testDir "test_totp.c"),
+        (Join-Path $testDir "test_totp_config_persist.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "test_sim_mistune.c"),
         (Join-Path $testDir "test_sim_factorial_design.c"),
@@ -267,6 +273,14 @@ try {
         # link needs; its psa/crypto.h host stub needs exactly one
         # g_stub_psa_import_key_result definition, added in test_backup_import.c.
         (Join-Path $driversDir "persist/web_auth_store.c"),
+        # docs/TOTP_PASSWORD_RESET_PLAN.md WT-A: totp.c is pure (no ESP-IDF/
+        # mbedtls/PSA dependency -- see its own header comment for why it
+        # hand-rolls SHA-1/HMAC rather than going through the PSA stub that
+        # web_auth_store.c above needs), so it links in for real with no
+        # extra plumbing. totp_config.c needs only the hal_kv backend
+        # (fake_kv.c/hal_status.c, already linked above for web_auth_store.c).
+        (Join-Path $driversDir "net/totp.c"),
+        (Join-Path $driversDir "persist/totp_config.c"),
         # Opus review of 5dd23944 finding B (2026-09-20): backup_import.c
         # (#included via test_backup_import.c above) now calls
         # live_edit_name_collides() directly, in its new pass-1 dup-name
