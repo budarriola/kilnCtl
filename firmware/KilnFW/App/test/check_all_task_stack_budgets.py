@@ -680,8 +680,12 @@ TASKS = [
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_thermo.c",
              r'xTaskCreatePinnedToCoreWithCaps\(thermo_bridge_task,\s*"thermo_uart_bridge",\s*(\d+)')),
     dict(name="touch_uart_bridge", root="touch_bridge_task",
-         stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_touch.c",
-             r'xTaskCreatePinnedToCoreWithCaps\(touch_bridge_task,\s*"touch_uart_bridge",\s*(\d+)')),
+         # Raised 3072 -> 4096 2026-09-24 (TOUCH_UART_BRIDGE_STACK_BYTES,
+         # uart_bridge_touch.c) after bench SK-02 measured 440 B high-water
+         # free against the 512 B absolute floor. PSRAM stack: 0 B DRAM impact.
+         stack=lambda: extract_local_macro("drivers/bridge/uart_bridge_touch.c",
+             r'#define TOUCH_UART_BRIDGE_STACK_BYTES\s+(\d+)',
+             r'xTaskCreatePinnedToCoreWithCaps\(touch_bridge_task,\s*"touch_uart_bridge",\s*TOUCH_UART_BRIDGE_STACK_BYTES')),
     dict(name="autotune_engine", root="task_entry",
          stack=lambda: extract_int_literal("drivers/control/autotune_engine.c",
              r'xTaskCreatePinnedToCoreWithCaps\(task_entry,\s*"autotune_engine",\s*(\d+)')),

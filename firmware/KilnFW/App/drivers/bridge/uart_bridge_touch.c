@@ -35,6 +35,13 @@
 
 static const char *TAG = "uart_bridge";
 
+/* Raised 3072 -> 4096 2026-09-24 after bench SK-02 measured 440 B
+ * high-water free against the 512 B absolute floor. PSRAM stack (see
+ * uart_bridge_start_touch_task() below), so this costs 0 B of internal
+ * DRAM. Used by both the task creation call and its stack_margin_register()
+ * call so they cannot drift apart. */
+#define TOUCH_UART_BRIDGE_STACK_BYTES 4096
+
 /* --------------------------------------------------------------------------
  * DISPLAY (task 4) -- removed 2026-08-27, confirmed dead code: main.c never
  * calls uart_bridge_start_display_task() (LVGL owns the ILI9488 outright
@@ -228,7 +235,7 @@ static void touch_bridge_task(void *arg)
                  * calling kiln_ui_log_tap_targets() directly (bench-
                  * reproduced 2026-09-19: IllegalInstruction panic,
                  * exc_task='touch_uart_brid'). This task's stack is only
-                 * 3072 B; kiln_ui_log_tap_targets() recurses the live LVGL
+                 * TOUCH_UART_BRIDGE_STACK_BYTES (4096 B, see below); kiln_ui_log_tap_targets() recurses the live LVGL
                  * tree and calls ESP_LOGI (itself stack-hungry, formatting
                  * a line per widget) at every node, which does not fit
                  * alongside this task's other locals with the ~176 B that
@@ -236,7 +243,12 @@ static void touch_bridge_task(void *arg)
                  * flags lvgl_port_task -- which already owns every other
                  * LVGL access and carries an 8192 B stack -- to run the
                  * dump on ITS next loop tick. See lvgl_port.h's declaration
-                 * comment for the thread-safety angle this also fixes. */
+                 * comment for the thread-safety angle this also fixes.
+                 *
+                 * 2026-09-24: this task's stack was raised from 3072 B to
+                 * TOUCH_UART_BRIDGE_STACK_BYTES (4096 B) after bench SK-02
+                 * measured only 440 B high-water free against the 512 B
+                 * absolute floor -- PSRAM stack, so the DRAM impact is 0 B. */
                 lvgl_port_request_tap_dump();
                 err = ESP_OK;
                 break;
@@ -286,13 +298,14 @@ esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *id
      * screen_idle_get_state()/lvgl_port_inject_touch(), neither of which
      * touches hardware directly or reaches flash/NVS. */
     static TaskHandle_t s_touch_bridge_task_handle; /* lives for the program's duration, same as ctx */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(touch_bridge_task, "touch_uart_bridge", 3072,
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(touch_bridge_task, "touch_uart_bridge",
+                                                         TOUCH_UART_BRIDGE_STACK_BYTES,
                                                          &ctx, 5, &s_touch_bridge_task_handle, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_TOUCH);
         return ESP_ERR_NO_MEM;
     }
-    stack_margin_register("touch_uart_bridge", &s_touch_bridge_task_handle, 3072);
+    stack_margin_register("touch_uart_bridge", &s_touch_bridge_task_handle, TOUCH_UART_BRIDGE_STACK_BYTES);
     return ESP_OK;
 }

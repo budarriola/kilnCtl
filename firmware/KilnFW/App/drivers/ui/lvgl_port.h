@@ -196,7 +196,7 @@ void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
  * kiln_ui_log_tap_targets() on ITS OWN stack (8192 B, static, internal SRAM)
  * instead of the caller's. Callable from any task -- in particular from
  * touch_uart_bridge (uart_bridge_touch.c's TOUCH_CMD_LOG_TAP_TARGETS
- * handler), whose own stack is only 3072 B and does not have room for a
+ * handler), whose own stack is only 4096 B and does not have room for a
  * recursive LVGL tree walk plus the ESP_LOGI formatting it does at every
  * node (see lvgl_port.c's definition comment for the bench-reproduced
  * panic this replaced). Fire-and-forget, same contract as the command
