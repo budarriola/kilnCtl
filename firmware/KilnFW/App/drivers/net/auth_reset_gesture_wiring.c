@@ -17,15 +17,35 @@
 #include "auth_reset_gesture.h"
 
 #include "../persist/web_auth_store.h"
+#include "../persist/totp_config.h"
 
 static auth_reset_gesture_state_t s_singleton;
 static bool s_singleton_initialized;
+
+// docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2, section 6: additive to the
+// pre-existing web_auth_store_clear_for_physical_reset() wiring below -- the
+// four-corner gesture must also clear any enrolled TOTP secret, or a
+// physical reset would leave the previous owner's authenticator app still
+// able to satisfy the OPEN-tier /api/auth/forgot route for whatever
+// administrator credential the gesture (or a subsequent bootstrap) sets up
+// next. Nothing else about the gesture's state machine, corner order or
+// timing changes -- only this one function pointer's target.
+// totp_config.h has no psa/crypto.h dependency (net/totp.h's hand-rolled
+// SHA-1/HMAC, not PSA), so it does not reintroduce the host-stub conflict
+// this file's header comment warns about; it uses hal_kv.h the same way
+// web_auth_store.c already does in this same translation unit.
+static bool auth_reset_gesture_clear_all(void)
+{
+    bool web_ok = web_auth_store_clear_for_physical_reset();
+    bool totp_ok = totp_config_clear();
+    return web_ok && totp_ok;
+}
 
 auth_reset_gesture_state_t *auth_reset_gesture_singleton(void)
 {
     if (!s_singleton_initialized) {
         auth_reset_gesture_reset(&s_singleton);
-        s_singleton.clear_credentials_fn = web_auth_store_clear_for_physical_reset;
+        s_singleton.clear_credentials_fn = auth_reset_gesture_clear_all;
         s_singleton_initialized = true;
     }
     return &s_singleton;

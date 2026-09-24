@@ -611,6 +611,13 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # (SHA-1/HMAC/HOTP, host-tested) and its kiln_auth NVS store.
                        "net/totp.c"
                        "persist/totp_config.c"
+                       # docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: the HTTP
+                       # routes on top of the WT-A core above. totp_http_core.c
+                       # is the pure/host-tested token-lifecycle and pending-
+                       # secret state machine; auth_totp_http.c is the ESP-only
+                       # httpd glue (enrollment, status, forgot/reset).
+                       "http/totp_http_core.c"
+                       "http/auth_totp_http.c"
                        "control/profile_executor_relay_io.c"
                        "control/profile_executor_config_reload.c"
                        "control/profile_executor_pid_tick.c"

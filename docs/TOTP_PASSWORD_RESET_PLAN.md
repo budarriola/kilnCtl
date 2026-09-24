@@ -329,54 +329,47 @@ Wire rules for all three (review of WT-B, 2026-09-24):
 - `totp_enroll_confirm`/`totp_disable` must go through
   `totp_config_verify_and_consume()` like every other code check (section
   7), with the SNTP check first.
-- **Buffer sizes in `security_http.c` do not fit the begin response as they
-  stand:** `resp` is `SECURITY_HTTP_MESSAGE_MAX + 32` (192 B), while the
-  begin JSON carries a 32-char base32 secret plus a ~100-150-char otpauth
-  URI plus the time fields (~300 B). WT-A must size a separate buffer for
-  it -- not a larger stack array on the 8 KB httpd task (see CLAUDE.md's "httpd
-  stack blob class" note); stream it with
-  `httpd_resp_send_chunk()` or use a static/heap buffer. `cmd_val[24]`
-  already fits the longest new command (`totp_enroll_confirm`, 19 chars).
+- **Buffer sizes (DONE):** the begin response uses its own local `body[320]`
+  (plus `uri[192]`/`base32[64]` locals feeding it), never the shared
+  `resp[SECURITY_HTTP_MESSAGE_MAX + 32]` (192 B) that the other cmd=
+  outcomes use -- still a fixed stack buffer, not `httpd_resp_send_chunk()`,
+  but comfortably under the 8 KB httpd stack (see CLAUDE.md's "httpd stack
+  blob class" note) and sized with margin above the worst case (32-char
+  base32 + up to a 33-char username baked into the otpauth URI + JSON
+  overhead, ~280 B against a 320 B buffer); a `snprintf()` truncation check
+  fails loud (500) rather than silently truncating if that margin is ever
+  exceeded. `cmd_val[24]` already fits the longest new command
+  (`totp_enroll_confirm`, 19 chars).
 
 ## 7. Work tranches
 
-**WT-A — firmware: TOTP core + NVS + routes.** PARTIAL, `totpfw` worktree:
-core (`drivers/net/totp.c`/`.h`, pure RFC 6238/4226/4648, no mbedtls --
-target SHA-1 exists via PSA, but the host PSA stub is non-cryptographic, so
-the hand-rolled code is what both builds run; see `totp.h`'s header comment) and `totp_config.c`/`.h` (NVS persistence, write-only-secret
-discipline, tri-state load status) are DONE and host-tested (WT-D below).
-Routes that check a code must call `totp_config_verify_and_consume()`, which
-persists the matched step as used before returning OK; its
-`TOTP_CONSUME_UNAVAILABLE` (unreadable secret/counter or failed write) is a
-refusal, and the SNTP 503 check of section 6a comes before the call.
-Routes (`auth_forgot_reset_http.c`, `route_tier_table.h` entries, the QR
-encoder, the settings-page enrollment/disable handlers, and the
-`auth_reset_gesture_wiring.c` additive clear call) are NOT done -- deferred
-to a follow-up pass rather than rushed under this session's time budget,
-since weakening or half-wiring an auth-adjacent route is worse than leaving
-it unstarted. Sizes: medium-large (new
-crypto-adjacent code, a QR encoder, two new HTTP routes, one additive call
-site in the reset-gesture wiring). Files: new
-`firmware/KilnFW/App/drivers/net/totp.c`/`.h` (RFC 6238 HMAC-SHA1
-compute, base32 encode/decode, counter window check, constant-time
-compare), ~~a vendored small QR-encoder pair (e.g. `qrcodegen.c`/`.h`) plus a
-thin SVG-emission wrapper~~ (dropped: WT-B renders the QR client-side, see
-section 6b), new `firmware/KilnFW/App/drivers/persist/
-totp_config.c`/`.h` (NVS read/write for `totp_secret`/`totp_last_ctr`,
-write-only-on-GET semantics for the secret exactly like the email plan's
-`smtp_password`), edits to `route_tier_table.h` (2 new OPEN entries),
-`auth_forgot_reset_http.c` (new, 2 handlers), one additive line at
-`auth_reset_gesture_wiring.c`'s confirm call site (section 6), and the
-enrollment/disable handlers on the existing settings-page route(s).
-**No `max_uri_handlers` bump needed** at 162/170 — confirm with
-`check_uri_handler_cap.ps1` in the same commit regardless. Depends on:
-nothing outside this tree; independent of the `lazylogin` worktree.
-Checks: `-Only "check_uri_handler_cap|check_00_kilnfw_target_build|check_nvs_key"`
-plus a full `run_all_checks.ps1` before commit. **Also fix in this commit:**
-`check_flash_worker_lint.ps1` is currently RED on main because
-`totp_config.c` (`0f5151f0`) writes NVS outside the lint allowlist -- add it
-to the allowlist (or restructure the write) as part of landing these routes,
-not as a separate follow-up.
+**WT-A — firmware: TOTP core + NVS + routes. DONE 2026-09-24**,
+`totproutes_6k74k3` worktree: core (`drivers/net/totp.c`/`.h`) and
+`totp_config.c`/`.h` were already DONE/host-tested (WT-D below). This pass
+added `firmware/KilnFW/App/drivers/http/auth_totp_http.c`/`.h` (`GET
+/api/auth/totp_status`, `POST /api/auth/forgot`, `POST /api/auth/reset` --
+2 handlers plus the status read, section 6a's 503/429/202/200 shapes, the
+per-IP backoff ladder, the single-use reset-token table) and
+`totp_http_core.c`/`.h` (pure pending-secret/reset-token logic, host-tested
+in `test_totp_http_core.c`, 11 cases). Enrollment/disable ended up folding
+into the existing `POST /api/auth/security` cmd= dispatch instead of new
+routes, per section 6b (WT-B's chosen shape, confirmed against WT-B's
+landed `security_page.html`/`app.js` at `e8750924` after a rebase) --
+`security_http.c` gained `cmd=totp_enroll_begin`/`totp_enroll_confirm`/
+`totp_disable`, all returning `{"ok":bool}` (begin also carries
+`secret_base32`/`otpauth_uri`/`board_time_utc`/`sntp_synced`), an unsynced
+clock reported as `{"ok":false,"clock_unsynced":true}` rather than a raised
+503 (this route's page JS only reads the JSON body). Only 3 new routes
+total (`totp_status` GET ADMIN, `forgot`/`reset` POST OPEN) --
+`check_uri_handler_cap.ps1` reports 163/170, 7 spare. Also fixed in this
+commit: `check_flash_worker_lint.ps1` (added a `totp_config.c` allowlist
+entry -- Pattern 3, reached only from `security_http.c`'s cmd= handlers and
+the reset-gesture path, both internal-SRAM-stack, never PSRAM, never the
+flash worker) and the additive TOTP clear in
+`auth_reset_gesture_wiring.c`'s four-corner confirm path. Negative-tested:
+byte-sabotaged `totp_http_core.c`'s reset-token single-use check, confirmed
+`check_00_kilnfw_host_tests.ps1` failed, restored by hand (empty
+`git diff`), forced full rebuild, confirmed pass again.
 
 **WT-B — web UI: enrollment page + forgot-password modal flow. DONE
 2026-09-24** (`62f8bd4e`, gesture follow-up `cafc80f3`): the login modal's
@@ -432,7 +425,6 @@ confirms the host-test suite catches it, then a forced full rebuild before
 restoring by hand — not a hand-restore alone, per this repo's
 negative-test-every-check rule.
 
-**Dependency summary:** WT-B, WT-C and WT-D are done. **WT-A (firmware
-routes) is the only remaining, no-external-dependency tranche** -- it must
-also fix the `check_flash_worker_lint.ps1` red noted above in the same
-commit.
+**Dependency summary:** WT-A, WT-B, WT-C (code side) and WT-D are all done
+2026-09-24. WT-C's live-board verification against these routes is the only
+remaining follow-up, not tracked as its own tranche.

@@ -35,6 +35,7 @@
 #include "security_backend_web_auth.h"
 #include "security_http.h"
 #include "web_auth_login_http.h"
+#include "auth_totp_http.h"
 #include "web_auth_session_status_http.h"
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
@@ -619,6 +620,19 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (web_auth_login_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "web_auth_login_http_start failed: %s -- no /login or "
                       "/api/auth/login route this boot", esp_err_to_name(web_auth_login_err));
+    }
+
+    // docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: TOTP enrollment/status
+    // (ADMIN) and the /api/auth/forgot + /api/auth/reset password-reset flow
+    // (OPEN). Registered after security_backend_web_auth_start() so
+    // reset_post_handler()'s security_backend_get_vtable()->set_web_password()
+    // call reaches the real vtable, same ordering requirement as
+    // security_http_start() above. Non-fatal on failure, same convention as
+    // every other *_http_start() call in this block.
+    esp_err_t auth_totp_err = auth_totp_http_start();
+    if (auth_totp_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "auth_totp_http_start failed: %s -- no TOTP enrollment or "
+                      "password-reset routes this boot", esp_err_to_name(auth_totp_err));
     }
 
     // WEB_AUTH_PLAN.md section 8, web-GUI half: the inactivity lock's status

@@ -179,6 +179,11 @@ try {
         # test_http_auth_enforce.c/test_web_auth_login.c just above.
         (Join-Path $testDir "test_totp.c"),
         (Join-Path $testDir "test_totp_config_persist.c"),
+        # docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: totp_http_core.c
+        # below is pure (no ESP-IDF dependency, just net/totp.h's
+        # TOTP_SECRET_LEN), so it links in for real, same convention as
+        # totp.c/totp_config.c just above.
+        (Join-Path $testDir "test_totp_http_core.c"),
         (Join-Path $testDir "test_sim_high_temp.c"),
         (Join-Path $testDir "test_sim_mistune.c"),
         (Join-Path $testDir "test_sim_factorial_design.c"),
@@ -281,6 +286,10 @@ try {
         # (fake_kv.c/hal_status.c, already linked above for web_auth_store.c).
         (Join-Path $driversDir "net/totp.c"),
         (Join-Path $driversDir "persist/totp_config.c"),
+        # WT-A part 2: the pure token-lifecycle/pending-secret state machine
+        # behind auth_totp_http.c/security_http.c's TOTP routes -- no
+        # ESP-IDF dependency, see totp_http_core.h's own header comment.
+        (Join-Path $driversDir "http/totp_http_core.c"),
         # Opus review of 5dd23944 finding B (2026-09-20): backup_import.c
         # (#included via test_backup_import.c above) now calls
         # live_edit_name_collides() directly, in its new pass-1 dup-name

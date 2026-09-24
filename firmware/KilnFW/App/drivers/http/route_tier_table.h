@@ -131,6 +131,15 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * shared pre-handler already produces for USER-tier routes; there is no
      * reason to log out a session that does not exist. */
     ROUTE_TIER("/api/auth/logout", HTTP_POST, ROUTE_TIER_USER),
+    /* docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2, section 6a: an
+     * unauthenticated caller must be able to reach the password-reset flow
+     * with no session, same reasoning as /api/auth/login above -- the real
+     * gates are the clock-sync check, the per-IP/board-wide backoff and
+     * totp_config_verify_and_consume()/the reset-token table inside the
+     * handlers themselves, not this classification. Neither route discloses
+     * anything beyond a token-shaped opaque value or a bare ok/fail. */
+    ROUTE_TIER("/api/auth/forgot", HTTP_POST, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/auth/reset", HTTP_POST, ROUTE_TIER_OPEN),
     ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),
@@ -339,6 +348,13 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * nvs_keys_get_handler() comment. ADMIN like every other diagnostics
      * route that can name internal storage layout. */
     ROUTE_TIER("/api/nvs/keys", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2 / section 6b: TOTP
+     * status. ADMIN like every other credential-management route in this
+     * section. Enrollment (begin/confirm) and disable ride the existing
+     * POST /api/auth/security cmd= dispatch instead of their own routes
+     * (section 6b, WT-B's chosen shape) -- no separate tier row needed for
+     * them, since that route is already ROUTE_TIER_ADMIN below. */
+    ROUTE_TIER("/api/auth/totp_status", HTTP_GET, ROUTE_TIER_ADMIN),
     /* GET /api/ota/challenge stays OPEN per the plan -- it issues a nonce
      * plus the administrator record's salt/iteration count, neither usable
      * without the administrator password itself (plan section 1, the

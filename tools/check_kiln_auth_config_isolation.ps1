@@ -82,7 +82,13 @@ $forbiddenIdentifiers = @("kiln_auth", "web_auth", "lcd_auth", "auth_policy")
 # only three factory-reset ever erases), and web_auth/lcd_auth/auth_policy
 # are its three blob keys. No config/backup/restore/factory-reset path may
 # reference them; this file is the one place that legitimately does.
-$Allowlist = @("web_auth_store.c", "web_auth_store.h")
+#
+# totp_config.c/.h: docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2 -- also item
+# 2's credential-storage class, sharing web_auth_store's kiln_auth namespace
+# deliberately (the TOTP secret/last-counter record belongs with the other
+# auth material, not with kiln_nvs/wifi_nvs/profiles_nvs). No config/backup/
+# restore/factory-reset path may reference it either.
+$Allowlist = @("web_auth_store.c", "web_auth_store.h", "totp_config.c", "totp_config.h")
 
 # Per-line escape hatch for a REFUSAL, not a real reference: a line carrying
 # this exact marker comment is read as "this line names the identifier only

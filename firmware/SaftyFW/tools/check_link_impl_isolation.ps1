@@ -198,6 +198,17 @@ $allowlistPaths = @(
     # this module's host tests build standalone off-target -- nothing to do
     # with the link's CRC16-CCITT-FALSE.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\web_auth_store.c"),
+    # docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: totp_config.c's
+    # crc32_compute()/secret_blob_crc() are the SAME class as web_auth_
+    # store.c's entry just above -- a standalone table-less CRC32 (IEEE
+    # 802.3/zlib polynomial) over this module's OWN kiln_auth NVS blob (the
+    # TOTP secret/last-counter record), deliberately copied rather than
+    # shared so this module's host tests build standalone off-target --
+    # nothing to do with the link's CRC16-CCITT-FALSE. test_totp_config_
+    # persist.c's own test_crc32() is the matching host-test-side copy, same
+    # reason test files elsewhere in this list carry their own copy.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\totp_config.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_totp_config_persist.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\watchdog_cfg.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety\crash_report.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\http\profiles_http.c"),

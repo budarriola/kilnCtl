@@ -13,12 +13,31 @@
 
 #include "esp_log.h"
 
-#include "http_auth_http.h" // kiln_http_register(), http_auth_caller_is_admin()
+#include "hal_sysinfo.h"     // hal_sysinfo_fill_random()
+#include "hal_time.h"        // hal_time_now_ms()
+#include "http_auth_http.h"  // kiln_http_register(), http_auth_caller_is_admin()
 #include "http_form.h"
 #include "security_backend.h"
 #include "security_http_core.h"
+#include "time_sync.h"       // time_sync_get_status()
+#include "totp.h"            // net/totp.h -- on the include path via "net"
+#include "totp_config.h"     // persist/totp_config.h -- via "persist"
+#include "totp_http_core.h"
+#include "web_auth_store.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
+
+// docs/TOTP_PASSWORD_RESET_PLAN.md section 6b (2026-09-24, WT-B's chosen
+// shape): enrollment/disable ride this route's existing cmd= dispatch
+// rather than three new routes -- see this file's POST handler comment.
+// The RAM-only pending secret is a single-board, single-administrator
+// singleton, same lifetime rule as auth_totp_http.c's reset-token table.
+static totp_pending_enrollment_t s_totp_pending;
+
+static uint32_t security_http_now_ms(void)
+{
+    return (uint32_t)hal_time_now_ms();
+}
 
 static const char *TAG = "security_http";
 
@@ -101,6 +120,26 @@ static esp_err_t security_config_get_handler(httpd_req_t *req)
 //   cmd=set_lcd_pin&role=admin|user&pin=...
 //   cmd=set_policy&web_enabled=0|1&lcd_enabled=0|1&web_timeout_min=N&lcd_timeout_min=N
 //   cmd=clear_credentials (item 12b -- no other fields)
+//   cmd=totp_enroll_begin (docs/TOTP_PASSWORD_RESET_PLAN.md section 6b) --
+//     returns {"ok":true,"secret_base32","otpauth_uri","board_time_utc",
+//     "sntp_synced"}
+//   cmd=totp_enroll_confirm&code=NNNNNN -- returns {"ok"} only
+//   cmd=totp_disable&code=NNNNNN -- requires a currently-valid code, not
+//     merely the ADMIN session already required by this route; {"ok"} only
+//
+// The three totp_* commands are handled directly below, before the
+// set_web_password/etc dispatch machinery, and return early -- they do not
+// go through security_http_dispatch()/security_backend_vtable_t (no backend
+// seam exists for a TOTP secret; it lives in persist/totp_config.h
+// directly). All three answer through the same generic {"ok":bool} JSON
+// shape as security_http_dispatch()'s other commands (transport always 200,
+// same as that dispatch path -- see security_post_handler()'s own comment),
+// whether the underlying failure is a bad code, no pending enrollment, or a
+// clock issue (reported as {"ok":false,"clock_unsynced":true}, never a raised
+// 503, since this route's page-side JS only reads the JSON body's `ok`).
+// Plan section 6b's enumeration-safety note: this surface is ADMIN-gated
+// already, so the concern is a stolen-session attacker brute-forcing
+// disable, not an anonymous oracle.
 // Bounded-body-then-parse-then-dispatch, same shape as settings_http.c's
 // POST handlers. This route is ROUTE_TIER_ADMIN so kiln_http_register()'s
 // pre-handler has already refused a non-admin caller before this body runs;
@@ -138,6 +177,135 @@ static int parse_int_field(const char *body, const char *key, int *out)
     return n;
 }
 
+// --- cmd=totp_enroll_begin / totp_enroll_confirm / totp_disable -------------
+//
+// CLOCK-BEFORE-ANYTHING (plan section 6a's rule for /api/auth/forgot and
+// /api/auth/reset, applied here too, but through THIS route's own always-200
+// cmd= transport per section 6b -- not those two OPEN routes' raw 503, since
+// this route's page-side fetch().then(r => r.json()) already only inspects
+// the JSON body's `ok`, never r.status, same as every other cmd= outcome
+// dispatched below): a clock-not-ready check here returns 200 with
+// {"ok":false,"clock_unsynced":true} instead of raising a transport error.
+// Checked before touching the pending secret, NVS, or the request body.
+//
+// STACK: all locals here are small fixed buffers (well under the httpd 8 KB
+// stack blob class this codebase watches for), same convention as
+// auth_totp_http.c's forgot/reset handlers.
+
+static esp_err_t security_send_totp_clock_unsynced(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"clock_unsynced\":true}");
+}
+
+static esp_err_t security_totp_enroll_begin(httpd_req_t *req)
+{
+    time_sync_status_t st;
+    time_sync_get_status(&st);
+    if (!totp_http_clock_ready(st.ever_synced)) {
+        return security_send_totp_clock_unsynced(req);
+    }
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    hal_sysinfo_fill_random(secret, sizeof(secret));
+    totp_pending_begin(&s_totp_pending, secret, security_http_now_ms());
+    totp_secure_zero(secret, sizeof(secret));
+
+    web_auth_password_record_t admin_record;
+    const char *username = "administrator";
+    if (web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &admin_record) == WEB_AUTH_LOAD_OK &&
+        admin_record.configured && admin_record.username[0] != '\0') {
+        username = admin_record.username;
+    }
+
+    char uri[192];
+    size_t uri_len = totp_build_otpauth_uri(username, s_totp_pending.secret, TOTP_SECRET_LEN, uri, sizeof(uri));
+    char base32[64];
+    size_t base32_len = (uri_len != 0) ? totp_base32_encode(s_totp_pending.secret, TOTP_SECRET_LEN, base32, sizeof(base32)) : 0;
+    if (uri_len == 0 || base32_len == 0) {
+        totp_pending_clear(&s_totp_pending);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "totp enrollment secret build failed");
+        return ESP_OK;
+    }
+
+    char body[320];
+    int n = snprintf(body, sizeof(body),
+                      "{\"ok\":true,\"secret_base32\":\"%s\",\"otpauth_uri\":\"%s\",\"board_time_utc\":%lld,\"sntp_synced\":%s}",
+                      base32, uri, (long long)st.now_epoch, st.ever_synced ? "true" : "false");
+    totp_secure_zero(uri, sizeof(uri));
+    totp_secure_zero(base32, sizeof(base32));
+    if (n < 0 || (size_t)n >= sizeof(body)) {
+        totp_pending_clear(&s_totp_pending);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response too large");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, body);
+    totp_secure_zero(body, sizeof(body));
+    return ret;
+}
+
+static esp_err_t security_totp_enroll_confirm(httpd_req_t *req, const char *body)
+{
+    time_sync_status_t st;
+    time_sync_get_status(&st);
+    if (!totp_http_clock_ready(st.ever_synced)) {
+        return security_send_totp_clock_unsynced(req);
+    }
+    if (!totp_pending_is_valid(&s_totp_pending, security_http_now_ms())) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    char code[8];
+    if (http_form_find_field(body, "code", code, sizeof(code)) < 0) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    uint64_t matched_counter = 0;
+    bool ok = totp_verify(s_totp_pending.secret, TOTP_SECRET_LEN, code, (uint64_t)st.now_epoch, 0, &matched_counter);
+    totp_secure_zero(code, sizeof(code));
+    if (!ok) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    bool persisted =
+        totp_config_set_secret(s_totp_pending.secret) && totp_config_set_last_counter((uint32_t)matched_counter);
+    totp_pending_clear(&s_totp_pending);
+    if (!persisted) {
+        totp_config_clear();
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, persisted ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+static esp_err_t security_totp_disable(httpd_req_t *req, const char *body)
+{
+    time_sync_status_t st;
+    time_sync_get_status(&st);
+    if (!totp_http_clock_ready(st.ever_synced)) {
+        return security_send_totp_clock_unsynced(req);
+    }
+    char code[8];
+    if (http_form_find_field(body, "code", code, sizeof(code)) < 0) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    // Requires a currently-valid TOTP code, not merely the ADMIN session
+    // already required by this route (plan section 6b) -- a hijacked web
+    // session alone must not be able to remove a locked-out owner's only
+    // non-admin-session recovery path.
+    totp_consume_result_t r = totp_config_verify_and_consume(code, (uint64_t)st.now_epoch);
+    totp_secure_zero(code, sizeof(code));
+    if (r != TOTP_CONSUME_OK) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    totp_pending_clear(&s_totp_pending); // hygiene: never leave a stale pending secret behind either
+    bool cleared = totp_config_clear();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, cleared ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 static esp_err_t security_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > SECURITY_HTTP_BODY_MAX) {
@@ -162,6 +330,16 @@ static esp_err_t security_post_handler(httpd_req_t *req)
     if (cmd_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cmd is required");
         return ESP_OK;
+    }
+
+    if (strcmp(cmd_val, "totp_enroll_begin") == 0) {
+        return security_totp_enroll_begin(req);
+    }
+    if (strcmp(cmd_val, "totp_enroll_confirm") == 0) {
+        return security_totp_enroll_confirm(req, body);
+    }
+    if (strcmp(cmd_val, "totp_disable") == 0) {
+        return security_totp_disable(req, body);
     }
 
     security_request_t sreq;
