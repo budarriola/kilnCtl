@@ -200,11 +200,11 @@ class RaisingUiTest(PageNavUiTest):
 
     def click_by_name(self, name):
         self._call_count += 1
-        if name == "Home":
+        if name == "home":
             self.home_calls += 1
             self._page = "home"
             return {"result": "ok"}
-        if name == "Back":
+        if name == "back":
             return {"result": "not_found"}
         if self._call_count == self._raise_on_call:
             raise RuntimeError("board went unresponsive")

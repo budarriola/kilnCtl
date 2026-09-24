@@ -102,6 +102,22 @@ static const kiln_ui_tap_name_tag_t kUiTopbarGearTapName = {
     .name = "settings",
 };
 
+/* "back"/"home" tap names for the topbar's Back and Home icons, same
+ * pattern as kUiTopbarGearTapName above. Added so a bench harness can
+ * navigate by name on pages like the config hub (ui_page_config.c,
+ * show_home=false) that have no gear icon and previously had no nameable
+ * target at all. Back and Home never both render with the same name (they
+ * are distinct strings), so kiln_ui_click_by_name() never sees two exact
+ * matches for either one. */
+static const kiln_ui_tap_name_tag_t kUiTopbarBackTapName = {
+    .magic = KILN_UI_TAP_NAME_MAGIC,
+    .name = "back",
+};
+static const kiln_ui_tap_name_tag_t kUiTopbarHomeTapName = {
+    .magic = KILN_UI_TAP_NAME_MAGIC,
+    .name = "home",
+};
+
 /* Non-clickable indicator icon (the relay-life warning). Same fixed size and
  * card background as build_icon()'s buttons so it sits in the row without
  * looking out of place, but no button widget, no event callback, and no
@@ -212,10 +228,12 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
          * stays flush with the container's right edge even while the hidden
          * warning slot collapses to zero width. */
         if (cfg->back_page) {
-            out->back_btn = build_icon(icons, LV_SYMBOL_LEFT, nav_cb, (void *)cfg->back_page);
+            out->back_btn = build_icon_named(icons, LV_SYMBOL_LEFT, nav_cb, (void *)cfg->back_page,
+                                              &kUiTopbarBackTapName);
         }
         if (cfg->show_home) {
-            out->home_btn = build_icon(icons, LV_SYMBOL_HOME, nav_cb, (void *)"home");
+            out->home_btn = build_icon_named(icons, LV_SYMBOL_HOME, nav_cb, (void *)"home",
+                                              &kUiTopbarHomeTapName);
         }
         if (cfg->prev_cb) {
             /* LV_SYMBOL_PREV/NEXT (the media skip glyphs), not

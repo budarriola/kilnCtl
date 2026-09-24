@@ -252,9 +252,14 @@ def _navigate_home(ui) -> None:
     profiles/diagnostics sub-page for whatever runs next."""
     try:
         if ui.get_current_page() != "home":
-            ui.click_by_name("Back")
+            # Lowercase tap names, same convention as "settings" -- ui_topbar.c's
+            # build_icon_named() now tags Back/Home with kUiTopbarBackTapName/
+            # kUiTopbarHomeTapName ("back"/"home"). Before that fix these icons
+            # had no tap name at all, so this call always silently missed (the
+            # exact strcmp saw the icon glyph's raw text, never "Back"/"Home").
+            ui.click_by_name("back")
             if ui.get_current_page() != "home":
-                ui.click_by_name("Home")
+                ui.click_by_name("home")
     except Exception:
         pass
 
