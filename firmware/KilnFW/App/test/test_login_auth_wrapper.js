@@ -435,7 +435,7 @@ function flush() {
       String: String,
     };
     vm.createContext(gctx);
-    vm.runInContext('var loginModalEl = null;\n' + RANGE_C +
+    vm.runInContext('var loginModalEl = null;\nvar forgotModalEl = null;\n' + RANGE_C +
       '\nthis.__isUser = kcRequestIsUserInitiated; this.__isDash = kcPageIsDashboard;', gctx);
     const isUser = gctx.__isUser;
     const runTimers = () => { while (timers.length) timers.shift()(); };
@@ -457,6 +457,38 @@ function flush() {
     assert(gctx.__isDash() === true, 'kcPageIsDashboard: "/" is the dashboard');
     gctx.window.location.pathname = '/settings/zones';
     assert(gctx.__isDash() === false, 'kcPageIsDashboard: a gated page is not');
+  }
+
+  // -------------------------------------------------------------------
+  // Group 14 (second reviewer, 2026-09-24): kcNoteGesture must ignore
+  // events inside the forgot-password reset modal too, not just
+  // loginModalEl -- typing a TOTP code in that modal is not a new page
+  // action and must not restart the 3 s write window.
+  // -------------------------------------------------------------------
+  {
+    let clock2 = 5000000;
+    const listeners2 = {};
+    const timers2 = [];
+    const fakeTarget = {};
+    const fakeForgotModal = { contains: function (el) { return el === fakeTarget; } };
+    const gctx2 = {
+      Date: { now: function () { return clock2; } },
+      setTimeout: function (fn) { timers2.push(fn); return timers2.length; },
+      document: { addEventListener: function (type, fn) { (listeners2[type] = listeners2[type] || []).push(fn); } },
+      window: { location: { pathname: '/' }, confirm: function () { return true; } },
+      String: String,
+    };
+    vm.createContext(gctx2);
+    vm.runInContext('var loginModalEl = null;\nvar forgotModalEl = null;\n' + RANGE_C +
+      '\nthis.__isUser2 = kcRequestIsUserInitiated;' +
+      '\nthis.__setForgotModal = function (m) { forgotModalEl = m; };', gctx2);
+    gctx2.__setForgotModal(fakeForgotModal);
+    listeners2.keydown.forEach((fn) => fn({ target: fakeTarget }));
+    assert(!gctx2.__isUser2('POST'),
+      'kcNoteGesture: a keydown inside the reset modal does not restart the write window');
+    listeners2.keydown.forEach((fn) => fn({ target: {} }));
+    assert(gctx2.__isUser2('POST'),
+      'sanity: a keydown outside the reset modal still counts as a gesture');
   }
 
   console.log('');

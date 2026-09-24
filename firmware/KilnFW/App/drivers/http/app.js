@@ -782,6 +782,7 @@
   function kcNoteGesture(evt) {
     // Typing/clicking inside the modal itself is not a new page action.
     if (loginModalEl && evt && evt.target && loginModalEl.contains(evt.target)) return;
+    if (forgotModalEl && evt && evt.target && forgotModalEl.contains(evt.target)) return;
     kcGestureActive = true;
     kcLastGestureAt = Date.now();
     setTimeout(function () { kcGestureActive = false; }, 0);
