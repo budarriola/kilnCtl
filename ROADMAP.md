@@ -23,7 +23,8 @@
 >   `tools/check_firing_ceiling_margin_mirror_drift.ps1` guards the check
 >   against its own mirror drifting. **Open follow-ups from that review:**
 >   (1) the LCD home screen's quick-start path only logs the refused start —
->   the operator sees nothing (fix in progress, worktree homerefuse);
+>   the operator sees nothing (FIXED deeab320: it now shows the same "Cannot Start"
+>   modal as the profile detail page; not yet flashed);
 >   (2) the check compares against the 100 C default margin, not the Pico's
 >   actually-configured 0x0201 margin/placement mode from `safety_cfg_store`,
 >   so it can over-refuse or pass a start through that the real Pico ceiling
