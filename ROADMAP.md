@@ -1,6 +1,54 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-24, the first real-hardware
+> **Status:** planning · **Last reviewed:** 2026-09-24, a real `profile_executor`
+> panic found by the heat rerun (run `20260924T085059Z_heat`), root-caused and
+> fixed, plus a new cross-process bench board lock (thirty-seventh sweep) —
+> open items below.
+> - **`profile_executor` dwell-fault assert, real defect, fixed 2026-09-24**
+>   (`docs/audits/profile_executor_panic_2026-09-24.md`, `3ce065ca`): HP-07's
+>   global thermal guard tripped while the run was dwelling; `escalate_guard_trip()`
+>   set `state = FAULTED` but left `s_exec.dwelling` true, and the same tick's
+>   `exec_mode_state_check()` rule 5 then asserted and rebooted the board
+>   (`profile_executor.c:1814`). Fixed by `773ec669`: a new
+>   `exec_enter_terminal_state()` helper (`profile_executor_relay_io.c`) sets
+>   state and clears `dwelling`/`ramp_lock_held` together, wired into all six
+>   FAULTED/DONE transition sites; a host test drives `escalate_guard_trip()`
+>   from a dwelling RUNNING state and requires zero `exec_mode_state_check()`
+>   violations afterward (confirmed failing against the unfixed helper first).
+>   `adc7f65c` corrects the rule-4/rule-5 rationale comments the audit found
+>   false. **Owner decision:** the production `assert()` at
+>   `profile_executor.c:1814` is left unchanged for now — a future change is
+>   expected to latch FAULTED and log instead of aborting, but that is not
+>   implemented yet. Crash report (`dump_id` 861174328) acknowledged by owner
+>   decision, not by this fix. The panicked run's own HP-02/03/05 FAILs were
+>   not the defect: a **second, concurrent** `bench_test_run(suite="heat")`
+>   (`20260924T085635Z_heat`) was driving the same board and slot 7 at the
+>   same time — a bench-scheduling gap, not a mode-state bug.
+> - **Cross-process bench board lock landed** (`d5bfac19`, review fixes
+>   `759660c2`): `bench_test/board_lock.py` adds a lock file at
+>   `logs/bench_test/.board_lock` keyed off a per-suite mutation table
+>   (heat/autotune/ota/flash/safety/web/nightly/full are MUTATING; lcd moved
+>   to MUTATING in the review pass since it injects real touches and can clear
+>   a latched trip or write policy; smoke/static/stack stay READ_ONLY and
+>   never touch the file). Wired into `BenchTestRunner.run()` itself, so
+>   `bench_test_run`, `ota_matrix_run`, and any direct `run_suite()` caller
+>   all get it; a live holder refuses immediately, naming pid/suite/start
+>   time, and read-only suites are now refused while a live mutating run
+>   holds the lock. This is the fix for the "two heat runs sharing one board"
+>   scheduling gap the panic investigation above found.
+> - **Stack judge follow-up, INCONCLUSIVE**: `9d905ab9` corrects the SK-01/02
+>   plan note (baseline script's real output dir, the 512 B `min_free_bytes`
+>   floor wording) — cross-commit review only, no new bench run.
+> - **LCD-01/08/09/14/16 judge/navigation fixes landed** (`0df96d5d`): the
+>   chroma judge's near-black fallback now requires a brightness floor
+>   (`CHROMA_MIN_BRIGHTNESS_RATIO`), and case-level tests now prove a FAIL
+>   naming the missed hop instead of clicking a stale target when the first
+>   hop's page never arrives. `f3164403` re-review-fixes LCD-19/WEB-SEC-04
+>   (PIN format validation, dismiss-survives-error restore, per-`send()`
+>   `EnterPinTest` replies). **Neither the stack nor the LCD suite has been
+>   rerun against these fixes yet** — both reruns and the heat rerun (against
+>   the dwell-fault fix above) are still pending.
+> **Previously reviewed:** 2026-09-24, the first real-hardware
 > runs of the bench test system's heat/LCD/stack/web suites, and the runner
 > fixes they found (thirty-sixth sweep) — open items below.
 > - **First real-hardware bench_test runs, 2026-09-24** (ESP `351304cb`, Pico
@@ -3679,15 +3727,25 @@ Owner instruction, 2026-09-21.
 - [x] First real-hardware bench_test heat/LCD/stack/web suite runs, 2026-09-24
   — see the top-of-file entry above and `docs/BENCH_TEST_LOG.md`. Every FAIL
   traced to the runner, not firmware; fixes landed same day.
-- [ ] Fix and rerun LCD-01/08/09/14/16: second run (`20260924T084342Z_lcd`, panel
-  lit) failed on judge/navigation defects, not firmware; fix in progress.
-- [ ] Rerun the stack suite (SK-01/02) against the noise-tolerance/
-  fw_commit-gate fix (`866003ea`) — the last attempt (`20260924T084524Z_stack`)
-  hit a preflight refusal on a stale MCP server, unrelated to the fix.
+- [x] Fix LCD-01/08/09/14/16 judge/navigation defects — done, 2026-09-24
+  (`0df96d5d`). **Still pending: rerun** the LCD suite against this fix; no
+  rerun yet.
+- [x] Fix the SK-01/02 noise-tolerance/fw_commit-gate issue — done,
+  2026-09-24 (`866003ea`; plan-note follow-up `9d905ab9`). **Still pending:
+  rerun** the stack suite against this fix — the last attempt
+  (`20260924T084524Z_stack`) hit a preflight refusal on a stale MCP server,
+  unrelated to the fix.
 - [ ] Capture a stack-margin baseline at the currently running commit
   (`351304cb`/`6bb41fe1`) once the stack suite rerun above lands clean.
 - [ ] Run LCD-19 with `KILNCTL_LCD_PIN` set (unset on every run so far, so it
   has never executed).
+- [x] Root-cause and fix the `profile_executor` dwell-fault panic hit by heat
+  run `20260924T085059Z_heat` — done, 2026-09-24 (`3ce065ca` audit, `773ec669`
+  fix, `adc7f65c` comment correction; see the top-of-file entry above).
+  **Still pending: rerun** the heat suite against this fix — no rerun yet.
+- [x] Add a bench board lock so concurrent heat/mutating runs cannot share one
+  board — done, 2026-09-24 (`d5bfac19`, `759660c2`; see the top-of-file entry
+  above).
 
 ---
 
