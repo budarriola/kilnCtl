@@ -61,11 +61,11 @@ class SecHttpClientGetTest(unittest.TestCase):
         client = C._SecHttpClient("1.2.3.4")
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             captured["header"] = req.get_header("Accept-encoding")
             return _FakeHttpResponse(200, b"plain body", {})
 
-        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
         self.assertEqual(captured["header"], "gzip")
         self.assertEqual(status, 200)
@@ -75,10 +75,10 @@ class SecHttpClientGetTest(unittest.TestCase):
         client = C._SecHttpClient("1.2.3.4")
         payload = gzip.compress(b"<html>hello</html>")
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             return _FakeHttpResponse(200, payload, {"Content-Encoding": "gzip"})
 
-        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
         self.assertEqual(status, 200)
         self.assertEqual(text, "<html>hello</html>")
@@ -88,10 +88,10 @@ class SecHttpClientGetTest(unittest.TestCase):
         doesn't actually decompress must not raise out of _get()."""
         client = C._SecHttpClient("1.2.3.4")
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             return _FakeHttpResponse(200, b"not actually gzip", {"Content-Encoding": "gzip"})
 
-        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
         self.assertEqual(status, 200)
         self.assertIsNone(text)
@@ -101,12 +101,12 @@ class SecHttpClientGetTest(unittest.TestCase):
         payload = gzip.compress(b'{"ok": false, "reason": "forbidden"}')
         headers = _FakeHeaders({"Content-Encoding": "gzip"})
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             raise urllib.error.HTTPError(
                 url="http://1.2.3.4/", code=403, msg="Forbidden", hdrs=headers, fp=io.BytesIO(payload)
             )
 
-        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
         self.assertEqual(status, 403)
         self.assertEqual(text, '{"ok": false, "reason": "forbidden"}')
@@ -115,15 +115,46 @@ class SecHttpClientGetTest(unittest.TestCase):
         client = C._SecHttpClient("1.2.3.4")
         headers = _FakeHeaders({})
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             raise urllib.error.HTTPError(
                 url="http://1.2.3.4/", code=401, msg="Unauthorized", hdrs=headers, fp=io.BytesIO(b"nope")
             )
 
-        with mock.patch.object(C.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
         self.assertEqual(status, 401)
         self.assertEqual(text, "nope")
+
+    def test_302_is_returned_as_302_and_not_followed(self):
+        """The WEB-SEC-03 bug: firmware answers an unauthenticated
+        non-/api GET with 302 + Location: /login?return=... . A client that
+        auto-follows lands on the login shell with 200 -- exactly the stale
+        premise that made admin_route_gated pass on a page that was never
+        actually gated. This client must observe the 302 itself."""
+        client = C._SecHttpClient("1.2.3.4")
+        headers = _FakeHeaders({"Location": "/login?return=/settings/zones"})
+
+        def fake_open(req, timeout=None):
+            # A real OpenerDirector with _NoRedirectHandler installed hands
+            # back the original 302 response rather than raising or
+            # re-issuing the request against Location -- this fake mirrors
+            # that contract directly.
+            return _FakeHttpResponse(302, b"", headers)
+
+        with mock.patch.object(client._opener, "open", side_effect=fake_open):
+            status, location = client.get_status_location("/settings/zones")
+        self.assertEqual(status, 302)
+        self.assertEqual(location, "/login?return=/settings/zones")
+
+    def test_no_redirect_handler_returns_none_from_redirect_request(self):
+        """Direct check of the handler installed on client._opener: it must
+        refuse to build a follow-up request for any 3xx."""
+        handler = C._NoRedirectHandler()
+        result = handler.redirect_request(
+            req=mock.Mock(), fp=mock.Mock(), code=302, msg="Found",
+            headers=_FakeHeaders({"Location": "/login"}), newurl="http://1.2.3.4/login",
+        )
+        self.assertIsNone(result)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +193,7 @@ class JudgeWebSec03Test(unittest.TestCase):
     def _happy(self, **overrides):
         kwargs = dict(
             pw_ok=True, enabled_ok=True, dashboard_ok=True, admin_route_gated=True,
+            api_route_gated=True,
             login_ok=True, session_ok=True, extend_ok=True, restore_ok=True, restore_matches=True,
         )
         kwargs.update(overrides)
@@ -190,6 +222,14 @@ class JudgeWebSec03Test(unittest.TestCase):
         result = J.judge_web_sec03(**self._happy(admin_route_gated=False))
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
+
+    def test_api_route_not_gated_fails_even_if_page_route_is_gated(self):
+        """The stale-premise bug this fix closes: a 200 on the data-bearing
+        GET /api/zones must FAIL even when /settings/zones correctly
+        redirected -- one gated probe is not evidence for the other."""
+        result = J.judge_web_sec03(**self._happy(api_route_gated=False))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("api/zones", result.reason)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +369,9 @@ class Diag08Test(unittest.TestCase):
 
 class FakeSecClient:
     def __init__(self, web_enabled=False, lcd_enabled=False, web_timeout_min=30, lcd_timeout_min=30,
-                 pw_ok=True, enable_ok=True, dashboard_status=200, admin_status=302,
+                 pw_ok=True, enable_ok=True, dashboard_status=200,
+                 admin_page_status=302, admin_page_location="/login?return=/settings/zones",
+                 api_status=401,
                  login_ok=True, session_ok=True, extend_status=200,
                  login_raises=False, restore_ok=True):
         self._cfg = {
@@ -339,7 +381,9 @@ class FakeSecClient:
         self.pw_ok = pw_ok
         self.enable_ok = enable_ok
         self.dashboard_status = dashboard_status
-        self.admin_status = admin_status
+        self.admin_page_status = admin_page_status
+        self.admin_page_location = admin_page_location
+        self.api_status = api_status
         self.login_ok = login_ok
         self.session_ok = session_ok
         self.extend_status = extend_status
@@ -376,7 +420,12 @@ class FakeSecClient:
     def get_status(self, path, cookie=None):
         if path == "/":
             return self.dashboard_status
-        return self.admin_status
+        if path == "/api/zones":
+            return self.api_status
+        return self.admin_page_status
+
+    def get_status_location(self, path, cookie=None):
+        return self.admin_page_status, self.admin_page_location
 
 
 class FakeSecClientWithBody(FakeSecClient):
@@ -394,7 +443,7 @@ class FakeSecClientWithBody(FakeSecClient):
     def get_status_body(self, path, cookie=None):
         self.get_status_body_calls += 1
         if path != "/":
-            return self.admin_status, None
+            return self.admin_page_status, None
         if self._bodies:
             idx = min(self.get_status_body_calls - 1, len(self._bodies) - 1)
             return self._bodies[idx]
@@ -431,12 +480,30 @@ class WebSec03Test(unittest.TestCase):
         # restore (to False) still attempted
         self.assertIn(False, client.set_policy_calls)
 
-    def test_admin_route_not_gated_fails(self):
-        client = FakeSecClient(admin_status=200)
+    def test_admin_page_not_gated_fails(self):
+        """The stale premise this fix closes: a real client that auto-follows
+        the 302 would see 200 here. FakeSecClient's get_status_location
+        stands in for that observed (non-followed) status directly."""
+        client = FakeSecClient(admin_page_status=200, admin_page_location=None)
         ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
+
+    def test_admin_page_redirect_to_wrong_location_fails(self):
+        """A 302 alone is not enough -- it must point at /login."""
+        client = FakeSecClient(admin_page_status=302, admin_page_location="/some/other/page")
+        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        result = C._case_web_sec03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("settings/zones", result.reason)
+
+    def test_api_route_not_gated_fails_even_with_page_gated(self):
+        client = FakeSecClient(api_status=200)
+        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        result = C._case_web_sec03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("api/zones", result.reason)
 
     def test_dashboard_probe_records_status_and_body_on_success(self):
         """2026-09-24 fix: `observed` must carry dashboard_status/body, not

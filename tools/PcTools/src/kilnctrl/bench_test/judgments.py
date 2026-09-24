@@ -1192,16 +1192,27 @@ def judge_web_rw_toggle(field: str, original: Any, test_value: Any, write_ok: bo
 
 
 def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
-                     admin_route_gated: Optional[bool], login_ok: bool, session_ok: bool,
+                     admin_route_gated: Optional[bool], api_route_gated: Optional[bool],
+                     login_ok: bool, session_ok: bool,
                      extend_ok: bool, restore_ok: bool, restore_matches: bool,
                      state: Optional[dict] = None) -> CaseResult:
     """WEB-SEC-03: enable web auth with the harness credential, verify the
-    auth surface (dashboard still open, an ADMIN-tier route now gated, login
-    + session + extend all work), then disable and confirm the restore
-    round-tripped. Same "restore failure always FAILs, otherwise the verdict
-    is about the write path" shape as :func:`judge_web_rw_toggle`, just with
-    more write-path steps to check in order -- the first one that did not
-    hold names the reason."""
+    auth surface (dashboard still open, an ADMIN-tier page now redirects to
+    login, the data-bearing ADMIN route answers 401, login + session +
+    extend all work), then disable and confirm the restore round-tripped.
+
+    ``admin_route_gated`` and ``api_route_gated`` are two separate probes,
+    both required: firmware deliberately answers an unauthenticated non-
+    ``/api`` GET (e.g. ``/settings/zones``) with 302 to ``/login`` rather
+    than a 401/403 page (owner decision 2026-09-21, no bare "authentication
+    required" page), while ``GET /api/zones`` -- the data-bearing route --
+    answers exactly 401. A 200 on either is a real gating failure, not
+    evidence the other is fine.
+
+    Same "restore failure always FAILs, otherwise the verdict is about the
+    write path" shape as :func:`judge_web_rw_toggle`, just with more
+    write-path steps to check in order -- the first one that did not hold
+    names the reason."""
     observed = dict(state or {})
     if not restore_ok or not restore_matches:
         return CaseResult(
@@ -1225,7 +1236,13 @@ def judge_web_sec03(pw_ok: bool, enabled_ok: bool, dashboard_ok: Optional[bool],
     if not admin_route_gated:
         return CaseResult(
             Verdict.FAIL,
-            reason="/settings/zones was reachable with no session while web auth was enabled",
+            reason="/settings/zones did not answer 302 to /login with no session while web auth was enabled",
+            observed=observed,
+        )
+    if not api_route_gated:
+        return CaseResult(
+            Verdict.FAIL,
+            reason="GET /api/zones did not answer 401 with no session while web auth was enabled",
             observed=observed,
         )
     if not login_ok:

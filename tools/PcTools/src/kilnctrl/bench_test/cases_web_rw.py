@@ -269,6 +269,15 @@ def _case_diag08(ctx: dict) -> CaseResult:
 # again. This case *always* restores, in finally (plan doc section 3.7).
 # ---------------------------------------------------------------------------
 
+#: Reuse cases_web.py's own no-redirect handler (its 2026-09-21 WEB-X-03 fix
+#: for the exact same firmware behaviour: an unauthenticated GET on a gated
+#: PAGE route answers "302 Found -> /login?return=<uri>"
+#: (http_auth_http.c:307-334), not a 401/403 body -- plain urlopen() follows
+#: it and lands on the login page with 200. _SecHttpClient had the same bug
+#: independently, since it never shared cases_web.py's opener.
+_NoRedirectHandler = cases_web._NoRedirect
+
+
 class _SecHttpClient:
     """Thin, real-HTTP implementation of the seam ``_case_web_sec03`` needs.
     Tests inject a fake object with the same method names via
@@ -277,6 +286,11 @@ class _SecHttpClient:
     def __init__(self, host: str, timeout: float = 8.0) -> None:
         self.host = host
         self.timeout = timeout
+        # A per-instance opener (not urllib.request's module-global default)
+        # so this class never auto-follows a redirect -- see
+        # _NoRedirectHandler above. Tests patch ``client._opener.open``
+        # rather than ``urllib.request.urlopen``.
+        self._opener = urllib.request.build_opener(_NoRedirectHandler)
 
     def _get(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str], Any]":
         url = f"http://{self.host}{path}"
@@ -293,7 +307,7 @@ class _SecHttpClient:
         if cookie:
             req.add_header("Cookie", f"kiln_sid={cookie}")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 raw = resp.read()
                 if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
                     try:
@@ -379,6 +393,17 @@ class _SecHttpClient:
         status, text, _headers = self._get(path, cookie=cookie)
         return status, text
 
+    def get_status_location(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str]]":
+        """Like ``get_status`` but also returns the ``Location`` header, for
+        WEB-SEC-03's ``/settings/zones`` probe -- the 302-to-login contract
+        (``http_auth_http.c:307-334``) is only actually confirmed by reading
+        where the redirect points, not merely that the status isn't 200."""
+        status, _text, headers = self._get(path, cookie=cookie)
+        location = None
+        if headers is not None:
+            location = headers.get("Location")
+        return status, location
+
 
 def _sec_client(ctx: dict) -> Any:
     client = ctx.get("sec_client")
@@ -448,6 +473,7 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
     enabled_ok = False
     dashboard_ok: Optional[bool] = None
     admin_route_gated: Optional[bool] = None
+    api_route_gated: Optional[bool] = None
     login_ok = False
     session_ok = False
     extend_ok = False
@@ -479,7 +505,22 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
                 # show for it.
                 state["dashboard_status"] = dashboard_status
                 state["dashboard_body"] = (dashboard_body[:200] if dashboard_body else dashboard_body)
-                admin_route_gated = client.get_status("/settings/zones") in (302, 401, 403)
+                # /settings/zones (a page, not /api/*) gets the deliberate
+                # 302-to-/login answer, never a 401/403 page
+                # (http_auth_http.c:307-334, owner decision 2026-09-21: no
+                # bare "authentication required" page, always show the login
+                # shell) -- confirm both the status AND that Location really
+                # points at /login, not merely that it isn't 200. The
+                # data-bearing ADMIN route (GET /api/zones) is checked
+                # separately and must answer exactly 401: a 200 on either
+                # probe is a real gating failure, not evidence for the other.
+                page_status, page_location = client.get_status_location("/settings/zones")
+                admin_route_gated = page_status == 302 and bool(page_location) and page_location.startswith("/login")
+                state["admin_page_status"] = page_status
+                state["admin_page_location"] = page_location
+                api_status = client.get_status("/api/zones")
+                api_route_gated = api_status == 401
+                state["api_route_status"] = api_status
                 login_status, cookie = client.login(username, password)
                 login_ok = login_status == 200 and bool(cookie)
                 state["login_status"] = login_status
@@ -509,7 +550,8 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
 
     return J.judge_web_sec03(
         pw_ok=pw_ok, enabled_ok=enabled_ok, dashboard_ok=dashboard_ok,
-        admin_route_gated=admin_route_gated, login_ok=login_ok, session_ok=session_ok,
+        admin_route_gated=admin_route_gated, api_route_gated=api_route_gated,
+        login_ok=login_ok, session_ok=session_ok,
         extend_ok=extend_ok, restore_ok=state["restore"]["post_ok"],
         restore_matches=state["restore"]["readback_matches"], state=state,
     )
