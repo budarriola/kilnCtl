@@ -8324,6 +8324,9 @@ static void test_mode_state_check_no_violation_after_abort_policy_trip_mid_dwell
     TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED");
     TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared by the FAULTED transition, not left stale");
     TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared alongside dwelling");
+    TEST_CHECK(s_exec.zones[0].active,
+               "FAULTED must KEEP zone 0 active -- firing stats, get_status()'s per-zone fault report, "
+               "force_all_relays_off() and clear_this_runs_faults() all read it after this transition");
 
     char msg[160];
     uint32_t v = exec_mode_state_check(msg, sizeof(msg));
@@ -8356,10 +8359,45 @@ static void test_mode_state_check_no_violation_after_all_heaters_faulted_mid_dwe
     TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED once every active zone has faulted");
     TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared by the FAULTED transition, not left stale");
     TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared alongside dwelling");
+    TEST_CHECK(s_exec.zones[0].active && s_exec.zones[1].active,
+               "FAULTED must KEEP both zones active -- see the abort-policy test above");
 
     char msg[160];
     uint32_t v = exec_mode_state_check(msg, sizeof(msg));
     TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations -- rule 5 must not fire");
+
+    reset_relay_claim_test_state();
+}
+
+// Review of the halt-clear pass: exec_enter_terminal_state() clears zone
+// `active` on IDLE only. DONE must keep it -- both DONE call sites in
+// profile_executor.c call force_all_relays_off() (which iterates active
+// zones) immediately afterward, and the next tick's firing_stats_maybe_
+// finalize() copies `active` into the persisted run record.
+static void test_terminal_state_done_keeps_active_idle_clears_it(void)
+{
+    TEST_SECTION("exec_enter_terminal_state -- DONE keeps zone active (relay force-off, firing stats), "
+                 "IDLE clears it (rule 4)");
+    reset_relay_claim_test_state();
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[1].active = true;
+    s_exec.dwelling = true;
+    s_exec.ramp_lock_held = true;
+
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_DONE, "state must be DONE");
+    TEST_CHECK(!s_exec.dwelling && !s_exec.ramp_lock_held, "DONE clears dwelling and ramp_lock_held");
+    TEST_CHECK(s_exec.zones[1].active, "DONE must KEEP zone 1 active");
+
+    exec_enter_terminal_state(PROFILE_EXEC_IDLE);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "state must be IDLE");
+    TEST_CHECK(!s_exec.zones[1].active, "IDLE must clear zone 1's active flag (rule 4)");
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations after IDLE");
 
     reset_relay_claim_test_state();
 }
@@ -8379,6 +8417,7 @@ static void run_test_exec_mode_state_check(void)
     test_mode_state_check_no_violation_after_global_guard_trip_mid_dwell();
     test_mode_state_check_no_violation_after_abort_policy_trip_mid_dwell();
     test_mode_state_check_no_violation_after_all_heaters_faulted_mid_dwell();
+    test_terminal_state_done_keeps_active_idle_clears_it();
 
     // Leave clean s_exec/autotune-stub state behind for whichever test runs next.
     reset_mode_state_check_test_state();

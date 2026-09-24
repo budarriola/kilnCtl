@@ -200,9 +200,12 @@ extern const char *PE_TAG;
  *     **Follow-up, same audit, halt-clear pass:** exec_enter_terminal_state()
  *     (profile_executor_relay_io.c) -- the same function rule 5's correction
  *     below introduced for dwelling/ramp_lock_held -- now also clears every
- *     zone's `active` back to false on every terminal transition it drives,
- *     INCLUDING profile_executor_halt()'s own IDLE transition (halt() now
- *     calls this helper instead of assigning s_exec.state directly). Rule 4
+ *     zone's `active` back to false on the IDLE transition only, i.e.
+ *     profile_executor_halt()'s (halt() now calls this helper instead of
+ *     assigning s_exec.state directly). FAULTED/DONE deliberately keep
+ *     `active`: force_all_relays_off(), firing_stats_build_record(),
+ *     get_status()'s per-zone fault report and clear_this_runs_faults() all
+ *     read it after those transitions -- see the helper's comment. Rule 4
  *     is true by construction from this point forward, not merely
  *     unreachable: an IDLE executor never has a stale active zone in its
  *     s_exec, whether or not exec_mode_state_check() is ever called there
@@ -227,7 +230,7 @@ extern const char *PE_TAG;
  *     exec_mode_state_check() call caught it). All six sites now go through
  *     exec_enter_terminal_state() (profile_executor_relay_io.c), the one
  *     function that sets state AND clears dwelling/ramp_lock_held (and,
- *     since the halt-clear follow-up below, every zone's `active`)
+ *     on the IDLE transition only, every zone's `active` -- rule 4 above)
  *     together; any future FAULTED/DONE/IDLE transition must use it too,
  *     not assign s_exec.state directly, or this rule's guarantee breaks
  *     again. Of the six, only escalate_guard_trip()'s three could

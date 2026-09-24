@@ -84,8 +84,11 @@ void profile_executor_halt(void)
      * which rule 4/5's "Correction, audit 2026-09-24" comment (profile_
      * executor_internal.h) documents as unreachable-by-the-assert-today but
      * real, stale data -- this call is what makes it not exist in the first
-     * place, same as every other FAULTED/DONE path already gets. Still under
-     * s_exec.lock here, the same precondition the helper documents. */
+     * place. The zone `active` clear happens on IDLE only (FAULTED/DONE keep
+     * it), which is why this must stay AFTER force_all_relays_off(),
+     * firing_stats_maybe_finalize() and clear_this_runs_faults() above --
+     * each iterates active zones. Still under s_exec.lock here, the same
+     * precondition the helper documents. */
     exec_enter_terminal_state(PROFILE_EXEC_IDLE);
     s_exec.fault_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;

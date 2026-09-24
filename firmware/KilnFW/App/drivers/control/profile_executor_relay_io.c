@@ -693,19 +693,30 @@ void io_segs_tick(float dt_s)
  * trip mid-dwell reach exec_mode_state_check()'s rule-5 assert on the very
  * same tick and abort() the task.
  *
- * Follow-up (same audit, halt-clear pass): every terminal transition --
- * including this one reaching IDLE via profile_executor_halt() -- also
- * clears every zone's `active` flag here, so rule 4 ("no active zone while
- * IDLE") is true by construction rather than merely unreachable-today (see
- * that rule's own "Correction, audit 2026-09-24" comment in profile_
- * executor_internal.h's big table, updated alongside this change). Clearing
- * `active` on the FAULTED/DONE transitions too (not just IDLE) is harmless
- * and deliberate -- profile_executor_run()'s own zone_mask loop always
- * re-sets it for whichever zones the NEXT run actually uses, and a faulted/
- * done zone reading active==false in between changes nothing any reader of
- * `active` currently depends on (force_all_relays_off() etc. all gate off
- * `s_exec.state`, not per-zone `active`, once the run has already left
- * RUNNING/PAUSED).
+ * Follow-up (same audit, halt-clear pass): the IDLE transition (reached
+ * only via profile_executor_halt()) also clears every zone's `active` flag
+ * here, so rule 4 ("no active zone while IDLE") is true by construction
+ * rather than merely unreachable-today (see that rule's own "Correction,
+ * audit 2026-09-24" comment in profile_executor_internal.h's big table).
+ *
+ * IDLE ONLY -- FAULTED and DONE must keep `active` (review of the halt-clear
+ * pass). A FAULTED/DONE run is still a loaded run, and several readers need
+ * to know which zones it used AFTER this call returns:
+ *   - force_all_relays_off() iterates active zones -- both DONE call sites
+ *     (profile_executor.c) call it right after this, and every later
+ *     non-RUNNING tick calls it again; clearing here would make it a no-op
+ *     and leave relays commanded on.
+ *   - firing_stats_maybe_finalize() -> firing_stats_build_record() copies
+ *     z->active into the persisted record on the NEXT tick; clearing here
+ *     would persist an empty record and feed adaptive_tune_run_end() nothing.
+ *   - profile_executor_get_status() (-> dashboard_json.c, uart_bridge_ext_
+ *     control.c) reports per-zone faulted/fault_reason/fault_guard only for
+ *     active zones while FAULTED/DONE -- "which zone faulted" would vanish.
+ *   - clear_this_runs_faults() (halt() dismissing a FAULTED run) releases a
+ *     per-zone relay_authority block only for active zones; clearing here
+ *     would leave that block latched after the dismiss.
+ * halt() runs all of those before calling this with IDLE, so clearing at
+ * IDLE loses nothing.
  *
  * Must be called with s_exec.lock held, same precondition as
  * escalate_guard_trip() below and every other s_exec-touching static in this
@@ -715,8 +726,10 @@ void exec_enter_terminal_state(profile_exec_state_t st)
     s_exec.state = st;
     s_exec.dwelling = false;
     s_exec.ramp_lock_held = false;
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        s_exec.zones[zi].active = false;
+    if (st == PROFILE_EXEC_IDLE) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            s_exec.zones[zi].active = false;
+        }
     }
 }
 
