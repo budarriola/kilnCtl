@@ -822,6 +822,24 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
     if (out) *out = g_stub_autotune_status;
 }
 
+/* docs/audits/profile_executor_panic_2026-09-24.md's advisory: a rule-1
+ * violation (profile run and autotune double-owning a zone) must also stop
+ * the autotune session, via autotune_engine_abort() -- autotune_engine.c is
+ * not linked here (see the comment above), so this fake just records
+ * whether/why it was called, the same shape as g_stub_autotune_status. */
+static int g_autotune_abort_calls = 0;
+static char g_last_autotune_abort_reason[160];
+void autotune_engine_abort(const char *reason)
+{
+    g_autotune_abort_calls++;
+    if (reason) {
+        strncpy(g_last_autotune_abort_reason, reason, sizeof(g_last_autotune_abort_reason) - 1);
+        g_last_autotune_abort_reason[sizeof(g_last_autotune_abort_reason) - 1] = '\0';
+    } else {
+        g_last_autotune_abort_reason[0] = '\0';
+    }
+}
+
 /* PID_EXPANSION_PLAN.md section 2c/Phase 3b: settable coupling matrix, one
  * row per zone, defaulting to all-zero (every pre-existing test never
  * touches this and gets exactly today's zero-coefficient feedforward). Test
@@ -8204,6 +8222,9 @@ static void reset_mode_state_violation_test_state(void)
     g_heat_zone_claim_begin_calls = 0;
     g_heat_zone_claim_end_calls = 0;
     g_last_heat_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+    memset(&g_stub_autotune_status, 0, sizeof(g_stub_autotune_status));
+    g_autotune_abort_calls = 0;
+    g_last_autotune_abort_reason[0] = '\0';
 }
 
 static void test_exec_handle_mode_state_violation_forces_faulted_and_latches(void)
@@ -8287,11 +8308,85 @@ static void test_exec_handle_mode_state_violation_keeps_existing_fault_reason(vo
     TEST_CHECK(s_exec.fault_guard == THERMAL_GUARD_TRIP_MAX_TEMP, "the guard trip's fault_guard must survive");
 }
 
+// docs/audits/profile_executor_panic_2026-09-24.md's advisory: a rule-1
+// violation (this run and an in-progress, heat-driving autotune session both
+// claiming the same zone) must also stop autotune, not just this run --
+// otherwise autotune keeps driving that zone's heater through its own,
+// separate relay/heat claims even after this run is forced FAULTED.
+static void test_exec_handle_mode_state_violation_rule1_aborts_autotune(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- a rule-1 violation (zone double-owned by "
+                 "this run and a driving autotune session) also calls autotune_engine_abort()");
+    reset_mode_state_violation_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[2].active = true;
+    s_exec.claimed_relay_mask = 0x04;
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_STEPPING; // "actively driving", same set exec_mode_state_check() uses
+    g_stub_autotune_status.zone_index = 2;
+
+    bool forced = exec_handle_mode_state_violation(1u, "rule 1: zone 2 active in a RUNNING profile run "
+                                                        "AND autotune state=2 driving it");
+
+    TEST_CHECK(forced, "a rule-1 violation still forces FAULTED like any other");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED");
+    TEST_CHECK(g_autotune_abort_calls == 1, "autotune_engine_abort() must be called exactly once for a rule-1 violation");
+    TEST_CHECK(strstr(g_last_autotune_abort_reason, "rule-1") != NULL,
+              "the abort reason must identify the cause, not a generic message");
+}
+
+// The mirror image: a non-rule-1 violation (rule 5, dwelling stale) with no
+// autotune session driving anything must never touch autotune.
+static void test_exec_handle_mode_state_violation_non_rule1_does_not_touch_autotune(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- a non-rule-1 violation must NOT call "
+                 "autotune_engine_abort()");
+    reset_mode_state_violation_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.dwelling = true;
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x01;
+    // No autotune session active at all (all-zero g_stub_autotune_status,
+    // state == AUTOTUNE_ENGINE_IDLE == 0 -- not "driving").
+
+    bool forced = exec_handle_mode_state_violation(1u, "rule 5: dwelling==true while state=4 (not RUNNING/PAUSED)");
+
+    TEST_CHECK(forced, "the violation still forces FAULTED");
+    TEST_CHECK(g_autotune_abort_calls == 0, "no autotune session was driving this zone -- abort must not be called");
+}
+
+// Rule-1 violation, but the driving autotune session owns a DIFFERENT zone
+// than the one active in this run -- must not call abort either, since
+// rule 1 itself would not have fired for that pairing.
+static void test_exec_handle_mode_state_violation_autotune_driving_other_zone_untouched(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- an autotune session driving a DIFFERENT zone "
+                 "than this run's must not be aborted");
+    reset_mode_state_violation_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.dwelling = true;
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x01;
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_STEPPING;
+    g_stub_autotune_status.zone_index = 3; // not zone 0 -- no double ownership
+
+    bool forced = exec_handle_mode_state_violation(1u, "rule 5: dwelling==true while state=4 (not RUNNING/PAUSED)");
+
+    TEST_CHECK(forced, "the violation still forces FAULTED");
+    TEST_CHECK(g_autotune_abort_calls == 0,
+              "autotune driving an unrelated zone must be left alone");
+}
+
 static void run_test_exec_handle_mode_state_violation(void)
 {
     test_exec_handle_mode_state_violation_forces_faulted_and_latches();
     test_exec_handle_mode_state_violation_noop_when_clean();
     test_exec_handle_mode_state_violation_keeps_existing_fault_reason();
+    test_exec_handle_mode_state_violation_rule1_aborts_autotune();
+    test_exec_handle_mode_state_violation_non_rule1_does_not_touch_autotune();
+    test_exec_handle_mode_state_violation_autotune_driving_other_zone_untouched();
     reset_mode_state_violation_test_state();
 }
 

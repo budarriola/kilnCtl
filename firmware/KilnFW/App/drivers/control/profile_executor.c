@@ -238,6 +238,28 @@ bool exec_handle_mode_state_violation(uint32_t mode_violations, const char *firs
     force_all_relays_off();
     io_segs_force_all_off(false);
     release_profile_relay_claim();
+
+    /* docs/audits/profile_executor_panic_2026-09-24.md's advisory: rule 1
+     * (this run and an in-progress, heat-driving autotune session both
+     * claiming the same zone) forces THIS run FAULTED above, but autotune
+     * holds its own, entirely separate claims on that zone's relay
+     * (RELAY_OWNER_AUTOTUNE via relay_authority_claim_mask()) and heat
+     * (HEAT_ENABLE_CLAIMANT_AUTOTUNE, autotune_engine.c) -- release_profile_
+     * relay_claim() above only releases THIS run's own claim, so a violated
+     * autotune session would otherwise keep driving that zone's heater right
+     * through this run's fault. Stop it too. autotune_engine_abort() only
+     * ever takes s_at.lock (never s_exec.lock -- see autotune_engine_guard.c),
+     * so calling it here, under s_exec.lock, cannot invert the required
+     * s_exec.lock -> s_at.lock order. */
+    autotune_engine_status_t at;
+    autotune_engine_get_status(&at);
+    bool autotune_driving = (at.state == AUTOTUNE_ENGINE_SETTLING || at.state == AUTOTUNE_ENGINE_STEPPING ||
+                             at.state == AUTOTUNE_ENGINE_RELAY_APPROACH ||
+                             at.state == AUTOTUNE_ENGINE_RELAY_CYCLING);
+    if (autotune_driving && at.zone_index < MAX31856_CHANNEL_COUNT && s_exec.zones[at.zone_index].active) {
+        autotune_engine_abort("profile_executor: rule-1 mode-state violation -- zone double-owned by a "
+                              "profile run and an active autotune session");
+    }
     return true;
 }
 
