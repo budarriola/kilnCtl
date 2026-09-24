@@ -313,8 +313,8 @@ CHROMA_MATCH_TOLERANCE = 0.10
 CHROMA_MIN_BRIGHTNESS_RATIO = 0.5
 
 
-#: Threshold for judge_lcd_home_idle's whole-frame white-balance sanity
-#: check (2026-09-24 bench evidence: a cyan-cast capture read the Start
+#: Threshold for judge_lcd_home_idle's background-reference diagnostic
+#: (annotates a FAIL reason only, never changes a verdict; 2026-09-24 bench evidence: a cyan-cast capture read the Start
 #: button at RGB(25,96,98) vs. ACCENT_4's RGB(92,192,110) -- chroma-distance
 #: 0.2121, outside even CHROMA_MATCH_TOLERANCE -- while the bezel sampled a
 #: plausible near-black (6,11,16), showing the cast affected lit/background

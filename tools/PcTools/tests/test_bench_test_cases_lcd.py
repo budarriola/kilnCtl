@@ -592,14 +592,57 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(page, "diagnostics")
 
     def test_every_call_site_is_a_pure_navigation_target(self):
-        # A retried click is a second real tap. Pin the set of names routed
-        # through _click_then_page() so a Start/Stop/Confirm/PIN/toggle
-        # target can't be added without revisiting the retry.
+        # A retried click is a second real tap. Pin EVERY call site of both
+        # retrying helpers (_click_then_page and _click_then_targets_change)
+        # so a Start/Stop/Confirm/PIN/toggle target can't be added without
+        # revisiting the retry. A literal name must be in the allowlist; the
+        # only non-literal argument allowed is `title` iterating
+        # J._DIAG_TITLES, whose entries are checked against unsafe words.
         import inspect
         import re
         src = inspect.getsource(C)
-        names = set(re.findall(r'_click_then_page\(ui, "([^"]+)"', src))
-        self.assertEqual(names, {"settings", "Profiles", "Temperature", "Diagnostics"})
+        calls = re.findall(r'(?<!def )\b(_click_then_page|_click_then_targets_change)\(\s*ui\s*,\s*([^,)]+)', src)
+        self.assertTrue(calls, "no call sites found -- the regex no longer matches the source")
+        literals = set()
+        for helper, arg in calls:
+            arg = arg.strip()
+            m = re.fullmatch(r'"([^"]+)"', arg)
+            if m:
+                literals.add(m.group(1))
+            else:
+                self.assertEqual((helper, arg), ("_click_then_targets_change", "title"),
+                                 f"non-literal retried click target {arg!r} in {helper}()")
+        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics"})
+        self.assertIn("for title in J._DIAG_TITLES:", src)
+        unsafe = ("start", "stop", "confirm", "pin", "toggle", "cancel", "ack", "reset", "clear", "ok")
+        for title in J._DIAG_TITLES + tuple(literals):
+            words = re.findall(r"[a-z]+", title.lower())
+            for word in unsafe:
+                self.assertNotIn(word, words, f"retried click target {title!r} contains {word!r}")
+
+
+class ThemeMirrorDriftTest(unittest.TestCase):
+    """cases_lcd.py mirrors four ui_theme.h colors as reference values.
+    Fails (never skips) if the header moves or a value drifts."""
+
+    HEADER = os.path.join(os.path.dirname(__file__), "..", "..", "..", "firmware", "KilnFW",
+                          "App", "drivers", "ui", "ui_theme.h")
+
+    def _hex(self, text, macro):
+        import re
+        m = re.search(r"#define\s+" + macro + r"\s+0x([0-9a-fA-F]{6})\b", text)
+        self.assertIsNotNone(m, f"{macro} not found in ui_theme.h")
+        v = int(m.group(1), 16)
+        return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+
+    def test_mirrors_match_ui_theme_h(self):
+        self.assertTrue(os.path.isfile(self.HEADER), f"missing {os.path.abspath(self.HEADER)}")
+        with open(self.HEADER, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(C._BG_RGB, self._hex(text, "UI_THEME_COLOR_BG_HEX"))
+        self.assertEqual(C._ACCENT_1_RGB, self._hex(text, "UI_THEME_ACCENT_1_HEX"))
+        self.assertEqual(C._ACCENT_4_RGB, self._hex(text, "UI_THEME_ACCENT_4_HEX"))
+        self.assertEqual(C._ACCENT_5_RGB, self._hex(text, "UI_THEME_ACCENT_5_HEX"))
 
 
 class _CountingNavUi(PageNavUiTest):
@@ -672,6 +715,42 @@ class Lcd09Test(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             C._case_lcd09({"srv": srv})
         self.assertGreaterEqual(ui.home_calls, 1)
+
+    # Firmware-shaped profiles page: ui_topbar.c's untagged Prev/Next/New
+    # icons are listed under their glyph label text, which the PC decodes
+    # as U+FFFD bytes; only "back"/"home" carry tag names. Row 0 is kept so
+    # the row-tap half of the judge is exercised.
+    _GLYPH = "\ufffd\ufffd\ufffd"
+
+    def _profiles_targets(self, slots):
+        back = {"name": "back", "cx": 140, "cy": 26, "hidden": False}
+        home = {"name": "home", "cx": 180, "cy": 26, "hidden": False}
+        glyphs = [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in slots]
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [{"name": "profile_row_0", "cx": 50, "cy": 150, "hidden": False, "starred": False},
+                            back, home] + glyphs
+        return page
+
+    def _run_firmware_shaped(self, slots):
+        ui = PageNavUiTest(page="home", page_targets=self._profiles_targets(slots), nav_map=_PROFILES_NAV)
+        return C._case_lcd09({"srv": FakeSrvFull(ui)})
+
+    def test_glyph_icons_by_position_pass(self):
+        self.assertEqual(self._run_firmware_shaped([1, 2, 3]).verdict, Verdict.PASS)
+
+    def test_only_next_enabled_passes(self):
+        self.assertEqual(self._run_firmware_shaped([2, 3]).verdict, Verdict.PASS)
+
+    def test_single_page_both_paging_disabled_is_inconclusive(self):
+        self.assertEqual(self._run_firmware_shaped([3]).verdict, Verdict.INCONCLUSIVE)
+
+    def test_no_topbar_icons_fails(self):
+        result = self._run_firmware_shaped([])
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("Prev/Next", result.reason)
+
+    def test_new_icon_missing_fails(self):
+        self.assertEqual(self._run_firmware_shaped([1, 2]).verdict, Verdict.FAIL)
 
 
 _TEMP_NAV = {"settings": "config", "Temperature": "temperature"}
@@ -826,6 +905,26 @@ class Lcd16Test(unittest.TestCase):
         with mock.patch.object(C._click_then_targets_change, "__defaults__", (0.05,)):
             result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.observed.get("titles_seen"), list(J._DIAG_TITLES))
+        self.assertEqual(result.observed.get("titles_changed"), list(J._DIAG_TITLES))
+
+    def test_dead_tab_bar_is_inconclusive_not_pass(self):
+        # Every sub-tab click answers 'ok' but nothing changes. The static
+        # diagnostics targets happen to include a parseable heap value that
+        # agrees with get_heap_status() -- before the review fix of
+        # ff55bda2 that read was taken off the stale set and the case
+        # PASSed with no tab content ever observed.
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}],
+            "config": [{"name": "Diagnostics", "hidden": False}],
+            "diagnostics": [{"name": "board_heap_free", "value": "100000", "hidden": False}],
+        }
+        nav_map = {"settings": "config", "Diagnostics": "diagnostics"}
+        ui = PageNavUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(C._click_then_targets_change, "__defaults__", (0.05,)):
+            result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.observed.get("titles_changed"), [])
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
 
 class PopupUiTest(FakeUiTest):

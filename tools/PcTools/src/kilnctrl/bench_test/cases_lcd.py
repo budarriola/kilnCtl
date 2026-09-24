@@ -305,7 +305,7 @@ def _click_then_page(ui, name: str, expected_page: str,
     return None, page, waited_s
 
 def _click_then_targets_change(ui, name: str, prev_names: "set",
-                                timeout_s: float = _PAGE_POLL_TIMEOUT_S) -> "tuple[Optional[CaseResult], Optional[dict], float]":
+                                timeout_s: float = _PAGE_POLL_TIMEOUT_S) -> "tuple[Optional[CaseResult], Optional[dict], float, bool]":
     """Diagnostics-sub-tab analogue of :func:`_click_then_page`: a sub-tab
     switch never changes kiln_ui's top-level page name
     (``_wait_for_targets_change``'s docstring), so the same
@@ -328,7 +328,12 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     so "the set didn't change" is not, by itself, proof of a swallowed tap
     the way "the page name didn't change" is for a real navigation hop.
     This only ever fails on an outright not_found click; the caller gets
-    the best tap-target read available after one retry either way."""
+    the best tap-target read available after one retry either way, plus a
+    ``changed`` flag (the fourth tuple element) saying whether that read
+    actually differs from ``prev_names``. A caller must not treat an
+    unchanged read as the new tab's content: it is the previous tab's
+    targets (or a dead tab bar that answers 'ok' and does nothing), and
+    reading per-tab values off it would confirm the wrong tab."""
     click = ui.click_by_name(name)
     if click.get("result") != "ok":
         return (
@@ -339,6 +344,7 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
             ),
             None,
             0.0,
+            False,
         )
     tap, waited_s = _wait_for_targets_change(ui, prev_names, timeout_s=timeout_s)
     names = {t.get("name") for t in tap.get("targets", [])}
@@ -348,7 +354,8 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
             tap2, waited_s2 = _wait_for_targets_change(ui, prev_names, timeout_s=timeout_s)
             waited_s += waited_s2
             tap = tap2
-    return None, tap, waited_s
+    changed = {t.get("name") for t in tap.get("targets", [])} != prev_names
+    return None, tap, waited_s, changed
 
 
 #: Mirrored from firmware/KilnFW/App/drivers/ui/ui_theme.h -- reference
@@ -360,14 +367,14 @@ _ACCENT_4_RGB = (0x5C, 0xC0, 0x6E)
 _ACCENT_1_RGB = (0xE8, 0x97, 0x4E)
 _ACCENT_5_RGB = (0xD6, 0x55, 0x5F)
 
-#: Mirrored from UI_THEME_COLOR_BG_HEX (ui_theme.h). Not a true neutral
-#: grey, but a known, exact, large-area reference far from any button or
-#: text -- used only as a whole-frame white-balance sanity check (LCD-01's
-#: judge), never as a per-widget color check. Sampled at a fixed widget
-#: coordinate near the top-left corner (5, 5): inside the bezel and clear of
-#: every topbar icon (leftmost icon starts at cx=414 on home per
-#: docs/COMMISSIONING_LCD_RUNBOOK.md Table 2) and of the bottom action row
-#: (y=294+), so this point is background on every page layout traced there.
+#: Mirrored from UI_THEME_COLOR_BG_HEX (ui_theme.h); the drift guard is
+#: test_bench_test_cases_lcd.py's ThemeMirrorDriftTest. Sampled at widget
+#: (5, 5), inside scr's 8 px outer padding: on home that is under the
+#: transparent top-left auth-reset corner zone (ui_page_home.c, bg_opa
+#: TRANSP) and above the transparent topbar, so it renders as screen
+#: background. It is only a few frame pixels from the panel edge, though,
+#: so geometry drift can put it on the bezel -- which is why it is
+#: diagnostic only (judge_lcd_home_idle) and never softens a verdict.
 _BG_REFERENCE_XY = (5, 5)
 _BG_RGB = (0x1A, 0x1F, 0x2B)
 
@@ -468,22 +475,28 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                     "off_tolerance": lcd_sampler.MIN_BEZEL_CONTRAST,
                     "is_hidden": pause_hidden,
                 }
-        # White-balance sanity check (2026-09-24): sample a known-exact
-        # background region far from any widget and compare its chromaticity
-        # to the theme's own UI_THEME_COLOR_BG -- a large chroma offset here
-        # means the whole capture is under a color cast, which is what makes
-        # a definite-looking Start-button mismatch INCONCLUSIVE rather than
-        # a hard FAIL (see judge_lcd_home_idle). Best-effort: absence of this
-        # key just means no cast signal was available, never itself a cast.
+        # Background reference sample (2026-09-24), DIAGNOSTIC ONLY: compare
+        # a UI_THEME_COLOR_BG region's chromaticity to the theme value so a
+        # Start-button FAIL can say whether the capture itself looks off.
+        # judge_lcd_home_idle only uses this to annotate a FAIL reason; it
+        # never changes the verdict (see the comment there for the capture
+        # where this point landed on the bezel). A reference that reads as
+        # bezel is reported as such, never as a color cast.
         bg_sample = lcd_sampler.sample_widget(image_path, *_BG_REFERENCE_XY, repo_root=ctx.get("repo_root"))
         bg_offset = lcd_sampler.chroma_offset(bg_sample.region, _BG_RGB)
+        bg_on_bezel = (
+            bg_sample.bezel is not None
+            and lcd_sampler.color_distance(bg_sample.region, bg_sample.bezel) < lcd_sampler.MIN_BEZEL_CONTRAST
+        )
         color_debug["bg_reference"] = {
             "region_xy": _BG_REFERENCE_XY,
             "sampled_rgb": bg_sample.region,
+            "bezel_rgb": bg_sample.bezel,
             "target_rgb": _BG_RGB,
             "chroma_offset": round(bg_offset, 4),
             "cast_threshold": lcd_sampler.CAST_CHROMA_THRESHOLD,
-            "cast_suspected": bg_offset > lcd_sampler.CAST_CHROMA_THRESHOLD,
+            "reads_as_bezel": bg_on_bezel,
+            "cast_suspected": (not bg_on_bezel) and bg_offset > lcd_sampler.CAST_CHROMA_THRESHOLD,
         }
     except lcd_sampler.LcdCaptureError:
         pass
@@ -739,6 +752,70 @@ def _case_lcd04(ctx: dict) -> CaseResult:
 # LCD-09 -- profiles picker (tap Profiles from the config hub).
 # ---------------------------------------------------------------------------
 
+def _is_glyph_name(name: object) -> bool:
+    """True for a tap target whose only name is an LVGL symbol glyph.
+    ui_topbar.c's build_icon() sets no tap-name tag, so kiln_ui.c's tap
+    walk falls back to the button's label text, which is the glyph's UTF-8
+    bytes (LV_SYMBOL_PREV/NEXT/FILE are three bytes each).
+    ui_test_client._unpack_str8() decodes names as ASCII with
+    errors="replace", so each of those names arrives as U+FFFD repeated.
+    Prev, Next and New therefore all read the same and can only be told
+    apart by position."""
+    return isinstance(name, str) and name != "" and set(name) == {"�"}
+
+
+def _profiles_topbar_icons(targets: "list[dict]") -> Dict[str, Optional[bool]]:
+    """Locate the profiles (manage) topbar's untagged Prev/Next/New icons by
+    position. ui_page_profile_picker.c builds Back, Home, Prev, Next, New in
+    that order in one flex row (ui_topbar.c), Back and Home carry the
+    "back"/"home" tap names, and a disabled Prev/Next is dimmed but keeps
+    its layout slot (ui_topbar_set_prev_enabled()), so the slots sit at
+    home.cx + k * (home.cx - back.cx) for k = 1 (Prev), 2 (Next), 3 (New).
+
+    A disabled icon is not clickable and so is not listed at all. ``add``
+    is True/False for a glyph in slot 3. ``paging`` is True when New is in
+    slot 3 and a glyph sits in the Prev or Next slot; None when New is in
+    slot 3 but both paging slots are empty (both disabled: a single page of
+    profiles -- the slots must exist or New would have been pulled left) or
+    when New is not in slot 3 but slot 1/2 holds a glyph (undecidable, and
+    the missing New FAILs on its own); False when no glyph occupies slots
+    1-3 at all. Both are None when Back or Home is missing (no anchor)."""
+    back = _find(targets, "back")
+    home = _find(targets, "home")
+    if back is None or home is None:
+        return {"paging": None, "add": None}
+    try:
+        pitch = float(home["cx"]) - float(back["cx"])
+        home_cx = float(home["cx"])
+        home_cy = float(home["cy"])
+    except (KeyError, TypeError, ValueError):
+        return {"paging": None, "add": None}
+    if pitch <= 0:
+        return {"paging": None, "add": None}
+    glyphs = [
+        t for t in targets
+        if _is_glyph_name(t.get("name")) and not t.get("hidden")
+        and abs(float(t.get("cy", -1000)) - home_cy) <= pitch / 4
+    ]
+
+    def slot(k: int) -> bool:
+        return any(abs(float(g.get("cx", -1000)) - (home_cx + k * pitch)) <= pitch / 4 for g in glyphs)
+
+    prev_on, next_on, add_on = slot(1), slot(2), slot(3)
+    paging: Optional[bool]
+    if add_on:
+        # New in slot 3 proves both paging slots exist in the row.
+        paging = True if (prev_on or next_on) else None
+    elif prev_on or next_on:
+        # New is not in slot 3: a glyph in slot 1/2 is either New pulled
+        # left (paging missing) or paging with New missing. Either way the
+        # missing New already FAILs; paging itself is undecidable.
+        paging = None
+    else:
+        paging = False
+    return {"paging": paging, "add": add_on}
+
+
 def _case_lcd09(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
@@ -754,8 +831,9 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "profiles", tap)
         rows = [t for t in targets if str(t.get("name", "")).startswith("profile_row_")]
-        paging_present = _find(targets, "paging") is not None
-        new_icon_present = _find(targets, "new_profile") is not None
+        icons = _profiles_topbar_icons(targets)
+        paging_present = True if _find(targets, "paging") is not None else icons["paging"]
+        new_icon_present = True if _find(targets, "new_profile") is not None else icons["add"]
         detail_page = None
         if rows:
             click3 = ui.click_by_name(rows[0]["name"])
@@ -850,6 +928,7 @@ def _case_lcd16(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     ui = srv._ui_test
     titles_seen = []
+    titles_changed = []
     relay_life_has_reset: Optional[bool] = None
     crash_report_visible_entries: Optional[int] = None
     board_heap_value: Optional[float] = None
@@ -869,13 +948,20 @@ def _case_lcd16(ctx: dict) -> CaseResult:
             return fail
         prev_names = {t.get("name") for t in ui.list_tap_targets().get("targets", [])}
         for title in J._DIAG_TITLES:
-            fail, tap, _ = _click_then_targets_change(ui, title, prev_names)
+            fail, tap, _, changed = _click_then_targets_change(ui, title, prev_names)
             if fail is not None:
                 break
             targets = tap.get("targets", [])
             prev_names = {t.get("name") for t in targets}
             page_title = ui.get_current_page()
             titles_seen.append(title)
+            if not changed:
+                # Unchanged target set: this read is the previous tab's
+                # content (or a dead tab bar that says 'ok' and does
+                # nothing), so no per-tab value may be taken from it --
+                # otherwise a dead tab bar would "confirm" every tab.
+                continue
+            titles_changed.append(title)
             if title == "Relay Life":
                 relay_life_has_reset = _find(targets, "reset") is not None
                 heap_target = _find(targets, "board_heap_free")
@@ -902,6 +988,7 @@ def _case_lcd16(ctx: dict) -> CaseResult:
                 heap_diff_pct = None
         return J.judge_lcd_diagnostics_pages(
             titles_seen, relay_life_has_reset, crash_report_visible_entries, heap_diff_pct,
+            titles_changed=titles_changed,
         )
     finally:
         _navigate_home(ui)

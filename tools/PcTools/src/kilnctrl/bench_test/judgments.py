@@ -795,32 +795,33 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
         # 'hidden' flag disagreement; absent camera data, trust the flag.
         return CaseResult(Verdict.FAIL, reason="Pause target is not hidden on home/idle", observed=observed, evidence=evidence)
     if start_matches_accent4 is False:
-        # 2026-09-24: a whole-frame color cast (the Start button sampled
-        # RGB(25,96,98) against target RGB(92,192,110), chroma-distance
-        # 0.2121 -- outside even matches_color()'s own chroma fallback --
-        # while the bezel sampled a plausible near-black) can make a
-        # perfectly good board read as a definite color FAIL. Before
-        # trusting that, check the background reference sample
-        # (cases_lcd._try_capture_and_sample's "bg_reference", a known-exact
-        # UI_THEME_COLOR_BG region far from any widget): if IT also reads
-        # far from its own expected chromaticity, the capture itself is
-        # suspect and this degrades to INCONCLUSIVE, never a loosening of
-        # COLOR_MATCH_TOLERANCE/CHROMA_MATCH_TOLERANCE themselves (those
-        # still gate start_matches_accent4 exactly as before).
+        # A Start-button color mismatch always FAILs. The background
+        # reference sample (cases_lcd._try_capture_and_sample's
+        # "bg_reference") is diagnostic only: it may annotate the reason,
+        # never soften the verdict. Review of the 2026-09-24 capture: the
+        # reference point (widget 5,5) maps to a few frame pixels inside the
+        # panel edge, and on that capture it landed on the bezel --
+        # RGB(6,13,22) against a bezel of RGB(6,11,16), chroma offset 0.156,
+        # just over the 0.15 threshold. Letting it downgrade the verdict
+        # meant a few pixels of geometry drift would turn a real wrong-color
+        # Start button into INCONCLUSIVE. The same capture shows the Start
+        # button plainly green; the Start sample itself (frame 902,579) sat
+        # on the button's top edge, which points at stale FRAME_CORNERS (a
+        # geometry problem), not a color cast.
+        reason = "Start button region does not read as ACCENT_4"
         bg_ref = (color_debug or {}).get("bg_reference")
-        if bg_ref and bg_ref.get("cast_suspected"):
-            return CaseResult(
-                Verdict.INCONCLUSIVE,
-                reason=(
-                    "camera color cast: background reference region reads "
-                    f"chroma-offset {bg_ref.get('chroma_offset')} from its expected "
-                    f"color (threshold {bg_ref.get('cast_threshold')}) -- the Start "
-                    "button mismatch cannot be trusted against this capture"
-                ),
-                observed=observed,
-                evidence=evidence,
+        if bg_ref and bg_ref.get("reads_as_bezel"):
+            reason += (
+                " (background reference point reads as bezel: the widget-to-frame "
+                "geometry is likely off, so the Start sample may not be on the button either)"
             )
-        return CaseResult(Verdict.FAIL, reason="Start button region does not read as ACCENT_4", observed=observed, evidence=evidence)
+        elif bg_ref and bg_ref.get("cast_suspected"):
+            reason += (
+                f" (background reference also reads chroma-offset {bg_ref.get('chroma_offset')}, "
+                f"threshold {bg_ref.get('cast_threshold')}: check camera geometry and color cast "
+                "before treating this as a firmware color defect)"
+            )
+        return CaseResult(Verdict.FAIL, reason=reason, observed=observed, evidence=evidence)
     # Only the checks a capture could actually have answered make this
     # INCONCLUSIVE. A board that does not list a hidden Pause target at all
     # legitimately yields pause_is_hidden=None with a perfectly good frame --
@@ -1004,8 +1005,8 @@ def judge_lcd_home_tripped(strip_visible_before: bool,
     return CaseResult(Verdict.PASS, observed=observed)
 
 
-def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: bool,
-                               new_icon_present: bool, detail_page: Optional[str],
+def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: Optional[bool],
+                               new_icon_present: Optional[bool], detail_page: Optional[str],
                                max_rows: int = 4) -> CaseResult:
     """LCD-09: profiles picker reached by tapping Profiles from the hub.
     `rows` is the subset of tap targets named `profile_row_*`."""
@@ -1020,34 +1021,34 @@ def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: boo
     favorites = [r for r in rows if r.get("starred")]
     if favorites and any(not r.get("starred") for r in rows[: len(favorites)]):
         return CaseResult(Verdict.FAIL, reason="favorite row(s) are not sorted first", observed=observed)
-    if not paging_present:
-        # 2026-09-24 finding: firmware builds the Prev/Next paging icons via
-        # ui_topbar.c's UNTAGGED build_icon() (unlike "settings"/"back"/
-        # "home", which use build_icon_named() to stash a tap-name
-        # override) -- so these icons carry no tap-target name at all on
-        # this build. No name-based lookup can ever find "paging"; this is
-        # a firmware gap (icons never registered as named tap targets), not
-        # a naming mismatch this test can fix by trying another string, and
-        # not something this PcTools-only change may fix in firmware.
-        # INCONCLUSIVE rather than FAIL so it doesn't read as "the picker
-        # lost its paging control" when the paging control likely still
-        # works -- it just can't be confirmed by name from the bench.
-        return CaseResult(
-            Verdict.INCONCLUSIVE,
-            reason=(
-                "no tap target named 'paging' exists -- firmware's Prev/Next "
-                "topbar icons are built via ui_topbar.c's untagged build_icon() "
-                "and carry no tap name at all, so this cannot be confirmed by "
-                "name from the bench (firmware gap, not fixed here)"
-            ),
-            observed=observed,
-        )
-    if not new_icon_present:
+    # paging_present / new_icon_present are Optional: cases_lcd.py's
+    # _profiles_topbar_icons() finds the topbar's Prev/Next/New icons by
+    # POSITION, since ui_topbar.c's build_icon() sets no tap-name tag and
+    # kiln_ui.c's tap walk falls back to the button's label text -- the
+    # LVGL symbol glyph, which arrives on the PC as U+FFFD bytes. The icons
+    # ARE listed tap targets, so a missing one is a real FAIL; only a state
+    # the bench genuinely cannot decide (None) is INCONCLUSIVE.
+    if paging_present is False:
+        return CaseResult(Verdict.FAIL, reason="Prev/Next paging icons missing from the topbar", observed=observed)
+    if new_icon_present is False:
         return CaseResult(Verdict.FAIL, reason="New profile icon missing from the topbar", observed=observed)
     if rows and detail_page != "profile_detail":
         return CaseResult(
             Verdict.FAIL,
             reason=f"tapping a row opened {detail_page!r}, expected 'profile_detail'",
+            observed=observed,
+        )
+    if new_icon_present is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="could not locate the topbar icons (no 'back'/'home' anchor target)",
+            observed=observed,
+        )
+    if paging_present is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=("Prev/Next both disabled (a single page of profiles, or undecidable "
+                    "from tap positions) -- paging could not be confirmed"),
             observed=observed,
         )
     if not rows:
@@ -1099,20 +1100,33 @@ def judge_lcd_diagnostics_pages(titles_seen: "list[str]", relay_life_has_reset: 
                                  crash_report_visible_entries: Optional[int],
                                  heap_diff_pct: Optional[float],
                                  expected_titles: "tuple[str, ...]" = _DIAG_TITLES,
-                                 max_heap_diff_pct: float = 10.0) -> CaseResult:
+                                 max_heap_diff_pct: float = 10.0,
+                                 titles_changed: "Optional[list[str]]" = None) -> CaseResult:
     """LCD-16: the 5 diagnostics sub-pages reached in order, Relay Life has
     no Reset button (post-rework), Crash Report shows none, and the LCD's
     own reported heap value is within `max_heap_diff_pct` of
-    `get_heap_status()`."""
+    `get_heap_status()`.
+
+    `titles_changed` (when given) lists the titles whose tap actually
+    changed the tap-target set. `titles_seen` only proves each click said
+    'ok'; a dead tab bar says 'ok' too. If no title ever changed the set,
+    no tab content was observed at all and the verdict can never be PASS."""
     observed = {
         "titles_seen": titles_seen, "relay_life_has_reset": relay_life_has_reset,
         "crash_report_visible_entries": crash_report_visible_entries,
-        "heap_diff_pct": heap_diff_pct,
+        "heap_diff_pct": heap_diff_pct, "titles_changed": titles_changed,
     }
     if list(titles_seen) != list(expected_titles):
         return CaseResult(
             Verdict.FAIL,
             reason=f"diagnostics titles seen {titles_seen!r}, expected {list(expected_titles)!r}",
+            observed=observed,
+        )
+    if titles_changed is not None and not titles_changed:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=("every diagnostics title click answered 'ok' but none changed the "
+                    "tap-target set -- no sub-tab content was ever observed"),
             observed=observed,
         )
     if relay_life_has_reset:

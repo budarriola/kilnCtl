@@ -112,21 +112,34 @@ class LcdHomeIdleTest(unittest.TestCase):
         self.assertEqual(r.evidence, [])
         self.assertNotIn("color_debug", r.observed)
 
-    def test_color_mismatch_with_suspected_cast_degrades_to_inconclusive(self):
-        # 2026-09-24 fix: a whole-frame color cast (bezel fine, everything
-        # lit reads shifted) can make a genuinely-correct board FAIL Start's
-        # color check. When the background reference region (a known-exact
-        # UI_THEME_COLOR_BG sample far from any widget) also reads far off
-        # its own expected chromaticity, this is no longer trusted as a hard
-        # FAIL.
+    def test_color_mismatch_with_suspected_cast_still_fails_annotated(self):
+        # Review fix of ff55bda2: the background-reference cast check used to
+        # DOWNGRADE this to INCONCLUSIVE. On the 2026-09-24 capture the
+        # reference point mapped onto the bezel (stale FRAME_CORNERS), whose
+        # chroma offset alone exceeds the threshold -- so the downgrade would
+        # have masked every Start-color FAIL. It is now diagnostic only: the
+        # verdict stays FAIL and the reason carries the cast note.
         color_debug = {
             "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
             "start": {"sampled_rgb": (25, 96, 98), "matches": False},
             "bg_reference": {"sampled_rgb": (6, 40, 60), "chroma_offset": 0.30, "cast_threshold": 0.15, "cast_suspected": True},
         }
         r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
-        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertIn("color cast", r.reason)
+
+    def test_bg_reference_on_bezel_still_fails_with_geometry_note(self):
+        # The exact 2026-09-24 shape: the reference reads as the bezel, so
+        # the geometry is suspect. Still FAIL, never INCONCLUSIVE.
+        color_debug = {
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (25, 96, 98), "matches": False},
+            "bg_reference": {"sampled_rgb": (6, 13, 22), "bezel_rgb": (6, 11, 16), "reads_as_bezel": True,
+                             "chroma_offset": 0.156, "cast_threshold": 0.15, "cast_suspected": False},
+        }
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("reads as bezel", r.reason)
 
     def test_color_mismatch_without_suspected_cast_still_fails(self):
         # The cast check must never loosen COLOR_MATCH_TOLERANCE/
@@ -292,16 +305,31 @@ class LcdProfilesPickerTest(unittest.TestCase):
         r = J.judge_lcd_profiles_picker("profiles", rows, True, True, "profile_detail")
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_missing_paging_is_inconclusive_not_fail(self):
-        # 2026-09-24 finding: firmware's Prev/Next paging icons are built via
-        # ui_topbar.c's untagged build_icon() and carry no tap name at all --
-        # a firmware gap, not a naming mismatch this judge can fix by trying
-        # another string. No name-based lookup for "paging" can ever
-        # succeed on this build, so this degrades to INCONCLUSIVE (naming
-        # the gap) instead of a FAIL that reads like a real regression.
+    def test_missing_paging_fails(self):
+        # Review fix of ff55bda2: the Prev/Next icons DO carry a tap name
+        # (build_icon() sets no tag, so kiln_ui.c falls back to the glyph
+        # label text); cases_lcd.py locates them by position. A definite
+        # "absent" (False) is a real FAIL.
         r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, False, True, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("paging", r.reason)
+
+    def test_missing_new_icon_fails(self):
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, True, False, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_undecidable_paging_is_inconclusive(self):
+        # Both paging icons disabled (single page): cannot be confirmed.
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, None, True, "profile_detail")
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
-        self.assertIn("build_icon()", r.reason)
+
+    def test_no_topbar_anchor_is_inconclusive(self):
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, None, None, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_undecidable_paging_does_not_mask_detail_fail(self):
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, None, True, "home")
+        self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_paging_present_and_everything_else_ok_still_passes(self):
         # Negative-test companion: proves the INCONCLUSIVE above is really
@@ -362,6 +390,18 @@ class LcdDiagnosticsPagesTest(unittest.TestCase):
     def test_heap_diff_too_large_fails(self):
         r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 25.0)
         self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_dead_tab_bar_is_inconclusive_not_pass(self):
+        # Every click said 'ok' but no title changed the tap-target set:
+        # no tab content was ever observed, so this must never PASS even
+        # with otherwise-passing values.
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 2.0, titles_changed=[])
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("no sub-tab content", r.reason)
+
+    def test_some_tabs_changed_can_pass(self):
+        r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, 2.0, titles_changed=["Relay Life"])
+        self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_unparseable_heap_is_inconclusive_not_pass(self):
         r = J.judge_lcd_diagnostics_pages(list(J._DIAG_TITLES), False, 0, None)
