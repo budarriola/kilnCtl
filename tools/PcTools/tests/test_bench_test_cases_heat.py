@@ -494,3 +494,59 @@ class HP07Test(unittest.TestCase):
         }
         result = C._case_hp07(ctx)
         self.assertEqual(result.verdict, Verdict.SKIP)
+
+
+class HP08Test(unittest.TestCase):
+    """GET /api/firing_history requires profile_id (400 without it) -- the
+    HP-08 fix adds `?profile_id={BENCH_PROFILE_SLOT_ID}` to the harness's
+    call and accepts firmware's real `records` response key."""
+
+    def test_passes_with_profile_id_and_records_key(self):
+        calls = []
+
+        def fake_get(host, path):
+            calls.append(path)
+            return 200, {"records": [{
+                "profile_name": C.BENCH_PROFILE_NAME, "run_started_unix_s": 1,
+                "duration_s": 10,
+            }]}
+
+        orig = C._http_get_json
+        C._http_get_json = fake_get
+        try:
+            result = C._case_hp08({"host": "10.0.0.5"})
+        finally:
+            C._http_get_json = orig
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(f"profile_id={C.BENCH_PROFILE_SLOT_ID}", calls[0])
+
+    def test_no_host_is_inconclusive(self):
+        result = C._case_hp08({})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_non_200_fails(self):
+        orig = C._http_get_json
+        C._http_get_json = lambda host, path: (400, {"error": "profile_id missing"})
+        try:
+            result = C._case_hp08({"host": "10.0.0.5"})
+        finally:
+            C._http_get_json = orig
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_missing_profile_id_param_NEGATIVE(self):
+        """Reproduces the original HP-08 bug directly: a call with no
+        profile_id query param at all is what the un-fixed harness sent, and
+        firmware 400s it."""
+        def fake_get(host, path):
+            if "profile_id" not in path:
+                return 400, {"error": "profile_id missing"}
+            return 200, {"records": []}
+
+        orig = C._http_get_json
+        C._http_get_json = fake_get
+        try:
+            status, _ = C._http_get_json("10.0.0.5", "/api/firing_history")
+        finally:
+            C._http_get_json = orig
+        self.assertEqual(status, 400)

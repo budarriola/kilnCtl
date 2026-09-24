@@ -380,17 +380,22 @@ def _case_hp06(ctx: dict) -> CaseResult:
 
 
 def _case_hp08(ctx: dict) -> CaseResult:
+    """`GET /api/firing_history` requires a `profile_id` query parameter
+    (`firing_history_get_handler()`, `dashboard_exec_http.c`) -- it has no
+    concept of "all profiles" and 400s with no id at all. HP-01..05 all ran
+    their firing through the hidden `BENCH_PROFILE_SLOT_ID` slot, so that
+    slot's own id is the one history to read back."""
     host = ctx.get("host")
     if not host:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx")
-    status, body = _http_get_json(host, "/api/firing_history")
+    status, body = _http_get_json(host, f"/api/firing_history?profile_id={BENCH_PROFILE_SLOT_ID}")
     if status != 200:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/firing_history: status={status}", observed={"body": body})
     entries: List[dict]
     if isinstance(body, list):
         entries = body
     elif isinstance(body, dict):
-        entries = body.get("runs") or body.get("entries") or []
+        entries = body.get("records") or body.get("runs") or body.get("entries") or []
     else:
         entries = []
     return J.judge_firing_history(entries, expected_name_prefix=BENCH_PROFILE_NAME)
@@ -473,13 +478,29 @@ def _case_hp03(ctx: dict) -> CaseResult:
 
 
 def _case_hp07(ctx: dict) -> CaseResult:
-    """HP-01's profile, but with the target zone's `max_temp_c` limit set
-    3C above ambient so the software thermal guard trips it (a `dashboard`
-    zone-config field, never a Pico/safety trip) -- expects FAULTED with
-    fault_guard naming the over-max-temp guard, and confirms the sticky
-    bar's Acknowledge (`profiles.stop()`, mirroring the web UI's
-    POST /api/profile_exec/stop) clears it. Restores the zone's original
-    max_temp_c in `finally`."""
+    """HP-01's profile, but the target zone's `max_temp_c` limit is lowered
+    to 3C above ambient *while the profile is already RUNNING*, so the
+    software thermal guard trips it live (a `dashboard` zone-config field,
+    never a Pico/safety trip) -- expects FAULTED with fault_guard naming the
+    over-max-temp guard, and confirms the sticky bar's Acknowledge
+    (`profiles.stop()`, mirroring the web UI's POST /api/profile_exec/stop)
+    clears it. Restores the zone's original max_temp_c in `finally`.
+
+    Found on hardware 2026-09-24 (run 20260924T072516Z_heat): lowering the
+    limit BEFORE calling `profiles.start()` never reaches the runtime guard
+    at all -- `profile_executor_run.c`'s start-time re-validation
+    (`profile_executor_run.c:320-339`) refuses outright, naming "refused,
+    not clamped", whenever a segment's target exceeds the zone's *current*
+    max_temp_c at start time; this is a deliberate, unconditional hard
+    refusal (PID_EXPANSION_PLAN.md sec 7.2 -- "a target above the kiln's
+    permitted maximum is refused and NEVER stretched"), not a bug, and it
+    makes the runtime FAULTED path (`thermal_guard.c`'s
+    `measurement_c >= max_temp_c` check, evaluated live every guard tick
+    against whatever `zones_config_get_temp_limits()` currently returns)
+    unreachable if the limit is already below the target before start. So
+    this case starts the profile against the zone's UNMODIFIED (wide-enough)
+    limit first -- same as HP-01 -- confirms RUNNING, and only then lowers
+    max_temp_c out from under the live run to provoke the runtime trip."""
     from .. import zones_http_client
 
     rested, rest_reason = _rest_gate(ctx)
@@ -507,12 +528,6 @@ def _case_hp07(ctx: dict) -> CaseResult:
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build the lowered-limit preset body: {exc}")
     try:
-        post_result = zones_http_client.post_zones(host, limited_body)
-    except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
-    if post_result != "ok":
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
-    try:
         ok, reason, _ambient = _start_bench_profile(
             ctx, zone_mask=1 << target_zone, target_offset_c=15.0,
         )
@@ -521,8 +536,26 @@ def _case_hp07(ctx: dict) -> CaseResult:
         srv = _srv(ctx)
         sleep = ctx.get("_sleep", time.sleep)
         now = ctx.get("_now", time.monotonic)
+        # Confirm RUNNING before pulling the limit out from under it -- a
+        # premature POST while the executor is still transitioning could
+        # itself be refused or race the start-time re-validation.
+        running_deadline = now() + 30.0
+        state = "starting"
+        while now() < running_deadline:
+            st = srv._profiles.get_exec_status()
+            state = st.state_name
+            if state == "running":
+                break
+            sleep(1)
+        if state != "running":
+            return CaseResult(Verdict.FAIL, reason=f"never reached RUNNING within 30s (last state={state})")
+        try:
+            post_result = zones_http_client.post_zones(host, limited_body)
+        except Exception as exc:
+            return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
+        if post_result != "ok":
+            return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
         deadline = now() + 240.0
-        state = "running"
         st = None
         while now() < deadline:
             st = srv._profiles.get_exec_status()

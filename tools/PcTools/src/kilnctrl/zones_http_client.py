@@ -895,6 +895,19 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # counterpart is needed here, same as approach_rate_cap_c_per_hr's own
     # note just above.
     "error_band_c", "rate_band_c_per_s",
+    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE_PLAN.md step 6, 2026-09-08):
+    # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s. Found missing from
+    # this set by bench_test's HP-03 (an on/off-zone preset naming zone_type
+    # raised ZonesHttpUnknownFieldError) -- the same silent-drop-turned-
+    # explicit-raise class as cross_zone_max_delta_c/relay_type above, just
+    # never hit on hardware until a preset actually tried to reconfigure a
+    # zone as on/off. All five are legitimate per-bench overrides a preset
+    # picking an on/off zone must be able to carry (same class as
+    # relay_mask/control_mode above): zone_type picks heater-vs-on/off,
+    # failsafe_state/hyst_c/min_on_s/min_off_s are that on/off zone's own
+    # hysteresis/timing, none of which a preset should be forced to leave at
+    # whatever the board happened to have.
+    "zone_type", "failsafe_state", "hyst_c", "min_on_s", "min_off_s",
 }
 
 #: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:

@@ -551,6 +551,48 @@ class BuildPostBodyTest(unittest.TestCase):
         # Bug reproduced: the preset's 0.0 never arrived, stale 25.0 echoed.
         self.assertEqual(form["z1_xzone"], repr(25.0))
 
+    # ---- on/off zone preset fields (HP-03: preset build failed loudly on
+    # zone_type -- correctly, per the "consumer without producer" guard, but
+    # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s are legitimate
+    # always-POST-writable per-zone fields (docs/ON_OFF_ZONE_PLAN.md) that
+    # were simply never added to the override allowlist) ----
+
+    def test_preset_overlay_carries_zone_type(self):
+        current = _sample_get_response()
+        current["zones"][1]["zone_type"] = 0
+        preset = {"name": "p", "zones": [{"index": 1, "zone_type": 1}]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z1_zonetype"], "1")
+
+    def test_preset_overlay_carries_onoff_fields(self):
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{
+            "index": 1,
+            "failsafe_state": False,
+            "hyst_c": 2.5,
+            "min_on_s": 10,
+            "min_off_s": 15,
+        }]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z1_failsafe"], "0")
+        self.assertEqual(form["z1_hystc"], repr(2.5))
+        self.assertEqual(form["z1_minons"], "10")
+        self.assertEqual(form["z1_minoffs"], "15")
+
+    def test_preset_overlay_zone_type_NEGATIVE(self):
+        """Proves the above test actually catches the bug: with zone_type
+        removed from _PRESET_ZONE_OVERRIDE_FIELDS (the pre-fix state), the
+        preset raises loudly instead of silently dropping -- this is the
+        HP-03 failure reproduced directly."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 1, "zone_type": 1}]}
+        with unittest.mock.patch.object(
+                zh, "_PRESET_ZONE_OVERRIDE_FIELDS",
+                zh._PRESET_ZONE_OVERRIDE_FIELDS - {"zone_type"}):
+            with self.assertRaises(zh.ZonesHttpUnknownFieldError) as ctx:
+                zh.build_post_body(current, preset)
+        self.assertIn("zone_type", str(ctx.exception))
+
     def test_unmappable_preset_zone_key_raises_loudly(self):
         """A preset zone key that is neither a known override field nor a
         known-ignored field (index/k_dc/tau_s/dead_time_s) must fail loudly

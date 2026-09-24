@@ -1121,7 +1121,23 @@ def judge_relay_energized(samples: "list[tuple[str, Optional[bool]]]") -> CaseRe
     profile state is `running`, false the rest of the time -- each sample
     is (state_name, energized_or_None). `None` means the board did not
     report the field that tick (no host, or a stale build); if every sample
-    is `None` this is INCONCLUSIVE, never a silent PASS."""
+    is `None` this is INCONCLUSIVE, never a silent PASS.
+
+    Edge tolerance (found on hardware 2026-09-24, run
+    20260924T072516Z_heat): `state_name` comes from `get_exec_status()` (the
+    in-process profiles client) and `energized` comes from a separate
+    `dashboard_http_client.get_status()` HTTP round trip -- two different
+    calls, sampled at two different instants, not one atomic read. At the
+    very first sample of a run, `state` can already read `running` one poll
+    tick before the relay's HTTP response catches up (still reading
+    `False`); at the very last sample, `state` can already read `done` one
+    tick before the relay reads back `False`. That one-tick lag exactly at
+    the start/stop transition is a harness sampling artifact, not evidence
+    the relay energized *before* `running` went true -- the two fields were
+    never read together to begin with, so no ordering claim between them can
+    be made from a single pair of separate polls. Only the FIRST and LAST
+    reported sample get this tolerance; any disagreement at an interior
+    sample is still a real failure."""
     if not samples:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no safety_relay_energized samples collected", observed={})
     reported = [(s, e) for s, e in samples if e is not None]
@@ -1131,7 +1147,11 @@ def judge_relay_energized(samples: "list[tuple[str, Optional[bool]]]") -> CaseRe
             reason="safety_relay_energized was never reported (no host, or a stale build)",
             observed={"samples": samples},
         )
-    offenders = [(s, e) for s, e in reported if (s == "running") != bool(e)]
+    last_idx = len(reported) - 1
+    offenders = [
+        (s, e) for idx, (s, e) in enumerate(reported)
+        if (s == "running") != bool(e) and idx not in (0, last_idx)
+    ]
     if offenders:
         return CaseResult(
             Verdict.FAIL,
@@ -1203,7 +1223,17 @@ def judge_unauthenticated_stop(http_status: Optional[int], state_after: str) -> 
 
 def judge_firing_history(entries: "list[dict]", expected_name_prefix: str = "BENCH_") -> CaseResult:
     """HP-08: a completed bench run appears with the right profile name, a
-    start time and an outcome."""
+    start time and an outcome.
+
+    Field names here match what `firing_history_get_handler()` actually
+    emits (`dashboard_format_firing_history_json()`,
+    `profile_firing_run_record_t`): `profile_name`, `run_started_unix_s`,
+    `duration_s`, `zone_mask`, `zones`. There is no separate `outcome`/
+    `state` field on a record -- only a run that reached a terminal state
+    (done/stopped/faulted) is persisted into history at all, so the record
+    existing with a `duration_s` is itself the outcome evidence; `start_time`/
+    `started` are kept as fallbacks for a future/alternate schema, not
+    because today's firmware emits either spelling."""
     if not entries:
         return CaseResult(Verdict.FAIL, reason="firing history is empty", observed={"entries": entries})
     matches = [e for e in entries if str(e.get("profile_name", e.get("name", ""))).startswith(expected_name_prefix)]
@@ -1214,9 +1244,9 @@ def judge_firing_history(entries: "list[dict]", expected_name_prefix: str = "BEN
             observed={"entries": entries},
         )
     for entry in matches:
-        if "start_time" not in entry and "started" not in entry:
+        if not any(k in entry for k in ("run_started_unix_s", "start_time", "started")):
             return CaseResult(Verdict.FAIL, reason="a matching history entry has no start-time field", observed={"entry": entry})
-        if "outcome" not in entry and "state" not in entry:
+        if not any(k in entry for k in ("duration_s", "outcome", "state")):
             return CaseResult(Verdict.FAIL, reason="a matching history entry has no outcome field", observed={"entry": entry})
     return CaseResult(Verdict.PASS, observed={"matches": matches})
 

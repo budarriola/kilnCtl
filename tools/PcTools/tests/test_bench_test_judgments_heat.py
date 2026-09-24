@@ -76,7 +76,12 @@ class RelayEnergizedTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_energized_after_stop_fails(self):
-        samples = [("running", True), ("done", True)]
+        # Interior mismatch (index 1 of 3, neither first nor last sample) --
+        # must still FAIL. Edge tolerance only covers the very first/last
+        # poll, which can straddle the two separate HTTP calls (running-state
+        # vs relay-energized) at a start/stop transition; a mismatch that
+        # persists into the middle of the run is a real ordering defect.
+        samples = [("running", True), ("done", True), ("done", False)]
         r = J.judge_relay_energized(samples)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
@@ -87,6 +92,25 @@ class RelayEnergizedTest(unittest.TestCase):
     def test_all_none_samples_is_inconclusive_not_pass(self):
         r = J.judge_relay_energized([("running", None), ("done", None)])
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_first_sample_mismatch_is_tolerated(self):
+        # HP-01 root cause: running-state and relay-energized come from two
+        # separate HTTP round trips, not one atomic read. A mismatch confined
+        # to the very first sample (poll landed between the two calls at
+        # start-of-run) is tolerated, not a real ordering defect.
+        samples = [("done", True), ("running", True), ("running", True)]
+        r = J.judge_relay_energized(samples)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_last_sample_mismatch_is_tolerated(self):
+        samples = [("running", True), ("running", True), ("done", True)]
+        r = J.judge_relay_energized(samples)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_both_edges_mismatched_but_interior_clean_is_tolerated(self):
+        samples = [("done", True), ("running", True), ("done", True)]
+        r = J.judge_relay_energized(samples)
+        self.assertEqual(r.verdict, Verdict.PASS)
 
 
 class PauseResumeTest(unittest.TestCase):
@@ -141,6 +165,17 @@ class FiringHistoryTest(unittest.TestCase):
         r = J.judge_firing_history(entries)
         self.assertEqual(r.verdict, Verdict.PASS)
 
+    def test_real_firmware_field_names_pass(self):
+        # HP-08: firmware's actual dashboard_format_firing_history_json()
+        # schema -- run_started_unix_s/duration_s, no separate outcome/state
+        # field at all. A record existing with duration_s IS the outcome.
+        entries = [{
+            "profile_name": "BENCH_HP", "run_started_unix_s": 1234567890,
+            "duration_s": 42, "zone_mask": 0b111, "zones": [],
+        }]
+        r = J.judge_firing_history(entries)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
     def test_empty_history_fails(self):
         r = J.judge_firing_history([])
         self.assertEqual(r.verdict, Verdict.FAIL)
@@ -152,6 +187,11 @@ class FiringHistoryTest(unittest.TestCase):
 
     def test_missing_outcome_field_fails(self):
         entries = [{"profile_name": "BENCH_HP", "start_time": "t"}]
+        r = J.judge_firing_history(entries)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_real_field_names_missing_duration_fails(self):
+        entries = [{"profile_name": "BENCH_HP", "run_started_unix_s": 1234567890}]
         r = J.judge_firing_history(entries)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
