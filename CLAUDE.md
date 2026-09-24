@@ -417,6 +417,18 @@ The smallest axis-aligned box containing all four corners is
 now the default crop, and `lcd_sampler.py`'s `FRAME_CORNERS` was updated to
 match. The 2026-09-19 numbers above are kept only as history.
 
+**Camera aim (2026-09-24, round 3):** the LCD-01 corners above went stale the
+same day. A numeric edge scan of
+`logs/bench_test/20260924T162517Z_lcd/captures/lcd01_start_pause.jpg` puts
+the panel corners at top-left `(180, 69)`, top-right `(1038, 121)`,
+bottom-left `(178, 627)`, bottom-right `(985, 628)`; `lcd_sampler.py`'s
+`FRAME_CORNERS` now carries these, and it samples four background points
+after the homography, downgrading a color FAIL to INCONCLUSIVE ("frame
+corners stale or panel dark") whenever any of them reads as bezel. The
+`capture_lcd.ps1` crop above still contains all four corners and is unchanged.
+Full detail: `docs/COMMISSIONING_LCD_RUNBOOK.md`, "Camera aim (2026-09-24,
+round 3)".
+
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
 Three git-workflow guards live under `tools/`: `worktree_mint.ps1` (mint/remove
