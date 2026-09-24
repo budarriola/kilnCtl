@@ -106,9 +106,10 @@ static const kiln_ui_tap_name_tag_t kUiTopbarGearTapName = {
  * pattern as kUiTopbarGearTapName above. Added so a bench harness can
  * navigate by name on pages like the config hub (ui_page_config.c,
  * show_home=false) that have no gear icon and previously had no nameable
- * target at all. Back and Home never both render with the same name (they
- * are distinct strings), so kiln_ui_click_by_name() never sees two exact
- * matches for either one. */
+ * target at all. A duplicate match is handled, not structurally
+ * impossible: only one topbar is built per page (ui_topbar_create() above),
+ * and kiln_ui_click_by_name() (kiln_ui.c) returns AMBIGUOUS rather than
+ * picking one if it ever did see two visible exact matches. */
 static const kiln_ui_tap_name_tag_t kUiTopbarBackTapName = {
     .magic = KILN_UI_TAP_NAME_MAGIC,
     .name = "back",

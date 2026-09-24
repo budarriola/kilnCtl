@@ -529,8 +529,8 @@ The gear's tap-target *name*, as `list_tap_targets`/`click_by_name` see it, is
 not its label text, since an icon-only button's caption is an opaque LVGL
 glyph. The old "Menu" button this replaced was removed 2026-08-20.
 
-The topbar's Back and Home icons carry the same kind of override as of this
-pass: tap names `back` and `home` (`kUiTopbarBackTapName`/
+The topbar's Back and Home icons carry the same kind of override as of
+2026-09-24: tap names `back` and `home` (`kUiTopbarBackTapName`/
 `kUiTopbarHomeTapName`, `ui_topbar.c`). Before this they had no tap name at
 all, so a page like the config hub (`ui_page_config.c`, `show_home=false`)
 had no way to navigate back by name -- only by raw coordinates. Both names

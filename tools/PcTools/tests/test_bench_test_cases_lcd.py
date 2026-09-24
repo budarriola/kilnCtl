@@ -211,6 +211,41 @@ class RaisingUiTest(PageNavUiTest):
         return super().click_by_name(name)
 
 
+class BackThenNoHomeUiTest(PageNavUiTest):
+    """Mirrors the real topbar's per-page icon set for _navigate_home's
+    home-first ordering: 'back' walks a page toward home one hop at a time
+    (diagnostics -> config -> home, config's own Back), while 'home' is a
+    no-op (not_found) on config specifically -- config hub has no Home icon
+    (show_home=false) -- and otherwise jumps straight to home."""
+
+    def click_by_name(self, name):
+        if name == "home":
+            if self._page == "config":
+                return {"result": "not_found", "cx": 0, "cy": 0}
+            self._page = "home"
+            return {"result": "ok", "cx": 0, "cy": 0}
+        if name == "back":
+            dest = self._nav_map.get(self._page)
+            if dest is not None:
+                self._page = dest
+            return {"result": "ok", "cx": 0, "cy": 0}
+        return super().click_by_name(name)
+
+
+class NavigateHomeTest(unittest.TestCase):
+    def test_back_then_home_from_diagnostics_via_config(self):
+        # diagnostics has no direct Home icon target in this double's map,
+        # only a Back that lands on config; config itself has no Home icon
+        # (show_home=false) and its own Back reaches home. A "back"-first
+        # ordering would click "back" (diagnostics -> config), then "home"
+        # (not_found on config) and strand on config; "home"-first either
+        # jumps straight home from a page that has it, or falls through to
+        # "back" from config, which does reach home.
+        ui = BackThenNoHomeUiTest(page="diagnostics", nav_map={"diagnostics": "config", "config": "home"})
+        C._navigate_home(ui)
+        self.assertEqual(ui.get_current_page(), "home")
+
+
 class Lcd02Test(unittest.TestCase):
     def test_not_run_when_hp01_absent(self):
         srv = FakeSrvFull(FakeUiTest(page="home", targets=_HOME_TARGETS))

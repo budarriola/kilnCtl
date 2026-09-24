@@ -252,14 +252,24 @@ def _navigate_home(ui) -> None:
     profiles/diagnostics sub-page for whatever runs next."""
     try:
         if ui.get_current_page() != "home":
-            # Lowercase tap names, same convention as "settings" -- ui_topbar.c's
-            # build_icon_named() now tags Back/Home with kUiTopbarBackTapName/
-            # kUiTopbarHomeTapName ("back"/"home"). Before that fix these icons
-            # had no tap name at all, so this call always silently missed (the
-            # exact strcmp saw the icon glyph's raw text, never "Back"/"Home").
-            ui.click_by_name("back")
-            if ui.get_current_page() != "home":
-                ui.click_by_name("home")
+            # These strings must match kUiTopbarBackTapName/kUiTopbarHomeTapName
+            # (ui_topbar.c) exactly -- nothing here checks that mechanically.
+            #
+            # "home" first, not "back": the config hub (show_home=false) has
+            # no Home icon, so from diagnostics/temperature (back_page=
+            # "config") a "back" click first only reaches config, where the
+            # follow-up "home" click then returns not_found and strands the
+            # board there. Home is present on every topbar page except home
+            # and config itself, so it either works directly or (from
+            # config) is a no-op we fall through from. Each click is
+            # followed by _wait_for_page(), not an immediate read, for the
+            # same click-then-read race this file documents above
+            # (_PAGE_POLL_TIMEOUT_S).
+            ui.click_by_name("home")
+            page, _ = _wait_for_page(ui, "home")
+            if page != "home":
+                ui.click_by_name("back")
+                _wait_for_page(ui, "home")
     except Exception:
         pass
 
