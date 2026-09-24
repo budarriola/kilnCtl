@@ -1,6 +1,39 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-23, the machine-wide build
+> **Status:** planning · **Last reviewed:** 2026-09-24, `estop_verified` closed
+> end to end on the bench, the Pico reflashed, and the bench Wi-Fi hotspot
+> landed (thirty-fifth sweep) — open items below.
+> - **`estop_verified` closed end to end, 2026-09-24 (bench time):** owner
+>   pulled the bench E-stop jumper; S7 (`SAFETY_TRIP_ESTOP`, trip_reason 8,
+>   `trip_mask 0x0080`) latched and was confirmed on the Pico diag output, the
+>   ESP's safety cache, and readiness's `safety_trip`, with every relay
+>   de-energized. Owner refitted the jumper (pole 1 stays permanently unwired
+>   by owner decision, unchanged), the trip was cleared via
+>   `safety_clear_trip()`, and the verification was recorded with read-back
+>   through the new `estop_verify` MCP tool (`fc16c186` adds the tool wrapping
+>   `POST /api/estop/verify`; `055703af` fixes a trip-item-missing gap and a
+>   stale success summary found while using it). Every Class C heat/firing
+>   row previously BLOCKED on `estop_verified` is now unblocked — **not yet
+>   run**, just no longer gated.
+> - **Bench Pico reflashed to HEAD** (`6bc4fc23`'s successor commit,
+>   `6bb41fe1`, SaftyFW build `d6309f4a`) via `debug_program(peer="pico")`
+>   after the owner reseated the CMSIS-DAP probe — closes the "Pico when the
+>   probe is replugged" open item from prior sweeps.
+> - **Secured bench Wi-Fi hotspot landed** (`3eadbe35`, `5279552c`):
+>   `docs/BENCH_HOTSPOT.md` and `tools/PcTools/scripts/bench_hotspot.ps1`
+>   stand up a second, isolated 2.4 GHz AP (Windows Mobile Hotspot over
+>   `NetworkOperatorTetheringManager`, WPA2) for AP-fallback/provisioning
+>   testing without touching the lab network; credentials live only in
+>   User-scope `KILNCTL_HOTSPOT_SSID`/`KILNCTL_HOTSPOT_PASSWORD`. This
+>   supplies the second AP the AP-fallback row below needed — the
+>   AP-fallback test itself has not been run yet.
+> - **Commissioning pass, 2026-09-24, at HEAD:** readiness 17 ok / 1 not_done
+>   (`safety_commissioned`: `i_normal_a[0..2]` unset, needs a CT current
+>   sweep under load) / 3 other (`deliberately_off`: `guard_cross_zone`;
+>   `calibration`; `pico_update`; `cannot_yet`: `ct_attribution` pending the
+>   same sweep). `cfgfs` mounted, 9 files; only `dual_write.zones` is not yet
+>   file-backed, expected to self-clear on the next zones write.
+> **Previously reviewed:** 2026-09-23, the machine-wide build
 > gate, the `safety_get_param` GET_PARAM wire, and cfgrecrc closed
 > (thirty-fourth sweep) — open items below.
 > - **Machine-wide heavy-build gate landed** (`e3aaa4ff`, opus-review fixes
@@ -1916,7 +1949,7 @@ open is short:
 |---|---|---|
 | S | Time the firing abort (30 s) with a stopwatch during a real running firing — the 1.5 s staleness ceiling was bench-verified 2026-09-06 (`LINK_PROTOCOL.md` §8) with no firing needed | M6 |
 | M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; this was `ct_installed=no` on the bare bench as of the checked date above). **Corrected 2026-09-18, then superseded the same day by the CT-summed-topology fix:** the board reads `ct_installed=1` (channel 2's summed CT fitted and calibrated, per the CT-commissioning bench check at the top of this file); `s_current_sensing_commissioned` used to require all three `k_ct_v_per_a` entries greater than zero regardless of topology — a deliberate decision at the time, but one that permanently blocked any SUMMED-topology board (only one CT, wired to channel 2) from ever reporting commissioned. It now instead requires `k_ct_v_per_a > 0` only on channels that are actually fitted for the board's topology (`config_store_current_sensing_commissioned()`, `firmware/SaftyFW/src/config_store.h`), landed together with masking `any_current_present` to fitted channels only (channels 0/1's idle ADC noise must not count) so the unclearable S9 latch cannot arm off noise. **S9's `TRIP_INEFFECTIVE` is now armable on this board for the first time** — this is a live change to the bench's safety posture, not only to source, once flashed: a welded-contactor exercise here can now actually latch S9, independent of the fixture-availability question above. | M4 |
-| M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
+| M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config; the second AP itself is no longer the gap — `docs/BENCH_HOTSPOT.md`'s bench hotspot, 2026-09-24, provides one — the test has not been run yet) | M6 |
 | M | Per-channel CT-to-jack commissioning and the ADC noise-floor measurement — see the M-size CT commissioning row far above (M5's table), `CT_COMMISSIONING_PLAN.md` steps 0 and 6 | M5 |
 | M | **HW changes:** relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector. (LCD backlight control's flying wire is fitted and confirmed — see M1, closed 2026-09-04.) | M1 |
 | S | **Blocking, before the MSP4031 touches J2 at all**: meter module pins 10/12 (CTP_SCL/CTP_SDA) at 5V — confirms or clears a hazard that can back-feed the SX1509/ESP32-S3 through the shared I2C bus. `DISPLAY_ST7796_PLAN.md` §4 | M1 |
@@ -2716,7 +2749,10 @@ because it changes what a bare main board will do.
       honest reporting of absent hardware, not a code gap and no longer an
       M0 consequence
 - [ ] **AP-fallback fix unverified end to end** — needs a router with both
-      correct and deliberately-wrong static config; see `KilnFW/TODO.md` Wi-Fi
+      correct and deliberately-wrong static config; the bench hotspot
+      (`docs/BENCH_HOTSPOT.md`, 2026-09-24) now supplies the second AP, so
+      this is no longer blocked on that piece — the test itself is still not
+      run; see `KilnFW/TODO.md` Wi-Fi
 
 **2026-08-20: a large batch of UI, Wi-Fi, and boot-stability bugs were found
 and fixed during a full hardware test pass** — profile/readiness reporting,
@@ -3608,11 +3644,13 @@ Owner instruction, 2026-09-21.
 - [x] Bench ESP reflash — done, 2026-09-23: `9c26dd91`, `nvs` erased, web
   auth re-bootstrapped, readiness 16 ok / 2 not_done / 3 other. See the
   top-of-file entry above for findings (D2-D5).
-- [ ] Bench Pico reflash — still `987050f6`; blocked, no CMSIS-DAP debug
-  probe enumerates on USB (physical, needs the owner to replug/check the
-  probe).
-- [ ] Class C heat/firing commissioning rows — blocked on `estop_verified`,
-  which needs the bench E-stop jumper pulled by the owner.
+- [x] Bench Pico reflash — done, 2026-09-24: `6bb41fe1` (SaftyFW build
+  `d6309f4a`) via `debug_program(peer="pico")` after the owner reseated the
+  CMSIS-DAP probe.
+- [x] `estop_verified` closed end to end, 2026-09-24 — S7 latched, verified,
+  cleared, and recorded via the new `estop_verify` MCP tool (`fc16c186`,
+  `055703af`). Class C heat/firing commissioning rows are now unblocked —
+  not yet run.
 
 ---
 
