@@ -275,6 +275,10 @@ core (`drivers/net/totp.c`/`.h`, pure RFC 6238/4226/4648, no mbedtls --
 target SHA-1 exists via PSA, but the host PSA stub is non-cryptographic, so
 the hand-rolled code is what both builds run; see `totp.h`'s header comment) and `totp_config.c`/`.h` (NVS persistence, write-only-secret
 discipline, tri-state load status) are DONE and host-tested (WT-D below).
+Routes that check a code must call `totp_config_verify_and_consume()`, which
+persists the matched step as used before returning OK; its
+`TOTP_CONSUME_UNAVAILABLE` (unreadable secret/counter or failed write) is a
+refusal, and the SNTP 503 check of section 6a comes before the call.
 Routes (`auth_forgot_reset_http.c`, `route_tier_table.h` entries, the QR
 encoder, the settings-page enrollment/disable handlers, and the
 `auth_reset_gesture_wiring.c` additive clear call) are NOT done -- deferred
