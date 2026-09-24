@@ -3218,6 +3218,17 @@ re-trips on that same tick. So the operator sequence is: identify the source,
 remove it, then clear. None of that is currently told to the operator, and the
 owner had to ask.
 
+**"Identify the source" was not possible after the fact until 2026-09-24.** A
+transient ESP-side fault source (guard 9 stale-tick, or a 1.5 s safety-link
+staleness blip) asserts the mainFault line, the Pico latches S6a, and the ESP
+then self-clears its own bits at profile stop, leaving no record of which source
+fired (incident of that day, `docs/BENCH_TEST_LOG.md`, cause still unproven).
+`5754603a` adds a 16-entry fault-source transition ring plus per-source rising-edge
+counters in `safety_link.c`, reported on the existing `GET /api/safety/commissioning`
+route (`fault_source_edges`, `fault_source_counts`, no new URI) and rendered by
+`safety_get_commissioning`; read it before clearing any S6a that did not follow a
+dual reflash. Not yet flashed to the bench board.
+
 ## M14 — Verification you can trust · *opened and CLOSED 2026-08-28*
 
 Not a feature milestone. It exists because on 2026-08-28 the sentence "tests
