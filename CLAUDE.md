@@ -351,10 +351,18 @@ trip that latches right after an OTA reboot can be the SX1509 I/O expander
 failing its post-reset init, not a firmware defect — a second `debug_reset`
 clears it.
 
-`tools/PcTools/scripts/capture_lcd.ps1` grabs one frame from the bench webcam
+`tools/PcTools/scripts/capture_lcd.ps1` grabs a frame from the bench webcam
 aimed at the board's LCD, cropped to the panel (`-Full` for an uncropped frame
 if the camera moved and the crop needs re-measuring) — display rendering can
-be checked without a human at the bench. Judge colors by **numeric pixel
+be checked without a human at the bench. ffmpeg's dshow input exposes no
+exposure/gain/focus control on this camera (2026-09-24 check: `-list_options
+true` lists only format/resolution/fps), so `-Frames` (default 5,
+`-WarmupSeconds` default 1.0) instead captures several frames after an
+auto-exposure/auto-focus settling delay and keeps the sharpest by a
+Laplacian-sharpness metric, printing the chosen candidate and its score;
+`-Frames 1` restores the old single-frame behavior. This fixes blur from a
+capture that started before the camera settled, not a genuinely overexposed
+scene. Judge colors by **numeric pixel
 sampling**, never by eye or by matching theme source constants:
 `ffmpeg -i img.jpg -vf "crop=W:H:X:Y,scale=1:1" -f rawvideo -pix_fmt rgb24 - | od -An -tu1`.
 Always sample an off-screen bezel region too, as a neutral reference. If it
