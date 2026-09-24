@@ -570,10 +570,27 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
  * the same treatment for free. */
 static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
 {
-    if (screen) {
-        log_tap_targets(screen, 0, ctx);
-    }
-
+    /* 2026-09-24 (LCD-16 bench root cause): top/sys layers are walked
+     * BEFORE the page screen now, not after. kiln_ui_collect_tap_targets()
+     * and the UI_TEST LIST_TAP_TARGETS wire handler both cap the walk at a
+     * fixed-size array (uart_bridge_ui_test.c's 32-entry `targets[]`) and
+     * silently stop adding once it fills (tap_walk_add() sets `truncated`
+     * and drops the rest). The topbar's Back/Home/Prev/Next icons and any
+     * open modal live on lv_layer_top()/lv_layer_sys(), not under the page
+     * screen (see this function's original doc comment below) -- so when
+     * the screen was walked first, a page whose OWN body already has >=32
+     * clickable rows (ui_page_diagnostics.c's Memory Usage sub-page: one
+     * row per heap stat) filled the cap before the walk ever reached the
+     * topbar, and every nav icon silently vanished from the dump, on every
+     * run, deterministically -- not a race. `_diagnostics_next_target()`
+     * (tools/PcTools/src/kilnctrl/bench_test/cases_lcd.py) then read this
+     * as "Next not found" and LCD-16 reported "paging stopped after 0/7
+     * forward hops" identically across three consecutive bench runs
+     * (20260924T191429Z/203338Z/221915Z). Walking the screen-independent,
+     * always-small overlay layers first guarantees persistent navigation
+     * (and any open modal) survives the cap regardless of how many rows a
+     * page body has; only less-critical page-body targets past the 32nd
+     * slot are ever dropped now. */
     lv_obj_t *top = lv_layer_top();
     if (top && lv_obj_get_child_count(top) > 0) {
         if (ctx->do_log) {
@@ -588,6 +605,10 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
             ESP_LOGI(TAG, "  -- sys-layer --");
         }
         log_tap_targets(sys, 0, ctx);
+    }
+
+    if (screen) {
+        log_tap_targets(screen, 0, ctx);
     }
 }
 

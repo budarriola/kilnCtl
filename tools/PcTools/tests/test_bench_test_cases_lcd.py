@@ -711,15 +711,28 @@ class ClickThenPageTest(unittest.TestCase):
         # a Start/Stop/Confirm/PIN/toggle target can't be added without
         # revisiting the retry. Every argument here must be a literal name
         # in the allowlist -- round 3 removed the one non-literal case
-        # (`title` iterating J._DIAG_TITLES).
+        # (`title` iterating J._DIAG_TITLES). LCD-09's fix (2026-09-24)
+        # reintroduced one non-literal call site: `rows[0]["name"]`, the
+        # profile-picker's row label read live off the board. It is
+        # explicitly allowed here rather than added to `literals` (which
+        # must stay a set of exact strings) because the row name is a
+        # profile name chosen by whatever profiles exist on the bench, never
+        # a fixed string -- but it is still reviewed and safe: it names a
+        # row on the `profiles` list page, structurally never the same
+        # widget as Start/Stop/Confirm/PIN/toggle, which all live on other
+        # pages entirely (home / settings), so the `unsafe`-word check below
+        # does not apply to it.
         import inspect
         import re
         src = inspect.getsource(C)
         calls = re.findall(r'(?<!def )\b(_click_then_page|_click_then_targets_change)\(\s*ui\s*,\s*([^,)]+)', src)
         self.assertTrue(calls, "no call sites found -- the regex no longer matches the source")
+        allowed_nonliteral = {'rows[0]["name"]'}
         literals = set()
         for helper, arg in calls:
             arg = arg.strip()
+            if arg in allowed_nonliteral:
+                continue
             m = re.fullmatch(r'"([^"]+)"', arg)
             self.assertIsNotNone(m, f"non-literal retried click target {arg!r} in {helper}()")
             literals.add(m.group(1))
@@ -835,6 +848,42 @@ class Lcd09Test(unittest.TestCase):
         srv = FakeSrvFull(ui)
         result = C._case_lcd09({"srv": srv})
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_row_tap_retries_once_on_swallowed_tap_then_passes(self):
+        # 2026-09-24 bench root cause (LCD-09, three identical runs:
+        # 20260924T191429Z/203338Z/221915Z): the row tap used to go through
+        # a bare click_by_name()+_wait_for_page_change() with no retry,
+        # unlike every other hop in this module -- the same
+        # screen_idle/touch-poll swallow race _click_then_page() already
+        # guards every other case against (see Lcd08Test's identical
+        # scenario above). The first tap on the picker's row says "ok" but
+        # the page never actually moves off "profiles"; only the retried
+        # second tap lands on "profile_detail".
+        class SwallowRowOnceUi(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.row_calls = 0
+
+            def click_by_name(self, name):
+                if name == "profile_row_0":
+                    self.row_calls += 1
+                    if self.row_calls == 1:
+                        return {"result": "ok", "cx": 0, "cy": 0}  # swallowed
+                    self._page = "profile_detail"
+                    return {"result": "ok", "cx": 0, "cy": 0}
+                return super().click_by_name(name)
+
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [
+            {"name": "profile_row_0", "cx": 50, "cy": 150, "hidden": False},
+            {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+            {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        ] + [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in (1, 2, 3)]
+        nav = dict(_PROFILES_NAV)
+        ui = SwallowRowOnceUi(page="home", page_targets=page, nav_map=nav)
+        result = C._case_lcd09({"srv": FakeSrvFull(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ui.row_calls, 2)
 
     def test_finally_restores_home_on_exception(self):
         ui = RaisingUiTest(page="home", page_targets=_PROFILES_PAGE_TARGETS, nav_map=_PROFILES_NAV, raise_on_call=2)
@@ -1546,6 +1595,24 @@ class Lcd19Test(unittest.TestCase):
         srv = FakeSrvFull(FakeUiTest(page="home"))
         result = C._case_lcd19({"srv": srv})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
+
+    def test_wakes_and_homes_before_driving_the_keypad(self):
+        # 2026-09-24 bench root cause (LCD-19, three identical runs:
+        # 20260924T191429Z/203338Z/221915Z): this case went straight to
+        # click_by_name("Start")/("Stop") with no _wake_and_home() call --
+        # the one exception among every click-driven LCD case. On a bench
+        # run where the panel had blanked or drifted off `home` since the
+        # previous case, that first click legitimately failed (a blanked
+        # panel swallows the tap; a stale page has no "Start"/"Stop"
+        # widget), leaving all four PIN-lock booleans at None -- the
+        # observed INCONCLUSIVE. Pin that _wake_and_home() runs before the
+        # click.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C, "_wake_and_home") as wake:
+            C._case_lcd19(ctx)
+        wake.assert_called_once_with(ctx)
 
     def test_owns_its_own_lcd_enabled_toggle_and_restores_it_off(self):
         # Fix 1: LCD-19 must not depend on WEB-SEC-04 leaving lcd_enabled on

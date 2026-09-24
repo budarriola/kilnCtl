@@ -980,9 +980,28 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         new_icon_present = icons["add"]
         detail_page = None
         if rows:
-            click3 = ui.click_by_name(rows[0]["name"])
-            if click3.get("result") == "ok":
-                detail_page, _ = _wait_for_page_change(ui, page)
+            # 2026-09-24 (round 4): this row tap used to be a bare
+            # click_by_name() + _wait_for_page_change() with no retry --
+            # the exact screen_idle/touch-poll swallow race this module's
+            # docstring names for LCD-01/08/09/14/16, but LCD-08/14 were
+            # migrated to _click_then_page()'s retry-once helper while this
+            # one was missed. A swallowed row tap read back as page
+            # unchanged ('profiles'), which judge_lcd_profiles_picker
+            # reports as "tapping a row opened 'profiles', expected
+            # 'profile_detail'" -- identical across three consecutive bench
+            # runs (20260924T191429Z/203338Z/221915Z) even though the
+            # firmware side (row_name_clicked_cb() in manage mode) does
+            # call kiln_ui_show("profile_detail") correctly. The
+            # destination is always "profile_detail" for a manage-mode row
+            # (ui_page_profile_picker.c), so it can be named directly, same
+            # as every other _click_then_page() caller in this module. A
+            # double tap here is harmless: the row is a pure navigation
+            # target, not a Start/Stop/Confirm/PIN-digit/toggle.
+            row_fail, detail_page, row_waited_s = _click_then_page(ui, rows[0]["name"], "profile_detail")
+            if row_fail is not None:
+                row_fail.observed = dict(row_fail.observed or {})
+                row_fail.observed["page_wait_s"] = round(waited_s + row_waited_s, 3)
+                return row_fail
         # profiles_count is a best-effort cross-check only: when the board
         # reports at least one profile over the wire but the list area
         # shows no rows at all, that is a real defect (a stuck/empty list),
@@ -1688,6 +1707,24 @@ def _case_lcd19(ctx: dict) -> CaseResult:
     pin_cfg = ctx.get("_lcd_pin")
     if pin_cfg is None:
         return CaseResult(Verdict.NOT_RUN, reason="no PIN was configured in this session (ctx['_lcd_pin'] absent, owned by WEB-SEC-04)")
+    # 2026-09-24 (LCD-19 bench root cause): every other click-driven LCD
+    # case wakes the panel and returns to `home` first (_wake_and_home's own
+    # docstring above: the shortest display timeout is 1 minute, and the
+    # gaps between LCD cases routinely exceed that). This case was the one
+    # exception -- it went straight to `click_by_name("Start")`/("Stop")
+    # with no wake/home step, so on a bench run where the panel had blanked
+    # or drifted off `home` since the previous case, that first click
+    # legitimately returned something other than "ok" (a blanked panel
+    # swallows the tap; a stale page has no "Start"/"Stop" widget). The
+    # click's own success is never in `observed`, but its absence is
+    # visible indirectly: `after_start_click_names`/`after_stop_click_names`
+    # never got set for three identical bench runs, meaning
+    # `click.get("result") == "ok"` was false on the very first click, which
+    # then left all four downstream booleans at None -- the "one or more
+    # PIN-lock checks could not be exercised" INCONCLUSIVE observed on
+    # 20260924T191429Z/203338Z/221915Z. Waking and homing first closes this
+    # gap the same way it already does for every other case in this module.
+    _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
     from . import cases_web_rw as _web  # local import: avoids a module-load cycle with cases_web_rw
@@ -1723,6 +1760,7 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             if not firing_active:
                 baseline = _lcd19_overlay_names(ui)
                 click = ui.click_by_name("Start")
+                state["start_click_result"] = click.get("result")
                 if click.get("result") == "ok":
                     names, _ = _wait_for_overlay_names(ui, present=True, baseline=baseline)
                     state["after_start_click_names"] = sorted(names) if names is not None else None
@@ -1755,6 +1793,7 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             else:
                 baseline = _lcd19_overlay_names(ui)
                 stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
+                state["stop_click_result"] = stop_click.get("result")
                 if stop_click.get("result") == "ok":
                     names, _ = _wait_for_overlay_names(ui, present=True, baseline=baseline)
                     state["after_stop_click_names"] = sorted(names) if names is not None else None
