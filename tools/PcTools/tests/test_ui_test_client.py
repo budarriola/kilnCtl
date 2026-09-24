@@ -191,6 +191,21 @@ class ClickByNameTest(unittest.TestCase):
         # silently truncate a name that doesn't fit its buffer.
         self.assertEqual(self.link.sent, [])
 
+    def test_non_ascii_name_raises_without_sending(self):
+        # Firmware matches raw bytes with strcmp; an errors="replace" '?'
+        # substitute could never match the real target and would surface as
+        # a misleading not_found instead of a loud, immediate refusal.
+        with self.assertRaises(ValueError):
+            self.client.click_by_name("Café", timeout=1.0)
+        self.assertEqual(self.link.sent, [])
+
+    def test_empty_name_raises_without_sending(self):
+        # Firmware would see a 1-byte frame (subcommand only) and reject it
+        # as truncated with no indication of the real cause.
+        with self.assertRaises(ValueError):
+            self.client.click_by_name("", timeout=1.0)
+        self.assertEqual(self.link.sent, [])
+
 
 if __name__ == "__main__":
     unittest.main()

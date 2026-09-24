@@ -60,13 +60,6 @@ class UiTestResponseError(ValueError):
     """Raised when a UI_TEST response payload does not match its wire layout."""
 
 
-def _pack_str8(text: str) -> bytes:
-    encoded = text.encode("ascii", errors="replace")
-    if len(encoded) > 255:
-        raise ValueError(f"target name too long: {len(encoded)} bytes > 255")
-    return struct.pack("<B", len(encoded)) + encoded
-
-
 def _unpack_str8(payload: bytes, offset: int) -> "tuple[str, int]":
     if offset >= len(payload):
         raise UiTestResponseError(f"UI_TEST response truncated at string length, offset {offset}")
@@ -244,12 +237,17 @@ def _pack_click_request(name: str) -> bytes:
     bytes1..(length-1) = ASCII target name, NOT null-terminated`` -- unlike
     every reply on this task (GET_CURRENT_PAGE/LIST_TAP_TARGETS), the request
     carries no length-prefix byte of its own: the frame's own `length` field
-    is the only length. A length-prefixed encoding here (as
-    :func:`_pack_str8` produces) silently corrupts the name on the wire --
-    the firmware reads the prefix byte as the first character of the name
-    and everything shifts by one.
+    is the only length. A length-prefixed encoding (as an earlier, now-deleted
+    ``_pack_str8`` helper produced) would silently corrupt the name on the
+    wire -- the firmware reads the prefix byte as the first character of the
+    name and everything shifts by one.
     """
-    encoded = name.encode("ascii", errors="replace")
+    if not name:
+        raise ValueError("target name must not be empty")
+    try:
+        encoded = name.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"target name {name!r} is not ASCII: {exc}") from exc
     if len(encoded) > _MAX_CLICK_NAME_BYTES:
         raise ValueError(
             f"target name too long: {len(encoded)} bytes > {_MAX_CLICK_NAME_BYTES} "
