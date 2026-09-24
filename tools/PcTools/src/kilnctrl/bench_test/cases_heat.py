@@ -130,13 +130,17 @@ def _capability_preflight_ok(ctx: dict) -> Tuple[bool, str]:
 def _start_bench_profile(
     ctx: dict, zone_mask: int, target_offset_c: float = 15.0,
     ramp_c_per_hr: float = 600.0, dwell_min: int = 2,
+    target_c: Optional[float] = None,
 ) -> Tuple[bool, str, Optional[float]]:
     """Refuses to start (never touches the board) if `capability_preflight`
     is not ok. Otherwise saves a fresh one-segment profile into
     BENCH_PROFILE_SLOT_ID -- target = the current ambient reference +
     `target_offset_c`, plan doc section 3.6's "target = ambient + 15C, ramp
     600C/h, dwell 2min" -- and starts it. Returns (ok, reason,
-    ambient_reference_c)."""
+    ambient_reference_c). An explicit `target_c` overrides the
+    ambient + `target_offset_c` computation: HP-07 pins the target to a
+    limit it already derived from an EARLIER ambient reading, and a fresh
+    re-read here that drifted up would otherwise put target above limit."""
     ok, reason = _capability_preflight_ok(ctx)
     if not ok:
         return False, reason, None
@@ -144,7 +148,8 @@ def _start_bench_profile(
     if not zone_temps:
         return False, "no valid thermo reading to use as an ambient reference", None
     ambient = min(zone_temps.values())
-    target_c = ambient + target_offset_c
+    if target_c is None:
+        target_c = ambient + target_offset_c
     srv = _srv(ctx)
     from .. import devices
 
@@ -523,26 +528,27 @@ def _case_hp03(ctx: dict) -> CaseResult:
             pass
 
 
-#: Margin above ambient both the lowered `max_temp_c` limit and the
-#: profile's own target are set to (HP-07) -- kept as one named constant so
-#: the limit-side POST and the target-side `_start_bench_profile` call can
-#: never drift apart and accidentally leave `target_c > limit_c`, which
-#: `profile_executor_run.c` refuses outright at start time.
+#: Margin above ambient the lowered `max_temp_c` limit is set to (HP-07).
+#: The profile's own target is then pinned to that exact `limit_c` value
+#: (passed through as `target_c`), never recomputed from a second ambient
+#: reading -- any upward drift between two reads would leave
+#: `target_c > limit_c`, which `profile_executor_run.c` refuses outright at
+#: start time.
 _HP07_MARGIN_C = 3.0
 
 
-def _run_hp07_profile(ctx: dict, target_zone: int) -> CaseResult:
+def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult:
     """The heat/poll/ack body of HP-07, once the zone's `max_temp_c` limit is
     already lowered (to `_HP07_MARGIN_C` above ambient) and the hidden slot
-    has not yet been started. Starts a profile whose target is the SAME
-    ambient + `_HP07_MARGIN_C` margin -- never above the just-lowered limit,
+    has not yet been started. Starts a profile whose target is exactly
+    `limit_c` (the value just POSTed) -- never above the just-lowered limit,
     since `profile_executor_run.c`'s start-time re-validation refuses
     outright (never clamps) a segment target greater than the zone's
     *current* max_temp_c -- and lets the setpoint's approach/overshoot cross
     that limit live, tripping `thermal_guard.c`'s runtime check
     (`measurement_c >= max_temp_c`, evaluated every guard tick)."""
     ok, reason, ambient_at_start = _start_bench_profile(
-        ctx, zone_mask=1 << target_zone, target_offset_c=_HP07_MARGIN_C,
+        ctx, zone_mask=1 << target_zone, target_c=limit_c,
     )
     if not ok:
         return CaseResult(Verdict.FAIL, reason=reason)
@@ -633,19 +639,22 @@ def _case_hp07(ctx: dict) -> CaseResult:
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build the lowered-limit preset body: {exc}")
 
-    # Lower the limit WHILE IDLE -- the profile has not been started yet, so
-    # this POST is not subject to the RUNNING interlock 409 above.
-    try:
-        post_result = zones_http_client.post_zones(host, limited_body)
-    except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
-    if post_result != "ok":
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
-
     restore_note: Optional[str] = None
     result: Optional[CaseResult] = None
     try:
-        result = _run_hp07_profile(ctx, target_zone)
+        # Lower the limit WHILE IDLE -- the profile has not been started yet,
+        # so this POST is not subject to the RUNNING interlock 409 above.
+        # Inside the try so the restore below still runs if this POST raises
+        # after firmware already committed it (e.g. a read timeout).
+        try:
+            post_result = zones_http_client.post_zones(host, limited_body)
+        except Exception as exc:
+            result = CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
+        else:
+            if post_result != "ok":
+                result = CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
+            else:
+                result = _run_hp07_profile(ctx, target_zone, limit_c)
     finally:
         # Unconditional: stop whatever is still running and delete the
         # hidden slot before touching zone config again.

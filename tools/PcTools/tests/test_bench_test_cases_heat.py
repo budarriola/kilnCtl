@@ -535,6 +535,56 @@ class HP07Test(unittest.TestCase):
         self.assertEqual(self.fake_zhc.post_calls[0]["body"]["preset"]["zones"][0]["max_temp_c"], 27.0)
         self.assertEqual(self.fake_zhc.post_calls[1]["body"]["preset"], {})
 
+    def test_target_pinned_to_limit_despite_ambient_drift(self):
+        """The limit comes from one ambient reading; `_start_bench_profile`
+        takes another before saving. Upward drift in between must not put
+        the target above the limit (firmware refuses target > max_temp_c at
+        start), so the target must be exactly the POSTed limit."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP()]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        base = ctx["srv"]._thermo.read()
+        fake_zhc = self.fake_zhc
+
+        def drifting_read():
+            if not fake_zhc.posted_bodies:
+                return base
+            return [_Reading(r.channel, r.temperature_c + 0.2) for r in base]
+
+        ctx["srv"]._thermo.read = drifting_read
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        limit = fake_zhc.posted_bodies[0]["preset"]["zones"][0]["max_temp_c"]
+        self.assertEqual(limit, 27.0)
+        self.assertEqual(profiles.saved[0][3][0].target_c, limit)
+
+    def test_limit_restored_even_when_lowering_post_raises(self):
+        """A lowering POST that raises (e.g. a read timeout after firmware
+        already committed) must still be followed by the restore POST."""
+        profiles = _FakeProfilesClientHP(exec_statuses=[_ExecStatus("idle", [_ZoneExecStatusHP()])])
+        ctx = self._ctx(profiles)
+        import kilnctrl.zones_http_client as real
+        fake_post = self.fake_zhc.post_zones
+        n = {"calls": 0}
+
+        def post(host, body):
+            n["calls"] += 1
+            if n["calls"] == 1:
+                raise TimeoutError("timed out after commit")
+            return fake_post(host, body)
+
+        real.post_zones = post
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("lowered max_temp_c", result.reason)
+        self.assertEqual(n["calls"], 2, "restore POST did not run after the lowering POST raised")
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(profiles.started, [])
+
 
 class HP08Test(unittest.TestCase):
     """GET /api/firing_history requires profile_id (400 without it) -- the
@@ -632,13 +682,15 @@ class HP08Test(unittest.TestCase):
         calls = []
 
         def fake_get(host, path):
-            calls.append(path)
+            # Record what had been deleted at GET time, to prove ordering.
+            calls.append((path, list(profiles.deleted)))
             return 200, {"records": [{"profile_name": C.BENCH_PROFILE_NAME}]}
 
         ctx = {"srv": srv, "host": "10.0.0.5", "_http_get_json": fake_get}
         C._cleanup_bench_profile(ctx)
         self.assertEqual(len(calls), 1)
-        self.assertIn(f"profile_id={C.BENCH_PROFILE_SLOT_ID}", calls[0])
+        self.assertIn(f"profile_id={C.BENCH_PROFILE_SLOT_ID}", calls[0][0])
+        self.assertEqual(calls[0][1], [], "history GET ran after the slot was already deleted")
         self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
         snapshots = ctx.get(C.HP_FIRING_HISTORY_SNAPSHOTS_KEY)
         self.assertEqual(len(snapshots), 1)
