@@ -489,6 +489,13 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
                          min-height: var(--ui-touch, 40px); }
 .kc-forgot-step[hidden] { display: none; }
 .kc-forgot-step { display: flex; flex-direction: column; gap: 0.6em; }
+/* app.js's shared kcConfirm/kcAlert modal (owner rule: every confirmation
+   popup follows the color theme) -- a wider .kc-login-panel for a
+   paragraph of confirmation text rather than a login form's two inputs.
+   Generalized from ota_page.html's page-local .ota-confirm-panel, which
+   this class replaces. */
+.kc-confirm-panel { width: 28rem; }
+.kc-confirm-panel p { margin: 0 0 0.6em 0; color: var(--ui-text-primary); }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
    item 4's "dim its values" wording. Every *_page.html now annotates its
    live device-reading elements with .kc-live-value (temperatures, relay/

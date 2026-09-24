@@ -1294,30 +1294,32 @@ function wireCtAutoZeroButtons() {
             : '') +
           'Every heater relay must stay off during this action -- do not start ' +
           'a firing until it completes.';
-        if (!window.kcConfirm(confirmMsg)) {
-          btn.disabled = false;
-          result.textContent = 'cancelled';
-          result.className = 'ct-auto-zero-result';
-          return;
-        }
-        overrideManual = !!j.manual_conflict;
-        result.textContent = 'committing...';
-        postAutoZero(true).then(function (j2) {
-          btn.disabled = false;
-          if (j2.ok) {
-            result.textContent = 'ok -- zero_mv=' + j2.zero_mv.toFixed(2) +
-              (j2.persisted ? '' : ' (WARNING: not persisted -- ' + (j2.err || 'NVS error') + ')');
+        window.kcConfirm(confirmMsg).then(function (confirmed) {
+          if (!confirmed) {
+            btn.disabled = false;
+            result.textContent = 'cancelled';
             result.className = 'ct-auto-zero-result';
-            loadCommissioning();
-          } else {
-            result.textContent = 'FAILED: ' + (j2.reason || 'unknown error');
-            result.className = 'ct-auto-zero-result crc-mismatch';
+            return;
           }
-        }).catch(function (authErr) {
-          btn.disabled = false;
-          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-          result.textContent = 'FAILED: request error';
-          result.className = 'ct-auto-zero-result crc-mismatch';
+          overrideManual = !!j.manual_conflict;
+          result.textContent = 'committing...';
+          postAutoZero(true).then(function (j2) {
+            btn.disabled = false;
+            if (j2.ok) {
+              result.textContent = 'ok -- zero_mv=' + j2.zero_mv.toFixed(2) +
+                (j2.persisted ? '' : ' (WARNING: not persisted -- ' + (j2.err || 'NVS error') + ')');
+              result.className = 'ct-auto-zero-result';
+              loadCommissioning();
+            } else {
+              result.textContent = 'FAILED: ' + (j2.reason || 'unknown error');
+              result.className = 'ct-auto-zero-result crc-mismatch';
+            }
+          }).catch(function (authErr) {
+            btn.disabled = false;
+            if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+            result.textContent = 'FAILED: request error';
+            result.className = 'ct-auto-zero-result crc-mismatch';
+          });
         });
       }).catch(function (authErr) {
         btn.disabled = false;
@@ -1869,24 +1871,24 @@ document.getElementById('benchBtn').addEventListener('click', function () {
   // preset. kcConfirm's message says so explicitly, and the request itself
   // leaves calibration_missing set (the Pico's own behaviour, per that
   // section) rather than this page pretending the board is now commissioned.
-  if (!window.kcConfirm(
+  window.kcConfirm(
     'Apply the test preset?\n\n' +
     'This loads test values for exercising the link and the commissioning ' +
     'flow with no kiln attached. It is NOT a commissioning: the ' +
     'board stays marked calibration_missing (not commissioned) afterward, ' +
     'and every real guard threshold above still needs to be set for an ' +
-    'actual kiln before it is fired.')) {
-    return;
-  }
-  var msg = document.getElementById('msg');
-  msg.textContent = 'Applying test preset…';
-  fetch('/api/safety/commissioning/bench_preset', { method: 'POST' }).then(function (r) {
-    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
-    msg.textContent = 'Test preset applied -- board remains NOT commissioned (test values only).';
-    loadCurrent();
-  }).catch(function (e) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'Test preset failed: ' + e.message;
+    'actual kiln before it is fired.').then(function (ok) {
+    if (!ok) return;
+    var msg = document.getElementById('msg');
+    msg.textContent = 'Applying test preset…';
+    fetch('/api/safety/commissioning/bench_preset', { method: 'POST' }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      msg.textContent = 'Test preset applied -- board remains NOT commissioned (test values only).';
+      loadCurrent();
+    }).catch(function (e) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+      msg.textContent = 'Test preset failed: ' + e.message;
+    });
   });
 });
 

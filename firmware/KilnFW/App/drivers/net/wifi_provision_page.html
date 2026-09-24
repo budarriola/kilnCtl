@@ -941,16 +941,18 @@ function forgetNetwork(ssid, savedCount) {
   var msg = savedCount === 1
     ? 'This is the last saved network. Forgetting it will switch this board to Access Point mode. Continue?'
     : 'Forget this network?';
-  if (!confirm(msg)) return;
-  var rows = document.getElementById('statusRows');
-  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Forgetting…</span></li>';
-  fetch('/forget', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                      body: 'ssid=' + encodeURIComponent(ssid) })
-    .then(r => { if (!r.ok) throw new Error('rejected'); poll(); fetchNetworks(); })
-    .catch((authErr) => {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not forget network</span></li>';
-    });
+  window.kcConfirm(msg).then((ok) => {
+    if (!ok) return;
+    var rows = document.getElementById('statusRows');
+    rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Forgetting…</span></li>';
+    return fetch('/forget', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'ssid=' + encodeURIComponent(ssid) })
+      .then(r => { if (!r.ok) throw new Error('rejected'); poll(); fetchNetworks(); })
+      .catch((authErr) => {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not forget network</span></li>';
+      });
+  });
 }
 
 function renderNetworkList(list) {

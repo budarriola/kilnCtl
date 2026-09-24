@@ -280,23 +280,24 @@ document.getElementById('kcApplyBtn').addEventListener('click', function () {
   // guard thresholds -- overwriting the current live setup outright. Must
   // say so plainly and nudge toward saving first, since there is no "are you
   // sure" after this point.
-  if (!confirm('Apply kiln config "' + cfg.name + '"?\n\n' +
+  window.kcConfirm('Apply kiln config "' + cfg.name + '"?\n\n' +
                'This REPLACES the current relay wiring, thermocouple assignment, ' +
                'PID gains, and guard thresholds with what was saved in this config. ' +
                'If your current settings aren\'t saved anywhere, save them first ' +
-               '(below) or they will be lost.')) return;
-  kcSetMsg('Applying...', false);
-  // Not kcPost(): this one needs its own header. The hardware-differs ack is
-  // a header (X-Kiln-Ack-Hardware-Differs), matching how app.js's
-  // kcFetchWithSafetyAck carries X-Ota-Ack-No-Safety -- but app.js only ever
-  // adds the SAFETY one, so this page must supply this one itself.
-  var headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
-  if (document.getElementById('kcAckHwDiffers').checked) {
-    headers['X-Kiln-Ack-Hardware-Differs'] = '1';
-  }
-  window.kcFetchWithSafetyAck('/api/kiln_configs/apply', {
-    method: 'POST', headers: headers, body: 'id=' + encodeURIComponent(cfg.id),
-  }).then(function (r) {
+               '(below) or they will be lost.').then(function (ok) {
+    if (!ok) return;
+    kcSetMsg('Applying...', false);
+    // Not kcPost(): this one needs its own header. The hardware-differs ack is
+    // a header (X-Kiln-Ack-Hardware-Differs), matching how app.js's
+    // kcFetchWithSafetyAck carries X-Ota-Ack-No-Safety -- but app.js only ever
+    // adds the SAFETY one, so this page must supply this one itself.
+    var headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    if (document.getElementById('kcAckHwDiffers').checked) {
+      headers['X-Kiln-Ack-Hardware-Differs'] = '1';
+    }
+    return window.kcFetchWithSafetyAck('/api/kiln_configs/apply', {
+      method: 'POST', headers: headers, body: 'id=' + encodeURIComponent(cfg.id),
+    }).then(function (r) {
     // 428 is the hardware-differs refusal, and the body IS the explanation of
     // what differs -- surface it verbatim and point at the checkbox, rather
     // than letting it read as a generic failure the operator cannot act on.
@@ -319,9 +320,10 @@ document.getElementById('kcApplyBtn').addEventListener('click', function () {
     // be claiming an outcome nothing has confirmed.
     kcSetMsg('Applying "' + cfg.name + '"... (pushing to the safety processor)', false);
     return pollApplyStatus(cfg);
-  }).catch(function (e) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    kcSetMsg('Apply failed: ' + (e && e.message ? e.message : 'error'), true);
+    }).catch(function (e) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+      kcSetMsg('Apply failed: ' + (e && e.message ? e.message : 'error'), true);
+    });
   });
 });
 
@@ -433,10 +435,12 @@ document.getElementById('kcSaveNewBtn').addEventListener('click', function () {
 document.getElementById('kcOverwriteBtn').addEventListener('click', function () {
   var cfg = kcSelectedConfig();
   if (!cfg) return;
-  if (!confirm('Overwrite "' + cfg.name + '" with the CURRENT relay/thermocouple/PID/guard setup?\n\n' +
-               'This replaces whatever was previously saved under that name. This cannot be undone.')) return;
-  kcPost('/api/kiln_configs/save', 'name=' + encodeURIComponent(cfg.name) + '&id=' + encodeURIComponent(cfg.id))
-    .then(function (result) { kcHandleResult(result, 'Overwrote "' + cfg.name + '".'); });
+  window.kcConfirm('Overwrite "' + cfg.name + '" with the CURRENT relay/thermocouple/PID/guard setup?\n\n' +
+               'This replaces whatever was previously saved under that name. This cannot be undone.').then(function (ok) {
+    if (!ok) return;
+    kcPost('/api/kiln_configs/save', 'name=' + encodeURIComponent(cfg.name) + '&id=' + encodeURIComponent(cfg.id))
+      .then(function (result) { kcHandleResult(result, 'Overwrote "' + cfg.name + '".'); });
+  });
 });
 
 document.getElementById('kcCloneBtn').addEventListener('click', function () {
@@ -470,9 +474,11 @@ document.getElementById('kcRenameBtn').addEventListener('click', function () {
 document.getElementById('kcDeleteBtn').addEventListener('click', function () {
   var cfg = kcSelectedConfig();
   if (!cfg) return;
-  if (!confirm('Delete kiln config "' + cfg.name + '"? This cannot be undone.')) return;
-  kcPost('/api/kiln_configs/delete', 'id=' + encodeURIComponent(cfg.id))
-    .then(function (result) { kcHandleResult(result, 'Deleted "' + cfg.name + '".'); });
+  window.kcConfirm('Delete kiln config "' + cfg.name + '"? This cannot be undone.').then(function (ok) {
+    if (!ok) return;
+    kcPost('/api/kiln_configs/delete', 'id=' + encodeURIComponent(cfg.id))
+      .then(function (result) { kcHandleResult(result, 'Deleted "' + cfg.name + '".'); });
+  });
 });
 
 // Download: GET the export envelope as a blob and save it client-side -- a

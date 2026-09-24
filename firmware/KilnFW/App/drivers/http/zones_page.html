@@ -2077,12 +2077,14 @@ document.getElementById('zones').addEventListener('change', function (e) {
      * block, not a cosmetic warning, so a negative test removing this
      * confirm() call has something real to catch (see test file). */
     if (e.target.value === '1') {
-      var ok = window.confirm(
+      var failsafeTarget = e.target;
+      window.kcConfirm(
         'Fail-safe ON means this relay is ENERGISED whenever the run aborts, faults, or the ' +
         'safety processor trips. Only choose this if that is genuinely the safe state for this ' +
         'device (e.g. a vent that should open to dump heat) -- for most on/off devices OFF is ' +
-        'correct. Set fail-safe state to ON?');
-      if (!ok) { e.target.value = '0'; }
+        'correct. Set fail-safe state to ON?').then(function (ok) {
+        if (!ok) { failsafeTarget.value = '0'; }
+      });
     }
   }
   if (e.target.classList.contains('settingssrc')) {
@@ -3857,7 +3859,7 @@ function pollAdaptiveTune() {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'zone=' + zone,
         }).then(function (r) { return r.json(); }).then(function (j) {
-          if (!j.ok) { window.alert('Revert failed: ' + (j.reason || 'unknown reason')); }
+          if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); }
           pollAdaptiveTune();
         }).catch(function () { pollAdaptiveTune(); });
       });

@@ -536,21 +536,21 @@ password below for at least the administrator account before turning authenticat
   var clearCredsBtn = document.getElementById('kcSecClearCreds');
   var clearCredsStatus = document.getElementById('kcSecClearCredsStatus');
   clearCredsBtn.addEventListener('click', function () {
-    if (!confirm('Clear the administrator password, user password, and both LCD PINs? ' +
-                 'This cannot be undone from this page.')) {
-      return;
-    }
-    setStatus(clearCredsStatus, 'Clearing...', false);
-    fetch('/api/auth/security', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=clear_credentials',
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d.ok) throw new Error(d.error || 'clear failed');
-        setStatus(clearCredsStatus, 'Cleared. You will be signed out.', false);
-        loadCurrent();
+    window.kcConfirm('Clear the administrator password, user password, and both LCD PINs? ' +
+                 'This cannot be undone from this page.').then(function (ok) {
+      if (!ok) return;
+      setStatus(clearCredsStatus, 'Clearing...', false);
+      return fetch('/api/auth/security', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=clear_credentials',
       })
-      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(clearCredsStatus, 'Clear failed: ' + e.message, true); });
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (!d.ok) throw new Error(d.error || 'clear failed');
+          setStatus(clearCredsStatus, 'Cleared. You will be signed out.', false);
+          loadCurrent();
+        })
+        .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(clearCredsStatus, 'Clear failed: ' + e.message, true); });
+    });
   });
 })();
 </script>
@@ -1297,30 +1297,30 @@ password below for at least the administrator account before turning authenticat
       setStatus(disableStatus, 'Enter the 6-digit code.', false);
       return;
     }
-    if (!confirm('Disable two-factor password reset? A locked-out operator will need ' +
-                 'another admin session to regain access.')) {
-      return;
-    }
-    disableBtn.disabled = true;
-    fetch('/api/auth/security', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'cmd=totp_disable&code=' + encodeURIComponent(code)
-    }).then(function (resp) { return resp.json(); }).then(function (data) {
-      if (data && data.ok) {
-        setStatus(disableStatus, 'Disabled.', true);
-        loadTotpStatus();
-      } else if (data && data.clock_unsynced) {
-        setStatus(disableStatus, CLOCK_UNSYNCED_MSG, false);
-      } else {
-        setStatus(disableStatus, 'Incorrect code.', false);
-      }
-    }).catch(function (err) {
-      if (isAuthCancelled(err)) return;
-      setStatus(disableStatus, 'Network error.', false);
-    }).then(function () {
-      disableBtn.disabled = false;
-      disableCodeInput.value = '';
+    window.kcConfirm('Disable two-factor password reset? A locked-out operator will need ' +
+                 'another admin session to regain access.').then(function (ok) {
+      if (!ok) return;
+      disableBtn.disabled = true;
+      return fetch('/api/auth/security', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=totp_disable&code=' + encodeURIComponent(code)
+      }).then(function (resp) { return resp.json(); }).then(function (data) {
+        if (data && data.ok) {
+          setStatus(disableStatus, 'Disabled.', true);
+          loadTotpStatus();
+        } else if (data && data.clock_unsynced) {
+          setStatus(disableStatus, CLOCK_UNSYNCED_MSG, false);
+        } else {
+          setStatus(disableStatus, 'Incorrect code.', false);
+        }
+      }).catch(function (err) {
+        if (isAuthCancelled(err)) return;
+        setStatus(disableStatus, 'Network error.', false);
+      }).then(function () {
+        disableBtn.disabled = false;
+        disableCodeInput.value = '';
+      });
     });
   });
 

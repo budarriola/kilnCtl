@@ -1555,37 +1555,39 @@ function bulkExport(ids) {
 
 function bulkDelete(ids) {
   // Item 6: the confirm must name the count being deleted.
-  if (!kcConfirm('Delete ' + ids.length + ' fire profile' + (ids.length === 1 ? '' : 's') +
-      '? This cannot be undone.')) return;
-  var msg = document.getElementById('catMsg');
-  msg.textContent = 'Deleting…';
-  Promise.all(ids.map(function (id) {
-    return fetch('/api/profile/delete', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
-    }).then(function (r) {
-      // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
-      // response (e.g. 409 "profile is currently running") must not be
-      // reported as a success -- surface the board's own message text.
-      if (r.ok) return null;
-      return r.text().then(function (body) { return { id: id, body: body || (r.status + ' ' + r.statusText) }; });
+  kcConfirm('Delete ' + ids.length + ' fire profile' + (ids.length === 1 ? '' : 's') +
+      '? This cannot be undone.').then(function (ok) {
+    if (!ok) return;
+    var msg = document.getElementById('catMsg');
+    msg.textContent = 'Deleting…';
+    Promise.all(ids.map(function (id) {
+      return fetch('/api/profile/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
+      }).then(function (r) {
+        // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+        // response (e.g. 409 "profile is currently running") must not be
+        // reported as a success -- surface the board's own message text.
+        if (r.ok) return null;
+        return r.text().then(function (body) { return { id: id, body: body || (r.status + ' ' + r.statusText) }; });
+      });
+    })).then(function (results) {
+      var failures = results.filter(function (x) { return x; });
+      var failedIds = failures.map(function (f) { return f.id; });
+      if (ids.indexOf(editingId) !== -1 && failedIds.indexOf(editingId) === -1) resetEditor();
+      if (failures.length === 0) {
+        msg.textContent = 'Deleted ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+      } else {
+        var okCount = ids.length - failures.length;
+        msg.innerHTML = '<span class="err">' +
+          (okCount > 0 ? 'Deleted ' + okCount + ', failed ' + failures.length + ': ' : 'Delete failed: ') +
+          failures.map(function (f) { return 'id ' + f.id + ': ' + window.kcEscapeHtml(f.body); }).join('; ') + '</span>';
+      }
+      exitSelectMode();
+      refreshAll();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Delete failed -- could not reach the board.</span>';
     });
-  })).then(function (results) {
-    var failures = results.filter(function (x) { return x; });
-    var failedIds = failures.map(function (f) { return f.id; });
-    if (ids.indexOf(editingId) !== -1 && failedIds.indexOf(editingId) === -1) resetEditor();
-    if (failures.length === 0) {
-      msg.textContent = 'Deleted ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
-    } else {
-      var okCount = ids.length - failures.length;
-      msg.innerHTML = '<span class="err">' +
-        (okCount > 0 ? 'Deleted ' + okCount + ', failed ' + failures.length + ': ' : 'Delete failed: ') +
-        failures.map(function (f) { return 'id ' + f.id + ': ' + window.kcEscapeHtml(f.body); }).join('; ') + '</span>';
-    }
-    exitSelectMode();
-    refreshAll();
-  }).catch(function (authErr) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-    msg.innerHTML = '<span class="err">Delete failed -- could not reach the board.</span>';
   });
 }
 
@@ -1682,8 +1684,10 @@ function profileActionsGroup(p) {
       // page-load time. Now that the control is an icon rather than the word
       // "Delete", this confirm is also the thing that makes a mis-tap
       // recoverable -- it names the profile it is about to destroy.
-      if (!kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.')) return;
-      deleteProfile(p.id);
+      kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.').then(function (ok) {
+        if (!ok) return;
+        deleteProfile(p.id);
+      });
     });
 
     g.appendChild(exportBtn);

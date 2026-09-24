@@ -88,18 +88,125 @@
   };
   window.thermalGuardWords = function (guard) { return THERMAL_GUARD_WORDS[guard] || ('guard ' + guard); };
 
-  // ---- kcConfirm -----------------------------------------------------
+  // ---- kcConfirm / kcAlert --------------------------------------------
   //
   // A single named seam for "ask before doing something destructive"
   // (UI_PLAN.md item 5: delete a profile, force a relay on, forget a
-  // network, factory-reset). Today this is exactly window.confirm() --
-  // no custom modal, no new CSS, nothing to get wrong -- but every call
-  // site in every page goes through this name instead of calling
-  // confirm() directly, so a future replacement (a themed dialog that
-  // matches dark mode, say) is a one-file change instead of a grep-and-
-  // replace across seven pages.
-  window.kcConfirm = function (message) {
-    return window.confirm(message);
+  // network, factory-reset) and for reporting a failure that used to be a
+  // native alert(). kcConfirm used to be a thin wrapper over
+  // window.confirm() -- every call site in every page already went
+  // through this name instead of calling confirm()/alert() directly, so
+  // the owner's "every confirmation popup must be an in-page, cancellable
+  // modal that follows the color theme" rule (the login modal above is
+  // the reference; ota_page.html's confirmForceProtocol() was the first
+  // page-local themed confirm, built before this shared version existed)
+  // lands here as a one-file change instead of a grep-and-replace across
+  // every page. Both return a Promise now, not a bool, so every existing
+  // caller has to become a .then()/await -- same shape kcOtaAuthedFetch
+  // callers already use.
+  //
+  // Reuses the same .kc-login-overlay/.kc-login-panel/.kc-login-actions/
+  // .kc-login-cancel tokens the login modal above and confirmForceProtocol()
+  // used, plus a wider .kc-confirm-panel rule in theme.css (generalized
+  // from ota_page.html's page-local .ota-confirm-panel). `message` may
+  // contain literal "\n\n" to split into separate paragraphs; each is
+  // rendered via textContent, never innerHTML, so an operator- or server-
+  // supplied string spliced into a confirm/alert message can't inject
+  // markup. `opts` is optional: {title, okLabel}. Only call from inside an
+  // event-handler callback, same rule kcConfirm always had (this file's own
+  // header comment).
+  var confirmModalEl = null, confirmTitleEl = null, confirmTextEl = null,
+      confirmCancelEl = null, confirmOkEl = null;
+
+  function buildConfirmModal() {
+    var overlay = document.createElement('div');
+    overlay.className = 'kc-login-overlay';
+    overlay.setAttribute('hidden', '');
+    var panel = document.createElement('div');
+    panel.className = 'kc-login-panel kc-confirm-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'kc-confirm-title');
+    panel.setAttribute('aria-describedby', 'kc-confirm-text');
+    panel.innerHTML =
+      '<h2 class="kc-login-title" id="kc-confirm-title"></h2>' +
+      '<div id="kc-confirm-text"></div>' +
+      '<div class="kc-login-actions">' +
+      '<button type="button" class="kc-login-cancel">Cancel</button>' +
+      '<button type="button" class="kc-confirm-ok"></button>' +
+      '</div>';
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    confirmModalEl = overlay;
+    confirmTitleEl = panel.querySelector('#kc-confirm-title');
+    confirmTextEl = panel.querySelector('#kc-confirm-text');
+    confirmCancelEl = panel.querySelector('.kc-login-cancel');
+    confirmOkEl = panel.querySelector('.kc-confirm-ok');
+  }
+
+  // Resolves true on OK, false on Cancel/Escape/backdrop -- except in
+  // `opts.alertOnly` mode (kcAlert below), which hides the Cancel button
+  // and treats Escape/backdrop the same as OK, always resolving true (an
+  // alert has nothing to decline). Never rejects. Focus starts on Cancel
+  // (the safe choice) when present, else OK; Tab stays inside the panel;
+  // focus returns to whatever had it before -- same behaviour as the login
+  // modal and confirmForceProtocol() above/below.
+  function openConfirmModal(message, opts) {
+    if (!confirmModalEl) buildConfirmModal();
+    confirmTitleEl.textContent = opts.title || (opts.alertOnly ? 'Notice' : 'Confirm');
+    confirmTextEl.textContent = '';
+    String(message === null || message === undefined ? '' : message).split('\n\n').forEach(function (para) {
+      var p = document.createElement('p');
+      p.textContent = para;
+      confirmTextEl.appendChild(p);
+    });
+    confirmOkEl.textContent = opts.okLabel || 'OK';
+    confirmCancelEl.style.display = opts.alertOnly ? 'none' : '';
+    var previouslyFocused = document.activeElement;
+    confirmModalEl.removeAttribute('hidden');
+    (opts.alertOnly ? confirmOkEl : confirmCancelEl).focus();
+    return new Promise(function (resolve) {
+      function finish(ok) {
+        confirmOkEl.removeEventListener('click', onOk);
+        confirmCancelEl.removeEventListener('click', onCancel);
+        confirmModalEl.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKeydown, true);
+        confirmModalEl.setAttribute('hidden', '');
+        if (previouslyFocused && typeof previouslyFocused.focus === 'function') previouslyFocused.focus();
+        resolve(ok);
+      }
+      function onOk(evt) { evt.preventDefault(); finish(true); }
+      function onCancel(evt) { evt.preventDefault(); finish(false); }
+      function onBackdrop(evt) { if (evt.target === confirmModalEl) finish(!!opts.alertOnly); }
+      function onKeydown(evt) {
+        if (evt.key === 'Escape' || evt.keyCode === 27) {
+          evt.preventDefault();
+          finish(!!opts.alertOnly);
+          return;
+        }
+        if (evt.key !== 'Tab' && evt.keyCode !== 9) return;
+        evt.preventDefault();
+        if (opts.alertOnly) { confirmOkEl.focus(); return; }
+        (document.activeElement === confirmCancelEl ? confirmOkEl : confirmCancelEl).focus();
+      }
+      confirmOkEl.addEventListener('click', onOk);
+      confirmCancelEl.addEventListener('click', onCancel);
+      confirmModalEl.addEventListener('click', onBackdrop);
+      document.addEventListener('keydown', onKeydown, true);
+    });
+  }
+
+  window.kcConfirm = function (message, opts) {
+    return openConfirmModal(message, opts || {});
+  };
+
+  // Themed replacement for window.alert() -- OK-only, resolves (never
+  // rejects) once dismissed by OK, Escape, or a backdrop click.
+  window.kcAlert = function (message, opts) {
+    var o = { alertOnly: true };
+    if (opts && opts.title) o.title = opts.title;
+    if (opts && opts.okLabel) o.okLabel = opts.okLabel;
+    return openConfirmModal(message, o).then(function () {});
   };
 
   // Owner report, 2026-09-24: Cancel on the sign-in modal must reject the
@@ -1001,26 +1108,28 @@
       // actually said keeps this from going stale if that ever widens.
       return r.text().then(function (reason) {
         var msg = (reason ? reason.trim() + '\n\n' : '') + NO_SAFETY_WARNING;
-        if (!window.kcConfirm(msg)) {
-          // Hand back the original refusal so the caller's error path runs
-          // unchanged -- declining is not a new kind of failure.
-          return r;
-        }
-        var retry = {};
-        for (var k in init) { if (Object.prototype.hasOwnProperty.call(init, k)) retry[k] = init[k]; }
-        retry.headers = {};
-        var src = init.headers || {};
-        // init.headers may be a plain object or a Headers instance; normalise
-        // to a plain object so adding one key cannot drop the others.
-        if (typeof src.forEach === 'function' && !(src instanceof Array)) {
-          src.forEach(function (v, k2) { retry.headers[k2] = v; });
-        } else {
-          for (var k3 in src) {
-            if (Object.prototype.hasOwnProperty.call(src, k3)) retry.headers[k3] = src[k3];
+        return window.kcConfirm(msg).then(function (ok) {
+          if (!ok) {
+            // Hand back the original refusal so the caller's error path runs
+            // unchanged -- declining is not a new kind of failure.
+            return r;
           }
-        }
-        retry.headers['X-Ota-Ack-No-Safety'] = '1';
-        return fetch(url, retry);
+          var retry = {};
+          for (var k in init) { if (Object.prototype.hasOwnProperty.call(init, k)) retry[k] = init[k]; }
+          retry.headers = {};
+          var src = init.headers || {};
+          // init.headers may be a plain object or a Headers instance; normalise
+          // to a plain object so adding one key cannot drop the others.
+          if (typeof src.forEach === 'function' && !(src instanceof Array)) {
+            src.forEach(function (v, k2) { retry.headers[k2] = v; });
+          } else {
+            for (var k3 in src) {
+              if (Object.prototype.hasOwnProperty.call(src, k3)) retry.headers[k3] = src[k3];
+            }
+          }
+          retry.headers['X-Ota-Ack-No-Safety'] = '1';
+          return fetch(url, retry);
+        });
       });
     });
   };
@@ -1787,13 +1896,13 @@
     btn.textContent = 'STOP FIRING';
     btn.setAttribute('hidden', '');
     btn.addEventListener('click', function () {
-      if (!kcConfirm('Stop this firing now? This aborts the run in progress and cannot be resumed.')) {
-        return;
-      }
-      btn.disabled = true;
-      fetch('/api/profile_exec/stop', { method: 'POST' })
-        .then(function () { btn.disabled = false; })
-        .catch(function () { btn.disabled = false; });
+      kcConfirm('Stop this firing now? This aborts the run in progress and cannot be resumed.').then(function (ok) {
+        if (!ok) return;
+        btn.disabled = true;
+        fetch('/api/profile_exec/stop', { method: 'POST' })
+          .then(function () { btn.disabled = false; })
+          .catch(function () { btn.disabled = false; });
+      });
     });
 
     // The DONE/FAULTED affordance -- reuses .kc-pause-btn's box/touch-target
@@ -1814,13 +1923,13 @@
       var msg = faulted
         ? 'Clear this fault? Heat is already off; this just returns the board to idle so a new firing can start.'
         : 'Clear this finished firing? It already completed with heat off; this just returns the board to idle so a new firing can start.';
-      if (!kcConfirm(msg)) {
-        return;
-      }
-      ackBtn.disabled = true;
-      fetch('/api/profile_exec/stop', { method: 'POST' })
-        .then(function () { ackBtn.disabled = false; })
-        .catch(function () { ackBtn.disabled = false; });
+      kcConfirm(msg).then(function (ok) {
+        if (!ok) return;
+        ackBtn.disabled = true;
+        fetch('/api/profile_exec/stop', { method: 'POST' })
+          .then(function () { ackBtn.disabled = false; })
+          .catch(function () { ackBtn.disabled = false; });
+      });
     });
     ackBtnEl = ackBtn;
 

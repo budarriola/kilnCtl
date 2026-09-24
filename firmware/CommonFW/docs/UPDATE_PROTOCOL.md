@@ -706,7 +706,8 @@ bar, and a rollback button per processor.
       specific blocker named. **2026-09-04 (triage verification)**:
       `ota_page.html`'s `#interlockBox` calls `GET /api/ota/interlock`
       (`ota_http.c`) on load and before any file is chosen — see
-      `ota_page.html:122,332,348-370`.
+      `ota_page.html`'s `loadInterlock()` (cited by symbol, not line number,
+      since those drift on every edit to the file).
 - [x] Refuse to start if the other processor is mid-update. **2026-09-04**:
       covered by the single-claim mutex documented under "Reboots and
       concurrency" above (`ota_http_update_in_progress()`).

@@ -223,30 +223,32 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
         'name, wiring, calibration, limits, timing, guard thresholds) with the contents of this file. ' +
         'Wi-Fi credentials are not affected.\n\nRestore mode: ' + mode + '.\n\n' + planText +
         'Continue?';
-      if (!kcConfirm(msg)) {
-        status.textContent = 'Restore cancelled.';
-        return;
-      }
-      status.textContent = 'Uploading...';
-      var headers = { 'Content-Type': 'application/json', 'X-Kiln-Config-Mode': mode };
-      if (deleteCount > 0) {
-        headers['X-Kiln-Config-Ack-Delete'] = String(deleteCount);
-      }
-      window.kcFetchWithSafetyAck('/api/backup/import', {
-        method: 'POST',
-        headers: headers,
-        body: body,
-      }).then(function (r) {
-        return r.text().then(function (t) { return { ok: r.ok, text: t }; });
-      }).then(function (res) {
-        status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
-      }).catch(function (authErr) {
-        // Quiet note, never a stale "Uploading...".
-        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
-          status.textContent = 'Sign-in cancelled -- nothing was restored.';
+      kcConfirm(msg).then(function (ok) {
+        if (!ok) {
+          status.textContent = 'Restore cancelled.';
           return;
         }
-        status.textContent = 'Upload failed -- check the connection and try again.';
+        status.textContent = 'Uploading...';
+        var headers = { 'Content-Type': 'application/json', 'X-Kiln-Config-Mode': mode };
+        if (deleteCount > 0) {
+          headers['X-Kiln-Config-Ack-Delete'] = String(deleteCount);
+        }
+        return window.kcFetchWithSafetyAck('/api/backup/import', {
+          method: 'POST',
+          headers: headers,
+          body: body,
+        }).then(function (r) {
+          return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+        }).then(function (res) {
+          status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+        }).catch(function (authErr) {
+          // Quiet note, never a stale "Uploading...".
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+            status.textContent = 'Sign-in cancelled -- nothing was restored.';
+            return;
+          }
+          status.textContent = 'Upload failed -- check the connection and try again.';
+        });
       });
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {

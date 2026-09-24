@@ -770,26 +770,26 @@ here:</p>
     var btn = e.target.closest('.relay-reset-btn');
     if (!btn) return;
     var relay = btn.getAttribute('data-relay');
-    if (!window.kcConfirm('Reset the lifetime contact-cycle count for relay ' + (Number(relay) + 1) +
+    window.kcConfirm('Reset the lifetime contact-cycle count for relay ' + (Number(relay) + 1) +
         '? This cannot be undone and does not replace the physical relay -- only use it after the relay ' +
-        'itself has actually been replaced.')) {
-      return;
-    }
-    btn.disabled = true;
-    fetch('/api/relay_cycles/reset', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'relay=' + encodeURIComponent(relay),
-    }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (j) {
-        if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+        'itself has actually been replaced.').then(function (ok) {
+      if (!ok) return;
+      btn.disabled = true;
+      fetch('/api/relay_cycles/reset', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'relay=' + encodeURIComponent(relay),
+      }).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+        });
+      }).then(function () {
+        poll();
+      }).catch(function (err) {
+        if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+          window.kcAlert('Could not reset relay count: ' + err.message);
+        }
+        btn.disabled = false;
       });
-    }).then(function () {
-      poll();
-    }).catch(function (err) {
-      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
-        alert('Could not reset relay count: ' + err.message);
-      }
-      btn.disabled = false;
     });
   });
 
@@ -824,18 +824,18 @@ here:</p>
     }
     btn.onclick = function () {
       var nextDisabled = !disabled;
-      if (nextDisabled && !window.kcConfirm(
+      (nextDisabled ? window.kcConfirm(
           'Disable the task-watchdog panic? If a task hangs, the board will NOT reboot -- it will ' +
           'sit hung with the relays in whatever state they were last commanded, instead of resetting. ' +
-          'This is for developer debugging only. Continue?')) {
-        return;
-      }
-      fetch('/api/watchdog_cfg', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'disabled=' + (nextDisabled ? '1' : '0'),
-      }).then(function (r) { return r.json(); }).then(function (result) {
-        renderWatchdogCfg(!!result.panic_disabled);
-      }).catch(function () {});
+          'This is for developer debugging only. Continue?') : Promise.resolve(true)).then(function (ok) {
+        if (!ok) return;
+        fetch('/api/watchdog_cfg', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'disabled=' + (nextDisabled ? '1' : '0'),
+        }).then(function (r) { return r.json(); }).then(function (result) {
+          renderWatchdogCfg(!!result.panic_disabled);
+        }).catch(function () {});
+      });
     };
   }
   function pollWatchdogCfg() {
@@ -867,22 +867,22 @@ here:</p>
     btn.disabled = false;
     btn.onclick = function () {
       var nextEnabled = !enabled;
-      if (nextEnabled && !window.kcConfirm(
+      (nextEnabled ? window.kcConfirm(
           'Enable ramp assist? A PID tuning run or A/B controller comparison needs this OFF so ' +
           'tracking-error numbers stay comparable between runs -- with it enabled, the executor may ' +
-          'automatically stretch ramps and shorten dwells during a firing. Continue?')) {
-        return;
-      }
-      fetch('/api/ramp_assist', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'enabled=' + (nextEnabled ? '1' : '0'),
-      }).then(function (r) { return r.json(); }).then(function (result) {
-        if (result && result.ok) {
-          renderRampAssist(!!result.enabled);
-        } else {
-          renderRampAssistError();
-        }
-      }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
+          'automatically stretch ramps and shorten dwells during a firing. Continue?') : Promise.resolve(true)).then(function (ok) {
+        if (!ok) return;
+        fetch('/api/ramp_assist', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'enabled=' + (nextEnabled ? '1' : '0'),
+        }).then(function (r) { return r.json(); }).then(function (result) {
+          if (result && result.ok) {
+            renderRampAssist(!!result.enabled);
+          } else {
+            renderRampAssistError();
+          }
+        }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
+      });
     };
   }
   function renderRampAssistError() {
@@ -1239,8 +1239,9 @@ here:</p>
     if (btn) {
       btn.addEventListener('click', function () {
         if (dwwSubmitting) return;
-        if (kcConfirm('Record a verified restore? Only confirm this after you have personally ' +
-                       'restored a backup and checked the result matches, byte for byte.')) {
+        kcConfirm('Record a verified restore? Only confirm this after you have personally ' +
+                       'restored a backup and checked the result matches, byte for byte.').then(function (ok) {
+          if (!ok) return;
           dwwSubmitting = true;
           btn.disabled = true;
           fetch('/api/dualwrite_window/restore_verified', { method: 'POST' }).then(function () {
@@ -1250,7 +1251,7 @@ here:</p>
             dwwSubmitting = false;
             btn.disabled = false;
           });
-        }
+        });
       });
     }
   }
@@ -1627,7 +1628,7 @@ here:</p>
       poll(); // refresh /api/status so the relay grid reflects the new state
     }).catch(function (err) {
       if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
-        alert('Relay command failed: ' + err.message);
+        window.kcAlert('Relay command failed: ' + err.message);
       }
     }).finally(function () { dangerSetRelayBusy(relay, false); });
   }
@@ -1684,7 +1685,7 @@ here:</p>
       dangerPoll(); // refresh dangerHeatRequested from the board, not an optimistic guess
     }).catch(function (err) {
       if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
-        alert('Firing mode command failed: ' + err.message);
+        window.kcAlert('Firing mode command failed: ' + err.message);
       }
     }).finally(function () { dangerHeatBusy = false; renderDangerFiringTile(); });
   }
@@ -1766,27 +1767,27 @@ here:</p>
     document.getElementById('dangerEnterBtn').disabled = !e.target.checked;
   });
   document.getElementById('dangerEnterBtn').addEventListener('click', function () {
-    if (!window.kcConfirm(
+    window.kcConfirm(
         'Enter Danger Mode? This board\'s own gate on its four heater relays turns off -- you will be ' +
         'able to force any of them on or off directly. Nothing is requested from the safety processor ' +
         'yet -- use the separate "Firing mode" toggle if you also want it to consider closing the ' +
         'safety relay; its own guards decide either way. This auto-exits after 5 minutes of no ' +
-        'activity here (heat-enable released if it was requested, gate restored, no reboot). Continue?')) {
-      return;
-    }
-    fetch('/api/diagnostics/danger/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'accept=1',
-    }).then(function (r) {
-      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
-      return r.json();
-    }).then(function () {
-      document.getElementById('dangerAccept').checked = false;
-      document.getElementById('dangerEnterBtn').disabled = true;
-      dangerPoll();
-    }).catch(function (err) {
-      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
-        alert('Could not enter danger mode: ' + err.message);
-      }
+        'activity here (heat-enable released if it was requested, gate restored, no reboot). Continue?').then(function (ok) {
+      if (!ok) return;
+      fetch('/api/diagnostics/danger/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'accept=1',
+      }).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+        return r.json();
+      }).then(function () {
+        document.getElementById('dangerAccept').checked = false;
+        document.getElementById('dangerEnterBtn').disabled = true;
+        dangerPoll();
+      }).catch(function (err) {
+        if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+          window.kcAlert('Could not enter danger mode: ' + err.message);
+        }
+      });
     });
   });
   document.getElementById('dangerExitBtn').addEventListener('click', function () {

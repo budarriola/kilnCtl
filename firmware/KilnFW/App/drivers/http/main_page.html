@@ -2424,9 +2424,9 @@ function redirectToReadinessIfBlocked(errMsg) {
     if (blocking) {
       window.location.href = '/readiness';
     } else {
-      alert(errMsg || 'failed to start');
+      window.kcAlert(errMsg || 'failed to start');
     }
-  }).catch(function () { alert(errMsg || 'failed to start'); });
+  }).catch(function () { window.kcAlert(errMsg || 'failed to start'); });
 }
 
 // -- Profile feasibility (2026-09-02) -------------------------------------
@@ -2801,53 +2801,55 @@ function updateProfileFeasIcon() {
 }
 
 function proceedToStart(id, startName) {
-  if (!confirm('Start firing "' + startName + '" now? This energises the heaters and will run for hours.')) return;
-  // Extra confirmation on top of the normal one above, only when the task-
-  // watchdog panic is currently disabled (dev/bench mode).
-  if (lastWatchdogPanicDisabled && !window.kcConfirm(WATCHDOG_CFG_FIRING_WARNING_JS)) {
-    return;
-  }
-  fetch('/api/profile_exec/start', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'id=' + id,
-  }).then(function (r) { return r.json(); }).then(function (result) {
-    if (result.ok === false) {
-      // THE READINESS FIRING INTERLOCK (2026-09-09,
-      // App/drivers/safety/readiness_gate.h). Four checklist items --
-      // safety_trip, recovery_mode, crash_report, estop_verified -- now
-      // REFUSE a start outright. When one of them is the reason, the
-      // response carries "readiness_item": the /api/readiness key of the
-      // single item that blocked.
-      //
-      // Handled ahead of redirectToReadinessIfBlocked() below, and NOT by
-      // folding it into that function, because the two cases genuinely
-      // differ: that path knows only that SOMETHING on the checklist is
-      // amber and sends the operator to go look, which is the right answer
-      // for a vague "board isn't ready". This path knows exactly which item
-      // refused and why, so it says so first -- a refusal that dumps the
-      // operator on an eighteen-item checklist with no indication of which
-      // line refused them reads as a broken board, which is precisely the
-      // failure this interlock must not introduce.
-      if (result.readiness_item) {
-        alert(result.error || 'refused by the readiness interlock');
-        window.location.href = '/readiness#' + encodeURIComponent(result.readiness_item);
-        return;
-      }
-      redirectToReadinessIfBlocked(result.error);
-      return;
-    }
-    pollExec();
-  }).catch(function (err) {
-    // Was a bare `.catch(pollExec)`: a non-JSON error body (the plain-text
-    // 409 the recovery-mode refusal above this handler still sends) threw
-    // here and the operator saw the Start button do absolutely nothing. Poll
-    // as before, but say something first -- unless the operator simply
-    // cancelled the sign-in prompt, which is not a board failure.
-    if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
-      alert('Start failed and the board did not explain why -- check the '
-            + 'Readiness page and the log.');
-    }
-    pollExec();
+  window.kcConfirm('Start firing "' + startName + '" now? This energises the heaters and will run for hours.').then(function (ok) {
+    if (!ok) return;
+    // Extra confirmation on top of the normal one above, only when the task-
+    // watchdog panic is currently disabled (dev/bench mode).
+    (lastWatchdogPanicDisabled ? window.kcConfirm(WATCHDOG_CFG_FIRING_WARNING_JS) : Promise.resolve(true)).then(function (ok2) {
+      if (!ok2) return;
+      fetch('/api/profile_exec/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'id=' + id,
+      }).then(function (r) { return r.json(); }).then(function (result) {
+        if (result.ok === false) {
+          // THE READINESS FIRING INTERLOCK (2026-09-09,
+          // App/drivers/safety/readiness_gate.h). Four checklist items --
+          // safety_trip, recovery_mode, crash_report, estop_verified -- now
+          // REFUSE a start outright. When one of them is the reason, the
+          // response carries "readiness_item": the /api/readiness key of the
+          // single item that blocked.
+          //
+          // Handled ahead of redirectToReadinessIfBlocked() below, and NOT by
+          // folding it into that function, because the two cases genuinely
+          // differ: that path knows only that SOMETHING on the checklist is
+          // amber and sends the operator to go look, which is the right answer
+          // for a vague "board isn't ready". This path knows exactly which item
+          // refused and why, so it says so first -- a refusal that dumps the
+          // operator on an eighteen-item checklist with no indication of which
+          // line refused them reads as a broken board, which is precisely the
+          // failure this interlock must not introduce.
+          if (result.readiness_item) {
+            window.kcAlert(result.error || 'refused by the readiness interlock');
+            window.location.href = '/readiness#' + encodeURIComponent(result.readiness_item);
+            return;
+          }
+          redirectToReadinessIfBlocked(result.error);
+          return;
+        }
+        pollExec();
+      }).catch(function (err) {
+        // Was a bare `.catch(pollExec)`: a non-JSON error body (the plain-text
+        // 409 the recovery-mode refusal above this handler still sends) threw
+        // here and the operator saw the Start button do absolutely nothing. Poll
+        // as before, but say something first -- unless the operator simply
+        // cancelled the sign-in prompt, which is not a board failure.
+        if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+          window.kcAlert('Start failed and the board did not explain why -- check the '
+                + 'Readiness page and the log.');
+        }
+        pollExec();
+      });
+    });
   });
 }
 

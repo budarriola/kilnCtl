@@ -297,30 +297,30 @@ fetch('/api/cfgfs/format_pending').then(function (r) { return r.json(); }).then(
   // best-effort status fetch on this page, stay silent rather than alarm.
 });
 document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', function () {
-  if (!kcConfirm('This permanently erases the config filesystem and cannot be undone. Continue?')) {
-    return;
-  }
-  var status = document.getElementById('cfgFsFormatStatus');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) {
-    status.textContent = 'Enter the Wi-Fi AP password first.';
-    return;
-  }
-  status.textContent = 'Formatting...';
-  // cfg_fs_format_http.c's format_confirm_post_handler() deliberately reuses
-  // OTA_HTTP_CONTEXT_FACTORY_RESET (see that file's own header comment) --
-  // not a separate context of its own -- so this signs with "factory-reset",
-  // same as the Danger-zone buttons below.
-  window.kcOtaAuthedFetch('/api/cfgfs/format_confirm', 'factory-reset', pw, { method: 'POST' }).then(function (r) {
-    return r.text().then(function (t) { return { ok: r.ok, text: t }; });
-  }).then(function (res) {
-    status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
-    if (res.ok) {
-      document.getElementById('cfgFsFormatBanner').hidden = true;
+  kcConfirm('This permanently erases the config filesystem and cannot be undone. Continue?').then(function (ok) {
+    if (!ok) return;
+    var status = document.getElementById('cfgFsFormatStatus');
+    var pw = document.getElementById('apPassword').value;
+    if (!pw) {
+      status.textContent = 'Enter the Wi-Fi AP password first.';
+      return;
     }
-  }).catch(function (authErr) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-    status.textContent = 'Request failed -- check the board is reachable and try again.';
+    status.textContent = 'Formatting...';
+    // cfg_fs_format_http.c's format_confirm_post_handler() deliberately reuses
+    // OTA_HTTP_CONTEXT_FACTORY_RESET (see that file's own header comment) --
+    // not a separate context of its own -- so this signs with "factory-reset",
+    // same as the Danger-zone buttons below.
+    window.kcOtaAuthedFetch('/api/cfgfs/format_confirm', 'factory-reset', pw, { method: 'POST' }).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (res) {
+      status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
+      if (res.ok) {
+        document.getElementById('cfgFsFormatBanner').hidden = true;
+      }
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      status.textContent = 'Request failed -- check the board is reachable and try again.';
+    });
   });
 });
 
@@ -328,29 +328,29 @@ document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', funct
 // mixed into the danger-btn loop below: no scope, no "erases X" wording, and
 // a different confirm message reflecting that nothing is being erased.
 document.getElementById('swResetBtn').addEventListener('click', function () {
-  if (!kcConfirm('This reboots both processors right now -- this controller, and the safety '
+  kcConfirm('This reboots both processors right now -- this controller, and the safety '
                + 'processor in place (same firmware). No configuration is erased or changed. '
                + 'The safety processor may refuse if its relay is armed; the result will say so. '
                + 'This WILL latch an S6a main-fault trip on the safety processor -- expect it '
                + 'every time -- and it does NOT clear one. Required follow-up before heating: '
                + '"Clear latched trip" on the Safety page (or Clear Trip on the dashboard). '
-               + 'Continue?')) {
-    return;
-  }
-  var status = document.getElementById('swResetStatus');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) {
-    status.textContent = 'Enter the Wi-Fi AP password first.';
-    return;
-  }
-  status.textContent = 'Rebooting both processors...';
-  window.kcOtaAuthedFetch('/api/sw_reset', 'sw-reset', pw, { method: 'POST' }).then(function (r) {
-    return r.text().then(function (t) { return { ok: r.ok, text: t }; });
-  }).then(function (res) {
-    status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
-  }).catch(function (authErr) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-    status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+               + 'Continue?').then(function (ok) {
+    if (!ok) return;
+    var status = document.getElementById('swResetStatus');
+    var pw = document.getElementById('apPassword').value;
+    if (!pw) {
+      status.textContent = 'Enter the Wi-Fi AP password first.';
+      return;
+    }
+    status.textContent = 'Rebooting both processors...';
+    window.kcOtaAuthedFetch('/api/sw_reset', 'sw-reset', pw, { method: 'POST' }).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (res) {
+      status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+    });
   });
 });
 
@@ -358,28 +358,28 @@ document.querySelectorAll('.danger-btn').forEach(function (b) {
   b.addEventListener('click', function () {
     var scope = b.getAttribute('data-scope');
     var label = SCOPE_LABELS[scope] || scope;
-    if (!kcConfirm('This permanently erases ' + label + ' and reboots the board right now. ' +
-                 'There is no undo. Continue?')) {
-      return;
-    }
-    var status = document.getElementById('resetStatus');
-    var pw = document.getElementById('apPassword').value;
-    if (!pw) {
-      status.textContent = 'Enter the Wi-Fi AP password first.';
-      return;
-    }
-    status.textContent = 'Erasing and rebooting...';
-    window.kcOtaAuthedFetch('/api/factory_reset', 'factory-reset', pw, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'scope=' + encodeURIComponent(scope),
-    }).then(function (r) {
-      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
-    }).then(function (res) {
-      status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
-    }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-      status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+    kcConfirm('This permanently erases ' + label + ' and reboots the board right now. ' +
+                 'There is no undo. Continue?').then(function (ok) {
+      if (!ok) return;
+      var status = document.getElementById('resetStatus');
+      var pw = document.getElementById('apPassword').value;
+      if (!pw) {
+        status.textContent = 'Enter the Wi-Fi AP password first.';
+        return;
+      }
+      status.textContent = 'Erasing and rebooting...';
+      window.kcOtaAuthedFetch('/api/factory_reset', 'factory-reset', pw, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'scope=' + encodeURIComponent(scope),
+      }).then(function (r) {
+        return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+      }).then(function (res) {
+        status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
+      }).catch(function (authErr) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+      });
     });
   });
 });

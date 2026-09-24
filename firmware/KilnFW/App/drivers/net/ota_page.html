@@ -66,10 +66,6 @@
      tight enough to look cramped rather than merely narrow, so `.kv`
      collapses to a single stacked column there -- dt above its dd, both
      full width, no column fight left to lose. */
-  /* The protocol-mismatch confirmation carries a paragraph, not a login
-     form -- wider than .kc-login-panel's 18rem, same max-width clamp. */
-  .ota-confirm-panel { width: 28rem; }
-  .ota-confirm-panel p { margin: 0 0 0.6em 0; color: var(--ui-text-primary); }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15em 0.8em; font-size: 0.92em; }
   .kv dt { color: var(--muted); }
   .kv dd { margin: 0; min-width: 0; word-break: break-all; }
@@ -197,24 +193,6 @@ who can trigger an update, not what an already-authorized update can do.</p>
   <div class="progress-outer"><div id="picoProgressBar" class="progress-inner">0%</div></div>
 </div>
 <p id="picoMsg" class="msg"></p>
-
-<!-- In-page confirmation for the Pico protocol-version-mismatch 409 (see
-     confirmForceProtocol() below). Reuses theme.css's .kc-login-* overlay/
-     panel tokens -- the owner's "popup follows the color theme" rule for
-     app.js's login modal -- rather than a native confirm(), which the
-     browser draws in its own chrome. Cancel, Escape and a backdrop click all
-     decline. -->
-<div id="forceProtoModal" class="kc-login-overlay" hidden>
-  <div class="kc-login-panel ota-confirm-panel" role="dialog" aria-modal="true"
-       aria-labelledby="forceProtoTitle" aria-describedby="forceProtoText">
-    <h2 class="kc-login-title" id="forceProtoTitle">Protocol version mismatch</h2>
-    <div id="forceProtoText"></div>
-    <div class="kc-login-actions">
-      <button type="button" class="kc-login-cancel" id="forceProtoCancel">Cancel</button>
-      <button type="submit" id="forceProtoOk">Relay anyway</button>
-    </div>
-  </div>
-</div>
 
 <script>
 /* ---- OTA challenge/response handshake ------------------------------------
@@ -479,12 +457,14 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
   var msg = document.getElementById('espMsg');
   var pw = document.getElementById('apPassword').value;
   if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
-  if (!confirm('Roll back the ESP to its previous image and reboot now?')) return;
-  msg.textContent = 'Requesting rollback…';
-  window.kcOtaAuthedFetch('/api/ota/esp/rollback', 'esp-rollback', pw, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: new Uint8Array(0),
+  window.kcConfirm('Roll back the ESP to its previous image and reboot now?').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting rollback…';
+    return window.kcOtaAuthedFetch('/api/ota/esp/rollback', 'esp-rollback', pw, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    });
   }).then(function (r) {
     return r.text().then(function (text) {
       if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
@@ -493,6 +473,7 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
   }).then(function (body) {
     msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
   }).catch(function (e) {
+    if (e && e.__kcHandled) return;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Rollback failed: ' + e.message;
   });
@@ -536,13 +517,15 @@ document.getElementById('picoRollbackBtn').addEventListener('click', function ()
   var msg = document.getElementById('picoMsg');
   var pw = document.getElementById('apPassword').value;
   if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
-  if (!confirm('Roll back the SAFETY PROCESSOR (Pico) to its previous image and reboot it now? ' +
-               'This reboots the safety processor mid-session.')) return;
-  msg.textContent = 'Requesting rollback…';
-  window.kcOtaAuthedFetch('/api/ota/pico/rollback', 'pico-rollback', pw, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: new Uint8Array(0),
+  window.kcConfirm('Roll back the SAFETY PROCESSOR (Pico) to its previous image and reboot it now? ' +
+               'This reboots the safety processor mid-session.').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting rollback…';
+    return window.kcOtaAuthedFetch('/api/ota/pico/rollback', 'pico-rollback', pw, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    });
   }).then(function (r) {
     return r.text().then(function (text) {
       var body = null;
@@ -556,6 +539,7 @@ document.getElementById('picoRollbackBtn').addEventListener('click', function ()
     renderPicoRollbackStatus(msg, body);
     setTimeout(pollPicoRollbackStatus, 500);
   }).catch(function (e) {
+    if (e && e.__kcHandled) return;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Rollback failed: ' + e.message;
   });
@@ -565,12 +549,14 @@ document.getElementById('recoveryExitBtn').addEventListener('click', function ()
   var msg = document.getElementById('espMsg');
   var pw = document.getElementById('apPassword').value;
   if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
-  if (!confirm('Reboot the board now to exit recovery mode?')) return;
-  msg.textContent = 'Requesting recovery-mode exit…';
-  window.kcOtaAuthedFetch('/api/ota/esp/recovery_exit', 'recovery', pw, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: new Uint8Array(0),
+  window.kcConfirm('Reboot the board now to exit recovery mode?').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting recovery-mode exit…';
+    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_exit', 'recovery', pw, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    });
   }).then(function (r) {
     return r.text().then(function (text) {
       if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
@@ -579,6 +565,7 @@ document.getElementById('recoveryExitBtn').addEventListener('click', function ()
   }).then(function () {
     msg.textContent = 'Recovery-mode exit accepted -- board is rebooting now.';
   }).catch(function (e) {
+    if (e && e.__kcHandled) return;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Recovery-mode exit failed: ' + e.message;
   });
@@ -604,47 +591,14 @@ function isProtocolMismatch(e) {
 }
 
 // Resolves true only on "Relay anyway"; Cancel, Escape and a backdrop
-// click resolve false. Never rejects. Focus starts on Cancel (the safe
-// choice), Tab stays inside the panel, and focus returns to whatever had it
-// before -- same behaviour as app.js's login modal.
+// click resolve false. Never rejects. Thin wrapper over app.js's shared
+// kcConfirm (owner rule: every confirmation popup is one themed, in-page,
+// cancellable modal) -- this page used to carry its own copy of that modal
+// (built before kcConfirm supported this shape); it now just supplies the
+// wording.
 function confirmForceProtocol(paragraphs) {
-  var overlay = document.getElementById('forceProtoModal');
-  var text = document.getElementById('forceProtoText');
-  var okBtn = document.getElementById('forceProtoOk');
-  var cancelBtn = document.getElementById('forceProtoCancel');
-  text.textContent = '';
-  paragraphs.forEach(function (t) {
-    var p = document.createElement('p');
-    p.textContent = t;
-    text.appendChild(p);
-  });
-  var previouslyFocused = document.activeElement;
-  overlay.removeAttribute('hidden');
-  cancelBtn.focus();
-  return new Promise(function (resolve) {
-    function finish(ok) {
-      okBtn.removeEventListener('click', onOk);
-      cancelBtn.removeEventListener('click', onCancel);
-      overlay.removeEventListener('click', onBackdrop);
-      document.removeEventListener('keydown', onKeydown, true);
-      overlay.setAttribute('hidden', '');
-      if (previouslyFocused && typeof previouslyFocused.focus === 'function') previouslyFocused.focus();
-      resolve(ok);
-    }
-    function onOk(evt) { evt.preventDefault(); finish(true); }
-    function onCancel(evt) { evt.preventDefault(); finish(false); }
-    function onBackdrop(evt) { if (evt.target === overlay) finish(false); }
-    function onKeydown(evt) {
-      if (evt.key === 'Escape' || evt.keyCode === 27) { evt.preventDefault(); finish(false); return; }
-      if (evt.key !== 'Tab' && evt.keyCode !== 9) return;
-      evt.preventDefault();
-      (document.activeElement === cancelBtn ? okBtn : cancelBtn).focus();
-    }
-    okBtn.addEventListener('click', onOk);
-    cancelBtn.addEventListener('click', onCancel);
-    overlay.addEventListener('click', onBackdrop);
-    document.addEventListener('keydown', onKeydown, true);
-  });
+  return window.kcConfirm(paragraphs.join('\n\n'),
+    { title: 'Protocol version mismatch', okLabel: 'Relay anyway' });
 }
 
 document.getElementById('picoUpdateBtn').addEventListener('click', function () {
