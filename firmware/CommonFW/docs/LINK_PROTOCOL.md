@@ -481,6 +481,31 @@ clamped, not obeyed. **The main controller is allowed to ask for more
 protection, never for less.** That asymmetry is what makes it safe to accept
 this field from the component under suspicion at all.
 
+**Start-time hazard and its ESP-side refusal (2026-09-24):** a profile whose
+peak target sits more than `firing_margin_c` below the kiln's *current*
+temperature — a cool-down-only profile started on an already-hot kiln — makes
+this same tightening trip S1 almost immediately after start, since
+`firing_max_c + firing_margin_c` lands below the live reading before the
+profile ever gets to act. `profile_executor_run()`
+(`firmware/KilnFW/App/drivers/control/profile_executor_run.c`,
+`profile_firing_ceiling_would_trip_on_start()` in
+`profile_executor_internal.h`) now refuses such a start up front (HTTP 400
+via the profiles start route, `dashboard_exec_http.c`'s ordinary run()-refusal
+path), naming both the profile's peak target and the kiln's current reading in
+the error. This is a courtesy check only — it fails **open** (never refuses)
+when the current reading is unavailable or non-finite, since the Pico's own
+S1 guard above remains the real backstop either way. The 100 °C margin used
+in this check (`PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR`) is a
+hand-mirrored copy of the Pico's `FIRING_MARGIN_C_DEFAULT`
+(`firmware/SaftyFW/src/safety_guards.c`) — CommonFW's wire codec
+(`kilnlink_ceiling.c`/`.h`) only carries `firing_max_c` itself, not this
+margin, so there is no shared definition to draw from; a drift between the
+two is caught by
+`firmware/KilnFW/App/test/firing_ceiling_margin_mirror_drift_check.py`
+(wired into the standing check suite as
+`check_firing_ceiling_margin_mirror_drift.ps1`), the same technique
+`approach_rate_cap_mirror_drift_check.py` uses for its own mirrored constant.
+
 ### `SAFETY_CMD_CLEAR_TRIP` = `0x0A` (ESP → Pico)
 
 | Offset | Type | Field |

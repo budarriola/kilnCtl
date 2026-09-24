@@ -548,13 +548,16 @@ uint32_t zones_config_generation(void)
 
 // live_profile.c/profiles_http.c are the http/persist tier, deliberately not
 // linked into this control-tier host executable (same reasoning as
-// profiles_http_get() above) -- fixed at 0 so reload_live_profile_if_changed()
-// takes its cheap "unchanged" return every tick, matching this file's
-// pre-existing behavior for every test that doesn't specifically exercise the
-// live-edit pickup path (none do yet; that is test_live_profile.c's job).
+// profiles_http_get() above) -- fixed at 0 by default so reload_live_profile_
+// if_changed() takes its cheap "unchanged" return every tick, matching this
+// file's pre-existing behavior for every test that doesn't specifically
+// exercise the live-edit pickup path. Settable (arm_live_edit_pickup() below)
+// for the SET_FIRING_CEILING live-edit test, which DOES need to drive the
+// real reload_live_profile_if_changed() body once.
+static uint32_t s_test_live_profile_generation = 0;
 uint32_t live_profile_generation(void)
 {
-    return 0;
+    return s_test_live_profile_generation;
 }
 
 bool live_profile_load_working(profile_t *out)
@@ -565,15 +568,20 @@ bool live_profile_load_working(profile_t *out)
 
 // HIGH-2/MEDIUM-1 review fix: profile_executor.c's reload_live_profile_if_
 // changed() now calls these two instead of the bare live_profile_load_
-// working() above -- never actually reached here either, same reasoning as
-// live_profile_load_working()'s own comment (live_profile_generation() is
-// pinned at 0, so the "unchanged" early return always fires first), but the
-// symbols must still exist for the link to succeed.
+// working() above -- settable so the one live-edit test below can exercise
+// the real body; every other test leaves s_test_live_profile_generation at 0
+// so this stub is never reached and keeps its original NONE_FOR_ORIGIN
+// answer, matching this file's pre-existing behavior.
+static bool s_test_live_profile_load_ok = false;
+static profile_t s_test_live_profile_load_out;
 live_profile_load_result_t live_profile_load_working_for_origin(uint8_t expect_origin_id, profile_t *out)
 {
     (void)expect_origin_id;
-    (void)out;
-    return LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN;
+    if (!s_test_live_profile_load_ok) {
+        return LIVE_PROFILE_LOAD_NONE_FOR_ORIGIN;
+    }
+    if (out) *out = s_test_live_profile_load_out;
+    return LIVE_PROFILE_LOAD_OK;
 }
 
 bool live_profile_has_pending_for_origin(uint8_t origin_id)
@@ -584,11 +592,13 @@ bool live_profile_has_pending_for_origin(uint8_t origin_id)
 
 // profile_executor_live_pickup.c (linked for real -- it is a small pure
 // file) calls live_edit_check_window(), which lives in live_profile.c,
-// deliberately not linked into this executable (see comment above). Never
-// actually reached here: live_profile_generation() always returns 0, so
-// reload_live_profile_if_changed() always takes its early-return before any
-// candidate is loaded -- live_edit_check_window() is exercised for real by
-// test_live_profile.c, its own executable.
+// deliberately not linked into this executable (see comment above). Settable
+// live_edit_check_window() returns true when the window is VIOLATED (the
+// edit is refused) -- so "ok"/no-violation is false, the default here, so
+// the live-edit test below can let its candidate through the window check;
+// every other test leaves s_test_live_profile_generation at 0 so this stub
+// is never reached, same as before.
+static bool s_test_live_edit_window_violated = false;
 bool live_edit_check_window(const profile_t *running, const profile_t *candidate, uint8_t segment_index, char *err,
                              size_t err_cap)
 {
@@ -596,7 +606,21 @@ bool live_edit_check_window(const profile_t *running, const profile_t *candidate
     (void)candidate;
     (void)segment_index;
     if (err && err_cap) err[0] = '\0';
-    return false;
+    return s_test_live_edit_window_violated;
+}
+
+// Arms the stubs above so a test can drive reload_live_profile_if_changed()'s
+// real body: bumps the generation counter (the only thing that lifts its
+// early "unchanged" return), and hands back `candidate` as the pending edit
+// for whichever origin asks. Callers must set s_exec.state to RUNNING and
+// s_exec.profile_id to match before calling reload_live_profile_if_changed()
+// -- the function reads both under s_exec.lock at its own top.
+static void arm_live_edit_pickup(const profile_t *candidate)
+{
+    s_test_live_profile_generation++;
+    s_test_live_profile_load_ok = true;
+    s_test_live_profile_load_out = *candidate;
+    s_test_live_edit_window_violated = false;
 }
 
 bool profiles_validate_candidate(const profile_t *candidate, int mode, char *warnings_json, size_t warnings_json_cap,
@@ -1991,6 +2015,42 @@ static void test_firing_ceiling_after_live_edit_is_monotonic(void)
                "a NULL/empty edited profile never clears the ceiling mid-firing");
 }
 
+// CLAUDE.md SET_FIRING_CEILING hazard: profile_firing_ceiling_would_trip_on_
+// start() is the pure predicate the start-time refusal in
+// profile_executor_run.c is built on. It must refuse ONLY when the kiln is
+// demonstrably already hotter than the Pico's post-start ceiling would allow
+// (firing_max_c + the mirrored 100C margin), and must fail OPEN (never
+// refuse) on any non-finite input -- a courtesy check must never itself be
+// the thing that blocks a legitimate start.
+static void test_firing_ceiling_would_trip_on_start_refuses_cooldown_on_hot_kiln(void)
+{
+    TEST_SECTION("profile_firing_ceiling_would_trip_on_start() -- refuses only when current temp "
+                 "exceeds firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR");
+
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, 250.0f),
+               "current 250C is within the 100C margin of a 200C peak (ceiling 300C) -- not refused");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, 300.0f),
+               "current temp exactly AT the ceiling (300C) is not '>' it -- not refused");
+    TEST_CHECK(profile_firing_ceiling_would_trip_on_start(200.0f, 300.5f),
+               "current 300.5C exceeds a 200C peak's 300C ceiling by half a degree -- refused "
+               "(cool-down-only profile on a hot kiln, the hazard this check exists for)");
+    TEST_CHECK(profile_firing_ceiling_would_trip_on_start(50.0f, 900.0f),
+               "a near-room-temperature target on a 900C kiln is refused");
+}
+
+static void test_firing_ceiling_would_trip_on_start_fails_open_on_non_finite(void)
+{
+    TEST_SECTION("profile_firing_ceiling_would_trip_on_start() -- fails OPEN (never refuses) whenever "
+                 "the current reading is unavailable/non-finite, since this is a courtesy check, not "
+                 "a safety interlock -- the Pico's own S1 guard is the real backstop");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, NAN),
+               "NaN current temp (no live reading yet / all sensors invalid) never refuses");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, INFINITY),
+               "+Inf current temp never refuses (garbled reading, not a real hazard signal)");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(INFINITY, 50.0f),
+               "+Inf firing_max_c (ceiling itself non-finite after adding the margin) never refuses");
+}
+
 static void test_get_status_reports_firing_ceiling_only_while_running_or_paused(void)
 {
     TEST_SECTION("profile_executor_get_status() -- firing_ceiling_c is reported only while RUNNING/PAUSED; "
@@ -2868,6 +2928,69 @@ static profile_segment_t relay_io_seg(uint8_t io_target, uint8_t io_state, uint8
     return s;
 }
 
+// The stub-controlled reload path: proves reload_live_profile_if_changed()
+// (profile_executor.c ~line 632) really does call profile_firing_ceiling_
+// after_live_edit() on a real adopted edit, and that s_exec.firing_ceiling_c
+// never drops as a result -- not just that the pure helper itself is
+// monotonic (already covered above), but that the caller actually uses it.
+static void test_reload_live_profile_if_changed_uses_monotonic_ceiling_helper(void)
+{
+    TEST_SECTION("reload_live_profile_if_changed() -- adopts a live edit and updates "
+                 "s_exec.firing_ceiling_c via profile_firing_ceiling_after_live_edit(), "
+                 "never lowering it");
+
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.profile_id = 7;
+    s_exec.live_edit_generation = 0;
+    s_exec.segment_index = 0;
+    s_exec.firing_ceiling_c = 1000.0f; /* peak of the currently-running profile */
+
+    profile_t running;
+    memset(&running, 0, sizeof(running));
+    running.segment_count = 1;
+    running.segments[0] = zone_ramp_seg(1000.0f, 100.0f, 0);
+    s_exec.profile = running;
+
+    s_test_live_profile_generation = 0;
+    s_test_live_profile_load_ok = false;
+    s_test_live_edit_window_violated = false;
+
+    /* Case A: edit LOWERS the running segment's target (700C, down from
+     * 1000C) -- adopted (content swap happens unconditionally once the
+     * window check passes), but the ceiling must NOT follow it down. */
+    profile_t lowered = running;
+    lowered.segments[0] = zone_ramp_seg(700.0f, 100.0f, 0);
+    arm_live_edit_pickup(&lowered);
+
+    reload_live_profile_if_changed();
+
+    TEST_CHECK(s_exec.profile.segments[0].target_c == 700.0f,
+               "the edit's lowered target IS adopted into s_exec.profile (content swap is unconditional)");
+    TEST_CHECK(s_exec.firing_ceiling_c == 1000.0f,
+               "but firing_ceiling_c stays at 1000C -- profile_firing_ceiling_after_live_edit() refused "
+               "to lower it, and reload_live_profile_if_changed() used its return value");
+    TEST_CHECK(!s_exec.live_edit_last_refusal.valid, "a within-window edit is not recorded as a refusal");
+
+    /* Case B: a second edit RAISES the peak past the original 1000C --
+     * the ceiling must follow it up. */
+    profile_t raised = running;
+    raised.segments[0] = zone_ramp_seg(1300.0f, 100.0f, 0);
+    arm_live_edit_pickup(&raised);
+
+    reload_live_profile_if_changed();
+
+    TEST_CHECK(s_exec.profile.segments[0].target_c == 1300.0f, "the raised edit is adopted");
+    TEST_CHECK(s_exec.firing_ceiling_c == 1300.0f,
+               "firing_ceiling_c is raised to match -- profile_firing_ceiling_after_live_edit() adopts "
+               "a higher peak at once");
+
+    vSemaphoreDelete(s_exec.lock);
+    s_test_live_profile_generation = 0;
+    s_test_live_profile_load_ok = false;
+}
+
 // Test 1 (mandatory coverage item 1): cold kiln -- no warm start, starts at
 // segment 0, byte-identical to the pre-feature code. The kiln reads 50C,
 // well below segment 0's 200C target -- run() must land exactly where it
@@ -3212,7 +3335,13 @@ static void test_warm_start_hotter_than_entire_profile_lands_on_last_segment(voi
     p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
     p.segments[1] = zone_ramp_seg(280.0f, 100.0f, 15);
 
-    warm_start_test_setup(&p, 900.0f); /* hotter than every segment in the profile */
+    // 350C: hotter than every segment (peak 280C) yet still within the mirrored
+    // 100C SET_FIRING_CEILING margin (280+100=380 > 350) -- this test is about
+    // the "hotter than everything" landing decision, not the cooldown-hazard
+    // refusal, which has its own dedicated tests below. A kiln genuinely hot
+    // enough to trip that refusal (e.g. 900C) is exactly the new hazard this
+    // check exists to catch, not a case this test should exercise.
+    warm_start_test_setup(&p, 350.0f); /* hotter than every segment in the profile */
     char err[128] = {0};
     bool ok = profile_executor_run(0, err, sizeof(err));
 
@@ -3222,6 +3351,77 @@ static void test_warm_start_hotter_than_entire_profile_lands_on_last_segment(voi
     TEST_CHECK(s_exec.segment_index == 1, "lands on the LAST segment of the profile (index 1), not the first");
     TEST_CHECK(s_exec.dwelling, "entered directly as a dwell -- see Q3, the soak still runs");
     TEST_CHECK(s_exec.segment_elapsed_s == 0, "the full soak is still ahead of it, not shortened");
+
+    profile_executor_halt();
+}
+
+// CLAUDE.md SET_FIRING_CEILING hazard: profile_executor_run() must refuse a
+// start whose peak target is more than the mirrored 100C margin below the
+// kiln's CURRENT reading (a cool-down-only profile started on a hot kiln),
+// naming both temperatures in err_msg for the HTTP layer to surface as-is
+// (dashboard_exec_http.c already turns any run() refusal into an HTTP 400
+// with {"ok":false,"error":err_msg} -- no HTTP-layer change needed).
+static void test_run_refuses_cooldown_only_profile_on_hot_kiln(void)
+{
+    TEST_SECTION("profile_executor_run() -- refuses to start a cool-down-only profile on an "
+                 "already-hot kiln (SET_FIRING_CEILING 0x09 hazard: the Pico would tighten S1's "
+                 "ceiling below the current temperature and trip almost immediately)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5); /* peak 200C -> Pico ceiling would be 300C */
+
+    warm_start_test_setup(&p, 900.0f); /* kiln already at 900C, far past the 300C ceiling */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "refused before ever reaching RUNNING");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "state must not have been mutated by a refused start");
+    TEST_CHECK(strstr(err, "200.0") != NULL, "err_msg names the profile's peak target");
+    TEST_CHECK(strstr(err, "900.0") != NULL, "err_msg names the kiln's current reading");
+}
+
+static void test_run_allows_cooldown_profile_within_margin(void)
+{
+    TEST_SECTION("profile_executor_run() -- a cool-down profile whose peak is within the mirrored "
+                 "100C margin of the current reading is NOT refused (only a genuine cool-down-on-hot- "
+                 "kiln hazard is blocked, not every profile with a lower first target)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(250.0f, 100.0f, 5); /* peak 250C -> Pico ceiling 350C */
+
+    warm_start_test_setup(&p, 300.0f); /* within the 350C ceiling */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "not refused -- current reading is within the margin-derived ceiling");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "reaches RUNNING normally");
+
+    profile_executor_halt();
+}
+
+static void test_run_never_refuses_on_missing_live_reading(void)
+{
+    TEST_SECTION("profile_executor_run() -- a cold/no-sensor-yet board (no live reading available) "
+                 "never refuses on this check -- it fails OPEN, same as the pure predicate");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
+
+    warm_start_test_setup(&p, 50.0f);
+    reset_test_thermo_readings(); /* no thermo bus armed -- live_current_max_zone_c() reads NAN */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "no live reading available -> never refused by this check");
 
     profile_executor_halt();
 }
@@ -9495,6 +9695,9 @@ void run_test_profile_executor_prestart(void)
     test_profile_compute_firing_max_c_null_and_empty();
     test_profile_compute_firing_max_c_skips_non_finite_and_negative();
     test_firing_ceiling_after_live_edit_is_monotonic();
+    test_firing_ceiling_would_trip_on_start_refuses_cooldown_on_hot_kiln();
+    test_firing_ceiling_would_trip_on_start_fails_open_on_non_finite();
+    test_reload_live_profile_if_changed_uses_monotonic_ceiling_helper();
     test_get_status_reports_firing_ceiling_only_while_running_or_paused();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
@@ -9592,6 +9795,9 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_2015c_gas_kiln_profile_on_80c_zone();
     test_warm_start_descending_profile_does_not_jump_into_cooldown();
     test_warm_start_hotter_than_entire_profile_lands_on_last_segment();
+    test_run_refuses_cooldown_only_profile_on_hot_kiln();
+    test_run_allows_cooldown_profile_within_margin();
+    test_run_never_refuses_on_missing_live_reading();
 
     // PWM/progress-window fix -- order-independent, each re-derives its own
     // fresh thermal_guard_state_t/heater_output_state_t (or memsets s_exec).

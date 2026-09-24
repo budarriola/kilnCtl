@@ -55,6 +55,61 @@ static void history_buf_ensure_alloc(void)
     }
 }
 
+/* One-shot live read for the cool-down-on-a-hot-kiln pre-start check below
+ * -- deliberately NOT s_exec.zones[]/thermo_owner, both of which either only
+ * update while RUNNING (s_exec.zones[zi].actual_c is stale from the last
+ * firing while IDLE, see executor_task_entry()'s "continue" branch for a
+ * non-RUNNING state) or are reserved for writes/configuration
+ * (thermo_owner.h's own header comment: MAX31856_read_all() callers,
+ * including this file's sibling profile_executor.c, are explicitly out of
+ * scope for that owner-task migration). Mirrors executor_task_entry()'s own
+ * read-then-combine-per-zone shape (profile_executor.c ~line 795) against
+ * only the zones this profile targets. Returns NAN if no zone in
+ * `zone_mask` has a currently-valid reading -- including a board with no
+ * thermocouple hardware initialized at all (sim disabled, thermo_bus not
+ * up), which is exactly the "unknown, never refuse" case
+ * profile_firing_ceiling_would_trip_on_start() documents. */
+static float live_current_max_zone_c(uint8_t zone_mask)
+{
+    float ch_raw_c[MAX31856_CHANNEL_COUNT];
+    bool ch_sensor_ok[MAX31856_CHANNEL_COUNT];
+    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+        ch_raw_c[ci] = NAN;
+        ch_sensor_ok[ci] = false;
+    }
+    if (sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized)) {
+        MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+        size_t count = 0;
+        if (sim_backend_enabled()) {
+            sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
+        } else {
+            MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+        }
+        for (size_t i = 0; i < count; i++) {
+            uint8_t ci = readings[i].channel;
+            if (ci >= MAX31856_CHANNEL_COUNT) continue;
+            ch_raw_c[ci] = readings[i].tc_temperature_c;
+            bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
+            ch_sensor_ok[ci] = !readings[i].spi_failed && !isnan(ch_raw_c[ci]) && !fault_bits_bad;
+        }
+    }
+    float max_c = NAN;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!(zone_mask & (1u << zi))) continue;
+        uint8_t tmask = 0;
+        zones_config_get_thermo_mask(zi, &tmask);
+        bool valid = false;
+        float combined = thermo_combine(ch_raw_c, ch_sensor_ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
+        if (!valid) continue;
+        float calibrated = zones_config_apply_cal(zi, combined);
+        if (!isfinite(calibrated)) continue;
+        if (!isfinite(max_c) || calibrated > max_c) {
+            max_c = calibrated;
+        }
+    }
+    return max_c;
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h
@@ -241,6 +296,32 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                 snprintf(err_msg, err_cap, "zone %u has an autotune run active -- it cannot run at the "
                                            "same time as a profile (TODO.md 6A.5)",
                          zi);
+            }
+            return false;
+        }
+    }
+
+    /* CLAUDE.md's SET_FIRING_CEILING (0x09) hazard: a profile whose peak
+     * target is more than PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR
+     * below the kiln's CURRENT temperature would ask the Pico to tighten S1
+     * to a ceiling already exceeded, tripping it within a few ticks of this
+     * start rather than ever letting the profile run (a cool-down-only
+     * profile started on a hot kiln). Refused here, at the door, rather than
+     * discovered as a latched S1 trip a few seconds into a run that reads
+     * {"ok":true}. Checked before the lock, same as the other feasibility
+     * checks above -- no s_exec state is touched, only a live hardware read
+     * and the profile's own already-validated zone_mask/segments. */
+    {
+        float firing_max_c = profile_compute_firing_max_c(&p);
+        float current_max_zone_c = live_current_max_zone_c(p.zone_mask);
+        if (profile_firing_ceiling_would_trip_on_start(firing_max_c, current_max_zone_c)) {
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "profile '%s' peaks at %.1fC but a target zone already reads %.1fC -- starting it "
+                         "would ask the safety processor to tighten its over-temperature ceiling below the "
+                         "kiln's current temperature and trip almost immediately. Refused before starting "
+                         "(cool-down-only profile on a hot kiln)",
+                         p.name, (double)firing_max_c, (double)current_max_zone_c);
             }
             return false;
         }

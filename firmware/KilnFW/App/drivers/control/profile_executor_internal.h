@@ -1515,6 +1515,54 @@ static inline float profile_firing_ceiling_after_live_edit(float current_c, cons
     return (new_max_c > current_c) ? new_max_c : current_c;
 }
 
+/* Mirrors SaftyFW's FIRING_MARGIN_C_DEFAULT (firmware/SaftyFW/src/
+ * safety_guards.c, S1: `ceiling = min(abs_max_temp_c, firing_max_c +
+ * effective_f(cfg->firing_margin_c, FIRING_MARGIN_C_DEFAULT))`) so this file
+ * can refuse a start BEFORE asking the Pico to tighten S1 to a ceiling the
+ * kiln is already hotter than, instead of letting S1 trip a few ticks after
+ * SET_FIRING_CEILING lands. This is a courtesy pre-check, not a redefinition
+ * of the guard: it does not know the board's actual `firing_margin_c` (that
+ * value can be reconfigured via SET_PARAM 0x0201 and only the Pico enforces
+ * it) or its `tc_placement_mode` (SaftyFW only applies this ceiling in
+ * CHAMBER_AGREED -- see safety_guards.c line ~629), so it applies the
+ * DEFAULT margin unconditionally, including in EXTERNAL_OVERHEAT where the
+ * Pico would never have tightened the ceiling at all. That can make this
+ * pre-check refuse a start the Pico would have allowed; it can never do the
+ * reverse (let through a start the Pico would trip on with a *smaller*
+ * configured margin, since a smaller margin only makes the real ceiling
+ * lower, tightening the case this checks). Checked against SaftyFW's
+ * constant by firmware/KilnFW/App/test/firing_ceiling_margin_mirror_drift_check.py
+ * so the two numbers cannot silently drift apart. */
+#define PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR 100.0f
+
+/* True if starting (or resuming) a firing whose peak target is
+ * `firing_max_c` would ask the Pico to tighten S1's ceiling to
+ * `firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR` while a
+ * zone this firing targets is ALREADY hotter than that -- the "cool-down
+ * profile started on a hot kiln" hazard CLAUDE.md's SET_FIRING_CEILING
+ * section names. `current_max_zone_c` is the caller's already-computed
+ * hottest currently-valid live reading among the profile's own target
+ * zones; NaN/non-finite ("unknown", or no valid reading at all) never
+ * refuses -- a board that cannot see its own temperature has no basis to
+ * say it is too hot, and refusing on that would be a new hazard of its own,
+ * not a fix for this one. Pure function, no s_exec, host-test-callable
+ * directly against hand-built inputs. */
+static inline bool profile_firing_ceiling_would_trip_on_start(float firing_max_c, float current_max_zone_c)
+{
+    if (!isfinite(current_max_zone_c)) {
+        return false;
+    }
+    float ceiling = firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR;
+    if (!isfinite(ceiling)) {
+        /* Garbled input (NaN/huge firing_max_c) -- fail open here, same
+         * direction as safety_guards.c's own isfinite() guard on this exact
+         * arithmetic: this pre-check is a courtesy, the Pico's own isfinite()
+         * guard is the one that must never latch a nuisance trip forever. */
+        return false;
+    }
+    return current_max_zone_c > ceiling;
+}
+
 /* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored
  * profile_on_off_rule_t (if any) for (zone_index, segment_index) in `p` and
  * translates it into on_off_trigger_decide.h's on_off_trigger_rule_t, the
