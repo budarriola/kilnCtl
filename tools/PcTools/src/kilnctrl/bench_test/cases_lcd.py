@@ -56,6 +56,22 @@ _PAGE_POLL_INTERVAL_S = 0.1
 #: page before any case starts tapping named targets for real.
 _WAKE_TOUCH_XY = (5, 5)
 
+#: How long, after sending the wake touch, to poll ``touch.get_state()``
+#: waiting for ``screen_on`` to read True before the first navigation click
+#: is issued. `TouchClient.inject()` (kilnctrl/touch.py) already blocks the
+#: caller for up to ``DRIVER_ERROR_REJECT_WINDOW_S`` (0.5s) per call waiting
+#: out an optional driver-error reply, so the wake's own press+release are
+#: already spaced well past one ~30ms LVGL poll -- a live bench check
+#: (2026-09-24) confirmed a single press+release wake reliably flips
+#: `screen_on` to True by the time both `inject()` calls return. This wait
+#: is a bounded belt-and-suspenders check on top of that, not a fixed sleep:
+#: it returns as soon as the state reads on, and never blocks past
+#: `_WAKE_SCREEN_ON_TIMEOUT_S` if the touch task itself is unavailable
+#: (`touch is None`) or a query fails, so a board not wired for touch
+#: injection still lets the case proceed and fail honestly on its own click.
+_WAKE_SCREEN_ON_TIMEOUT_S = 1.0
+_WAKE_SCREEN_ON_POLL_S = 0.05
+
 #: The shortest persisted display timeout is 1 minute
 #: (display_power_policy.c's DISPLAY_TIMEOUT_1_MIN), so a panel that reads
 #: on with less idle time than this still has >= 30 s before it can blank.
@@ -110,6 +126,20 @@ def _wake_and_home(ctx: dict) -> None:
                 touch.inject(x, y, False)
             except Exception:
                 pass
+            else:
+                # Belt-and-suspenders: confirm the wake actually took before
+                # the first real navigation click -- see
+                # _WAKE_SCREEN_ON_TIMEOUT_S's comment. Never raises; a touch
+                # task that can't answer GET_STATE just falls through to the
+                # case's own click, same as before this wait existed.
+                deadline = time.monotonic() + _WAKE_SCREEN_ON_TIMEOUT_S
+                while time.monotonic() < deadline:
+                    try:
+                        if touch.get_state().screen_on:
+                            break
+                    except Exception:
+                        break
+                    time.sleep(_WAKE_SCREEN_ON_POLL_S)
     ui = srv._ui_test
     _navigate_home(ui)
 
@@ -200,21 +230,43 @@ def _click_then_page(ui, name: str, expected_page: str,
             CaseResult(
                 Verdict.FAIL,
                 reason=f"click_by_name({name!r}) returned {click.get('result')!r}",
-                observed={"click": click},
+                observed={"click": click, "attribution": "not_found"},
             ),
             "",
             0.0,
         )
     page, waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
     if page != expected_page:
+        # One retry: click_by_name() said 'ok' (the target existed and an
+        # injection was issued) but the page never arrived within
+        # timeout_s -- the documented screen_idle/touch-poll swallow race
+        # this module's module docstring names, where the tap that landed
+        # was the one that woke an already-reblanked panel rather than
+        # actually reaching the widget underneath. A second click on an
+        # awake panel (screen_on is already true post-wake, so this retry's
+        # own tap cannot itself be a NEW wake edge) either recovers cleanly
+        # or proves the hop is genuinely stuck -- retried once, not looped,
+        # so a real defect still fails within a bounded time.
+        retry_click = ui.click_by_name(name)
+        if retry_click.get("result") == "ok":
+            retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
+            if retry_page == expected_page:
+                return None, retry_page, waited_s + retry_waited_s
+            page, waited_s = retry_page, waited_s + retry_waited_s
+            click = retry_click
         return (
             CaseResult(
                 Verdict.FAIL,
                 reason=(
                     f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
-                    f"expected {expected_page!r}" + J.BLANKED_SCREEN_HINT
+                    f"expected {expected_page!r} (retried once)" + J.BLANKED_SCREEN_HINT
                 ),
-                observed={"click": click, "page": page, "page_wait_s": round(waited_s, 3)},
+                observed={
+                    "click": click,
+                    "page": page,
+                    "page_wait_s": round(waited_s, 3),
+                    "attribution": "swallowed_or_wrong_page",
+                },
             ),
             page,
             waited_s,
@@ -242,24 +294,52 @@ def _remember_page_targets(ctx: dict, page: str, tap_targets: dict) -> None:
     ctx.setdefault("_lcd_pages_visited", {})[page] = tap_targets
 
 
-def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional[tuple], Optional[bool]]":
+def _capture_dir(ctx: dict) -> str:
+    """Where to save a captured frame. Defaults to ``<run_dir>/captures``
+    (created by report.py's write_run() -- see runner.py, ``ctx["run_dir"]``
+    is set before any case runs) so a captured frame actually lands where
+    the run's own report expects evidence to live, instead of always
+    falling back to a scratch tempdir that nothing downstream ever reads
+    (the pre-existing bug behind LCD-01's empty ``captures/``/``evidence=[]``
+    symptom -- nothing ever set ``ctx["_lcd_capture_dir"]``). An explicit
+    ``ctx["_lcd_capture_dir"]`` (e.g. a unit test's tmp_path) still wins."""
+    override = ctx.get("_lcd_capture_dir")
+    if override:
+        return override
+    run_dir = ctx.get("run_dir")
+    if run_dir:
+        captures_dir = os.path.join(run_dir, "captures")
+        try:
+            os.makedirs(captures_dir, exist_ok=True)
+        except OSError:
+            return tempfile.gettempdir()
+        return captures_dir
+    return tempfile.gettempdir()
+
+
+def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional[tuple], Optional[bool], dict]":
     """Best-effort: capture one -Full frame and sample the 'start'/'pause'
-    tap targets' regions. Returns (start_sample_or_None, pause_is_hidden)
-    -- both None/absent on any capture failure (camera busy etc.)."""
+    tap targets' regions. Returns (start_sample_or_None, pause_is_hidden,
+    color_debug) -- the samples are None/absent on any capture failure
+    (camera busy etc.); ``color_debug`` carries the raw evidence (sampled
+    RGB, bezel RGB, region coords, distances, thresholds, capture path) for
+    CaseResult.observed/evidence so a FAIL or PASS verdict on Start's color
+    can be corroborated later instead of being a bare bool (CLAUDE.md:
+    judge colors by numeric pixel sampling, and that sampling has to be
+    recorded to be checked)."""
     # Case-insensitive: firmware's label is Title Case ("Start"/"Pause");
     # see judgments._find_target's docstring for why this can't just be "==".
     start = J._find_target(targets, "start")
     pause = J._find_target(targets, "pause")
+    color_debug: Dict[str, Any] = {}
     if start is None and pause is None:
-        return None, None
-    tmpdir = ctx.get("_lcd_capture_dir") or tempfile.gettempdir()
-    image_path = os.path.join(tmpdir, "bench_test_lcd_full.jpg")
+        return None, None, color_debug
+    image_path = os.path.join(_capture_dir(ctx), "lcd01_start_pause.jpg")
     try:
         lcd_sampler.capture_full_frame(image_path, repo_root=ctx.get("repo_root"))
     except lcd_sampler.LcdCaptureError:
-        return None, None
-    finally:
-        pass
+        return None, None, color_debug
+    color_debug["capture_path"] = image_path
     start_matches: Optional[bool] = None
     pause_hidden: Optional[bool] = None
     try:
@@ -267,13 +347,37 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
             sample = lcd_sampler.sample_widget(image_path, start["cx"], start["cy"], repo_root=ctx.get("repo_root"))
             if sample.bezel is not None:
                 start_matches = lcd_sampler.matches_color(sample.region, _ACCENT_4_RGB, sample.bezel)
+                color_debug["start"] = {
+                    "region_xy": (start["cx"], start["cy"]),
+                    "sampled_rgb": sample.region,
+                    "bezel_rgb": sample.bezel,
+                    "target_rgb": _ACCENT_4_RGB,
+                    "distance": round(lcd_sampler.color_distance(sample.region, _ACCENT_4_RGB), 2),
+                    "distance_tolerance": lcd_sampler.COLOR_MATCH_TOLERANCE,
+                    "chroma_distance": round(
+                        lcd_sampler.color_distance(
+                            lcd_sampler._chromaticity(sample.region), lcd_sampler._chromaticity(_ACCENT_4_RGB)
+                        ),
+                        4,
+                    ),
+                    "chroma_tolerance": lcd_sampler.CHROMA_MATCH_TOLERANCE,
+                    "matches": start_matches,
+                }
         if pause is not None:
             sample2 = lcd_sampler.sample_widget(image_path, pause["cx"], pause["cy"], repo_root=ctx.get("repo_root"))
             if sample2.bezel is not None:
                 pause_hidden = lcd_sampler.is_off(sample2.region, sample2.bezel)
+                color_debug["pause"] = {
+                    "region_xy": (pause["cx"], pause["cy"]),
+                    "sampled_rgb": sample2.region,
+                    "bezel_rgb": sample2.bezel,
+                    "distance_from_bezel": round(lcd_sampler.color_distance(sample2.region, sample2.bezel), 2),
+                    "off_tolerance": lcd_sampler.MIN_BEZEL_CONTRAST,
+                    "is_hidden": pause_hidden,
+                }
     except lcd_sampler.LcdCaptureError:
         pass
-    return start_matches, pause_hidden
+    return start_matches, pause_hidden, color_debug
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +396,8 @@ def _case_lcd01(ctx: dict) -> CaseResult:
     if page != "home":
         # Wrong page entirely -- no point spending a webcam capture on it.
         return J.judge_lcd_home_idle(page, targets, None, None)
-    start_matches_accent4, pause_is_hidden = _try_capture_and_sample(ctx, targets)
-    return J.judge_lcd_home_idle(page, targets, start_matches_accent4, pause_is_hidden)
+    start_matches_accent4, pause_is_hidden, color_debug = _try_capture_and_sample(ctx, targets)
+    return J.judge_lcd_home_idle(page, targets, start_matches_accent4, pause_is_hidden, color_debug=color_debug)
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +469,7 @@ def _sample_widget_off(ctx: dict, image_path: str, target: Optional[dict]) -> Op
 
 
 def _capture(ctx: dict) -> Optional[str]:
-    tmpdir = ctx.get("_lcd_capture_dir") or tempfile.gettempdir()
-    image_path = os.path.join(tmpdir, "bench_test_lcd_full.jpg")
+    image_path = os.path.join(_capture_dir(ctx), "bench_test_lcd_full.jpg")
     try:
         lcd_sampler.capture_full_frame(image_path, repo_root=ctx.get("repo_root"))
     except lcd_sampler.LcdCaptureError:
@@ -446,10 +549,13 @@ def _case_lcd02(ctx: dict) -> CaseResult:
     profile_name_tap_noop = hp01.get("profile_name_tap_noop")
     if profile_name is None:
         profile_name_greyed = profile_name_greyed if profile_name_greyed is not None else None
-    return J.judge_lcd_home_firing(
+    result = J.judge_lcd_home_firing(
         page, targets, start_reads_stop, pause_matches_accent1, progress_samples,
         profile_name_greyed, profile_name_tap_noop,
     )
+    if image_path:
+        result.evidence = list(result.evidence or []) + [image_path]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +610,9 @@ def _case_lcd04(ctx: dict) -> CaseResult:
     strip_after = _find(targets_after, "trip_strip")
     image_path2 = _capture(ctx)
     strip_off_after_clear = _sample_widget_off(ctx, image_path2, strip_after) if image_path2 else None
-    return J.judge_lcd_home_tripped(strip_visible_before, strip_matches_accent5_before, strip_off_after_clear)
+    result = J.judge_lcd_home_tripped(strip_visible_before, strip_matches_accent5_before, strip_off_after_clear)
+    result.evidence = list(result.evidence or []) + [p for p in (image_path, image_path2) if p]
+    return result
 
 
 # ---------------------------------------------------------------------------

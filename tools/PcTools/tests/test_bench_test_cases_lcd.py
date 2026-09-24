@@ -80,6 +80,46 @@ class Lcd01Test(unittest.TestCase):
             C._case_lcd01(ctx)
         self.assertIn("home", ctx["_lcd_pages_visited"])
 
+    def test_capture_lands_under_run_dir_captures_and_evidence_recorded(self, ):
+        # 2026-09-24 fix: ctx["_lcd_capture_dir"] was never set anywhere, so
+        # a captured frame always fell back to the OS tempdir and never
+        # landed in the run's own captures/ directory, and CaseResult.evidence
+        # stayed empty. A run_dir in ctx must now make the capture land under
+        # <run_dir>/captures with its path recorded in evidence.
+        import shutil
+        import tempfile as _tempfile
+        run_dir = _tempfile.mkdtemp(prefix="lcd01_run_")
+        try:
+            srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+            fake_sample = lcd_sampler.RegionSample(region=(0x5C, 0xC0, 0x6E), bezel=(26, 31, 43))
+            captured_paths = []
+
+            def fake_capture(path, repo_root=None):
+                captured_paths.append(path)
+                with open(path, "wb") as f:
+                    f.write(b"\x00")
+
+            with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=fake_capture), \
+                 mock.patch.object(lcd_sampler, "sample_widget", return_value=fake_sample):
+                result = C._case_lcd01({"srv": srv, "run_dir": run_dir})
+            self.assertEqual(result.verdict, Verdict.PASS)
+            self.assertTrue(captured_paths)
+            self.assertTrue(captured_paths[0].startswith(os.path.join(run_dir, "captures")))
+            self.assertTrue(os.path.isdir(os.path.join(run_dir, "captures")))
+            self.assertEqual(result.evidence, [captured_paths[0]])
+            self.assertIn("color_debug", result.observed)
+            self.assertIn("start", result.observed["color_debug"])
+            self.assertEqual(result.observed["color_debug"]["start"]["sampled_rgb"], fake_sample.region)
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    def test_explicit_lcd_capture_dir_overrides_run_dir(self):
+        srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")) as cap:
+            C._case_lcd01({"srv": srv, "run_dir": "/should/not/be/used", "_lcd_capture_dir": "/explicit/dir"})
+        called_path = cap.call_args[0][0]
+        self.assertTrue(called_path.startswith("/explicit/dir") or called_path.startswith(os.path.normpath("/explicit/dir")))
+
 
 _CONFIG_TARGETS = [
     {"name": "Profiles", "cx": 100, "cy": 100, "hidden": False},
@@ -385,6 +425,43 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("config", fail.reason)
         self.assertEqual(page, "home")
+
+    def test_retries_once_and_recovers_on_second_click(self):
+        # A click that says 'ok' but the page swallowed the tap on the
+        # first attempt must be retried once before failing outright -- the
+        # retry lands on an already-awake panel (no wake edge involved), so
+        # a second click that actually reaches the target must recover.
+        class _RecoversOnSecondClick(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.calls = 0
+
+            def click_by_name(self, name):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"result": "ok"}  # swallowed: no page change
+                return super().click_by_name(name)
+
+        ui = _RecoversOnSecondClick(page="home", page_targets={"home": [], "config": []},
+                                     nav_map={"settings": "config"})
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNone(fail)
+        self.assertEqual(page, "config")
+        self.assertEqual(ui.calls, 2)
+
+    def test_retry_exhausted_fails_naming_the_retry(self):
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertIn("retried once", fail.reason)
+        self.assertEqual(fail.observed.get("attribution"), "swallowed_or_wrong_page")
+
+    def test_not_found_attribution_never_retries(self):
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config")
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.observed.get("attribution"), "not_found")
 
 
 class _RecordingNavUi(PageNavUiTest):

@@ -758,26 +758,42 @@ def _find_target(targets: "list[dict]", name: str) -> "Optional[dict]":
 
 def judge_lcd_home_idle(page: str, targets: "list[dict]",
                          start_matches_accent4: Optional[bool],
-                         pause_is_hidden: Optional[bool]) -> CaseResult:
+                         pause_is_hidden: Optional[bool],
+                         color_debug: "Optional[dict]" = None) -> CaseResult:
     """LCD-01: home page, idle. Start button present and tappable, Pause
     hidden, and (when a capture was available) Start reads the ACCENT_4
     color. A missing camera capture degrades the color half to
     INCONCLUSIVE rather than failing the whole case on a busy webcam
     (CLAUDE.md: ffmpeg exit -5 means busy, never treated as a board defect).
+
+    ``color_debug`` (from cases_lcd._try_capture_and_sample) carries the raw
+    sampled/bezel RGB, region coords, distances and thresholds behind
+    ``start_matches_accent4``/``pause_is_hidden`` -- attached to
+    ``observed`` and, when a frame was actually saved, its path to
+    ``evidence`` -- so a verdict here can be corroborated after the fact
+    instead of resting on a bare bool with nothing to check it against
+    (the 2026-09-24 LCD-01 FAIL had no sampled RGB, no bezel reference, and
+    an empty captures/ dir alongside it).
     """
     observed = {"page": page, "targets": targets}
+    evidence = []
+    if color_debug:
+        observed["color_debug"] = color_debug
+        capture_path = color_debug.get("capture_path")
+        if capture_path:
+            evidence.append(capture_path)
     if page != "home":
-        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'home'" + BLANKED_SCREEN_HINT, observed=observed)
+        return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'home'" + BLANKED_SCREEN_HINT, observed=observed, evidence=evidence)
     start = _find_target(targets, "start")
     if start is None or start.get("hidden"):
-        return CaseResult(Verdict.FAIL, reason="Start target missing or hidden on home/idle", observed=observed)
+        return CaseResult(Verdict.FAIL, reason="Start target missing or hidden on home/idle", observed=observed, evidence=evidence)
     pause = _find_target(targets, "pause")
     if pause is not None and not pause.get("hidden") and pause_is_hidden is not False:
         # pause_is_hidden (from a camera sample) can override a firmware
         # 'hidden' flag disagreement; absent camera data, trust the flag.
-        return CaseResult(Verdict.FAIL, reason="Pause target is not hidden on home/idle", observed=observed)
+        return CaseResult(Verdict.FAIL, reason="Pause target is not hidden on home/idle", observed=observed, evidence=evidence)
     if start_matches_accent4 is False:
-        return CaseResult(Verdict.FAIL, reason="Start button region does not read as ACCENT_4", observed=observed)
+        return CaseResult(Verdict.FAIL, reason="Start button region does not read as ACCENT_4", observed=observed, evidence=evidence)
     # Only the checks a capture could actually have answered make this
     # INCONCLUSIVE. A board that does not list a hidden Pause target at all
     # legitimately yields pause_is_hidden=None with a perfectly good frame --
@@ -788,8 +804,9 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
             Verdict.INCONCLUSIVE,
             reason="no camera capture available (webcam busy or unreachable) -- widget state checked, color not",
             observed=observed,
+            evidence=evidence,
         )
-    return CaseResult(Verdict.PASS, observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed, evidence=evidence)
 
 
 def judge_lcd_config_hub(page: str, targets: "list[dict]",

@@ -94,6 +94,24 @@ class LcdHomeIdleTest(unittest.TestCase):
         r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_color_debug_attached_to_observed_and_evidence(self):
+        # 2026-09-24 fix: a FAIL (or PASS) on the color half must carry the
+        # sampled/bezel RGB and the capture path it came from, not a bare
+        # bool with nothing to corroborate it against.
+        color_debug = {
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (60, 138, 92), "bezel_rgb": (26, 31, 43), "matches": False},
+        }
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(r.observed["color_debug"], color_debug)
+        self.assertIn("/tmp/run/captures/lcd01_start_pause.jpg", r.evidence)
+
+    def test_no_color_debug_leaves_evidence_empty(self):
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, True, True)
+        self.assertEqual(r.evidence, [])
+        self.assertNotIn("color_debug", r.observed)
+
 
 _CONFIG_TARGETS = [
     {"name": "Profiles", "cx": 100, "cy": 100, "hidden": False},
