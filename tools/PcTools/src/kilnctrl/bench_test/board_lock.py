@@ -38,25 +38,29 @@ LOCK_FILENAME = ".board_lock"
 
 #: Suites confirmed, by reading every cases_*.py module in this package, to
 #: only ever READ board state -- never start/stop/pause a profile run,
-#: start/abort/accept autotune, flash a processor, clear a safety trip, or
-#: POST a config-writing web route. These may run concurrently with each
-#: other (two smoke runs racing is harmless), but are still refused while a
-#: MUTATING suite below holds the lock, since a mutating run can change the
-#: very state a read-only case is asserting about.
+#: start/abort/accept autotune, flash a processor, clear a safety trip,
+#: inject a touch, or POST a config-writing web route. They never CREATE the
+#: lock file and may run concurrently with each other (two smoke runs racing
+#: is harmless), but `acquire()` still REFUSES them while a live MUTATING
+#: run holds the lock: `BenchTestRunner.preflight()` only refuses a profile
+#: that is running, or an autotune that is active, at the instant it
+#: samples, so it lets a read-only run through between a heat run's cases or
+#: during an ota/flash/web/safety/lcd run that never starts a profile --
+#: exactly while the state these cases assert about is changing underneath
+#: them. (The reverse -- a mutating run starting while a read-only run is
+#: already in flight -- is not blocked, since read-only runs leave no trace
+#: in the lock file. That costs at most a spurious read-only verdict, never
+#: a board action, so it is accepted rather than adding reader bookkeeping.)
 #:
 #:   smoke  -- cases_smoke.py: reads only (thermo, link stats, ...)
 #:   static -- cases_smoke.py's ST-* rows: static/doc-derived checks, no board call
 #:   stack  -- cases_smoke.py's SK-* rows: reads GET_STACK_MARGIN; SK-01/02 write
 #:             a baseline record under the run's OWN logs/bench_test/<run_id>/
-#:             directory, never board state
-#:   lcd    -- cases_lcd.py: taps/reads the LCD over the UI-test channel.
-#:             LCD-19's PIN-keypad flow DOES call srv.safety_clear_trip() once
-#:             it has independently verified the trip mask matches the formula
-#:             for the exact trip it itself induced -- board-side this clears
-#:             a latch a moment after inducing it, not a lasting change a
-#:             concurrent read-only case would observe as divergent, so it
-#:             stays in this bucket rather than promoting the whole suite.
-READ_ONLY_SUITES = frozenset({"smoke", "static", "stack", "lcd"})
+#:             directory, never board state (SK-02 depends on HP-01, which is
+#:             not in this suite, so it reports NOT_RUN here)
+#:
+#: `lcd` is deliberately NOT here -- see MUTATING_SUITES_DOCUMENTED below.
+READ_ONLY_SUITES = frozenset({"smoke", "static", "stack"})
 
 #: Suites confirmed to mutate persistent board state, kept here as
 #: documentation (see `suite_is_mutating` below for the actual, fail-closed
@@ -82,10 +86,17 @@ READ_ONLY_SUITES = frozenset({"smoke", "static", "stack", "lcd"})
 #:               ...). Classified MUTATING as a whole suite, fail-closed,
 #:               since a single `bench_test_run(suite="web")` call can reach
 #:               both kinds of case in the same run.
+#:   lcd      -- cases_lcd.py: the page cases wake and navigate the panel
+#:               with real touch_inject presses (`_wake_and_home()`); LCD-04
+#:               calls srv.safety_clear_trip() on ANY latched trip whose
+#:               mask matches the formula -- not a trip it induced, so a
+#:               concurrent run's genuine guard trip would be cleared under
+#:               it; LCD-19 turns `lcd_enabled` on via set_policy(), types
+#:               wrong and right PINs on the keypad, then restores the policy.
 #:   nightly  -- aggregates heat/ota/autotune/safety/web among others
 #:   full     -- same as nightly
 MUTATING_SUITES_DOCUMENTED = frozenset({
-    "heat", "autotune", "ota", "flash", "safety", "web", "nightly", "full",
+    "heat", "autotune", "ota", "flash", "safety", "web", "lcd", "nightly", "full",
 })
 
 
@@ -133,30 +144,64 @@ class LockInfo:
 
 
 def _pid_alive(pid: int) -> bool:
-    """True if `pid` names a live process, on either Windows or POSIX. A
-    dead pid (or one we cannot even ask about in a way that means "alive")
-    returns False -- an unreadable answer is never treated as "alive
-    forever", since that would mean a genuinely stale lock could never be
-    reclaimed."""
+    """True if `pid` names a live process on THIS host, on either Windows or
+    POSIX. Fails closed: only a positive "no such process" or "that process
+    has exited" answer counts as dead, so a live holder's lock is never
+    reclaimed -- at worst a genuinely stale lock needs a human to remove it.
+
+    Windows: OpenProcess failing with ERROR_INVALID_PARAMETER (87) is the
+    only "no such pid" answer; any other failure (ERROR_ACCESS_DENIED for an
+    elevated, protected or other-user process) means the process exists. A
+    successful OpenProcess alone is NOT proof of life -- an exited process
+    stays openable for as long as anything (a parent shell, a debugger)
+    still holds a handle to it -- so the exit code must read STILL_ACTIVE.
+    Known, accepted false positive on both platforms: a dead holder's pid
+    that the OS has since reused for an unrelated live process reads alive,
+    which refuses (fail closed) rather than reclaiming."""
     if pid <= 0:
         return False
     if os.name == "nt":
         import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return False
+        ERROR_INVALID_PARAMETER = 87
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True  # could not tell -- fail closed
+            # A process that really exited with code 259 reads alive: fail
+            # closed, same as pid reuse.
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True  # exists, just owned by someone else
+    except OSError:
+        return True  # PermissionError (someone else's process) or anything else: fail closed
     else:
         return True
+
+
+def _holder_alive(existing: "LockInfo") -> bool:
+    """A lock written on another host (e.g. through a synced logs/ directory)
+    names a pid this host cannot check, so it counts as live -- refuse
+    rather than reclaim."""
+    if existing.hostname and existing.hostname != socket.gethostname():
+        return True
+    return _pid_alive(existing.pid)
 
 
 def _lock_path(logs_root: Optional[str]) -> str:
@@ -202,17 +247,40 @@ class BoardLock:
 
 
 def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = None) -> Optional[BoardLock]:
-    """Acquire the board lock for `suite`. Returns `None` immediately (no
-    file touched) for a suite in READ_ONLY_SUITES -- there is nothing to
-    hold. Raises `BoardLockHeld`, naming the current holder, if a live
-    process already holds the lock. A lock file whose pid is confirmed dead
-    is reclaimed with a logged notice (the returned `BoardLock.reclaimed_from`
-    carries the prior holder's `LockInfo` so the caller can log it) --
-    reclaiming is NEVER attempted while the holder pid is alive."""
+    """Acquire the board lock for `suite`.
+
+    READ_ONLY_SUITES only READ the lock file, never create or remove it:
+    raises `BoardLockHeld` if a live mutating run holds it (or it is
+    unreadable), otherwise returns `None` -- there is nothing to hold, and a
+    stale file is left for the next mutating run to reclaim.
+
+    Any other suite raises `BoardLockHeld`, naming the current holder, if a
+    live process already holds the lock. A lock file whose holder is
+    confirmed dead is reclaimed with a logged notice (the returned
+    `BoardLock.reclaimed_from` carries the prior holder's `LockInfo` so the
+    caller can log it) -- reclaiming is NEVER attempted while the holder
+    pid is alive or unverifiable."""
+    path = _lock_path(logs_root)
+
     if not suite_is_mutating(suite):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                existing = LockInfo.from_json(fh.read())
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            raise BoardLockHeld(
+                f"board lock file {path} exists but could not be read/parsed ({exc}); "
+                f"refusing read-only suite {suite!r} rather than guessing whether a "
+                "mutating run owns the board -- inspect it by hand"
+            ) from exc
+        if _holder_alive(existing):
+            raise BoardLockHeld(
+                f"board lock held by {existing.describe()}; refusing read-only suite "
+                f"{suite!r} while a mutating run owns the board -- wait for it to finish"
+            )
         return None
 
-    path = _lock_path(logs_root)
     lock_dir = os.path.dirname(path) or "."
     os.makedirs(lock_dir, exist_ok=True)
 
@@ -239,7 +307,7 @@ def acquire(suite: str, tag: Optional[str] = None, logs_root: Optional[str] = No
                     "refusing rather than guessing which run owns it -- inspect it by hand "
                     "before removing it"
                 ) from exc
-            if _pid_alive(existing.pid):
+            if _holder_alive(existing):
                 raise BoardLockHeld(
                     f"board lock held by {existing.describe()}; refusing to start suite "
                     f"{suite!r} concurrently -- wait for that run to finish"

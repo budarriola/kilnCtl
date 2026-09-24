@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,11 +31,11 @@ from test_bench_test_runner import _FakeSrv, _FakeCapabilityPreflightReport  # n
 
 class SuiteClassificationTest(unittest.TestCase):
     def test_read_only_suites_are_not_mutating(self):
-        for suite in ("smoke", "static", "stack", "lcd"):
+        for suite in ("smoke", "static", "stack"):
             self.assertFalse(board_lock.suite_is_mutating(suite), suite)
 
     def test_known_mutating_suites_are_mutating(self):
-        for suite in ("heat", "autotune", "ota", "flash", "safety", "web", "nightly", "full"):
+        for suite in ("heat", "autotune", "ota", "flash", "safety", "web", "lcd", "nightly", "full"):
             self.assertTrue(board_lock.suite_is_mutating(suite), suite)
 
     def test_unknown_suite_name_is_mutating_by_default(self):
@@ -47,6 +49,44 @@ class AcquireReleaseTest(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_read_only_suite_is_refused_while_a_live_mutating_lock_is_held(self):
+        held = board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.addCleanup(held.release)
+        with self.assertRaises(board_lock.BoardLockHeld) as ctx:
+            board_lock.acquire("stack", logs_root=self.tmpdir)
+        self.assertIn("suite='heat'", str(ctx.exception))
+
+    def test_read_only_suite_ignores_but_never_removes_a_stale_lock(self):
+        path = os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)
+        dead = board_lock.LockInfo(pid=_dead_pid(), hostname=socket.gethostname(), suite="heat",
+                                    started_at="2020-01-01T00:00:00Z", tag=None)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(dead.to_json())
+        self.assertIsNone(board_lock.acquire("smoke", logs_root=self.tmpdir))
+        self.assertTrue(os.path.exists(path))  # left for a mutating run to reclaim
+
+    def test_read_only_suite_refuses_an_unparseable_lock_file(self):
+        path = os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("not json")
+        with self.assertRaises(board_lock.BoardLockHeld):
+            board_lock.acquire("smoke", logs_root=self.tmpdir)
+
+    def test_lock_from_another_host_is_never_reclaimed(self):
+        path = os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)
+        foreign = board_lock.LockInfo(pid=_dead_pid(), hostname="some-other-host", suite="heat",
+                                       started_at="2020-01-01T00:00:00Z", tag=None)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(foreign.to_json())
+        with self.assertRaises(board_lock.BoardLockHeld):
+            board_lock.acquire("heat", logs_root=self.tmpdir)
+
+    def test_mutating_acquire_creates_a_missing_logs_directory(self):
+        root = os.path.join(self.tmpdir, "fresh_clone", "logs", "bench_test")
+        lock = board_lock.acquire("heat", logs_root=root)
+        self.addCleanup(lock.release)
+        self.assertTrue(os.path.exists(os.path.join(root, board_lock.LOCK_FILENAME)))
 
     def test_read_only_suite_never_touches_the_lock_file(self):
         lock = board_lock.acquire("smoke", logs_root=self.tmpdir)
@@ -99,7 +139,7 @@ class AcquireReleaseTest(unittest.TestCase):
     def test_stale_lock_from_a_dead_pid_is_reclaimed(self):
         path = os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)
         os.makedirs(self.tmpdir, exist_ok=True)
-        dead = board_lock.LockInfo(pid=_dead_pid(), hostname="ghost", suite="heat",
+        dead = board_lock.LockInfo(pid=_dead_pid(), hostname=socket.gethostname(), suite="heat",
                                     started_at="2020-01-01T00:00:00Z", tag=None)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(dead.to_json())
@@ -116,6 +156,32 @@ class AcquireReleaseTest(unittest.TestCase):
             fh.write("not json")
         with self.assertRaises(board_lock.BoardLockHeld):
             board_lock.acquire("heat", logs_root=self.tmpdir)
+
+
+class PidAliveTest(unittest.TestCase):
+    def test_own_pid_is_alive(self):
+        self.assertTrue(board_lock._pid_alive(os.getpid()))
+
+    def test_exited_pid_is_dead(self):
+        self.assertFalse(board_lock._pid_alive(_dead_pid()))
+
+    def test_exited_process_whose_handle_is_still_open_is_dead(self):
+        # Popen keeps its process handle open until the object is collected,
+        # so on Windows OpenProcess() on this pid still SUCCEEDS -- a crashed
+        # server whose parent shell still holds its handle must read dead.
+        proc = subprocess.Popen(_trivial_cmd())
+        proc.wait(timeout=5)
+        self.assertFalse(board_lock._pid_alive(proc.pid))
+
+    @unittest.skipUnless(os.name == "nt", "Windows access-denied path")
+    def test_access_denied_pid_counts_as_alive(self):
+        # pid 4 is the Windows "System" process: always running, and
+        # OpenProcess on it fails with ERROR_ACCESS_DENIED for a normal user.
+        self.assertTrue(board_lock._pid_alive(4))
+
+
+def _trivial_cmd():
+    return ["cmd", "/c", "exit 0"] if os.name == "nt" else ["true"]
 
 
 def _dead_pid() -> int:
@@ -204,12 +270,20 @@ class RunnerLockIntegrationTest(unittest.TestCase):
             runner.run(suite="heat", cases=["HP-01"], allow_heat=False)
         self.assertFalse(os.path.exists(os.path.join(self.tmpdir, board_lock.LOCK_FILENAME)))
 
-    def test_read_only_suite_runs_freely_while_a_mutating_lock_is_held(self):
+    def test_read_only_run_is_refused_while_a_mutating_lock_is_held(self):
         held = board_lock.acquire("heat", logs_root=self.tmpdir)
         self.addCleanup(held.release)
         runner = BenchTestRunner(self._ctx(), logs_root=self.tmpdir)
-        outcome = runner.run(suite="smoke", cases=["ST-05"])
-        self.assertIsNotNone(outcome)  # never refused: smoke needs no lock
+        with self.assertRaises(board_lock.BoardLockHeld):
+            runner.run(suite="smoke", cases=["ST-05"])
+        self.assertEqual(os.listdir(self.tmpdir), [board_lock.LOCK_FILENAME])
+
+    def test_lcd_run_takes_the_lock(self):
+        held = board_lock.acquire("heat", logs_root=self.tmpdir)
+        self.addCleanup(held.release)
+        runner = BenchTestRunner(self._ctx(), logs_root=self.tmpdir)
+        with self.assertRaises(board_lock.BoardLockHeld):
+            runner.run(suite="lcd", cases=["LCD-19"])
 
     def test_two_read_only_runs_can_both_proceed(self):
         runner_a = BenchTestRunner(self._ctx(), logs_root=self.tmpdir)

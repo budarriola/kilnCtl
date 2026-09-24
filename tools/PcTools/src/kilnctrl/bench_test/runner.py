@@ -240,7 +240,8 @@ class BenchTestRunner:
         # Board lock (docs/audits/profile_executor_panic_2026-09-24.md
         # HP-02/HP-05): acquired here, before preflight even runs, for any
         # suite `board_lock.suite_is_mutating()` calls mutating -- a
-        # read-only suite gets `None` back and never touches the lock file.
+        # read-only suite gets `None` back and never creates the lock file,
+        # but is refused too while a live mutating run holds it.
         # Refuses immediately (never waits) if a live process already holds
         # it; a stale lock (holder pid confirmed dead) is reclaimed with a
         # logged notice. Held for the ENTIRE run, released only in the

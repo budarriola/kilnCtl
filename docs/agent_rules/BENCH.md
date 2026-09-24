@@ -39,9 +39,9 @@ RP2040 safety processor, the bench camera, or the MCP servers.
   thresholds, never write zones or profile config unless the prompt says to.
 - No heating in bench verification unless the prompt authorizes it. If a profile is running
   when you arrive, stop and report; do not flash.
-- `bench_test_run`/`ota_matrix_run` on a MUTATING suite (`heat`, `autotune`, `ota`, `flash`,
-  `safety`, `web`, `nightly`, `full`) refuse fail-closed if `logs/bench_test/.board_lock`
-  already names a live holder — do not remove that file or start a second run to "just
+- `bench_test_run`/`ota_matrix_run` refuse fail-closed if `logs/bench_test/.board_lock`
+  already names a live holder (any suite; only `smoke`/`static`/`stack` skip taking the
+  lock themselves) — do not remove that file or start a second run to "just
   check"; wait for the named run to finish, or report the refusal (pid/suite/start time) if
   it looks stale and you did not start it yourself.
 - Login attempts: one per verification, at least 30 s apart, form-encoded
