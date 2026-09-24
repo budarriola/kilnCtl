@@ -15,14 +15,16 @@ Wraps two existing scripts rather than reimplementing them:
 The other half of this module is the widget-centre -> camera-frame
 transform: LVGL reports tap-target centres in the display's own 480x320
 landscape coordinate space (``list_tap_targets()``, ``ui_test_client.py``).
-The board sits rotated a few degrees in front of the camera (CLAUDE.md
-"Camera aim (2026-09-19)"), so a plain per-axis scale is wrong -- this
-fits a full affine map (6 parameters: rotation + independent x/y scale +
-translation) from the four measured screen corners, least-squares, so the
-four corners is not itself the whole calibration; it also means a fifth
-point off the diagonal is not automatically exact, which is why tolerance
-work below is calibrated against the bezel, not against an assumed-perfect
-transform.
+The board sits at a perspective skew in front of the camera (CLAUDE.md
+"Camera aim": the right edge measures shorter than the left and slants,
+the top edge is longer than the bottom -- not a simple in-plane rotation),
+so a plain per-axis scale, or even a full affine map, is wrong -- this
+fits a 4-point homography (projective transform) from the four measured
+screen corners, which is exact at all four corners by construction, unlike
+a least-squares affine fit. A point off the four corners is still not
+automatically exact for a real (imperfectly measured) quadrilateral, which
+is why tolerance work below is calibrated against the bezel, not against
+an assumed-perfect transform.
 """
 from __future__ import annotations
 
@@ -55,9 +57,11 @@ WIDGET_CORNERS: Tuple[Tuple[float, float], ...] = (
 #:   top-right corner:    (1044, 116)
 #:   bottom-left corner:  (161, 645)
 #:   bottom-right corner: (983, 624)
-#: The tilt direction has flipped since 2026-09-19: the right side is now
-#: LOWER at the top and HIGHER at the bottom than the left side (a clockwise
-#: roll), not the counter-clockwise "right side higher" tilt recorded before.
+#: The geometry is a perspective skew, not a simple rotation: the right
+#: edge is shorter than the left (~14%) and slants (~61px lower at the top
+#: than at the bottom vs the left edge's near-vertical run), while the top
+#: edge is longer than the bottom (~8%). This has changed shape since
+#: 2026-09-19, not just direction.
 #: Superseded 2026-09-19 corners, kept for history: TL=(298,86) TR=(1145,60)
 #: BL=(323,635) BR=(1147,617).
 FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
@@ -70,8 +74,22 @@ FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
 
 @dataclasses.dataclass(frozen=True)
 class AffineTransform:
-    """x' = a*x + b*y + c ; y' = d*x + e*y + f -- a full 2D affine map, not
-    a scale-only one, so the panel's rotation (CLAUDE.md) is represented."""
+    """A perspective (projective) map, fit exactly through 4 point
+    correspondences -- a plain affine map cannot represent the panel's
+    perspective skew (CLAUDE.md "Camera aim": the right edge measures ~14%
+    shorter than the left and slants 61px while the left edge is vertical,
+    and the top edge is ~8% longer than the bottom), so 4 corners are fit
+    with a full homography instead of a 6-parameter least-squares affine
+    fit:
+
+        x' = (a*x + b*y + c) / (g*x + h*y + 1)
+        y' = (d*x + e*y + f) / (g*x + h*y + 1)
+
+    The class name is kept as ``AffineTransform`` for callers, even though
+    the map is now projective, to avoid touching call sites outside this
+    module (``widget_to_frame``/``sample_widget`` are the only other
+    consumers, and they only ever call ``.apply()``).
+    """
 
     a: float
     b: float
@@ -79,56 +97,56 @@ class AffineTransform:
     d: float
     e: float
     f: float
+    g: float = 0.0
+    h: float = 0.0
 
     def apply(self, x: float, y: float) -> Tuple[float, float]:
-        return (self.a * x + self.b * y + self.c, self.d * x + self.e * y + self.f)
+        w = self.g * x + self.h * y + 1.0
+        if abs(w) < 1e-12:
+            raise ValueError("degenerate homography apply() (w ~= 0)")
+        return ((self.a * x + self.b * y + self.c) / w, (self.d * x + self.e * y + self.f) / w)
 
     @classmethod
     def fit(cls, src: Sequence[Tuple[float, float]], dst: Sequence[Tuple[float, float]]) -> "AffineTransform":
-        """Least-squares fit of the 6 affine parameters from >=3 point
-        correspondences (4 here -- one more than the minimum, so the fit is
-        a genuine least-squares solve, not an exact interpolation of 3
-        points with the 4th unused). No numpy dependency (memory
-        project_pctools_numpy_undeclared_dependency) -- plain Gaussian
-        elimination on the two independent 3x3 normal-equation systems
-        (x' and y' each depend on the same [x, y, 1] design matrix).
+        """Exact 4-point homography fit (8 unknowns from 4 correspondences,
+        8 equations -- not a least-squares over-determined solve). No numpy
+        dependency (memory project_pctools_numpy_undeclared_dependency) --
+        plain Gaussian elimination on the 8x8 linear system, generalising
+        the previous 3x3 ``_solve3`` pattern.
+
+        Requires exactly 4 point correspondences (the classic 4-point DLT
+        case); a caller needing more or fewer points would need a genuine
+        least-squares homography solve, which this does not implement.
         """
         if len(src) != len(dst):
             raise ValueError("src and dst must have the same number of points")
-        if len(src) < 3:
-            raise ValueError("need at least 3 point correspondences to fit an affine transform")
+        if len(src) != 4:
+            raise ValueError("homography fit requires exactly 4 point correspondences")
 
-        # Design matrix rows: [x, y, 1] for each point once.
-        rows = [(x, y, 1.0) for x, y in src]
+        # Build the 8x8 system A p = b for p = [a,b,c,d,e,f,g,h].
+        rows: List[List[float]] = []
+        rhs: List[float] = []
+        for (x, y), (xp, yp) in zip(src, dst):
+            rows.append([x, y, 1.0, 0.0, 0.0, 0.0, -x * xp, -y * xp])
+            rhs.append(xp)
+            rows.append([0.0, 0.0, 0.0, x, y, 1.0, -x * yp, -y * yp])
+            rhs.append(yp)
 
-        def solve_axis(targets: Sequence[float]) -> Tuple[float, float, float]:
-            # Normal equations: (R^T R) p = R^T t, solved by hand for the
-            # 3x3 case with Gaussian elimination + partial pivoting.
-            ata = [[0.0] * 3 for _ in range(3)]
-            atb = [0.0, 0.0, 0.0]
-            for row, t in zip(rows, targets):
-                for i in range(3):
-                    atb[i] += row[i] * t
-                    for j in range(3):
-                        ata[i][j] += row[i] * row[j]
-            return _solve3(ata, atb)
-
-        xa, xb, xc = solve_axis([p[0] for p in dst])
-        ya, yb, yc = solve_axis([p[1] for p in dst])
-        return cls(a=xa, b=xb, c=xc, d=ya, e=yb, f=yc)
+        a, b, c, d, e, f, g, h = _solve_n(rows, rhs)
+        return cls(a=a, b=b, c=c, d=d, e=e, f=f, g=g, h=h)
 
 
-def _solve3(m: List[List[float]], v: List[float]) -> Tuple[float, float, float]:
-    """Solve a 3x3 linear system m @ x = v via Gaussian elimination with
+def _solve_n(m: List[List[float]], v: List[float]) -> Tuple[float, ...]:
+    """Solve an NxN linear system m @ x = v via Gaussian elimination with
     partial pivoting. Raises ValueError on a singular system (e.g. the 4
     corners are collinear -- would mean the calibration itself is broken,
     not something to silently paper over)."""
+    n = len(v)
     m = [row[:] + [v[i]] for i, row in enumerate(m)]
-    n = 3
     for col in range(n):
         pivot_row = max(range(col, n), key=lambda r: abs(m[r][col]))
         if abs(m[pivot_row][col]) < 1e-9:
-            raise ValueError("singular system fitting affine transform (degenerate corner points)")
+            raise ValueError("singular system fitting perspective transform (degenerate corner points)")
         m[col], m[pivot_row] = m[pivot_row], m[col]
         pivot = m[col][col]
         m[col] = [val / pivot for val in m[col]]
@@ -138,7 +156,7 @@ def _solve3(m: List[List[float]], v: List[float]) -> Tuple[float, float, float]:
             factor = m[r][col]
             if factor:
                 m[r] = [a - factor * b for a, b in zip(m[r], m[col])]
-    return (m[0][3], m[1][3], m[2][3])
+    return tuple(row[n] for row in m)
 
 
 #: The transform fit once, from the CLAUDE.md corners, at import time. A

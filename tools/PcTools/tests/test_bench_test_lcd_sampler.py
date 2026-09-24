@@ -18,32 +18,24 @@ from kilnctrl.bench_test import lcd_sampler as S  # noqa: E402
 
 
 class AffineTransformTest(unittest.TestCase):
-    """The four CLAUDE.md corners must map back onto the measured camera
-    corners within a few px, and the LCD centre must land inside the
-    panel -- exactly the task's two stated test requirements."""
+    """The four CLAUDE.md corners must map exactly onto the measured camera
+    corners (a 4-point homography is an exact fit, not a least-squares
+    approximation), and interior points must land correctly too."""
 
-    def test_corners_map_within_a_few_pixels(self):
+    def test_corners_map_within_a_pixel(self):
         for widget_pt, frame_pt in zip(S.WIDGET_CORNERS, S.FRAME_CORNERS):
             mapped = S.DEFAULT_TRANSFORM.apply(*widget_pt)
             dist = ((mapped[0] - frame_pt[0]) ** 2 + (mapped[1] - frame_pt[1]) ** 2) ** 0.5
-            # The 4 measured corners of a real, slightly-perspective-skewed
-            # rectangle are not exactly affine-consistent, so a genuine
-            # least-squares fit (not an exact interpolation) leaves a small
-            # residual on every corner. This was ~6.3px under the 2026-09-19
-            # geometry; the 2026-09-24 re-measurement (CLAUDE.md "Camera aim")
-            # has more keystone/perspective skew (all 4 residuals land at the
-            # same ~26.3px, the signature of a genuine trapezoid rather than a
-            # measurement slip -- every corner residual is identical by
-            # construction of the least-squares fit over 4 points) and the
-            # capture itself was noticeably blurrier. 35px is a generous
-            # ceiling that still catches a grossly wrong transform.
-            self.assertLess(dist, 35.0, f"{widget_pt} -> {mapped}, expected near {frame_pt}")
+            # A 4-point homography passes exactly through all 4
+            # correspondences by construction (8 unknowns, 8 equations) --
+            # any residual here is floating point / solve error only.
+            self.assertLess(dist, 1.0, f"{widget_pt} -> {mapped}, expected near {frame_pt}")
 
     def test_lcd_centre_lands_inside_the_measured_panel(self):
         cx, cy = S.widget_to_frame(S.LCD_WIDTH / 2.0, S.LCD_HEIGHT / 2.0)
         xs = [p[0] for p in S.FRAME_CORNERS]
         ys = [p[1] for p in S.FRAME_CORNERS]
-        # A generous bounding-box check (the panel is a rotated
+        # A generous bounding-box check (the panel is a skewed
         # quadrilateral, not an axis-aligned rectangle) -- the centre must
         # at minimum land inside the box that contains all four corners.
         self.assertGreaterEqual(cx, min(xs))
@@ -51,10 +43,32 @@ class AffineTransformTest(unittest.TestCase):
         self.assertGreaterEqual(cy, min(ys))
         self.assertLessEqual(cy, max(ys))
 
+    def test_widget_centre_lands_near_the_quadrilateral_diagonal_crossing(self):
+        # The panel centre (240, 160) should map to (approximately) where
+        # the two diagonals of the measured quadrilateral (TL-BR and
+        # TR-BL) cross -- an independent geometric check on the interior
+        # mapping, not just the four corners themselves.
+        tl, tr, bl, br = S.FRAME_CORNERS
+
+        def _line_intersection(p1, p2, p3, p4):
+            x1, y1 = p1
+            x2, y2 = p2
+            x3, y3 = p3
+            x4, y4 = p4
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
+            py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
+            return px, py
+
+        expected = _line_intersection(tl, br, tr, bl)
+        mapped = S.widget_to_frame(S.LCD_WIDTH / 2.0, S.LCD_HEIGHT / 2.0)
+        dist = ((mapped[0] - expected[0]) ** 2 + (mapped[1] - expected[1]) ** 2) ** 0.5
+        self.assertLess(dist, 3.0, f"centre mapped to {mapped}, expected near diagonal crossing {expected}")
+
     def test_fit_is_exact_for_a_pure_scale_with_no_rotation(self):
-        # Sanity check on the least-squares machinery itself, independent
-        # of the real (rotated) calibration: an axis-aligned scale+
-        # translate must be recovered exactly.
+        # Sanity check on the solve machinery itself, independent of the
+        # real (skewed) calibration: an axis-aligned scale+translate must
+        # be recovered exactly.
         src = [(0, 0), (10, 0), (0, 10), (10, 10)]
         dst = [(100, 200), (300, 200), (100, 400), (300, 400)]
         t = S.AffineTransform.fit(src, dst)
@@ -63,13 +77,59 @@ class AffineTransformTest(unittest.TestCase):
             self.assertAlmostEqual(mapped[0], d[0], places=6)
             self.assertAlmostEqual(mapped[1], d[1], places=6)
 
+    def test_fit_round_trips_a_pure_affine_parallelogram(self):
+        # A parallelogram (pure affine: shear + scale + translate, no
+        # perspective) must still be recovered correctly by the more
+        # general homography solve -- g and h should come out ~0 and the
+        # interior point should match the affine prediction exactly.
+        src = [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0), (10.0, 10.0)]
+        # x' = 2x + y + 5 ; y' = 0.5x + 3y + 1 (a genuine affine map)
+        dst = [(x * 2 + y + 5, x * 0.5 + y * 3 + 1) for x, y in src]
+        t = S.AffineTransform.fit(src, dst)
+        self.assertAlmostEqual(t.g, 0.0, places=6)
+        self.assertAlmostEqual(t.h, 0.0, places=6)
+        mapped = t.apply(4.0, 7.0)
+        self.assertAlmostEqual(mapped[0], 4.0 * 2 + 7.0 + 5, places=6)
+        self.assertAlmostEqual(mapped[1], 4.0 * 0.5 + 7.0 * 3 + 1, places=6)
+
+    def test_fit_maps_interior_point_of_a_perspective_quadrilateral(self):
+        # A genuine perspective (non-affine) quadrilateral: unit square ->
+        # a trapezoid whose right edge is shorter than the left.
+        src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+        dst = [(0.0, 0.0), (10.0, 2.0), (0.0, 10.0), (6.0, 9.0)]
+        t = S.AffineTransform.fit(src, dst)
+
+        # Hand-solved for this exact correspondence set (b=c=f=0 from the
+        # (0,0)->(0,0) and (0,1)->(0,10) equations; then solving the
+        # remaining two corner equations for g,h):
+        #   2g - 3h + 2 = 0 ; -7g + h + 3 = 0
+        #   => g = 11/19, h = 20/19
+        #   a = 10(g+1) = 300/19 ; d = 2(g+1) = 60/19 ; e = 10(h+1) = 390/19
+        # At the centre (0.5, 0.5): w = 0.5*(g+h) + 1 = 69/38, giving
+        #   x' = (0.5*a) / w = 100/23 ; y' = (0.5*(d+e)) / w = 150/23
+        expected_x = 100.0 / 23.0
+        expected_y = 150.0 / 23.0
+        mapped = t.apply(0.5, 0.5)
+        self.assertAlmostEqual(mapped[0], expected_x, places=6)
+        self.assertAlmostEqual(mapped[1], expected_y, places=6)
+        # And independently, the point must land inside the bounding box of
+        # the 4 mapped corners (a sanity floor: a perspective map of an
+        # interior point of the unit square can never land outside the
+        # quadrilateral it warps into).
+        xs = [p[0] for p in dst]
+        ys = [p[1] for p in dst]
+        self.assertGreaterEqual(mapped[0], min(xs))
+        self.assertLessEqual(mapped[0], max(xs))
+        self.assertGreaterEqual(mapped[1], min(ys))
+        self.assertLessEqual(mapped[1], max(ys))
+
     def test_fit_rejects_collinear_points(self):
-        src = [(0, 0), (1, 0), (2, 0)]
-        dst = [(0, 0), (1, 1), (2, 2)]
+        src = [(0, 0), (1, 0), (2, 0), (3, 0)]
+        dst = [(0, 0), (1, 1), (2, 2), (3, 3)]
         with self.assertRaises(ValueError):
             S.AffineTransform.fit(src, dst)
 
-    def test_fit_rejects_too_few_points(self):
+    def test_fit_rejects_wrong_point_count(self):
         with self.assertRaises(ValueError):
             S.AffineTransform.fit([(0, 0), (1, 1)], [(0, 0), (1, 1)])
 

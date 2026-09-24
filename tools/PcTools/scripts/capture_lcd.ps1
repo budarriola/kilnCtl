@@ -47,10 +47,10 @@ param(
     # 2026-09-24 by numeric pixel sampling (luminance/color edge scans against
     # the black bezel) after LCD-01 found the 2026-09-19 crop stale -- the
     # panel had moved left and up again (left edge from ~298-323 to ~158-172,
-    # right edge from ~1145-1147 to ~983-1044), and the tilt direction
-    # flipped: the right side is now LOWER at the top and HIGHER at the
-    # bottom than the left side (a clockwise roll), not the counter-clockwise
-    # tilt recorded in 2026-09-19. Corners: top-left (160, 52), top-right
+    # right edge from ~1145-1147 to ~983-1044), and the geometry is a
+    # perspective skew, not a simple rotation: the right edge measures
+    # shorter than the left and slants, while the top edge is longer than
+    # the bottom. Corners: top-left (160, 52), top-right
     # (1044, 116), bottom-left (161, 645), bottom-right (983, 624). This
     # rectangle is the smallest axis-aligned box that contains all four
     # corners of the screen content -- it includes a few pixels of bezel on

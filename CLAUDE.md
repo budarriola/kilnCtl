@@ -387,11 +387,13 @@ bezel on the tighter sides rather than clipping any UI content. (The previous,
 again. A fresh `-Full` capture and numeric luminance/color edge scans (never
 by eye) put the four corners at top-left `(160, 52)`, top-right `(1044, 116)`,
 bottom-left `(161, 645)`, bottom-right `(983, 624)` -- the panel moved left
-and slightly up, and the tilt direction flipped: the right side is now LOWER
-at the top and HIGHER at the bottom than the left side (a clockwise roll),
-not the counter-clockwise "right side higher" tilt recorded in 2026-09-19.
+and slightly up, and the geometry is a perspective skew, not a simple
+rotation: the right edge measures ~14% shorter than the left and slants
+~61px (lower at the top, higher at the bottom) while the left edge runs
+near-vertical, and the top edge is ~8% longer than the bottom.
 The smallest axis-aligned box containing all four corners is
-`X=158 Y=52 W=886 H=593` (`tools/PcTools/scripts/capture_lcd.ps1:57-60`),
+`X=158 Y=52 W=886 H=593` (`tools/PcTools/scripts/capture_lcd.ps1`'s
+`-CropX/-CropY/-CropW/-CropH` defaults),
 now the default crop, and `lcd_sampler.py`'s `FRAME_CORNERS` was updated to
 match. The 2026-09-19 numbers above are kept only as history.
 
