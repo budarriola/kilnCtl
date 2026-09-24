@@ -81,8 +81,22 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * Do not move this back without first removing every flash write from
      * the tick path, which is not a stack-placement question but a design
      * one: the run-state breadcrumb exists precisely so a power loss mid-tick
-     * is recoverable. */
-    BaseType_t ok = xTaskCreatePinnedToCore(executor_task_entry, "profile_executor", 4096, NULL, 5,
+     * is recoverable.
+     *
+     * 4096 -> 6144 (2026-09-24, owner-authorized per CLAUDE.md's 2026-09-21
+     * decision: "task stack SIZES may be raised without asking when measured
+     * too small"). Evidence: docs/stack_margin_baseline/stack_margin_
+     * mid_firing_111b1b6f_20260924T183836Z.json and stack_margin_web_ui_
+     * open_111b1b6f_20260924T184140Z.json (fw 111b1b6f) both recorded this
+     * task worst-since-boot at 468 B free of 4096 B (11.4%, CRITICAL) during
+     * a real bench firing -- check_executor_task_stack_budget.py's own
+     * static-plus-overhead model separately puts honest headroom at 940 B/
+     * 22.9% (LOW), so the live reading is the tighter of the two and the one
+     * that matters: this is a measured-too-small stack, not a code-path
+     * regression to fix by moving locals off it (there is no new deep call
+     * chain here since the 2026-09-10 fix -- see
+     * check_executor_task_stack_budget.py's own CEILING_BYTES history). */
+    BaseType_t ok = xTaskCreatePinnedToCore(executor_task_entry, "profile_executor", 6144, NULL, 5,
                                             &s_exec.task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_executor) failed");
@@ -93,11 +107,11 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     /* Opus review round 3, item 5: registered even on the ok==pdPASS-only
      * path (matching every other stack_margin_register() call site in this
      * codebase -- creation failure already returned above, so this line is
-     * only ever reached with a real handle). 4096 must match the literal
+     * only ever reached with a real handle). 6144 must match the literal
      * xTaskCreatePinnedToCore() argument two lines up exactly -- see
      * stack_margin.h's own doc comment on why this number is never assumed
      * equal to another task's. */
-    stack_margin_register("profile_executor", &s_exec.task, 4096);
+    stack_margin_register("profile_executor", &s_exec.task, 6144);
     /* Small and independent on purpose -- guard 9 exists precisely because
      * the control task cannot be trusted to notice its own death. Same
      * priority as the control task it's watching.

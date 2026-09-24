@@ -129,7 +129,16 @@ REPO_ROOT = base.REPO_ROOT
 DEFAULT_ELF = base.DEFAULT_ELF
 
 ROOT = "executor_task_entry"
-STACK_BYTES = 4096
+# 4096 -> 6144, 2026-09-24: profile_executor's declared stack was raised
+# (profile_executor_start.c) after two live baselines
+# (docs/stack_margin_baseline/stack_margin_mid_firing_111b1b6f_*.json and
+# stack_margin_web_ui_open_111b1b6f_*.json) both recorded a worst-since-boot
+# CRITICAL reading (468 B free of 4096 B, 11.4%) during a real firing --
+# owner-authorized per CLAUDE.md's 2026-09-21 decision. CEILING_BYTES/
+# UNMODELED_OVERHEAD_BYTES below are unchanged: the static deepest path and
+# its unmodelled-overhead figure did not change, only the declared stack the
+# same path now has more room within.
+STACK_BYTES = 6144
 
 # See "CEILING, not a headroom-fraction budget" above and the 2026-09-10
 # UPDATE in the module docstring -- the post-2026-09-10-fix worst case

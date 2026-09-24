@@ -3850,7 +3850,19 @@ Owner instruction, 2026-09-21.
   first baseline, not a recapture). Only `kiln_io_owner` shrank more than
   256 B against the `75a5e459` mid_firing baseline (2708 to 2100 B free, still
   OK). Both files record `profile_executor` at CRITICAL (468 B of 4096 B
-  worst-since-boot) during the firing; a stack raise is dispatched.
+  worst-since-boot) during the firing; a stack raise is dispatched. **Raised
+  2026-09-24 (this commit):** `profile_executor`'s declared
+  stack 4096 -> 6144 B (`profile_executor_start.c`, INTERNAL DRAM -- this task
+  writes NVS on its tick path and cannot use a PSRAM stack). `info_uart_bridge`
+  (976 B/3584 B, 27.2%) and `lvgl` (1968 B/8192 B, 24.0%) also read LOW in the
+  same two captures but both sit above the 15% CRITICAL threshold, so neither
+  was raised. `check_executor_task_stack_budget.py`'s own static-path model
+  moved from 940 B/22.9% (LOW) to 3148 B/51.2% (OK) at the same measured
+  deepest path (1776 B, unchanged); DRAM impact is +2048 B of internal-heap
+  task-stack allocation at runtime, not a `.dram0.bss` change (the stack is
+  allocated dynamically by `xTaskCreatePinnedToCore`, not a static array) --
+  `check_kilnfw_dram_bss_budget.ps1` still passes at the same static `.bss`
+  figure (97256 B of a 101000 B ceiling).
 - [ ] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
   timeout did not raise the PIN keypad", `keypad_raised=false`) root-caused
   2026-09-24 as a runner defect, not firmware: `_wait_for_overlay_names(present=True)`
