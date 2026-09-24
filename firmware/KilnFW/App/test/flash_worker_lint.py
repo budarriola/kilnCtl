@@ -344,6 +344,24 @@ ALLOWLIST = {
     # settings HTTP handler's internal-SRAM-stack httpd task.
     "unit_pref.c",
     # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time) --
+    # same shape as display_power_cfg.c's/unit_pref.c's/zones_config_store.c's
+    # own entries. iter_tune_store_set_zone()'s only write call site is
+    # iter_tune_restore_post_handler() (drivers/http/iter_tune_http.c, POST
+    # /api/iter_tune/restore_commissioned), registered on
+    # wifi_provision_http_get_server()'s httpd instance -- config.stack_size
+    # = 8192 (wifi_provision_http.c:1151), a plain stack_size on
+    # HTTPD_DEFAULT_CONFIG() with no MALLOC_CAP_SPIRAM task-creation flag, the
+    # same internal-SRAM-stack fact those other files' entries rely on.
+    # iter_tune_store_start() (the file's other write site, via
+    # nvs_save_raw() inside its file/NVS rev-reconciliation) runs once from
+    # iter_tune_http_start(), called synchronously during bringup before this
+    # httpd server itself is even created -- no concurrency, no PSRAM stack.
+    # Neither call site dispatches through
+    # uart_bridge_ext_run_on_flash_worker(), so the re-entrancy half of this
+    # lint does not apply; this covers only the direct-hal_kv-write and
+    # cfg_fs-write halves (see CFG_FS_ALLOWLIST's twin entry below).
+    "iter_tune_store.c",
+    # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time) --
     # same shape as estop_verification.c's/display_power_cfg.c's own
     # entries. web_auth_store_set_password()/_set_pin()/_set_policy() (via
     # set_blob_verified()) are called only from the password/PIN-entry
@@ -456,6 +474,11 @@ CFG_FS_ALLOWLIST = {
     "pref_cfg_fs.c",
     "profiles_cfg_fs.c",
     "zones_config_cfg_fs.c",
+    # cfg_fs_save_raw()'s cfg_fs_write_atomic() call -- see ALLOWLIST's twin
+    # entry above for the httpd-task/internal-SRAM-stack reasoning; same call
+    # site, same caller (iter_tune_store_set_zone()), just the cfg dual-write
+    # half of the same write instead of the NVS half.
+    "iter_tune_store.c",
     # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100_PLAN.md sec 7 task 10):
     # deletes the firing-history mirror file for a profile id being erased,
     # called only from profile_executor_firing_stats.c's firing_stats_erase(),
