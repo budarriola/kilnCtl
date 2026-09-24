@@ -429,20 +429,15 @@ corners stale or panel dark") whenever any of them reads as bezel. The
 Full detail: `docs/COMMISSIONING_LCD_RUNBOOK.md`, "Camera aim (2026-09-24,
 round 3)".
 
-**Camera aim (2026-09-24, round 4):** round 3's bottom-right corner,
-`(985, 628)`, was itself stale -- it was actually the Start button's own
-bottom edge, not the true bezel boundary; a column scan at `x=950` on
-`logs/bench_test/20260924T191429Z_lcd/captures/lcd01_start_pause.jpg` shows
-the lit panel running down to `y~=660` before the bezel starts, so
-`widget_to_frame(423, 289)` (the Start button target) landed on the button's
-top edge instead of its centre. Re-derived numerically from that same
-capture, scanning each edge for the first *sustained* run of dark samples
-rather than round 3's single-biggest-jump rule (which is what the stale
-button-edge value came from): top-left `(179, 68)`, top-right `(1045, 125)`,
-bottom-left `(177, 627)`, bottom-right `(981, 662)` -- only the bottom-right
-corner moved materially from round 3. `lcd_sampler.py`'s `FRAME_CORNERS` now
-carries these. Full detail: `docs/COMMISSIONING_LCD_RUNBOOK.md`, "Camera aim
-(2026-09-24, round 4)".
+**Camera aim (2026-09-24, round 4):** round 3's bottom-right corner
+`(985, 628)` was an internal content edge, not the bezel (the lit panel runs
+to `y~=660` at `x=950`). A "sustained dark run" edge scan of
+`logs/bench_test/20260924T191429Z_lcd/captures/lcd01_start_pause.jpg` puts
+the corners at top-left `(179, 68)`, top-right `(1045, 125)`, bottom-left
+`(177, 627)`, bottom-right `(981, 662)`; `lcd_sampler.py`'s `FRAME_CORNERS`
+carries these. The old crop no longer contained them, so the
+`capture_lcd.ps1` default grew to `X=158 Y=52 W=894 H=616`. Full detail:
+`docs/COMMISSIONING_LCD_RUNBOOK.md`, "Camera aim (2026-09-24, round 4)".
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 

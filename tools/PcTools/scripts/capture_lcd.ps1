@@ -88,13 +88,20 @@ param(
     # corners of the screen content -- it includes a few pixels of bezel on
     # some sides rather than clipping any UI, since losing content is worse
     # than a small margin.
+    # Grown 2026-09-24 (round 4, LCD-01 corner re-derivation) from W=886
+    # H=593 to W=894 H=616, origin unchanged: lcd_sampler.py's re-derived
+    # FRAME_CORNERS put the panel's bottom-right corner at (981, 662) and
+    # top-right at (1045, 125), outside the old box (bottom edge 645, right
+    # edge 1044). The new box ends at x=1052, y=668 -- all four round-4
+    # corners plus a few pixels of bezel; every value stays even, since an
+    # odd crop offset/size on this 4:2:2 source makes ffmpeg refuse.
     # (Superseded 2026-09-19 rectangle, kept for history: X=296 Y=58 W=853
     # H=578, corners left 298 (top)/323 (bottom), right ~1145-1147, top 60
     # (right)/86 (left), bottom 617 (right)/635 (left).)
     [int]$CropX = 158,
     [int]$CropY = 52,
-    [int]$CropW = 886,
-    [int]$CropH = 593
+    [int]$CropW = 894,
+    [int]$CropH = 616
 )
 
 $ErrorActionPreference = "Stop"

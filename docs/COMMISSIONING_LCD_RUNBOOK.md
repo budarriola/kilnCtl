@@ -21,8 +21,8 @@ count and therefore row assignment changes with which cells are offered).
 raw LVGL **screen-pixel** coordinates (0,0 top-left, 480x320 native), the
 same space every `ui_page_*.c` lays widgets out in — a different space from
 the webcam capture-crop pixel coordinates used by `sample_lcd_region.ps1`
-(crop is `X=158 Y=52 W=886 H=593` as of the 2026-09-24 camera-aim fix
-(CLAUDE.md), an 886x593 window, not 480x320 — the capture is a photograph of
+(crop is `X=158 Y=52 W=894 H=616` as of the 2026-09-24 round-4 camera-aim
+fix (CLAUDE.md), an 894x616 window, not 480x320 — the capture is a photograph of
 the panel, magnified, not a framebuffer dump; the crop verification section
 below predates that fix and quotes the superseded 2026-09-19 numbers).
 
@@ -191,13 +191,24 @@ intersecting adjacent edges' fitted lines:
 
 Three of the four corners moved only 1-7px from round 3 (within the method's
 noise); only the bottom-right corner moved materially, confirming it was the
-stale one. Verified against the reported symptom: with these corners, the
-Start button target `widget_to_frame(423, 289)` maps to frame `(893, 609)`,
-which samples as unmistakably green (raw pixels around that point read like
-`RGB(47,178,128)`/`RGB(62,179,135)`, G well above R and B) against a bezel
-reference of `RGB(9,16,24)` — squarely inside the Start button, not on its
-edge. See CLAUDE.md's "Camera aim (2026-09-24, round 4)" note and
-`lcd_sampler.py`'s `FRAME_CORNERS` comment for the full method.
+stale one. With these corners the Start button target
+`widget_to_frame(423, 289)` maps to frame `(893, 609)`, inside the button
+(round 3 put it at `(901, 581)`, a few pixels above the button's top edge).
+
+Review cross-check: an independent scan of the same frame gave corners within
+4px (top-right `(1043, 121)`, bottom-right `(982, 662)`), and the same edges
+on `20260924T162517Z_lcd` and on both runs' `lcd08_config_hub.jpg` agree.
+Points 22 widget-px outside each edge read within 4-60 of the bezel
+reference; points just inside read 102-352 away. Start is still an open
+item, though: the runner's 8x8 box mean at `(893, 609)` is `RGB(98,204,184)`,
+because the target centre sits on the white "Start" label. That is 75 from
+`_ACCENT_4_RGB` with chroma distance 0.124 (tolerances 45 and 0.10), so
+`matches_color()` is still `False` and LCD-01 would still FAIL on this frame.
+The button body 22 widget-px right of centre, `(445, 289)`, reads
+`RGB(59,157,116)` and matches. The individual pixels the round-4 commit
+quoted, `RGB(47,178,128)`, are not what the runner samples. See CLAUDE.md's
+"Camera aim (2026-09-24, round 4)" note and `lcd_sampler.py`'s
+`FRAME_CORNERS` comment for the method.
 
 ## Navigation graph (from source, `kiln_ui_show()` call sites)
 
