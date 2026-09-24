@@ -2049,6 +2049,13 @@ static void test_firing_ceiling_would_trip_on_start_fails_open_on_non_finite(voi
                "+Inf current temp never refuses (garbled reading, not a real hazard signal)");
     TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(INFINITY, 50.0f),
                "+Inf firing_max_c (ceiling itself non-finite after adding the margin) never refuses");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(0.0f, 900.0f),
+               "firing_max_c 0 is the wire's 'no ceiling' (link_frame_ceiling_is_active() needs > 0) -- "
+               "a profile with no positive ZONE_RAMP target tightens nothing, so a 900C kiln is not refused");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(-5.0f, 900.0f),
+               "a negative firing_max_c is likewise never an active ceiling Pico-side -- not refused");
+    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(NAN, 900.0f),
+               "NaN firing_max_c (the other 'no ceiling' spelling) -- not refused");
 }
 
 static void test_get_status_reports_firing_ceiling_only_while_running_or_paused(void)
@@ -2987,6 +2994,8 @@ static void test_reload_live_profile_if_changed_uses_monotonic_ceiling_helper(vo
                "a higher peak at once");
 
     vSemaphoreDelete(s_exec.lock);
+    s_exec.lock = NULL;
+    s_exec.state = PROFILE_EXEC_IDLE; /* never leave a fake RUNNING firing behind for the next test */
     s_test_live_profile_generation = 0;
     s_test_live_profile_load_ok = false;
 }
@@ -3374,13 +3383,49 @@ static void test_run_refuses_cooldown_only_profile_on_hot_kiln(void)
     p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5); /* peak 200C -> Pico ceiling would be 300C */
 
     warm_start_test_setup(&p, 900.0f); /* kiln already at 900C, far past the 300C ceiling */
-    char err[128] = {0};
+    /* 96: the smallest err buffer any real caller passes
+     * (uart_bridge_ext_control.c's PROFILES_CMD_START) -- the reason, not
+     * just the two numbers, must survive that truncation. */
+    char err[96] = {0};
     bool ok = profile_executor_run(0, err, sizeof(err));
 
     TEST_CHECK(!ok, "refused before ever reaching RUNNING");
     TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "state must not have been mutated by a refused start");
     TEST_CHECK(strstr(err, "200.0") != NULL, "err_msg names the profile's peak target");
     TEST_CHECK(strstr(err, "900.0") != NULL, "err_msg names the kiln's current reading");
+    TEST_CHECK(strstr(err, "S1 would trip, refused") != NULL,
+               "the reason survives a 96-byte caller buffer (not truncated off the end)");
+
+    /* Worst-case widths still fit a 96-byte buffer whole. */
+    warm_start_test_setup(&p, 2400.0f);
+    s_test_profiles_http_get_out.segments[0] = zone_ramp_seg(1300.0f, 100.0f, 5);
+    g_stub_max_temp_c[0] = 1300.0f;
+    char err2[96] = {0};
+    ok = profile_executor_run(0, err2, sizeof(err2));
+    TEST_CHECK(!ok, "1300C peak on a 2400C reading is refused");
+    TEST_CHECK(strstr(err2, "refused") != NULL, "4-digit temperatures: the full message still fits in 96 bytes");
+}
+
+static void test_run_never_refuses_on_invalid_hot_reading(void)
+{
+    TEST_SECTION("profile_executor_run() -- a thermo bus that IS up but whose only target-zone reading is "
+                 "invalid (spi_failed) never refuses on this check, however hot the stale number reads");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
+
+    warm_start_test_setup(&p, 900.0f);
+    s_test_thermo_readings[0].spi_failed = true; /* bus up, reading present, but not valid */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "an invalid reading is 'unknown', not 'too hot' -- not refused by this check");
+    TEST_CHECK(strstr(err, "S1 would trip") == NULL, "and err_msg carries no firing-ceiling refusal");
+
+    profile_executor_halt();
 }
 
 static void test_run_allows_cooldown_profile_within_margin(void)
@@ -9798,6 +9843,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_cooldown_only_profile_on_hot_kiln();
     test_run_allows_cooldown_profile_within_margin();
     test_run_never_refuses_on_missing_live_reading();
+    test_run_never_refuses_on_invalid_hot_reading();
 
     // PWM/progress-window fix -- order-independent, each re-derives its own
     // fresh thermal_guard_state_t/heater_output_state_t (or memsets s_exec).

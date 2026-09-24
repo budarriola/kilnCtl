@@ -1527,12 +1527,15 @@ static inline float profile_firing_ceiling_after_live_edit(float current_c, cons
  * CHAMBER_AGREED -- see safety_guards.c line ~629), so it applies the
  * DEFAULT margin unconditionally, including in EXTERNAL_OVERHEAT where the
  * Pico would never have tightened the ceiling at all. That can make this
- * pre-check refuse a start the Pico would have allowed; it can never do the
- * reverse (let through a start the Pico would trip on with a *smaller*
- * configured margin, since a smaller margin only makes the real ceiling
- * lower, tightening the case this checks). Checked against SaftyFW's
- * constant by firmware/KilnFW/App/test/firing_ceiling_margin_mirror_drift_check.py
- * so the two numbers cannot silently drift apart. */
+ * pre-check refuse a start the Pico would have allowed (EXTERNAL_OVERHEAT,
+ * or a configured margin LARGER than the default). The reverse also exists
+ * and is accepted: a configured margin SMALLER than the default makes the
+ * Pico's real ceiling lower than the one checked here, so a start in that
+ * gap is let through and still trips S1 -- the same safe-direction outcome
+ * as having no pre-check at all, never a missed guard. Checked against
+ * SaftyFW's constant by
+ * firmware/KilnFW/App/test/firing_ceiling_margin_mirror_drift_check.py so
+ * the two defaults cannot silently drift apart. */
 #define PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR 100.0f
 
 /* True if starting (or resuming) a firing whose peak target is
@@ -1550,6 +1553,14 @@ static inline float profile_firing_ceiling_after_live_edit(float current_c, cons
 static inline bool profile_firing_ceiling_would_trip_on_start(float firing_max_c, float current_max_zone_c)
 {
     if (!isfinite(current_max_zone_c)) {
+        return false;
+    }
+    /* firing_max_c <= 0 is the wire's own "no ceiling" spelling (0.0f is what
+     * profile_compute_firing_max_c() returns for a profile with no positive
+     * ZONE_RAMP target): SaftyFW's link_frame_ceiling_is_active() requires
+     * isfinite() && > 0.0f before it tightens S1 at all, so such a start
+     * never tightens anything and must not be refused here either. */
+    if (!(firing_max_c > 0.0f)) {
         return false;
     }
     float ceiling = firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR;

@@ -315,14 +315,19 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         float firing_max_c = profile_compute_firing_max_c(&p);
         float current_max_zone_c = live_current_max_zone_c(p.zone_mask);
         if (profile_firing_ceiling_would_trip_on_start(firing_max_c, current_max_zone_c)) {
+            /* Kept under 96 bytes worst case: the smallest caller buffer is
+             * uart_bridge_ext_control.c's char[96] (then dashboard_exec_
+             * http.c's char[128]), and both temperatures AND the reason must
+             * survive truncation -- so no profile name (the caller already
+             * knows which one it asked for; the log line below has it). */
             if (err_msg) {
-                snprintf(err_msg, err_cap,
-                         "profile '%s' peaks at %.1fC but a target zone already reads %.1fC -- starting it "
-                         "would ask the safety processor to tighten its over-temperature ceiling below the "
-                         "kiln's current temperature and trip almost immediately. Refused before starting "
-                         "(cool-down-only profile on a hot kiln)",
-                         p.name, (double)firing_max_c, (double)current_max_zone_c);
+                snprintf(err_msg, err_cap, "peak %.1fC is >%.0fC below kiln %.1fC: safety S1 would trip, refused",
+                         (double)firing_max_c, (double)PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR,
+                         (double)current_max_zone_c);
             }
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) '%s' refused: peak %.1fC, hottest target zone %.1fC "
+                             "(SET_FIRING_CEILING would put S1 below the kiln)",
+                     (unsigned)profile_id, p.name, (double)firing_max_c, (double)current_max_zone_c);
             return false;
         }
     }

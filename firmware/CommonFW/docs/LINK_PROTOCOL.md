@@ -493,8 +493,13 @@ profile ever gets to act. `profile_executor_run()`
 via the profiles start route, `dashboard_exec_http.c`'s ordinary run()-refusal
 path), naming both the profile's peak target and the kiln's current reading in
 the error. This is a courtesy check only — it fails **open** (never refuses)
-when the current reading is unavailable or non-finite, since the Pico's own
-S1 guard above remains the real backstop either way. The 100 °C margin used
+when the current reading is unavailable or non-finite, and never refuses a
+profile whose `firing_max_c` is not an active ceiling (0/NaN/negative, e.g. no
+positive ZONE_RAMP target), since the Pico's own S1 guard above remains the
+real backstop either way. It checks the DEFAULT margin, not the board's
+configured one: a larger configured margin can make it refuse a start the Pico
+would allow, and a smaller one lets through a start that still trips S1 (the
+same safe-direction outcome as no pre-check). The 100 °C margin used
 in this check (`PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR`) is a
 hand-mirrored copy of the Pico's `FIRING_MARGIN_C_DEFAULT`
 (`firmware/SaftyFW/src/safety_guards.c`) — CommonFW's wire codec
