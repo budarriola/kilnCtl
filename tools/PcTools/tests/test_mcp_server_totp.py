@@ -159,6 +159,22 @@ class ResetSuccessPathTest(_Base):
         self.assertIn("429", result)
         reset_mock.assert_not_called()
 
+    def test_forgot_unsynced_clock_503_is_named_and_stops_before_reset(self):
+        self._set_env()
+        with unittest.mock.patch.object(thc, "post_forgot", return_value=(503, {})),              unittest.mock.patch.object(thc, "post_reset") as reset_mock:
+            result = mst.totp_reset_password(confirm=True)
+        self.assertIn("503", result)
+        self.assertIn("not SNTP-synced", result)
+        reset_mock.assert_not_called()
+
+    def test_reset_unsynced_clock_503_is_named(self):
+        self._set_env()
+        with unittest.mock.patch.object(thc, "post_forgot",
+                                         return_value=(202, {"reset_token": "realtok"})),              unittest.mock.patch.object(thc, "post_reset", return_value=(503, {})),              unittest.mock.patch.object(http_auth, "login") as login_mock:
+            result = mst.totp_reset_password(confirm=True)
+        self.assertIn("not SNTP-synced", result)
+        login_mock.assert_not_called()
+
     def test_forgot_missing_reset_token_stops_before_reset(self):
         self._set_env()
         with unittest.mock.patch.object(thc, "post_forgot", return_value=(202, {})), \

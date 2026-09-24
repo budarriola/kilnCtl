@@ -150,7 +150,7 @@ def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> st
     body, which could otherwise leak the opaque reset-token value or the
     (deliberately generic) failure text into a transcript for no
     diagnostic benefit; a status code alone is enough to know what
-    happened, per the plan's documented response shapes (200/400/429).
+    happened, per the plan's documented response shapes (200/400/429/503).
 
     After a successful ``/api/auth/reset`` (HTTP 200), this then attempts
     an actual login with the NEW credential via the existing
@@ -200,6 +200,9 @@ def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> st
 
     if forgot_status == 429:
         return f"failed: POST /api/auth/forgot rate-limited (HTTP 429) (host={resolved})"
+    if forgot_status == 503:
+        return (f"failed: POST /api/auth/forgot refused (HTTP 503) -- board clock not "
+                f"SNTP-synced yet, TOTP cannot be verified (host={resolved})")
     if forgot_status != 202:
         return (f"failed: POST /api/auth/forgot returned unexpected HTTP {forgot_status} "
                 f"(host={resolved})")
@@ -216,6 +219,9 @@ def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> st
 
     if reset_status == 429:
         return f"failed: POST /api/auth/reset rate-limited (HTTP 429) (host={resolved})"
+    if reset_status == 503:
+        return (f"failed: POST /api/auth/reset refused (HTTP 503) -- board clock not "
+                f"SNTP-synced yet (host={resolved})")
     if reset_status != 200:
         return (f"failed: POST /api/auth/reset returned HTTP {reset_status} -- code and/or "
                 f"new password rejected (host={resolved})")

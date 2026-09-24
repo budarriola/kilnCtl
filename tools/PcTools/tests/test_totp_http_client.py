@@ -35,6 +35,10 @@ def _fake_response(body: bytes, status: int = 200):
     return _Ctx()
 
 
+#: Verbatim body of the shared login ladder's 429 (web_auth_login_http.c).
+_LADDER_429_BODY = b"too many failed attempts, try again later"
+
+
 class ForgotTest(unittest.TestCase):
     def test_posts_username_and_code_no_auth_seam(self):
         """This is an OPEN-tier route -- it must use plain urllib, never
@@ -68,11 +72,29 @@ class ForgotTest(unittest.TestCase):
         self.assertIn("reset_token", body)
 
     def test_rate_limited_429_is_returned_not_raised(self):
-        err = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(b'{"ok":false}'))
+        # The shared login ladder's real 429 body is PLAIN TEXT
+        # (web_auth_login_http.c's login 429 site) -- it must still come
+        # back as a status the caller can branch on, not a parse error.
+        err = urllib.error.HTTPError("u", 429, "Too Many Requests", {},
+                                     io.BytesIO(_LADDER_429_BODY))
         with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
             status, body = thc.post_forgot("host", "bench", "123456")
         self.assertEqual(status, 429)
-        self.assertEqual(body, {"ok": False})
+        self.assertEqual(body, {})
+
+    def test_unsynced_clock_503_plain_text_is_returned_not_raised(self):
+        err = urllib.error.HTTPError("u", 503, "Service Unavailable", {},
+                                     io.BytesIO(b"board clock not synced yet"))
+        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+            status, body = thc.post_forgot("host", "bench", "123456")
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {})
+
+    def test_read_timeout_raises_totp_error_not_bare_oserror(self):
+        with unittest.mock.patch("urllib.request.urlopen",
+                                  unittest.mock.Mock(side_effect=TimeoutError("timed out"))):
+            with self.assertRaises(thc.TotpHttpError):
+                thc.post_forgot("host", "bench", "123456")
 
     def test_unreachable_host_raises(self):
         with unittest.mock.patch("urllib.request.urlopen",
@@ -89,11 +111,18 @@ class ForgotTest(unittest.TestCase):
     def test_code_never_appears_in_a_repr_of_the_request_error(self):
         """Defence in depth: even an exception path must not embed the
         submitted code in a way a caller might print."""
-        err = urllib.error.HTTPError("u", 400, "Bad Request", {}, io.BytesIO(b"not json"))
-        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+        with unittest.mock.patch("urllib.request.urlopen",
+                                  lambda req, timeout=None: _fake_response(b"not json", status=202)):
             with self.assertRaises(thc.TotpHttpError) as ctx:
                 thc.post_forgot("host", "bench", "999999")
         self.assertNotIn("999999", str(ctx.exception))
+
+    def test_plain_text_400_is_returned_not_raised(self):
+        err = urllib.error.HTTPError("u", 400, "Bad Request", {},
+                                     io.BytesIO(b"body missing or too large"))
+        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+            status, body = thc.post_forgot("host", "bench", "999999")
+        self.assertEqual((status, body), (400, {}))
 
 
 class ResetTest(unittest.TestCase):
@@ -120,14 +149,15 @@ class ResetTest(unittest.TestCase):
         self.assertEqual(body, {"ok": False})
 
     def test_rate_limited_429_is_returned_not_raised(self):
-        err = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(b'{"ok":false}'))
+        err = urllib.error.HTTPError("u", 429, "Too Many Requests", {},
+                                     io.BytesIO(_LADDER_429_BODY))
         with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
             status, body = thc.post_reset("host", "bench", "sometoken", "whatever")
-        self.assertEqual(status, 429)
+        self.assertEqual((status, body), (429, {}))
 
     def test_password_never_appears_in_exception_text(self):
-        err = urllib.error.HTTPError("u", 400, "Bad Request", {}, io.BytesIO(b"not json"))
-        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+        with unittest.mock.patch("urllib.request.urlopen",
+                                  lambda req, timeout=None: _fake_response(b"not json", status=200)):
             with self.assertRaises(thc.TotpHttpError) as ctx:
                 thc.post_reset("host", "bench", "tok", "SuperSecretPW123")
         self.assertNotIn("SuperSecretPW123", str(ctx.exception))

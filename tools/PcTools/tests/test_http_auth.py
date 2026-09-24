@@ -490,6 +490,12 @@ class ClientsUseTheSeamTest(unittest.TestCase):
         # A one-shot credential check: http_auth's auto-login-on-401 would
         # defeat the "log in exactly once, never retry" contract here.
         ("web_auth_setup_http_client.py", "try_login"),
+        # POST /api/auth/forgot and /api/auth/reset are ROUTE_TIER_OPEN and
+        # exist for an operator who has LOST the password: auto-login-on-401
+        # with KILNCTL_WEB_PASSWORD (or attaching a remembered session
+        # cookie) has no place in that flow (docs/TOTP_PASSWORD_RESET_PLAN.md
+        # section 4; totp_http_client.py's route-tier note).
+        ("totp_http_client.py", "_post_open"),
     }
 
     @staticmethod

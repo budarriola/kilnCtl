@@ -250,9 +250,14 @@ WT-A must implement exactly this shape; the fuller reasoning lives in
   `{"username","reset_token","new_password"}`. Success: HTTP 200, JSON
   `{"ok": true}`. Any failure (expired/wrong/reused token, password policy
   rejection): HTTP 400, JSON `{"ok": false}` — deliberately generic, never
-  distinguishing which of the two failed. A rate-limit refusal from the
-  shared `login_ip_scope.c` ladder is HTTP 429, reused as-is rather than
-  remapped to 400.
+  distinguishing which of the two failed.
+- Both OPEN routes: a rate-limit refusal from the shared `login_ip_scope.c`
+  ladder is HTTP 429 with the login ladder's existing plain-text body,
+  reused as-is rather than remapped. An unsynced board clock (section 3's
+  "board clock not synced yet" refusal) is HTTP 503 on either route — the
+  one deliberate exception to `/forgot`'s always-202, and not an oracle,
+  since clock sync is board-wide rather than per-user. No non-2xx body has
+  to be JSON; the PC client branches on status code alone.
 - `GET /api/auth/totp_status` (ROUTE_TIER_ADMIN, unlike the two OPEN routes
   above): JSON `{"enrolled": bool}`, plus WT-C's PC-side tool additionally
   reads and reports `board_time_utc`/`sntp_synced` fields **if present** —
