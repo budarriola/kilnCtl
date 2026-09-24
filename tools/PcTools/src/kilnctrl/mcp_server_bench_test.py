@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from . import mcp_server as _srv
+from .bench_test import board_lock as bt_board_lock
 from .bench_test import registry as bt_registry
 from .bench_test import report as bt_report
 from .bench_test.runner import BenchTestRunner
@@ -84,6 +85,11 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                               allow_heat=allow_heat, tag=tag)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
+    except bt_board_lock.BoardLockHeld as exc:
+        # Fail closed, before preflight ever ran (docs/audits/
+        # profile_executor_panic_2026-09-24.md HP-02/HP-05): another
+        # mutating run already owns the board.
+        return f"error: refused -- {exc}"
 
     lines = [f"bench_test_run: suite={suite} run_id={outcome.run_id} exit_code={outcome.exit_code}",
              f"host: {resolved_host} ({host_source})"]

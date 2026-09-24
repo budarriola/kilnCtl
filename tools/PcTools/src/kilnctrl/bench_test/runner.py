@@ -15,6 +15,7 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from .registry import REGISTRY, CaseResult, Verdict, get_case, suite_case_ids
+from . import board_lock
 from . import report as report_mod
 
 
@@ -235,9 +236,42 @@ class BenchTestRunner:
         # and again below in report_mod.run_dir_path() for `outcome.run_dir`
         # always agrees.
         self.ctx["run_dir"] = report_mod.run_dir_path(self.logs_root, run_id)
+
+        # Board lock (docs/audits/profile_executor_panic_2026-09-24.md
+        # HP-02/HP-05): acquired here, before preflight even runs, for any
+        # suite `board_lock.suite_is_mutating()` calls mutating -- a
+        # read-only suite gets `None` back and never touches the lock file.
+        # Refuses immediately (never waits) if a live process already holds
+        # it; a stale lock (holder pid confirmed dead) is reclaimed with a
+        # logged notice. Held for the ENTIRE run, released only in the
+        # `finally` below -- including the case where the MCP client's own
+        # 300 s tool timeout fires: the server keeps executing this method
+        # regardless of whether the HTTP reply was ever read, so the lock
+        # must track the run's real lifetime, not the reply.
+        lock = board_lock.acquire(suite, tag=tag, logs_root=self.logs_root)
+        if lock is not None and lock.reclaimed_from is not None:
+            self._log(
+                f"board lock: reclaimed stale lock from dead {lock.reclaimed_from.describe()}"
+            )
         self._log(f"# bench_test run {run_id} (suite={suite}, dry_run={dry_run})")
         self._log(f"requested cases: {', '.join(requested)}")
 
+        try:
+            outcome = self._run_locked(
+                suite=suite, requested=requested, run_id=run_id, started=started,
+                dry_run=dry_run, allow_heat=allow_heat,
+            )
+        finally:
+            if lock is not None:
+                lock.release()
+        return outcome
+
+    def _run_locked(self, *, suite: str, requested: List[str], run_id: str, started: float,
+                     dry_run: bool, allow_heat: bool) -> RunOutcome:
+        """The actual preflight/execute/teardown/report body, run only once
+        the board lock (if this suite needs one) is held. Split out of
+        `run()` so the lock's `finally` wraps exactly this and nothing
+        about lock acquisition itself."""
         preflight_ok, preflight_reason, board_before = self.preflight()
         self._log(f"preflight: {'OK' if preflight_ok else 'FAILED - ' + preflight_reason}")
 

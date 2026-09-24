@@ -73,6 +73,7 @@ from typing import Optional
 from . import mcp_server as _srv
 from . import mcp_server_coordinated_gpio_test as _gpio_tool
 from . import mcp_server_ota as _ota_tool
+from .bench_test import board_lock as bt_board_lock
 from .bench_test import registry as bt_registry
 from .bench_test import report as bt_report
 from .bench_test.runner import BenchTestRunner
@@ -232,6 +233,11 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
                               allow_heat=allow_heat, tag=tag)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
+    except bt_board_lock.BoardLockHeld as exc:
+        # Fail closed, before preflight ever ran (docs/audits/
+        # profile_executor_panic_2026-09-24.md HP-02/HP-05): another
+        # mutating run (this suite included) already owns the board.
+        return f"error: refused -- {exc}"
 
     lines = [f"ota_matrix_run: suite=ota run_id={outcome.run_id} exit_code={outcome.exit_code}",
              f"host: {ctx.get('host')} ({ctx.get('host_source', 'unknown')})",
