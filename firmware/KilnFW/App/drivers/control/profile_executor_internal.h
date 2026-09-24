@@ -185,13 +185,19 @@ extern const char *PE_TAG;
  *     2026-09-24 (docs/audits/profile_executor_panic_2026-09-24.md):** despite
  *     this rule's original claim, no DONE/FAULTED/halt path actually clears
  *     a zone's `active` back to false -- grep finds no writer of `active =
- *     false` anywhere in this module. The rule still holds only because
- *     profile_executor_run() re-touches every bit of `p.zone_mask` for the
- *     NEXT run before that run reaches RUNNING, so a zone that was active
- *     under an old run and is active again under the new one never observes
- *     a false IDLE-with-active-zone gap. This is fragile, undocumented
- *     coupling, not a guarantee this rule's rationale can currently rely on;
- *     it is left as a known gap rather than fixed here.
+ *     false` on a zone_runtime_t anywhere in this module, so after
+ *     profile_executor_halt() sets IDLE every zone of the halted run still
+ *     reads active == true -- the data this rule describes as illegal does
+ *     exist, until the next run. It cannot reach the assert: the one
+ *     asserting call site (the control tick) is reached only on a tick that
+ *     found state == RUNNING at the top (every other state `continue`s
+ *     first), and no code inside that locked tick body writes IDLE (the only
+ *     IDLE writers are profile_executor_start() and halt(), each under its
+ *     own s_exec.lock take). profile_executor_run() then memset()s
+ *     s_exec.zones before setting the new run's zone_mask bits, so no stale
+ *     `active` survives into the next RUNNING tick. Known gap, left for a
+ *     follow-up: rule 4 is unenforced data hygiene today, not a live assert
+ *     hazard.
  *
  *  5. s_exec.dwelling == true AND s_exec.state NOT IN {RUNNING, PAUSED}.
  *     Reason: dwelling is only ever set true inside the RUNNING control
@@ -213,7 +219,14 @@ extern const char *PE_TAG;
  *     exec_enter_terminal_state() (profile_executor_relay_io.c), the one
  *     function that sets state AND clears dwelling/ramp_lock_held together;
  *     any future FAULTED/DONE transition must use it too, not assign
- *     s_exec.state directly, or this rule's guarantee breaks again.
+ *     s_exec.state directly, or this rule's guarantee breaks again. Of the
+ *     six, only escalate_guard_trip()'s three could actually reach the
+ *     assert (they run inside the RUNNING tick, before its check); the two
+ *     DONE branches `continue` before the check and the watchdog's FAULT
+ *     runs in another task, so those were stale data, not a panic path.
+ *     profile_executor_halt()'s IDLE transition still leaves dwelling as it
+ *     was -- unreachable by the assert for the same reason rule 4's gap is
+ *     (see above), and get_status() does not report dwelling while IDLE.
  *
  *  6. autotune per-zone state has no_setpoint == true AND method ==
  *     AUTOTUNE_METHOD_RELAY.
