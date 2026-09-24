@@ -3834,10 +3834,23 @@ Owner instruction, 2026-09-21.
   rerun** the stack suite against this fix — the last attempt
   (`20260924T084524Z_stack`) hit a preflight refusal on a stale MCP server,
   unrelated to the fix.
-- [ ] Capture a stack-margin baseline at the currently running commit
-  (`351304cb`/`6bb41fe1`) once the stack suite rerun above lands clean.
-- [ ] Run LCD-19 with `KILNCTL_LCD_PIN` set (unset on every run so far, so it
-  has never executed).
+- [x] Capture the `idle`-load stack-margin baseline at the currently running
+  commit — done, 2026-09-24 (`5c44ae95`,
+  `docs/stack_margin_baseline/stack_margin_idle_111b1b6f_20260924T175921Z.json`).
+- [ ] Capture the `mid_firing` and `web_ui_open` stack-margin baselines at the
+  currently running commit (`111b1b6f`/`6bb41fe1`) — both still only exist at
+  the older `75a5e459`.
+- [ ] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
+  timeout did not raise the PIN keypad", `keypad_raised=false`) root-caused
+  2026-09-24 as a runner defect, not firmware: `_wait_for_overlay_names(present=True)`
+  in `cases_lcd.py` exits on any non-empty tap-target set, and the home
+  page's own buttons satisfy it before LVGL processes the click (the case ran
+  0.92 s against a 2.0 s timeout). Firmware force-lock-on-enable
+  (`ui_lcd_lock.c`, `security_backend_web_auth.c`) is correct. Fix (a
+  baseline-then-changed wait) is in flight in the LCD runner round 3 commit —
+  runner fix pending, rerun required once it lands.
+- [ ] Profile/autotune same-zone start race fix (atomic per-zone claim in
+  `relay_authority.c`) is under review, not yet landed.
 - [x] Root-cause and fix the `profile_executor` dwell-fault panic hit by heat
   run `20260924T085059Z_heat` — done, 2026-09-24 (`3ce065ca` audit, `773ec669`
   fix, `adc7f65c` comment correction; see the top-of-file entry above).

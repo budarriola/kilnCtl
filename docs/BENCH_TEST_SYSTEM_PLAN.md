@@ -96,6 +96,12 @@ Judgment for SK-01/02 depends on **one dependency**: the baseline records must e
 
 **Baseline committed 2026-09-24.** `docs/stack_margin_baseline/stack_margin_mid_firing_75a5e459_20260924T075210Z.json` -- all 31 registered tasks (`pico_auto_update` excluded, on-demand per its own liveness tag), captured against firmware 75a5e459 read-only via `kiln_call(name="get_stack_margin")` while a firing was active (the more conservative of the required load conditions, per this file's §4.3 cross-reference to `DRAM_PSRAM_PLAN.md`). This resolves the `20260924T070821Z_stack` run's blanket INCONCLUSIVE (no committed baseline existed for any of the 31 tasks). Two tasks read CRITICAL under this load and are recorded as-is, not excluded: `touch_uart_bridge` (440 B free of 3072 B configured, 14.3% headroom) and `profile_executor` (612 B free of 4096 B configured, 14.9% headroom) -- SK-01 compares a live reading against what's committed here, it does not itself gate on this file being clean. Written via a new zero-board-access helper, `tools/PcTools/scripts/write_stack_margin_baseline_from_text.py`, which parses `get_stack_margin()`'s plain-text rendering (`kilnctrl.stack_margin_baseline.parse_stack_margin_report_text`) rather than opening its own board connection -- the existing `capture_stack_margin_baseline.py` writer needs a live UART connection of its own and was not usable by a caller restricted to the read-only MCP facade. The `idle` and `web_ui_open` conditions are still uncommitted; a task or run gathering those should extend this same directory rather than replace it.
 
+**`idle` baseline recaptured 2026-09-24 at the current bench firmware.**
+`docs/stack_margin_baseline/stack_margin_idle_111b1b6f_20260924T175921Z.json`
+(`5c44ae95`). `mid_firing` and `web_ui_open` still only exist at the older
+`75a5e459` above and need recapture at `111b1b6f`/`6bb41fe1` before all three
+load conditions are trustworthy for the current commit.
+
 ### 3.4 Suite OT — OTA, both processors (absorbs roadmap row `24f02f94`)
 
 This section is the home of the roadmap row "Thorough OTA testing of both processors". The Pico half is **blocked** until the two open defects land (`docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md`, `docs/audits/pico_ota_staged_crc_mismatch_2026-09-18.md`); until then every OT-P case reports `SKIP` with reason `pico_ota_defect_open` and the runner never attempts a Pico OTA (constraint: an attempt watchdog-resets the safety processor). All OT cases need `ap_password` (or an admin session when web auth is on) and take the config fingerprint below before and after.
@@ -349,7 +355,18 @@ crash report (`touch_log_tap_targets` panic); this wave is unit-level only.
 
 **Wave 2 — nightly (after 1a-1d).** **DONE (2026-09-19) except the LCD part.** `cases_web_rw.py` (WEB-DASH-13, WEB-DIAG-07/08, WEB-SEC-03) and `cases_ota.py` (OT-B01 + its SP-04 observer, OT-E01/E02/E03/E12) implement read-current / write-test / read-back / restore-in-`finally` throughout; a restore that does not round-trip FAILs unconditionally. WEB-SEC-03 takes its credential only from `KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` (SKIP if unset, never logged or persisted) and adds no HTTP route. `registry.py`'s explicit `_NIGHTLY_ORDER` carries the full §5.1 nightly membership in §5.2's fixed order (HP-01 before its SP-06 observer and SK-02, HP-02 before SP-03, OT-B01 before SP-04, the OT block strictly last); `RunOutcome.exit_code` is four-way (0 all-PASS, 1 a FAIL, 2 preflight refused, 3 SKIP/INCONCLUSIVE/NOT_RUN only), preserving §6 rule 11; `docs/BENCH_TEST_LOG.md` is written by `report.append_log_line()` (redacted, append-only, one line per run). All of it is unit-tested only — nothing in this wave has been run against the bench board (unacknowledged crash report blocks `capability_preflight`).
 
-**Wave 2 LCD part.** LCD-02/03/04/09/14/16/19 are wired in `cases_lcd.py`/`judgments.py` with `depends_on` LCD-02→HP-01, LCD-03→HP-04, LCD-04→OT-B01, LCD-19→WEB-SEC-04; observers report `NOT_RUN` when the case they read did not run, never a fabricated PASS. `cases_heat.py`'s `_case_hp04` stashes `ctx["_hp04"]` so LCD-03 has a real pause window to observe. Nothing in wave 2 remains open.
+**Wave 2 LCD part.** LCD-02/03/04/09/14/16/19 are wired in `cases_lcd.py`/`judgments.py` with `depends_on` LCD-02→HP-01, LCD-03→HP-04, LCD-04→OT-B01, LCD-19→WEB-SEC-04; observers report `NOT_RUN` when the case they read did not run, never a fabricated PASS. `cases_heat.py`'s `_case_hp04` stashes `ctx["_hp04"]` so LCD-03 has a real pause window to observe.
+
+**LCD-19, 2026-09-24: runner defect, not landed clean.** Run `20260924T180332Z_full`
+FAILed LCD-19 ("Start tap after the LCD timeout did not raise the PIN keypad",
+`keypad_raised=false`), root-caused to `_wait_for_overlay_names(present=True)`
+in `cases_lcd.py` exiting on any non-empty tap-target set — the home page's
+own buttons satisfy it before LVGL processes the click (the case ran 0.92 s
+against its 2.0 s timeout). Firmware force-lock-on-enable (`ui_lcd_lock.c`,
+`security_backend_web_auth.c`) is correct; no firmware defect. A fix (wait for
+the tap-target set to change from its pre-tap baseline, not merely be
+non-empty) is in flight in the LCD runner round 3 commit. Runner fix pending,
+rerun required.
 
 **Wave 3 â€” full (after 2).** AT-01..05 with rest gates, HP-03/HP-07, OT-E04..E10, FL-10/11 opt-in, WEB-SEC-05 last, `--attended` operator prompts for SP-08/09, WEB-WIFI-06, OT-E06. Touches the new package only. **AT/HP part DONE (2026-09-19):** `cases_autotune.py` (AT-01..05) and `cases_heat.py`'s `_case_hp03`/`_case_hp07` added, judges in `judgments.py`, unit-tested only (bench board still blocked by the unacknowledged crash report). **OT part DONE (2026-09-19):** OT-E04..E10 in `cases_ota.py`, with the Â§6 rule 1 live-interlock gate wired into every OTA action and OT-B01's dual reset additionally gated on relays de-energized. **FL/SEC/attended part DONE (2026-09-19):** FL-10/FL-11 (opt-in `allow_flash`), WEB-SEC-05 (ordered dead last), WEB-WIFI-06, SP-08/SP-09 via the new `--attended` operator-prompt mechanism (`operator.py`).
 
