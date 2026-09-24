@@ -8177,10 +8177,17 @@ static void test_exec_handle_mode_state_violation_forces_faulted_and_latches(voi
     s_exec.ramp_lock_held = true;
     s_exec.zones[0].active = true;
     s_exec.claimed_relay_mask = 0x01;
+    // An active non-relay IO segment: io_segs_tick() only runs while
+    // RUNNING, so the FAULTED transition itself must finish it (s_exec.io is
+    // NULL here, so io_seg_finish() only clears the tracking flag).
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = false;
 
-    exec_handle_mode_state_violation(1u, "rule 5: DONE while dwelling");
+    bool forced = exec_handle_mode_state_violation(1u, "rule 5: DONE while dwelling");
 
+    TEST_CHECK(forced, "the first violation must report that it newly forced FAULTED (caller records the breadcrumb)");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "a violation must force FAULTED, not reboot");
+    TEST_CHECK(!s_exec.io_segs[0].active, "relay/IO segments must be force-finished, same as a guard trip");
     TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared entering the terminal state");
     TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared entering the terminal state");
     TEST_CHECK(g_relay_release_calls == 1, "relays/claim must be released exactly once (heaters off)");
@@ -8195,7 +8202,8 @@ static void test_exec_handle_mode_state_violation_forces_faulted_and_latches(voi
     // real control tick would call this every tick if the offending state
     // isn't otherwise cleared, and it must not spam the log or re-release
     // an already-released claim on every one of those ticks).
-    exec_handle_mode_state_violation(1u, "rule 5: DONE while dwelling");
+    forced = exec_handle_mode_state_violation(1u, "rule 5: DONE while dwelling");
+    TEST_CHECK(!forced, "a second call while latched must not report a new FAULTED transition");
     TEST_CHECK(g_relay_release_calls == 1, "a second call while latched must not re-release the claim");
     TEST_CHECK(s_exec.mode_state_violation_count == 2, "the lifetime counter still counts every occurrence");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must remain FAULTED, not be reassigned again");
@@ -8207,18 +8215,40 @@ static void test_exec_handle_mode_state_violation_noop_when_clean(void)
     reset_mode_state_violation_test_state();
     s_exec.state = PROFILE_EXEC_RUNNING;
 
-    exec_handle_mode_state_violation(0u, NULL);
+    bool forced = exec_handle_mode_state_violation(0u, NULL);
 
+    TEST_CHECK(!forced, "no violation must report no FAULTED transition");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "no violation must never force a state change");
     TEST_CHECK(!s_exec.mode_state_fault_latched, "no violation must never set the latch");
     TEST_CHECK(s_exec.mode_state_violation_count == 0, "no violation must never bump the counter");
     TEST_CHECK(g_relay_release_calls == 0, "no violation must never touch the relay claim");
 }
 
+static void test_exec_handle_mode_state_violation_keeps_existing_fault_reason(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- an already-FAULTED run keeps its guard-trip "
+                 "fault_reason/fault_guard");
+    reset_mode_state_violation_test_state();
+    s_exec.state = PROFILE_EXEC_FAULTED;
+    s_exec.dwelling = true;
+    strncpy(s_exec.fault_reason, "36.4C >= max_temp_c 36.4C", sizeof(s_exec.fault_reason) - 1);
+    s_exec.fault_guard = THERMAL_GUARD_TRIP_MAX_TEMP;
+
+    bool forced = exec_handle_mode_state_violation(1u, "rule 5: FAULTED while dwelling");
+
+    TEST_CHECK(forced, "the first violation still latches and tears down");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state stays FAULTED");
+    TEST_CHECK(!s_exec.dwelling, "dwelling is cleared by exec_enter_terminal_state()");
+    TEST_CHECK(strcmp(s_exec.fault_reason, "36.4C >= max_temp_c 36.4C") == 0,
+              "the guard trip's own fault_reason must not be overwritten by the violation message");
+    TEST_CHECK(s_exec.fault_guard == THERMAL_GUARD_TRIP_MAX_TEMP, "the guard trip's fault_guard must survive");
+}
+
 static void run_test_exec_handle_mode_state_violation(void)
 {
     test_exec_handle_mode_state_violation_forces_faulted_and_latches();
     test_exec_handle_mode_state_violation_noop_when_clean();
+    test_exec_handle_mode_state_violation_keeps_existing_fault_reason();
     reset_mode_state_violation_test_state();
 }
 

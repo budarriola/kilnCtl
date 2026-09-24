@@ -195,49 +195,50 @@ uint32_t exec_mode_state_check(char *out_first_violation, size_t out_cap)
  * kind of harm. mode_state_violation_count is a lifetime-of-this-boot
  * diagnostics counter (never reset), reported over GET /api/profile_exec,
  * so this class of violation is visible without grepping the device log
- * ring (which drops lines silently under volume). Must be called with
- * s_exec.lock held. */
-void exec_handle_mode_state_violation(uint32_t mode_violations, const char *first_violation)
+ * ring (which drops lines silently under volume). Returns true only on the
+ * call that newly forced FAULTED, so the caller can record the run-state
+ * breadcrumb exactly as it does for a guard trip (run_faulted_this_tick).
+ * Must be called with s_exec.lock held. */
+bool exec_handle_mode_state_violation(uint32_t mode_violations, const char *first_violation)
 {
     if (mode_violations == 0) {
-        return;
+        return false;
     }
     s_exec.mode_state_violation_count++;
     if (s_exec.mode_state_fault_latched) {
         /* Already forced FAULTED for this run -- don't re-log or re-force
          * relays off every tick. */
-        return;
+        return false;
     }
     s_exec.mode_state_fault_latched = true;
     ESP_LOGE(PE_TAG,
              "exec_mode_state_check found %lu violation(s) -- forcing FAULTED, heaters off, run continues "
              "(no reboot): %s",
              (unsigned long)mode_violations, first_violation != NULL ? first_violation : "?");
-    s_exec.state = PROFILE_EXEC_FAULTED;
-    /* Same per-run scratch-flag clearing exec_enter_terminal_state() (a
-     * sibling worktree's fix for the specific dwelling-left-stale sequence,
-     * docs/audits/profile_executor_panic_2026-09-24.md) does -- inlined here
-     * rather than calling that helper because it does not exist in this
-     * worktree's tree; if it lands first, this can call it directly instead
-     * of repeating its two assignments. */
-    s_exec.dwelling = false;
-    s_exec.ramp_lock_held = false;
-    strncpy(s_exec.fault_reason, first_violation != NULL ? first_violation : "exec_mode_state_check violation",
-            sizeof(s_exec.fault_reason) - 1);
-    s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
-    s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE; /* not a thermal_guard_trip_t fault -- see fault_guard's own doc */
-    /* Abnormal stop -- same two-call discipline escalate_guard_trip()'s
-     * GLOBAL branch uses (relay_io.c): force every active zone's relay off
-     * AND release this run's relay claim, so a relay this run touched is not
-     * left refused to /api/relay, the LCD, or the UART bridge as "owned by a
-     * running profile" once no profile is actually running (the exact bug
-     * fixed for guard trips before this -- see release_profile_relay_claim()'s
-     * own doc comment). io_segs_force_all_off() is deliberately NOT called
-     * here -- unlike a genuine guard trip, a mode-state violation says
-     * nothing about relay/IO segments, so leave that machinery to whichever
-     * transition path actually reached this violation. */
+    /* An already-FAULTED run (a guard trip earlier this tick) keeps its own
+     * fault_reason/fault_guard -- that is the cause the operator needs; the
+     * violation itself is still logged above and counted. */
+    bool was_faulted = (s_exec.state == PROFILE_EXEC_FAULTED);
+    exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
+    if (!was_faulted) {
+        strncpy(s_exec.fault_reason, first_violation != NULL ? first_violation : "exec_mode_state_check violation",
+                sizeof(s_exec.fault_reason) - 1);
+        s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
+        s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE; /* not a thermal_guard_trip_t fault -- see fault_guard's own doc */
+    }
+    /* Abnormal stop -- same relay teardown escalate_guard_trip()'s GLOBAL
+     * branch and the watchdog's forced FAULTED transition use: force every
+     * active zone's relay off, force every relay/IO segment off without
+     * honoring leave_on_at_end (io_segs_tick() only runs while RUNNING, so
+     * nothing else would ever finish a segment once this run is FAULTED),
+     * then release this run's relay claim, heat claim and K4 request so a
+     * relay this run touched is not left refused to /api/relay, the LCD, or
+     * the UART bridge as "owned by a running profile" -- see
+     * release_profile_relay_claim()'s own doc comment. */
     force_all_relays_off();
+    io_segs_force_all_off(false);
     release_profile_relay_claim();
+    return true;
 }
 
 static int16_t history_pack_temp(float c)
@@ -1879,7 +1880,9 @@ void executor_task_entry(void *arg)
             char mode_violation[160];
             uint32_t mode_violations = exec_mode_state_check(mode_violation, sizeof(mode_violation));
 #if defined(ESP_PLATFORM)
-            exec_handle_mode_state_violation(mode_violations, mode_violation);
+            if (exec_handle_mode_state_violation(mode_violations, mode_violation)) {
+                run_faulted_this_tick = true; /* record the FAULTED breadcrumb, same as a guard trip */
+            }
 #else
             assert(mode_violations == 0 && "exec_mode_state_check found a mode-state violation -- see the ESP_LOGE just above for which rule");
 #endif

@@ -212,6 +212,13 @@ time. They were not a firmware defect.
    are already off by this point, and a reboot mid-firing destroys the
    run/history evidence. A logged fault plus a latched FAULTED state may serve
    better than `abort()`. This is an owner decision.
+   **Decided and implemented 2026-09-24:** on a target build (`ESP_PLATFORM`)
+   a violation now logs once, forces FAULTED with heaters off through the
+   same teardown as a GLOBAL guard trip, latches per run, and counts in a
+   lifetime `mode_state_violation_count` on `GET /api/profile_exec`. It never
+   reboots. Host and debug builds keep the `assert()`. See
+   `exec_handle_mode_state_violation()` in `profile_executor.c` and
+   `docs/COMPLETED_2026-09.md`.
 5. **Harness:** add a run-level exclusivity lock to `bench_test_run` (or refuse
    `suite="heat"` while another heat run is live), so two sessions cannot share
    slot 7 on one board.

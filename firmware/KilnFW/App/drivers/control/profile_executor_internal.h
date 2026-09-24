@@ -1546,10 +1546,12 @@ uint32_t exec_mode_state_check(char *out_first_violation, size_t out_cap);
  * rationale. Left compiled and callable on every build (host included) so a
  * host test can drive it directly, even though the real control-loop call
  * site only reaches it on ESP_PLATFORM (host/debug builds hard-assert
- * instead). A no-op if mode_violations == 0. Must be called with
+ * instead). A no-op returning false if mode_violations == 0 or the latch
+ * is already set; returns true only on the call that newly forced FAULTED
+ * (the caller then sets run_faulted_this_tick). Must be called with
  * s_exec.lock held -- same precondition as exec_mode_state_check() itself,
- * which only reads state, plus escalate_guard_trip()'s force_all_relays_off()
- * call this makes. */
-void exec_handle_mode_state_violation(uint32_t mode_violations, const char *first_violation);
+ * which only reads state, plus the force_all_relays_off()/
+ * io_segs_force_all_off()/release_profile_relay_claim() teardown this makes. */
+bool exec_handle_mode_state_violation(uint32_t mode_violations, const char *first_violation);
 
 #endif /* PROFILE_EXECUTOR_INTERNAL_H */
