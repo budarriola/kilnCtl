@@ -620,6 +620,11 @@
       if (!forgotModalVisible()) return;
       if (evt.key === 'Escape' || evt.keyCode === 27) {
         evt.preventDefault();
+        // This listener is registered once, during the first login modal;
+        // every later login modal's own capture listener on `document` runs
+        // AFTER it. closeForgotModal() resumes that login synchronously, so
+        // without this the same Escape would fall through and cancel it.
+        if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
         closeForgotModal();
         return;
       }

@@ -174,7 +174,10 @@ function makeFakeDom() {
       if (i !== -1) arr.splice(i, 1);
     },
     dispatch(type, evt) {
-      (documentListeners[type] || []).slice().forEach((fn) => fn(evt));
+      for (const fn of (documentListeners[type] || []).slice()) {
+        fn(evt);
+        if (evt && evt._stopped) break;
+      }
     },
     activeElement: null,
     _listenerCount(type) { return (documentListeners[type] || []).length; },
@@ -493,6 +496,33 @@ function flush() {
       'login keydown listener removed on finish (only the reset modal\'s page-lifetime one remains)');
     dom.registry['.kc-login-forgot-link'].dispatch('click');
     assert(ctx.forgotModalEl.hidden === true, 'forgot link is inert once no login is pending');
+  }
+
+  // Group 11b: a SECOND login modal on the same page load. The reset
+  // modal's page-lifetime keydown listener was registered during the first
+  // login, so for the second one it now runs BEFORE the login's own
+  // capture listener: Escape must close only the reset modal, never also
+  // fall through to the just-resumed login and cancel it.
+  {
+    const { ctx, dom } = makeContext({ withLogin: true });
+    const p1 = ctx.openLoginModal('Administrator login required');
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    dom.registry['kc-forgot-cancel1'].dispatch('click');
+    dom.registry['.kc-login-cancel'].dispatch('click', { preventDefault() {}, target: null });
+    await p1;
+    let settled2;
+    const p2 = ctx.openLoginModal('Administrator login required').then((ok) => { settled2 = ok; });
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    const evt = { key: 'Escape', preventDefault() {}, stopImmediatePropagation() { this._stopped = true; } };
+    // Honour stopImmediatePropagation the way a browser would.
+    dom.document.dispatch('keydown', evt);
+    await flush();
+    assert(settled2 === undefined, 'second login: Escape in the reset modal does not cancel the resumed login');
+    assert(ctx.forgotModalEl.hidden === true && ctx.loginModalEl.hidden === false,
+      'second login: Escape closes the reset modal and resumes the login modal');
+    dom.registry['.kc-login-cancel'].dispatch('click', { preventDefault() {}, target: null });
+    await p2;
+    assert(settled2 === false, 'second login still settles on its own Cancel');
   }
 
   // Group 10: no localStorage/sessionStorage reference exists in this code
