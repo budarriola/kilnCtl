@@ -171,12 +171,27 @@ def _start_bench_profile(
     return True, "", ambient
 
 
+#: Key `_cleanup_bench_profile` accumulates pre-delete firing-history
+#: snapshots into (a list, since a suite runs several HP cases back to back
+#: and each one's teardown adds its own snapshot). `_case_hp08` reads this
+#: list rather than a live GET, since by the time it runs the hidden slot's
+#: history has already been erased by every prior case's own cleanup.
+HP_FIRING_HISTORY_SNAPSHOTS_KEY = "_hp_firing_history_snapshots"
+
+
 def _cleanup_bench_profile(ctx: dict) -> None:
     """Best-effort restore, called from every case's `finally`: stop
-    whatever is still running and delete the hidden bench slot. Never
-    raises -- a cleanup failure must not mask the case's own verdict, and
-    the next case's own preflight/rest-gate will catch a board left in a
-    bad state."""
+    whatever is still running, snapshot the hidden slot's firing history,
+    and delete the hidden bench slot. Never raises -- a cleanup failure must
+    not mask the case's own verdict, and the next case's own preflight/
+    rest-gate will catch a board left in a bad state.
+
+    The history snapshot must happen BEFORE the delete: `profiles_http_
+    delete()` erases the slot's firing history (`profiles_http.c:1004`,
+    `firing_stats_erase`), so any case (e.g. HP-08) that wants to judge what
+    a run actually recorded has to read it here, in the one place every HP
+    case's teardown funnels through, or it will always find the record
+    already gone."""
     srv = _srv(ctx)
     # Stop UNCONDITIONALLY, in its own try: "stopping the host does not stop
     # a firing" (memory project_stopping_host_does_not_stop_firing), so the
@@ -189,6 +204,15 @@ def _cleanup_bench_profile(ctx: dict) -> None:
         srv._profiles.stop()
     except Exception:
         pass
+    host = ctx.get("host")
+    if host:
+        try:
+            get_json = ctx.get("_http_get_json", _http_get_json)
+            status, body = get_json(host, f"/api/firing_history?profile_id={BENCH_PROFILE_SLOT_ID}")
+            if status == 200:
+                ctx.setdefault(HP_FIRING_HISTORY_SNAPSHOTS_KEY, []).append(body)
+        except Exception:
+            pass
     try:
         srv._profiles.delete(BENCH_PROFILE_SLOT_ID)
     except Exception:
@@ -379,26 +403,48 @@ def _case_hp06(ctx: dict) -> CaseResult:
         _cleanup_bench_profile(ctx)
 
 
+def _entries_from_body(body: Any) -> List[dict]:
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        return body.get("records") or body.get("runs") or body.get("entries") or []
+    return []
+
+
 def _case_hp08(ctx: dict) -> CaseResult:
     """`GET /api/firing_history` requires a `profile_id` query parameter
     (`firing_history_get_handler()`, `dashboard_exec_http.c`) -- it has no
     concept of "all profiles" and 400s with no id at all. HP-01..05 all ran
     their firing through the hidden `BENCH_PROFILE_SLOT_ID` slot, so that
-    slot's own id is the one history to read back."""
+    slot's own id is the one history to read back.
+
+    Found on hardware 2026-09-24: reading it live here always finds it
+    empty, because every HP case's own `finally` runs
+    `_cleanup_bench_profile()`, which deletes the hidden slot --
+    `profiles_http_delete()` erases that slot's firing history
+    (`profiles_http.c:1004`, `firing_stats_erase`) as part of the delete.
+    By the time this case runs (whether standalone after another HP case's
+    teardown, or last in a suite), the record is already gone regardless of
+    the `profile_id` param being correct. Fix: `_cleanup_bench_profile()`
+    snapshots `GET /api/firing_history?profile_id=...` into
+    `ctx[HP_FIRING_HISTORY_SNAPSHOTS_KEY]` BEFORE every delete, so this case
+    judges whichever snapshot(s) a prior run in this same suite execution
+    left behind. A live GET is kept as a fallback (e.g. this case run in
+    isolation, immediately after starting a firing by hand, before any
+    cleanup has run) but will normally see nothing, same as before this fix."""
+    snapshots = ctx.get(HP_FIRING_HISTORY_SNAPSHOTS_KEY)
+    if snapshots:
+        entries: List[dict] = []
+        for body in snapshots:
+            entries.extend(_entries_from_body(body))
+        return J.judge_firing_history(entries, expected_name_prefix=BENCH_PROFILE_NAME)
     host = ctx.get("host")
     if not host:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx")
     status, body = _http_get_json(host, f"/api/firing_history?profile_id={BENCH_PROFILE_SLOT_ID}")
     if status != 200:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/firing_history: status={status}", observed={"body": body})
-    entries: List[dict]
-    if isinstance(body, list):
-        entries = body
-    elif isinstance(body, dict):
-        entries = body.get("records") or body.get("runs") or body.get("entries") or []
-    else:
-        entries = []
-    return J.judge_firing_history(entries, expected_name_prefix=BENCH_PROFILE_NAME)
+    return J.judge_firing_history(_entries_from_body(body), expected_name_prefix=BENCH_PROFILE_NAME)
 
 
 def _case_hp03(ctx: dict) -> CaseResult:
@@ -477,30 +523,88 @@ def _case_hp03(ctx: dict) -> CaseResult:
             pass
 
 
+#: Margin above ambient both the lowered `max_temp_c` limit and the
+#: profile's own target are set to (HP-07) -- kept as one named constant so
+#: the limit-side POST and the target-side `_start_bench_profile` call can
+#: never drift apart and accidentally leave `target_c > limit_c`, which
+#: `profile_executor_run.c` refuses outright at start time.
+_HP07_MARGIN_C = 3.0
+
+
+def _run_hp07_profile(ctx: dict, target_zone: int) -> CaseResult:
+    """The heat/poll/ack body of HP-07, once the zone's `max_temp_c` limit is
+    already lowered (to `_HP07_MARGIN_C` above ambient) and the hidden slot
+    has not yet been started. Starts a profile whose target is the SAME
+    ambient + `_HP07_MARGIN_C` margin -- never above the just-lowered limit,
+    since `profile_executor_run.c`'s start-time re-validation refuses
+    outright (never clamps) a segment target greater than the zone's
+    *current* max_temp_c -- and lets the setpoint's approach/overshoot cross
+    that limit live, tripping `thermal_guard.c`'s runtime check
+    (`measurement_c >= max_temp_c`, evaluated every guard tick)."""
+    ok, reason, ambient_at_start = _start_bench_profile(
+        ctx, zone_mask=1 << target_zone, target_offset_c=_HP07_MARGIN_C,
+    )
+    if not ok:
+        return CaseResult(Verdict.FAIL, reason=reason)
+    srv = _srv(ctx)
+    sleep = ctx.get("_sleep", time.sleep)
+    now = ctx.get("_now", time.monotonic)
+    deadline = now() + 240.0
+    st = None
+    state = "running"
+    while now() < deadline:
+        st = srv._profiles.get_exec_status()
+        state = st.state_name
+        if state == "faulted":
+            break
+        sleep(2)
+    if st is None or state != "faulted":
+        return CaseResult(Verdict.FAIL, reason=f"never reached FAULTED within 240s (last state={state})")
+    zone_status = st.zones[target_zone] if target_zone < len(st.zones) else None
+    faulted = bool(getattr(zone_status, "faulted", False))
+    fault_guard = getattr(zone_status, "fault_guard", None)
+    ack_result = srv._profiles.stop()
+    sleep(2)
+    st_after = srv._profiles.get_exec_status()
+    return J.judge_faulted_run(
+        state_name=state, faulted=faulted, fault_guard=fault_guard,
+        ack_ok=bool(ack_result.ok), post_ack_state=st_after.state_name,
+    )
+
+
 def _case_hp07(ctx: dict) -> CaseResult:
     """HP-01's profile, but the target zone's `max_temp_c` limit is lowered
-    to 3C above ambient *while the profile is already RUNNING*, so the
-    software thermal guard trips it live (a `dashboard` zone-config field,
-    never a Pico/safety trip) -- expects FAULTED with fault_guard naming the
-    over-max-temp guard, and confirms the sticky bar's Acknowledge
-    (`profiles.stop()`, mirroring the web UI's POST /api/profile_exec/stop)
-    clears it. Restores the zone's original max_temp_c in `finally`.
+    to 3C above ambient BEFORE the profile starts, and the profile's own
+    target is set to exactly that (already-lowered) limit -- so the
+    setpoint's approach/overshoot crosses the limit live and the software
+    thermal guard trips it (a `dashboard` zone-config field, never a Pico/
+    safety trip). Expects FAULTED with fault_guard naming the over-max-temp
+    guard, and confirms the sticky bar's Acknowledge (`profiles.stop()`,
+    mirroring the web UI's POST /api/profile_exec/stop) clears it. Restores
+    the zone's original max_temp_c in `finally`.
 
-    Found on hardware 2026-09-24 (run 20260924T072516Z_heat): lowering the
-    limit BEFORE calling `profiles.start()` never reaches the runtime guard
-    at all -- `profile_executor_run.c`'s start-time re-validation
-    (`profile_executor_run.c:320-339`) refuses outright, naming "refused,
-    not clamped", whenever a segment's target exceeds the zone's *current*
-    max_temp_c at start time; this is a deliberate, unconditional hard
-    refusal (PID_EXPANSION_PLAN.md sec 7.2 -- "a target above the kiln's
-    permitted maximum is refused and NEVER stretched"), not a bug, and it
-    makes the runtime FAULTED path (`thermal_guard.c`'s
-    `measurement_c >= max_temp_c` check, evaluated live every guard tick
-    against whatever `zones_config_get_temp_limits()` currently returns)
-    unreachable if the limit is already below the target before start. So
-    this case starts the profile against the zone's UNMODIFIED (wide-enough)
-    limit first -- same as HP-01 -- confirms RUNNING, and only then lowers
-    max_temp_c out from under the live run to provoke the runtime trip."""
+    Found on hardware 2026-09-24 (run 20260924T072516Z_heat), TWICE:
+
+    1. Lowering the limit BEFORE `profiles.start()` never reaches the
+       runtime guard at all if the profile's OWN target is still above the
+       old (wide) limit -- `profile_executor_run.c`'s start-time
+       re-validation (`profile_executor_run.c:320-339`) refuses outright,
+       naming "refused, not clamped", whenever a segment's target exceeds
+       the zone's *current* max_temp_c at start time; deliberate,
+       unconditional (PID_EXPANSION_PLAN.md sec 7.2 -- "a target above the
+       kiln's permitted maximum is refused and NEVER stretched"), not a bug.
+
+    2. The first fix (lower the limit AFTER confirming RUNNING) does not
+       work either: `POST /api/zones` while RUNNING is refused 409 by
+       `ota_http_check_interlocks()` (`zones_http_post.c:44-48`,
+       `ota_interlock.c:56-57`) -- deliberate, not a bug, and there is no
+       software surface to lower a limit on a zone that is actively firing.
+
+    The only sequencing that reaches the runtime guard at all: lower the
+    limit while IDLE (allowed), then start a profile whose OWN target
+    equals that lowered limit (`profile_executor_run.c` refuses only a
+    target ABOVE the zone's current max_temp_c, so target == limit is
+    accepted), and let the live approach/overshoot cross it."""
     from .. import zones_http_client
 
     rested, rest_reason = _rest_gate(ctx)
@@ -514,6 +618,7 @@ def _case_hp07(ctx: dict) -> CaseResult:
     if not zone_temps:
         return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as an ambient reference")
     ambient = min(zone_temps.values())
+    limit_c = ambient + _HP07_MARGIN_C
     try:
         snapshot = zones_http_client.get_zones(host)
     except Exception as exc:
@@ -522,65 +627,44 @@ def _case_hp07(ctx: dict) -> CaseResult:
         restore_body = zones_http_client.build_post_body(snapshot, {})
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build a restore body from the snapshot: {exc}")
-    preset = {"zones": [{"index": target_zone, "max_temp_c": ambient + 3.0}]}
+    preset = {"zones": [{"index": target_zone, "max_temp_c": limit_c}]}
     try:
         limited_body = zones_http_client.build_post_body(snapshot, preset)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build the lowered-limit preset body: {exc}")
+
+    # Lower the limit WHILE IDLE -- the profile has not been started yet, so
+    # this POST is not subject to the RUNNING interlock 409 above.
     try:
-        ok, reason, _ambient = _start_bench_profile(
-            ctx, zone_mask=1 << target_zone, target_offset_c=15.0,
-        )
-        if not ok:
-            return CaseResult(Verdict.FAIL, reason=reason)
-        srv = _srv(ctx)
-        sleep = ctx.get("_sleep", time.sleep)
-        now = ctx.get("_now", time.monotonic)
-        # Confirm RUNNING before pulling the limit out from under it -- a
-        # premature POST while the executor is still transitioning could
-        # itself be refused or race the start-time re-validation.
-        running_deadline = now() + 30.0
-        state = "starting"
-        while now() < running_deadline:
-            st = srv._profiles.get_exec_status()
-            state = st.state_name
-            if state == "running":
-                break
-            sleep(1)
-        if state != "running":
-            return CaseResult(Verdict.FAIL, reason=f"never reached RUNNING within 30s (last state={state})")
-        try:
-            post_result = zones_http_client.post_zones(host, limited_body)
-        except Exception as exc:
-            return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
-        if post_result != "ok":
-            return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
-        deadline = now() + 240.0
-        st = None
-        while now() < deadline:
-            st = srv._profiles.get_exec_status()
-            state = st.state_name
-            if state == "faulted":
-                break
-            sleep(2)
-        if st is None or state != "faulted":
-            return CaseResult(Verdict.FAIL, reason=f"never reached FAULTED within 240s (last state={state})")
-        zone_status = st.zones[target_zone] if target_zone < len(st.zones) else None
-        faulted = bool(getattr(zone_status, "faulted", False))
-        fault_guard = getattr(zone_status, "fault_guard", None)
-        ack_result = srv._profiles.stop()
-        sleep(2)
-        st_after = srv._profiles.get_exec_status()
-        return J.judge_faulted_run(
-            state_name=state, faulted=faulted, fault_guard=fault_guard,
-            ack_ok=bool(ack_result.ok), post_ack_state=st_after.state_name,
-        )
+        post_result = zones_http_client.post_zones(host, limited_body)
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) failed: {exc}")
+    if post_result != "ok":
+        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (lowered max_temp_c) refused: {post_result}")
+
+    restore_note: Optional[str] = None
+    result: Optional[CaseResult] = None
+    try:
+        result = _run_hp07_profile(ctx, target_zone)
     finally:
+        # Unconditional: stop whatever is still running and delete the
+        # hidden slot before touching zone config again.
         _cleanup_bench_profile(ctx)
         try:
-            zones_http_client.post_zones(host, restore_body)
-        except Exception:
-            pass
+            restore_result = zones_http_client.post_zones(host, restore_body)
+            if restore_result != "ok":
+                restore_note = f"limit restore POST refused: {restore_result}"
+        except Exception as exc:
+            restore_note = f"limit restore POST failed: {type(exc).__name__}: {exc}"
+    if restore_note:
+        # A failed restore must surface in the verdict, never be silently
+        # swallowed -- a zone left with a 3C-above-ambient max_temp_c would
+        # refuse every subsequent case's own profile start.
+        if result is None:
+            return CaseResult(Verdict.FAIL, reason=restore_note)
+        combined_reason = f"{result.reason}; {restore_note}" if result.reason else restore_note
+        return CaseResult(Verdict.FAIL, reason=combined_reason, observed=result.observed)
+    return result
 
 
 _CASE_FUNCS = {

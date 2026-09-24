@@ -301,7 +301,7 @@ class _FakeZonesHttpClient:
     replays a canned snapshot for GET, so HP-03/HP-07 can be exercised
     without a board or real HTTP."""
 
-    def __init__(self, snapshot=None):
+    def __init__(self, snapshot=None, profiles=None):
         self.snapshot = snapshot or {
             "thermo_count": 3, "relay_count": 3,
             "zones": [
@@ -312,6 +312,12 @@ class _FakeZonesHttpClient:
         }
         self.posted_bodies = []
         self.post_result = "ok"
+        # Optional: a _FakeProfilesClient(HP) to check against, so post_zones
+        # can simulate the real firmware's RUNNING interlock -- 409 refused
+        # (zones_http_post.c:44-48, ota_interlock.c:56-57) whenever the
+        # profile has been started and not yet stopped.
+        self.profiles = profiles
+        self.post_calls = []
 
     def get_zones(self, host):
         return self.snapshot
@@ -327,6 +333,12 @@ class _FakeZonesHttpClient:
         return {"current": current, "preset": preset, "merged": merged}
 
     def post_zones(self, host, body):
+        was_running = bool(
+            self.profiles is not None and self.profiles.started and not self.profiles.stop_called
+        )
+        self.post_calls.append({"body": body, "was_running": was_running})
+        if was_running:
+            return "refused: HTTP 409: ota interlock active (profile RUNNING)"
         self.posted_bodies.append(body)
         return self.post_result
 
@@ -495,6 +507,34 @@ class HP07Test(unittest.TestCase):
         result = C._case_hp07(ctx)
         self.assertEqual(result.verdict, Verdict.SKIP)
 
+    def test_never_posts_zones_while_running(self):
+        """Regression for the 2026-09-24 finding: POST /api/zones while
+        RUNNING is refused 409 by the OTA/config-write interlock
+        (zones_http_post.c:44-48, ota_interlock.c:56-57), so the limit must
+        be lowered BEFORE the profile starts and restored only after it has
+        been stopped -- never while `_FakeProfilesClientHP` reports the
+        profile as started-and-not-yet-stopped."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP()]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        self.fake_zhc.profiles = profiles
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertTrue(self.fake_zhc.post_calls, "expected at least one zones POST")
+        self.assertFalse(
+            any(c["was_running"] for c in self.fake_zhc.post_calls),
+            "a zones POST happened while the profile was RUNNING -- would be refused 409 on real hardware",
+        )
+        # Exactly two POSTs: lower the limit (while IDLE, before start), then
+        # restore it (after stop, in `finally`).
+        self.assertEqual(len(self.fake_zhc.post_calls), 2)
+        self.assertEqual(self.fake_zhc.post_calls[0]["body"]["preset"]["zones"][0]["max_temp_c"], 27.0)
+        self.assertEqual(self.fake_zhc.post_calls[1]["body"]["preset"], {})
+
 
 class HP08Test(unittest.TestCase):
     """GET /api/firing_history requires profile_id (400 without it) -- the
@@ -535,18 +575,71 @@ class HP08Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_missing_profile_id_param_NEGATIVE(self):
-        """Reproduces the original HP-08 bug directly: a call with no
-        profile_id query param at all is what the un-fixed harness sent, and
-        firmware 400s it."""
+        """Reproduces the original HP-08 bug directly, through the actual
+        case function: a call with no profile_id query param at all is what
+        the un-fixed harness sent, and firmware 400s it. This must call
+        C._case_hp08 itself (not just its own local fake in isolation) so it
+        can actually fail if a future edit ever drops the `?profile_id=...`
+        query param the fix added -- the previous version of this test only
+        asserted on a bare local function call and could never fail."""
         def fake_get(host, path):
             if "profile_id" not in path:
                 return 400, {"error": "profile_id missing"}
-            return 200, {"records": []}
+            return 200, {"records": [{
+                "profile_name": C.BENCH_PROFILE_NAME, "run_started_unix_s": 1, "duration_s": 10,
+            }]}
 
         orig = C._http_get_json
         C._http_get_json = fake_get
         try:
-            status, _ = C._http_get_json("10.0.0.5", "/api/firing_history")
+            # No snapshot in ctx -- forces the live-GET fallback path, which
+            # is the one that must include profile_id in the query string.
+            result = C._case_hp08({"host": "10.0.0.5"})
         finally:
             C._http_get_json = orig
-        self.assertEqual(status, 400)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_uses_snapshot_before_a_live_get(self):
+        """`_cleanup_bench_profile()` snapshots firing history into ctx
+        before deleting the hidden slot (the slot's history is erased by the
+        delete) -- `_case_hp08` must judge that snapshot rather than issuing
+        a live GET that would always find the slot's history already gone."""
+        ctx = {
+            "host": "10.0.0.5",
+            C.HP_FIRING_HISTORY_SNAPSHOTS_KEY: [
+                {"records": [{
+                    "profile_name": C.BENCH_PROFILE_NAME, "run_started_unix_s": 1, "duration_s": 10,
+                }]},
+            ],
+        }
+
+        def _should_not_be_called(host, path):
+            raise AssertionError("a live GET was made even though a snapshot was present")
+
+        orig = C._http_get_json
+        C._http_get_json = _should_not_be_called
+        try:
+            result = C._case_hp08(ctx)
+        finally:
+            C._http_get_json = orig
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_cleanup_snapshots_history_before_deleting_the_slot(self):
+        """The teardown itself: `_cleanup_bench_profile()` must GET firing
+        history and stash it in ctx BEFORE calling delete()."""
+        profiles = _FakeProfilesClient()
+        srv = _FakeSrv(profiles=profiles)
+        calls = []
+
+        def fake_get(host, path):
+            calls.append(path)
+            return 200, {"records": [{"profile_name": C.BENCH_PROFILE_NAME}]}
+
+        ctx = {"srv": srv, "host": "10.0.0.5", "_http_get_json": fake_get}
+        C._cleanup_bench_profile(ctx)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(f"profile_id={C.BENCH_PROFILE_SLOT_ID}", calls[0])
+        self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
+        snapshots = ctx.get(C.HP_FIRING_HISTORY_SNAPSHOTS_KEY)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["records"][0]["profile_name"], C.BENCH_PROFILE_NAME)
