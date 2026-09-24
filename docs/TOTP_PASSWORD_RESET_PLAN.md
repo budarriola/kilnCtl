@@ -372,20 +372,18 @@ enrollment/disable handlers on the existing settings-page route(s).
 `check_uri_handler_cap.ps1` in the same commit regardless. Depends on:
 nothing outside this tree; independent of the `lazylogin` worktree.
 Checks: `-Only "check_uri_handler_cap|check_00_kilnfw_target_build|check_nvs_key"`
-plus a full `run_all_checks.ps1` before commit.
+plus a full `run_all_checks.ps1` before commit. **Also fix in this commit:**
+`check_flash_worker_lint.ps1` is currently RED on main because
+`totp_config.c` (`0f5151f0`) writes NVS outside the lint allowlist -- add it
+to the allowlist (or restructure the write) as part of landing these routes,
+not as a separate follow-up.
 
-**WT-B — web UI: enrollment page + forgot-password modal flow.** Sizes:
-medium. Files: `settings_page.html` (TOTP enrollment block: QR + manual
-key + verify-code field + disable button), the `lazylogin`-worktree login
-modal's "Forgot password?" link and its two-step inline form (code entry,
-then new password) — coordinate merge order with that worktree, do not fork
-its markup independently, same caution the email plan already gave.
-Depends on: WT-A's routes existing (can be stubbed/mocked during
-development) and ideally `lazylogin` merging first or in parallel with
-active coordination. Checks: `-Only "check_ui_responsive_sweep|check_lint_pages"`.
-Acceptance: QR renders and scans correctly from a real phone app at
-320-390px width without scrolling; forgot-password flow shows only generic
-messages to an unauthenticated caller.
+**WT-B — web UI: enrollment page + forgot-password modal flow. DONE
+2026-09-24** (`62f8bd4e`, gesture follow-up `cafc80f3`): the login modal's
+forgot-password flow, settings-page enrollment with a client-side-rendered
+QR, `test_forgot_password_modal.js` (48) and `test_qrcode_encoder.js` (17).
+Plan section 6b's field names are the shape WT-A must implement against; do
+not rewrite that section here.
 
 **WT-C — PcTools MCP wrappers. DONE 2026-09-24 (code side; live-board
 verification still pending WT-A).** Sizes: small. Files: new
@@ -434,7 +432,7 @@ confirms the host-test suite catches it, then a forced full rebuild before
 restoring by hand — not a hand-restore alone, per this repo's
 negative-test-every-check rule.
 
-**Dependency summary:** WT-A is the only firmware-touching, no-external-
-dependency tranche and should land first. WT-B needs WT-A's routes (stub
-acceptable) and coordination with `lazylogin`. WT-C and WT-D can start once
-WT-A's on-disk/wire shapes are fixed, independent of each other and of WT-B.
+**Dependency summary:** WT-B, WT-C and WT-D are done. **WT-A (firmware
+routes) is the only remaining, no-external-dependency tranche** -- it must
+also fix the `check_flash_worker_lint.ps1` red noted above in the same
+commit.

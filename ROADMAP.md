@@ -79,8 +79,12 @@
 >   (`auth_forgot_reset_http.c`, settings-page enrollment, the reset-gesture
 >   disenroll call) are still pending, in worktree `C:\wt\totpfw_2yhb0w`.
 >   WT-D (host tests: RFC 6238 Appendix B vectors) landed alongside the core.
->   WT-B (web UI: settings-page enrollment with QR, "Forgot password?" in the
->   login modal) is in progress, not yet landed.
+>   **WT-B landed** (`62f8bd4e`, gesture follow-up `cafc80f3`): forgot-password
+>   flow in the login modal, settings-page enrollment with a client-side QR,
+>   `test_forgot_password_modal.js` (48) and `test_qrcode_encoder.js` (17).
+>   **Known-red pending item:** `check_flash_worker_lint.ps1` is RED on main
+>   because `totp_config.c` (`0f5151f0`) writes NVS outside the lint
+>   allowlist; fix is assigned to the WT-A routes commit.
 > - **Lazy login pop-up, landed** (`090aaa9f`, review fixes `58e10e11`):
 >   serves page shells without redirecting to a login page on load, replacing
 >   that with one shared, themed, cancelable login modal instead -- the
@@ -3849,8 +3853,11 @@ Owner instruction, 2026-09-21.
   (`ui_lcd_lock.c`, `security_backend_web_auth.c`) is correct. Fix (a
   baseline-then-changed wait) is in flight in the LCD runner round 3 commit —
   runner fix pending, rerun required once it lands.
-- [ ] Profile/autotune same-zone start race fix (atomic per-zone claim in
-  `relay_authority.c`) is under review, not yet landed.
+- [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
+  `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
+  landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,
+  `test_autotune_engine_prestart.c`, `test_link_watchdog.c`). **Not yet
+  flashed to the bench** -- ESP is still `111b1b6f`; add to the next reflash.
 - [x] Root-cause and fix the `profile_executor` dwell-fault panic hit by heat
   run `20260924T085059Z_heat` — done, 2026-09-24 (`3ce065ca` audit, `773ec669`
   fix, `adc7f65c` comment correction; see the top-of-file entry above).
@@ -3874,9 +3881,12 @@ Owner instruction, 2026-09-21.
   naming -- done, 2026-09-24 (`93355ee9`). **Still pending: rerun** the LCD
   suite against this fix -- no rerun yet.
 - [x] Replace the email forgot-password design with TOTP -- done, 2026-09-24
-  (`84fa2e7b`, owner change); WT-C PcTools wrappers up for review
-  (`c7db358a`, not landed); WT-A (firmware) and WT-D (host tests) in
-  progress; WT-B (web UI) not started. See the top-of-file entry above.
+  (`84fa2e7b`, owner change); WT-C and WT-D landed; **WT-B landed**
+  (`62f8bd4e`, gesture follow-up `cafc80f3`); WT-A (firmware routes) still in
+  progress, in worktree `C:\wt\totpfw_2yhb0w`. See the top-of-file entry above.
+- [ ] `check_flash_worker_lint.ps1` is RED on main: `drivers/persist/totp_config.c`
+  (`0f5151f0`) writes NVS outside the lint allowlist. Fix is assigned to the
+  WT-A routes commit, not a separate pass.
 
 ---
 
