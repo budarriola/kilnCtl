@@ -601,13 +601,16 @@ def _sample_widget_off(ctx: dict, image_path: str, target: Optional[dict]) -> Op
 def _downgrade_if_corners_stale(ctx: dict, result: CaseResult, image_path: Optional[str]) -> CaseResult:
     """Downgrade a FAIL to INCONCLUSIVE when lcd_sampler.frame_corners_look_stale()
     finds FRAME_CORNERS/DEFAULT_TRANSFORM landing on bezel instead of screen
-    background at all four corner-check points -- the same symptom the
+    background at any of the four corner-check points -- the same symptom the
     2026-09-24 round-3 fix found and re-derived the corners for (see
     lcd_sampler.py's FRAME_CORNERS comment). Never touches a PASS, or an
     already-INCONCLUSIVE/NOT_RUN/SKIP verdict, and never masks a genuine
-    color mismatch: only ALL FOUR corner points reading as bezel proves the
-    *geometry*, not the color judgment, is at fault -- a single point
-    reading as background leaves the original FAIL untouched."""
+    color mismatch: the four check points are panel background, never a
+    widget, so any of them reading as bezel means the geometry (or a dark
+    panel) is at fault rather than the color judgment; the original FAIL
+    reason is kept in observed["original_fail_reason"] and the verdict is
+    only ever lowered to INCONCLUSIVE, never raised to PASS. A blank/dark
+    panel also trips this check, hence the reason string names both."""
     if result.verdict != Verdict.FAIL or not image_path:
         return result
     try:
@@ -619,7 +622,7 @@ def _downgrade_if_corners_stale(ctx: dict, result: CaseResult, image_path: Optio
     observed = dict(result.observed or {})
     observed["frame_corners_stale"] = True
     observed["original_fail_reason"] = result.reason
-    return CaseResult(Verdict.INCONCLUSIVE, reason="frame corners stale", observed=observed, evidence=result.evidence)
+    return CaseResult(Verdict.INCONCLUSIVE, reason="frame corners stale or panel dark", observed=observed, evidence=result.evidence)
 
 
 def _capture(ctx: dict, name: str) -> Optional[str]:
@@ -1069,7 +1072,7 @@ def _wait_for_targets_signature_change(ui, before_sig: tuple,
 def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
                                    timeout_s: float = _PAGE_POLL_TIMEOUT_S,
                                    confirm: bool = True,
-                                   ) -> "tuple[Optional[CaseResult], Optional[dict], float, bool, bool]":
+                                   ) -> "tuple[Optional[CaseResult], Optional[dict], float, bool, bool, bool]":
     """Raw-touch analogue of :func:`_click_then_targets_change`, for the
     diagnostics topbar's Next icon specifically -- click_by_name() cannot
     target it (see _diagnostics_next_target()'s docstring), so this locates
@@ -1093,28 +1096,32 @@ def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
     whatever the very next read shows is returned as-is, ``changed=True``
     unconditionally (the caller trusts the tap; see _case_lcd16).
 
-    Returns ``(fail, tap, waited_s, changed, found_next)``. ``found_next``
-    is False when Next could not be located at all (disabled/last page, or
-    missing anchors) -- distinct from a located-but-swallowed tap, so a
-    caller can tell "done paging" from "navigation broke"."""
+    Returns ``(fail, tap, waited_s, changed, found_next, retried)``.
+    ``found_next`` is False when Next could not be located at all
+    (disabled/last page, or missing anchors) -- distinct from a
+    located-but-swallowed tap, so a caller can tell "done paging" from
+    "navigation broke". ``retried`` is True when a boundary hop needed its
+    second tap; the caller records it, because a dropped INTERIOR tap is
+    invisible at the time and only shows up later as the final boundary
+    hop needing (and being rescued by) that retry."""
     srv = _srv(ctx)
     touch = getattr(srv, "_touch", None)
     tap = ui.list_tap_targets()
     targets = tap.get("targets", [])
     next_target = _diagnostics_next_target(targets)
     if next_target is None:
-        return None, tap, 0.0, False, False
+        return None, tap, 0.0, False, False, False
     if touch is None:
         return (
             CaseResult(Verdict.INCONCLUSIVE, reason="no touch-inject transport available for Next", observed={}),
-            None, 0.0, False, True,
+            None, 0.0, False, True, False,
         )
     try:
         x, y = float(next_target["cx"]), float(next_target["cy"])
     except (KeyError, TypeError, ValueError):
         return (
             CaseResult(Verdict.FAIL, reason="located Next icon has no numeric cx/cy", observed={"next_target": next_target}),
-            None, 0.0, False, True,
+            None, 0.0, False, True, False,
         )
 
     def _tap() -> bool:
@@ -1128,20 +1135,22 @@ def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
     if not _tap():
         return (
             CaseResult(Verdict.FAIL, reason="touch inject failed for the Next icon", observed={}),
-            None, 0.0, False, True,
+            None, 0.0, False, True, False,
         )
     if not confirm:
         tap2 = ui.list_tap_targets()
-        return None, tap2, 0.0, True, True
+        return None, tap2, 0.0, True, True, False
     tap2, waited_s = _wait_for_targets_signature_change(ui, prev_sig, timeout_s=timeout_s)
     sig2 = _targets_signature(tap2.get("targets", []))
+    retried = False
     if sig2 == prev_sig:
+        retried = True
         if _tap():
             tap3, waited_s2 = _wait_for_targets_signature_change(ui, prev_sig, timeout_s=timeout_s)
             waited_s += waited_s2
             tap2 = tap3
     changed = _targets_signature(tap2.get("targets", [])) != prev_sig
-    return None, tap2, waited_s, changed, True
+    return None, tap2, waited_s, changed, True, retried
 
 
 def _case_lcd16(ctx: dict) -> CaseResult:
@@ -1153,6 +1162,7 @@ def _case_lcd16(ctx: dict) -> CaseResult:
     relay_life_has_reset: Optional[bool] = None
     next_disabled_at_end: Optional[bool] = None
     expected_hops = J.DIAGNOSTICS_PAGE_COUNT - 1
+    retried_hops: list = []
     try:
         fail, _config_page, _ = _click_then_page(ui, "settings", "config")
         if fail is not None:
@@ -1191,10 +1201,16 @@ def _case_lcd16(ctx: dict) -> CaseResult:
             # hop is not waited/retried at all (see
             # _tap_next_then_targets_change's confirm=False docstring).
             is_boundary_hop = step == 0 or step == expected_hops - 1
-            fail, tap, _, changed, found_next = _tap_next_then_targets_change(
+            fail, tap, _, changed, found_next, retried = _tap_next_then_targets_change(
                 ctx, ui, prev_sig, confirm=is_boundary_hop)
             if fail is not None:
                 return fail
+            if retried:
+                # Recorded, never judged: a retry at the LAST boundary hop
+                # can also be absorbing an interior tap that was dropped
+                # earlier (the interior hops are not confirmed), so the
+                # final state can read correct while one tap was lost.
+                retried_hops.append(step)
             if not found_next:
                 # Next disappeared before reaching the last page -- paging
                 # broke; stop here rather than looping with nothing to tap.
@@ -1204,10 +1220,14 @@ def _case_lcd16(ctx: dict) -> CaseResult:
             pages_paged += 1
             targets = tap.get("targets", []) if tap else targets
             prev_sig = _targets_signature(targets)
-        return J.judge_lcd_diagnostics_pages(
+        result = J.judge_lcd_diagnostics_pages(
             pages_paged, expected_hops, next_disabled_at_end,
             crash_report_step, relay_life_has_reset,
         )
+        observed = dict(result.observed or {})
+        observed["retried_hops"] = list(retried_hops)
+        result.observed = observed
+        return result
     finally:
         _navigate_home(ui)
 

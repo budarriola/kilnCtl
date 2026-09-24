@@ -841,6 +841,46 @@ _DIAG_PITCH = 40.0
 _DIAG_NEXT = {"name": _DIAG_GLYPH, "cx": 180 + 2 * _DIAG_PITCH, "cy": 26, "hidden": False}
 
 
+class DowngradeIfCornersStaleTest(unittest.TestCase):
+    """_downgrade_if_corners_stale() may only ever lower a FAIL to
+    INCONCLUSIVE, and only on an explicit True from the self-check."""
+
+    def _fail(self):
+        return C.CaseResult(Verdict.FAIL, reason="wrong color", observed={"x": 1}, evidence=["e.jpg"])
+
+    def _run(self, result, stale=None, raises=False):
+        def fake(*a, **k):
+            if raises:
+                raise RuntimeError("boom")
+            return stale
+        with mock.patch.object(lcd_sampler, "frame_corners_look_stale", fake):
+            return C._downgrade_if_corners_stale({}, result, "img.jpg")
+
+    def test_pass_is_never_touched(self):
+        r = C.CaseResult(Verdict.PASS)
+        self.assertIs(self._run(r, stale=True), r)
+
+    def test_fail_with_stale_corners_becomes_inconclusive_keeping_reason(self):
+        out = self._run(self._fail(), stale=True)
+        self.assertEqual(out.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(out.observed["original_fail_reason"], "wrong color")
+        self.assertTrue(out.observed["frame_corners_stale"])
+        self.assertEqual(out.evidence, ["e.jpg"])
+
+    def test_fail_with_sound_corners_stays_fail(self):
+        self.assertEqual(self._run(self._fail(), stale=False).verdict, Verdict.FAIL)
+
+    def test_fail_with_undeterminable_corners_stays_fail(self):
+        self.assertEqual(self._run(self._fail(), stale=None).verdict, Verdict.FAIL)
+
+    def test_self_check_exception_stays_fail(self):
+        self.assertEqual(self._run(self._fail(), raises=True).verdict, Verdict.FAIL)
+
+    def test_no_image_stays_fail(self):
+        with mock.patch.object(lcd_sampler, "frame_corners_look_stale", lambda *a, **k: True):
+            self.assertEqual(C._downgrade_if_corners_stale({}, self._fail(), None).verdict, Verdict.FAIL)
+
+
 class DiagPagingUi(PageNavUiTest):
     """Models ui_page_diagnostics.c's 8 sub-pages, reached only by the
     topbar's untagged Next icon (position-located, never click_by_name --
@@ -943,6 +983,22 @@ class Lcd16Test(unittest.TestCase):
         result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(result.observed.get("pages_paged"), 7)
+
+    def test_no_retry_recorded_on_a_clean_run(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("retried_hops"), [])
+
+    def test_swallowed_interior_tap_is_recorded_not_silent(self):
+        # Interior hops are single, unconfirmed taps, so a tap dropped at
+        # step 3 is only rescued by the LAST boundary hop's retry. The
+        # final state is still correct (verdict unchanged), but the retry
+        # must be visible in observed rather than silently absorbed.
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV, swallow_step=3)
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertEqual(ui.step, 7)
+        self.assertEqual(result.observed.get("retried_hops"), [6])
 
     def test_next_stuck_after_retry_is_inconclusive(self):
         class StuckDiagUi(DiagPagingUi):
@@ -1232,6 +1288,25 @@ class Lcd19Test(unittest.TestCase):
         self.assertEqual(result.observed["overlay_dismiss"]["present"], True)
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
         self.assertEqual(ui.list_tap_targets()["targets"], [])
+
+    def test_start_click_that_changes_nothing_fails_with_names_recorded(self):
+        # The Start click is acknowledged but no popup appears: the
+        # post-click set never diverges from the pre-click baseline, so the
+        # keypad is not raised, the case FAILs, and the raw names it saw
+        # are still recorded in observed for the operator.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        real_click = ui.click_by_name
+        ui.click_by_name = lambda name: {"result": "ok"} if name == "Start" else real_click(name)
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C._wait_for_overlay_names, "__defaults__",
+                               tuple(0.05 if d == C._PAGE_POLL_TIMEOUT_S else d
+                                     for d in C._wait_for_overlay_names.__defaults__)):
+            result = C._case_lcd19(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIs(result.observed.get("keypad_raised"), False)
+        self.assertIn("after_start_click_names", result.observed)
+        self.assertEqual(result.observed["after_start_click_names"], [])
 
     def test_restore_runs_even_if_overlay_dismiss_raises(self):
         # The dismiss is a UART round trip that can raise; the HTTP policy

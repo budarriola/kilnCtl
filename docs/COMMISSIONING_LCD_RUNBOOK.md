@@ -145,12 +145,18 @@ Verified against the reported symptom: with these corners,
 Because a stale-corner regression like this fails silently as ordinary color
 FAILs rather than loudly, `lcd_sampler.frame_corners_look_stale()` now
 samples the four expected-background widget-space corners (`(5,5)` etc.) at
-runtime and reports `True` only if *all four* read as bezel relative to
-their own locally-sampled bezel reference (never an absolute threshold,
-since the theme's own darkest background is not far from bezel darkness).
-`cases_lcd.py`'s `_downgrade_if_corners_stale()` uses this to downgrade an
-existing color-judgment `FAIL` to `INCONCLUSIVE` with reason "frame corners
-stale" — but only a `FAIL`, and only on a definite `True`, never on `False`
+runtime and reports `True` if *any one* of them reads as bezel, compared
+against `sample_widget()`'s one fixed bezel reference at frame `(100,100)`
+(not a per-corner local sample, and never an absolute threshold, since the
+theme's own darkest background is not far from bezel darkness). "Any", not
+"all four": on the capture above the superseded corners put only two of the
+four points on bezel (`(5,5)` and `(5,315)`), so an all-four rule would have
+missed the very incident it exists to catch. A dark/blanked panel trips it
+too. `cases_lcd.py`'s `_downgrade_if_corners_stale()` uses this to downgrade
+an existing color-judgment `FAIL` to `INCONCLUSIVE` with reason "frame
+corners stale or panel dark" (the original reason kept in
+`observed["original_fail_reason"]`) — but only a `FAIL`, and only on a
+definite `True`, never on `False`
 (background reads as background: a real mismatch is real) or `None`
 (capture/sample failure: stays whatever it already was).
 

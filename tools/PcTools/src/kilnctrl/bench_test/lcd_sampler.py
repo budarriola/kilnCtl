@@ -305,22 +305,31 @@ def frame_corners_look_stale(image_path: str, transform: Optional[AffineTransfor
 
     Samples the four CORNER_CHECK_POINTS (widget-space points just inside
     each corner, over a patch of background no LCD page in this suite ever
-    covers with a widget) together with each point's own separately-sampled
-    bezel reference. Returns True only when ALL FOUR read indistinguishable
-    from their own bezel reference (i.e. the transform is landing on actual
-    bezel, not screen content) -- a single point reading as background is
-    enough to call the geometry sound, so a real color mismatch on one
-    widget can never be masked by this check. Returns False when at least
-    one point reads as background. Returns None if any sample could not be
-    taken at all (capture/parse failure) -- callers must not treat None as
-    either stale or sound.
+    covers with a widget), each compared against sample_widget()'s bezel
+    reference (the one fixed frame point, (100, 100) by default -- NOT a
+    per-corner local sample). Returns True when ANY of the four reads
+    indistinguishable from bezel: a correctly-aimed transform maps every
+    inset point onto the lit panel, so even one landing on bezel means that
+    part of the geometry (or the panel as a whole -- a dark/blanked screen
+    looks the same) cannot be trusted. Requiring all four was rejected on
+    measured evidence: against the motivating capture
+    (20260924T162517Z_lcd/captures/lcd01_start_pause.jpg) the superseded
+    corners put only TWO of the four check points on bezel ((5,5) and
+    (5,315) read ~7-8 from bezel; (475,5) and (475,315) read 162 and 133),
+    so an all-four rule would have returned False on the very incident it
+    exists to catch. None of these points is a widget, so no widget's own
+    color mismatch can move them -- and callers only ever downgrade a FAIL
+    to INCONCLUSIVE on True, never to PASS. Returns False when all four read
+    as panel content. Returns None if any sample could not be taken at all
+    (capture/parse failure) -- callers must not treat None as either stale
+    or sound.
 
     A fixed absolute luminance threshold was considered and rejected: the
     theme's own darkest background color is not much brighter than the
     bezel itself (see MIN_BEZEL_CONTRAST's own comment), so a point that is
     legitimately on-screen-but-dark could false-positive against an
-    absolute threshold. Comparing each point to its own locally-sampled
-    bezel reference avoids that ambiguity.
+    absolute threshold. Comparing against a bezel reference sampled from
+    the same frame keeps exposure/white-balance drift out of it.
     """
     threshold = MIN_BEZEL_CONTRAST if min_bezel_contrast is None else min_bezel_contrast
     stale_votes = 0
@@ -333,7 +342,7 @@ def frame_corners_look_stale(image_path: str, transform: Optional[AffineTransfor
             return None
         if is_off(sample.region, sample.bezel, tol=threshold):
             stale_votes += 1
-    return stale_votes == len(CORNER_CHECK_POINTS)
+    return stale_votes >= 1
 
 
 # ---------------------------------------------------------------------------

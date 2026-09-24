@@ -291,5 +291,36 @@ class SampleRegionSubprocessTest(unittest.TestCase):
                     S.capture_full_frame("out.jpg")
 
 
+class FrameCornersLookStaleTest(unittest.TestCase):
+    """frame_corners_look_stale(): ANY corner-check point reading as bezel
+    is stale (the motivating capture put only two of four on bezel)."""
+
+    _BEZEL = (6, 11, 15)
+    _PANEL = (60, 70, 90)
+
+    def _run(self, regions, bezel=_BEZEL):
+        samples = iter([S.RegionSample(region=r, bezel=bezel) for r in regions])
+        with mock.patch.object(S, "sample_widget", lambda *a, **k: next(samples)):
+            return S.frame_corners_look_stale("x.jpg")
+
+    def test_all_background_is_not_stale(self):
+        self.assertIs(self._run([self._PANEL] * 4), False)
+
+    def test_one_bezel_point_is_stale(self):
+        self.assertIs(self._run([self._PANEL, self._PANEL, self._PANEL, self._BEZEL]), True)
+
+    def test_two_of_four_bezel_like_the_motivating_capture_is_stale(self):
+        self.assertIs(self._run([self._BEZEL, self._PANEL, self._BEZEL, self._PANEL]), True)
+
+    def test_missing_bezel_reference_is_none(self):
+        self.assertIsNone(self._run([self._PANEL] * 4, bezel=None))
+
+    def test_capture_error_is_none(self):
+        def boom(*a, **k):
+            raise S.LcdCaptureError("no frame")
+        with mock.patch.object(S, "sample_widget", boom):
+            self.assertIsNone(S.frame_corners_look_stale("x.jpg"))
+
+
 if __name__ == "__main__":
     unittest.main()
