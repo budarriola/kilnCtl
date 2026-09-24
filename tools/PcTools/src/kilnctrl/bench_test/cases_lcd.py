@@ -903,7 +903,9 @@ def _profile_rows_by_position(targets: "list[dict]") -> "list[dict]":
     content-area boundary (`_PROFILES_LIST_AREA_Y0`), excluding the
     Delete button's own literal "Delete" label (manage mode only,
     `build_row()`) -- back/home/Prev/Next/New all sit above that boundary
-    at cy ~= 26 and are excluded by it already; the name/glyph checks are
+    at cy ~= 26 and are excluded by it already. An unnamed target (the
+    list's own clickable `rows_col` container) is never a row; the
+    name/glyph checks are
     only needed for a target that, for whatever reason, reports a cy in
     the list band. Returned ordered top-to-bottom by cy, matching on-screen
     row order (`rows[0]` is the first row `_case_lcd09` taps)."""
@@ -912,6 +914,14 @@ def _profile_rows_by_position(targets: "list[dict]") -> "list[dict]":
         if t.get("hidden"):
             continue
         name = t.get("name")
+        # An unnamed target is never a row: the list's own `rows_col`
+        # container (`ui_page_profile_picker.c`, a plain lv_obj_create, so
+        # CLICKABLE by default and walked with name "") sits at cy ~= 178,
+        # inside the list band -- counting it made a full 4-row page read
+        # as 5 rows (a false max_rows FAIL) and an empty list read as one
+        # row. A real row's name button always carries its label text.
+        if not isinstance(name, str) or name == "":
+            continue
         if _is_glyph_name(name) or name in ("back", "home", "Delete"):
             continue
         try:

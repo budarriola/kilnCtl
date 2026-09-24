@@ -321,19 +321,18 @@ class FrameCornersLookStaleTest(unittest.TestCase):
         with mock.patch.object(S, "sample_widget", boom):
             self.assertIsNone(S.frame_corners_look_stale("x.jpg"))
 
-    # 2026-09-24 coordinator follow-up: a corner point can read clearly NOT
-    # bezel yet still be off-panel/wrong-content -- the bezel-only check
-    # above missed exactly this on a real bench capture. "light blue" is
-    # the actually-observed RGB [111,205,252] from that capture.
+    # 2026-09-24 review regression: this camera renders the theme's dark BG
+    # (0x1a1f2b) as a bright blue -- [111,205,252] was measured ON the panel
+    # at a corner check point of a real bench capture
+    # (20260924T162517Z_lcd/captures/lcd01_start_pause.jpg), and all four
+    # corner points of four real captures read 92-304 RGB units from the
+    # theme constant. A "too far from theme BG" vote fired on all of them
+    # and downgraded every LCD-01/-02 FAIL to INCONCLUSIVE; it was
+    # reverted. A corner that reads clearly off the bezel stays NOT stale.
     _LIGHT_BLUE = (111, 205, 252)
 
-    def test_off_panel_light_blue_not_bezel_is_still_stale(self):
-        self.assertIs(self._run([self._LIGHT_BLUE, self._PANEL, self._PANEL, self._PANEL]), True)
-
-    def test_plausible_dark_panel_background_is_not_stale(self):
-        # Negative-test companion: a corner reading close to the theme's own
-        # BG color (not bezel, not implausible) must NOT trip the new vote.
-        self.assertIs(self._run([S._BG_RGB, self._PANEL, self._PANEL, self._PANEL]), False)
+    def test_camera_cast_panel_background_is_not_stale(self):
+        self.assertIs(self._run([self._LIGHT_BLUE] * 4), False)
 
 
 if __name__ == "__main__":

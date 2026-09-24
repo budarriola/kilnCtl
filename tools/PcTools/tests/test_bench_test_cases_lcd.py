@@ -801,6 +801,28 @@ class Lcd09Test(unittest.TestCase):
         result = C._case_lcd09({"srv": FakeSrvFull(ui)})
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_full_page_with_unnamed_rows_col_container_passes(self):
+        # Review 2026-09-24: the list's own `rows_col` container
+        # (ui_page_profile_picker.c, plain lv_obj_create -> CLICKABLE by
+        # default, walked with name "") sits at cy ~= 178, inside the list
+        # band. A full 4-row page plus that container must read as 4 rows,
+        # not 5 (a false max_rows FAIL), and never tap the container.
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [
+            {"name": "", "cx": 240, "cy": 178, "hidden": False},
+        ] + [
+            {"name": "Profile %d" % k, "cx": 50, "cy": 74 + 32 * k, "hidden": False}
+            for k in range(4)
+        ] + [
+            {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+            {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        ] + [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in (1, 2, 3)]
+        nav = dict(_PROFILES_NAV)
+        nav["Profile 0"] = "profile_detail"
+        ui = PageNavUiTest(page="home", page_targets=page, nav_map=nav)
+        result = C._case_lcd09({"srv": FakeSrvFull(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
     def test_no_rows_with_known_positive_profiles_count_fails_not_inconclusive(self):
         # 2026-09-24 coordinator follow-up: an empty list area used to read
         # as merely undecidable even when the board itself reports profiles

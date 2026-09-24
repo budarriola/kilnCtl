@@ -291,28 +291,6 @@ def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
     return sample_region(image_path, fx - w // 2, fy - h // 2, w, h, bezel_x, bezel_y, repo_root)
 
 
-#: Mirrored from UI_THEME_COLOR_BG_HEX (ui_theme.h) -- used only by
-#: frame_corners_look_stale()'s background-plausibility vote below, never
-#: compared to a sampled pixel to judge anything but geometry/panel
-#: soundness (see CLAUDE.md's "judge colors by numeric pixel sampling"
-#: rule). Kept alongside cases_lcd.py's own `_BG_RGB` mirror (same value,
-#: same header) since this module must not import from cases_lcd.py.
-_BG_RGB: Tuple[int, int, int] = (0x1A, 0x1F, 0x2B)
-
-#: Minimum Euclidean RGB distance a CORNER_CHECK_POINTS sample may read from
-#: the theme's own BG color before it counts as a stale-geometry vote in
-#: frame_corners_look_stale(), alongside (not instead of) the bezel check.
-#: 2026-09-24 bench finding: a widget-space (5,5) sample read RGB
-#: [111,205,252] (a light blue) against theme BG [26,31,43] -- nowhere near
-#: bezel-dark, so the bezel-only check missed it entirely, yet nowhere near
-#: a plausible dark background either, meaning the homography was landing
-#: off-panel or on the wrong content for that capture. [111,205,252] is
-#: distance ~279 from BG_RGB; genuine BG-region JPEG noise measured
-#: elsewhere in this module is a few counts per channel, so 90 sits well
-#: above that noise floor and well below an obviously-wrong-content read
-#: like the one that motivated this.
-CORNER_BG_MAX_DISTANCE = 90.0
-
 #: frame_corners_look_stale()'s own gate. Reuses MIN_BEZEL_CONTRAST's value
 #: (defined below) rather than a second constant, but is read at call time
 #: -- module order below is preserved (MIN_BEZEL_CONTRAST is a plain float,
@@ -364,19 +342,14 @@ def frame_corners_look_stale(image_path: str, transform: Optional[AffineTransfor
             return None
         if is_off(sample.region, sample.bezel, tol=threshold):
             stale_votes += 1
-            continue
-        # 2026-09-24 bench finding: a corner point that reads clearly NOT
-        # bezel is not automatically sound geometry -- the bezel-only check
-        # above only catches the homography landing on the dark bezel
-        # itself. A point can just as easily land off-panel or on the wrong
-        # on-screen content and read something implausible for a page
-        # background, e.g. widget-space (5,5) reading [111,205,252] (a
-        # light blue) against theme BG [26,31,43] -- distance ~279, nowhere
-        # near bezel-dark but nowhere near a plausible dark background
-        # either. That combination (not bezel, not BG-like) is itself a
-        # stale-geometry vote.
-        if color_distance(sample.region, _BG_RGB) > CORNER_BG_MAX_DISTANCE:
-            stale_votes += 1
+        # Deliberately NO second "reads too far from theme BG" vote here
+        # (tried and reverted 2026-09-24 in review): this camera renders the
+        # theme's dark BG (0x1a1f2b) as a bright blue -- every CORNER_CHECK_POINTS
+        # sample on 20260924T162517Z/191429Z's lcd01/lcd08/lcd14 captures read
+        # 92-304 from the theme constant while sitting squarely on the panel,
+        # so such a vote fired on every real frame and downgraded every FAIL
+        # to INCONCLUSIVE. Same CLAUDE.md rule: never judge a sampled pixel
+        # against a theme source constant.
     return stale_votes >= 1
 
 
@@ -415,7 +388,9 @@ COLOR_MATCH_TOLERANCE = 45.0
 #: missing row makes BOTH the text point and the reference point read the
 #: *same* background (contrast ~0) while a genuinely rendered row's text
 #: (``UI_THEME_COLOR_TEXT_PRIMARY``, 0xf0f0f0) against its own CARD
-#: background measures ~336. Chosen well below that measured value but
+#: background is ~336 on paper; measured on the real bench capture
+#: (20260924T191429Z_lcd/captures/lcd14_temperature.jpg, three rendered
+#: rows) it read 213-228 through the camera. Chosen well below that but
 #: comfortably above JPEG/auto-exposure noise between two same-frame
 #: samples (a few counts per channel, same class of noise
 #: MIN_BEZEL_CONTRAST's own comment measures).
