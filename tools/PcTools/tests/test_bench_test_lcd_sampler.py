@@ -312,16 +312,27 @@ class SampleWidgetBodyTest(unittest.TestCase):
         return mock.patch.object(S, "_run", return_value=fake)
 
     def test_offsets_cy_by_label_avoid_offset_before_mapping(self):
-        """sample_widget_body(cx, cy) must call widget_to_frame with
-        cy + LABEL_AVOID_OFFSET_PX, not the raw cy -- verified by comparing
-        the frame coordinates sample_region() is invoked with (captured via
-        the fake _run's call args aren't available, so instead compare
-        against an explicit sample_widget() call at the offset point)."""
+        """sample_widget_body(cx, cy) must map cy + LABEL_AVOID_OFFSET_PX
+        through the transform, not the raw cy -- verified on the -X/-Y
+        frame coordinates actually handed to sample_lcd_region.ps1 (the
+        fake returns the same RGB for any point, so comparing results
+        alone could never fail)."""
         transform = S.AffineTransform.fit(S.WIDGET_CORNERS, S.FRAME_CORNERS)
-        with self._run_sample_region((1, 2, 3)):
-            got = S.sample_widget_body("fake.jpg", 423, 289, transform=transform)
-            want = S.sample_widget("fake.jpg", 423, 289 + S.LABEL_AVOID_OFFSET_PX, transform=transform)
-        self.assertEqual(got, want)
+
+        def frame_xy(run_mock):
+            args = run_mock.call_args[0][0]
+            return int(args[args.index("-X") + 1]), int(args[args.index("-Y") + 1])
+
+        with self._run_sample_region((1, 2, 3)) as run_mock:
+            S.sample_widget_body("fake.jpg", 423, 289, transform=transform)
+            got = frame_xy(run_mock)
+        fx, fy = S.widget_to_frame(423, 289 + S.LABEL_AVOID_OFFSET_PX, transform)
+        self.assertEqual(got, (int(fx - 4), int(fy - 4)))
+        cx, cy = S.widget_to_frame(423, 289, transform)
+        # The offset is downward in widget space and survives the mapping
+        # as a real downward move in the frame (several frame px, not a
+        # rounding artefact).
+        self.assertGreater(got[1], int(cy - 4) + 5)
 
     def test_start_button_dead_centre_fails_but_offset_passes_20260924T191429Z(self):
         # Dead-centre sample on the white "Start" label glyph.

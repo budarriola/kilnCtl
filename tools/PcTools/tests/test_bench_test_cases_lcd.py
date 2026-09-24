@@ -142,29 +142,32 @@ class Lcd01Test(unittest.TestCase):
 
     def test_wrong_color_still_fails_with_numeric_evidence(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
-        red = lcd_sampler.RegionSample(region=(0xD6, 0x20, 0x20), bezel=(26, 31, 43))
-        bg = lcd_sampler.RegionSample(region=C._BG_RGB, bezel=(26, 31, 43))
+        # Bezel is a realistic dark reference (the measured bezel on both
+        # 2026-09-24 captures reads ~(6,11,15)), distinctly darker than the
+        # theme BG -- a fake bezel equal to _BG_RGB would make every
+        # background point, including CORNER_CHECK_POINTS[0] == (5, 5),
+        # read as bezel and downgrade this FAIL to INCONCLUSIVE.
+        bezel = (6, 11, 15)
+        red = lcd_sampler.RegionSample(region=(0xD6, 0x20, 0x20), bezel=bezel)
+        bg = lcd_sampler.RegionSample(region=C._BG_RGB, bezel=bezel)
 
         def fake_sample_widget(image_path, x, y, *args, **kwargs):
             # No color cast in this capture: only the widget itself reads
             # wrong, so the bg-reference sanity check must not fire and
-            # mask a genuine defect as INCONCLUSIVE.
-            if (x, y) == C._BG_REFERENCE_XY:
+            # mask a genuine defect as INCONCLUSIVE. Background points
+            # (the bg reference and every corner-check point) read as lit
+            # theme BG; everything else is the wrong-colored widget.
+            if (x, y) == C._BG_REFERENCE_XY or (x, y) in lcd_sampler.CORNER_CHECK_POINTS:
                 return bg
             return red
 
-        # frame_corners_look_stale() gets its own coverage in
-        # SampleWidgetBodyTest/FrameCornersLookStaleTest; it is stubbed out
-        # here because CORNER_CHECK_POINTS[0] coincidentally equals
-        # _BG_REFERENCE_XY ((5, 5)), so this test's single-value fake would
-        # otherwise feed the corner-staleness loop the same bezel-matching
-        # sample used for the (unrelated) bg-reference sanity check above and
-        # spuriously downgrade this genuine color FAIL to INCONCLUSIVE.
         with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="x.jpg"), \
-             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget), \
-             mock.patch.object(C, "_downgrade_if_corners_stale", side_effect=lambda ctx, result, path: result):
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
             result = C._case_lcd01({"srv": srv, "_lcd_capture_dir": "/cap"})
+        # The real _downgrade_if_corners_stale() ran and found sound corners.
         self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("frame_corners_stale", result.observed)
+        self.assertFalse(result.observed["color_debug"]["bg_reference"]["reads_as_bezel"])
         dbg = result.observed["color_debug"]["start"]
         self.assertFalse(dbg["matches"])
         self.assertEqual(dbg["sampled_rgb"], (0xD6, 0x20, 0x20))

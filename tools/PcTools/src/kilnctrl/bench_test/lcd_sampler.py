@@ -311,10 +311,12 @@ def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
 #: (423, 289)): sampling dead-centre reads RGB(100,193,164) on
 #: 20260924T191429Z_lcd (color_distance to _ACCENT_4_RGB (0x5C,0xC0,0x6E) =
 #: 54.6, FAIL against COLOR_MATCH_TOLERANCE=45.0) and RGB(100,205,157) on
-#: 20260924T162517Z_lcd (distance 49.4, also FAIL) -- both land on the white
+#: 20260924T162517Z_lcd (distance 49.4, over tolerance, but its chroma offset
+#: 0.077 passes matches_color()'s CHROMA_MATCH_TOLERANCE fallback) -- both
+#: are pulled off the fill by the white
 #: "Start" label glyph. Offsetting 10 widget-space px downward (away from
 #: the label, still inside the button's own fill) reads RGB(67,181,132)
-#: (distance 35.9, PASS) and RGB(68,192,130) (distance 31.2, PASS)
+#: (distance 35.1, PASS) and RGB(68,192,130) (distance 31.2, PASS)
 #: respectively. A horizontal offset of similar magnitude was tried and
 #: rejected: it was inconsistent across the two captures (some points still
 #: failed tolerance, or landed near the button's rounded-corner edge
@@ -325,7 +327,13 @@ def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
 #: (ui_home_build_button(..., 36, ...)), ui_page_profile_builder_zones.c's
 #: "Next" button is 44px, and ui_page_touch_cal.c's "Back" button is
 #: UI_THEME_MIN_TOUCH_TARGET_PX (72px) -- a 10px offset from centre stays
-#: well inside even the 36px case's own padded fill.
+#: well inside even the 36px case's own padded fill. Worked margins for
+#: that case: the label is LV_FONT_DEFAULT montserrat_14 (line_height 16,
+#: base_line 3), so "Start"/"Pause" glyph pixels (no descenders) end at
+#: about cy+5; the default 8x8 frame-px patch spans ~5 widget px at this
+#: camera scale (~1.6 frame px per widget px vertically), i.e. about
+#: cy+7.5..cy+12.5; the button's bottom edge is cy+18 (radius 10 only
+#: rounds the corners, not the centre column).
 LABEL_AVOID_OFFSET_PX = 10.0
 
 

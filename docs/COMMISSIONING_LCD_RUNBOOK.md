@@ -230,7 +230,7 @@ was reliable on both `20260924T191429Z_lcd` and `20260924T162517Z_lcd`:
 
 | capture | dead-centre RGB | RGB distance | `matches_color()` | offset(+10) RGB | RGB distance | `matches_color()` |
 |---|---|---|---|---|---|---|
-| `20260924T191429Z_lcd` | `(100,193,164)` | 54.6 | FAIL (chroma distance 0.104, also over tolerance) | `(67,181,132)` | 35.9 | PASS |
+| `20260924T191429Z_lcd` | `(100,193,164)` | 54.6 | FAIL (chroma distance 0.104, also over tolerance) | `(67,181,132)` | 35.1 | PASS |
 | `20260924T162517Z_lcd` | `(100,205,157)` | 49.4 | PASS (RGB distance over tolerance, but chroma distance 0.077 is under `CHROMA_MATCH_TOLERANCE`, so the OR-fallback saves it on this capture) | `(68,192,130)` | 31.2 | PASS |
 
 Only the first capture demonstrates the bug outright; the second shows the
