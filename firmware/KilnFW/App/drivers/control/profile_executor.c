@@ -905,7 +905,7 @@ void executor_task_entry(void *arg)
                 s_exec.segment_elapsed_s = 0;
                 segment_changed = true;
                 if (s_exec.segment_index >= s_exec.profile.segment_count) {
-                    s_exec.state = PROFILE_EXEC_DONE;
+                    exec_enter_terminal_state(PROFILE_EXEC_DONE);
                     force_all_relays_off();
                     /* The one path allowed to honor leave_on_at_end: the
                      * schedule reached its own natural end with every
@@ -1025,7 +1025,7 @@ void executor_task_entry(void *arg)
                 if (dwell_done) {
                     s_exec.segment_index++;
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
-                        s_exec.state = PROFILE_EXEC_DONE;
+                        exec_enter_terminal_state(PROFILE_EXEC_DONE);
                         force_all_relays_off();
                         /* This is ALSO a clean end -- the run's LAST segment
                          * happened to be a ZONE_RAMP dwell, but an earlier
@@ -1998,7 +1998,7 @@ void watchdog_task_entry(void *arg)
                 kiln_io_all_relays_off(s_exec.io);
             }
             io_segs_force_all_off(false); /* abnormal stop -- see escalate_guard_trip()'s branches */
-            s_exec.state = PROFILE_EXEC_FAULTED;
+            exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
             strncpy(s_exec.fault_reason, wd_out.fault_reason, sizeof(s_exec.fault_reason) - 1);
             s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
             /* Same release as escalate_guard_trip()'s FAULTED branches --

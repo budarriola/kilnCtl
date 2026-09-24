@@ -179,20 +179,41 @@ extern const char *PE_TAG;
  *  4. s_exec.state == PROFILE_EXEC_IDLE AND any zone active == true.
  *     Reason: `active` means "in the current run's zone_mask"
  *     (zone_runtime_t.active's own comment) -- profile_executor_run()
- *     is the only writer that sets it true, and it always also sets state
- *     to RUNNING in the same locked section; profile_executor_halt() and
- *     the DONE/FAULTED transition paths clear every zone's `active` at the
- *     same time they leave RUNNING/PAUSED. An IDLE tick with an active zone
- *     means the run-teardown path updated one without the other.
+ *     (profile_executor_run.c, the zone_mask loop that sets z->active = true)
+ *     is the only writer that ever sets it true, and it always also sets
+ *     state to RUNNING in the same locked section. **Correction, audit
+ *     2026-09-24 (docs/audits/profile_executor_panic_2026-09-24.md):** despite
+ *     this rule's original claim, no DONE/FAULTED/halt path actually clears
+ *     a zone's `active` back to false -- grep finds no writer of `active =
+ *     false` anywhere in this module. The rule still holds only because
+ *     profile_executor_run() re-touches every bit of `p.zone_mask` for the
+ *     NEXT run before that run reaches RUNNING, so a zone that was active
+ *     under an old run and is active again under the new one never observes
+ *     a false IDLE-with-active-zone gap. This is fragile, undocumented
+ *     coupling, not a guarantee this rule's rationale can currently rely on;
+ *     it is left as a known gap rather than fixed here.
  *
  *  5. s_exec.dwelling == true AND s_exec.state NOT IN {RUNNING, PAUSED}.
  *     Reason: dwelling is only ever set true inside the RUNNING control
  *     loop's segment-stepping block and only ever read back (never reset)
- *     across a PAUSED interval -- see the LEGAL row above. Every path that
- *     leaves RUNNING/PAUSED for IDLE/DONE/FAULTED (profile_executor_run() at
- *     the top of a fresh run, profile_executor_halt()) resets the whole
- *     s_exec_state_t including dwelling. Seeing it true in IDLE/DONE/FAULTED
- *     means a teardown path forgot to reset it.
+ *     across a PAUSED interval -- see the LEGAL row above. **Correction,
+ *     audit 2026-09-24:** this rule's original text claimed "every path that
+ *     leaves RUNNING/PAUSED for IDLE/DONE/FAULTED resets the whole
+ *     s_exec_state_t including dwelling" -- that was false. Before the same
+ *     audit's fix, `dwelling` was cleared only at profile_executor_run()'s
+ *     own start (profile_executor_run.c:412) and at a segment advance
+ *     (profile_executor.c, the ZONE_RAMP dwell-done branch); every FAULTED/
+ *     DONE transition inside the RUNNING tick (escalate_guard_trip()'s three
+ *     branches in profile_executor_relay_io.c, the watchdog's guard-9 FAULT
+ *     action, and the RELAY_IO/ZONE_RAMP DONE branches in profile_executor.c)
+ *     set state directly and left dwelling untouched, which is exactly the
+ *     sequence that reached this rule's assert on 2026-09-24 (a guard tripped
+ *     mid-dwell, FAULTED was set, dwelling stayed true, the same tick's
+ *     exec_mode_state_check() call caught it). All six sites now go through
+ *     exec_enter_terminal_state() (profile_executor_relay_io.c), the one
+ *     function that sets state AND clears dwelling/ramp_lock_held together;
+ *     any future FAULTED/DONE transition must use it too, not assign
+ *     s_exec.state directly, or this rule's guarantee breaks again.
  *
  *  6. autotune per-zone state has no_setpoint == true AND method ==
  *     AUTOTUNE_METHOD_RELAY.
@@ -1125,6 +1146,13 @@ void io_seg_start(uint8_t idx, const profile_segment_t *seg);
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);
 void io_segs_tick(float dt_s);
+/* Sets s_exec.state and clears the per-run scratch flags (dwelling,
+ * ramp_lock_held) that only mean anything inside RUNNING/PAUSED -- see the
+ * definition in profile_executor_relay_io.c for the full rationale. Use this
+ * at every transition to FAULTED or DONE instead of assigning s_exec.state
+ * directly; the caller still owns fault_reason/fault_guard/relay-off/claim-
+ * release, which vary per site. Must be called with s_exec.lock held. */
+void exec_enter_terminal_state(profile_exec_state_t st);
 bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *detail);
 void guard9_assert_stale_tick_fault(void);
 void clear_this_runs_faults(void);

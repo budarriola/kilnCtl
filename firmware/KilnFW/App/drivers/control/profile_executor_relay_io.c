@@ -678,6 +678,26 @@ void io_segs_tick(float dt_s)
     }
 }
 
+/* Every transition out of RUNNING/PAUSED into FAULTED or DONE must leave
+ * s_exec in a state exec_mode_state_check() accepts -- rule 5 forbids
+ * dwelling==true outside RUNNING/PAUSED, and ramp_lock_held has the same
+ * "only meaningful mid-run" lifetime (set only inside the RUNNING
+ * segment-stepping block, cleared only at profile_executor_run()'s own
+ * start -- profile_executor_run.c:414). Both are per-run scratch state with
+ * no meaning once the run has left RUNNING/PAUSED, so both are cleared here
+ * rather than left for the next profile_executor_run() to paper over.
+ * docs/audits/profile_executor_panic_2026-09-24.md: six call sites used to
+ * set s_exec.state directly and never cleared dwelling, which let a guard
+ * trip mid-dwell reach exec_mode_state_check()'s rule-5 assert on the very
+ * same tick and abort() the task. Must be called with s_exec.lock held,
+ * same precondition as escalate_guard_trip() below. */
+void exec_enter_terminal_state(profile_exec_state_t st)
+{
+    s_exec.state = st;
+    s_exec.dwelling = false;
+    s_exec.ramp_lock_held = false;
+}
+
 /* Escalation policy (TODO.md 6A.6, "decide which -- see 6A.6"): guards whose
  * failure mode is severe/board-wide (a welded relay, an out-of-range
  * reading, an electrically faulted sensor) assert the GLOBAL fault source,
@@ -717,7 +737,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
             s_exec.zones[zi2].fault_guard = reason;
             force_zone_relay_off(zi2);
         }
-        s_exec.state = PROFILE_EXEC_FAULTED;
+        exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
         strncpy(s_exec.fault_reason, detail, sizeof(s_exec.fault_reason) - 1);
         s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
         s_exec.fault_guard = reason;
@@ -758,7 +778,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
             s_exec.zones[zi2].fault_guard = reason;
             force_zone_relay_off(zi2);
         }
-        s_exec.state = PROFILE_EXEC_FAULTED;
+        exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
                 "zone %u thermal guard tripped, whole firing aborted per policy: %s", zi, detail);
         s_exec.fault_guard = reason;
@@ -786,7 +806,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         }
     }
     if (all_heaters_faulted) {
-        s_exec.state = PROFILE_EXEC_FAULTED;
+        exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason), "every active zone individually faulted; last: %s",
                 detail);
         s_exec.fault_guard = reason;

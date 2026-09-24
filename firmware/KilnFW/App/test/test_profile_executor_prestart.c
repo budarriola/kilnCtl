@@ -8104,6 +8104,42 @@ static void test_mode_state_check_legal_autotune_done_does_not_conflict(void)
     TEST_CHECK(v == 0, "DONE/ABORTED/IDLE are not 'actively driving' -- rule 1 must not fire against them");
 }
 
+// docs/audits/profile_executor_panic_2026-09-24.md: a global thermal guard
+// tripping while a run is dwelling used to reach the assert at
+// profile_executor.c:1814 -- escalate_guard_trip()'s GLOBAL branch set state
+// to FAULTED but left s_exec.dwelling true, which is exactly rule 5's
+// illegal combination. This test drives the REAL escalate_guard_trip() path
+// (not a hand-poked state struct, same reasoning as the relay-claim tests
+// above) from a dwelling RUNNING state and requires exec_mode_state_check()
+// to come back clean afterward. Before exec_enter_terminal_state() existed,
+// this test failed with v==1 and a "rule 5" message -- see the negative-test
+// run recorded in this pass's hand-back for that exact output.
+static void test_mode_state_check_no_violation_after_global_guard_trip_mid_dwell(void)
+{
+    TEST_SECTION("exec_mode_state_check -- a GLOBAL guard trip mid-dwell must leave state FAULTED, "
+                 "dwelling false, and zero violations (regression, profile_executor_panic_2026-09-24)");
+    reset_relay_claim_test_state();
+    reset_mode_state_check_test_state();
+
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.dwelling = true;          // reached a dwell before the guard fired
+    s_exec.ramp_lock_held = true;    // same per-run scratch-flag class as dwelling
+    s_exec.claimed_relay_mask = 0x01;
+
+    bool run_faulted = escalate_guard_trip(0, THERMAL_GUARD_TRIP_MAX_TEMP, "36.4C >= max_temp_c 36.4C");
+    TEST_CHECK(run_faulted, "a GLOBAL reason must fault the whole run");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED");
+    TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared by the FAULTED transition, not left stale");
+    TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared alongside dwelling");
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations -- rule 5 must not fire");
+
+    reset_relay_claim_test_state();
+}
+
 static void run_test_exec_mode_state_check(void)
 {
     test_mode_state_check_rule4_idle_with_active_zone();
@@ -8116,6 +8152,7 @@ static void run_test_exec_mode_state_check(void)
     test_mode_state_check_legal_autotune_settling_no_setpoint();
     test_mode_state_check_legal_paused_mid_dwell();
     test_mode_state_check_legal_autotune_done_does_not_conflict();
+    test_mode_state_check_no_violation_after_global_guard_trip_mid_dwell();
 
     // Leave clean s_exec/autotune-stub state behind for whichever test runs next.
     reset_mode_state_check_test_state();
