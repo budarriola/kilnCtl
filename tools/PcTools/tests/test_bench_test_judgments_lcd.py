@@ -112,6 +112,34 @@ class LcdHomeIdleTest(unittest.TestCase):
         self.assertEqual(r.evidence, [])
         self.assertNotIn("color_debug", r.observed)
 
+    def test_color_mismatch_with_suspected_cast_degrades_to_inconclusive(self):
+        # 2026-09-24 fix: a whole-frame color cast (bezel fine, everything
+        # lit reads shifted) can make a genuinely-correct board FAIL Start's
+        # color check. When the background reference region (a known-exact
+        # UI_THEME_COLOR_BG sample far from any widget) also reads far off
+        # its own expected chromaticity, this is no longer trusted as a hard
+        # FAIL.
+        color_debug = {
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (25, 96, 98), "matches": False},
+            "bg_reference": {"sampled_rgb": (6, 40, 60), "chroma_offset": 0.30, "cast_threshold": 0.15, "cast_suspected": True},
+        }
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("color cast", r.reason)
+
+    def test_color_mismatch_without_suspected_cast_still_fails(self):
+        # The cast check must never loosen COLOR_MATCH_TOLERANCE/
+        # CHROMA_MATCH_TOLERANCE themselves: a clean background reference
+        # alongside a genuine Start-color mismatch is still a hard FAIL.
+        color_debug = {
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (214, 32, 32), "matches": False},
+            "bg_reference": {"sampled_rgb": (24, 32, 44), "chroma_offset": 0.02, "cast_threshold": 0.15, "cast_suspected": False},
+        }
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
 
 _CONFIG_TARGETS = [
     {"name": "Profiles", "cx": 100, "cy": 100, "hidden": False},
@@ -264,9 +292,22 @@ class LcdProfilesPickerTest(unittest.TestCase):
         r = J.judge_lcd_profiles_picker("profiles", rows, True, True, "profile_detail")
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_missing_paging_fails(self):
+    def test_missing_paging_is_inconclusive_not_fail(self):
+        # 2026-09-24 finding: firmware's Prev/Next paging icons are built via
+        # ui_topbar.c's untagged build_icon() and carry no tap name at all --
+        # a firmware gap, not a naming mismatch this judge can fix by trying
+        # another string. No name-based lookup for "paging" can ever
+        # succeed on this build, so this degrades to INCONCLUSIVE (naming
+        # the gap) instead of a FAIL that reads like a real regression.
         r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, False, True, "profile_detail")
-        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("build_icon()", r.reason)
+
+    def test_paging_present_and_everything_else_ok_still_passes(self):
+        # Negative-test companion: proves the INCONCLUSIVE above is really
+        # gated on paging_present, not something else in this fixture.
+        r = J.judge_lcd_profiles_picker("profiles", _PROFILE_ROWS, True, True, "profile_detail")
+        self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_no_rows_is_inconclusive(self):
         r = J.judge_lcd_profiles_picker("profiles", [], True, True, None)

@@ -313,8 +313,31 @@ CHROMA_MATCH_TOLERANCE = 0.10
 CHROMA_MIN_BRIGHTNESS_RATIO = 0.5
 
 
+#: Threshold for judge_lcd_home_idle's whole-frame white-balance sanity
+#: check (2026-09-24 bench evidence: a cyan-cast capture read the Start
+#: button at RGB(25,96,98) vs. ACCENT_4's RGB(92,192,110) -- chroma-distance
+#: 0.2121, outside even CHROMA_MATCH_TOLERANCE -- while the bezel sampled a
+#: plausible near-black (6,11,16), showing the cast affected lit/background
+#: regions unevenly rather than uniformly scaling every channel the way
+#: matches_color()'s own chroma fallback assumes). This is deliberately
+#: looser than CHROMA_MATCH_TOLERANCE: it exists only to flag "the capture
+#: itself looks untrustworthy," not to decide any single widget's color, so
+#: it must never substitute for -- or loosen -- COLOR_MATCH_TOLERANCE/
+#: CHROMA_MATCH_TOLERANCE themselves.
+CAST_CHROMA_THRESHOLD = 0.15
+
+
 def color_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def chroma_offset(rgb: Tuple[int, int, int], target: Tuple[int, int, int]) -> float:
+    """Chromaticity-space distance between `rgb` and `target`, exposed
+    standalone (matches_color() computes the same thing internally) for
+    callers that want the number itself rather than a match/no-match bool --
+    e.g. a whole-frame color-cast sanity check against a known-neutral
+    reference region."""
+    return color_distance(_chromaticity(rgb), _chromaticity(target))
 
 
 def _chromaticity(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:

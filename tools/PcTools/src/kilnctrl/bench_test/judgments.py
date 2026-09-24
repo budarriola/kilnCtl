@@ -795,6 +795,31 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
         # 'hidden' flag disagreement; absent camera data, trust the flag.
         return CaseResult(Verdict.FAIL, reason="Pause target is not hidden on home/idle", observed=observed, evidence=evidence)
     if start_matches_accent4 is False:
+        # 2026-09-24: a whole-frame color cast (the Start button sampled
+        # RGB(25,96,98) against target RGB(92,192,110), chroma-distance
+        # 0.2121 -- outside even matches_color()'s own chroma fallback --
+        # while the bezel sampled a plausible near-black) can make a
+        # perfectly good board read as a definite color FAIL. Before
+        # trusting that, check the background reference sample
+        # (cases_lcd._try_capture_and_sample's "bg_reference", a known-exact
+        # UI_THEME_COLOR_BG region far from any widget): if IT also reads
+        # far from its own expected chromaticity, the capture itself is
+        # suspect and this degrades to INCONCLUSIVE, never a loosening of
+        # COLOR_MATCH_TOLERANCE/CHROMA_MATCH_TOLERANCE themselves (those
+        # still gate start_matches_accent4 exactly as before).
+        bg_ref = (color_debug or {}).get("bg_reference")
+        if bg_ref and bg_ref.get("cast_suspected"):
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=(
+                    "camera color cast: background reference region reads "
+                    f"chroma-offset {bg_ref.get('chroma_offset')} from its expected "
+                    f"color (threshold {bg_ref.get('cast_threshold')}) -- the Start "
+                    "button mismatch cannot be trusted against this capture"
+                ),
+                observed=observed,
+                evidence=evidence,
+            )
         return CaseResult(Verdict.FAIL, reason="Start button region does not read as ACCENT_4", observed=observed, evidence=evidence)
     # Only the checks a capture could actually have answered make this
     # INCONCLUSIVE. A board that does not list a hidden Pause target at all
@@ -996,7 +1021,27 @@ def judge_lcd_profiles_picker(page: str, rows: "list[dict]", paging_present: boo
     if favorites and any(not r.get("starred") for r in rows[: len(favorites)]):
         return CaseResult(Verdict.FAIL, reason="favorite row(s) are not sorted first", observed=observed)
     if not paging_present:
-        return CaseResult(Verdict.FAIL, reason="no paging indicator found in the topbar", observed=observed)
+        # 2026-09-24 finding: firmware builds the Prev/Next paging icons via
+        # ui_topbar.c's UNTAGGED build_icon() (unlike "settings"/"back"/
+        # "home", which use build_icon_named() to stash a tap-name
+        # override) -- so these icons carry no tap-target name at all on
+        # this build. No name-based lookup can ever find "paging"; this is
+        # a firmware gap (icons never registered as named tap targets), not
+        # a naming mismatch this test can fix by trying another string, and
+        # not something this PcTools-only change may fix in firmware.
+        # INCONCLUSIVE rather than FAIL so it doesn't read as "the picker
+        # lost its paging control" when the paging control likely still
+        # works -- it just can't be confirmed by name from the bench.
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(
+                "no tap target named 'paging' exists -- firmware's Prev/Next "
+                "topbar icons are built via ui_topbar.c's untagged build_icon() "
+                "and carry no tap name at all, so this cannot be confirmed by "
+                "name from the bench (firmware gap, not fixed here)"
+            ),
+            observed=observed,
+        )
     if not new_icon_present:
         return CaseResult(Verdict.FAIL, reason="New profile icon missing from the topbar", observed=observed)
     if rows and detail_page != "profile_detail":

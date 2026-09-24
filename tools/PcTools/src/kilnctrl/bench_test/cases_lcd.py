@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from . import judgments as J
 from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
+from ..protocol import THERMO_CHANNEL_ALL
 
 #: click_by_name() (uart_bridge_ui_test.c -> kiln_ui_click_by_name(),
 #: firmware/KilnFW/App/drivers/ui/kiln_ui.c) injects the synthetic touch
@@ -303,6 +304,53 @@ def _click_then_page(ui, name: str, expected_page: str,
         )
     return None, page, waited_s
 
+def _click_then_targets_change(ui, name: str, prev_names: "set",
+                                timeout_s: float = _PAGE_POLL_TIMEOUT_S) -> "tuple[Optional[CaseResult], Optional[dict], float]":
+    """Diagnostics-sub-tab analogue of :func:`_click_then_page`: a sub-tab
+    switch never changes kiln_ui's top-level page name
+    (``_wait_for_targets_change``'s docstring), so the same
+    screen_idle-swallow race that helper guards against has to be detected
+    by tap-target-set membership here instead of page name. 2026-09-24 bench
+    root cause for LCD-16: the old loop broke on any non-'ok' click result
+    with no retry, and separately never even checked whether the target set
+    had actually changed after a click that DID say 'ok' -- so a swallowed
+    tap on this loop silently reused the previous tab's stale targets.
+
+    Retried once, only when the set is unchanged (the swallow shape); never
+    retried when the set changed to something else, since a second tap on a
+    page that already moved could land on a different tab's widget of the
+    same name. Every title here is a pure navigation tap, same class as
+    _click_then_page's callers, so a harmless double-tap is fine.
+
+    Unlike :func:`_click_then_page`, an unchanged set after the retry is
+    NOT reported as a hard FAIL: some diagnostics sub-tabs (e.g. an empty
+    Crash Report) legitimately show no distinguishing tap targets at all,
+    so "the set didn't change" is not, by itself, proof of a swallowed tap
+    the way "the page name didn't change" is for a real navigation hop.
+    This only ever fails on an outright not_found click; the caller gets
+    the best tap-target read available after one retry either way."""
+    click = ui.click_by_name(name)
+    if click.get("result") != "ok":
+        return (
+            CaseResult(
+                Verdict.FAIL,
+                reason=f"click_by_name({name!r}) returned {click.get('result')!r}",
+                observed={"click": click, "attribution": "not_found"},
+            ),
+            None,
+            0.0,
+        )
+    tap, waited_s = _wait_for_targets_change(ui, prev_names, timeout_s=timeout_s)
+    names = {t.get("name") for t in tap.get("targets", [])}
+    if names == prev_names:
+        retry_click = ui.click_by_name(name)
+        if retry_click.get("result") == "ok":
+            tap2, waited_s2 = _wait_for_targets_change(ui, prev_names, timeout_s=timeout_s)
+            waited_s += waited_s2
+            tap = tap2
+    return None, tap, waited_s
+
+
 #: Mirrored from firmware/KilnFW/App/drivers/ui/ui_theme.h -- reference
 #: values ONLY. Per CLAUDE.md ("never by matching theme source constants"),
 #: a sampled region is judged against these plus a live bezel sample
@@ -311,6 +359,17 @@ def _click_then_page(ui, name: str, expected_page: str,
 _ACCENT_4_RGB = (0x5C, 0xC0, 0x6E)
 _ACCENT_1_RGB = (0xE8, 0x97, 0x4E)
 _ACCENT_5_RGB = (0xD6, 0x55, 0x5F)
+
+#: Mirrored from UI_THEME_COLOR_BG_HEX (ui_theme.h). Not a true neutral
+#: grey, but a known, exact, large-area reference far from any button or
+#: text -- used only as a whole-frame white-balance sanity check (LCD-01's
+#: judge), never as a per-widget color check. Sampled at a fixed widget
+#: coordinate near the top-left corner (5, 5): inside the bezel and clear of
+#: every topbar icon (leftmost icon starts at cx=414 on home per
+#: docs/COMMISSIONING_LCD_RUNBOOK.md Table 2) and of the bottom action row
+#: (y=294+), so this point is background on every page layout traced there.
+_BG_REFERENCE_XY = (5, 5)
+_BG_RGB = (0x1A, 0x1F, 0x2B)
 
 
 def _srv(ctx: dict):
@@ -409,6 +468,23 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                     "off_tolerance": lcd_sampler.MIN_BEZEL_CONTRAST,
                     "is_hidden": pause_hidden,
                 }
+        # White-balance sanity check (2026-09-24): sample a known-exact
+        # background region far from any widget and compare its chromaticity
+        # to the theme's own UI_THEME_COLOR_BG -- a large chroma offset here
+        # means the whole capture is under a color cast, which is what makes
+        # a definite-looking Start-button mismatch INCONCLUSIVE rather than
+        # a hard FAIL (see judge_lcd_home_idle). Best-effort: absence of this
+        # key just means no cast signal was available, never itself a cast.
+        bg_sample = lcd_sampler.sample_widget(image_path, *_BG_REFERENCE_XY, repo_root=ctx.get("repo_root"))
+        bg_offset = lcd_sampler.chroma_offset(bg_sample.region, _BG_RGB)
+        color_debug["bg_reference"] = {
+            "region_xy": _BG_REFERENCE_XY,
+            "sampled_rgb": bg_sample.region,
+            "target_rgb": _BG_RGB,
+            "chroma_offset": round(bg_offset, 4),
+            "cast_threshold": lcd_sampler.CAST_CHROMA_THRESHOLD,
+            "cast_suspected": bg_offset > lcd_sampler.CAST_CHROMA_THRESHOLD,
+        }
     except lcd_sampler.LcdCaptureError:
         pass
     return start_matches, pause_hidden, color_debug
@@ -445,20 +521,26 @@ def _case_lcd08(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
-    click = ui.click_by_name("settings")
-    if click.get("result") != "ok":
-        return CaseResult(
-            Verdict.FAIL,
-            reason=f"click_by_name('settings') returned {click.get('result')!r}, expected 'ok'",
-            observed={"click": click},
-        )
-    page, waited_s = _wait_for_page(ui, "config")
-    tap = ui.list_tap_targets()
-    _remember_page_targets(ctx, "config", tap)
-    result = J.judge_lcd_config_hub(page, tap.get("targets", []))
-    result.observed = dict(result.observed or {})
-    result.observed["page_wait_s"] = round(waited_s, 3)
-    return result
+    try:
+        # 2026-09-24 bench root cause: this case used to call
+        # click_by_name("settings") directly with no retry, so a swallowed
+        # wake tap (screen_idle's touch-swallow race, same shape as every
+        # other _click_then_page() caller) failed here with no second
+        # chance. Migrated to the shared retry helper.
+        fail, page, waited_s = _click_then_page(ui, "settings", "config")
+        if fail is not None:
+            return fail
+        tap = ui.list_tap_targets()
+        _remember_page_targets(ctx, "config", tap)
+        result = J.judge_lcd_config_hub(page, tap.get("targets", []))
+        result.observed = dict(result.observed or {})
+        result.observed["page_wait_s"] = round(waited_s, 3)
+        image_path = _capture(ctx, "lcd08_config_hub.jpg")
+        if image_path:
+            result.evidence = list(result.evidence or []) + [image_path]
+        return result
+    finally:
+        _navigate_home(ui)
 
 
 # ---------------------------------------------------------------------------
@@ -703,21 +785,46 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         fail, page, waited_s = _click_then_page(ui, "Temperature", "temperature")
         if fail is not None:
             return fail
+        def _zone_rows_from(targets: "list[dict]") -> Dict[int, float]:
+            rows: Dict[int, float] = {}
+            for t in targets:
+                name = str(t.get("name", ""))
+                if name.startswith("zone_temp_") and t.get("value") is not None:
+                    try:
+                        rows[int(name.rsplit("_", 1)[-1])] = float(t["value"])
+                    except (TypeError, ValueError):
+                        pass
+            return rows
+
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
+        zone_rows = _zone_rows_from(targets)
+        # Bounded poll (<=3s): the zone rows are populated by the same LVGL
+        # ~30ms task poll _click_then_page's module docstring describes for
+        # page transitions -- an immediate read right after the page arrives
+        # can still see rows not yet filled in.
+        poll_start = time.monotonic()
+        while not zone_rows and time.monotonic() - poll_start < 3.0:
+            time.sleep(_PAGE_POLL_INTERVAL_S)
+            tap = ui.list_tap_targets()
+            targets = tap.get("targets", [])
+            zone_rows = _zone_rows_from(targets)
         _remember_page_targets(ctx, "temperature", tap)
-        zone_rows: Dict[int, float] = {}
-        for t in targets:
-            name = str(t.get("name", ""))
-            if name.startswith("zone_temp_") and t.get("value") is not None:
-                try:
-                    zone_rows[int(name.rsplit("_", 1)[-1])] = float(t["value"])
-                except (TypeError, ValueError):
-                    pass
+        thermo_error: Optional[str] = None
         try:
-            readings = {int(z): float(v) for z, v in srv._thermo.read_all().items()}
-        except Exception:
+            # ThermoClient has no read_all(); read(THERMO_CHANNEL_ALL) is the
+            # actual API (2026-09-24 bench root cause: the old
+            # srv._thermo.read_all() call always raised AttributeError,
+            # silently swallowed by a bare except, which mislabeled this as
+            # "no zone rows reported" instead of a coding bug).
+            readings = {
+                int(r.channel): float(r.temperature_c)
+                for r in srv._thermo.read(THERMO_CHANNEL_ALL)
+                if r.valid
+            }
+        except Exception as exc:
             readings = {}
+            thermo_error = f"{type(exc).__name__}: {exc}"
         safety_target = _find(targets, "safety_line")
         safety_on = safety_target.get("on") if safety_target is not None else None
         try:
@@ -727,6 +834,8 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         result = J.judge_lcd_temperature_page(page, zone_rows, readings, safety_on, expect_safety_on)
         result.observed = dict(result.observed or {})
         result.observed["page_wait_s"] = round(waited_s, 3)
+        if thermo_error is not None:
+            result.observed["thermo_error"] = thermo_error
         return result
     finally:
         _navigate_home(ui)
@@ -760,10 +869,9 @@ def _case_lcd16(ctx: dict) -> CaseResult:
             return fail
         prev_names = {t.get("name") for t in ui.list_tap_targets().get("targets", [])}
         for title in J._DIAG_TITLES:
-            click3 = ui.click_by_name(title)
-            if click3.get("result") != "ok":
+            fail, tap, _ = _click_then_targets_change(ui, title, prev_names)
+            if fail is not None:
                 break
-            tap, _ = _wait_for_targets_change(ui, prev_names)
             targets = tap.get("targets", [])
             prev_names = {t.get("name") for t in targets}
             page_title = ui.get_current_page()

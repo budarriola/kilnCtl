@@ -116,8 +116,18 @@ class Lcd01Test(unittest.TestCase):
     def test_wrong_color_still_fails_with_numeric_evidence(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
         red = lcd_sampler.RegionSample(region=(0xD6, 0x20, 0x20), bezel=(26, 31, 43))
+        bg = lcd_sampler.RegionSample(region=C._BG_RGB, bezel=(26, 31, 43))
+
+        def fake_sample_widget(image_path, x, y, repo_root=None):
+            # No color cast in this capture: only the widget itself reads
+            # wrong, so the bg-reference sanity check must not fire and
+            # mask a genuine defect as INCONCLUSIVE.
+            if (x, y) == C._BG_REFERENCE_XY:
+                return bg
+            return red
+
         with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="x.jpg"), \
-             mock.patch.object(lcd_sampler, "sample_widget", return_value=red):
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
             result = C._case_lcd01({"srv": srv, "_lcd_capture_dir": "/cap"})
         self.assertEqual(result.verdict, Verdict.FAIL)
         dbg = result.observed["color_debug"]["start"]
@@ -153,19 +163,66 @@ _CONFIG_TARGETS = [
 class Lcd08Test(unittest.TestCase):
     def test_menu_tap_reaches_config_hub(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_CONFIG_TARGETS, click_result="ok"))
-        result = C._case_lcd08({"srv": srv})
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd08({"srv": srv})
         self.assertEqual(result.verdict, Verdict.PASS)
 
     def test_menu_tap_not_found_fails(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_CONFIG_TARGETS, click_result="not_found"))
-        result = C._case_lcd08({"srv": srv})
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd08({"srv": srv})
         self.assertEqual(result.verdict, Verdict.FAIL)
-        self.assertIn("not_found", result.reason)
+        self.assertIn("not_found", result.observed.get("attribution", ""))
 
     def test_records_visited_page_in_ctx(self):
         ctx = {"srv": FakeSrv(FakeUiTest(page="home", targets=_CONFIG_TARGETS, click_result="ok"))}
-        C._case_lcd08(ctx)
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            C._case_lcd08(ctx)
         self.assertIn("config", ctx["_lcd_pages_visited"])
+
+    def test_retries_once_on_swallowed_tap_then_passes(self):
+        # 2026-09-24 fix: _case_lcd08 used to call click_by_name('settings')
+        # directly with no retry -- migrated to _click_then_page(), which
+        # retries once when the click said 'ok' but the page never moved
+        # (the screen_idle swallow race).
+        class SwallowOnceUi(FakeUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.calls = 0
+                self.settings_calls = 0
+
+            def click_by_name(self, name):
+                self.calls += 1
+                if name == "settings":
+                    self.settings_calls += 1
+                    if self.settings_calls == 1:
+                        return {"result": "ok", "cx": 0, "cy": 0}  # swallowed: no page change
+                    self._page = "config"
+                    return {"result": "ok", "cx": 0, "cy": 0}
+                # Any other click (e.g. _navigate_home's "home"/"back") is a
+                # normal, un-swallowed navigation back to home.
+                self._page = "home"
+                return {"result": "ok", "cx": 0, "cy": 0}
+
+        ui = SwallowOnceUi(page="home", targets=_CONFIG_TARGETS)
+        srv = FakeSrv(ui)
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd08({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(ui.settings_calls, 2)
+
+    def test_saves_a_capture_as_evidence(self):
+        srv = FakeSrv(FakeUiTest(page="home", targets=_CONFIG_TARGETS, click_result="ok"))
+        captured = {}
+
+        def fake_capture(path, **kw):
+            captured["path"] = path
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=fake_capture):
+            result = C._case_lcd08({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.evidence, [captured["path"]])
+        self.assertTrue(captured["path"].endswith("lcd08_config_hub.jpg"))
 
 
 class FakeSafetyDiag:
@@ -196,12 +253,33 @@ class FakeProfiles:
         return self._status
 
 
-class FakeThermo:
-    def __init__(self, readings=None):
-        self._readings = readings or {}
+class FakeThermoReading:
+    """Stand-in for kilnctrl.devices_thermo.ThermoReading -- just enough
+    surface (.channel/.temperature_c/.valid) for cases_lcd._case_lcd14's
+    srv._thermo.read(THERMO_CHANNEL_ALL) call."""
 
-    def read_all(self):
-        return self._readings
+    def __init__(self, channel, temperature_c, valid=True):
+        self.channel = channel
+        self.temperature_c = temperature_c
+        self.valid = valid
+
+
+class FakeThermo:
+    """Real ThermoClient has only .read(channel), never a .read_all() --
+    2026-09-24 bench root cause for LCD-14 (cases_lcd.py called a method
+    that never existed, always raising AttributeError, silently swallowed).
+    `readings` is {channel: temperature_c}, same convenient shape the old
+    (nonexistent) read_all() would have returned, translated here into the
+    list[ThermoReading]-shaped shape .read() actually returns."""
+
+    def __init__(self, readings=None, raises=None):
+        self._readings = readings or {}
+        self._raises = raises
+
+    def read(self, channel=0xFF, timeout=None):
+        if self._raises is not None:
+            raise self._raises
+        return [FakeThermoReading(ch, temp) for ch, temp in self._readings.items()]
 
 
 class FakeSrvFull(FakeSrv):
@@ -633,6 +711,54 @@ class Lcd14Test(unittest.TestCase):
             C._case_lcd14({"srv": srv})
         self.assertGreaterEqual(ui.home_calls, 1)
 
+    def test_thermo_read_exception_is_recorded_not_swallowed(self):
+        # 2026-09-24 bench root cause: srv._thermo.read_all() never existed
+        # on the real ThermoClient (only .read(channel)), so this call always
+        # raised AttributeError and a bare `except Exception: readings = {}`
+        # swallowed it -- reporting the misleading "no zone rows with a
+        # numeric value were reported" INCONCLUSIVE instead of the real
+        # coding bug. Fixed to call .read() and to record the exception
+        # text into observed["thermo_error"] rather than discard it.
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}],
+            "config": [{"name": "Temperature", "hidden": False}],
+            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
+        }
+        ui = PageNavUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV)
+        srv = FakeSrvFull(ui, thermo=FakeThermo(raises=RuntimeError("no reply")),
+                           profiles=FakeProfiles(FakeExecStatus("idle")))
+        result = C._case_lcd14({"srv": srv})
+        self.assertIn("thermo_error", result.observed)
+        self.assertIn("no reply", result.observed["thermo_error"])
+
+    def test_zone_rows_arriving_one_poll_late_are_still_read(self):
+        # Bounded (<=3s) poll for zone_temp_* targets, same class of race as
+        # _click_then_page's page-name poll: the first read right after the
+        # page arrives can still see rows not yet populated.
+        class DelayedZoneRowsUi(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._temp_reads = 0
+
+            def list_tap_targets(self):
+                if self._page == "temperature":
+                    self._temp_reads += 1
+                    if self._temp_reads == 1:
+                        return {"targets": [{"name": "safety_line", "on": False}], "truncated": False}
+                return super().list_tap_targets()
+
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}],
+            "config": [{"name": "Temperature", "hidden": False}],
+            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
+        }
+        ui = DelayedZoneRowsUi(page="home", page_targets=page_targets, nav_map=_TEMP_NAV)
+        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
+        with mock.patch.object(C.time, "sleep"):
+            result = C._case_lcd14({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("zone_rows"), {0: 100.0})
+
 
 class Lcd16Test(unittest.TestCase):
     def test_finally_restores_home_on_exception(self):
@@ -653,6 +779,53 @@ class Lcd16Test(unittest.TestCase):
         srv = FakeSrvFull(ui)
         result = C._case_lcd16({"srv": srv})
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_sub_tab_retries_once_on_swallowed_tap_then_all_titles_seen(self):
+        # 2026-09-24 fix: the per-title loop used to break on any non-'ok'
+        # click result with no retry, and separately never even checked
+        # whether the tap-target set actually changed after an 'ok' click --
+        # so a swallowed tap on the FIRST sub-tab silently reused the
+        # previous (config-hub) targets and looked like a legitimate,
+        # empty diagnostics tab instead of a failed hop. Migrated to
+        # _click_then_targets_change(), which retries once when the set is
+        # unchanged.
+        class SwallowOnceDiagUi(PageNavUiTest):
+            def __init__(self, *a, tab_targets=None, **kw):
+                super().__init__(*a, **kw)
+                self._tab_targets = tab_targets or {}
+                self._current_tab_targets: "list" = []
+                self._swallowed_once = set()
+
+            def click_by_name(self, name):
+                if self._click_result != "ok":
+                    return {"result": self._click_result, "cx": 0, "cy": 0}
+                dest = self._nav_map.get(name)
+                if dest is not None:
+                    self._page = dest
+                    return {"result": "ok", "cx": 0, "cy": 0}
+                if name in self._tab_targets:
+                    if name not in self._swallowed_once:
+                        self._swallowed_once.add(name)
+                        return {"result": "ok", "cx": 0, "cy": 0}  # swallowed: set unchanged
+                    self._current_tab_targets = self._tab_targets[name]
+                return {"result": "ok", "cx": 0, "cy": 0}
+
+            def list_tap_targets(self):
+                if self._page not in ("config", "home"):
+                    return {"targets": self._current_tab_targets, "truncated": False}
+                return {"targets": self._page_targets.get(self._page, []), "truncated": False}
+
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}],
+            "config": [{"name": "Diagnostics", "hidden": False}],
+        }
+        nav_map = {"settings": "config", "Diagnostics": "diagnostics"}
+        tab_targets = {t: [{"name": f"marker_{i}"}] for i, t in enumerate(J._DIAG_TITLES)}
+        ui = SwallowOnceDiagUi(page="home", page_targets=page_targets, nav_map=nav_map, tab_targets=tab_targets)
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(C._click_then_targets_change, "__defaults__", (0.05,)):
+            result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.observed.get("titles_seen"), list(J._DIAG_TITLES))
 
 
 class PopupUiTest(FakeUiTest):
