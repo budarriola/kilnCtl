@@ -25,7 +25,8 @@
 > `kilnlink_announce_encode()`. `SaftyFW`'s `link_task.c` also dispatches the
 > `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT` frames from
 > `UPDATE_PROTOCOL.md` §4 to `update_task.c`. **Still not wired anywhere:**
-> `SET_FIRING_CEILING`, `GET_FW_VERSION`, `SET_CLOCK` on the ESP send side,
+> `GET_FW_VERSION`, `SET_CLOCK` on the ESP send side (`SET_FIRING_CEILING`
+> landed 2026-09-24 as a per-poll resend, `6f8ed940`/`34f242c3`, see §10),
 > and `KilnFW` has no `CLEAR_TRIP` send path yet (no GUI trigger built) — see
 > `firmware/CommonFW/README.md`'s checklist and this document's own §10 for
 > the itemised state of each frame.
@@ -1427,7 +1428,7 @@ Neither firmware is complete; these are the ESP-side items. Sequenced in
 | 0.5 | Accept unsolicited status/diag/version/trip frames with no outstanding request (partly present — the poll cache already accepts unsolicited status) | `safety_link.c` |
 | 0.6 | **Redefine `SAFETY_FAULT_SRC_SAFETY_LINK` as "no telemetry within 1.5 s"** and wire the 30 s firing-abort. §7 | `safety_link.{c,h}`, `profile_executor.c` |
 | 0.7 | Request the Pico's build identity at boot, **with retry**, and on every `boot_id` change. Reuse the `INFO_CMD_GET_FW_VERSION` parser | `safety_link.c`, `pc_tools/` |
-| 0.8 | Send `SET_FIRING_CEILING` at profile start/edit — the highest target the profile will ask for | `profile_executor.c`, `profiles_http.c` |
+| 0.8 | **Done 2026-09-24.** `SET_FIRING_CEILING` resent after every `PUSH_CONTEXT` while RUNNING/PAUSED (level-triggered, not edge) — the highest target the profile will ask for | `profile_executor.c`, `profiles_http.c` |
 | 0.9 | Surface `DIAG`, `FW_VERSION` (incl. **config CRC**) and `TRIP_EVENT` on the dashboard and over the PC link | `dashboard_http.c`, `uart_bridge.c` |
 | 0.10 | Bump `UART_PROTOCOL_VERSION` 4 → 5 with a note explaining the broadcast type | `uart_task_ids.h:52` |
 | 0.11 | Correct `docs/SAFETY_LINK.md` "Trap 1" and the R15 boot-artefact note; correct `docs/HARDWARE.md`'s optocoupler table. **Done 2026-08-16.** | `firmware/KilnFW/docs/` |
