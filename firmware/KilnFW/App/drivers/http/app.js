@@ -102,25 +102,38 @@
     return window.confirm(message);
   };
 
+  // Owner report, 2026-09-24: Cancel on the sign-in modal must reject the
+  // pending action cleanly with "no error toast, or a quiet 'cancelled'
+  // note" -- never the same "could not reach the board" wording a real
+  // network/server failure gets, since the board was reached fine and
+  // simply refused without a session. window.fetch's own 401/403 handling
+  // below throws an Error named 'AuthCancelled' for exactly this case;
+  // every page-local .catch() that renders visible error text for a failed
+  // /api/ fetch should check this first and skip (or show a quiet note)
+  // instead of the "could not reach"/"failed" wording meant for a genuine
+  // failure. Exported the same way kcConfirm/kcEscapeHtml are so every page
+  // checks the SAME name rather than each re-deriving `err.name ===
+  // 'AuthCancelled'` by hand.
+  window.kcIsAuthCancelled = function (err) {
+    return !!(err && err.name === 'AuthCancelled');
+  };
+
   // ---- Login-escalation modal + global 401/403 handling -----------------
   //
   // Owner report, 2026-09-21: "When I click something on the site that
   // requires a password it should ask me for one, not just show an
-  // authentication required page" -- refined the same day to: a request
-  // with NO session at all must never render a bare auth-error body,
-  // ever, page load or click; a request with a REAL session but the wrong
-  // role (a `user`/viewer hitting an admin-only action) should instead pop
-  // an in-place modal offering to log into an admin account, retrying the
-  // one action on success. The no-session case is handled almost entirely
-  // in http_auth_http.c now (it 302s a bare page GET straight to
-  // /login?return=<uri> before any JS here ever runs) -- what is left for
-  // this file is (a) the same redirect for a fetch()/XHR call, since a
-  // page already loaded and a session that then expires mid-use both still
-  // answer with a plain 401 body rather than a redirect the browser would
-  // follow automatically, and (b) the admin-escalation modal for the
-  // wrong-role case, both for an AJAX 403 and for the admin_required=<uri>
-  // query param http_auth_http.c's page-route redirect leaves on "/" when
-  // a signed-in viewer's own page navigation was the thing denied.
+  // authentication required page" -- refined 2026-09-24 to: no page ever
+  // shows a login form or redirect on load, ever, including a deep link to
+  // an admin-tier page (http_auth_http.c's is_page_shell_get() now serves
+  // every page shell directly regardless of session/role); the FIRST time
+  // an operator is asked to sign in is when an actual fetch needs it,
+  // via ONE shared, cancelable, theme-styled modal covering BOTH refusal
+  // shapes -- no session at all (401) and a real session with the wrong
+  // role (403 + X-Kiln-Auth-Reason: insufficient_role) -- with the same
+  // contract either way: success retries the one action once; Cancel (or
+  // Escape, or a backdrop click) rejects it with a distinguishable
+  // `AuthCancelled` error (see window.kcIsAuthCancelled below) rather than
+  // surfacing a raw 401/403 or navigating the tab away.
   //
   // The 401-vs-403-insufficient-role distinction is exactly what the
   // firmware's two decisions already send: HTTP_AUTH_DECISION_DENY_NO_SESSION
@@ -188,9 +201,10 @@
 
   // Shows the modal and resolves `true` (logged in) or `false` (cancelled)
   // -- this never rejects, so a caller's `.then()` never needs its own
-  // `.catch()` just to handle a decline. `titleText` distinguishes the two
-  // callers' wording (an AJAX 403 vs the admin_required=<uri> page-load
-  // case) without needing two separate modals.
+  // `.catch()` just to handle a decline; window.fetch's wrapper below is
+  // what turns a `false` into the AuthCancelled rejection callers see.
+  // `titleText` distinguishes the no-session vs wrong-role wording without
+  // needing two separate modals.
   function openLoginModal(titleText) {
     if (!loginModalEl) buildLoginModal();
     loginTitleEl.textContent = titleText;
@@ -398,34 +412,60 @@
     // generic wrapper stands down and hands the 403 straight back to it,
     // rather than both layers opening a modal for the same failure.
     var callerHandlesAuth = !!(init && init.__kcCallerHandlesAuth);
+    function retryOnce() {
+      var retryInit = {};
+      var src = init || {};
+      for (var k in src) {
+        if (Object.prototype.hasOwnProperty.call(src, k)) retryInit[k] = src[k];
+      }
+      retryInit.__kcAuthRetried = true;
+      return window.fetch(inputForRetry, retryInit);
+    }
+    function authCancelled() {
+      // Owner report, 2026-09-24: Cancel on the modal must reject the
+      // pending action cleanly, distinguishably, so a caller can tell
+      // "the operator declined to sign in" apart from any other failure
+      // and stay quiet about it (no error toast) rather than surface the
+      // raw 401/403 as if the server itself refused the request. Callers
+      // that want a quiet UI already have somewhere to catch this: see
+      // kc-auth-cancelled handling added alongside this change.
+      var e = new Error('sign-in cancelled');
+      e.name = 'AuthCancelled';
+      throw e;
+    }
     return nativeFetch(input, init).then(function (resp) {
-      if (resp.status === 401) {
-        // No session at all -- per the owner's refinement this is never
-        // shown in place; the whole tab goes to the login page, carrying
-        // the current location back as ?return= exactly the way
-        // http_auth_http.c's own page-route redirect does, so a session
-        // that expires mid-click lands the operator back where they were
-        // after logging in again. The in-flight action itself is not
-        // retried (there is nothing left to retry into -- the page is
-        // navigating away), matching the plan's "returning to the right
-        // page is required, retrying the click is optional."
-        var here = window.location.pathname + window.location.search;
-        window.location.href = '/login?return=' + encodeURIComponent(here);
-        return resp;
+      if (!alreadyRetried && !callerHandlesAuth && resp.status === 401) {
+        // Owner report, 2026-09-24 (see is_page_shell_get() in
+        // http_auth_http.c): no session at all no longer navigates the tab
+        // away. The page itself never shows a login form or redirect on
+        // load -- this is the FIRST time an unauthenticated caller learns
+        // anything needs a session, and it happens only when an actual
+        // action/data fetch needs one, via the SAME shared, cancelable
+        // modal the insufficient-role case below uses (one modal, one
+        // retry queue, `pendingLogin` singleton -- concurrent 401s and 403s
+        // share it). Success retries this exact request once; Cancel
+        // rejects with AuthCancelled instead of resolving to the raw 401,
+        // so a caller's own .then() never mistakes "declined to sign in"
+        // for a real response body to parse.
+        return ensureAdminLogin('Sign in required').then(function (ok) {
+          if (!ok) return authCancelled();
+          return retryOnce();
+        });
       }
       if (!alreadyRetried && !callerHandlesAuth && resp.status === 403 &&
           resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
         // Signed in, wrong role -- offer to elevate in place and retry the
-        // SAME request once on success. On cancel (or a second failed
-        // login), hand back the original 403 unchanged so whatever this
-        // page already does with a failed action (an inline error message,
-        // its own .catch()) still runs exactly as before this change.
+        // SAME request once on success. Cancel rejects with AuthCancelled
+        // (unified with the 401 case above, 2026-09-24) rather than
+        // resolving with the original 403, so both refusal shapes give
+        // callers one consistent contract to catch.
         //
         // Review fix, 2026-09-21 (b), CORRECTED by review the same day:
         // the retry goes back through window.fetch (this same wrapper)
         // rather than nativeFetch so that a 401 on the retry -- the session
-        // dropping again between the login and the resend -- still gets the
-        // /login redirect above instead of surfacing as a raw 401 body.
+        // dropping again between the login and the resend -- still gets
+        // the same modal treatment above instead of surfacing as a raw 401
+        // body.
         //
         // What re-entry does NOT do, despite an earlier comment here saying
         // it did: kcFetchWithSafetyAck and kcOtaAuthedFetch sit ABOVE this
@@ -450,56 +490,13 @@
         // kcFetchWithSafetyAck inspects whatever response this wrapper's
         // promise resolves to, retry included.
         return ensureAdminLogin('Administrator login required').then(function (ok) {
-          if (!ok) return resp;
-          var retryInit = {};
-          var src = init || {};
-          for (var k in src) {
-            if (Object.prototype.hasOwnProperty.call(src, k)) retryInit[k] = src[k];
-          }
-          retryInit.__kcAuthRetried = true;
-          return window.fetch(inputForRetry, retryInit);
+          if (!ok) return authCancelled();
+          return retryOnce();
         });
       }
       return resp;
     });
   };
-
-  // admin_required=<uri>: left on "/" by http_auth_http.c's page-route
-  // redirect when a signed-in non-admin session tried to navigate straight
-  // to an ADMIN-tier page (a bookmark, a typed URL). Offers the same modal
-  // and, on success, continues on to the page the operator actually
-  // wanted; on cancel, just drops the query param so a reload doesn't
-  // re-offer it.
-  (function () {
-    var params = new URLSearchParams(window.location.search);
-    var target = params.get('admin_required');
-    // Review fix, 2026-09-21: a BACKSLASH second character is rejected too --
-    // browsers normalise "/\" to "//", so "/?admin_required=/\evil.example"
-    // would otherwise navigate off-host. URLSearchParams has already decoded
-    // percent escapes, so the check runs on the decoded value.
-    if (!target || target.charAt(0) !== '/' || target.charAt(1) === '/' ||
-        target.charAt(1) === '\\') {
-      // Missing, or not a same-page-relative path (a "//host" value would
-      // be browser-interpreted as protocol-relative to an attacker's
-      // host) -- same open-redirect guard as login_page.html's
-      // loginReturnPath(). Never acted on.
-      return;
-    }
-    function offer() {
-      ensureAdminLogin('Administrator login required to open this page').then(function (ok) {
-        var clean = window.location.pathname; // drop the query param either way
-        window.history.replaceState(null, '', clean);
-        if (ok) {
-          window.location.href = target;
-        }
-      });
-    }
-    if (document.body) {
-      offer();
-    } else {
-      document.addEventListener('DOMContentLoaded', offer);
-    }
-  })();
 
   // ---- kcFetchWithSafetyAck ------------------------------------------
   //

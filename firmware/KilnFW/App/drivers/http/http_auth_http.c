@@ -235,6 +235,38 @@ bool http_auth_caller_is_admin(httpd_req_t *req) {
     return role == HTTP_AUTH_ROLE_ADMIN;
 }
 
+// Owner report, 2026-09-24 (verbatim): "When I open the webpage, don't show
+// the login until I do something that would require it ... a pop-up ... that
+// allows me to cancel the action." The previous behaviour (see the removed
+// 302-to-/login and 302-to-/?admin_required= branches this replaces) forced a
+// full-page redirect to the login form -- or to the dashboard with a query
+// flag -- the instant a bare page GET landed on a USER/ADMIN-tier route with
+// no or an insufficient session, which is exactly the "shows the login before
+// I do anything" experience the owner asked to remove.
+//
+// Every one of these page-shell routes (route_tier_table.h's "Page shells
+// other than /" section, plus /settings/*, /safety*, /diagnostics,
+// /profiles, /live_profile, /readiness, /setup, /ota) serves ONLY a static,
+// compiled-in HTML/JS document -- never per-caller data embedded server-side;
+// every real read or write those pages perform happens client-side against
+// their own /api/... routes, which keep the EXACT SAME tier gate this
+// function already enforces above (this function changes nothing about the
+// switch a few lines up, only what happens for these two decisions on a
+// page-shell GET). So serving the shell unconditionally on GET reveals
+// nothing an unauthenticated caller could not already learn by reading the
+// same static bytes any other way, and it does not let an unauthenticated
+// caller read or change one byte of protected state -- the API-tier gate is
+// untouched. The page's own JS (app.js's global fetch wrapper) is what
+// notices the first 401/403 an actual data/action fetch gets back and opens
+// the shared, cancelable login modal in place -- see app.js.
+//
+// Deliberately narrow: only a GET on a non-"/api/" uri qualifies. A POST
+// (mutating) request, or any "/api/..." route, still falls through to the
+// ordinary 401/403 handling below unchanged.
+static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
+    return ctx->method == HTTP_GET && strncmp(ctx->uri, "/api/", 5) != 0;
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
@@ -300,59 +332,34 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             req->user_ctx = ctx->real_user_ctx;
             return ctx->real_handler(req);
         case HTTP_AUTH_DECISION_DENY_NO_SESSION:
-            // Owner report, 2026-09-21: "I dont want the authentication
-            // required page to exist ... if they are not logged in then
-            // just show a login page no matter where they come from."  A
-            // GET on a page route (every registered URI outside "/api/" --
-            // "/settings", "/zones", "/safety", ...) is an ordinary browser
-            // navigation with no JS of its own running yet to react to a
-            // 401 body, so the only way to "just show a login page" for
-            // that case is a real redirect here, not a client-side fixup.
-            // API/fetch routes ("/api/...") keep the bare 401 below --
-            // app.js's global fetch wrapper (kiln_help()/CLAUDE.md's
-            // shared-fetch note) handles those by navigating the tab to
-            // /login itself, so this is genuinely the no-JS/page-load
-            // fallback only, never rendered as a page a person reads.
-            if (ctx->method == HTTP_GET && strncmp(ctx->uri, "/api/", 5) != 0) {
-                char loc[160];
-                int n = snprintf(loc, sizeof(loc), "/login?return=%s", ctx->uri);
-                if (n > 0 && (size_t)n < sizeof(loc)) {
-                    httpd_resp_set_status(req, "302 Found");
-                    httpd_resp_set_hdr(req, "Location", loc);
-                    httpd_resp_send(req, NULL, 0);
-                    return ESP_OK;
-                }
-                // ctx->uri too long to fit the redirect target -- fall
-                // through to the ordinary 401 rather than send a truncated
-                // Location header. uri[] is capped at 80 bytes (see
-                // kiln_http_route_ctx_t above) and "/login?return=" is 14,
-                // so this branch is unreachable today; kept as a fail-safe
-                // rather than an assert, since a wrong redirect target is a
-                // worse failure than an honest 401.
+            // Owner report, 2026-09-24 (see is_page_shell_get() above):
+            // no page load ever shows or redirects to a login form now.
+            // A page-shell GET serves the shell directly -- it's the SAME
+            // static bytes an unauthenticated caller could already fetch
+            // by any other means, and its own script is what notices the
+            // first data/action fetch failing and raises the cancelable
+            // modal in place. This supersedes the 2026-09-21 "just show a
+            // login page no matter where they come from" redirect: that
+            // was itself the "shows the login before I've done anything"
+            // behaviour the 2026-09-24 report asks to remove.
+            if (is_page_shell_get(ctx)) {
+                req->user_ctx = ctx->real_user_ctx;
+                return ctx->real_handler(req);
             }
             httpd_resp_set_status(req, "401 Unauthorized");
             httpd_resp_send(req, "authentication required", HTTPD_RESP_USE_STRLEN);
             return ESP_OK;
         case HTTP_AUTH_DECISION_DENY_INSUFFICIENT:
-            // Same owner report: a SIGNED-IN session with the wrong role
-            // (a `user`/viewer hitting an ADMIN-tier page by a bookmark or
-            // typed URL) redirects to the dashboard ("/", ROUTE_TIER_OPEN,
-            // always reachable) with admin_required=<uri> instead of
-            // rendering a bare "insufficient role" body -- app.js reads
-            // that query param on load and offers the SAME login-
-            // escalation modal an AJAX 403 below triggers, then continues
-            // on to the page the operator actually wanted.
-            if (ctx->method == HTTP_GET && strncmp(ctx->uri, "/api/", 5) != 0) {
-                char loc[160];
-                int n = snprintf(loc, sizeof(loc), "/?admin_required=%s", ctx->uri);
-                if (n > 0 && (size_t)n < sizeof(loc)) {
-                    httpd_resp_set_status(req, "302 Found");
-                    httpd_resp_set_hdr(req, "Location", loc);
-                    httpd_resp_send(req, NULL, 0);
-                    return ESP_OK;
-                }
+            // Same reasoning: a signed-in session with the wrong role
+            // hitting an ADMIN-tier page by a bookmark or typed URL now
+            // renders that page directly instead of detouring through the
+            // dashboard with admin_required=<uri> -- the page's own fetches
+            // are what raise the modal, in place, the moment one is tried.
+            if (is_page_shell_get(ctx)) {
+                req->user_ctx = ctx->real_user_ctx;
+                return ctx->real_handler(req);
             }
-            // AJAX/API path (or the page-uri-too-long fail-safe above):
+            // AJAX/API path:
             // ordinary 403, tagged with X-Kiln-Auth-Reason so a client can
             // tell THIS apart from an unrelated 403 (ota_http.c's verify
             // failure, ota_http_recovery.c's "not in recovery mode",

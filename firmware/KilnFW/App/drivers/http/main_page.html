@@ -2827,13 +2827,16 @@ function proceedToStart(id, startName) {
       return;
     }
     pollExec();
-  }).catch(function () {
+  }).catch(function (err) {
     // Was a bare `.catch(pollExec)`: a non-JSON error body (the plain-text
     // 409 the recovery-mode refusal above this handler still sends) threw
     // here and the operator saw the Start button do absolutely nothing. Poll
-    // as before, but say something first.
-    alert('Start failed and the board did not explain why -- check the '
-          + 'Readiness page and the log.');
+    // as before, but say something first -- unless the operator simply
+    // cancelled the sign-in prompt, which is not a board failure.
+    if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+      alert('Start failed and the board did not explain why -- check the '
+            + 'Readiness page and the log.');
+    }
     pollExec();
   });
 }

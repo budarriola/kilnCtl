@@ -786,7 +786,9 @@ here:</p>
     }).then(function () {
       poll();
     }).catch(function (err) {
-      alert('Could not reset relay count: ' + err.message);
+      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+        alert('Could not reset relay count: ' + err.message);
+      }
       btn.disabled = false;
     });
   });
@@ -1618,7 +1620,9 @@ here:</p>
       }
       poll(); // refresh /api/status so the relay grid reflects the new state
     }).catch(function (err) {
-      alert('Relay command failed: ' + err.message);
+      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+        alert('Relay command failed: ' + err.message);
+      }
     }).finally(function () { dangerSetRelayBusy(relay, false); });
   }
 
@@ -1673,7 +1677,9 @@ here:</p>
       }
       dangerPoll(); // refresh dangerHeatRequested from the board, not an optimistic guess
     }).catch(function (err) {
-      alert('Firing mode command failed: ' + err.message);
+      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+        alert('Firing mode command failed: ' + err.message);
+      }
     }).finally(function () { dangerHeatBusy = false; renderDangerFiringTile(); });
   }
 
@@ -1771,7 +1777,11 @@ here:</p>
       document.getElementById('dangerAccept').checked = false;
       document.getElementById('dangerEnterBtn').disabled = true;
       dangerPoll();
-    }).catch(function (err) { alert('Could not enter danger mode: ' + err.message); });
+    }).catch(function (err) {
+      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+        alert('Could not enter danger mode: ' + err.message);
+      }
+    });
   });
   document.getElementById('dangerExitBtn').addEventListener('click', function () {
     fetch('/api/diagnostics/danger/stop', { method: 'POST' }).then(dangerPoll).catch(function () {});

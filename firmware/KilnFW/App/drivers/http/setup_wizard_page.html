@@ -1500,6 +1500,10 @@ function renderStep11() {
         msgEl.textContent = 'Saved. Read back: web login is now ' + (wantEnable ? 'ON' : 'off') + '.';
         postStepState(11, 'done').then(function () { loadAll(); });
       }).catch(function (err) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
+          renderErrList(errEl, ['Sign-in cancelled.']);
+          return;
+        }
         renderErrList(errEl, [(err && err.message) ||
           'Could not reach the board to save this -- try again once it answers.']);
       });

@@ -2548,6 +2548,10 @@ document.getElementById('sweepStartBtn').addEventListener('click', function () {
     document.getElementById('sweepStatus').textContent = data.ok ? 'Started.' : ('Refused: ' + data.reason);
     if (data.ok) pollSweepStatus();
   }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
+      document.getElementById('sweepStatus').textContent = 'Sign-in cancelled.';
+      return;
+    }
     document.getElementById('sweepStatus').textContent = 'Could not reach the board: ' + String(err);
   });
 });
@@ -2600,6 +2604,11 @@ function loadCurrent() {
         '). Your stored configuration has NOT been changed -- reload the page; do not re-enter it.</p>';
     }
   }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
+      document.getElementById('zones').innerHTML =
+        '<p class="empty">Sign-in cancelled. Nothing has been changed; reload to retry.</p>';
+      return;
+    }
     if (window.console) console.error('zones config fetch failed', err);
     document.getElementById('zones').innerHTML =
       '<p class="empty">Could not reach the board to read the current config (' +
