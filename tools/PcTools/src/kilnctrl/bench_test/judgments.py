@@ -1082,7 +1082,9 @@ def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optiona
                                 readings: "dict[int, float]",
                                 safety_line_rendered: Optional[bool],
                                 expect_safety_on: bool,
-                                expected_zones: int = 3) -> CaseResult:
+                                configured_zones: Optional[int] = None,
+                                header_rendered: Optional[bool] = None,
+                                zero_zone_label_rendered: Optional[bool] = None) -> CaseResult:
     """LCD-14 (round 3 rewrite): the temperature page's zone-temp and Safety
     (K4) labels are plain, non-clickable `lv_label`s (`ui_page_temperature.c`
     never tap-tags them), so they never appear in `list_tap_targets()` at
@@ -1094,8 +1096,8 @@ def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optiona
     path returns something", not "the panel is displaying it correctly" --
     that half is dropped rather than kept as a fake confirmation.
 
-    What this can actually judge: whether `expected_zones` distinct zone-row
-    regions render as non-background content by webcam capture
+    What this can actually judge: whether `configured_zones` distinct
+    zone-row regions render as non-background content by webcam capture
     (`zone_rows_rendered`, keyed by zone index, True/False/None per region --
     see docs/COMMISSIONING_LCD_RUNBOOK.md for the sampled row geometry), and
     the same presence check for the Safety (K4) line
@@ -1106,6 +1108,42 @@ def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optiona
     reference only and never gates the verdict, since it proves nothing
     about what the panel renders.
 
+    `configured_zones` is the board's own authoritative zone count (over the
+    UART CONTROL link's GET_ZONES, cases_lcd.py's
+    `_configured_zone_count()`) -- the exact value
+    `ui_page_temperature.c`'s `ui_page_temperature_build()` uses to decide
+    how many zone rows to build, replacing an earlier `max(len(readings), 3)`
+    guess an opus review of d66ba612 found could PASS a genuinely missing
+    zone row: that guess could read 3 while the board renders only 2 real
+    rows, in which case the "3rd" sample lands on the Relays card header
+    (rendered one row higher than a real 3rd row would sit) and reads as
+    legitimate content. `configured_zones is None` (the GET_ZONES query
+    failed) is never treated as "assume 3" -- it goes straight to
+    INCONCLUSIVE, since a fabricated zone count is exactly the failure mode
+    being fixed. `configured_zones == 0` is a distinct, valid board state
+    (`s_zone_count == 0`'s "No zones configured" label, a plain
+    non-card-wrapped label at a different y than a real row -- see
+    `zero_zone_label_rendered`/`_LCD14_ZERO_ZONE_LABEL_Y`), judged
+    separately below rather than as "0 rows expected, 0 rows missing,
+    trivially PASS".
+
+    `header_rendered` (`configured_zones > 0` only) is the presence check at
+    the y-position the Relays card's own header line is expected to land,
+    computed from `configured_zones` via the SAME row-pitch formula real
+    zone rows use (a card's top pad and a zone row's top pad are both
+    UI_THEME_PADDING_PX/2, and each one's own first line sits the same
+    offset below it -- see cases_lcd.py's module comment). This is the
+    layout-shift check: if the board actually rendered ONE FEWER row than
+    `configured_zones` -- a real missing-row defect -- the header shifts up
+    by one full row pitch and this position reads as background instead.
+    A per-row-only check cannot tell that shape apart from a genuine Nth
+    row, since both read as non-background content at the position a
+    correctly-rendered Nth row would occupy; `header_rendered is False`
+    catches it directly. `header_rendered is None` (no capture, or
+    `configured_zones` unknown) is never held against the run by itself --
+    it only matters combined with a capture actually being available (see
+    below).
+
     Cannot detect: a zone row rendering a WRONG temperature value, a stale
     (frozen) value, or the Safety line rendering the wrong color/text while
     still being present -- only presence/absence of rendered content at
@@ -1113,18 +1151,50 @@ def judge_lcd_temperature_page(page: str, zone_rows_rendered: "dict[int, Optiona
     observed = {
         "page": page, "zone_rows_rendered": zone_rows_rendered, "readings": readings,
         "safety_line_rendered": safety_line_rendered, "expect_safety_on": expect_safety_on,
+        "configured_zones": configured_zones, "header_rendered": header_rendered,
+        "zero_zone_label_rendered": zero_zone_label_rendered,
     }
     if page != "temperature":
         return CaseResult(Verdict.FAIL, reason=f"page={page!r}, expected 'temperature'" + BLANKED_SCREEN_HINT, observed=observed)
+    if configured_zones is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="the board's configured zone count could not be read (control_get_zones failed) "
+                   "-- refusing to guess a zone count to check against",
+            observed=observed,
+        )
+    if configured_zones == 0:
+        if zero_zone_label_rendered is None:
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason="0 zones configured, but the 'No zones configured' label region was not "
+                       "sampled (no camera capture)",
+                observed=observed,
+            )
+        if zero_zone_label_rendered is False:
+            return CaseResult(
+                Verdict.FAIL,
+                reason="0 zones configured but the 'No zones configured' label does not render",
+                observed=observed,
+            )
+        return CaseResult(Verdict.PASS, observed=observed)
     if not zone_rows_rendered:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no zone-row regions were sampled (no camera capture)", observed=observed)
     missing = [z for z, rendered in zone_rows_rendered.items() if rendered is False]
     if missing:
         return CaseResult(Verdict.FAIL, reason=f"zone row(s) {missing} render as background (no content)", observed=observed)
-    if len(zone_rows_rendered) < expected_zones or any(v is None for v in zone_rows_rendered.values()):
+    if len(zone_rows_rendered) < configured_zones or any(v is None for v in zone_rows_rendered.values()):
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason=f"only {sum(1 for v in zone_rows_rendered.values() if v)} of {expected_zones} zone rows were confirmed rendered",
+            reason=f"only {sum(1 for v in zone_rows_rendered.values() if v)} of {configured_zones} zone rows were confirmed rendered",
+            observed=observed,
+        )
+    if header_rendered is False:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(f"the Relays card header does not render at its expected position for "
+                    f"{configured_zones} configured zone(s) -- it may have shifted up one row, "
+                    "meaning fewer zone rows actually rendered than are configured"),
             observed=observed,
         )
     # safety_line_rendered is frequently None -- its y-position is dynamic

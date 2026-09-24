@@ -1032,6 +1032,40 @@ _LCD14_ROW_X = float(lcd_sampler.LCD_WIDTH) / 2.0
 #: simply absent.
 _LCD14_ZONE_TEXT_X = 40.0
 
+#: The zero-zone "No zones configured" label (`ui_page_temperature.c`'s
+#: `s_zone_count == 0` branch) is a PLAIN label dropped directly into
+#: `content` with no card wrapper and no pad_all of its own -- unlike a real
+#: zone row, so it does NOT sit at `_LCD14_ZONE_ROW_Y0` (that offset already
+#: bakes in a card's own top pad + half the font line height). Its vertical
+#: centre is simply content's own y (44, see the module comment above) plus
+#: half a font line (UI_THEME_FONT_LINE_HEIGHT_PX/2=10): 44+10=54. Sampled at
+#: the same left-ish x as every other row's text column -- the label has no
+#: left pad of its own, but "No zones configured" is wide enough that x=40
+#: still lands under its text.
+_LCD14_ZERO_ZONE_LABEL_Y = 54.0
+
+
+def _configured_zone_count(srv) -> "tuple[Optional[int], Optional[str]]":
+    """The board's own authoritative zone count, over the UART CONTROL link
+    (`GET_ZONES`, `uart_bridge_ext_control.c`) -- the exact same
+    `zones_config_get_thermo_count()` value `ui_page_temperature.c`'s
+    `ui_page_temperature_build()` uses to decide how many zone rows to
+    create (`s_zone_count`) and where the Relays card lands. This replaces
+    the old `expected_zones = max(len(readings), 3)` guess (opus review of
+    d66ba612): that guess could read 3 while the board is actually
+    configured for 2 zones, in which case the "3rd" sample lands on the
+    Relays card header -- itself rendered one row higher than a real 3rd
+    zone row would be -- which reads as legitimate row content and PASSes.
+    Reading the real count directly removes the guess entirely. Returns
+    ``(count, error)`` -- `count` is None (never fabricated) if the query
+    raised for any reason, with `error` naming what happened for the
+    caller's `observed` dict."""
+    try:
+        _thermo_count, _relay_count, zones = srv._control.get_zones()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+    return len(zones), None
+
 
 def _case_lcd14(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
@@ -1053,9 +1087,10 @@ def _case_lcd14(ctx: dict) -> CaseResult:
             # srv._thermo.read_all() call always raised AttributeError,
             # silently swallowed by a bare except, which mislabeled this as
             # "no zone rows reported" instead of a coding bug). Readings are
-            # kept only as a sanity cross-check (finite values), never
-            # compared pixel-value-to-number -- see this case's module
-            # comment for why.
+            # kept only as a sanity cross-check (finite values) in
+            # `observed`, never used to derive expected_zones any more (see
+            # _configured_zone_count()) and never compared pixel-value-to-
+            # number -- see this case's module comment for why.
             readings = {
                 int(r.channel): float(r.temperature_c)
                 for r in srv._thermo.read(THERMO_CHANNEL_ALL)
@@ -1064,14 +1099,37 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         except Exception as exc:
             readings = {}
             thermo_error = f"{type(exc).__name__}: {exc}"
-        expected_zones = max(len(readings), 3) if readings else 3
+        configured_zones, zones_count_error = _configured_zone_count(srv)
         zone_rows_rendered: Dict[int, Optional[bool]] = {}
+        header_rendered: Optional[bool] = None
+        zero_zone_label_rendered: Optional[bool] = None
         image_path = _capture(ctx, "lcd14_temperature.jpg")
-        if image_path is not None:
-            for zone in range(expected_zones):
-                y = float(_LCD14_ZONE_ROW_Y0 + zone * _LCD14_ZONE_ROW_PITCH)
-                zone_rows_rendered[zone] = _sample_row_contrast(
-                    ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_ROW_X, y)
+        if image_path is not None and configured_zones is not None:
+            if configured_zones == 0:
+                zero_zone_label_rendered = _sample_row_contrast(
+                    ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_ROW_X, _LCD14_ZERO_ZONE_LABEL_Y)
+            else:
+                for zone in range(configured_zones):
+                    y = float(_LCD14_ZONE_ROW_Y0 + zone * _LCD14_ZONE_ROW_PITCH)
+                    zone_rows_rendered[zone] = _sample_row_contrast(
+                        ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_ROW_X, y)
+                # The Relays card's own header line lands exactly where a
+                # (configured_zones)'th zone row WOULD start -- both a card's
+                # top pad and a zone row's top pad are UI_THEME_PADDING_PX/2,
+                # and the header line and a zone row's own label are both
+                # the first thing inside their respective pad, so the two
+                # formulas coincide (see the module comment above). If the
+                # board actually rendered ONE FEWER row than
+                # `configured_zones` (the round-3 bug this fixes: a genuine
+                # missing-row defect, not just a wrong guess), the header
+                # shifts up by one full row pitch and this position reads as
+                # plain background instead -- catching exactly the "N-1
+                # rows, header shifted up" failure shape a per-row-only
+                # check cannot distinguish from a real Nth row (both read as
+                # non-background content at the SAME sampled position).
+                header_y = float(_LCD14_ZONE_ROW_Y0 + configured_zones * _LCD14_ZONE_ROW_PITCH)
+                header_rendered = _sample_row_contrast(
+                    ctx, image_path, _LCD14_ZONE_TEXT_X, _LCD14_ROW_X, header_y)
         try:
             expect_safety_on = bool(srv._profiles.get_exec_status().state_name == "running")
         except Exception:
@@ -1082,12 +1140,16 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         safety_line_rendered: Optional[bool] = None
         result = J.judge_lcd_temperature_page(
             page, zone_rows_rendered, readings, safety_line_rendered, expect_safety_on,
-            expected_zones=expected_zones,
+            configured_zones=configured_zones,
+            header_rendered=header_rendered,
+            zero_zone_label_rendered=zero_zone_label_rendered,
         )
         result.observed = dict(result.observed or {})
         result.observed["page_wait_s"] = round(waited_s, 3)
         if thermo_error is not None:
             result.observed["thermo_error"] = thermo_error
+        if zones_count_error is not None:
+            result.observed["zones_count_error"] = zones_count_error
         if image_path:
             result.evidence = list(result.evidence or []) + [image_path]
         return _downgrade_if_corners_stale(ctx, result, image_path)

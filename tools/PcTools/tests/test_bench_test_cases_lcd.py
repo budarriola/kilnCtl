@@ -289,15 +289,37 @@ class FakeThermo:
         return [FakeThermoReading(ch, temp) for ch, temp in self._readings.items()]
 
 
+class FakeControl:
+    """Stand-in for kilnctrl.control.ControlClient -- just enough surface
+    (.get_zones()) for cases_lcd._configured_zone_count()'s
+    srv._control.get_zones() call. Real get_zones() returns
+    (thermo_count, relay_count, zones: list[ZoneConfig]); only len(zones)
+    is used by _configured_zone_count(), so `zone_count` here builds a
+    same-length placeholder list. `raises`, if set, is raised instead --
+    the "zone count unreadable" case, which must produce None (never a
+    fabricated/guessed count), per the opus review of d66ba612."""
+
+    def __init__(self, zone_count=3, raises=None):
+        self._zone_count = zone_count
+        self._raises = raises
+
+    def get_zones(self):
+        if self._raises is not None:
+            raise self._raises
+        return (self._zone_count, self._zone_count, [object()] * self._zone_count)
+
+
 class FakeSrvFull(FakeSrv):
     """Extends FakeSrv with the extra client attributes LCD-02/03/04/09/14/16/19
     read (safety/profiles/thermo, and safety_clear_trip() at module scope)."""
 
-    def __init__(self, ui_test, safety=None, profiles=None, thermo=None, clear_trip_raises=False):
+    def __init__(self, ui_test, safety=None, profiles=None, thermo=None, clear_trip_raises=False,
+                 control=None):
         super().__init__(ui_test)
         self._safety = safety or FakeSafety()
         self._profiles = profiles or FakeProfiles()
         self._thermo = thermo or FakeThermo()
+        self._control = control or FakeControl()
         self._clear_trip_raises = clear_trip_raises
         self.clear_trip_called = False
 
@@ -868,10 +890,18 @@ class Lcd14Test(unittest.TestCase):
     # them. The judge is now driven by capture-based region sampling
     # (_sample_widget_off) against the fixed zone-row geometry derived from
     # ui_page_temperature.c's layout constants, not by named-target lookup.
-    def _run_with_rows(self, rendered_zones, thermo=None):
+    def _run_with_rows(self, rendered_zones, thermo=None, configured_zones=3,
+                        header_rendered=True, control=None):
         ui = PageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV)
         srv = FakeSrvFull(ui, thermo=thermo or FakeThermo({0: 100.0, 1: 100.0, 2: 100.0}),
-                           profiles=FakeProfiles(FakeExecStatus("idle")))
+                           profiles=FakeProfiles(FakeExecStatus("idle")),
+                           control=control or FakeControl(zone_count=configured_zones))
+        # The Relays card header samples at the SAME formula as a
+        # (configured_zones)'th zone row (see cases_lcd.py's header_y
+        # comment) -- model it as one more "row" slot in the same dict so
+        # this fake doesn't need a second code path.
+        rendered = dict(rendered_zones)
+        rendered[configured_zones] = header_rendered
 
         def fake_sample_widget(image_path, cx, cy, repo_root=None):
             # Realistic model (2026-09-24 contrast-judge follow-up): a
@@ -881,7 +911,7 @@ class Lcd14Test(unittest.TestCase):
             # BOTH points read the page's own BG -- never the bezel, which
             # neither point is anywhere near in real geometry.
             zone = round((cy - C._LCD14_ZONE_ROW_Y0) / C._LCD14_ZONE_ROW_PITCH)
-            on = rendered_zones.get(zone, False)
+            on = rendered.get(zone, False)
             is_text_point = abs(cx - C._LCD14_ZONE_TEXT_X) < abs(cx - C._LCD14_ROW_X)
             if not on:
                 region = C._BG_RGB
@@ -902,6 +932,47 @@ class Lcd14Test(unittest.TestCase):
         result = self._run_with_rows({0: True, 1: False, 2: True})
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("1", result.reason)
+
+    # -- Round 4: configured-zone-count cross-check (opus review of d66ba612) --
+
+    def test_header_shifted_up_when_row_missing_fails(self):
+        # The exact bug shape the review found: the board actually rendered
+        # only 2 zone rows (0, 1) while 3 are configured -- rows 0/1 read as
+        # rendered, but the Relays header is one row pitch higher than
+        # header_y (58 + 3*32 = 154), so sampling AT header_y reads
+        # background, not card content. A per-row-only check (the old code)
+        # could not tell this apart from a genuine 3rd row landing there.
+        result = self._run_with_rows({0: True, 1: True, 2: True}, configured_zones=3,
+                                      header_rendered=False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_zero_zones_configured_label_rendered_passes(self):
+        ui = PageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV)
+        srv = FakeSrvFull(ui, thermo=FakeThermo({}), profiles=FakeProfiles(FakeExecStatus("idle")),
+                           control=FakeControl(zone_count=0))
+
+        def fake_sample_widget(image_path, cx, cy, repo_root=None):
+            is_text_point = abs(cx - C._LCD14_ZONE_TEXT_X) < abs(cx - C._LCD14_ROW_X)
+            region = C._TEXT_PRIMARY_RGB if is_text_point else C._BG_RGB
+            return lcd_sampler.RegionSample(region=region, bezel=(6, 13, 22))
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value=None), \
+             mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget), \
+             mock.patch.object(lcd_sampler, "frame_corners_look_stale", return_value=False):
+            result = C._case_lcd14({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_zone_count_unreadable_is_inconclusive(self):
+        ui = PageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV)
+        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")),
+                           control=FakeControl(raises=RuntimeError("no reply")))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value=None), \
+             mock.patch.object(lcd_sampler, "sample_widget", return_value=lcd_sampler.RegionSample(
+                 region=C._TEXT_PRIMARY_RGB, bezel=(6, 13, 22))), \
+             mock.patch.object(lcd_sampler, "frame_corners_look_stale", return_value=False):
+            result = C._case_lcd14({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("zones_count_error", result.observed)
 
     def test_no_capture_is_inconclusive(self):
         ui = PageNavUiTest(page="home", page_targets=_TEMP_PAGE_TARGETS, nav_map=_TEMP_NAV)

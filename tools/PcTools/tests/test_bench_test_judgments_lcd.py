@@ -361,30 +361,44 @@ class LcdTemperaturePageTest(unittest.TestCase):
     # booleans from capture sampling, never by a value comparison against
     # a thermo reading (readings are passed through only for observed{}
     # context, never gate the verdict).
+    #
+    # Round 4 (opus review of d66ba612): expected_zones (guessed from
+    # readings, `max(len(readings), 3)`) was replaced by configured_zones
+    # (the board's own real GET_ZONES count) plus header_rendered (the
+    # Relays-card-header layout-shift check) and zero_zone_label_rendered
+    # (the 0-zones state) -- see judgments.py's own docstring for the failure
+    # shape this closes: a guessed count could sample the Relays card header
+    # as if it were an (N)th zone row and PASS.
     def test_all_rows_rendered_pass(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True)
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True,
+            configured_zones=3, header_rendered=True)
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_wrong_page_fails(self):
-        r = J.judge_lcd_temperature_page("home", {0: True}, {0: 100.0}, None, True)
+        r = J.judge_lcd_temperature_page("home", {0: True}, {0: 100.0}, None, True, configured_zones=1)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_missing_row_fails(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: False, 2: True}, {0: 100.0}, None, True,
-                                          expected_zones=3)
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: False, 2: True}, {0: 100.0}, None, True,
+            configured_zones=3, header_rendered=True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_no_zone_rows_sampled_is_inconclusive(self):
-        r = J.judge_lcd_temperature_page("temperature", {}, {0: 100.0}, None, True)
+        r = J.judge_lcd_temperature_page("temperature", {}, {0: 100.0}, None, True, configured_zones=3)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
     def test_undecided_rows_are_inconclusive_not_pass(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: None, 2: True}, {0: 100.0}, None, True,
-                                          expected_zones=3)
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: None, 2: True}, {0: 100.0}, None, True,
+            configured_zones=3, header_rendered=True)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
     def test_safety_line_definitely_absent_during_firing_fails(self):
-        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: True, 2: True}, {0: 100.0}, False, True)
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True, 2: True}, {0: 100.0}, False, True,
+            configured_zones=3, header_rendered=True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_safety_line_undetermined_never_blocks_pass(self):
@@ -392,8 +406,57 @@ class LcdTemperaturePageTest(unittest.TestCase):
         # wrapped relay-button row inside a separate card), so it is
         # sampled best-effort only -- a None reading must never hold up an
         # otherwise-passing zone-row result.
-        r = J.judge_lcd_temperature_page("temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True)
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True,
+            configured_zones=3, header_rendered=True)
         self.assertEqual(r.verdict, Verdict.PASS)
+
+    # -- Round 4: configured_zones / header_rendered / zero_zone_label_rendered --
+
+    def test_configured_zone_count_unreadable_is_inconclusive_never_pass(self):
+        # The GET_ZONES query failed (or was never attempted) -- the old code
+        # would have guessed 3; this must never fabricate a count.
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True, 2: True}, {0: 100.0}, None, True,
+            configured_zones=None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_correct_row_count_with_header_in_place_passes(self):
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True}, {}, None, False,
+            configured_zones=2, header_rendered=True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_missing_row_with_header_shifted_up_fails(self):
+        # The exact bug shape the opus review found: board configured for 3
+        # zones but only 2 real rows rendered, so the Relays card header
+        # shifted up one row pitch and landed where the sampler expects the
+        # 3rd zone row -- reading as non-background content, same as a real
+        # row would. zone_rows_rendered alone (all True) would have PASSed;
+        # header_rendered=False at the position a 3rd row's header SHOULD
+        # occupy is what catches the shift.
+        r = J.judge_lcd_temperature_page(
+            "temperature", {0: True, 1: True, 2: True}, {}, None, False,
+            configured_zones=3, header_rendered=False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_zero_zones_configured_with_label_rendered_passes(self):
+        r = J.judge_lcd_temperature_page(
+            "temperature", {}, {}, None, False,
+            configured_zones=0, zero_zone_label_rendered=True)
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_zero_zones_configured_label_missing_fails(self):
+        r = J.judge_lcd_temperature_page(
+            "temperature", {}, {}, None, False,
+            configured_zones=0, zero_zone_label_rendered=False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_zero_zones_configured_no_capture_is_inconclusive(self):
+        r = J.judge_lcd_temperature_page(
+            "temperature", {}, {}, None, False,
+            configured_zones=0, zero_zone_label_rendered=None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
 
 class LcdDiagnosticsPagesTest(unittest.TestCase):

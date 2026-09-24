@@ -622,6 +622,51 @@ list's content.
   (`_LCD14_ROW_X`, half of `LCD_WIDTH`) -- a rendered row's text and card
   background read distinctly apart there; a missing row reads the page `BG`
   at both points and fails the contrast check (`ROW_CONTENT_MIN_CONTRAST`).
+  **2026-09-24 round-5 addendum (opus review of `d66ba612`):** the round-4
+  judge above still guessed the expected row count as
+  `max(len(readings), 3)` rather than reading the board's real configured
+  zone count, and that guess could false-PASS a genuinely missing row: if
+  the board is actually configured for 2 zones but the guess says 3, the
+  "3rd" sample lands on the Relays card header instead of a real row --
+  and the header reads as legitimate rendered content (high contrast),
+  so the old check passed. Two fixes:
+  - **Authoritative zone count.** `cases_lcd._configured_zone_count(srv)`
+    now reads `srv._control.get_zones()` (UART `CONTROL_CMD_GET_ZONES`,
+    `uart_bridge_ext_control.c`) and uses `len(zones)` directly, never a
+    guess derived from thermo readings. Firmware confirms this wire
+    `count` equals `zones_config_get_thermo_count()`, the exact value
+    `ui_page_temperature_build()` uses as `s_zone_count` to decide how
+    many rows to build -- the same source of truth the LCD itself renders
+    from. If the query raises for any reason, `configured_zones` is
+    `None` and the judge (`judge_lcd_temperature_page`) returns
+    INCONCLUSIVE, never a guessed PASS/FAIL.
+  - **Header-position cross-check.** The Relays card's own header line
+    lands at exactly the same y formula as a hypothetical
+    `configured_zones`'th zone row: `header_y = _LCD14_ZONE_ROW_Y0 +
+    configured_zones * _LCD14_ZONE_ROW_PITCH` (58 + N*32) -- both a card's
+    top pad and a zone row's top pad are `UI_THEME_PADDING_PX/2`, and the
+    header text and a row's own label are each the first child inside that
+    pad, so the two offsets coincide structurally. This is precisely why
+    the old per-row-only check couldn't tell "N configured, N rendered,
+    header at 58+N*32" apart from "N configured, N-1 actually rendered,
+    header shifted up to 58+(N-1)*32" -- both cases read *something* as
+    non-background at 58+(N-1)*32 (a real row in the first case, the
+    shifted-up header in the second). The fix samples contrast AT the
+    correctly-computed `header_y` (derived from the real `configured_zones`,
+    not a guess): if a row is actually missing, the header sits one full
+    row pitch higher than this position, so the sample here reads plain
+    background and `header_rendered=False`, which `judge_lcd_temperature_page`
+    now treats as an unconditional FAIL even if every per-row sample below
+    it looked fine.
+  - **Zero-zone case.** `s_zone_count == 0` renders a plain, non-card
+    "No zones configured" label directly in `content` rather than any zone
+    row or Relays card -- its vertical centre is `content_y(44) +
+    UI_THEME_FONT_LINE_HEIGHT_PX/2(10) = 54` (`_LCD14_ZERO_ZONE_LABEL_Y`),
+    distinct from a real row's 58 offset because it has no card's own top
+    pad. `configured_zones == 0` now samples this label position instead of
+    any row/header position and judges PASS/FAIL/INCONCLUSIVE on whether it
+    reads as rendered, rather than trivially passing on "0 expected, 0
+    rendered."
 - **`network` page's "Manage networks" button and mode-toggle buttons'
   vertical position** — `status_card` above them is `LV_SIZE_CONTENT`
   height (wraps live Wi-Fi status text of variable length,
