@@ -53,6 +53,7 @@ for how a checked-in idle-only ``load`` is now treated.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,6 +202,72 @@ def write_record(record: StackMarginBaselineRecord, out_dir: Path) -> Path:
     path = out_dir / record_filename(record)
     path.write_text(json.dumps(record.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+#: Matches mcp_server_info.py's get_stack_margin() text rendering exactly:
+#: "<name>: <hwm> B free at worst of <configured> B (<pct> headroom) [<LEVEL>]"
+_ALIVE_LINE_RE = re.compile(
+    r"^(?P<name>\S+):\s+(?P<hwm>\d+)\s+B free at worst of\s+(?P<configured>\d+)\s+B\s+"
+    r"\([^)]*\)\s+\[(?P<level>[A-Z]+)\]\s*$"
+)
+#: "<name>: not running (configured <configured> B)"
+_DEAD_LINE_RE = re.compile(r"^(?P<name>\S+):\s+not running\s+\(configured\s+(?P<configured>\d+)\s+B\)\s*$")
+
+
+def parse_stack_margin_report_text(text: str) -> list[StackMarginEntry]:
+    """Reconstructs the ``StackMarginEntry`` list from the get_stack_margin()
+    MCP tool's plain-text rendering (mcp_server_info.py) -- for a caller that
+    only has that text (e.g. the read-only ``kiln_call(name="get_stack_margin")``
+    facade) and never opened its own link to the board's structured
+    ``KilnInfo.get_stack_margin()`` reply. Pure text parsing, no I/O, no
+    board access -- the counterpart of ``capture_stack_margin_baseline.py``'s
+    live capture path for a caller that is deliberately kept off the wire.
+
+    Ignores a trailing ``[STALE MCP SERVER]`` banner line or any other line
+    that does not match either known shape, rather than raising, so a caller
+    can pass the tool's raw ``result`` string unedited. Raises ``ValueError``
+    only if NOTHING in the text parses as an entry -- an empty result is not
+    silently accepted as "zero tasks", since ``get_stack_margin()`` itself
+    reports that case as ``"device reported no instrumented tasks"``, a
+    string this function also refuses to treat as an empty-but-valid list."""
+    entries: list[StackMarginEntry] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _ALIVE_LINE_RE.match(line)
+        if m:
+            entries.append(
+                StackMarginEntry(
+                    name=m.group("name"),
+                    configured_stack_bytes=int(m.group("configured")),
+                    hwm_bytes=int(m.group("hwm")),
+                    alive=True,
+                    level=StackMarginLevel[m.group("level")],
+                )
+            )
+            continue
+        m = _DEAD_LINE_RE.match(line)
+        if m:
+            entries.append(
+                StackMarginEntry(
+                    name=m.group("name"),
+                    configured_stack_bytes=int(m.group("configured")),
+                    hwm_bytes=0,
+                    alive=False,
+                    level=StackMarginLevel.OK,
+                )
+            )
+            continue
+        # Anything else (a stale-server banner, a blank separator, an error
+        # string) is skipped rather than raising -- see docstring.
+    if not entries:
+        raise ValueError(
+            "no stack-margin entries parsed from the given text -- it does not match "
+            "get_stack_margin()'s known line shapes (mcp_server_info.py); pass its raw "
+            "'result' string unedited, not an error message or an empty report"
+        )
+    return entries
 
 
 def load_records(out_dir: Path) -> list[StackMarginBaselineRecord]:

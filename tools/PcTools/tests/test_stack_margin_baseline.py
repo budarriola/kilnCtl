@@ -18,6 +18,7 @@ from kilnctrl.stack_margin_baseline import (
     LoadSnapshot,
     build_record,
     load_records,
+    parse_stack_margin_report_text,
     render_markdown_table,
     worst_case_across_conditions,
     write_record,
@@ -237,6 +238,80 @@ def test_load_records_tolerates_a_file_with_no_load_key(tmp_path):
     loaded = load_records(tmp_path)
     assert len(loaded) == 1
     assert loaded[0].load is None
+
+
+def test_parse_stack_margin_report_text_reads_alive_and_dead_lines():
+    """Mirrors the exact text mcp_server_info.py's get_stack_margin() tool
+    renders -- the shape a caller restricted to the read-only
+    kiln_call(name="get_stack_margin") facade actually has, with no
+    structured StackMarginEntry list of its own."""
+    text = (
+        "httpd_worker: 2956 B free at worst of 8192 B (36.1% headroom) [OK]\n"
+        "backlight_pwm: 896 B free at worst of 3072 B (29.2% headroom) [LOW]\n"
+        "profile_executor: 612 B free at worst of 4096 B (14.9% headroom) [CRITICAL]\n"
+        "pico_auto_update: not running (configured 8192 B)\n"
+    )
+    entries = parse_stack_margin_report_text(text)
+    by_name = {e.name: e for e in entries}
+    assert len(entries) == 4
+
+    assert by_name["httpd_worker"].hwm_bytes == 2956
+    assert by_name["httpd_worker"].configured_stack_bytes == 8192
+    assert by_name["httpd_worker"].alive is True
+    assert by_name["httpd_worker"].level == StackMarginLevel.OK
+
+    assert by_name["backlight_pwm"].level == StackMarginLevel.LOW
+    assert by_name["profile_executor"].level == StackMarginLevel.CRITICAL
+    assert by_name["profile_executor"].hwm_bytes == 612
+
+    dead = by_name["pico_auto_update"]
+    assert dead.alive is False
+    assert dead.hwm_bytes == 0
+    assert dead.configured_stack_bytes == 8192
+
+
+def test_parse_stack_margin_report_text_ignores_stale_server_banner():
+    """A real kiln_call() result can carry a trailing '[STALE MCP SERVER]
+    ...' banner line (mcp_servers.ps1's freshness self-report) -- that line
+    must be skipped, not mistaken for a task entry or treated as a parse
+    failure."""
+    text = (
+        "kiln_io_owner: 2708 B free at worst of 4096 B (66.1% headroom) [OK]\n"
+        "\n"
+        "[STALE MCP SERVER] 1 file changed on disk since this process started "
+        "serving (commit 2e7f2b97, started 2026-09-24 00:24:23) -- this result "
+        "may not reflect current source. Restart when no firing is active: "
+        ".\\tools\\PcTools\\scripts\\mcp_servers.ps1 restart"
+    )
+    entries = parse_stack_margin_report_text(text)
+    assert len(entries) == 1
+    assert entries[0].name == "kiln_io_owner"
+
+
+def test_parse_stack_margin_report_text_can_feed_build_record(tmp_path):
+    """The whole point of the parser: its output plugs straight into
+    build_record()/write_record() the same way a live structured reading
+    does, for a caller that only ever had the text form."""
+    text = "thermo_owner: 2664 B free at worst of 4096 B (65.0% headroom) [OK]\n"
+    entries = parse_stack_margin_report_text(text)
+    rec = build_record("mid_firing", entries, _FW, now=_NOW)
+    path = write_record(rec, tmp_path)
+    loaded = load_records(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].entries[0].name == "thermo_owner"
+    assert loaded[0].entries[0].hwm_bytes == 2664
+    assert path.exists()
+
+
+def test_parse_stack_margin_report_text_rejects_text_with_no_entries():
+    """An error string or an empty report must not silently become a
+    zero-task record -- get_stack_margin() itself distinguishes 'device
+    reported no instrumented tasks' from an error, and this parser refuses
+    to manufacture an empty-but-valid baseline from either."""
+    with pytest.raises(ValueError):
+        parse_stack_margin_report_text("error: no reply from device")
+    with pytest.raises(ValueError):
+        parse_stack_margin_report_text("")
 
 
 def test_load_records_skips_unparseable_file_without_raising(tmp_path):
