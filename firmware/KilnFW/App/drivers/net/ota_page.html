@@ -138,6 +138,22 @@ compromised ESP from pushing anything it likes to the safety processor
 (the ESP is the only thing authorising a Pico update): this password limits
 who can trigger an update, not what an already-authorized update can do.</p>
 
+<!-- UPDATE_PROTOCOL.md sec 6a: "GUI states the order -- ESP first -- when
+     both need updating." Both processors have no shared queue this page can
+     read back (the Pico has no A/B slot/pending-update concept at all, see
+     renderPicoInfo()'s own comment), so "both need updating" is read
+     directly off operator intent: a file chosen in BOTH pickers at once.
+     Hidden until both are chosen; re-hidden the moment either picker is
+     cleared or a file is picked in only one -- see updateOrderHintFilesChanged()
+     below. -->
+<div id="updateOrderHint" class="card" style="display:none">
+  Both an ESP and a Pico image are selected. Update the <b>ESP first</b>,
+  confirm it booted the new image, and only then push the Pico image --
+  the safety link the Pico update relies on comes up as part of the ESP's
+  own boot, so relaying to the Pico first (or mid-ESP-reboot) risks the
+  relay running over a link that is about to drop.
+</div>
+
 <div id="espPicker" style="display:none">
   <label for="espFile">New ESP image (.bin)</label>
   <input type="file" id="espFile" accept=".bin">
@@ -196,12 +212,14 @@ who can trigger an update, not what an already-authorized update can do.</p>
  * sends it), and "boot-guard-reset" (PcTools-only, no web page sends it). */
 
 /* ---- Fetch helpers ------------------------------------------------------ */
-function pushImage(endpoint, context, apPassword, fileBytes, onDone) {
+function pushImage(endpoint, context, apPassword, fileBytes, extraHeaders) {
+  var headers = { 'Content-Type': 'application/octet-stream' };
+  if (extraHeaders) {
+    for (var k in extraHeaders) { if (extraHeaders.hasOwnProperty(k)) { headers[k] = extraHeaders[k]; } }
+  }
   return window.kcOtaAuthedFetch(endpoint, context, apPassword, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/octet-stream',
-    },
+    headers: headers,
     body: fileBytes,
   }).then(function (r) {
     return r.text().then(function (text) {
@@ -210,6 +228,7 @@ function pushImage(endpoint, context, apPassword, fileBytes, onDone) {
       if (!r.ok) {
         var e2 = new Error(text || ('HTTP ' + r.status));
         e2.status = r.status;
+        e2.body = body;
         throw e2;
       }
       return body;
@@ -543,19 +562,57 @@ document.getElementById('recoveryExitBtn').addEventListener('click', function ()
   });
 });
 
+// UPDATE_PROTOCOL.md sec 6/6a: "warn, and require a second confirmation,
+// when the uploaded image's protocol version differs from the running
+// one." App/drivers/http/ota_http_pico.c's ota_pico_do_stage() already
+// refuses this with 409 {"error":"protocol_version_mismatch",...} unless
+// the request carries X-Ota-Force-Version: 1 (see that file's own header
+// comment for why a header, not a body/query field) -- this is the page-
+// side half: catch that specific refusal, show a theme-following confirm()
+// prompt naming both protocol versions (same cancellable-popup convention
+// every other destructive action on this page already uses -- rollback,
+// recovery exit), and only on an explicit OK retry the SAME upload with
+// the force header set. Any OTHER failure (wrong password, staging error,
+// a plain non-JSON body) falls through to the ordinary catch below
+// unchanged -- this only special-cases the one 409 shape this route emits
+// for a protocol mismatch specifically.
+function isProtocolMismatch(e) {
+  return e && e.status === 409 && e.body && e.body.error === 'protocol_version_mismatch';
+}
+
 document.getElementById('picoUpdateBtn').addEventListener('click', function () {
   var msg = document.getElementById('picoMsg');
   var pw = document.getElementById('apPassword').value;
   if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
   msg.textContent = 'Reading file…';
+  var fileBytes;
   readFileBytes(document.getElementById('picoFile')).then(function (bytes) {
+    fileBytes = bytes;
     msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
     return pushImage('/api/ota/pico', 'pico', pw, bytes);
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) throw e;
+    if (!isProtocolMismatch(e)) throw e;
+    var b = e.body;
+    var proceed = confirm(
+      'This image declares link protocol ' + b.image_protocol_version +
+      ', but this board currently speaks protocol ' + b.esp_protocol_version + '.\n\n' +
+      'Relaying it anyway may leave the safety processor unable to talk to this ESP ' +
+      '(DEGRADED_NO_CONTEXT -- context-dependent guards disabled) until a compatible ' +
+      'image is pushed to one side or the other.\n\n' +
+      'Relay it anyway?');
+    if (!proceed) {
+      msg.textContent = 'Pico update cancelled (protocol version mismatch not confirmed).';
+      throw { __kcHandled: true };
+    }
+    msg.textContent = 'Confirmed -- retrying with the protocol mismatch forced…';
+    return pushImage('/api/ota/pico', 'pico', pw, fileBytes, { 'X-Ota-Force-Version': '1' });
   }).then(function (body) {
     msg.textContent = 'Pico image staged (' + body.bytes + ' bytes, crc32 ' + body.crc32 +
       '), relaying over the safety UART link now -- watch the progress bar below.';
     pollPicoStatus();
   }).catch(function (e) {
+    if (e && e.__kcHandled) return;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Pico update failed: ' + e.message;
   });
@@ -600,6 +657,15 @@ function pollBootButtonBypass() {
     }
   }).catch(function () {});
 }
+
+/* ---- Update-order hint (UPDATE_PROTOCOL.md sec 6a) ------------------------ */
+function updateOrderHintFilesChanged() {
+  var espChosen = !!(document.getElementById('espFile').files || []).length;
+  var picoChosen = !!(document.getElementById('picoFile').files || []).length;
+  document.getElementById('updateOrderHint').style.display = (espChosen && picoChosen) ? '' : 'none';
+}
+document.getElementById('espFile').addEventListener('change', updateOrderHintFilesChanged);
+document.getElementById('picoFile').addEventListener('change', updateOrderHintFilesChanged);
 
 /* ---- Boot ------------------------------------------------------------------ */
 loadInterlock();

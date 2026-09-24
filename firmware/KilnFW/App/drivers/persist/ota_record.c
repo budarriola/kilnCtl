@@ -1,5 +1,7 @@
 #include "ota_record.h"
 
+#include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -68,6 +70,53 @@ static void copy_str(char *dst, size_t cap, const char *src)
     dst[cap - 1] = '\0';
 }
 
+// Pulls up to `max` leading-digit numeric runs out of `s`, skipping any
+// non-digit separator between them, and stops at (does not error on) the
+// first token with no leading digit at all -- see ota_record.h's header
+// comment on ota_version_compare() for why that's the right place to stop
+// rather than a parse failure. Returns how many components were parsed.
+static int parse_version_components(const char *s, long *out, int max)
+{
+    int n = 0;
+    const char *p = s;
+    while (*p != '\0' && n < max) {
+        while (*p != '\0' && !isdigit((unsigned char)*p)) {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char *end = NULL;
+        out[n] = strtol(p, &end, 10);
+        n++;
+        p = end;
+    }
+    return n;
+}
+
+ota_version_cmp_t ota_version_compare(const char *version_before, const char *version_after)
+{
+    if (!version_before || !version_after || version_before[0] == '\0' || version_after[0] == '\0') {
+        return OTA_VERSION_CMP_UNKNOWN;
+    }
+
+    enum { MAX_COMPONENTS = 4 };
+    long before[MAX_COMPONENTS] = { 0 };
+    long after[MAX_COMPONENTS] = { 0 };
+    int n_before = parse_version_components(version_before, before, MAX_COMPONENTS);
+    int n_after = parse_version_components(version_after, after, MAX_COMPONENTS);
+    if (n_before == 0 || n_after == 0) {
+        return OTA_VERSION_CMP_UNKNOWN;
+    }
+
+    for (int i = 0; i < MAX_COMPONENTS; i++) {
+        if (before[i] != after[i]) {
+            return (after[i] < before[i]) ? OTA_VERSION_CMP_OLDER : OTA_VERSION_CMP_NEWER;
+        }
+    }
+    return OTA_VERSION_CMP_SAME;
+}
+
 void ota_record_fill(ota_record_t *out, uint32_t uptime_s, const char *processor,
                       const char *version_before, const char *version_after, bool success,
                       const char *reason, const char *image_sha256_hex_or_null)
@@ -81,6 +130,10 @@ void ota_record_fill(ota_record_t *out, uint32_t uptime_s, const char *processor
     out->success = success ? 1u : 0u;
     copy_str(out->reason, sizeof(out->reason), reason);
     copy_str(out->image_sha256_hex, sizeof(out->image_sha256_hex), image_sha256_hex_or_null);
+
+    ota_version_cmp_t cmp = ota_version_compare(out->version_before, out->version_after);
+    out->version_compare_known = (cmp != OTA_VERSION_CMP_UNKNOWN) ? 1u : 0u;
+    out->is_downgrade = (cmp == OTA_VERSION_CMP_OLDER) ? 1u : 0u;
 }
 
 esp_err_t ota_record_append(const ota_record_t *rec)
@@ -119,9 +172,12 @@ esp_err_t ota_record_append(const ota_record_t *rec)
                  hal_status_to_name(err));
     } else {
         ESP_LOGI(TAG, "OTA update record saved: processor=%s success=%d reason=\"%s\" "
-                      "version %s -> %s sha256=%s",
+                      "version %s -> %s%s sha256=%s",
                  rec->processor, (int)rec->success, rec->reason, rec->version_before,
-                 rec->version_after, rec->image_sha256_hex[0] ? rec->image_sha256_hex : "(none)");
+                 rec->version_after,
+                 rec->version_compare_known ? (rec->is_downgrade ? " (DOWNGRADE)" : " (upgrade/same)")
+                                             : " (version comparison unknown)",
+                 rec->image_sha256_hex[0] ? rec->image_sha256_hex : "(none)");
     }
     return hal_status_to_esp_err(err);
 }

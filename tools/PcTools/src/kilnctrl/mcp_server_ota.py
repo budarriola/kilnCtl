@@ -529,9 +529,19 @@ def ota_status(host: Optional[str] = None) -> str:
         if last_update is None:
             last_update_str = "none (no ESP update has run this boot's NVS lifetime)"
         else:
+            # downgrade_known/is_downgrade added 2026-09-24
+            # (UPDATE_PROTOCOL.md's "a downgrade is allowed but logged as
+            # such" bullet) -- is_downgrade is only meaningful when
+            # downgrade_known is true, same "unknown is never a real
+            # answer" convention as protocol_version_known above.
+            if last_update.get("downgrade_known"):
+                downgrade_str = "DOWNGRADE" if last_update.get("is_downgrade") else "upgrade/same"
+            else:
+                downgrade_str = "unknown (version strings not comparable)"
             last_update_str = (f"processor={last_update.get('processor')!r} "
                                 f"{last_update.get('version_before')!r}->"
                                 f"{last_update.get('version_after')!r} "
+                                f"[{downgrade_str}] "
                                 f"success={last_update.get('success')} "
                                 f"reason={last_update.get('reason')!r} "
                                 f"uptime_s={last_update.get('uptime_s')}")

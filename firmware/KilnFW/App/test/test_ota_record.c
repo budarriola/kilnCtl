@@ -90,10 +90,93 @@ static void test_fill_does_not_clobber_other_fields(void)
     TEST_CHECK(strcmp(rec.version_after, "2.0.0") == 0, "version_after intact");
 }
 
+// --- ota_version_compare() / ota_record_fill()'s is_downgrade wiring -------
+// UPDATE_PROTOCOL.md's "a downgrade is allowed but logged as such" bullet
+// (sections 4 and 6a). version strings in this codebase are ESP-IDF's
+// `git describe`-shaped esp_app_desc_t.version default (e.g.
+// "v1.2-15-gabc1234"), not a clean semver -- see ota_record.h's header
+// comment on ota_version_compare() for the parsing rule this exercises.
+
+static void test_compare_detects_downgrade(void)
+{
+    TEST_SECTION("ota_version_compare -- a lower version is OLDER (downgrade)");
+    TEST_CHECK(ota_version_compare("v2.5-10-gabc1234", "v2.3-1-gdef5678") == OTA_VERSION_CMP_OLDER,
+               "2.3 after 2.5 is a downgrade");
+    TEST_CHECK(ota_version_compare("1.0.0", "0.9.0") == OTA_VERSION_CMP_OLDER,
+               "plain dotted versions also compare");
+}
+
+static void test_compare_detects_upgrade_and_same(void)
+{
+    TEST_SECTION("ota_version_compare -- upgrade and identical versions are never OLDER");
+    TEST_CHECK(ota_version_compare("v2.3-1-gdef5678", "v2.5-10-gabc1234") == OTA_VERSION_CMP_NEWER,
+               "2.5 after 2.3 is an upgrade");
+    TEST_CHECK(ota_version_compare("1.2.3", "1.2.3") == OTA_VERSION_CMP_SAME,
+               "identical strings compare equal");
+    // NEGATIVE-TEST-shaped check: the commit-count component (the 3rd
+    // dash-separated field in a git-describe string) must actually be
+    // compared, not just the leading dotted pair -- catches a comparator
+    // that stops after two components.
+    TEST_CHECK(ota_version_compare("v1.0-3-gaaaa", "v1.0-9-gbbbb") == OTA_VERSION_CMP_NEWER,
+               "same major.minor, higher commit count is still newer");
+}
+
+static void test_compare_unknown_on_unparseable_or_empty(void)
+{
+    TEST_SECTION("ota_version_compare -- empty or non-numeric strings are UNKNOWN, never guessed");
+    TEST_CHECK(ota_version_compare("", "1.0.0") == OTA_VERSION_CMP_UNKNOWN, "empty before -- unknown");
+    TEST_CHECK(ota_version_compare("1.0.0", "") == OTA_VERSION_CMP_UNKNOWN, "empty after -- unknown");
+    TEST_CHECK(ota_version_compare("", "") == OTA_VERSION_CMP_UNKNOWN, "both empty (the Pico path's case) -- unknown");
+    TEST_CHECK(ota_version_compare("dirty", "also-dirty") == OTA_VERSION_CMP_UNKNOWN,
+               "no leading digit anywhere -- unknown, not a false SAME");
+}
+
+static void test_fill_sets_is_downgrade_for_a_real_downgrade(void)
+{
+    TEST_SECTION("ota_record_fill -- is_downgrade/version_compare_known wired from ota_version_compare");
+
+    ota_record_t rec;
+    ota_record_fill(&rec, 0u, "esp", "v2.5-10-gabc1234", "v2.3-1-gdef5678", true, "ok", NULL);
+
+    TEST_CHECK(rec.version_compare_known == 1u, "both strings parseable -- comparison known");
+    TEST_CHECK(rec.is_downgrade == 1u, "record correctly flags this as a downgrade");
+}
+
+static void test_fill_never_flags_an_upgrade_as_a_downgrade(void)
+{
+    TEST_SECTION("ota_record_fill -- an upgrade is never mislabeled a downgrade "
+                 "(the negative-test proof for the field above)");
+
+    ota_record_t rec;
+    ota_record_fill(&rec, 0u, "esp", "v2.3-1-gdef5678", "v2.5-10-gabc1234", true, "ok", NULL);
+
+    TEST_CHECK(rec.version_compare_known == 1u, "both strings parseable -- comparison known");
+    TEST_CHECK(rec.is_downgrade == 0u, "an upgrade must never read back as a downgrade");
+}
+
+static void test_fill_is_downgrade_unknown_for_pico_blank_versions(void)
+{
+    TEST_SECTION("ota_record_fill -- the Pico path's blank version_before/version_after "
+                 "(ota_pico_relay.c's `done:` label -- no trustworthy Pico version string exists "
+                 "from this side) reads back as unknown, never a false is_downgrade=0 'answer'");
+
+    ota_record_t rec;
+    ota_record_fill(&rec, 0u, "pico", "", "", true, "ok", NULL);
+
+    TEST_CHECK(rec.version_compare_known == 0u, "blank strings -- comparison not known");
+    TEST_CHECK(rec.is_downgrade == 0u, "is_downgrade is the documented safe default, not a real answer");
+}
+
 void run_test_ota_record(void)
 {
     test_fill_populates_sha256();
     test_fill_null_hash_is_empty_string();
     test_fill_truncates_oversized_hash();
     test_fill_does_not_clobber_other_fields();
+    test_compare_detects_downgrade();
+    test_compare_detects_upgrade_and_same();
+    test_compare_unknown_on_unparseable_or_empty();
+    test_fill_sets_is_downgrade_for_a_real_downgrade();
+    test_fill_never_flags_an_upgrade_as_a_downgrade();
+    test_fill_is_downgrade_unknown_for_pico_blank_versions();
 }

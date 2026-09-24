@@ -76,7 +76,17 @@
 extern "C" {
 #endif
 
-#define OTA_RECORD_VERSION 2u  // bumped 2026-08-21: image_sha256_hex added below
+#define OTA_RECORD_VERSION 3u  // bumped 2026-09-24: is_downgrade/version_compare_known added below
+                                // (UPDATE_PROTOCOL.md's "a downgrade is allowed but logged as such"
+                                // bullet, sections 4 and 6a) -- struct size is UNCHANGED (216 bytes,
+                                // see the two new fields replacing two bytes of reserved2 below), so
+                                // ota_record_load()'s blob-size check alone would not detect an old
+                                // (version-2) record; that is fine here, since a version-2 record's
+                                // former reserved2 bytes were always written as 0, which reads back
+                                // as is_downgrade=0/version_compare_known=0 -- "not a downgrade,
+                                // comparison not known" -- the same safe default this field uses for
+                                // any genuinely unparseable version string. Nothing has to gate on the
+                                // version field itself for that reason.
 
 #define OTA_RECORD_PROCESSOR_MAX     8  // "esp" or "pico" + NUL, with room to spare
 #define OTA_RECORD_VERSION_STR_MAX  32  // matches esp_app_desc_t::version's own size
@@ -109,11 +119,48 @@ typedef struct {
                                                             // calls into pico_img) -- "" if hashing was
                                                             // never attempted for this record. A RECORD,
                                                             // not a gate -- see this file's header comment.
-    uint8_t  reserved2[3];                                 // pads to a 4-byte-aligned total, same
+    uint8_t  is_downgrade;                                 // 1 if version_after is an OLDER version
+                                                            // than version_before by ota_version_compare()
+                                                            // below, 0 otherwise (including "unknown" --
+                                                            // check version_compare_known before trusting
+                                                            // this as a real "no"). Best-effort: a
+                                                            // downgrade is allowed either way, this is a
+                                                            // RECORD, not a gate -- same "record, not a
+                                                            // gate" framing as image_sha256_hex above.
+    uint8_t  version_compare_known;                        // 1 if ota_version_compare() could parse both
+                                                            // version_before and version_after well enough
+                                                            // to compare them (see its header comment for
+                                                            // what "well enough" means); 0 if either string
+                                                            // was empty or had no leading numeric
+                                                            // component, in which case is_downgrade above
+                                                            // is meaningless and must not be shown as a
+                                                            // real answer.
+    uint8_t  reserved2[1];                                 // pads to a 4-byte-aligned total, same
                                                             // explicit-padding discipline as reserved0/1
                                                             // above rather than relying on invisible
                                                             // compiler tail padding
 } ota_record_t;
+
+// Best-effort, best-effort-parsed dotted/dashed numeric version comparison.
+// version strings in this codebase come from esp_app_desc_t.version, which
+// (with no PROJECT_VER/version.txt set in this tree) is ESP-IDF's own
+// `git describe`-shaped default, e.g. "v1.2-15-gabc1234" or "v1.2-15-gabc1234-dirty"
+// -- NOT a clean semver string. This walks each string left to right, pulling
+// out up to 4 leading-digit numeric runs (skipping any non-digit separator
+// between them, stopping at the first token that has no leading digit at
+// all -- e.g. the "gabc1234" hash suffix), and compares component-wise.
+// Returns OTA_VERSION_CMP_UNKNOWN if either string is empty or yields zero
+// parsed components -- never guesses in that case. This is exactly the same
+// "0/empty means unknown, never treated as a real answer" rule
+// ota_http_pico.c's own link_protocol_version==0 check already follows.
+typedef enum {
+    OTA_VERSION_CMP_UNKNOWN = 0,
+    OTA_VERSION_CMP_OLDER,
+    OTA_VERSION_CMP_SAME,
+    OTA_VERSION_CMP_NEWER,
+} ota_version_cmp_t;
+
+ota_version_cmp_t ota_version_compare(const char *version_before, const char *version_after);
 
 // Fills `out` from the given fields, NUL-terminating and truncating any
 // string that doesn't fit rather than overflowing. Pure -- no ESP-IDF call,

@@ -648,11 +648,15 @@ So the ESP sends `SAFETY_CMD_ANNOUNCE_REBOOT` before it goes:
       `version_after`, timestamp and reason, persisted and surfaced via
       `GET /api/ota/esp/status`'s `last_update` object
       (`ota_http_esp.c:531-538`).
-- [ ] A downgrade is allowed but logged as such. **Confirmed not built**
-      (2026-09-04): no `downgrade` reference anywhere in `ota_http_esp.c`,
-      `ota_http_pico.c` or `ota_record.c` — a downgrade is silently allowed
-      (nothing blocks it) but is not distinguished from an upgrade in the
-      record. Doable in software; out of scope for this triage pass.
+- [x] A downgrade is allowed but logged as such. **2026-09-24**: still
+      allowed unconditionally; `ota_record.c`'s new `ota_version_compare()`
+      (best-effort dotted/dashed numeric parse of `esp_app_desc_t.version`
+      strings) stamps `is_downgrade`/`version_compare_known` into
+      `ota_record_t` at `ota_record_fill()` time, logged and surfaced via
+      `GET /api/ota/esp/status`'s `last_update.downgrade_known`/`is_downgrade`.
+      ESP path only — the Pico path's before/after strings are both blank,
+      which correctly reads back as `version_compare_known=false`, not a
+      false "not a downgrade".
 
 ### What holds the heaters off while the ESP reboots
 
@@ -703,15 +707,17 @@ bar, and a rollback button per processor.
 - [x] Refuse to start if the other processor is mid-update. **2026-09-04**:
       covered by the single-claim mutex documented under "Reboots and
       concurrency" above (`ota_http_update_in_progress()`).
-- [ ] Warn, and require a second confirmation, when the uploaded image's
-      protocol version differs from the running one. **Not built**
-      (2026-09-04): `ota_page.html` shows a protocol-version mismatch
-      *after the fact* for an already-running/inactive image
-      (`"Compatible with this ESP" ... "NO -- mismatch"`), but there is no
-      pre-upload check of a picked file's own protocol version — consistent
-      with UPDATE_PROTOCOL.md §3's own note that the ESP has "no
-      embedded-version parser for a raw `.bin`" today, so the file's
-      protocol version genuinely isn't knowable before it is sent.
+- [x] Warn, and require a second confirmation, when the uploaded image's
+      protocol version differs from the running one. **2026-09-24**: the
+      Pico path only — the ESP's raw `.bin` still has no embedded-version
+      parser, so a pre-upload check there remains genuinely infeasible (per
+      §3's note above). `ota_http_pico.c`'s accept step already refused a
+      protocol mismatch with `409 {"error":"protocol_version_mismatch",...}`
+      unless `X-Ota-Force-Version: 1` is set (built in an earlier pass);
+      this pass added the missing web-page half — `ota_page.html`'s Pico
+      update button now catches that 409, shows a cancellable confirmation
+      dialog naming both protocol versions, and retries with the force
+      header only on explicit confirmation.
 
 ### MCP tools
 
@@ -931,8 +937,10 @@ and "Pico update" sections below for what each actually covers.
       what this bullet asks for; it is not literally "the ESP compares the
       header before sending," which this doc's §4 also describes as the
       design.
-- [ ] GUI states the order — ESP first — when both need updating. **Not
-      built** (2026-09-04): no ordering guidance found in `ota_page.html`.
+- [x] GUI states the order — ESP first — when both need updating. **2026-09-24**:
+      `ota_page.html` now shows a static `#updateOrderHint` card ("update the
+      ESP first") whenever both the ESP and Pico file pickers have a file
+      chosen, cleared as soon as either selection is cleared.
 
 **Image identification**
 - [x] Pico image header: magic, target, header version, protocol version,
@@ -1119,8 +1127,8 @@ and "Pico update" sections below for what each actually covers.
       time" above (`ota_http_update_in_progress()`).
 - [x] Append-only update record in NVS: timestamp, processor, image SHA-256,
       version before and after, result. Same evidence as above (`ota_record.c`).
-- [ ] Downgrades allowed but logged as such. **Confirmed not built**
-      (2026-09-04) — same finding as the identical bullet above.
+- [x] Downgrades allowed but logged as such. **2026-09-24** — same evidence
+      as the identical bullet above (`ota_version_compare()`/`is_downgrade`).
 - [ ] SX1509 output state across an ESP reset established on the bench.
       **Blocked**: needs the physical board (see the identical item under
       "What holds the heaters off while the ESP reboots" above).
@@ -1133,10 +1141,11 @@ and "Pico update" sections below for what each actually covers.
       Pico protocol version/compatibility, an interlock box, ESP and Pico
       progress bars, and rollback buttons for both processors
       (`/api/ota/esp/rollback`, `/api/ota/pico/rollback`).
-- [ ] Protocol-version mismatch warned about, with a second confirmation.
-      Same finding as the identical bullet under "Web page" (§6) above — the
-      page shows a mismatch after the fact but has no pre-upload check,
-      since a raw `.bin`'s protocol version isn't parseable before it's sent.
+- [x] Protocol-version mismatch warned about, with a second confirmation.
+      **2026-09-24** — same evidence as the identical bullet under "Web page"
+      (§6) above: the Pico path's existing 409 refusal now has a page-side
+      confirmation dialog; the ESP raw-`.bin` path is still unparseable
+      pre-upload, unchanged.
 - [x] **Now more than four MCP tools. 2026-08-18 baseline (`tools/PcTools`,
       see section 6 above for the original deviation notes): `ota_get_challenge`,
       `ota_update_esp`, `ota_update_pico`, `ota_status`. Grown since**:

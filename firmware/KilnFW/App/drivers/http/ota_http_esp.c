@@ -586,14 +586,17 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
                       "\"recovery_mode\":%s,"
                       "\"last_update\":"
                       "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
-                      "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u,\"image_sha256\":\"%s\"}}",
+                      "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u,\"image_sha256\":\"%s\","
+                      "\"downgrade_known\":%s,\"is_downgrade\":%s}}",
                       ota_http_esp_phase_str(phase), (unsigned)percent,
                       running_version, commit_json, dirty_json,
                       build_date_json, active_slot, inactive_slot, inactive_version,
                       recovery_mode ? "true" : "false",
                       rec.processor, rec.version_before,
                       rec.version_after, rec.success ? "true" : "false", rec.reason,
-                      (unsigned)rec.uptime_s, rec.image_sha256_hex);
+                      (unsigned)rec.uptime_s, rec.image_sha256_hex,
+                      rec.version_compare_known ? "true" : "false",
+                      (rec.version_compare_known && rec.is_downgrade) ? "true" : "false");
     } else {
         n = snprintf(body, sizeof(body),
                       "{\"phase\":\"%s\",\"percent\":%u,"

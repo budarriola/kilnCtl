@@ -483,7 +483,13 @@ def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     "finalizing"/"done"/"failed" (ota_http.c's esp_phase_str()). last_update
     is None (JSON null) until the first ESP update has ever run this NVS
     lifetime; once one has, it is a dict with processor/version_before/
-    version_after/success/reason/uptime_s, mirroring ota_record_t."""
+    version_after/success/reason/uptime_s/image_sha256/downgrade_known/
+    is_downgrade, mirroring ota_record_t (downgrade_known/is_downgrade added
+    2026-09-24, UPDATE_PROTOCOL.md's "a downgrade is allowed but logged as
+    such" bullet -- ota_version_compare()'s best-effort string comparison;
+    is_downgrade is only meaningful when downgrade_known is true, same
+    "0/unknown is never a real answer" rule as protocol_version_known
+    elsewhere on this board)."""
     req = urllib.request.Request(_url(host, "/api/ota/esp/status"), method="GET")
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
