@@ -160,6 +160,45 @@ definite `True`, never on `False`
 (background reads as background: a real mismatch is real) or `None`
 (capture/sample failure: stays whatever it already was).
 
+## Camera aim (2026-09-24, round 4): bottom-right corner was stale
+
+Round 3's corners above went stale again the same day: a review found that on
+`logs/bench_test/20260924T162517Z_lcd/captures/lcd01_start_pause.jpg` and
+`logs/bench_test/20260924T191429Z_lcd/captures/lcd01_*.jpg`, a luminance scan
+at `x=950` shows the panel's own lit content running down to `y~=660` before
+the bezel starts, not `y=628` — the round-3 bottom-right corner, `(985,
+628)`, was actually this capture's Start-button-to-background *internal*
+edge, not the true bezel boundary, so `widget_to_frame(423, 289)` (the Start
+button target) landed on the button's own top edge instead of its centre and
+LCD-01 read the wrong color.
+
+Re-derived all four corners numerically from
+`logs/bench_test/20260924T191429Z_lcd/captures/lcd01_start_pause.jpg`
+(PIL pixel sampling, never by eye). Round 3's "biggest single-step luminance
+jump" method is what produced the stale value: at `x=950` that rule fires on
+the Start button's own bottom edge (bezel-dark background to lit button,
+scanned outward) before it ever reaches the true bezel. Fixed by scanning
+each edge for the first point where several *consecutive* samples read below
+a fixed dark-luminance floor (a "sustained dark" run, not a single jump),
+then fitting a line through the resulting crossings along each edge (as
+round 3 did, dropping the low-signal region right at each corner) and
+intersecting adjacent edges' fitted lines:
+
+- top-left corner: `(179, 68)`
+- top-right corner: `(1045, 125)`
+- bottom-left corner: `(177, 627)`
+- bottom-right corner: `(981, 662)`
+
+Three of the four corners moved only 1-7px from round 3 (within the method's
+noise); only the bottom-right corner moved materially, confirming it was the
+stale one. Verified against the reported symptom: with these corners, the
+Start button target `widget_to_frame(423, 289)` maps to frame `(893, 609)`,
+which samples as unmistakably green (raw pixels around that point read like
+`RGB(47,178,128)`/`RGB(62,179,135)`, G well above R and B) against a bezel
+reference of `RGB(9,16,24)` — squarely inside the Start button, not on its
+edge. See CLAUDE.md's "Camera aim (2026-09-24, round 4)" note and
+`lcd_sampler.py`'s `FRAME_CORNERS` comment for the full method.
+
 ## Navigation graph (from source, `kiln_ui_show()` call sites)
 
 ```

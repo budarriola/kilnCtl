@@ -51,36 +51,43 @@ WIDGET_CORNERS: Tuple[Tuple[float, float], ...] = (
 )
 
 #: The same four corners, in the bench camera's full 1280x720 frame.
-#: Re-derived 2026-09-24 (round 3 of the LCD bench-runner fixes) from
-#: ``logs/bench_test/20260924T162517Z_lcd/captures/lcd01_start_pause.jpg``
-#: by numeric luminance edge scans (PIL pixel sampling, never by eye): the
-#: previous corners below made ``widget_to_frame(5, 5)`` land at frame pixel
-#: (171, 63), which reads as bezel RGB (6, 13, 22) rather than the home
-#: page's background -- the panel had moved again since that measurement.
-#: Method: scan luminance (0.299 R + 0.587 G + 0.114 B) along rows/columns
-#: near each expected edge, take the largest single-step jump as the
-#: bezel/screen boundary, fit a line through several such crossings along
-#: each edge, and intersect adjacent edges' fitted lines for each corner
-#: (the top-right and bottom-right crossings fall outside the low-signal
-#: region near the corners themselves, where the topbar's own gradient and
-#: an overexposed glare band above the panel mask the true edge, so those
-#: two corners are extrapolated from the clean part of each edge's fit
-#: rather than read directly):
-#:   top-left corner:     (180, 69)
-#:   top-right corner:    (1038, 121)
-#:   bottom-left corner:  (178, 627)
-#:   bottom-right corner: (985, 628)
-#: Geometry is still a perspective skew, not a simple rotation: the right
-#: edge remains shorter than the left and slants, while the left edge runs
-#: near-vertical (x ~= 178-181 across y = 100..600).
-#: Superseded 2026-09-24 (first pass) corners, kept for history: TL=(160,52)
-#: TR=(1044,116) BL=(161,645) BR=(983,624). Superseded 2026-09-19 corners:
-#: TL=(298,86) TR=(1145,60) BL=(323,635) BR=(1147,617).
+#: Re-derived 2026-09-24 (round 4 of the LCD bench-runner fixes) from
+#: ``logs/bench_test/20260924T191429Z_lcd/captures/lcd01_start_pause.jpg``
+#: by numeric luminance/color edge scans (PIL pixel sampling, never by eye):
+#: the round-3 bottom-right corner below, (985, 628), was stale -- a column
+#: scan at x=950 shows the panel's own lit content (bright blue-green) runs
+#: down to y~=660 before the luminance drops into the dark bezel, not y=628
+#: (that value was this capture's Start-button-to-background internal edge,
+#: not the true bezel boundary), so ``widget_to_frame(423, 289)`` (the Start
+#: button target) landed on the button's own top edge instead of its centre.
+#: Method: for each edge, scan rows/columns from a point known to be off-
+#: panel toward the panel, and take the first point where several
+#: consecutive samples read below a fixed dark-luminance floor (this
+#: "sustained dark" rule replaces round 3's "biggest single-step jump",
+#: which the bottom edge's own internal button/background transition could
+#: trigger before the real bezel edge was ever reached); fit a line through
+#: the resulting crossings along each edge (dropping points in the low-
+#: signal region right at a corner, per round 3's note below) and intersect
+#: adjacent edges' fitted lines for each corner:
+#:   top-left corner:     (179, 68)
+#:   top-right corner:    (1045, 125)
+#:   bottom-left corner:  (177, 627)
+#:   bottom-right corner: (981, 662)
+#: Three of the four corners moved by 1-7px from round 3 (within the noise
+#: of the method); only the bottom-right corner moved materially (628 -> 662,
+#: the stale value this round exists to fix). Geometry is still a
+#: perspective skew, not a simple rotation: the right edge remains shorter
+#: than the left and slants, while the left edge runs near-vertical
+#: (x ~= 177-179 across y = 100..620).
+#: Superseded 2026-09-24 (round 3) corners, kept for history: TL=(180,69)
+#: TR=(1038,121) BL=(178,627) BR=(985,628). Superseded 2026-09-24 (round 1)
+#: corners: TL=(160,52) TR=(1044,116) BL=(161,645) BR=(983,624). Superseded
+#: 2026-09-19 corners: TL=(298,86) TR=(1145,60) BL=(323,635) BR=(1147,617).
 FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
-    (180.0, 69.0),
-    (1038.0, 121.0),
-    (178.0, 627.0),
-    (985.0, 628.0),
+    (179.0, 68.0),
+    (1045.0, 125.0),
+    (177.0, 627.0),
+    (981.0, 662.0),
 )
 
 #: Four points, inset from the widget-space corners toward the panel's

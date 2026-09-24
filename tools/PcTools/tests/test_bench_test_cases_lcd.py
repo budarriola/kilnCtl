@@ -422,8 +422,16 @@ class Lcd02Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
 
     def test_wrong_page_fails(self):
+        # _case_lcd02 calls _capture() unconditionally (before the page check
+        # is judged), so this test must mock lcd_sampler.capture_full_frame --
+        # otherwise it shells out to capture_lcd.ps1 and depends on the real
+        # bench webcam. Page mismatch fails immediately regardless of what
+        # the (mocked-away) camera returns (judge_lcd_home_firing's first
+        # check), so the busy/unavailable side effect used elsewhere in this
+        # class is sufficient here too.
         srv = FakeSrvFull(FakeUiTest(page="profiles", targets=_HOME_TARGETS))
-        result = C._case_lcd02({"srv": srv, "_hp01": {}})
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd02({"srv": srv, "_hp01": {}})
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_camera_unavailable_degrades_to_inconclusive(self):
@@ -489,8 +497,12 @@ class Lcd04Test(unittest.TestCase):
     def test_unexpected_trip_mask_refuses_to_clear(self):
         # trip_reason=6 (S6a) implies mask 0x0020 by the formula in CLAUDE.md;
         # a board reporting a different mask must never be cleared blind.
+        # _case_lcd04 captures its "before" frame unconditionally once a trip
+        # is latched, before it ever reaches the mask check below, so this
+        # test must mock the camera too or it shells out for real.
         srv = FakeSrvFull(FakeUiTest(page="home"), safety=FakeSafety(FakeSafetyDiag(trip_reason=6, trip_mask=0x0040)))
-        result = C._case_lcd04({"srv": srv})
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd04({"srv": srv})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
         self.assertFalse(srv.clear_trip_called)
 
@@ -1771,7 +1783,10 @@ class Lcd08PollTest(unittest.TestCase):
             flips_after=1,
         )
         srv = FakeSrv(ui)
-        result = C._case_lcd08({"srv": srv})
+        # page flip succeeds so _case_lcd08 falls through to its unconditional
+        # _capture() call; mock the camera so this test never shells out.
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd08({"srv": srv})
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertIn("page_wait_s", result.observed)
 
@@ -1947,15 +1962,18 @@ class WakeAndHomeTest(unittest.TestCase):
         # the page never actually changes, so LCD-08 must FAIL.
         ui_old = SwallowingUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
         srv_old = FakeSrvWithTouch(ui_old)
-        with mock.patch.object(C, "_wake_and_home", lambda ctx: None):
-            result_old = C._case_lcd08({"srv": srv_old})
-        self.assertEqual(result_old.verdict, Verdict.FAIL)
+        # _case_lcd08 captures unconditionally on success (NEW path reaches
+        # config, page-flip succeeded), so mock the camera for both calls.
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            with mock.patch.object(C, "_wake_and_home", lambda ctx: None):
+                result_old = C._case_lcd08({"srv": srv_old})
+            self.assertEqual(result_old.verdict, Verdict.FAIL)
 
-        # NEW path: the real _wake_and_home runs first, sends the wake tap,
-        # and the same case now passes.
-        ui_new = SwallowingUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
-        srv_new = FakeSrvWithTouch(ui_new)
-        result_new = C._case_lcd08({"srv": srv_new})
+            # NEW path: the real _wake_and_home runs first, sends the wake tap,
+            # and the same case now passes.
+            ui_new = SwallowingUiTest(page="home", page_targets=page_targets, nav_map=nav_map)
+            srv_new = FakeSrvWithTouch(ui_new)
+            result_new = C._case_lcd08({"srv": srv_new})
         self.assertEqual(result_new.verdict, Verdict.PASS)
 
 
