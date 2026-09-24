@@ -397,6 +397,117 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
             f"acknowledged.")
 
 
+def _readiness_item(data: dict, key: str) -> Optional[dict]:
+    for item in data.get("items", []):
+        if item.get("key") == key:
+            return item
+    return None
+
+
+@_srv._tool()
+def estop_verify(confirm: bool = False, host: Optional[str] = None) -> str:
+    """Record that a HUMAN has physically verified the E-stop interlock
+    (POST /api/estop/verify, diagnostics_http.c's estop_verify_post_
+    handler(), ROUTE_TIER_ADMIN) -- the deliberate operator confirmation
+    firmware/SaftyFW/README.md's bench verification procedure ends with:
+    "I have verified the E-stop interlock" (both poles, on this fixture
+    pole 2; pole 1, the external line contactor's coil circuit, is wiring
+    firmware cannot see, which is the whole reason this flag is never
+    inferred from a GPIO read or a config value -- see estop_verification.h
+    for what invalidates it again).
+
+    THIS TOOL MUST NEVER BE CALLED FROM AN AUTOMATED SUITE. A passing test
+    or a script noticing readiness is "not_done" is not a substitute for a
+    person actually operating the E-stop and observing it cut power --
+    calling this without that having happened records a false attestation.
+    tools/PcTools/src/kilnctrl/bench_test/judgments.py's judge_estop_verify()
+    (SP-05) explicitly documents this same rule for the read-only smoke
+    case it covers and never calls this route itself; this tool exists for
+    a human (or an agent explicitly told a human just performed the
+    physical check) to invoke deliberately, once, after that check.
+
+    Always fetches GET /api/readiness FIRST and reports the ``estop_
+    verified`` item's current status before doing anything. If the
+    ``safety_trip`` item is not ``ok`` (a trip is latched), this refuses
+    unconditionally, regardless of `confirm` -- an E-stop verification must
+    only ever be recorded with no trip latched, never as a way to paper
+    over one. If readiness itself cannot be read, this errors before
+    touching the write route at all.
+
+    REFUSES UNLESS ``confirm=True`` (exactly ``True``) -- without it, this
+    is a dry run: it reports the current readiness state and says what it
+    WOULD record, but sends no POST. Same confirm-gate convention as
+    crash_report_ack()/crash_report_clear().
+
+    With ``confirm=True``, POSTs the verification
+    (estop_verify_http_client.py, over the same http_auth.urlopen() ADMIN-
+    session seam every other ADMIN-tier write tool in this package uses --
+    KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD from the environment), then
+    re-fetches GET /api/readiness and FAILS LOUDLY (does not report
+    success) if the ``estop_verified`` item still does not read ``ok``
+    afterward -- an ``{"ok":true}`` POST reply is not trusted alone, same
+    rule crash_report_ack()'s own docstring gives (see CLAUDE.md's
+    boot_guard write-lies section for why an unverified success report is
+    exactly the failure class this project has been bitten by before).
+
+    A 500 ("estop_verification_confirm() failed") from the board is
+    reported as a failure naming it, via estop_verify_http_client's
+    EstopVerifyHttpError.status.
+
+    Never prints, logs, or echoes a credential.
+
+    Host is auto-resolved the same way get_readiness()/get_heap_status()
+    do; pass `host` explicitly for kilnctl.local or a board reachable only
+    from a different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_readiness()
+    from . import readiness_http_client
+    from . import estop_verify_http_client
+
+    resolved = _ota_resolve_host(host)
+    try:
+        before = readiness_http_client.get_readiness(resolved)
+    except readiness_http_client.ReadinessHttpError as exc:
+        return f"error: could not read GET /api/readiness (host={resolved}): {exc}"
+
+    estop_item = _readiness_item(before, "estop_verified")
+    trip_item = _readiness_item(before, "safety_trip")
+    estop_summary = (f"estop_verified status={estop_item.get('status')!r} "
+                      f"detail={estop_item.get('detail')!r}" if estop_item is not None
+                      else "estop_verified: item not present in readiness response")
+    trip_summary = (f"safety_trip status={trip_item.get('status')!r} detail={trip_item.get('detail')!r}"
+                     if trip_item is not None else "safety_trip: item not present in readiness response")
+
+    if trip_item is not None and trip_item.get("status") != "ok":
+        return (f"refused: safety_trip is not ok ({trip_summary}) -- an E-stop verification "
+                f"must never be recorded while a trip is latched (host={resolved})")
+
+    if confirm is not True:
+        return (
+            f"DRY RUN (pass confirm=True, exactly, to actually record) -- {estop_summary}; "
+            f"{trip_summary} (host={resolved})"
+        )
+
+    try:
+        estop_verify_http_client.post_estop_verify(resolved)
+    except estop_verify_http_client.EstopVerifyHttpError as exc:
+        return f"failed: POST /api/estop/verify error (host={resolved}): {exc}"
+
+    try:
+        after = readiness_http_client.get_readiness(resolved)
+    except readiness_http_client.ReadinessHttpError as exc:
+        return (f"error: POST /api/estop/verify returned ok, but the confirming re-fetch of "
+                f"GET /api/readiness failed (host={resolved}): {exc} -- verification state "
+                f"UNKNOWN, re-check before trusting this")
+
+    after_item = _readiness_item(after, "estop_verified")
+    if after_item is not None and after_item.get("status") == "ok":
+        return f"ok - recorded and confirmed by read-back: {estop_summary} (host={resolved})"
+    return (f"FAILED: POST /api/estop/verify returned ok, but the re-fetched readiness item "
+            f"still does not read ok -- {estop_summary} (host={resolved}). Do not trust this "
+            f"as recorded.")
+
+
 @_srv._tool()
 def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False,
                         host: Optional[str] = None) -> str:

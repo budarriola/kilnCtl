@@ -22,9 +22,21 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (187 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `ota_matrix_run` was
-added -- ROADMAP.md M8's scripted, `run_pctools_tests`-style regression for
+the rest behind a search facade (188 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-23, when `estop_verify` was
+added -- an MCP tool wrapping `POST /api/estop/verify`
+(`diagnostics_http.c`'s `estop_verify_post_handler()`, ROUTE_TIER_ADMIN),
+recording that a HUMAN has physically verified the E-stop interlock per
+`firmware/SaftyFW/README.md`'s bench procedure -- never inferred from a GPIO
+read, and never to be called from an automated suite (see
+`judge_estop_verify()` in `tools/PcTools/src/kilnctrl/bench_test/judgments.py`,
+which documents the same rule for its own read-only smoke case and never
+calls this route itself). It reads `GET /api/readiness` first, reports the
+`estop_verified` item's state, refuses unconditionally if `safety_trip` is
+not `ok` (never a way to paper over a latched trip), refuses unless
+`confirm is True` exactly, and re-reads readiness afterward, failing loud if
+`estop_verified` still doesn't read `ok`. The one before it was
+`ota_matrix_run` -- ROADMAP.md M8's scripted, `run_pctools_tests`-style regression for
 suite `ota` (`docs/BENCH_TEST_SYSTEM_PLAN.md` section 3.4: OT-B01, OT-E01..12,
 OT-P01..05), a thin front door onto the same `BenchTestRunner` engine
 `bench_test_run()` already drives, adding a hard `confirm is True` gate
