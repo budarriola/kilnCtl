@@ -76,7 +76,17 @@ void profile_executor_halt(void)
     profile_firing_run_record_t fs_rec;
     fs_need_persist = firing_stats_maybe_finalize(&fs_rec);
     clear_this_runs_faults();
-    s_exec.state = PROFILE_EXEC_IDLE;
+    /* Routed through the same helper every other terminal transition uses
+     * (profile_executor_relay_io.c) rather than assigning s_exec.state
+     * directly -- 2026-09-24 halt-clear follow-up. Before this, a halt
+     * straight out of RUNNING/PAUSED (mid-dwell, or mid-ramp-lock) left
+     * dwelling/ramp_lock_held stale and every zone's `active` still true,
+     * which rule 4/5's "Correction, audit 2026-09-24" comment (profile_
+     * executor_internal.h) documents as unreachable-by-the-assert-today but
+     * real, stale data -- this call is what makes it not exist in the first
+     * place, same as every other FAULTED/DONE path already gets. Still under
+     * s_exec.lock here, the same precondition the helper documents. */
+    exec_enter_terminal_state(PROFILE_EXEC_IDLE);
     s_exec.fault_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     xSemaphoreGive(s_exec.lock);

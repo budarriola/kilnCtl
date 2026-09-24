@@ -678,24 +678,46 @@ void io_segs_tick(float dt_s)
     }
 }
 
-/* Every transition out of RUNNING/PAUSED into FAULTED or DONE must leave
- * s_exec in a state exec_mode_state_check() accepts -- rule 5 forbids
- * dwelling==true outside RUNNING/PAUSED, and ramp_lock_held has the same
- * "only meaningful mid-run" lifetime (set only inside the RUNNING
- * segment-stepping block, cleared only at profile_executor_run()'s own
- * start -- profile_executor_run.c:414). Both are per-run scratch state with
- * no meaning once the run has left RUNNING/PAUSED, so both are cleared here
- * rather than left for the next profile_executor_run() to paper over.
+/* Every transition out of RUNNING/PAUSED -- and, since the 2026-09-24
+ * halt-clear follow-up, an operator halt out of any state -- into IDLE,
+ * FAULTED or DONE must leave s_exec in a state exec_mode_state_check()
+ * accepts -- rule 5 forbids dwelling==true outside RUNNING/PAUSED, and
+ * ramp_lock_held has the same "only meaningful mid-run" lifetime (set only
+ * inside the RUNNING segment-stepping block, cleared only at profile_
+ * executor_run()'s own start -- profile_executor_run.c:414). Both are
+ * per-run scratch state with no meaning once the run has left RUNNING/
+ * PAUSED, so both are cleared here rather than left for the next profile_
+ * executor_run() to paper over.
  * docs/audits/profile_executor_panic_2026-09-24.md: six call sites used to
  * set s_exec.state directly and never cleared dwelling, which let a guard
  * trip mid-dwell reach exec_mode_state_check()'s rule-5 assert on the very
- * same tick and abort() the task. Must be called with s_exec.lock held,
- * same precondition as escalate_guard_trip() below. */
+ * same tick and abort() the task.
+ *
+ * Follow-up (same audit, halt-clear pass): every terminal transition --
+ * including this one reaching IDLE via profile_executor_halt() -- also
+ * clears every zone's `active` flag here, so rule 4 ("no active zone while
+ * IDLE") is true by construction rather than merely unreachable-today (see
+ * that rule's own "Correction, audit 2026-09-24" comment in profile_
+ * executor_internal.h's big table, updated alongside this change). Clearing
+ * `active` on the FAULTED/DONE transitions too (not just IDLE) is harmless
+ * and deliberate -- profile_executor_run()'s own zone_mask loop always
+ * re-sets it for whichever zones the NEXT run actually uses, and a faulted/
+ * done zone reading active==false in between changes nothing any reader of
+ * `active` currently depends on (force_all_relays_off() etc. all gate off
+ * `s_exec.state`, not per-zone `active`, once the run has already left
+ * RUNNING/PAUSED).
+ *
+ * Must be called with s_exec.lock held, same precondition as
+ * escalate_guard_trip() below and every other s_exec-touching static in this
+ * file. */
 void exec_enter_terminal_state(profile_exec_state_t st)
 {
     s_exec.state = st;
     s_exec.dwelling = false;
     s_exec.ramp_lock_held = false;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        s_exec.zones[zi].active = false;
+    }
 }
 
 /* Escalation policy (TODO.md 6A.6, "decide which -- see 6A.6"): guards whose

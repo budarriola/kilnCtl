@@ -2353,6 +2353,49 @@ static void test_halt_releases_heat_enable(void)
     TEST_CHECK(g_request_enable_false_calls == 1, "a second halt sends nothing more");
 }
 
+// docs/audits/profile_executor_panic_2026-09-24.md halt-clear follow-up: an
+// operator halt straight out of a mid-dwell RUNNING state used to leave
+// s_exec.dwelling/ramp_lock_held stale (halt() assigned s_exec.state =
+// PROFILE_EXEC_IDLE directly instead of going through exec_enter_terminal_
+// state()) and left every zone's `active` flag true (nothing anywhere wrote
+// `active = false` -- see rule 4's "Correction, audit 2026-09-24" comment in
+// profile_executor_internal.h). Neither could reach exec_mode_state_check()'s
+// assert while halt() was the only writer (the asserting call site only runs
+// inside a RUNNING tick, and profile_executor_run() memsets s_exec.zones
+// before the next run), but the data itself was real and stale, exactly the
+// "data hygiene" gap that comment flags. This test drives the REAL
+// profile_executor_halt() path (same reasoning as test_halt_releases_heat_
+// enable() above -- a real stub mutex, not a hand-poked struct) and checks
+// the post-halt state directly. Before exec_enter_terminal_state() was wired
+// into halt(), this failed with dwelling/ramp_lock_held/zones[0].active all
+// still true -- see this pass's hand-back for the exact recorded failure.
+static void test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active(void)
+{
+    TEST_SECTION("profile_executor_halt() out of a mid-dwell RUNNING state -- clears dwelling, "
+                 "ramp_lock_held, and every zone's active flag (regression, profile_executor_panic_2026-09-24)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.dwelling = true;
+    s_exec.ramp_lock_held = true;
+    s_exec.zones[0].active = true;
+    s_exec.zones[2].active = true;
+    s_exec.claimed_relay_mask = 0x05;
+
+    profile_executor_halt();
+    heat_enable_service_pending_release();
+
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "halt must leave state IDLE");
+    TEST_CHECK(!s_exec.dwelling, "dwelling must not survive a halt out of a mid-dwell run");
+    TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must not survive a halt out of a mid-dwell run");
+    TEST_CHECK(!s_exec.zones[0].active, "zone 0's active flag must be cleared by the halt");
+    TEST_CHECK(!s_exec.zones[2].active, "zone 2's active flag must be cleared by the halt");
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations after a halt out of a dwell");
+}
+
 /* T2 (2026-09-01 re-audit of ae5905f/S1/S2): pins the invariant the whole
  * "profile_executor_halt() cannot re-enter the flash worker" argument
  * actually rests on. profile_executor_status.c hardcodes `clean=false`
@@ -8252,6 +8295,75 @@ static void run_test_exec_handle_mode_state_violation(void)
     reset_mode_state_violation_test_state();
 }
 
+// Companion to the GLOBAL-branch test above -- the review of
+// exec_enter_terminal_state()'s introduction flagged that only the GLOBAL
+// branch of escalate_guard_trip() was covered, not the abort-policy
+// (per-zone-escalation) branch or the all-heaters-faulted branch, both of
+// which also call exec_enter_terminal_state(PROFILE_EXEC_FAULTED) and are
+// reachable the exact same way (a direct call, s_exec.lock never taken by
+// this plain static function -- same disclosure as every other escalate_
+// guard_trip() test in this file).
+static void test_mode_state_check_no_violation_after_abort_policy_trip_mid_dwell(void)
+{
+    TEST_SECTION("exec_mode_state_check -- a per-zone trip under abort-whole-firing policy, mid-dwell, "
+                 "must leave state FAULTED, dwelling false, and zero violations");
+    reset_relay_claim_test_state();
+    reset_mode_state_check_test_state();
+
+    /* g_continue_on_zone_trip is false (the default, reset by reset_relay_
+     * claim_test_state()) -- a single per-zone trip on the only active zone
+     * takes the abort-policy branch and ends the whole run. */
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.dwelling = true;
+    s_exec.ramp_lock_held = true;
+    s_exec.claimed_relay_mask = 0x01;
+
+    bool run_faulted = escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    TEST_CHECK(run_faulted, "abort-whole-firing policy must fault the whole run");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED");
+    TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared by the FAULTED transition, not left stale");
+    TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared alongside dwelling");
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations -- rule 5 must not fire");
+
+    reset_relay_claim_test_state();
+}
+
+static void test_mode_state_check_no_violation_after_all_heaters_faulted_mid_dwell(void)
+{
+    TEST_SECTION("exec_mode_state_check -- continue-on-trip policy, last active heater zone faulting "
+                 "mid-dwell, must leave state FAULTED, dwelling false, and zero violations");
+    reset_relay_claim_test_state();
+    reset_mode_state_check_test_state();
+
+    g_continue_on_zone_trip = true; /* opt-in: the run keeps going on other active zones until none remain */
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.zones[1].active = true;
+    s_exec.dwelling = true;
+    s_exec.ramp_lock_held = true;
+    s_exec.claimed_relay_mask = 0x03;
+
+    bool run_faulted_after_first = escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    TEST_CHECK(!run_faulted_after_first, "zone 1 is still healthy -- the run must not fault yet");
+    TEST_CHECK(s_exec.dwelling, "dwelling must survive a trip that does not end the run");
+
+    bool run_faulted_after_second = escalate_guard_trip(1, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 1 guard 1");
+    TEST_CHECK(run_faulted_after_second, "the last active zone faulting must end the run (all heaters faulted)");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED once every active zone has faulted");
+    TEST_CHECK(!s_exec.dwelling, "dwelling must be cleared by the FAULTED transition, not left stale");
+    TEST_CHECK(!s_exec.ramp_lock_held, "ramp_lock_held must be cleared alongside dwelling");
+
+    char msg[160];
+    uint32_t v = exec_mode_state_check(msg, sizeof(msg));
+    TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations -- rule 5 must not fire");
+
+    reset_relay_claim_test_state();
+}
+
 static void run_test_exec_mode_state_check(void)
 {
     test_mode_state_check_rule4_idle_with_active_zone();
@@ -8265,6 +8377,8 @@ static void run_test_exec_mode_state_check(void)
     test_mode_state_check_legal_paused_mid_dwell();
     test_mode_state_check_legal_autotune_done_does_not_conflict();
     test_mode_state_check_no_violation_after_global_guard_trip_mid_dwell();
+    test_mode_state_check_no_violation_after_abort_policy_trip_mid_dwell();
+    test_mode_state_check_no_violation_after_all_heaters_faulted_mid_dwell();
 
     // Leave clean s_exec/autotune-stub state behind for whichever test runs next.
     reset_mode_state_check_test_state();
@@ -8916,6 +9030,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_at_atomic_heat_claim_gate();
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();
+    test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();
     test_heat_enable_release_survives_a_down_link();
