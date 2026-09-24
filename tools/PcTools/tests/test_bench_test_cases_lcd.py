@@ -885,6 +885,37 @@ class Lcd09Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertEqual(ui.row_calls, 2)
 
+    def test_armed_delete_confirm_button_is_never_a_row_or_tapped(self):
+        # Review of ebec7d06: the row tap now goes through the retrying
+        # _click_then_page(), so rows[0] must never be a destructive
+        # target. ui_page_profile_picker.c relabels an armed Delete button
+        # "Confirm?" (and never resets the label when the window lapses);
+        # a stale "Confirm?" sorting above the first row's name button must
+        # be excluded from rows, never clicked -- let alone twice.
+        class RecordingUi(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.clicks = []
+
+            def click_by_name(self, name):
+                self.clicks.append(name)
+                return super().click_by_name(name)
+
+        page = dict(_PROFILES_PAGE_TARGETS)
+        page["profiles"] = [
+            {"name": "Confirm?", "cx": 400, "cy": 148, "hidden": False},
+            {"name": "Cone 6 Bisque", "cx": 50, "cy": 150, "hidden": False},
+            {"name": "back", "cx": 140, "cy": 26, "hidden": False},
+            {"name": "home", "cx": 180, "cy": 26, "hidden": False},
+        ] + [{"name": self._GLYPH, "cx": 180 + 40 * k, "cy": 26, "hidden": False} for k in (1, 2, 3)]
+        nav = dict(_PROFILES_NAV)
+        nav["Cone 6 Bisque"] = "profile_detail"
+        ui = RecordingUi(page="home", page_targets=page, nav_map=nav)
+        result = C._case_lcd09({"srv": FakeSrvFull(ui)})
+        self.assertNotIn("Confirm?", ui.clicks)
+        self.assertIn("Cone 6 Bisque", ui.clicks)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
     def test_finally_restores_home_on_exception(self):
         ui = RaisingUiTest(page="home", page_targets=_PROFILES_PAGE_TARGETS, nav_map=_PROFILES_NAV, raise_on_call=2)
         srv = FakeSrvFull(ui)
@@ -1333,6 +1364,32 @@ class Lcd16Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
         self.assertEqual(result.observed.get("pages_paged"), 0)
 
+    def test_truncated_tap_list_is_named_in_the_reason(self):
+        # Review of ebec7d06: the LIST_TAP_TARGETS reply's 253 B wire cap
+        # can cut the topbar icons from a sub-page with long row names
+        # (Internal RAM); that read carries truncated=True. LCD-16 must
+        # say so instead of only "Next may be broken".
+        class TruncatingDiagUi(DiagPagingUi):
+            def list_tap_targets(self):
+                tap = super().list_tap_targets()
+                if self._page == "diagnostics" and self.step >= 1:
+                    return {"targets": [{"name": "Internal RAM free", "cx": 240, "cy": 120, "hidden": False}],
+                            "truncated": True}
+                return tap
+
+        ui = TruncatingDiagUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertNotEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("tap_list_truncated_steps"), [1])
+        self.assertIn("truncated", result.reason)
+
+    def test_untruncated_run_records_no_truncation(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("tap_list_truncated_steps"), [])
+        self.assertNotIn("truncated", result.reason or "")
+
     def test_interior_hop_transient_blank_read_recovers_without_extra_tap(self):
         # 2026-09-24 coordinator follow-up: an interior hop's own ENTRY read
         # (locating Next before tapping it) lands right after the PREVIOUS
@@ -1613,6 +1670,25 @@ class Lcd19Test(unittest.TestCase):
         with mock.patch.object(C, "_wake_and_home") as wake:
             C._case_lcd19(ctx)
         wake.assert_called_once_with(ctx)
+
+    def test_wake_and_home_precedes_every_click(self):
+        # Review of ebec7d06: the test above only pins that the wake ran,
+        # not that it ran BEFORE the first click -- which is the claimed fix.
+        order = []
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        real_click = ui.click_by_name
+
+        def recording_click(name):
+            order.append(("click", name))
+            return real_click(name)
+
+        ui.click_by_name = recording_click
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C, "_wake_and_home", side_effect=lambda c: order.append(("wake",))):
+            C._case_lcd19(ctx)
+        self.assertTrue(any(o[0] == "click" for o in order), order)
+        self.assertEqual(order[0], ("wake",), order)
 
     def test_owns_its_own_lcd_enabled_toggle_and_restores_it_off(self):
         # Fix 1: LCD-19 must not depend on WEB-SEC-04 leaving lcd_enabled on

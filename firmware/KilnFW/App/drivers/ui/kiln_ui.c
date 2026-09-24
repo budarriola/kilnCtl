@@ -350,7 +350,16 @@ typedef struct {
     size_t max;
     size_t count;
     bool truncated;
+    /* Which of a walk ROOT's direct children (depth 0 only) this pass
+     * visits -- see log_all_tap_targets() for why the active screen is
+     * walked in two passes, FLOATING children first. Deeper levels always
+     * visit every child. */
+    uint8_t root_filter;
 } tap_walk_ctx_t;
+
+#define TAP_WALK_ROOT_ALL 0u
+#define TAP_WALK_ROOT_FLOATING_ONLY 1u
+#define TAP_WALK_ROOT_NON_FLOATING_ONLY 2u
 
 static void tap_walk_add(tap_walk_ctx_t *ctx, const char *name, int cx, int cy, bool hidden)
 {
@@ -400,6 +409,13 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
          * anything not currently hittable has no business in it. */
         if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
             continue;
+        }
+
+        if (depth == 0 && ctx->root_filter != TAP_WALK_ROOT_ALL) {
+            bool floating = lv_obj_has_flag(child, LV_OBJ_FLAG_FLOATING);
+            if (floating != (ctx->root_filter == TAP_WALK_ROOT_FLOATING_ONLY)) {
+                continue;
+            }
         }
 
         /* An lv_keyboard (and any other lv_buttonmatrix) is a SINGLE lv_obj
@@ -570,27 +586,29 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
  * the same treatment for free. */
 static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
 {
-    /* 2026-09-24 (LCD-16 bench root cause): top/sys layers are walked
-     * BEFORE the page screen now, not after. kiln_ui_collect_tap_targets()
-     * and the UI_TEST LIST_TAP_TARGETS wire handler both cap the walk at a
-     * fixed-size array (uart_bridge_ui_test.c's 32-entry `targets[]`) and
-     * silently stop adding once it fills (tap_walk_add() sets `truncated`
-     * and drops the rest). The topbar's Back/Home/Prev/Next icons and any
-     * open modal live on lv_layer_top()/lv_layer_sys(), not under the page
-     * screen (see this function's original doc comment below) -- so when
-     * the screen was walked first, a page whose OWN body already has >=32
-     * clickable rows (ui_page_diagnostics.c's Memory Usage sub-page: one
-     * row per heap stat) filled the cap before the walk ever reached the
-     * topbar, and every nav icon silently vanished from the dump, on every
-     * run, deterministically -- not a race. `_diagnostics_next_target()`
-     * (tools/PcTools/src/kilnctrl/bench_test/cases_lcd.py) then read this
-     * as "Next not found" and LCD-16 reported "paging stopped after 0/7
-     * forward hops" identically across three consecutive bench runs
-     * (20260924T191429Z/203338Z/221915Z). Walking the screen-independent,
-     * always-small overlay layers first guarantees persistent navigation
-     * (and any open modal) survives the cap regardless of how many rows a
-     * page body has; only less-critical page-body targets past the 32nd
-     * slot are ever dropped now. */
+    /* 2026-09-24 (LCD-16 bench root cause). Two separate caps can drop
+     * entries from the END of this walk's output: the fixed 32-entry arrays
+     * kiln_ui_collect_tap_targets() callers pass (tap_walk_add() sets
+     * `truncated` and drops the rest), and -- the one that actually bites --
+     * the UI_TEST LIST_TAP_TARGETS reply's UART_PROTO_MAX_PAYLOAD (253 B)
+     * wire limit (uart_bridge_ui_test.c stops emitting and sets the same
+     * truncated byte). The topbar's Back/Home/Prev/Next icons are NOT on
+     * lv_layer_top(): ui_topbar_create() builds them in a FLOATING proxy
+     * parented under the page screen itself, and ui_topbar_raise() moves
+     * that proxy to the screen's LAST child index -- so a plain in-order
+     * screen walk always emits them last. ui_page_diagnostics.c's Internal
+     * RAM sub-page (seven rows with ~30-character borrowed names) already
+     * fills the 253 B reply before the walk reaches them, so the nav icons
+     * vanished from the dump and _diagnostics_next_target()
+     * (tools/PcTools/src/kilnctrl/bench_test/cases_lcd.py) could not
+     * locate Next.
+     *
+     * Walk order is therefore: the overlay layers (a modal covers the page
+     * beneath it, so its targets matter most), then the screen's FLOATING
+     * direct children (the topbar icon proxy; ui_page_home.c's corner tap
+     * zones), then everything else in the screen's normal child order.
+     * Relative order within each group is unchanged, and hit-testing is not
+     * affected -- this is only the order targets are REPORTED in. */
     lv_obj_t *top = lv_layer_top();
     if (top && lv_obj_get_child_count(top) > 0) {
         if (ctx->do_log) {
@@ -608,7 +626,11 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
     }
 
     if (screen) {
+        ctx->root_filter = TAP_WALK_ROOT_FLOATING_ONLY;
         log_tap_targets(screen, 0, ctx);
+        ctx->root_filter = TAP_WALK_ROOT_NON_FLOATING_ONLY;
+        log_tap_targets(screen, 0, ctx);
+        ctx->root_filter = TAP_WALK_ROOT_ALL;
     }
 }
 

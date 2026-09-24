@@ -943,7 +943,11 @@ def _profile_rows_by_position(targets: "list[dict]") -> "list[dict]":
         # row. A real row's name button always carries its label text.
         if not isinstance(name, str) or name == "":
             continue
-        if _is_glyph_name(name) or name in ("back", "home", "Delete"):
+        # "Confirm?" is the same Delete button in its armed state
+        # (ui_page_profile_picker.c's delete_btn_clicked_cb() relabels it,
+        # and nothing resets the label when the 5 s window lapses) -- never
+        # a row, and never something _case_lcd09's retried row tap may aim at.
+        if _is_glyph_name(name) or name in ("back", "home", "Delete", "Confirm?"):
             continue
         try:
             cy = float(t.get("cy"))
@@ -1458,7 +1462,14 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         fail, _diag_page, _ = _click_then_page(ui, "Diagnostics", "diagnostics")
         if fail is not None:
             return fail
-        targets = ui.list_tap_targets().get("targets", [])
+        first_tap = ui.list_tap_targets()
+        targets = first_tap.get("targets", [])
+        # The LIST_TAP_TARGETS reply carries a `truncated` flag (253 B wire
+        # cap, see kiln_ui.c's log_all_tap_targets()); a truncated read can
+        # drop the topbar icons _diagnostics_next_target() needs, which
+        # otherwise reads as "Next may be broken". Recorded, and named in
+        # the reason whenever paging stops short.
+        truncated_steps: list = [0] if first_tap.get("truncated") else []
         prev_sig = _targets_signature(targets)
         for step in range(J.DIAGNOSTICS_PAGE_COUNT):
             if _find(targets, "Reset") is not None:
@@ -1486,6 +1497,13 @@ def _case_lcd16(ctx: dict) -> CaseResult:
                 ctx, ui, prev_sig, confirm=is_boundary_hop)
             if fail is not None:
                 return fail
+            if tap and tap.get("truncated"):
+                # With found_next False the returned read is the CURRENT
+                # sub-page's (Next could not be located on it); otherwise it
+                # is the read taken after the hop, i.e. the next sub-page's.
+                read_step = step + 1 if found_next else step
+                if read_step not in truncated_steps:
+                    truncated_steps.append(read_step)
             if retried:
                 # Recorded, never judged: a retry at the LAST boundary hop
                 # can also be absorbing an interior tap that was dropped
@@ -1507,7 +1525,14 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         )
         observed = dict(result.observed or {})
         observed["retried_hops"] = list(retried_hops)
+        observed["tap_list_truncated_steps"] = list(truncated_steps)
         result.observed = observed
+        if truncated_steps and pages_paged < expected_hops and result.verdict != Verdict.PASS:
+            result.reason = (
+                f"{result.reason} (LIST_TAP_TARGETS reply was truncated at sub-page step(s) "
+                f"{truncated_steps} -- the topbar icons may have been cut from the list, "
+                f"not missing from the screen)"
+            )
         return result
     finally:
         _navigate_home(ui)
