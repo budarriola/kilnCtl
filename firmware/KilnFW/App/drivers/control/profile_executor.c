@@ -219,6 +219,11 @@ bool exec_handle_mode_state_violation(uint32_t mode_violations, const char *firs
      * fault_reason/fault_guard -- that is the cause the operator needs; the
      * violation itself is still logged above and counted. */
     bool was_faulted = (s_exec.state == PROFILE_EXEC_FAULTED);
+    /* Sampled BEFORE the FAULTED transition below, for the rule-1 autotune
+     * re-derivation at the end of this function -- rule 1 only fires for a
+     * RUNNING/PAUSED run, and exec_enter_terminal_state() is about to
+     * overwrite that. */
+    bool was_running_or_paused = (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED);
     exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
     if (!was_faulted) {
         strncpy(s_exec.fault_reason, first_violation != NULL ? first_violation : "exec_mode_state_check violation",
@@ -247,16 +252,31 @@ bool exec_handle_mode_state_violation(uint32_t mode_violations, const char *firs
      * (HEAT_ENABLE_CLAIMANT_AUTOTUNE, autotune_engine.c) -- release_profile_
      * relay_claim() above only releases THIS run's own claim, so a violated
      * autotune session would otherwise keep driving that zone's heater right
-     * through this run's fault. Stop it too. autotune_engine_abort() only
-     * ever takes s_at.lock (never s_exec.lock -- see autotune_engine_guard.c),
-     * so calling it here, under s_exec.lock, cannot invert the required
+     * through this run's fault. Stop it too.
+     *
+     * The condition is rule 1's own (exec_mode_state_check() above),
+     * including its RUNNING/PAUSED clause evaluated on the PRE-transition
+     * state: `active` survives the FAULTED transition (exec_enter_terminal_
+     * state() clears it only on IDLE), so without that clause any other
+     * violation on an already-FAULTED run would also abort an autotune an
+     * operator legitimately started on a zone that stale run still lists as
+     * active (autotune's own start check, profile_executor_zone_is_active(),
+     * only refuses RUNNING/PAUSED).
+     *
+     * Lock order: autotune_engine_abort() takes s_at.lock, then (via
+     * abort_locked() -> force_relays_off()) only leaf locks -- the
+     * kiln_io_owner slot lock/queue wait (bounded, KILN_IO_OWNER_WAIT_MS),
+     * relay_authority's portMUX, s_he.lock, and the sim lock on a sim build
+     * -- none of which ever takes s_exec.lock or calls back into this
+     * module, so calling it here, under s_exec.lock, keeps the required
      * s_exec.lock -> s_at.lock order. */
     autotune_engine_status_t at;
     autotune_engine_get_status(&at);
     bool autotune_driving = (at.state == AUTOTUNE_ENGINE_SETTLING || at.state == AUTOTUNE_ENGINE_STEPPING ||
                              at.state == AUTOTUNE_ENGINE_RELAY_APPROACH ||
                              at.state == AUTOTUNE_ENGINE_RELAY_CYCLING);
-    if (autotune_driving && at.zone_index < MAX31856_CHANNEL_COUNT && s_exec.zones[at.zone_index].active) {
+    if (autotune_driving && was_running_or_paused && at.zone_index < MAX31856_CHANNEL_COUNT &&
+        s_exec.zones[at.zone_index].active) {
         autotune_engine_abort("profile_executor: rule-1 mode-state violation -- zone double-owned by a "
                               "profile run and an active autotune session");
     }

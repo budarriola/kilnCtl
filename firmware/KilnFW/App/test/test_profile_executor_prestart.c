@@ -8379,6 +8379,54 @@ static void test_exec_handle_mode_state_violation_autotune_driving_other_zone_un
               "autotune driving an unrelated zone must be left alone");
 }
 
+// Rule 1 fires for a PAUSED run too (exec_mode_state_check()'s rule-1
+// clause is RUNNING || PAUSED), so a paused run double-owning a zone with a
+// driving autotune session must abort autotune exactly like a running one.
+static void test_exec_handle_mode_state_violation_rule1_paused_aborts_autotune(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- a rule-1 violation on a PAUSED run also calls "
+                 "autotune_engine_abort()");
+    reset_mode_state_violation_test_state();
+
+    s_exec.state = PROFILE_EXEC_PAUSED;
+    s_exec.zones[1].active = true;
+    s_exec.claimed_relay_mask = 0x02;
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_RELAY_CYCLING;
+    g_stub_autotune_status.zone_index = 1;
+
+    bool forced = exec_handle_mode_state_violation(1u, "rule 1: zone 1 active in a PAUSED profile run "
+                                                        "AND autotune state=4 driving it");
+
+    TEST_CHECK(forced, "a rule-1 violation on a PAUSED run still forces FAULTED");
+    TEST_CHECK(g_autotune_abort_calls == 1, "a PAUSED run's rule-1 violation must abort autotune exactly once");
+}
+
+// An already-FAULTED run (guard trip earlier, not yet dismissed) keeps its
+// zones' `active` flags, and autotune's own start check only refuses a
+// RUNNING/PAUSED run -- so an operator can legitimately autotune a zone
+// that stale run still lists as active. Rule 1 does not fire for a FAULTED
+// run; a different violation reaching the handler must not abort that
+// legitimate autotune session.
+static void test_exec_handle_mode_state_violation_already_faulted_leaves_autotune(void)
+{
+    TEST_SECTION("exec_handle_mode_state_violation() -- a violation on an already-FAULTED run must NOT "
+                 "abort an autotune session on a zone that run still lists as active");
+    reset_mode_state_violation_test_state();
+
+    s_exec.state = PROFILE_EXEC_FAULTED;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].faulted = true;
+    s_exec.zones[0].relay_commanded_on = true;
+    g_stub_autotune_status.state = AUTOTUNE_ENGINE_STEPPING;
+    g_stub_autotune_status.zone_index = 0;
+
+    (void)exec_handle_mode_state_violation(1u, "rule 3: zone 0 faulted==true but relay_commanded_on==true");
+
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state stays FAULTED");
+    TEST_CHECK(g_autotune_abort_calls == 0,
+              "rule 1 cannot fire for a FAULTED run -- its autotune session must be left alone");
+}
+
 static void run_test_exec_handle_mode_state_violation(void)
 {
     test_exec_handle_mode_state_violation_forces_faulted_and_latches();
@@ -8387,6 +8435,8 @@ static void run_test_exec_handle_mode_state_violation(void)
     test_exec_handle_mode_state_violation_rule1_aborts_autotune();
     test_exec_handle_mode_state_violation_non_rule1_does_not_touch_autotune();
     test_exec_handle_mode_state_violation_autotune_driving_other_zone_untouched();
+    test_exec_handle_mode_state_violation_rule1_paused_aborts_autotune();
+    test_exec_handle_mode_state_violation_already_faulted_leaves_autotune();
     reset_mode_state_violation_test_state();
 }
 
