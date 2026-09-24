@@ -23,6 +23,7 @@ import urllib.request
 from typing import Any, Optional
 
 from . import judgments as J
+from .. import http_auth
 from .registry import CaseResult, Verdict, get_case
 
 
@@ -45,17 +46,27 @@ def _http_get_json(host: str, path: str, timeout: float = 5.0) -> "tuple[Optiona
     hatch, for the handful of routes -- /api/coredump/info -- that predate
     one). SP-05 no longer belongs in this category: it was rewritten to be
     read-only via srv.safety_get_status() rather than a raw POST to
-    /api/estop/verify, an admin write."""
+    /api/estop/verify, an admin write.
+
+    Several routes this helper reads (``/api/coredump/info`` for FL-06,
+    ``/api/saftyfw_stack_margin`` for SK-03, ``/api/ramp_assist`` for AT-01's
+    precondition check) are ROUTE_TIER_ADMIN. Goes through
+    ``kilnctrl.http_auth.urlopen`` -- the one seam every other admin-tier
+    PcTools client authenticates through (see that module's docstring) --
+    rather than a bare ``urllib.request.urlopen``, so a board with web auth
+    enabled answers a 401 with a login-and-retry instead of failing every
+    caller of this helper. Byte-for-byte identical to the old bare request
+    when auth is disabled (http_auth's own contract)."""
     url = f"http://{host}{path}"
     req = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
             status = resp.getcode()
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status = exc.code
         body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
         return None, str(exc)
     try:
         return status, json.loads(body) if body else {}

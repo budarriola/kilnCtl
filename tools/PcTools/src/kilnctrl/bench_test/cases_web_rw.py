@@ -22,15 +22,27 @@ confirming ``set_web_password``'s response reports ``ok:true`` -- the same
 in commit 5db79ac8 addressed, applied here to the same
 ``cmd=set_web_password`` / ``cmd=set_policy`` pair.
 
-All board access is bare HTTP through the existing routes named in the plan
-doc (``/api/status``, ``/api/unit_pref``, ``/api/watchdog_cfg``,
+All board access is HTTP through the existing routes named in the plan doc
+(``/api/status``, ``/api/unit_pref``, ``/api/watchdog_cfg``,
 ``/api/ramp_assist``, ``/api/auth/config``, ``/api/auth/security``,
 ``/api/auth/login``, ``/api/auth/session``, ``/api/auth/session/extend``,
 ``/settings/zones``) -- no new HTTP routes, no MCP tool beyond what already
-exists. ``ctx["http_get_json"]``/``ctx["http_post_json"]`` let unit tests
-replace the transport with a fake sequencer; ``ctx["sec_client"]`` does the
-same for WEB-SEC-03's richer client (login/session calls a plain GET/POST
-pair does not cover cleanly).
+exists. ``/api/unit_pref`` POST, ``/api/watchdog_cfg``, ``/api/ramp_assist``
+and ``/api/auth/config``/``/api/auth/security`` are all ROUTE_TIER_ADMIN, so
+the reads/writes that exercise them (WEB-DASH-13, WEB-DIAG-07, WEB-DIAG-08,
+and WEB-SEC-03's own ``get_config``/``set_web_password``/``set_policy``) go
+through ``kilnctrl.http_auth.urlopen`` -- the same seam every other
+admin-tier PcTools client authenticates through -- so these cases keep
+working whether web auth happens to be on or off on the board when the run
+reaches them, rather than 401ing whenever it is already on. The three calls
+that are deliberately still bare and unauthenticated are named explicitly at
+their call sites: ``_SecHttpClient.login()``/``.extend_session()`` (WEB-SEC-03
+is testing the login/session surface itself) and ``.get_status()`` used for
+``admin_route_gated``/``dashboard_ok`` (testing what an unauthenticated
+visitor sees is the point of that check). ``ctx["http_get_json"]``/
+``ctx["http_post_json"]`` let unit tests replace the transport with a fake
+sequencer; ``ctx["sec_client"]`` does the same for WEB-SEC-03's richer client
+(login/session calls a plain GET/POST pair does not cover cleanly).
 """
 from __future__ import annotations
 
@@ -43,6 +55,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from . import cases_web
 from . import judgments as J
+from .. import http_auth
 from .registry import CaseResult, Verdict, get_case
 
 _http_get_raw = cases_web._http_get_raw
@@ -60,10 +73,12 @@ def _parse_json(text: Optional[str]) -> Optional[dict]:
 def _http_post_raw(host: str, path: str, fields: Dict[str, Any], timeout: float = 5.0,
                     cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str], Any]":
     """Bare form-encoded POST -- deliberately no session auto-login (unlike
-    kilnctrl.http_auth): the round-trip cases run in the "auth off" part of
-    the fixed order (plan doc section 5.2) and WEB-SEC-03 is itself testing
-    the auth transition, so both need to see exactly what an unauthenticated
-    (or explicitly cookie-carrying) client gets."""
+    kilnctrl.http_auth). Used only by ``_SecHttpClient.login()`` and
+    ``.extend_session()``: WEB-SEC-03 is itself testing the login/session
+    surface, so those two calls need to see exactly what an unauthenticated
+    (or explicitly cookie-carrying) client gets, not have this module log in
+    on their behalf. Every other admin-tier write in this file goes through
+    ``_http_post_raw_authed`` instead."""
     url = f"http://{host}{path}"
     body = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
@@ -83,9 +98,57 @@ def _http_post_raw(host: str, path: str, fields: Dict[str, Any], timeout: float 
         return None, str(exc), None
 
 
+def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
+    """Authenticated GET via ``kilnctrl.http_auth.urlopen`` -- for
+    WEB-DASH-13/WEB-DIAG-07/WEB-DIAG-08 and WEB-SEC-03's own
+    ``/api/auth/config`` reads, all of which are ROUTE_TIER_ADMIN. Unlike
+    ``_http_get_raw``/``_http_post_raw`` above (deliberately bare, used only
+    where a case needs to see exactly what an unauthenticated or
+    explicit-cookie client gets), these round-trip cases are testing the
+    write path itself, not the auth gate, and must keep working whether the
+    board's web auth happens to be on or off when the run reaches them."""
+    url = f"http://{host}{path}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else None
+        except Exception:  # noqa: BLE001
+            detail = None
+        return exc.code, detail
+    except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
+        return None, str(exc)
+
+
+def _http_post_raw_authed(host: str, path: str, fields: Dict[str, Any],
+                           timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
+    """Authenticated POST counterpart to :func:`_http_get_raw_authed` -- see
+    that function's docstring."""
+    url = f"http://{host}{path}"
+    body = urllib.parse.urlencode(fields).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST",
+                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else None
+        except Exception:  # noqa: BLE001
+            detail = None
+        return exc.code, detail
+    except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
+        return None, str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Generic GET/POST-JSON seam -- ctx overrides let tests fake the transport
-# without touching urllib at all.
+# without touching urllib at all. Real transport goes through
+# kilnctrl.http_auth (same seam every other admin-tier PcTools client uses)
+# so WEB-DASH-13/WEB-DIAG-07/WEB-DIAG-08 keep working whether or not web
+# auth happens to be enabled on the board when the run reaches them.
 # ---------------------------------------------------------------------------
 
 def _get_json(ctx: dict, path: str) -> "Tuple[Optional[int], Optional[dict]]":
@@ -95,7 +158,7 @@ def _get_json(ctx: dict, path: str) -> "Tuple[Optional[int], Optional[dict]]":
     host = ctx.get("host")
     if not host:
         return None, None
-    status, text = _http_get_raw(host, path)
+    status, text = _http_get_raw_authed(host, path)
     return status, _parse_json(text)
 
 
@@ -106,7 +169,7 @@ def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[
     host = ctx.get("host")
     if not host:
         return None, None
-    status, text, _headers = _http_post_raw(host, path, fields)
+    status, text = _http_post_raw_authed(host, path, fields)
     return status, _parse_json(text)
 
 
@@ -222,24 +285,31 @@ class _SecHttpClient:
             return None, str(exc), None
 
     def get_config(self) -> "Tuple[Optional[int], Optional[dict]]":
-        status, text, _headers = self._get("/api/auth/config")
+        # ROUTE_TIER_ADMIN. Goes through http_auth (auto-login on 401) --
+        # unlike login()/get_session()/extend_session()/get_status() below,
+        # this call is not itself testing what an unauthenticated or
+        # explicit-cookie client sees; it needs to succeed whether the
+        # board's web auth is already on or off when WEB-SEC-03 runs.
+        status, text = _http_get_raw_authed(self.host, "/api/auth/config", timeout=self.timeout)
         return status, _parse_json(text)
 
     def set_web_password(self, username: str, password: str) -> "Tuple[Optional[int], Optional[dict]]":
-        status, text, _headers = _http_post_raw(self.host, "/api/auth/security", {
+        # ROUTE_TIER_ADMIN, same reasoning as get_config() above.
+        status, text = _http_post_raw_authed(self.host, "/api/auth/security", {
             "cmd": "set_web_password", "role": "admin", "username": username, "password": password,
-        })
+        }, timeout=self.timeout)
         return status, _parse_json(text)
 
     def set_policy(self, web_enabled: bool, lcd_enabled: bool, web_timeout_min: int,
                    lcd_timeout_min: int) -> "Tuple[Optional[int], Optional[dict]]":
-        status, text, _headers = _http_post_raw(self.host, "/api/auth/security", {
+        # ROUTE_TIER_ADMIN, same reasoning as get_config() above.
+        status, text = _http_post_raw_authed(self.host, "/api/auth/security", {
             "cmd": "set_policy",
             "web_enabled": "1" if web_enabled else "0",
             "lcd_enabled": "1" if lcd_enabled else "0",
             "web_timeout_min": str(web_timeout_min),
             "lcd_timeout_min": str(lcd_timeout_min),
-        })
+        }, timeout=self.timeout)
         return status, _parse_json(text)
 
     def login(self, username: str, password: str) -> "Tuple[Optional[int], Optional[str]]":
