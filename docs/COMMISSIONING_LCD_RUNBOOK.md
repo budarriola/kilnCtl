@@ -21,8 +21,10 @@ count and therefore row assignment changes with which cells are offered).
 raw LVGL **screen-pixel** coordinates (0,0 top-left, 480x320 native), the
 same space every `ui_page_*.c` lays widgets out in — a different space from
 the webcam capture-crop pixel coordinates used by `sample_lcd_region.ps1`
-(crop is `X=296 Y=58 W=853 H=578`, i.e. an 853x578 window, not 480x320 — the
-capture is a photograph of the panel, magnified, not a framebuffer dump).
+(crop is `X=158 Y=52 W=886 H=593` as of the 2026-09-24 camera-aim fix
+(CLAUDE.md), an 886x593 window, not 480x320 — the capture is a photograph of
+the panel, magnified, not a framebuffer dump; the crop verification section
+below predates that fix and quotes the superseded 2026-09-19 numbers).
 
 `touch_log_tap_targets()`'s own docstring says plainly: **"this is the only
 way to discover where a widget actually is on this panel — there is no
@@ -74,6 +76,11 @@ confirmed flashed and re-tested in isolation first.
   merely untested**, until this bench's touch controller changes.
 
 ## Camera crop verification (today, 2026-09-21)
+
+**Superseded 2026-09-24:** the crop this section verifies (`X=296 Y=58
+W=853 H=578`) went stale (LCD-01) and was replaced with `X=158 Y=52 W=886
+H=593` — see CLAUDE.md's "Camera aim (2026-09-24)" note. This section is
+kept as a historical record of that day's evidence, not current geometry.
 
 `capture_lcd.ps1 -Full` and the default-crop capture both succeeded (no
 ffmpeg exit `-5` — no other process was found holding the C920). Full frame:

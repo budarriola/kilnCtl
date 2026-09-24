@@ -14,11 +14,12 @@
   1280x720 frame costs several times the tokens of the default 640x360 crop
   for no diagnostic gain.
 
-  The crop rectangle was re-measured from a full-frame capture on 2026-09-19
-  after the LCD was moved and put back (see CLAUDE.md's "Camera aim" note). If the
-  camera or board is ever moved again, re-run with -Full to get an uncropped
-  frame, re-measure by numeric pixel sampling (never by eye) with
-  sample_lcd_region.ps1, and update the defaults here.
+  The crop rectangle was re-measured from a full-frame capture on 2026-09-24
+  (previously 2026-09-19) after the LCD/camera geometry drifted again (see
+  CLAUDE.md's "Camera aim" note). If the camera or board is ever moved again,
+  re-run with -Full to get an uncropped frame, re-measure by numeric pixel
+  sampling (never by eye) with sample_lcd_region.ps1, and update the defaults
+  here.
 
 .PARAMETER Out
   Output image path. Defaults to lcd.jpg in the current directory.
@@ -43,21 +44,25 @@ param(
     [int]$Width = 640,
     [string]$Device = "HD Pro Webcam C920",
     # Active-area rectangle of the LCD within a 1280x720 frame, re-measured
-    # 2026-09-19 by numeric pixel sampling (luminance edge scans against the
-    # black-bezel reference) after the owner moved the LCD and put it back --
-    # the panel shifted right ~195px and down ~46px from the 2026-09-10
-    # numbers, far beyond the few-px tolerance, so the old crop clipped most
-    # of the screen. The board now sits rotated a few degrees (its right side
-    # is ~25px higher than its left): left edge runs 298 (top) to 323
-    # (bottom), right edge ~1145-1147, top edge 60 (right) to 86 (left),
-    # bottom edge 617 (right) to 635 (left). This rectangle is the smallest
-    # axis-aligned box that contains all four corners of the screen content --
-    # it includes a few pixels of bezel on some sides rather than clipping any
-    # UI, since losing content is worse than a small margin.
-    [int]$CropX = 296,
-    [int]$CropY = 58,
-    [int]$CropW = 853,
-    [int]$CropH = 578
+    # 2026-09-24 by numeric pixel sampling (luminance/color edge scans against
+    # the black bezel) after LCD-01 found the 2026-09-19 crop stale -- the
+    # panel had moved left and up again (left edge from ~298-323 to ~158-172,
+    # right edge from ~1145-1147 to ~983-1044), and the tilt direction
+    # flipped: the right side is now LOWER at the top and HIGHER at the
+    # bottom than the left side (a clockwise roll), not the counter-clockwise
+    # tilt recorded in 2026-09-19. Corners: top-left (160, 52), top-right
+    # (1044, 116), bottom-left (161, 645), bottom-right (983, 624). This
+    # rectangle is the smallest axis-aligned box that contains all four
+    # corners of the screen content -- it includes a few pixels of bezel on
+    # some sides rather than clipping any UI, since losing content is worse
+    # than a small margin.
+    # (Superseded 2026-09-19 rectangle, kept for history: X=296 Y=58 W=853
+    # H=578, corners left 298 (top)/323 (bottom), right ~1145-1147, top 60
+    # (right)/86 (left), bottom 617 (right)/635 (left).)
+    [int]$CropX = 158,
+    [int]$CropY = 52,
+    [int]$CropW = 886,
+    [int]$CropH = 593
 )
 
 $ErrorActionPreference = "Stop"

@@ -49,21 +49,22 @@ WIDGET_CORNERS: Tuple[Tuple[float, float], ...] = (
 )
 
 #: The same four corners, in the bench camera's full 1280x720 frame, per
-#: CLAUDE.md's "Camera aim (2026-09-19)" numeric edge scan (never re-typed
+#: CLAUDE.md's "Camera aim (2026-09-24)" numeric edge scan (never re-typed
 #: from a screenshot -- these are the exact values quoted there):
-#:   left edge:   x=298 (top) .. x=323 (bottom)
-#:   right edge:  x=1145 (top) .. x=1147 (bottom)  (quoted as "1145-1147")
-#:   top edge:    y=86 (left) .. y=60 (right)
-#:   bottom edge: y=635 (left) .. y=617 (right)
-#: giving corners TL=(298,86) TR=(1145,60) BL=(323,635) BR=(1147,617), every value quoted verbatim from
-#: CLAUDE.md (no midpoints invented) --
-#: and consistent with "the board sits rotated a few degrees with its right
-#: side about 25px higher than its left".
+#:   top-left corner:     (160, 52)
+#:   top-right corner:    (1044, 116)
+#:   bottom-left corner:  (161, 645)
+#:   bottom-right corner: (983, 624)
+#: The tilt direction has flipped since 2026-09-19: the right side is now
+#: LOWER at the top and HIGHER at the bottom than the left side (a clockwise
+#: roll), not the counter-clockwise "right side higher" tilt recorded before.
+#: Superseded 2026-09-19 corners, kept for history: TL=(298,86) TR=(1145,60)
+#: BL=(323,635) BR=(1147,617).
 FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
-    (298.0, 86.0),
-    (1145.0, 60.0),
-    (323.0, 635.0),
-    (1147.0, 617.0),
+    (160.0, 52.0),
+    (1044.0, 116.0),
+    (161.0, 645.0),
+    (983.0, 624.0),
 )
 
 

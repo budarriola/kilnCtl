@@ -383,6 +383,18 @@ containing all four corners, `X=296 Y=58 W=853 H=578`
 bezel on the tighter sides rather than clipping any UI content. (The previous,
 2026-09-10 rectangle was `X=102 Y=12 W=907 H=609`.)
 
+**Camera aim (2026-09-24):** LCD-01 found the 2026-09-19 numbers above stale
+again. A fresh `-Full` capture and numeric luminance/color edge scans (never
+by eye) put the four corners at top-left `(160, 52)`, top-right `(1044, 116)`,
+bottom-left `(161, 645)`, bottom-right `(983, 624)` -- the panel moved left
+and slightly up, and the tilt direction flipped: the right side is now LOWER
+at the top and HIGHER at the bottom than the left side (a clockwise roll),
+not the counter-clockwise "right side higher" tilt recorded in 2026-09-19.
+The smallest axis-aligned box containing all four corners is
+`X=158 Y=52 W=886 H=593` (`tools/PcTools/scripts/capture_lcd.ps1:57-60`),
+now the default crop, and `lcd_sampler.py`'s `FRAME_CORNERS` was updated to
+match. The 2026-09-19 numbers above are kept only as history.
+
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
 Three git-workflow guards live under `tools/`: `worktree_mint.ps1` (mint/remove
