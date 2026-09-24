@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl.bench_test import cases_lcd as C  # noqa: E402
+from kilnctrl.bench_test import judgments as J  # noqa: E402
 from kilnctrl.bench_test import lcd_sampler  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict  # noqa: E402
 
@@ -495,6 +496,146 @@ class Lcd19Test(unittest.TestCase):
         ctx = {"srv": srv, "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
         result = C._case_lcd19(ctx)
         self.assertEqual(result.observed["overlay_dismiss"], {"checked": True, "present": False})
+
+
+class DelayedPageNavUiTest(PageNavUiTest):
+    """Models the click_by_name()-then-read race (2026-09-24 bench finding):
+    click_by_name() reports 'ok' immediately, but the destination page name
+    only becomes visible after `flips_after` subsequent get_current_page()
+    polls -- the real LVGL-task-poll delay collapsed to "N calls" so the
+    test runs instantly. `flips_after=None` means the page never flips at
+    all (the never-arrives case)."""
+
+    def __init__(self, *a, flips_after=1, **kw):
+        super().__init__(*a, **kw)
+        self._flips_after = flips_after
+        self._pending_dest = None
+        self._poll_count = 0
+
+    def click_by_name(self, name):
+        if self._click_result != "ok":
+            return {"result": self._click_result, "cx": 0, "cy": 0}
+        dest = self._nav_map.get(name)
+        if dest is not None:
+            self._pending_dest = dest
+            self._poll_count = 0
+        return {"result": "ok", "cx": 0, "cy": 0}
+
+    def get_current_page(self):
+        if self._pending_dest is not None and self._flips_after is not None:
+            self._poll_count += 1
+            if self._poll_count > self._flips_after:
+                self._page = self._pending_dest
+                self._pending_dest = None
+        return self._page
+
+    def list_tap_targets(self):
+        return {"targets": self._page_targets.get(self._page, []), "truncated": False}
+
+
+class Lcd08PollTest(unittest.TestCase):
+    """LCD-08 specifically reproduces the bench log: click_by_name('settings')
+    succeeds but an immediate page read still says 'home'."""
+
+    def test_page_flips_one_poll_after_click_still_passes(self):
+        ui = DelayedPageNavUiTest(
+            page="home",
+            page_targets={"home": [], "config": _CONFIG_TARGETS},
+            nav_map={"settings": "config"},
+            flips_after=1,
+        )
+        srv = FakeSrv(ui)
+        result = C._case_lcd08({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertIn("page_wait_s", result.observed)
+
+    def test_page_never_flips_is_still_a_fail(self):
+        ui = DelayedPageNavUiTest(
+            page="home",
+            page_targets={"home": [], "config": _CONFIG_TARGETS},
+            nav_map={"settings": "config"},
+            flips_after=None,
+        )
+        srv = FakeSrv(ui)
+        result = C._case_lcd08({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("home", result.reason)
+
+
+class Lcd09PollTest(unittest.TestCase):
+    def test_page_flips_one_poll_after_each_click_still_passes(self):
+        ui = DelayedPageNavUiTest(
+            page="home", page_targets=_PROFILES_PAGE_TARGETS, nav_map=_PROFILES_NAV, flips_after=1,
+        )
+        srv = FakeSrvFull(ui)
+        result = C._case_lcd09({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+
+class Lcd14PollTest(unittest.TestCase):
+    def test_page_flips_one_poll_after_each_click_still_passes(self):
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}],
+            "config": [{"name": "Temperature", "hidden": False}],
+            "temperature": [{"name": "zone_temp_0", "value": 100.0}, {"name": "safety_line", "on": False}],
+        }
+        ui = DelayedPageNavUiTest(page="home", page_targets=page_targets, nav_map=_TEMP_NAV, flips_after=1)
+        srv = FakeSrvFull(ui, thermo=FakeThermo({0: 100.0}), profiles=FakeProfiles(FakeExecStatus("idle")))
+        result = C._case_lcd14({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+
+class DelayedDiagUiTest(PageNavUiTest):
+    """LCD-16's diagnostics sub-tabs never change the top-level page name
+    (ui_page_diagnostics.c's own internal s_pages[]), so the race there
+    shows up in list_tap_targets(), not get_current_page(). Models a
+    per-title tap-target set that only updates `flips_after` polls after
+    the tab's click_by_name()."""
+
+    def __init__(self, *a, tab_targets=None, flips_after=1, **kw):
+        super().__init__(*a, **kw)
+        self._tab_targets = tab_targets or {}
+        self._flips_after = flips_after
+        self._pending_tab = None
+        self._current_tab_targets: "list" = []
+        self._poll_count = 0
+
+    def click_by_name(self, name):
+        if self._click_result != "ok":
+            return {"result": self._click_result, "cx": 0, "cy": 0}
+        dest = self._nav_map.get(name)
+        if dest is not None:
+            self._page = dest
+        if name in self._tab_targets:
+            self._pending_tab = name
+            self._poll_count = 0
+        return {"result": "ok", "cx": 0, "cy": 0}
+
+    def list_tap_targets(self):
+        if self._pending_tab is not None and self._flips_after is not None:
+            self._poll_count += 1
+            if self._poll_count > self._flips_after:
+                self._current_tab_targets = self._tab_targets[self._pending_tab]
+                self._pending_tab = None
+        if self._page != "config" and self._page != "home":
+            return {"targets": self._current_tab_targets, "truncated": False}
+        return {"targets": self._page_targets.get(self._page, []), "truncated": False}
+
+
+class Lcd16PollTest(unittest.TestCase):
+    def test_relay_life_tab_targets_arrive_one_poll_late(self):
+        page_targets = {
+            "home": [{"name": "settings", "hidden": False}],
+            "config": [{"name": "Diagnostics", "hidden": False}],
+        }
+        nav_map = {"settings": "config", "Diagnostics": "diagnostics"}
+        tab_targets = {t: [] for t in J._DIAG_TITLES}
+        tab_targets["Relay Life"] = [{"name": "reset", "hidden": False}]
+        ui = DelayedDiagUiTest(page="home", page_targets=page_targets, nav_map=nav_map,
+                                tab_targets=tab_targets, flips_after=1)
+        srv = FakeSrvFull(ui)
+        result = C._case_lcd16({"srv": srv})
+        self.assertEqual(result.observed.get("relay_life_has_reset"), True)
 
 
 class Lcd21Test(unittest.TestCase):

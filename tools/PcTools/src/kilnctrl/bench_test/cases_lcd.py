@@ -16,11 +16,84 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from typing import Any, Dict, Optional
 
 from . import judgments as J
 from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
+
+#: click_by_name() (uart_bridge_ui_test.c -> kiln_ui_click_by_name(),
+#: firmware/KilnFW/App/drivers/ui/kiln_ui.c) injects the synthetic touch
+#: press+release synchronously and replies OK as soon as the release is
+#: injected -- but the actual screen switch (lv_screen_load() /
+#: s_current_page_name update inside kiln_ui_show(), called from the
+#: button's LVGL click event) only happens later, when the LVGL task's own
+#: ~30ms touch_read_cb() poll (lvgl_port.c) next samples that latched
+#: release and runs its event handlers. A page (or tap-target) read
+#: immediately after a successful click can race that poll and still
+#: observe the OLD page -- this is exactly LCD-08/09/14/16's 2026-09-24
+#: bench failure (click_by_name succeeded, immediate read still said
+#: 'home'). Poll instead of reading once; bounded so a page that genuinely
+#: never arrives is still a FAIL, not a hang.
+_PAGE_POLL_TIMEOUT_S = 2.0
+_PAGE_POLL_INTERVAL_S = 0.1
+
+
+def _wait_for_page(ui, expected: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                    interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[str, float]":
+    """Poll ``ui.get_current_page()`` until it equals `expected` or
+    `timeout_s` elapses. Returns ``(last_page_seen, waited_s)`` -- never
+    raises, and never fabricates a match: a page that never arrives comes
+    back as whatever the last poll actually saw, so a caller's existing
+    ``page != expected`` check still fails the case honestly."""
+    start = time.monotonic()
+    page = ui.get_current_page()
+    while page != expected:
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        page = ui.get_current_page()
+    return page, time.monotonic() - start
+
+
+def _wait_for_page_change(ui, before: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                           interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[str, float]":
+    """Same race as :func:`_wait_for_page`, for a caller that does not know
+    the destination page's name in advance (a page transition mediated by
+    the destination page's own definition) -- poll until the page differs
+    from `before` instead of matching a fixed target."""
+    start = time.monotonic()
+    page = ui.get_current_page()
+    while page == before:
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        page = ui.get_current_page()
+    return page, time.monotonic() - start
+
+
+def _wait_for_targets_change(ui, before_names: "set",
+                              timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                              interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[dict, float]":
+    """Same race as :func:`_wait_for_page`, for pages whose name never
+    changes even though their content does -- ui_page_diagnostics.c's
+    sub-tabs are internal to that one page (its own ``s_pages[]`` array,
+    switched by ``show_page()``, never registered with kiln_ui.c's
+    top-level page registry), so ``get_current_page()`` stays 'diagnostics'
+    across every tab and cannot detect this transition. Poll
+    ``list_tap_targets()`` instead, until its name set differs from
+    `before_names` or `timeout_s` elapses."""
+    start = time.monotonic()
+    tap = ui.list_tap_targets()
+    names = {t.get("name") for t in tap.get("targets", [])}
+    while names == before_names:
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        tap = ui.list_tap_targets()
+        names = {t.get("name") for t in tap.get("targets", [])}
+    return tap, time.monotonic() - start
 
 #: Mirrored from firmware/KilnFW/App/drivers/ui/ui_theme.h -- reference
 #: values ONLY. Per CLAUDE.md ("never by matching theme source constants"),
@@ -113,10 +186,13 @@ def _case_lcd08(ctx: dict) -> CaseResult:
             reason=f"click_by_name('settings') returned {click.get('result')!r}, expected 'ok'",
             observed={"click": click},
         )
-    page = ui.get_current_page()
+    page, waited_s = _wait_for_page(ui, "config")
     tap = ui.list_tap_targets()
     _remember_page_targets(ctx, "config", tap)
-    return J.judge_lcd_config_hub(page, tap.get("targets", []))
+    result = J.judge_lcd_config_hub(page, tap.get("targets", []))
+    result.observed = dict(result.observed or {})
+    result.observed["page_wait_s"] = round(waited_s, 3)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +361,11 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         click = ui.click_by_name("settings")
         if click.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
+        _wait_for_page(ui, "config")
         click2 = ui.click_by_name("Profiles")
         if click2.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('Profiles') returned {click2.get('result')!r}", observed={"click": click2})
-        page = ui.get_current_page()
+        page, waited_s = _wait_for_page(ui, "profiles")
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "profiles", tap)
@@ -299,8 +376,11 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         if rows:
             click3 = ui.click_by_name(rows[0]["name"])
             if click3.get("result") == "ok":
-                detail_page = ui.get_current_page()
-        return J.judge_lcd_profiles_picker(page, rows, paging_present, new_icon_present, detail_page)
+                detail_page, _ = _wait_for_page_change(ui, page)
+        result = J.judge_lcd_profiles_picker(page, rows, paging_present, new_icon_present, detail_page)
+        result.observed = dict(result.observed or {})
+        result.observed["page_wait_s"] = round(waited_s, 3)
+        return result
     finally:
         _navigate_home(ui)
 
@@ -317,10 +397,11 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         click = ui.click_by_name("settings")
         if click.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
+        _wait_for_page(ui, "config")
         click2 = ui.click_by_name("Temperature")
         if click2.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('Temperature') returned {click2.get('result')!r}", observed={"click": click2})
-        page = ui.get_current_page()
+        page, waited_s = _wait_for_page(ui, "temperature")
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "temperature", tap)
@@ -342,7 +423,10 @@ def _case_lcd14(ctx: dict) -> CaseResult:
             expect_safety_on = bool(srv._profiles.get_exec_status().state_name == "running")
         except Exception:
             expect_safety_on = False
-        return J.judge_lcd_temperature_page(page, zone_rows, readings, safety_on, expect_safety_on)
+        result = J.judge_lcd_temperature_page(page, zone_rows, readings, safety_on, expect_safety_on)
+        result.observed = dict(result.observed or {})
+        result.observed["page_wait_s"] = round(waited_s, 3)
+        return result
     finally:
         _navigate_home(ui)
 
@@ -362,15 +446,24 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         click = ui.click_by_name("settings")
         if click.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('settings') returned {click.get('result')!r}", observed={"click": click})
+        config_page, _ = _wait_for_page(ui, "config")
         click2 = ui.click_by_name("Diagnostics")
         if click2.get("result") != "ok":
             return CaseResult(Verdict.FAIL, reason=f"click_by_name('Diagnostics') returned {click2.get('result')!r}", observed={"click": click2})
+        # ui_page_diagnostics.c's sub-tabs never change kiln_ui's top-level
+        # page name (they are one page's own internal s_pages[], see
+        # _wait_for_targets_change's docstring), so waiting for a page name
+        # here only ever catches config -> diagnostics; each per-title tap
+        # below is followed by a tap-target-set wait instead.
+        _wait_for_page_change(ui, config_page)
+        prev_names = {t.get("name") for t in ui.list_tap_targets().get("targets", [])}
         for title in J._DIAG_TITLES:
             click3 = ui.click_by_name(title)
             if click3.get("result") != "ok":
                 break
-            tap = ui.list_tap_targets()
+            tap, _ = _wait_for_targets_change(ui, prev_names)
             targets = tap.get("targets", [])
+            prev_names = {t.get("name") for t in targets}
             page_title = ui.get_current_page()
             titles_seen.append(title)
             if title == "Relay Life":
@@ -446,6 +539,27 @@ def _lcd19_overlay_names(ui) -> Optional[set]:
     return {t.get("name") for t in targets if not t.get("hidden")}
 
 
+def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                             interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[Optional[set], float]":
+    """Same click-then-read race as :func:`_wait_for_page`, for LCD-19's
+    top-layer popups: both the PIN keypad and the Confirm Start/Confirm
+    Stop dialogs are lv_msgbox popups raised asynchronously off the same
+    LVGL-task touch poll as any page switch (see kiln_ui_click_by_name()'s
+    comment), so an immediate tap-target read after Start/Stop/Cancel can
+    still see the pre-click set. `present=True` waits for a non-empty set
+    (after opening a popup); `present=False` waits for empty (after
+    dismissing one). Never raises; a popup that never (dis)appears is still
+    reported honestly via whatever the last poll saw."""
+    start = time.monotonic()
+    names = _lcd19_overlay_names(ui)
+    while names is not None and bool(names) != present:
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        names = _lcd19_overlay_names(ui)
+    return names, time.monotonic() - start
+
+
 def _dismiss_lcd19_overlay(ui) -> Dict[str, Any]:
     """Best-effort: dismiss a PIN keypad or Confirm Start/Confirm Stop dialog
     left open by this case, via "Cancel" only -- never the dialog's own
@@ -458,7 +572,7 @@ def _dismiss_lcd19_overlay(ui) -> Dict[str, Any]:
     if "Cancel" not in before:
         return {"checked": True, "present": False}
     click = ui.click_by_name("Cancel")
-    after = _lcd19_overlay_names(ui)
+    after, _ = _wait_for_overlay_names(ui, present=False)
     dismissed = after is not None and "Cancel" not in after
     return {
         "checked": True,
@@ -486,14 +600,14 @@ def _case_lcd19(ctx: dict) -> CaseResult:
         if not firing_active:
             click = ui.click_by_name("Start")
             if click.get("result") == "ok":
-                names = _lcd19_overlay_names(ui)
+                names, _ = _wait_for_overlay_names(ui, present=True)
                 keypad_raised = names is not None and "OK" in names and "Cancel" in names
             # wrong_pin_refused / right_pin_started stay None: UiTestClient
             # has no enter_pin() to drive the keypad any further.
         else:
             stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
             if stop_click.get("result") == "ok":
-                names = _lcd19_overlay_names(ui)
+                names, _ = _wait_for_overlay_names(ui, present=True)
                 if names is not None:
                     has_cancel = "Cancel" in names
                     has_ok = "OK" in names
