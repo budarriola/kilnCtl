@@ -171,6 +171,11 @@
   var loginModalEl = null, loginTitleEl = null, loginUserEl = null, loginPassEl = null,
       loginErrorEl = null, loginFormEl = null, loginCancelEl = null, loginSubmitEl = null,
       loginForgotEl = null;
+  // Control handle for the login promise currently on screen (set inside
+  // openLoginModal(), cleared by its finish()); null when no login modal is
+  // pending. The forgot-password flow uses it to hide/restore that modal
+  // without settling or duplicating its promise.
+  var loginActiveCtl = null;
 
   function buildLoginModal() {
     var overlay = document.createElement('div');
@@ -215,12 +220,13 @@
       evt.preventDefault();
       // Same themed overlay/panel classes as the login modal (owner
       // requirement: the popup follows the color theme) but its own
-      // element -- this one hides the login panel underneath rather than
-      // stacking. Cancel/close returns to a plain closed state; nothing
-      // here retries the original request that opened the login modal, so
-      // that promise still resolves the same way a Cancel on the login
-      // modal itself would.
-      loginModalEl.setAttribute('hidden', '');
+      // element -- the pending login modal is SUSPENDED (hidden, its
+      // keyboard handling paused, its promise still pending) rather than
+      // stacked or abandoned. Closing the reset modal -- Cancel or a
+      // successful reset -- resumes it, so the operator can then log in
+      // (and the original request retries) or Cancel it as usual. Refused
+      // while a login POST is in flight (same A2 rule as Cancel/Escape).
+      if (!loginActiveCtl || !loginActiveCtl.suspend()) return;
       openForgotPasswordModal();
     });
     return overlay;
@@ -257,20 +263,50 @@
       // cancel once the request is already in flight; the operator can
       // still close the modal after it resolves, same as before.
       var submitting = false;
+      // Set while the "Forgot password?" reset modal has this panel hidden
+      // in its place: this promise stays pending (so a login after a
+      // successful reset still retries the original request), but its
+      // document-level keydown handler must not act on keys meant for the
+      // other modal (Escape would settle this promise underneath it, and
+      // the Tab trap would pull focus into these hidden fields).
+      var suspended = false;
       function focusableEls() {
         // Order matches the DOM/tab order inside the panel: username,
-        // password, cancel, submit.
+        // password, cancel, submit, forgot-password link.
         return [loginUserEl, loginPassEl, loginCancelEl,
-                loginFormEl.querySelector('button[type="submit"]')].filter(Boolean);
+                loginFormEl.querySelector('button[type="submit"]'),
+                loginForgotEl].filter(Boolean);
       }
+      loginActiveCtl = {
+        // Refused (false) while the login POST is in flight -- same A2 rule
+        // as Escape/Cancel: nothing may hide the modal under a request
+        // whose outcome would otherwise be lost.
+        suspend: function () {
+          if (submitting || settled) return false;
+          suspended = true;
+          loginModalEl.setAttribute('hidden', '');
+          return true;
+        },
+        resume: function (noticeText) {
+          if (settled) return;
+          suspended = false;
+          loginUserEl.value = '';
+          loginPassEl.value = '';
+          loginErrorEl.textContent = noticeText || '';
+          loginModalEl.removeAttribute('hidden');
+          loginUserEl.focus();
+        }
+      };
       function onKeydown(evt) {
         if (evt.key === 'Escape' || evt.keyCode === 27) {
           if (submitting) return;
+          if (suspended) return; // the reset modal owns Escape right now
           // Same outcome as the Cancel button.
           evt.preventDefault();
           finish(false);
           return;
         }
+        if (suspended) return;
         if (evt.key !== 'Tab' && evt.keyCode !== 9) return;
         // Focus trap: Tab/Shift+Tab cycles within the panel instead of
         // escaping to the page behind the overlay.
@@ -295,6 +331,8 @@
       function finish(ok) {
         if (settled) return;
         settled = true;
+        suspended = false;
+        loginActiveCtl = null;
         // The modal's DOM is built ONCE (openLoginModal reuses loginModalEl),
         // so the disabled/"Signing in..." state set by setSubmitting(true)
         // outlives this promise unless it is cleared here. finish(true) --
@@ -422,7 +460,8 @@
   //      typed username (enumeration channel).
   // The code is never logged (not even to console on error) and the reset
   // token is held only in a closure variable -- never localStorage/
-  // sessionStorage, and it is discarded (set back to null) on every close.
+  // sessionStorage. The token is single-use on this side too: it is nulled
+  // the moment the /reset POST is built, and on every close.
   var forgotModalEl = null, forgotPanelEl = null, forgotStep1El = null, forgotStep2El = null,
       forgotUserEl = null, forgotCodeEl = null, forgotErrorEl = null,
       forgotNewPassEl = null, forgotNewPass2El = null, forgotErrorEl2 = null,
@@ -498,27 +537,63 @@
     return KC_FORGOT_GENERIC_FAIL;
   }
 
-  function closeForgotModal() {
+  // Bumped on every open and close: a /forgot or /reset response that
+  // lands after the operator cancelled (or reopened) the modal belongs to a
+  // dead attempt and must not advance the step, store a token, or reopen
+  // the login panel.
+  var forgotGeneration = 0;
+
+  function forgotModalVisible() {
+    return !!forgotModalEl && !forgotModalEl.hasAttribute('hidden');
+  }
+
+  // Clears every typed value and the token. `noticeText`, if given, is
+  // shown on the login panel this returns to (see loginActiveCtl above).
+  function closeForgotModal(noticeText) {
     if (!forgotModalEl) return;
+    forgotGeneration++;
     forgotModalEl.setAttribute('hidden', '');
     forgotResetToken = null; // never persisted anywhere else -- discard now
+    if (forgotUserEl) forgotUserEl.value = '';
     if (forgotCodeEl) forgotCodeEl.value = '';
     if (forgotNewPassEl) forgotNewPassEl.value = '';
     if (forgotNewPass2El) forgotNewPass2El.value = '';
     if (forgotErrorEl) forgotErrorEl.textContent = '';
     if (forgotErrorEl2) forgotErrorEl2.textContent = '';
+    if (forgotSubmit1El) forgotSubmit1El.disabled = false;
+    if (forgotSubmit2El) forgotSubmit2El.disabled = false;
     forgotStep1El.hidden = false;
     forgotStep2El.hidden = true;
+    if (loginActiveCtl) loginActiveCtl.resume(noticeText);
+  }
+
+  // Back to step 1 with a message -- used when a /reset attempt fails,
+  // since the token it carried was already spent (single-use).
+  function forgotBackToStep1(message) {
+    forgotResetToken = null;
+    forgotNewPassEl.value = '';
+    forgotNewPass2El.value = '';
+    forgotErrorEl2.textContent = '';
+    forgotCodeEl.value = '';
+    forgotStep2El.hidden = true;
+    forgotStep1El.hidden = false;
+    forgotErrorEl.textContent = message;
+    forgotCodeEl.focus();
   }
 
   function openForgotPasswordModal() {
     if (!forgotModalEl) buildForgotModal();
+    forgotGeneration++;
     forgotStep1El.hidden = false;
     forgotStep2El.hidden = true;
     forgotErrorEl.textContent = '';
     forgotErrorEl2.textContent = '';
     forgotUserEl.value = '';
     forgotCodeEl.value = '';
+    forgotNewPassEl.value = '';
+    forgotNewPass2El.value = '';
+    forgotSubmit1El.disabled = false;
+    forgotSubmit2El.disabled = false;
     forgotResetToken = null;
     forgotModalEl.removeAttribute('hidden');
     forgotUserEl.focus();
@@ -533,10 +608,31 @@
       if (evt.target !== forgotModalEl) return;
       closeForgotModal();
     }
+    function visibleFocusables() {
+      var step = forgotStep1El.hidden ? forgotStep2El : forgotStep1El;
+      return Array.prototype.slice.call(step.querySelectorAll('input, button'))
+        .filter(function (el) { return !el.disabled; });
+    }
+    // Registered once for the page's lifetime, so it must stay inert while
+    // the modal is hidden -- otherwise every Escape anywhere on the page
+    // would be swallowed (preventDefault) after the first open.
     function onKeydown(evt) {
+      if (!forgotModalVisible()) return;
       if (evt.key === 'Escape' || evt.keyCode === 27) {
         evt.preventDefault();
         closeForgotModal();
+        return;
+      }
+      if (evt.key !== 'Tab' && evt.keyCode !== 9) return;
+      // Focus trap, same shape as the login modal's.
+      var els = visibleFocusables();
+      if (!els.length) return;
+      var first = els[0], last = els[els.length - 1];
+      var inside = !!document.activeElement && forgotPanelEl.contains(document.activeElement);
+      if (evt.shiftKey) {
+        if (document.activeElement === first || !inside) { evt.preventDefault(); last.focus(); }
+      } else {
+        if (document.activeElement === last || !inside) { evt.preventDefault(); first.focus(); }
       }
     }
     forgotModalEl.querySelector('#kc-forgot-cancel1').addEventListener('click', onCancel);
@@ -546,6 +642,8 @@
 
     function onStep1Submit(evt) {
       evt.preventDefault();
+      if (forgotSubmit1El.disabled) return;
+      var gen = forgotGeneration;
       forgotErrorEl.textContent = '';
       forgotSubmit1El.disabled = true;
       var body = 'username=' + encodeURIComponent(forgotUserEl.value) +
@@ -555,13 +653,17 @@
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body
       }).then(function (resp) {
+        if (gen !== forgotGeneration) return;
         if (resp.status === 202) {
           return resp.json().then(function (data) {
-            forgotResetToken = (data && data.reset_token) || null;
+            if (gen !== forgotGeneration) return;
+            forgotResetToken = (data && typeof data.reset_token === 'string' && data.reset_token) || null;
             if (!forgotResetToken) {
               forgotErrorEl.textContent = KC_FORGOT_GENERIC_FAIL;
               return;
             }
+            // The code has done its job -- do not leave it in the DOM.
+            forgotCodeEl.value = '';
             forgotStep1El.hidden = true;
             forgotStep2El.hidden = false;
             forgotNewPassEl.value = '';
@@ -571,63 +673,75 @@
         }
         if (resp.status === 429) {
           return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
             forgotErrorEl.textContent = kcForgotStatusMessage(429, text);
           });
         }
         forgotErrorEl.textContent = kcForgotStatusMessage(resp.status, null);
       }).catch(function () {
+        if (gen !== forgotGeneration) return;
         forgotErrorEl.textContent = 'Network error.';
       }).then(function () {
+        if (gen !== forgotGeneration) return;
         forgotSubmit1El.disabled = false;
       });
     }
 
     function onStep2Submit(evt) {
       evt.preventDefault();
+      if (forgotSubmit2El.disabled) return;
       forgotErrorEl2.textContent = '';
       if (forgotNewPassEl.value !== forgotNewPass2El.value) {
         forgotErrorEl2.textContent = 'Passwords do not match.';
         return;
       }
       if (!forgotResetToken) {
-        // Token was discarded (e.g. modal reopened) -- restart at step 1
-        // rather than POSTing a reset with nothing to authorize it.
-        forgotErrorEl2.textContent = KC_FORGOT_GENERIC_FAIL;
-        forgotStep1El.hidden = false;
-        forgotStep2El.hidden = true;
+        // Token was discarded or already spent -- restart at step 1 rather
+        // than POSTing a reset with nothing to authorize it.
+        forgotBackToStep1(KC_FORGOT_GENERIC_FAIL);
         return;
       }
+      var gen = forgotGeneration;
+      // Single use: the token leaves this closure exactly once, in this
+      // request's body. Any retry has to go back through step 1.
+      var token = forgotResetToken;
+      forgotResetToken = null;
       forgotSubmit2El.disabled = true;
       var body = 'username=' + encodeURIComponent(forgotUserEl.value) +
-                 '&reset_token=' + encodeURIComponent(forgotResetToken) +
+                 '&reset_token=' + encodeURIComponent(token) +
                  '&new_password=' + encodeURIComponent(forgotNewPassEl.value);
+      token = null;
       nativeFetch('/api/auth/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body
       }).then(function (resp) {
+        if (gen !== forgotGeneration) return;
         if (resp.status === 200) {
           return resp.json().then(function (data) {
+            if (gen !== forgotGeneration) return;
             if (data && data.ok === true) {
-              closeForgotModal();
-              // Re-open the login modal so the operator can sign in with
-              // the password they just set -- same overlay class, no extra
-              // step needed.
-              openLoginModal('Administrator login required');
+              // Back to the (still pending) login modal so the operator
+              // signs in with the password just set; that login then
+              // retries whatever request originally raised the modal.
+              closeForgotModal('Password reset. Log in with the new password.');
               return;
             }
-            forgotErrorEl2.textContent = KC_FORGOT_GENERIC_FAIL;
+            forgotBackToStep1(KC_FORGOT_GENERIC_FAIL);
           });
         }
         if (resp.status === 429) {
           return resp.text().then(function (text) {
-            forgotErrorEl2.textContent = kcForgotStatusMessage(429, text);
+            if (gen !== forgotGeneration) return;
+            forgotBackToStep1(kcForgotStatusMessage(429, text));
           });
         }
-        forgotErrorEl2.textContent = kcForgotStatusMessage(resp.status, null);
+        forgotBackToStep1(kcForgotStatusMessage(resp.status, null));
       }).catch(function () {
-        forgotErrorEl2.textContent = 'Network error.';
+        if (gen !== forgotGeneration) return;
+        forgotBackToStep1('Network error.');
       }).then(function () {
+        if (gen !== forgotGeneration) return;
         forgotSubmit2El.disabled = false;
       });
     }

@@ -4,7 +4,7 @@
  * Extracts the forgotModalEl/buildForgotModal/openForgotPasswordModal block
  * from app.js by exact marker lines (same approach as
  * test_login_auth_wrapper.js) and runs it against a minimal fake DOM plus a
- * stubbed nativeFetch/openLoginModal/document, without a real browser.
+ * stubbed nativeFetch/loginActiveCtl/document, without a real browser.
  *
  * Covers:
  *   - step1 (username+code) POSTs /api/auth/forgot; a 202 with a
@@ -14,8 +14,14 @@
  *     enrolled/not-enrolled oracle);
  *   - step2 (new password x2) refuses locally on a mismatch without
  *     calling fetch at all; POSTs /api/auth/reset with the held token;
- *     {ok:true} closes the modal and reopens the login modal; anything
- *     else shows the generic failure text;
+ *     {ok:true} closes the modal and resumes the (still pending, suspended)
+ *     login modal via loginActiveCtl; anything else returns to step1 with
+ *     the generic failure text, since the token is single-use -- it is
+ *     nulled the moment the /reset POST is built, never re-sent;
+ *   - Escape is ignored (no preventDefault) while the modal is hidden --
+ *     the document-level keydown listener lives for the page's lifetime;
+ *   - a response that lands after Cancel is ignored (no step change, no
+ *     token stored, no login resume);
  *   - the code typed in step1 and the reset_token are never handed to
  *     console.log/console.error/console.warn (the modal must not become a
  *     new logging leak for either secret);
@@ -54,6 +60,15 @@ function extractRange(startMarker, endMarkerExclusive) {
 const RANGE_D = extractRange(
   '  var forgotModalEl = null, forgotPanelEl = null, forgotStep1El = null, forgotStep2El = null,',
   '  // ---- Which refusals may raise the modal (2026-09-24 review) ----------'
+);
+
+// Range L: the login modal (buildLoginModal/openLoginModal) that the
+// "Forgot password?" link lives in -- used by the suspend/resume group at
+// the end, which runs RANGE_L + RANGE_D together so the real
+// loginActiveCtl handshake is exercised, not a stub.
+const RANGE_L = extractRange(
+  '  var loginModalEl = null, loginTitleEl = null, loginUserEl = null, loginPassEl = null,',
+  '  // ---- Forgot-password reset flow (docs/TOTP_PASSWORD_RESET_PLAN.md) -----'
 );
 
 if (RANGE_D.indexOf('function openForgotPasswordModal') === -1) {
@@ -97,6 +112,9 @@ function makeFakeDom() {
         (this._listeners[type] || []).forEach((fn) => fn(evt));
       },
       focus() { this._focused = true; },
+      hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
+      contains() { return false; },
+      querySelectorAll() { return []; },
       setAttribute(k, v) {
         this.attrs[k] = v;
         if (k === 'hidden') this.hidden = true;
@@ -108,18 +126,34 @@ function makeFakeDom() {
       appendChild(child) { this.children.push(child); },
       querySelector(sel) {
         const m = sel.match(/^#(.+)$/);
-        return m ? registry[m[1]] || null : null;
+        if (m) return registry[m[1]] || null;
+        return registry[sel] || null;
+      },
+      removeEventListener(type, fn) {
+        const arr = this._listeners[type] || [];
+        const i = arr.indexOf(fn);
+        if (i !== -1) arr.splice(i, 1);
       },
       set className(v) { this._className = v; },
       get className() { return this._className; },
       set innerHTML(html) {
         this._innerHTML = html;
-        // Register every element carrying an id="..." attribute in the
-        // markup so panel.querySelector('#x') can find it afterward.
-        const re = /id="([^"]+)"/g;
-        let m;
-        while ((m = re.exec(html))) {
-          if (!registry[m[1]]) registry[m[1]] = makeElement('stub');
+        // Register every tag's id="..." (as 'x', for querySelector('#x')),
+        // each class (as '.c', first registration wins) and a submit
+        // button (as 'button[type="submit"]', first wins) so both modals'
+        // lookups resolve. One element per tag, shared across keys.
+        const tagRe = /<(\w+)([^>]*)>/g;
+        let t;
+        while ((t = tagRe.exec(html))) {
+          const attrs = t[2];
+          const idM = attrs.match(/id="([^"]+)"/);
+          const clsM = attrs.match(/class="([^"]+)"/);
+          const isSubmit = t[1] === 'button' && /type="submit"/.test(attrs);
+          if (!idM && !clsM && !isSubmit) continue;
+          let el = (idM && registry[idM[1]]) || makeElement(t[1]);
+          if (idM && !registry[idM[1]]) registry[idM[1]] = el;
+          if (clsM) clsM[1].split(/\s+/).forEach((c) => { if (!registry['.' + c]) registry['.' + c] = el; });
+          if (isSubmit && !registry['button[type="submit"]']) registry['button[type="submit"]'] = el;
         }
       },
       get innerHTML() { return this._innerHTML; },
@@ -134,9 +168,16 @@ function makeFakeDom() {
     addEventListener(type, fn, capture) {
       (documentListeners[type] = documentListeners[type] || []).push(fn);
     },
-    dispatch(type, evt) {
-      (documentListeners[type] || []).forEach((fn) => fn(evt));
+    removeEventListener(type, fn) {
+      const arr = documentListeners[type] || [];
+      const i = arr.indexOf(fn);
+      if (i !== -1) arr.splice(i, 1);
     },
+    dispatch(type, evt) {
+      (documentListeners[type] || []).slice().forEach((fn) => fn(evt));
+    },
+    activeElement: null,
+    _listenerCount(type) { return (documentListeners[type] || []).length; },
   };
   return { registry, document: doc };
 }
@@ -155,6 +196,7 @@ function makeContext(opts) {
   const fetchCalls = [];
   const loggedArgs = [];
   const openLoginModalCalls = [];
+  const resumeCalls = [];
   const dom = makeFakeDom();
 
   const fakeConsole = {
@@ -175,6 +217,12 @@ function makeContext(opts) {
       openLoginModalCalls.push(titleText);
       return Promise.resolve(true);
     },
+    // Stand-in for the pending login modal's control handle (app.js's
+    // openLoginModal() sets the real one); closing the reset modal must
+    // resume it rather than open a second login modal.
+    loginActiveCtl: {
+      resume: function (noticeText) { resumeCalls.push(noticeText); },
+    },
     console: fakeConsole,
     encodeURIComponent,
     String,
@@ -183,8 +231,17 @@ function makeContext(opts) {
     // ReferenceError, which the tests below treat as a failure.
   };
   vm.createContext(ctx);
-  vm.runInContext(RANGE_D, ctx);
-  return { ctx, dom, fetchCalls, openLoginModalCalls, loggedArgs };
+  if (opts.withLogin) {
+    // Real login modal: drop the stubs so RANGE_L's own declarations win.
+    delete ctx.loginActiveCtl;
+    delete ctx.openLoginModal;
+    ctx.setTimeout = setTimeout;
+    ctx.clearTimeout = clearTimeout;
+    vm.runInContext(RANGE_L + '\n' + RANGE_D, ctx);
+  } else {
+    vm.runInContext(RANGE_D, ctx);
+  }
+  return { ctx, dom, fetchCalls, openLoginModalCalls, resumeCalls, loggedArgs };
 }
 
 function flush() {
@@ -205,6 +262,7 @@ function flush() {
     assert(fetchCalls.length === 1 && fetchCalls[0].url === '/api/auth/forgot', 'step1 POSTs /api/auth/forgot');
     assert(dom.registry['kc-forgot-step1'].hidden === true, 'step1 hides on success');
     assert(dom.registry['kc-forgot-step2'].hidden === false, 'step2 shows on success');
+    assert(dom.registry['kc-forgot-code'].value === '', 'code field cleared once step1 succeeds');
   }
 
   // Group 2: step1 -> 429 shows the plain-text body verbatim, never JSON-parsed.
@@ -278,9 +336,10 @@ function flush() {
   }
 
   // Group 7: full happy path -- step1 202, step2 200/{ok:true} closes the
-  // modal (token cleared) and reopens the login modal.
+  // modal (token cleared) and resumes the pending login modal (never opens
+  // a second one, which would stack a second set of submit listeners).
   {
-    const { ctx, dom, openLoginModalCalls } = makeContext({
+    const { ctx, dom, openLoginModalCalls, resumeCalls, fetchCalls } = makeContext({
       fetchResponses: [
         { status: 202, json: { reset_token: 'tok-xyz' } },
         { status: 200, json: { ok: true } },
@@ -295,8 +354,78 @@ function flush() {
     dom.registry['kc-forgot-newpass2'].value = 'newpassword1';
     dom.registry['kc-forgot-step2'].dispatch('submit');
     await flush();
-    assert(openLoginModalCalls.length === 1, 'success reopens the login modal');
+    assert(resumeCalls.length === 1 && /reset/i.test(resumeCalls[0] || ''),
+      'success resumes the pending login modal with a notice');
+    assert(openLoginModalCalls.length === 0, 'success never opens a second login modal');
     assert(ctx.forgotResetToken === null, 'reset token cleared after success (closeForgotModal)');
+    assert(fetchCalls.length === 2 && /reset_token=tok-xyz/.test(fetchCalls[1].init.body),
+      'reset POST carries the token from step1');
+    assert(dom.registry['kc-forgot-username'].value === '', 'close clears the username field');
+  }
+
+  // Group 7b: the token is single-use client-side -- a failed /reset
+  // returns to step1 with the token already gone, and a second step2
+  // submit never re-sends it.
+  {
+    const { ctx, dom, fetchCalls } = makeContext({
+      fetchResponses: [
+        { status: 202, json: { reset_token: 'tok-once' } },
+        { status: 400, json: { ok: false } },
+      ],
+    });
+    ctx.openForgotPasswordModal();
+    dom.registry['kc-forgot-username'].value = 'bench';
+    dom.registry['kc-forgot-code'].value = '654321';
+    dom.registry['kc-forgot-step1'].dispatch('submit');
+    await flush();
+    dom.registry['kc-forgot-newpass'].value = 'short';
+    dom.registry['kc-forgot-newpass2'].value = 'short';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    assert(ctx.forgotResetToken === null, 'token nulled as soon as the /reset POST is sent');
+    await flush();
+    assert(dom.registry['kc-forgot-step1'].hidden === false, 'failed reset returns to step1');
+    assert(dom.registry['kc-forgot-newpass'].value === '', 'failed reset clears new-password field');
+    dom.registry['kc-forgot-newpass'].value = 'short';
+    dom.registry['kc-forgot-newpass2'].value = 'short';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    const resets = fetchCalls.filter((c) => c.url === '/api/auth/reset');
+    assert(resets.length === 1, 'token never sent twice (' + resets.length + ' reset POSTs)');
+  }
+
+  // Group 7c: the page-lifetime keydown listener is inert while hidden.
+  {
+    const { ctx, dom, resumeCalls } = makeContext({});
+    ctx.openForgotPasswordModal();
+    dom.registry['kc-forgot-cancel1'].dispatch('click');
+    const before = resumeCalls.length;
+    let prevented = false;
+    dom.document.dispatch('keydown', { key: 'Escape', preventDefault() { prevented = true; } });
+    assert(!prevented, 'Escape not swallowed while the modal is hidden');
+    assert(resumeCalls.length === before, 'hidden-modal Escape does not resume the login modal again');
+    ctx.openForgotPasswordModal();
+    prevented = false;
+    dom.document.dispatch('keydown', { key: 'Escape', preventDefault() { prevented = true; } });
+    assert(prevented && ctx.forgotModalEl.hidden === true, 'Escape closes the modal while visible');
+  }
+
+  // Group 7d: a /forgot response landing after Cancel is ignored.
+  {
+    let release;
+    const { ctx, dom, resumeCalls } = makeContext({});
+    ctx.nativeFetch = function () {
+      return new Promise((r) => { release = r; });
+    };
+    ctx.openForgotPasswordModal();
+    dom.registry['kc-forgot-username'].value = 'bench';
+    dom.registry['kc-forgot-code'].value = '123123';
+    dom.registry['kc-forgot-step1'].dispatch('submit');
+    dom.registry['kc-forgot-cancel1'].dispatch('click');
+    release(fakeResp({ status: 202, json: { reset_token: 'late-token' } }));
+    await flush();
+    assert(ctx.forgotResetToken === null, 'late /forgot response after Cancel stores no token');
+    assert(dom.registry['kc-forgot-step2'].hidden === true, 'late /forgot response after Cancel does not advance');
+    assert(resumeCalls.length === 1, 'Cancel resumed the login modal exactly once');
   }
 
   // Group 8: Cancel on step1 clears all state.
@@ -332,6 +461,38 @@ function flush() {
     const serialized = JSON.stringify(loggedArgs);
     assert(serialized.indexOf(secretCode) === -1, 'typed code never logged to console');
     assert(serialized.indexOf(secretToken) === -1, 'reset token never logged to console');
+  }
+
+  // Group 11: the "Forgot password?" link SUSPENDS the pending login
+  // promise (real openLoginModal, not a stub): while suspended its
+  // keydown handler ignores Escape/Tab, closing the reset modal resumes the
+  // same login modal, and the promise still settles normally afterward.
+  {
+    const { ctx, dom } = makeContext({ withLogin: true });
+    let settledWith;
+    const p = ctx.openLoginModal('Administrator login required').then((ok) => { settledWith = ok; });
+    const loginOverlay = ctx.loginModalEl;
+    const kdCount = dom.document._listenerCount('keydown');
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    assert(loginOverlay.hidden === true, 'forgot link hides the login modal');
+    assert(ctx.forgotModalEl.hidden === false, 'forgot link shows the reset modal');
+    assert(ctx.loginActiveCtl !== null, 'login promise still pending while reset modal is open');
+    dom.document.dispatch('keydown', { key: 'Escape', preventDefault() {} });
+    await flush();
+    assert(settledWith === undefined, 'Escape in the reset modal does not settle the suspended login');
+    assert(ctx.forgotModalEl.hidden === true && loginOverlay.hidden === false,
+      'Escape closes the reset modal and resumes the login modal');
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    dom.registry['kc-forgot-cancel1'].dispatch('click');
+    assert(loginOverlay.hidden === false, 'reset-modal Cancel resumes the login modal');
+    dom.registry['.kc-login-cancel'].dispatch('click', { preventDefault() {}, target: null });
+    await p;
+    assert(settledWith === false, 'login Cancel after a reset detour still settles the original promise');
+    assert(ctx.loginActiveCtl === null, 'finish() clears the control handle');
+    assert(dom.document._listenerCount('keydown') === kdCount,
+      'login keydown listener removed on finish (only the reset modal\'s page-lifetime one remains)');
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    assert(ctx.forgotModalEl.hidden === true, 'forgot link is inert once no login is pending');
   }
 
   // Group 10: no localStorage/sessionStorage reference exists in this code

@@ -74,7 +74,13 @@ placement idea as the email plan's SMTP block.
   hardware TRNG, already used elsewhere in this tree for OTA/session tokens;
   no new entropy source needed. Base32-encode (RFC 4648, no padding) for the
   manual-entry key and for the otpauth URI's `secret=` field.
-- **QR code:** render server-side as inline SVG (no third-party image
+- **QR code:** **superseded by section 6b (WT-B, 2026-09-24): the QR is
+  rendered client-side** by a self-written byte-mode encoder embedded in
+  `security_page.html` (no CDN, no third-party library; canonical copy
+  `firmware/KilnFW/App/test/qrcode_encoder_src.js`, drift-checked by
+  `test_qrcode_encoder.js`). Firmware only returns the `otpauth_uri`
+  string; WT-A needs no C QR encoder or SVG wrapper. Original proposal,
+  kept as history: render server-side as inline SVG (no third-party image
   library, no new binary dependency, no client-side JS library to vet
   against `docs/`'s page-bundle/`lint_pages.js` rules). A QR encoder is
   ~200-400 lines of pure C with no external dependencies (well-known
@@ -282,9 +288,11 @@ ride an existing one was a deliberate constraint, not just a style choice.
 
 - `cmd=totp_enroll_begin` (no other fields): generates a new pending
   secret (NOT committed to NVS — see below) and returns JSON
-  `{"secret_base32", "otpauth_uri", "board_time_utc", "sntp_synced"}`. A
-  second call before confirming replaces the still-pending secret (no
-  accumulation of abandoned attempts).
+  `{"ok": true, "secret_base32", "otpauth_uri", "board_time_utc",
+  "sntp_synced"}`. A second call before confirming replaces the
+  still-pending secret (no accumulation of abandoned attempts). The page
+  renders `otpauth_uri` as a QR code itself (client-side encoder, see
+  section 2's superseded QR bullet) -- firmware returns only the string.
 - `cmd=totp_enroll_confirm&code=NNNNNN`: validates `code` against the
   pending secret from the most recent `totp_enroll_begin` and, only on a
   match, commits it as the enrolled secret (NVS `totp_secret`/
@@ -298,13 +306,37 @@ ride an existing one was a deliberate constraint, not just a style choice.
   to silently remove a locked-out owner's only non-admin-session recovery
   path. Returns `{"ok": bool}`.
 
-All three respond through the same JSON body shape whether the underlying
-transport error is a bad code, no pending enrollment, or a board-clock
-issue — `security_page.html`'s script surfaces only "incorrect code" /
-"could not start enrollment" text, matching the enumeration-safety
-principle sections 4/6a already established for the reset routes (this
-surface is ADMIN-gated, so the concern here is a stolen-session attacker
-brute-forcing disable, not the same anonymous-caller oracle as `/forgot`).
+Wire rules for all three (review of WT-B, 2026-09-24):
+
+- **Transport status is always HTTP 200**, the existing convention of this
+  route (`security_http.c` reports every dispatch outcome inside the JSON
+  body; the page checks `ok`, never the status). Only the httpd layer's own
+  401/403 (session/role) differs, which the page's `app.js` wrapper already
+  handles.
+- A bad code, no pending enrollment, and any other refusal all read
+  `{"ok": false}` (an `error` string may follow, as for the route's other
+  commands; the page does not show it), so the page says only "incorrect
+  code" / "could not start enrollment" -- the same no-distinction principle
+  as sections 4/6a (this surface is ADMIN-gated, so the concern is a
+  stolen-session attacker brute-forcing disable, not the anonymous-caller
+  oracle of `/forgot`).
+- **The one exception is an unsynced board clock**, which section 3
+  requires be reported specifically: `{"ok": false, "clock_unsynced":
+  true}` on any of the three (optionally with `board_time_utc`). It is
+  board-wide, not per-user, so it is no oracle -- same reasoning as the 503
+  on the OPEN routes in 6a. The page shows "board clock is not synced yet"
+  for it.
+- `totp_enroll_confirm`/`totp_disable` must go through
+  `totp_config_verify_and_consume()` like every other code check (section
+  7), with the SNTP check first.
+- **Buffer sizes in `security_http.c` do not fit the begin response as they
+  stand:** `resp` is `SECURITY_HTTP_MESSAGE_MAX + 32` (192 B), while the
+  begin JSON carries a 32-char base32 secret plus a ~100-150-char otpauth
+  URI plus the time fields (~300 B). WT-A must size a separate buffer for
+  it -- not a larger stack array on the 8 KB httpd task (see CLAUDE.md's "httpd
+  stack blob class" note); stream it with
+  `httpd_resp_send_chunk()` or use a static/heap buffer. `cmd_val[24]`
+  already fits the longest new command (`totp_enroll_confirm`, 19 chars).
 
 ## 7. Work tranches
 
@@ -327,8 +359,9 @@ crypto-adjacent code, a QR encoder, two new HTTP routes, one additive call
 site in the reset-gesture wiring). Files: new
 `firmware/KilnFW/App/drivers/net/totp.c`/`.h` (RFC 6238 HMAC-SHA1
 compute, base32 encode/decode, counter window check, constant-time
-compare), a vendored small QR-encoder pair (e.g. `qrcodegen.c`/`.h`) plus a
-thin SVG-emission wrapper, new `firmware/KilnFW/App/drivers/persist/
+compare), ~~a vendored small QR-encoder pair (e.g. `qrcodegen.c`/`.h`) plus a
+thin SVG-emission wrapper~~ (dropped: WT-B renders the QR client-side, see
+section 6b), new `firmware/KilnFW/App/drivers/persist/
 totp_config.c`/`.h` (NVS read/write for `totp_secret`/`totp_last_ctr`,
 write-only-on-GET semantics for the secret exactly like the email plan's
 `smtp_password`), edits to `route_tier_table.h` (2 new OPEN entries),

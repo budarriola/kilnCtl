@@ -30,12 +30,20 @@
  *     symbol for that text (round-tripped through the same decode-shaped
  *     structural checks below).
  *   - "v10ish" (a long otpauth-shaped string, v7): version matches (7), but
- *     the two encoders pick a different (both spec-valid) mask via penalty
- *     scoring. Asserted instead: raw data placement matches bit-for-bit
- *     once both matrices are unmasked with their OWN chosen mask and
- *     function-pattern regions (finder/separator, timing, alignment,
- *     version-info) are excluded -- i.e. the encoding/placement logic is
- *     verified correct independent of the mask tie-break.
+ *     the two encoders pick a different (both spec-valid, both decodable)
+ *     mask. This is NOT a tie-break: python-qrcode's best_mask_pattern()
+ *     scores each candidate via makeImpl(test=True, mask), which leaves the
+ *     15 format-info modules LIGHT, while this encoder scores the finished
+ *     symbol with its real format bits in place, as ISO/IEC 18004
+ *     describes. Re-scoring python-qrcode's own makeImpl(test=False, mask)
+ *     matrices with its own util.lost_point() picks this encoder's mask in
+ *     227/227 inputs (review 2026-09-24: byte mode, EC L, versions 1-10),
+ *     and forcing python-qrcode to this encoder's mask reproduces its
+ *     matrix bit-for-bit in 227/227. Asserted here: raw data placement
+ *     matches bit-for-bit once both matrices are unmasked with their OWN
+ *     chosen mask and function-pattern regions (finder/separator, timing,
+ *     alignment, version-info) are excluded -- i.e. the encoding/placement
+ *     logic is verified correct independent of the mask-scoring difference.
  *
  * Run: node firmware/KilnFW/App/test/test_qrcode_encoder.js
  * Exit code 0 on all-pass, 1 otherwise.
@@ -50,7 +58,10 @@ const SRC_PATH = path.join(TEST_DIR, 'qrcode_encoder_src.js');
 const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
 const HTML_PATH = resolveDriverFile(resolveDriversDir(TEST_DIR), 'security_page.html');
 
-const SRC_TEXT = fs.readFileSync(SRC_PATH, 'utf8');
+// Normalize CRLF -> LF: with core.autocrlf=true (this repo's Windows
+// checkouts) the working-tree copy of this .js file is CRLF even though the
+// index holds LF, so a raw read never equals the \r-stripped HTML extract.
+const SRC_TEXT = fs.readFileSync(SRC_PATH, 'utf8').replace(/\r\n/g, '\n');
 const HTML_TEXT = fs.readFileSync(HTML_PATH, 'utf8');
 const HTML_LINES = HTML_TEXT.split('\n');
 
@@ -59,8 +70,8 @@ function extractEmbeddedEncoder() {
   if (startIdx === -1) throw new Error('security_page.html: <script id="kcQrEncoderScript"> not found');
   const endIdx = HTML_LINES.findIndex((l, i) => i > startIdx && l.replace(/\r$/, '') === '</script>');
   if (endIdx === -1) throw new Error('security_page.html: closing </script> for kcQrEncoderScript not found');
-  // security_page.html is CRLF; qrcode_encoder_src.js is LF-only -- strip
-  // \r per line so this compares content, not line-ending convention.
+  // Strip \r per line so this compares content, not line-ending convention
+  // (both files may be CRLF in an autocrlf working tree).
   return HTML_LINES.slice(startIdx + 1, endIdx).map((l) => l.replace(/\r$/, '')).join('\n');
 }
 const EMBEDDED_TEXT = extractEmbeddedEncoder();
@@ -73,8 +84,9 @@ function assert(cond, label) {
 }
 
 // ---- 1: the embedded copy is content-identical to the source file -------
-// (security_page.html is CRLF, qrcode_encoder_src.js is LF-only, so this
-// compares content only -- extractEmbeddedEncoder() strips \r per line.)
+// (Line endings are normalized on both sides -- extractEmbeddedEncoder()
+// strips \r per line and SRC_TEXT is CRLF->LF normalized -- so this
+// compares content only.)
 assert(EMBEDDED_TEXT === SRC_TEXT, 'security_page.html embeds qrcode_encoder_src.js content-identical (CRLF/LF normalized)');
 
 // Load the encoder as Node would (module.exports branch), from the embedded
@@ -151,7 +163,7 @@ function countMismatches(refRows, gotRows) {
   assert(isFinderCenterDark(res.matrix, n - 7, 0), 'qr_extra.short: bottom-left finder pattern present');
 }
 
-// ---- 5: "v10ish" -- mask tie-break divergence, raw-data-only comparison -
+// ---- 5: "v10ish" -- mask-scoring divergence, raw-data-only comparison ---
 {
   const extra = loadFixture('qr_extra_reference.json');
   const ref = extra.v10ish;

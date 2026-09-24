@@ -221,10 +221,13 @@ password below for at least the administrator account before turning authenticat
   <div id="kcTotpEnrolling" hidden>
     <p class="hint">Scan this with an authenticator app (or enter the key manually), then type
       the 6-digit code it shows to confirm.</p>
+    <!-- Fixed white canvas + 4-module quiet zone drawn by renderQr(): a QR
+         symbol needs a light border to scan, and the page background is
+         dark in the dark theme. max-width keeps it inside a phone viewport. -->
     <canvas id="kcTotpQrCanvas" width="200" height="200"
-            style="background:#fff;border-radius:var(--ui-radius);"></canvas>
+            style="background:#fff;border-radius:var(--ui-radius);max-width:100%;"></canvas>
     <p class="hint">Manual key:
-      <code id="kcTotpSecretText" style="user-select:all;"></code>
+      <code id="kcTotpSecretText" style="user-select:all;word-break:break-all;"></code>
       <button type="button" class="button" id="kcTotpCopySecret">Copy</button>
     </p>
     <label for="kcTotpConfirmCode">6-digit code</label>
@@ -1100,7 +1103,7 @@ password below for at least the administrator account before turning authenticat
 (function () {
   // ---------------------------------------------------------------------
   // TOTP enrollment wire contract (WT-B's choice, recorded in
-  // docs/TOTP_PASSWORD_RESET_PLAN.md section 7 -- that section and this
+  // docs/TOTP_PASSWORD_RESET_PLAN.md section 6b -- that section and this
   // script must be changed together, same rule as the wire-contract
   // comment on the other <script> above):
   //
@@ -1122,6 +1125,10 @@ password below for at least the administrator account before turning authenticat
   //       Requires a currently-valid code (not just an admin session) so a
   //       hijacked web session alone cannot silently turn off the reset
   //       path a locked-out owner would need.
+  //   Transport status is always 200 (this route's existing convention);
+  //   an unsynced board clock is { ok: false, clock_unsynced: true } on any
+  //   of the three (plan section 3's specific "board clock not synced"
+  //   refusal), shown as its own message rather than "incorrect code".
   // ---------------------------------------------------------------------
   var totpBadge = document.getElementById('kcTotpBadge');
   var clockLine = document.getElementById('kcTotpClockLine');
@@ -1155,21 +1162,41 @@ password below for at least the administrator account before turning authenticat
     clockLine.textContent = line;
   }
 
+  var QR_TARGET_PX = 200;
+  var QR_QUIET_MODULES = 4; // ISO/IEC 18004 minimum light border
   function renderQr(otpauthUri) {
     var res = window.kcQr.encode(otpauthUri);
-    var ctx = qrCanvas.getContext('2d');
-    var scale = Math.max(1, Math.floor(qrCanvas.width / res.size));
-    var pixel = res.size * scale;
+    var total = res.size + 2 * QR_QUIET_MODULES;
+    // Size from the fixed target, never from qrCanvas.width: that is
+    // rewritten below, so a second render would otherwise shrink.
+    var scale = Math.max(1, Math.floor(QR_TARGET_PX / total));
+    var pixel = total * scale;
+    var off = QR_QUIET_MODULES * scale;
     qrCanvas.width = pixel;
     qrCanvas.height = pixel;
+    var ctx = qrCanvas.getContext('2d');
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, pixel, pixel);
     ctx.fillStyle = '#000';
     for (var r = 0; r < res.size; r++) {
       for (var c = 0; c < res.size; c++) {
-        if (res.matrix[r][c]) ctx.fillRect(c * scale, r * scale, scale, scale);
+        if (res.matrix[r][c]) ctx.fillRect(off + c * scale, off + r * scale, scale, scale);
       }
     }
+  }
+
+  // Drop the secret from the DOM once it is no longer needed (Cancel, or a
+  // confirmed enrollment): the base32 key and the QR both encode it.
+  function clearEnrollmentSecret() {
+    secretText.textContent = '';
+    qrCanvas.width = QR_TARGET_PX;   // resetting width also clears the bitmap
+    qrCanvas.height = QR_TARGET_PX;
+    confirmCodeInput.value = '';
+  }
+
+  var CLOCK_UNSYNCED_MSG = 'Board clock is not synced yet -- codes cannot be checked. Try again shortly.';
+  function isAuthCancelled(err) {
+    return !!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err));
   }
 
   function loadTotpStatus() {
@@ -1198,14 +1225,21 @@ password below for at least the administrator account before turning authenticat
       if (!resp.ok) throw new Error('begin failed');
       return resp.json();
     }).then(function (data) {
-      secretText.textContent = data.secret_base32 || '';
-      renderQr(data.otpauth_uri || '');
+      if (data && data.clock_unsynced) {
+        showClockLine(data.board_time_utc, false);
+        setStatus(enrollStatus, CLOCK_UNSYNCED_MSG, false);
+        return;
+      }
+      if (!data || !data.secret_base32 || !data.otpauth_uri) throw new Error('begin failed');
+      secretText.textContent = data.secret_base32;
+      renderQr(data.otpauth_uri);
       showClockLine(data.board_time_utc, data.sntp_synced);
       confirmCodeInput.value = '';
       setStatus(enrollStatus, '', false);
       notEnrolledEl.hidden = true;
       enrollingEl.hidden = false;
-    }).catch(function () {
+    }).catch(function (err) {
+      if (isAuthCancelled(err)) return;
       setStatus(enrollStatus, 'Could not start enrollment.', false);
     }).then(function () {
       beginBtn.disabled = false;
@@ -1223,7 +1257,7 @@ password below for at least the administrator account before turning authenticat
   cancelEnrollBtn.addEventListener('click', function () {
     enrollingEl.hidden = true;
     notEnrolledEl.hidden = false;
-    confirmCodeInput.value = '';
+    clearEnrollmentSecret();
     setStatus(enrollStatus, '', false);
   });
 
@@ -1240,12 +1274,16 @@ password below for at least the administrator account before turning authenticat
       body: 'cmd=totp_enroll_confirm&code=' + encodeURIComponent(code)
     }).then(function (resp) { return resp.json(); }).then(function (data) {
       if (data && data.ok) {
+        clearEnrollmentSecret();
         setStatus(enrollStatus, 'Enrolled.', true);
         loadTotpStatus();
+      } else if (data && data.clock_unsynced) {
+        setStatus(enrollStatus, CLOCK_UNSYNCED_MSG, false);
       } else {
         setStatus(enrollStatus, 'Incorrect code -- try again.', false);
       }
-    }).catch(function () {
+    }).catch(function (err) {
+      if (isAuthCancelled(err)) return;
       setStatus(enrollStatus, 'Network error.', false);
     }).then(function () {
       confirmBtn.disabled = false;
@@ -1272,10 +1310,13 @@ password below for at least the administrator account before turning authenticat
       if (data && data.ok) {
         setStatus(disableStatus, 'Disabled.', true);
         loadTotpStatus();
+      } else if (data && data.clock_unsynced) {
+        setStatus(disableStatus, CLOCK_UNSYNCED_MSG, false);
       } else {
         setStatus(disableStatus, 'Incorrect code.', false);
       }
-    }).catch(function () {
+    }).catch(function (err) {
+      if (isAuthCancelled(err)) return;
       setStatus(disableStatus, 'Network error.', false);
     }).then(function () {
       disableBtn.disabled = false;
