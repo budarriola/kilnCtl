@@ -1136,8 +1136,10 @@ def judge_relay_energized(samples: "list[tuple[str, Optional[bool]]]") -> CaseRe
     the relay energized *before* `running` went true -- the two fields were
     never read together to begin with, so no ordering claim between them can
     be made from a single pair of separate polls. Only the FIRST and LAST
-    reported sample get this tolerance; any disagreement at an interior
-    sample is still a real failure."""
+    reported sample get this tolerance, and only when at least 3 samples
+    were reported (so an interior one exists); any disagreement at an
+    interior sample, or anywhere in a 1- or 2-sample series, is still a real
+    failure."""
     if not samples:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no safety_relay_energized samples collected", observed={})
     reported = [(s, e) for s, e in samples if e is not None]
@@ -1147,10 +1149,16 @@ def judge_relay_energized(samples: "list[tuple[str, Optional[bool]]]") -> CaseRe
             reason="safety_relay_energized was never reported (no host, or a stale build)",
             observed={"samples": samples},
         )
+    # The edge tolerance only applies once there is at least one INTERIOR
+    # sample left to judge strictly -- with 1 or 2 reported samples every
+    # sample is an edge, and tolerating both would make any such series a
+    # vacuous PASS (e.g. [("running", False), ("done", True)]: the relay was
+    # never once seen energized while running).
     last_idx = len(reported) - 1
+    edges = (0, last_idx) if len(reported) >= 3 else ()
     offenders = [
         (s, e) for idx, (s, e) in enumerate(reported)
-        if (s == "running") != bool(e) and idx not in (0, last_idx)
+        if (s == "running") != bool(e) and idx not in edges
     ]
     if offenders:
         return CaseResult(

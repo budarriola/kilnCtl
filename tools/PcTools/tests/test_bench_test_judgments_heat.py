@@ -93,6 +93,22 @@ class RelayEnergizedTest(unittest.TestCase):
         r = J.judge_relay_energized([("running", None), ("done", None)])
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
+    def test_two_sample_series_gets_no_edge_tolerance(self):
+        # Pre-23fae0a5 test, restored: with only 2 reported samples both are
+        # "edges", so tolerating them would make this a vacuous PASS.
+        samples = [("running", True), ("done", True)]
+        r = J.judge_relay_energized(samples)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_two_sample_never_energized_while_running_fails(self):
+        samples = [("running", False), ("done", True)]
+        r = J.judge_relay_energized(samples)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_single_sample_mismatch_fails(self):
+        r = J.judge_relay_energized([("running", False)])
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
     def test_first_sample_mismatch_is_tolerated(self):
         # HP-01 root cause: running-state and relay-energized come from two
         # separate HTTP round trips, not one atomic read. A mismatch confined
