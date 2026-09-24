@@ -108,6 +108,19 @@ static void ui_home_do_start(void)
     char err_msg[160] = ""; /* 64 -> 160, 2026-09-09: the readiness interlock's refusals (readiness_gate.h) name an item AND a remedy; at 64 the remedy was cut off. */
     if (!profile_executor_run(id, err_msg, sizeof(err_msg))) {
         ESP_LOGW(UI_HOME_TAG, "profile_executor_run(%u) refused: %s", id, err_msg);
+        /* Same "Cannot Start" modal ui_page_profile_detail.c's confirm_start_cb()
+         * shows -- reusing ui_confirm_show() rather than a second copy so the
+         * operator sees the refusal reason instead of a Start tap that appears
+         * to do nothing (found in review of e6fd5ed3). */
+        ui_confirm_params_t err_params = {
+            .title = "Cannot Start",
+            .body = err_msg[0] ? err_msg : "Refused for an unknown reason.",
+            .confirm_label = "OK",
+            .confirm_color = UI_THEME_COLOR_CARD,
+            .on_confirm = NULL,
+            .user_data = NULL,
+        };
+        ui_confirm_show(&err_params);
     }
 }
 
