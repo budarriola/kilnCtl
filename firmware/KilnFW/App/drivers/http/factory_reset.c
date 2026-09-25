@@ -25,6 +25,9 @@
 #include "profile_executor.h" /* firing_stats_cache_invalidate_all() -- see the erase loop in
                                 * execute_scope_job() below */
 #include "profiles_builtin.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
+#include "system_mode_gate.h" /* SYS_ACTION_FACTORY_RESET -- owner decision Q3, 2026-09-25 */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
 #include "wifi_provision_http.h"
 
 static const char *TAG = "factory_reset";
@@ -393,6 +396,23 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_FACTORY_RESET, ip)) {
         return ESP_OK;
+    }
+
+    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): refuse outright while a firing or autotune run
+     * is active, PAUSED included -- no ack, no override, unconditional. This
+     * is a distinct 409 from the OTA interlock's own 428/409 check just
+     * below, checked first since it can never be answered by an ack header
+     * the way that one can. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "factory_reset from %s: refused by system mode gate: %s", ip, mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
     }
 
     /* Refuse while a firing is running/paused or any heater is commanded on

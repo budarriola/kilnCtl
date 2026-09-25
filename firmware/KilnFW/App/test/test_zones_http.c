@@ -646,6 +646,25 @@ void relay_authority_heat_sweep_claim_end(void)
     s_test_heat_sweep_claim_end_calls++;
 }
 
+/* zones_post_handler() (system_mode_gate wiring, docs/SYSTEM_MODE_GATE_PLAN.md
+ * gate-slices-2/4/5, 2026-09-25) takes this same profile_running/
+ * autotune_running snapshot before calling system_mode_gate_check() --
+ * derived from the SAME s_test_profile_status/s_test_autotune_active globals
+ * the fakes above already use, so a test that sets those up for the
+ * zones_current_sweep_start() refusal checks exercises the identical
+ * scenario here too, per this file's own "single source of truth" fake
+ * convention. */
+void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
+{
+    if (profile_running_out) {
+        *profile_running_out = (s_test_profile_status.state == PROFILE_EXEC_RUNNING ||
+                                 s_test_profile_status.state == PROFILE_EXEC_PAUSED);
+    }
+    if (autotune_running_out) {
+        *autotune_running_out = s_test_autotune_active;
+    }
+}
+
 // ---- safety_link.h -- same reasoning: a small test-controlled stand-in
 // instead of linking the real (hardware-owning) module.
 static bool s_test_safety_link_up = false;

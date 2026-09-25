@@ -68,6 +68,19 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 // byte of the shared zones_config_export_blob() stub content.
 void test_stub_kiln_cfg_export_content_toggle_byte0(void);
 
+// relay_authority.h -- backup_import.c's system_mode_gate wiring
+// (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25). Defaults
+// idle so every pre-existing test in this file keeps exercising exactly the
+// scenario it did before; test_backup_import_refused_by_system_mode_gate()
+// below is the one test that sets this to prove the refusal is wired.
+static bool s_test_profile_running_for_mode_gate = false;
+static bool s_test_autotune_running_for_mode_gate = false;
+void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
+{
+    if (profile_running_out) *profile_running_out = s_test_profile_running_for_mode_gate;
+    if (autotune_running_out) *autotune_running_out = s_test_autotune_running_for_mode_gate;
+}
+
 // backup_http.c split into four files 2026-09-04 (ROADMAP.md M15's
 // 1500-line item) -- backup_json.c/backup_export.c/backup_import.c/
 // backup_http.c, see backup_http_internal.h for the map. All four are still
@@ -1717,6 +1730,25 @@ static void test_malformed_body_writes_nothing(void)
     TEST_CHECK(!ok, "a truncated/malformed body must be refused, not crash or silently accept");
     TEST_CHECK(g_total_write_calls == 0, "no setter may run when the body cannot even be parsed for \"kind\"");
     TEST_CHECK(g_profile_save_calls == 0, "no profile may be saved either");
+}
+
+static void test_refused_by_system_mode_gate_during_firing_writes_nothing(void)
+{
+    TEST_SECTION("backup_import_apply -- system_mode_gate refuses (409, sentinel-prefixed err_msg) while a firing is active (owner Q2, 2026-09-25)");
+    reset_stub_state();
+    s_test_profile_running_for_mode_gate = true;
+
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "refused while a firing is active, even with an otherwise-valid body");
+    TEST_CHECK(strncmp(err, "MODE_GATE_REFUSED:", strlen("MODE_GATE_REFUSED:")) == 0,
+               "err_msg carries the sentinel prefix backup_import_post_handler() strips before sending a 409");
+    TEST_CHECK(g_total_write_calls == 0, "nothing is written -- the gate runs before pass 1 even starts");
+    TEST_CHECK(g_profile_save_calls == 0, "no profile save either");
+
+    s_test_profile_running_for_mode_gate = false;
 }
 
 static void test_wrong_kind_refused(void)
@@ -4036,6 +4068,7 @@ static void test_kiln_configs_partial_write_set_on_mid_pass_create_failure(void)
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
+    test_refused_by_system_mode_gate_during_firing_writes_nothing();
     test_wrong_kind_refused();
     test_unknown_version_refused();
     test_version1_body_imports_under_v2_reader();

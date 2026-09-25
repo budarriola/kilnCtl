@@ -1,13 +1,13 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-25, the system-mode gate
-> landed for manual relay writes (owner decisions recorded, slice 3, review
-> fixes applied), two new bench MCP tools (`control_set_zone_limits`,
+> landed for zone-config writes, factory reset, and cfgfs format (slices
+> 2/4/5, on top of slice 3's manual relay writes), two new bench MCP tools (`control_set_zone_limits`,
 > `safety_get_unset_commissioning_params`) landed, and a further LCD-01/
 > LCD-19 harness/firmware review-fix chain landed (thirty-ninth sweep) —
 > open items below.
-> - **System-mode command gate, 2026-09-25 — owner decisions recorded, slice 3
->   (manual relay writes) LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
+> - **System-mode command gate, 2026-09-25 — owner decisions recorded, slices
+>   2/3/4/5 LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
 >   `firmware/KilnFW/TODO.md` 10.14's Phase 6 (a single owning function/table
 >   deciding whether a *class* of command is allowed given current system mode
 >   — firing/autotune/OTA/recovery/safety-tripped/readiness — composed with,
@@ -32,12 +32,31 @@
 >   blocking call inside) to remove a lock-order cycle between `owner_task`
 >   and `profile_executor`/`autotune_engine`'s own tick locks (each tick holds
 >   its own module lock across a call back into `kiln_io_owner.c`, which used
->   to wait on that same lock from `owner_task`). Owner also decided:
->   zones/config writes should be refused ALL (not scoped) while running, and
->   factory reset/cfgfs format should refuse outright while running — neither
->   is wired yet (plan doc §3.6 slices 4/5, deferred), nor is the recovery-mode
->   HTTP-only-wording slice 2. See the plan doc's §5 for the full owner
->   decisions and §3.6 for per-slice status.
+>   to wait on that same lock from `owner_task`). **Slices 2/4/5 landed same
+>   day:** zones/config writes are now refused ALL (not scoped) while a
+>   firing or autotune session runs, gated at the caller in
+>   `zones_http_post.c`, `uart_bridge_ext_control.c` (`SET_ZONE_PID`/
+>   `SET_ZONE_MODEL`), `kiln_cfg_http.c` (apply, at submit time), and
+>   `backup_import.c` (via a `"MODE_GATE_REFUSED:"` sentinel prefix through
+>   its existing `err_msg` return path, avoiding a signature change across
+>   ~60 call sites) — never the `zones_config` accessors themselves, so
+>   autotune/adaptive_tune's own direct writes are untouched (host-tested
+>   cross-product in `test_system_mode_gate.c`, plus dedicated regression
+>   tests proving autotune's own writes are NOT gated). Factory reset
+>   (`factory_reset.c`, after auth) and cfgfs format
+>   (`cfg_fs_format_http.c`, first line of the handler) now refuse outright
+>   while running. All four HTTP refusals share one sender,
+>   `system_mode_gate_http_send_refusal()` (slice 4), a 409 distinct from the
+>   OTA interlock's 428. **Known gap:** `kiln_cfg_http.c`,
+>   `uart_bridge_ext_control.c`, and `cfg_fs_format_http.c` have no
+>   host-test harness at all (pre-existing, not introduced by this change),
+>   so their gate wiring is verified by code-pattern review and an ESP-IDF
+>   target build only, not by a host-test assertion; a UART-level test and
+>   PcTools 409-vs-428 client parsing are still open. The recovery-mode
+>   HTTP-only-wording slice 2 mentioned in an earlier draft of this note
+>   was folded into the same-day zones/config work above rather than done
+>   separately. See the plan doc's §5 for the full owner decisions and §3.6
+>   for per-slice status.
 > - **`safety_get_unset_commissioning_params` MCP tool landed, 2026-09-25**
 >   (`397208ba`, review fixes `2d38f97f`): a READ-ONLY MCP tool re-deriving
 >   `readiness_http.h`'s commissioning-required exclusion rule so the

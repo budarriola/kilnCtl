@@ -21,7 +21,10 @@
 #include "profile_executor.h"
 #include "profiles_builtin.h"
 #include "profiles_http.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
 #include "run_state.h"
+#include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25;
+                                 * SET_ZONE_PID/MODEL were a real gap (no gate at all) before this */
 #include "uart_task_ids.h"
 #include "unit_pref.h"
 #include "zones_config_accessors.h"
@@ -83,6 +86,23 @@ static size_t control_build_get_zones(uint8_t *out)
  * never on control_task itself: CONTROL_CMD_SET_ZONE_PID/MODEL both end in
  * zones_http.c's nvs_save(). `reply` is a local here on purpose -- that is
  * what moves the BRIDGE_REPLY_MAX buffer onto the worker's internal stack. */
+/* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+ * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes -- not
+ * scoped to which field changed -- while a firing or autotune run is active,
+ * PAUSED included. CONTROL_CMD_SET_ZONE_PID/SET_ZONE_MODEL were a real gap
+ * before this pass: the UART bridge could rewrite a zone's PID gains or
+ * thermal model mid-firing with no gate at all, while the exact same write
+ * from the HTTP page (zones_http_post.c) was already refused. Returns true
+ * (refused) with `reason` filled -- same shape as system_mode_gate_check()
+ * itself -- so the caller can reply with the same reason string a refused
+ * HTTP request gets, never a bare "no". */
+static bool control_zones_write_refused(char *reason, size_t reason_cap)
+{
+    sys_mode_snapshot_t snap = { 0 };
+    relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
+    return system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &snap, reason, reason_cap);
+}
+
 static void control_handle_message(void *vargs)
 {
     bx_handler_args_t          *args = (bx_handler_args_t *)vargs;
@@ -104,6 +124,12 @@ static void control_handle_message(void *vargs)
                     uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, "truncated");
                     break;
                 }
+                char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+                mode_reason[0] = '\0';
+                if (control_zones_write_refused(mode_reason, sizeof(mode_reason))) {
+                    uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, mode_reason);
+                    break;
+                }
                 uint8_t zi = msg.payload[1];
                 float kp = uart_bridge_ext_f32_le(&msg.payload[2]);
                 float ki = uart_bridge_ext_f32_le(&msg.payload[6]);
@@ -115,6 +141,12 @@ static void control_handle_message(void *vargs)
             case CONTROL_CMD_SET_ZONE_MODEL: {
                 if (!uart_bridge_ext_args_ok("control", &msg, 14)) {
                     uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, "truncated");
+                    break;
+                }
+                char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+                mode_reason[0] = '\0';
+                if (control_zones_write_refused(mode_reason, sizeof(mode_reason))) {
+                    uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, mode_reason);
                     break;
                 }
                 uint8_t zi = msg.payload[1];

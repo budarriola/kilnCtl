@@ -27,16 +27,19 @@
 // substitutes for an auth check, and route_tier_table.h is untouched by
 // this module.
 //
-// Rollout (plan section 3.6): this lands with only SYS_ACTION_RAW_RELAY_DEBUG_
-// WRITE actually wired (kiln_io_owner.c's relay_on_blocked(), the single
-// choke point for HTTP's danger-mode relay route, the UART bridge's
-// SET_RELAY/SET_RELAY_MASK, and the LCD's manual override -- all three
-// transports at once, per the plan's whole point). The other action enum
-// values are declared now so later slices (zones/config writes, factory
-// reset, cfgfs format -- plan section 3.6 items 4-5) add a table row each
-// rather than re-deriving the shape; system_mode_gate_check() returns OK
-// unconditionally for any action this pass does not wire a rule for, which
-// is correct today because nothing calls this gate for those actions yet.
+// Rollout (plan section 3.6): landed with SYS_ACTION_RAW_RELAY_DEBUG_WRITE
+// wired first (kiln_io_owner.c's relay_on_blocked(), the single choke point
+// for HTTP's danger-mode relay route, the UART bridge's SET_RELAY/
+// SET_RELAY_MASK, and the LCD's manual override -- all three transports at
+// once, per the plan's whole point). Slices 2/4/5 (gate-slices-2/4/5 spec,
+// 2026-09-25) then wired SYS_ACTION_WRITE_ZONES_CONFIG (zones_http_post.c,
+// uart_bridge_ext_control.c's SET_ZONE_PID/MODEL, kiln_cfg_http.c's apply
+// submit, backup_import.c's apply) and SYS_ACTION_FACTORY_RESET/
+// SYS_ACTION_CFGFS_FORMAT (factory_reset.c, cfg_fs_format_http.c) the same
+// way. system_mode_gate_check() still returns OK unconditionally for any
+// action nobody has wired a rule for yet (SYS_ACTION_START_PROFILE/
+// SYS_ACTION_START_AUTOTUNE/SYS_ACTION_OTA_START keep their own existing
+// gates instead -- readiness_gate.h and ota_interlock.c respectively).
 #ifndef SYSTEM_MODE_GATE_H
 #define SYSTEM_MODE_GATE_H
 
@@ -56,10 +59,10 @@ extern "C" {
 typedef enum {
     SYS_ACTION_START_PROFILE = 0,
     SYS_ACTION_START_AUTOTUNE,
-    SYS_ACTION_WRITE_ZONES_CONFIG,   // not yet wired -- plan section 3.6 item 4
+    SYS_ACTION_WRITE_ZONES_CONFIG,   // wired -- see callers listed in this file's rollout note
     SYS_ACTION_RAW_RELAY_DEBUG_WRITE, // wired: kiln_io_owner.c's relay_on_blocked()
-    SYS_ACTION_FACTORY_RESET,        // not yet wired -- plan section 3.6 item 5
-    SYS_ACTION_CFGFS_FORMAT,         // not yet wired -- plan section 3.6 item 5
+    SYS_ACTION_FACTORY_RESET,        // wired: factory_reset.c's reset_post_handler()
+    SYS_ACTION_CFGFS_FORMAT,         // wired: cfg_fs_format_http.c's format_confirm_post_handler()
     SYS_ACTION_OTA_START,            // not gated here -- ota_interlock.c stays the owner (plan section 4)
 } sys_action_t;
 

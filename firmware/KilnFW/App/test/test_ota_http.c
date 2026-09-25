@@ -374,6 +374,23 @@ void profile_executor_get_status(profile_exec_status_t *out)
 static bool g_stub_autotune_active = false;
 bool autotune_engine_is_active(void) { return g_stub_autotune_active; }
 
+// relay_authority.h -- factory_reset.c's system_mode_gate wiring
+// (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25) reads this
+// same profile_running/autotune_running snapshot; derive it from the SAME
+// g_stub_profile_state/g_stub_autotune_active globals the fakes above use,
+// so a test that sets those up for the existing sw_reset refusal checks
+// exercises the identical scenario here too.
+void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
+{
+    if (profile_running_out) {
+        *profile_running_out = (g_stub_profile_state == PROFILE_EXEC_RUNNING ||
+                                 g_stub_profile_state == PROFILE_EXEC_PAUSED);
+    }
+    if (autotune_running_out) {
+        *autotune_running_out = g_stub_autotune_active;
+    }
+}
+
 // safety_link.h -- never actually invoked by any test here (ota_http_safety is
 // left NULL for every test -- ota_http_start()'s io_or_null/safety_or_null
 // arguments), but must resolve.
@@ -997,6 +1014,40 @@ static void test_authenticated_request_does_reach_interlock(void)
     TEST_CHECK(g_probe_interlock_called,
               "DECISION 3 (positive half): once auth succeeds, the interlock check DOES run -- proving "
               "the auth step is not a no-op ahead of an interlock check that runs unconditionally either way");
+}
+
+static void test_factory_reset_refused_by_system_mode_gate_during_firing(void)
+{
+    TEST_SECTION("reset_post_handler -- system_mode_gate refuses with a 409 while a firing is active (owner Q3, 2026-09-25)");
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "factory-reset-test-password";
+    g_stub_profile_state = PROFILE_EXEC_RUNNING;
+
+    uint8_t nonce[OTA_AUTH_NONCE_LEN];
+    issue_nonce(nonce);
+    uint8_t mac[32];
+    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_FACTORY_RESET), mac);
+    char hex[65];
+    hex_encode(mac, sizeof(mac), hex);
+    stub_headers_reset();
+    stub_header_set("X-Ota-Mac", hex);
+
+    g_probe_interlock_called = false;
+    s_last_resp_status[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0,
+              "system_mode_gate's refusal is a distinct 409, never the OTA interlock's 428");
+    TEST_CHECK(!g_probe_interlock_called,
+              "the system_mode_gate check runs BEFORE the OTA interlock check and short-circuits it -- "
+              "unconditional, unlike the interlock's ack-header escape hatch");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
 }
 
 // ---------------------------------------------------------------------------
@@ -2679,6 +2730,7 @@ void run_test_ota_http(void)
 
     test_missing_auth_header_never_reaches_interlock();
     test_authenticated_request_does_reach_interlock();
+    test_factory_reset_refused_by_system_mode_gate_during_firing();
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();

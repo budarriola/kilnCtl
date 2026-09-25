@@ -15,6 +15,9 @@
 #include "kiln_cfg_store.h"
 #include "kiln_cfg_swap_worker.h" /* item 5 -- the apply runs on its own task, not this one */
 #include "ota_http.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
+#include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
                                    * LOW) -- warn on an explicit save while diverged */
 #include "web_encoding.h" /* GET /settings/kiln_configs page shell -- same gzip-serving
@@ -388,6 +391,26 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
             ESP_LOGW(TAG, "kiln config apply id=%ld refused, hardware shape differs: %s", (long)id, hw_msg);
             httpd_resp_set_status(req, "428 Precondition Required");
             return httpd_resp_sendstr(req, hw_msg);
+        }
+    }
+
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
+     * applying a saved kiln config is exactly that -- while a firing or
+     * autotune run is active, PAUSED included. Checked HERE, at submit time,
+     * for the same reason the hardware-differs 428 check just above is: this
+     * is the only point that can still turn the refusal into a clean HTTP
+     * status, since kiln_cfg_swap_worker_submit() dispatches onto its own
+     * task. Distinct 409 from that 428 -- this refusal is not answerable
+     * with an ack header, only by waiting for the run to end. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "kiln config apply id=%ld refused by system mode gate: %s", (long)id, mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
         }
     }
 

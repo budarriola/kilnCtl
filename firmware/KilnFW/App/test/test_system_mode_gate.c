@@ -126,12 +126,11 @@ static void test_unwired_actions_are_ok_for_now(void)
 {
     TEST_SECTION("Unwired actions -- OK unconditionally, correct today per this file's top comment");
 
-    // Q2/Q3 decisions exist in the plan doc but are NOT wired into the gate
-    // table this pass -- no caller invokes this gate for these actions yet
-    // (zones/config keeps its own future gate; factory reset/cfgfs likewise).
-    // A worst-case snapshot (everything running/tripped) must still return
-    // "not refused" for these, since returning true here would be reporting
-    // a rule that does not exist.
+    // SYS_ACTION_START_PROFILE/START_AUTOTUNE/OTA_START are NOT wired into
+    // this gate table at all -- readiness_gate.h and ota_interlock.c own
+    // those respectively. A worst-case snapshot (everything running/tripped)
+    // must still return "not refused" for these, since returning true here
+    // would be reporting a rule that does not exist.
     sys_mode_snapshot_t snap = good_snapshot();
     snap.profile_running = true;
     snap.autotune_running = true;
@@ -144,14 +143,84 @@ static void test_unwired_actions_are_ok_for_now(void)
                "SYS_ACTION_START_PROFILE not wired -- always OK from this gate (readiness_gate.h owns it)");
     TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &snap, NULL, 0) == false,
                "SYS_ACTION_START_AUTOTUNE not wired -- always OK from this gate");
-    TEST_CHECK(system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &snap, NULL, 0) == false,
-               "SYS_ACTION_WRITE_ZONES_CONFIG not wired this pass -- plan section 3.6 item 4, deferred");
-    TEST_CHECK(system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &snap, NULL, 0) == false,
-               "SYS_ACTION_FACTORY_RESET not wired this pass -- plan section 3.6 item 5, deferred");
-    TEST_CHECK(system_mode_gate_check(SYS_ACTION_CFGFS_FORMAT, &snap, NULL, 0) == false,
-               "SYS_ACTION_CFGFS_FORMAT not wired this pass -- plan section 3.6 item 5, deferred");
     TEST_CHECK(system_mode_gate_check(SYS_ACTION_OTA_START, &snap, NULL, 0) == false,
                "SYS_ACTION_OTA_START not gated here at all -- ota_interlock.c stays the owner");
+}
+
+static void test_zones_config_write_refused_cross_product(void)
+{
+    TEST_SECTION("SYS_ACTION_WRITE_ZONES_CONFIG -- BLANKET refusal cross product (owner Q2, 2026-09-25)");
+
+    // Owner decision Q2: refuse ALL zone/relay/guard config writes -- not
+    // scoped to which field changed -- while EITHER a firing or an autotune
+    // session is active, PAUSED included (same profile_running fact as Q1).
+    static const struct {
+        bool profile_running;
+        bool autotune_running;
+        bool expect_refused;
+        const char *label;
+    } cases[] = {
+        { false, false, false, "both idle: allowed" },
+        { true,  false, true,  "profile running only: refused" },
+        { false, true,  true,  "autotune running only: refused" },
+        { true,  true,  true,  "both running: refused" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sys_mode_snapshot_t snap = good_snapshot();
+        snap.profile_running = cases[i].profile_running;
+        snap.autotune_running = cases[i].autotune_running;
+        char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+        bool refused = system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &snap, reason, sizeof(reason));
+        TEST_CHECK(refused == cases[i].expect_refused, cases[i].label);
+        if (cases[i].expect_refused) {
+            TEST_CHECK(reason[0] != '\0', "a refusal always writes a reason");
+            TEST_CHECK(strstr(reason, "firing or autotune") != NULL,
+                       "the reason names a firing/autotune run, not a generic refusal");
+        } else {
+            TEST_CHECK(reason[0] == '\0', "an allowed case leaves reason untouched");
+        }
+    }
+}
+
+static void test_factory_reset_and_cfgfs_format_refused_cross_product(void)
+{
+    TEST_SECTION("SYS_ACTION_FACTORY_RESET / SYS_ACTION_CFGFS_FORMAT -- unconditional refusal (owner Q3, 2026-09-25)");
+
+    // Owner decision Q3: refuse outright while running -- no ack, no
+    // override -- strictly more destructive than an ordinary zone-config
+    // write.
+    static const struct {
+        bool profile_running;
+        bool autotune_running;
+        bool expect_refused;
+        const char *label;
+    } cases[] = {
+        { false, false, false, "both idle: allowed" },
+        { true,  false, true,  "profile running only: refused" },
+        { false, true,  true,  "autotune running only: refused" },
+        { true,  true,  true,  "both running: refused" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sys_mode_snapshot_t snap = good_snapshot();
+        snap.profile_running = cases[i].profile_running;
+        snap.autotune_running = cases[i].autotune_running;
+
+        char reason1[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+        bool refused1 = system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &snap, reason1, sizeof(reason1));
+        TEST_CHECK(refused1 == cases[i].expect_refused, cases[i].label);
+
+        char reason2[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+        bool refused2 = system_mode_gate_check(SYS_ACTION_CFGFS_FORMAT, &snap, reason2, sizeof(reason2));
+        TEST_CHECK(refused2 == cases[i].expect_refused, cases[i].label);
+
+        if (cases[i].expect_refused) {
+            TEST_CHECK(reason1[0] != '\0' && reason2[0] != '\0', "a refusal always writes a reason");
+        } else {
+            TEST_CHECK(reason1[0] == '\0' && reason2[0] == '\0', "an allowed case leaves reason untouched");
+        }
+    }
 }
 
 static void test_reason_truncation_is_safe(void)
@@ -174,6 +243,8 @@ int main(void)
     test_relay_write_refused_cross_product();
     test_relay_write_ignores_reserved_fields();
     test_unwired_actions_are_ok_for_now();
+    test_zones_config_write_refused_cross_product();
+    test_factory_reset_and_cfgfs_format_refused_cross_product();
     test_reason_truncation_is_safe();
 
     printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);

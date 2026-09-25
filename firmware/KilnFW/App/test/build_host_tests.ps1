@@ -334,7 +334,16 @@ try {
         (Join-Path $driversDir "control/iter_tune.c"),
         (Join-Path $driversDir "control/firing_score.c"),
         (Join-Path $driversDir "control/firing_compare.c"),
-        (Join-Path $driversDir "safety/safety_ceiling_policy.c")
+        (Join-Path $driversDir "safety/safety_ceiling_policy.c"),
+        # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+        # gate-slices-2/4/5, 2026-09-25): backup_import.c (#included via
+        # test_backup_import.c above) now calls system_mode_gate_check()/
+        # system_mode_gate_http_send_refusal() -- link both real, pure,
+        # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
+        # itself is faked in test_backup_import.c, same convention as its
+        # other profile_executor/autotune_engine fakes.
+        (Join-Path $driversDir "safety/system_mode_gate.c"),
+        (Join-Path $driversDir "http/system_mode_gate_http.c")
     )
 
     # hal_time migration (HW_ABSTRACTION.md item 5) pushed the "main"
@@ -564,7 +573,15 @@ try {
             # "already host-tested elsewhere, needs its real symbols to link"
             # reasoning used everywhere else these four files travel together.
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
-            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`" " +
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # gate-slices-2/4/5, 2026-09-25): zones_http_post.c (#included
+            # above) now calls system_mode_gate_check()/
+            # system_mode_gate_http_send_refusal() -- link both real, pure,
+            # no-ESP-IDF-dependency objects in, same convention as exe50's
+            # own dedicated executable for the module's unit tests.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
@@ -982,7 +999,16 @@ try {
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # gate-slices-2/4/5, 2026-09-25): factory_reset.c (#included
+            # above) now calls system_mode_gate_check()/
+            # system_mode_gate_http_send_refusal() -- link both real, pure,
+            # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
+            # itself is faked in test_ota_http.c, same convention as its other
+            # profile_executor/autotune_engine fakes.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
     # WEB_AUTH_PLAN.md section 2b: ota_http.c now calls
     # http_auth_policy_web_enabled() (http_auth_policy_iface.c) directly, and
     # already used kiln_http_register() (http_auth_http.c) from the earlier

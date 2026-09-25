@@ -17,7 +17,10 @@
 #include "http_form.h"
 #include "ota_http.h" /* ota_http_check_interlocks() -- the shared "not while firing" gate */
 #include "ota_interlock.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
 #include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracks the zone max */
+#include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
 #include "zone_settings_source_chain.h"
 
 esp_err_t zones_post_handler(httpd_req_t *req)
@@ -46,6 +49,25 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by interlock: %s", interlock_reason);
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
+    }
+
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
+     * not scoped to which field changed -- while a firing or autotune run is
+     * active, PAUSED included, distinct 409 from the OTA interlock's own
+     * 428/409 above. relay_authority_heat_run_active() is the same leaf,
+     * no-module-lock-held snapshot read kiln_io_owner.c's relay gate already
+     * uses (CLAUDE.md's "cache a snapshot outside the lock" note) -- taken
+     * here with nothing else held. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by system mode gate: %s", mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
     }
 
     if (req->content_len <= 0 || req->content_len > ZONES_BODY_MAX) {

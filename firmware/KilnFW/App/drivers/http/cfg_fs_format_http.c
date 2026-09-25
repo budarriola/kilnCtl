@@ -9,6 +9,9 @@
 #include "cfg_fs_mount.h"
 #include "ota_http.h" /* challenge/response auth -- see this file's header comment for
                         * why POST reuses OTA_HTTP_CONTEXT_FACTORY_RESET */
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
+#include "system_mode_gate.h" /* SYS_ACTION_CFGFS_FORMAT -- owner decision Q3, 2026-09-25 */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
 #include "wifi_provision_http.h"
 
 static const char *TAG = "cfg_fs_format_http";
@@ -44,6 +47,21 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_FACTORY_RESET, ip)) {
         return ESP_OK;
+    }
+
+    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): refuse outright while a firing or autotune
+     * run is active, PAUSED included -- the first thing this handler does
+     * after auth, before touching cfg_fs at all. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_CFGFS_FORMAT, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused by system mode gate: %s", ip, mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
     }
 
     ESP_LOGW(TAG, "cfg_fs format_confirm from %s: authenticated, formatting cfg partition now", ip);
