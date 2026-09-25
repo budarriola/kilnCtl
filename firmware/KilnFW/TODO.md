@@ -642,6 +642,13 @@ Idle-state chart behavior: `docs/ARCHITECTURE_DECISIONS.md`, "Idle chart / pinne
 - [ ] **Still polled (2s), not pushed.** `CONFIG_HTTPD_WS_SUPPORT` is off; not
       yet justified. Revisit (WebSocket or SSE) if 2s polling proves too coarse
       once real hardware is attached and watched during a firing.
+      Re-evaluated 2026-09-25 from source: still not worth it. `.dram0.bss` has
+      under 1.5 KB of headroom, a held WS/SSE connection permanently takes one of
+      the 13 httpd sockets (the pool has already saturated once from two tabs
+      polling), no async-handler pattern exists yet to build it LRU-safe on, and
+      there is no path for a session expiring mid-stream. If 2s ever proves
+      inadequate, do the cheap wins first: ETag/304 on `/api/status` and a
+      slower idle interval, as `pollHistory`/`pollAutotune` already use.
 - [ ] **Pixel-level appearance of the idle dots was not visually confirmed**
       — no framebuffer readback and the browser was not driven during
       verification; only the API/serving behavior was checked.
