@@ -668,6 +668,18 @@
  * arm; that decoder needs updating, this is not a wire break. */
 #define UI_TEST_CLICK_INJECT_FAILED 0x06u
 
+/* 2026-09-25: the (first) match's centre lies off the panel entirely (the
+ * overflowing PIN keypad found in logs/bench_test/20260925T150107Z_lcd) --
+ * LVGL's own touch pipeline never clamps an injected point to the display,
+ * so a press there is silently swallowed by lv_indev_search_obj()'s hit
+ * test and used to come back UI_TEST_CLICK_OK, a false pass. Checked ahead
+ * of the hidden/visible split, so an off-screen widget reports this even if
+ * it also happens to be hidden. Same wire-compatibility note as the values
+ * above: an older PC decoder that has never seen this value falls into its
+ * own default/"unknown result" arm; that decoder needs updating, this is
+ * not a wire break. */
+#define UI_TEST_CLICK_OFFSCREEN 0x07u
+
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only
  * connections across the barrier are two UART lines through U6 (an

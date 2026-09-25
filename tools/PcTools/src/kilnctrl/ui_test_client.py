@@ -21,6 +21,7 @@ from .protocol import (
     UI_TEST_CLICK_HIDDEN,
     UI_TEST_CLICK_INJECT_FAILED,
     UI_TEST_CLICK_NOT_FOUND,
+    UI_TEST_CLICK_OFFSCREEN,
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
     UI_TEST_CLICK_VERDICT_UNKNOWN,
@@ -53,6 +54,11 @@ _CLICK_RESULT_NAMES = {
     #: sent but its swallow verdict couldn't be confirmed. Never a pass, and
     #: never grounds to poll for a page change.
     UI_TEST_CLICK_INJECT_FAILED: "inject_failed",
+    #: 2026-09-25: the (first) match's centre lies off the panel entirely --
+    #: LVGL never clamps an injected point to the display, so a press there
+    #: used to be silently swallowed by the hit test and come back "ok", a
+    #: false pass. Checked ahead of the hidden/visible split.
+    UI_TEST_CLICK_OFFSCREEN: "offscreen",
 }
 
 

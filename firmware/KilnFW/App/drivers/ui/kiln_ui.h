@@ -207,6 +207,20 @@ typedef enum {
      * never grounds to poll for a page change the same click could not have
      * caused. */
     KILN_UI_CLICK_INJECT_FAILED,
+    /* 2026-09-25: the bench run in logs/bench_test/20260925T150107Z_lcd found
+     * a tap target whose reported centre lay OUTSIDE the display (the old,
+     * overflowing PIN keypad's title/footer -- see ui_lcd_keypad.c) still
+     * came back KILN_UI_CLICK_OK: LVGL's own touch pipeline does not clamp
+     * an injected point to the panel, and lv_indev_search_obj()'s hit test
+     * simply fails silently for a point off every widget's box, so the
+     * press was "delivered" without landing on anything -- a false pass, not
+     * a caught defect. Distinct from KILN_UI_CLICK_HIDDEN (a real, on-screen
+     * widget that LVGL has flagged not visible): this is a target whose
+     * *coordinates* are off-panel regardless of its hidden flag. Checked
+     * before the hidden/visible split in kiln_ui_click_by_name() so an
+     * off-screen widget is reported as off-screen even if it also happens to
+     * be hidden. */
+    KILN_UI_CLICK_OFFSCREEN,
 } kiln_ui_click_result_t;
 
 /* Finds the tap target whose name exactly matches `name` (kiln_ui_collect_
@@ -238,6 +252,9 @@ typedef enum {
  *                              press (returned 0) -- nothing was ever
  *                              queued, so no wait was attempted and no
  *                              release was sent
+ *   KILN_UI_CLICK_OFFSCREEN -- the (first) match's centre lies outside the
+ *                              display; nothing is injected, checked ahead of
+ *                              the hidden/visible split above
  * Called directly from the UART bridge task, same as lvgl_port_inject_
  * touch() itself and TOUCH_CMD_INJECT's handler -- see that function's
  * thread-safety note (lvgl_port.h). */

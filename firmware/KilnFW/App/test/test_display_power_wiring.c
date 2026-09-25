@@ -1538,6 +1538,66 @@ static void run_section12_inject_failed_wired(void)
 //      only under s_ui_walk.data, taken with a ZERO timeout (it never blocks
 //      on a requester), and never takes s_ui_walk.data any other way;
 //   4. lvgl_port_task gives `done` only after releasing `data`.
+// 2026-09-25 KILN_UI_CLICK_OFFSCREEN: a tap target whose reported centre lies
+// off the panel used to be reported KILN_UI_CLICK_OK (LVGL never clamps an
+// injected point, so the hit test just silently misses) -- a false pass, not
+// a caught defect (logs/bench_test/20260925T150107Z_lcd). This pins that
+// kiln_ui_click_by_name() checks the match's coordinates against the
+// display's resolution BEFORE the hidden/visible split (so an off-screen
+// widget is reported as off-screen even if it also happens to be hidden),
+// and that the bridge maps it explicitly.
+static void run_section14_offscreen_checked_before_hidden(void)
+{
+    TEST_SECTION("KILN_UI_CLICK_OFFSCREEN: checked ahead of the hidden/visible "
+                 "split in click_by_name(), and the bridge maps it -- "
+                 "source-text scan (none of these files is host-compilable)");
+
+    char *ui_text = read_file_any(KILN_UI_C_CANDIDATES, 3);
+    char *ui_stripped = ui_text ? strip_c_comments(ui_text) : NULL;
+    if (!ui_stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/kiln_ui.c");
+    } else {
+        size_t len = 0;
+        const char *body = find_function_body(ui_stripped, "kiln_ui_click_result_t kiln_ui_click_by_name(", &len);
+        char *fn = body ? dup_range(body, len) : NULL;
+        TEST_CHECK(fn != NULL, "found kiln_ui_click_by_name()'s function body");
+        if (fn) {
+            const char *offscreen_ret = strstr(fn, "return KILN_UI_CLICK_OFFSCREEN;");
+            const char *hidden_ret = strstr(fn, "return KILN_UI_CLICK_HIDDEN;");
+            const char *ambiguous_ret = strstr(fn, "return KILN_UI_CLICK_AMBIGUOUS;");
+            const char *hres = strstr(fn, "lv_display_get_horizontal_resolution(");
+            const char *vres = strstr(fn, "lv_display_get_vertical_resolution(");
+            TEST_CHECK(offscreen_ret != NULL && hidden_ret != NULL && ambiguous_ret != NULL &&
+                           offscreen_ret < hidden_ret && offscreen_ret < ambiguous_ret,
+                       "kiln_ui_click_by_name() must return KILN_UI_CLICK_OFFSCREEN BEFORE "
+                       "the hidden/visible split -- otherwise an off-screen-and-hidden target "
+                       "reports HIDDEN instead of OFFSCREEN, or an off-screen widget slips "
+                       "through to the AMBIGUOUS/OK path.");
+            TEST_CHECK(hres != NULL && vres != NULL,
+                       "kiln_ui_click_by_name() must bounds-check the match's centre against "
+                       "the real display resolution (lv_display_get_horizontal/vertical_"
+                       "resolution(NULL)), not a hardcoded constant.");
+            free(fn);
+        }
+    }
+    free(ui_stripped);
+    free(ui_text);
+
+    // --- uart_bridge_ui_test.c: an explicit case for OFFSCREEN too. ---
+    char *br_text = read_file_any(UART_BRIDGE_UI_TEST_C_CANDIDATES, 3);
+    char *br_stripped = br_text ? strip_c_comments(br_text) : NULL;
+    if (!br_stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/bridge/uart_bridge_ui_test.c");
+    } else {
+        TEST_CHECK(strstr(br_stripped, "case KILN_UI_CLICK_OFFSCREEN: wire_result = "
+                                       "UI_TEST_CLICK_OFFSCREEN;") != NULL,
+                   "uart_bridge_ui_test.c must map KILN_UI_CLICK_OFFSCREEN to "
+                   "UI_TEST_CLICK_OFFSCREEN.");
+    }
+    free(br_stripped);
+    free(br_text);
+}
+
 static void run_section13_ui_walk_handoff_wired(void)
 {
     TEST_SECTION("lvgl_port_collect_tap_targets() cross-task handoff: seq-matched "
@@ -1648,4 +1708,5 @@ void run_test_display_power_wiring(void)
     run_section11_inject_verdict_handoff_wired();
     run_section12_inject_failed_wired();
     run_section13_ui_walk_handoff_wired();
+    run_section14_offscreen_checked_before_hidden();
 }

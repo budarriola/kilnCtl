@@ -226,6 +226,14 @@ UI_TEST_CLICK_VERDICT_UNKNOWN = 5
 #: kiln_ui.h's KILN_UI_CLICK_INJECT_FAILED. Never a pass, and never grounds
 #: to poll for a page change this click could not have caused.
 UI_TEST_CLICK_INJECT_FAILED = 6
+#: 2026-09-25: the (first) match's centre lies off the panel entirely (the
+#: overflowing PIN keypad found in logs/bench_test/20260925T150107Z_lcd) --
+#: LVGL never clamps an injected point to the display, so a press there used
+#: to be silently swallowed by the hit test and come back OK, a false pass.
+#: Checked ahead of the hidden/visible split, so an off-screen widget reports
+#: this even if it also happens to be hidden. See kiln_ui.h's
+#: KILN_UI_CLICK_OFFSCREEN.
+UI_TEST_CLICK_OFFSCREEN = 7
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged

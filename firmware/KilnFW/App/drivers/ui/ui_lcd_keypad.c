@@ -7,10 +7,62 @@
 
 #define UI_LCD_KEYPAD_WIDTH_PX 400
 
+/* ---- No-scroll fit, bug found by the 2026-09-25 LCD-01 bench run
+ * (logs/bench_test/20260925T150107Z_lcd) -- the old layout (default
+ * lv_msgbox header ~43px + a separate dots label + a separate status label
+ * + a 3*UI_THEME_MIN_TOUCH_TARGET_PX (216px) button matrix + a
+ * UI_THEME_MIN_TOUCH_TARGET_PX (72px) footer, plus theme padding) summed to
+ * well over DISPLAY_WIDTH (320, the landscape height -- see ui_theme.h's
+ * UI_THEME_PAGE_CONTENT_BUDGET_PX comment for why DISPLAY_WIDTH is the
+ * landscape HEIGHT), so the title clipped above the top edge and Cancel
+ * fell below the bottom edge. This box is a full-screen lv_msgbox_create(NULL)
+ * overlay, not a topbar'd page, so the applicable ceiling is the whole
+ * landscape height, not UI_THEME_PAGE_CONTENT_BUDGET_PX.
+ *
+ * Every pad/height below is set explicitly on the relevant lv_obj (never
+ * left at the default theme's lv_theme_default.c PAD_SMALL, which is
+ * itself DPI-derived and not meant to be reverse-engineered here) so this
+ * arithmetic is exact, not a guess about theme internals. Mirrors the real
+ * lv_obj_set_* calls in build_overlay() below -- keep both in sync. */
+#define UI_LCD_KEYPAD_HEADER_PAD_PX          4
+#define UI_LCD_KEYPAD_HEADER_HEIGHT_PX       (2 * UI_LCD_KEYPAD_HEADER_PAD_PX + UI_THEME_FONT_LINE_HEIGHT_PX)
+
+#define UI_LCD_KEYPAD_CONTENT_PAD_PX         4
+#define UI_LCD_KEYPAD_INFO_ROW_HEIGHT_PX     UI_THEME_FONT_LINE_HEIGHT_PX
+#define UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX   56
+#define UI_LCD_KEYPAD_MATRIX_HEIGHT_PX       (3 * UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX)
+/* content pad_top + info row + content pad_row (gap) + matrix + content pad_bottom */
+#define UI_LCD_KEYPAD_CONTENT_HEIGHT_PX \
+    (UI_LCD_KEYPAD_CONTENT_PAD_PX + UI_LCD_KEYPAD_INFO_ROW_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_PAD_PX + \
+     UI_LCD_KEYPAD_MATRIX_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_PAD_PX)
+
+#define UI_LCD_KEYPAD_FOOTER_HEIGHT_PX       56
+#define UI_LCD_KEYPAD_FOOTER_PAD_VER_PX      4
+#define UI_LCD_KEYPAD_FOOTER_BUTTON_HEIGHT_PX \
+    (UI_LCD_KEYPAD_FOOTER_HEIGHT_PX - 2 * UI_LCD_KEYPAD_FOOTER_PAD_VER_PX)
+
+/* mbox itself carries the default theme's pad_zero (0 padding, 0 gap
+ * between header/content/footer) -- see lv_theme_default.c's
+ * `lv_obj_check_type(obj, &lv_msgbox_class)` branch -- so the three
+ * sections stack with no extra gap between them. */
+#define UI_LCD_KEYPAD_TOTAL_HEIGHT_PX \
+    (UI_LCD_KEYPAD_HEADER_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_HEIGHT_PX + UI_LCD_KEYPAD_FOOTER_HEIGHT_PX)
+
+_Static_assert(UI_LCD_KEYPAD_TOTAL_HEIGHT_PX <= DISPLAY_WIDTH,
+               "ui_lcd_keypad.c: the PIN keypad overlay's total height exceeds the "
+               "320px landscape panel height (DISPLAY_WIDTH) -- shrink "
+               "UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX/FOOTER_HEIGHT_PX, don't let it "
+               "overflow the screen.");
+_Static_assert(UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX >= 48,
+               "ui_lcd_keypad.c: keypad button rows must stay comfortably tappable "
+               "(>= ~48px tall).");
+_Static_assert(UI_LCD_KEYPAD_FOOTER_BUTTON_HEIGHT_PX >= 48,
+               "ui_lcd_keypad.c: the Cancel footer button must stay comfortably "
+               "tappable (>= ~48px tall).");
+
 static lv_obj_t *s_mbox;
 static lv_obj_t *s_prompt_label;
-static lv_obj_t *s_dots_label;
-static lv_obj_t *s_status_label; // "Wrong PIN" / lockout countdown -- empty otherwise
+static lv_obj_t *s_info_label; // dots normally; "Wrong PIN" / lockout countdown on error
 static lv_obj_t *s_bm;
 
 static lcd_keypad_state_t s_ks;
@@ -32,12 +84,14 @@ static void refresh_dots(void)
         buf[i] = '*';
     }
     buf[n] = '\0';
-    lv_label_set_text(s_dots_label, buf);
+    lv_obj_set_style_text_color(s_info_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_info_label, buf);
 }
 
 static void set_status(const char *text)
 {
-    lv_label_set_text(s_status_label, text ? text : "");
+    lv_obj_set_style_text_color(s_info_label, UI_THEME_ACCENT_5, 0);
+    lv_label_set_text(s_info_label, text ? text : "");
 }
 
 static void close_overlay(void)
@@ -124,16 +178,19 @@ static void bm_value_changed_cb(lv_event_t *e)
         return;
     }
 
-    set_status(""); // any keypress clears a stale "Wrong PIN" message
-
     if (strcmp(key, "OK") == 0) {
+        /* Deliberately does NOT blank the info label first: the dots/status
+         * label is now shared (see this file's header comment), and OK on a
+         * too-short entry is a defined no-op (try_submit()'s can_submit()
+         * guard) that must leave whatever is currently showing (dots or a
+         * still-relevant error) alone rather than wiping it. */
         try_submit();
     } else if (strcmp(key, LV_SYMBOL_BACKSPACE) == 0) {
         lcd_pin_entry_backspace(&s_ks.entry);
-        refresh_dots();
+        refresh_dots(); // clears a stale "Wrong PIN" message same as any digit edit
     } else if (key[0] >= '0' && key[0] <= '9' && key[1] == '\0') {
         lcd_pin_entry_push_digit(&s_ks.entry, key[0]);
-        refresh_dots();
+        refresh_dots(); // clears a stale "Wrong PIN" message same as any digit edit
     }
 }
 
@@ -145,27 +202,32 @@ static void build_overlay(void)
     lv_obj_set_width(s_mbox, UI_LCD_KEYPAD_WIDTH_PX);
 
     s_prompt_label = lv_msgbox_add_title(s_mbox, "");
+    lv_obj_t *header = lv_msgbox_get_header(s_mbox);
+    lv_obj_set_height(header, UI_LCD_KEYPAD_HEADER_HEIGHT_PX);
+    lv_obj_set_style_pad_all(header, UI_LCD_KEYPAD_HEADER_PAD_PX, 0);
 
     lv_obj_t *content = lv_msgbox_get_content(s_mbox);
+    lv_obj_set_style_pad_all(content, UI_LCD_KEYPAD_CONTENT_PAD_PX, 0);
+    lv_obj_set_style_pad_row(content, UI_LCD_KEYPAD_CONTENT_PAD_PX, 0);
 
-    s_dots_label = lv_label_create(content);
-    lv_obj_set_style_text_color(s_dots_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(s_dots_label, "");
-
-    s_status_label = lv_label_create(content);
-    lv_obj_set_style_text_color(s_status_label, UI_THEME_ACCENT_5, 0);
-    lv_label_set_text(s_status_label, "");
+    /* Dots and status share one label (2026-09-25 fix -- see this file's
+     * header comment): a separate always-present status line was part of
+     * what pushed the overlay's total height past the 320px panel. */
+    s_info_label = lv_label_create(content);
+    lv_obj_set_height(s_info_label, UI_LCD_KEYPAD_INFO_ROW_HEIGHT_PX);
+    lv_label_set_text(s_info_label, "");
 
     s_bm = lv_buttonmatrix_create(content);
     lv_buttonmatrix_set_map(s_bm, s_bm_map);
-    lv_obj_set_size(s_bm, lv_pct(100), 3 * UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_size(s_bm, lv_pct(100), UI_LCD_KEYPAD_MATRIX_HEIGHT_PX);
     lv_obj_add_event_cb(s_bm, bm_value_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(s_mbox, "Cancel");
     lv_obj_set_style_bg_color(cancel_btn, UI_THEME_COLOR_CARD, 0);
     lv_obj_add_event_cb(cancel_btn, cancel_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *footer = lv_msgbox_get_footer(s_mbox);
-    lv_obj_set_height(footer, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_height(footer, UI_LCD_KEYPAD_FOOTER_HEIGHT_PX);
+    lv_obj_set_style_pad_ver(footer, UI_LCD_KEYPAD_FOOTER_PAD_VER_PX, 0);
 
     lv_obj_t *backdrop = lv_obj_get_parent(s_mbox);
     if (backdrop) {
@@ -181,8 +243,7 @@ void ui_lcd_keypad_show(const char *prompt, ui_lcd_keypad_done_cb_t on_done, voi
     }
 
     lcd_pin_entry_reset(&s_ks.entry);
-    refresh_dots();
-    set_status("");
+    refresh_dots(); // shared label -- also clears any stale status text from a prior open
     lv_label_set_text(s_prompt_label, prompt ? prompt : "Enter PIN");
     s_on_done = on_done;
     s_user_data = user_data;

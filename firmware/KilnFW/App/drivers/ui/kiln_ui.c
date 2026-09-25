@@ -828,6 +828,22 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
     if (out_cy) {
         *out_cy = targets[match].cy;
     }
+    /* 2026-09-25: a target whose reported centre lies off the panel (the
+     * overflowing PIN keypad found in logs/bench_test/20260925T150107Z_lcd)
+     * used to inject a "successful" press at a point LVGL's own touch
+     * pipeline never clamps to the display -- lv_indev_search_obj()'s hit
+     * test just fails silently for a point off every widget's box, so the
+     * press landed nowhere and KILN_UI_CLICK_OK was a false pass. Checked
+     * ahead of the hidden/visible split so an off-screen widget is reported
+     * as off-screen even if it also happens to be hidden. */
+    {
+        int32_t disp_w = lv_display_get_horizontal_resolution(NULL);
+        int32_t disp_h = lv_display_get_vertical_resolution(NULL);
+        if (targets[match].cx < 0 || targets[match].cx >= disp_w ||
+            targets[match].cy < 0 || targets[match].cy >= disp_h) {
+            return KILN_UI_CLICK_OFFSCREEN;
+        }
+    }
     if (targets[match].hidden) {
         return KILN_UI_CLICK_HIDDEN;
     }
