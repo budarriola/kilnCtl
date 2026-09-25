@@ -317,6 +317,16 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
     (void)status;
     return ESP_OK;
 }
+// 2026-09-25 fix-then-push review: backup_import_post_handler() now sends a
+// 409 body via httpd_resp_sendstr() when http_async_job_busy() refuses a
+// concurrent restore -- stub it the same way every other test file in this
+// executable already does for its own handler under test.
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
+{
+    (void)r;
+    (void)s;
+    return ESP_OK;
+}
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;

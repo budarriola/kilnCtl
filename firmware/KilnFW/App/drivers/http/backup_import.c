@@ -34,6 +34,9 @@
 #include "backup_http_internal.h"
 #include "backup_json.h"
 
+#include "http_async_job.h" /* http_async_job_busy() -- refuse a restore while ct_auto_zero's
+                              * async job is mid-commit, 2026-09-25 fix-then-push review */
+
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
@@ -2709,6 +2712,20 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
                                                             sizeof(reason));
     if (gate != OTA_INTERLOCK_OK) {
         return ota_http_send_interlock_refusal(req, gate, reason);
+    }
+
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: a restore can write the same safety_cfg_store/zones_config
+    // state that job commits at the end of its window, and letting both
+    // proceed concurrently risks one clobbering the other's write
+    // (2026-09-25 fix-then-push review, A2 pulled forward). Set explicitly
+    // rather than via httpd_resp_send_err(): esp_http_server has no
+    // HTTPD_409_CONFLICT enumerator (same workaround as kiln_cfg_http.c's
+    // apply-in-flight refusal) -- 409 is the right code, a refusal the
+    // operator cannot argue with.
+    if (http_async_job_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "another commissioning operation is running");
     }
 
     if (req->content_len <= 0 || (size_t)req->content_len > BACKUP_BODY_MAX) {

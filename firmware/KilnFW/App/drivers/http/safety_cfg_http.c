@@ -742,6 +742,14 @@ static bool commissioning_pair_range_problem(const safety_cfg_post_pair_t *pairs
 
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: it can commit CT-cal/config state this handler also touches,
+    // and letting both proceed concurrently risks one silently clobbering
+    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
+    if (http_async_job_busy()) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
     /* 2026-09-05 DRAM_PSRAM_PLAN.md: same rationale as commissioning_get_
      * handler's json[] above -- no NVS/flash call in this file, so these
      * scratch buffers are safe to move off internal DRAM. */
@@ -965,6 +973,14 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
 
 static esp_err_t relay_type_post_handler(httpd_req_t *req)
 {
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: it can commit CT-cal/config state this handler also touches,
+    // and letting both proceed concurrently risks one silently clobbering
+    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
+    if (http_async_job_busy()) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
     char body[SAFETY_RELAY_TYPE_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -1032,6 +1048,14 @@ static esp_err_t relay_type_post_handler(httpd_req_t *req)
 
 static esp_err_t ct_cal_post_handler(httpd_req_t *req)
 {
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: it can commit CT-cal/config state this handler also touches,
+    // and letting both proceed concurrently risks one silently clobbering
+    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
+    if (http_async_job_busy()) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
     char body[SAFETY_CT_CAL_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -1183,6 +1207,14 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
 
 static esp_err_t ct_trim_post_handler(httpd_req_t *req)
 {
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: it can commit CT-cal/config state this handler also touches,
+    // and letting both proceed concurrently risks one silently clobbering
+    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
+    if (http_async_job_busy()) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
     char body[SAFETY_CT_TRIM_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -1467,13 +1499,21 @@ static void ct_auto_zero_job(httpd_req_t *async_req, void *arg)
      * reaches DONE, so DONE is only trusted once this loop has actually
      * observed that transition for itself. */
     kilnlink_ct_auto_zero_status_t az = {0};
+    // waited_ms is a real elapsed-time measurement (hal_time_now_us() deltas),
+    // not a poll-count proxy -- vTaskDelay() only guarantees AT LEAST the
+    // requested delay, so summing SAFETY_CT_AUTO_ZERO_POLL_MS per iteration
+    // (the pre-2026-09-25 approach) under-counts real elapsed time whenever a
+    // poll is delayed by scheduling, and ct_auto_zero_check_postconditions()'s
+    // 5000+waited_ms floor is only as honest as this number (2026-09-25
+    // fix-then-push review).
+    uint64_t start_us = hal_time_now_us();
     uint32_t waited_ms = 0;
     bool done = false;
     bool stale_done = false;
     bool observed_in_progress = false;
     while (waited_ms < SAFETY_CT_AUTO_ZERO_TIMEOUT_MS) {
         vTaskDelay(pdMS_TO_TICKS(SAFETY_CT_AUTO_ZERO_POLL_MS));
-        waited_ms += SAFETY_CT_AUTO_ZERO_POLL_MS;
+        waited_ms = (uint32_t)((hal_time_now_us() - start_us) / 1000);
         if (safety_link_get_ct_auto_zero_status(s_link, &az) != ESP_OK) {
             continue; // transient poll miss -- keep trying within the overall timeout
         }
@@ -1573,6 +1613,33 @@ static void ct_auto_zero_job(httpd_req_t *async_req, void *arg)
         httpd_resp_set_type(async_req, "application/json");
         httpd_resp_send(async_req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
         return;
+    }
+
+    // --- Re-check the CT-cal snapshot itself, not just the operational
+    // preconditions above: the ~10-15s measurement window is long enough for
+    // another writer (ct_cal_post_handler(), a backup restore, etc) to have
+    // stored a NEW cal for this same channel since jc->existing_* was
+    // snapshotted before the handoff. http_async_job_busy() checks added
+    // elsewhere refuse a NEW writer from starting while this job is running,
+    // but they cannot undo one that already committed in the window between
+    // this request's own precondition check and this point. Refuse rather
+    // than overwrite a value this request never actually observed -- most
+    // importantly, never silently clobber a MANUAL cal made in that window
+    // with this stale auto-zero snapshot's numbers (2026-09-25 fix-then-push
+    // review). ---
+    {
+        float fresh_a_fs = 0.0f, fresh_zero_mv = 0.0f;
+        safety_ct_cal_source_t fresh_source = SAFETY_CT_CAL_SOURCE_MANUAL; /* overwritten below if fresh_has */
+        bool fresh_has = safety_cfg_store_get_ct_cal_input(channel, &fresh_a_fs, &fresh_zero_mv, &fresh_source);
+        bool changed = (fresh_has != has_existing) ||
+                       (fresh_has && (fresh_source != existing_source || fresh_a_fs != existing_a_fs));
+        if (changed) {
+            httpd_resp_set_type(async_req, "application/json");
+            httpd_resp_sendstr(async_req, "{\"ok\":false,\"reason\":\"CT calibration for this channel "
+                                            "changed while this measurement was running -- refusing to "
+                                            "commit a stale snapshot; re-run auto-zero\"}");
+            return;
+        }
     }
 
     // --- Commit (confirm=1) -- same order as ct_cal_post_handler(): Pico
@@ -1754,18 +1821,41 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     jc->existing_a_fs = existing_a_fs;
     jc->existing_zero_mv = existing_zero_mv;
 
-    if (!http_async_job_try_start(req, "http_async_job", 4096, ct_auto_zero_job, jc)) {
+    // 2026-09-25 fix-then-push review: 4096 B undercounted the real depth.
+    // Resolved from ct_auto_zero_job down through safety_cfg_write_apply_pairs
+    // -> apply_pairs_ex -> safety_cfg_store_refetch_locked ->
+    // safety_link_get_config_page (a 1024 B frame) -> uart_protocol_send_
+    // broadcast -> frame_and_send: 3280 B. Add http_async_job_task's own
+    // 32 B trampoline plus ~300 B of FreeRTOS/toolchain overhead this static
+    // walk does not carry (~3612 B), and an ESP_LOG call through the
+    // uart_log_vprintf hook anywhere on this path adds roughly another
+    // 830 B on top of that -- comfortably over the old 4096 B budget. 6144 B
+    // restores real headroom; check_all_task_stack_budgets.py's http_async_job
+    // row now walks ct_auto_zero_job as an extra_root and grades against a
+    // ceiling derived from this real depth, not a borrowed one.
+    http_async_job_start_result_t start_result =
+        http_async_job_try_start(req, "http_async_job", 6144, ct_auto_zero_job, jc);
+    if (start_result == HTTP_ASYNC_JOB_STARTED) {
+        return ESP_OK;
+    }
+    free(jc);
+    httpd_resp_set_type(req, "application/json");
+    if (start_result == HTTP_ASYNC_JOB_BUSY) {
         // Refused -- another async job (this route, or a future A2/A3/A4
-        // user of the same helper) is already running, or the async handoff
-        // itself failed. req is untouched by http_async_job_try_start() in
-        // every refusal case, so responding on it synchronously here is
-        // safe. Same refusal shape this route already used for every other
-        // precondition failure above.
-        free(jc);
-        httpd_resp_set_type(req, "application/json");
+        // user of the same helper) is already running. req is untouched by
+        // http_async_job_try_start() in every refusal case, so responding on
+        // it synchronously here is safe. This is a NEW refusal reply this
+        // route did not send before A1 -- a concurrent second POST to this
+        // route now gets it instead of both requests racing inline.
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
     }
-    return ESP_OK;
+    // HTTP_ASYNC_JOB_RESOURCE_FAILURE: the async handoff itself failed
+    // (httpd_req_async_handler_begin()) or the job task could not be
+    // created -- an out-of-memory-shaped failure, not contention. Matches
+    // this handler's existing OOM replies elsewhere (e.g. the jc allocation
+    // just above) rather than being misreported as "another operation
+    // running".
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -2120,6 +2210,14 @@ static esp_err_t rate_guard_auto_get_handler(httpd_req_t *req)
  * record or reports success. */
 static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
 {
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: it can commit CT-cal/config state this handler also touches,
+    // and letting both proceed concurrently risks one silently clobbering
+    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
+    if (http_async_job_busy()) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
     bool confirm = false;
     if (req->content_len > 0) {
         char body[32];
