@@ -376,8 +376,10 @@ ALLOWLIST = {
     # docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: set_blob_verified()/
     # erase_key()'s hal_kv_set_blob()/hal_kv_erase_key()/hal_kv_commit()
     # calls are reached only from security_http.c's totp_enroll_confirm/
-    # totp_disable cmd= handlers and auth_reset_gesture_wiring.c's
-    # physical four-corner reset path -- all running on the same
+    # totp_disable cmd= handlers, auth_totp_http.c's POST /api/auth/forgot
+    # handler (totp_config_verify_and_consume() persists the used counter),
+    # and auth_reset_gesture_wiring.c's physical four-corner reset path --
+    # all running on the same
     # wifi_provision_http_get_server() httpd instance's worker task
     # (config.stack_size = 8192, wifi_provision_http.c:1151, a plain
     # internal-DRAM stack_size, never PSRAM) or, for the gesture path, the

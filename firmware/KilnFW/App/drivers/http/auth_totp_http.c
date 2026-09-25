@@ -363,11 +363,33 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
                           web_auth_login_role_for_username(username, admin_username) == WEB_AUTH_SESSION_ROLE_ADMIN;
 
     bool verified = false;
+    bool did_hmac = false;
     if (is_admin_claim) {
         totp_consume_result_t r = totp_config_verify_and_consume(code, (uint64_t)st.now_epoch);
         verified = (r == TOTP_CONSUME_OK);
+        // REJECTED and OK both ran totp_verify()'s HMACs; NOT_ENROLLED and
+        // the early UNAVAILABLE exits did not.
+        did_hmac = (r == TOTP_CONSUME_OK || r == TOTP_CONSUME_REJECTED);
+    } else {
+        // Anti-oracle timing (plan section 6a): a non-administrator username
+        // must not answer measurably faster than the administrator's --
+        // otherwise the 202's response time alone enumerates the admin
+        // username. Mirror the real path's NVS secret read here too.
+        uint8_t scratch[TOTP_SECRET_LEN];
+        (void)totp_config_load_secret(scratch);
+        totp_secure_zero(scratch, sizeof(scratch));
+    }
+    if (!did_hmac) {
+        // Same window of HMAC work as a real verification, against an
+        // all-zero key whose result is discarded -- never consulted, never
+        // persisted, so a coincidental match grants nothing.
+        uint8_t dummy_secret[TOTP_SECRET_LEN];
+        memset(dummy_secret, 0, sizeof(dummy_secret));
+        uint64_t dummy_matched = 0;
+        (void)totp_verify(dummy_secret, sizeof(dummy_secret), code, (uint64_t)st.now_epoch, 0u, &dummy_matched);
     }
     totp_secure_zero(code, sizeof(code));
+    totp_secure_zero(&admin_record, sizeof(admin_record));
 
     // Anti-oracle (plan section 6a): always generate a token-shaped value and
     // always answer 202, whether or not verification succeeded. Only a
@@ -447,7 +469,24 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     totp_reset_token_result_t tr = totp_reset_token_consume(reset_tokens(), reset_token, username, now_ms());
     totp_secure_zero(reset_token, sizeof(reset_token));
     bool ok = false;
-    if (tr == TOTP_RESET_TOKEN_OK) {
+    // A token only proves a code was valid when /api/auth/forgot minted it
+    // (up to TOTP_RESET_TOKEN_TTL_MS ago). Re-check, at the moment of use,
+    // everything that made it valid then: TOTP still enrolled (not disabled
+    // via cmd=totp_disable or cleared by the LCD reset gesture in the
+    // meantime), and an administrator record still configured under exactly
+    // this username (not cleared or renamed since). Otherwise a token
+    // outstanding across any of those events would still set the admin
+    // password -- the "reset one side of a pair" class (CLAUDE.md).
+    web_auth_password_record_t admin_record;
+    bool still_bound = false;
+    if (tr == TOTP_RESET_TOKEN_OK && totp_config_enrolled() &&
+        web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &admin_record) == WEB_AUTH_LOAD_OK &&
+        admin_record.configured &&
+        web_auth_login_role_for_username(username, admin_record.username) == WEB_AUTH_SESSION_ROLE_ADMIN) {
+        still_bound = true;
+    }
+    totp_secure_zero(&admin_record, sizeof(admin_record));
+    if (still_bound) {
         security_err_t serr = security_backend_get_vtable()->set_web_password(SECURITY_ROLE_ADMIN, username, new_password);
         ok = (serr == SECURITY_OK);
         if (ok) {

@@ -198,12 +198,36 @@ static esp_err_t security_send_totp_clock_unsynced(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":false,\"clock_unsynced\":true}");
 }
 
+// Enrollment is only ever for a board with NO secret stored. An already-
+// enrolled board must go through cmd=totp_disable (which demands a valid
+// code from the CURRENT secret) first -- otherwise begin+confirm would
+// silently replace the secret using a code from the new one, letting a
+// hijacked admin session alone swap the owner's reset factor for its own,
+// exactly what section 6b's "disable requires a valid code" rule forbids.
+// UNREADABLE refuses too (fail closed), same as ENROLLED.
+static bool security_totp_not_enrolled(void)
+{
+    uint8_t scratch[TOTP_SECRET_LEN];
+    totp_config_load_status_t st = totp_config_load_secret(scratch);
+    totp_secure_zero(scratch, sizeof(scratch));
+    return st == TOTP_CONFIG_LOAD_ABSENT;
+}
+
+static esp_err_t security_send_totp_refused(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":false}");
+}
+
 static esp_err_t security_totp_enroll_begin(httpd_req_t *req)
 {
     time_sync_status_t st;
     time_sync_get_status(&st);
     if (!totp_http_clock_ready(st.ever_synced)) {
         return security_send_totp_clock_unsynced(req);
+    }
+    if (!security_totp_not_enrolled()) {
+        return security_send_totp_refused(req);
     }
 
     uint8_t secret[TOTP_SECRET_LEN];
@@ -220,6 +244,7 @@ static esp_err_t security_totp_enroll_begin(httpd_req_t *req)
 
     char uri[192];
     size_t uri_len = totp_build_otpauth_uri(username, s_totp_pending.secret, TOTP_SECRET_LEN, uri, sizeof(uri));
+    totp_secure_zero(&admin_record, sizeof(admin_record)); // username already copied into uri
     char base32[64];
     size_t base32_len = (uri_len != 0) ? totp_base32_encode(s_totp_pending.secret, TOTP_SECRET_LEN, base32, sizeof(base32)) : 0;
     if (uri_len == 0 || base32_len == 0) {
@@ -251,6 +276,10 @@ static esp_err_t security_totp_enroll_confirm(httpd_req_t *req, const char *body
     time_sync_get_status(&st);
     if (!totp_http_clock_ready(st.ever_synced)) {
         return security_send_totp_clock_unsynced(req);
+    }
+    if (!security_totp_not_enrolled()) {
+        totp_pending_clear(&s_totp_pending);
+        return security_send_totp_refused(req);
     }
     if (!totp_pending_is_valid(&s_totp_pending, security_http_now_ms())) {
         httpd_resp_set_type(req, "application/json");
@@ -332,6 +361,15 @@ static esp_err_t security_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    bool totp_cmd = strcmp(cmd_val, "totp_enroll_begin") == 0 || strcmp(cmd_val, "totp_enroll_confirm") == 0 ||
+                    strcmp(cmd_val, "totp_disable") == 0;
+    if (totp_cmd && !http_auth_caller_is_admin(req)) {
+        // Defence in depth, same as the security_http_dispatch() path below:
+        // route_tier_table.h already gates this route ADMIN, but the TOTP
+        // commands bypass that dispatcher's own caller_role check, so make
+        // it here explicitly rather than rely on the tier gate alone.
+        return security_send_totp_refused(req);
+    }
     if (strcmp(cmd_val, "totp_enroll_begin") == 0) {
         return security_totp_enroll_begin(req);
     }
