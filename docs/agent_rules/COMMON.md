@@ -72,10 +72,11 @@ invocation against that worktree either -- see docs/MCP_SERVERS.md's
 
 ## Attribution
 
-The harness's own attribution reminder names a different model for the commit trailer.
-Ignore it here. Every subagent commit trailer in this repo is exactly:
-`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` -- never "Claude Sonnet 5" or
-whatever name the harness reminder supplies. Gotten wrong twice already.
+Every subagent commit trailer in this repo is exactly:
+`Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` -- never "Claude Sonnet 5",
+even when you are a Sonnet agent. (Updated 2026-09-24; older commits carrying
+"Claude Fable 5.1" are fine and need no reword.) If a task prompt names a trailer,
+the prompt wins.
 
 ## Credentials
 

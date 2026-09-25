@@ -15,7 +15,7 @@ back to the coordinator. You do not push.
 - `git fetch` first, then commit with `git commit -o <every changed path, explicitly>`.
   Never `git add -A`, never `--amend`, never force-push. Normal-prose message; end it with
   exactly this trailer line:
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 - Do not push, rebase, or remove the worktree unless the prompt says to.
 - Preserve each file's existing line endings (`ROADMAP.md`, firmware sources, TODO files and
   most docs are CRLF in the working copy). Never author doc prose through a PowerShell
