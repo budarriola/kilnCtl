@@ -274,6 +274,8 @@ KEYWORDS = {
                                  "de-energize", "relay off"),
     "adaptive_tune_revert": ("undo", "rollback", "restore", "previous", "one-click"),
     "control_set_zone_pid": ("kp", "ki", "kd", "gains", "loop"),
+    "control_set_zone_limits": ("zone limit", "max temp", "min temp", "ceiling", "floor",
+                                "restore", "max_temp_c", "min_temp_c", "abs_max"),
     "wifi_add_network": ("provision", "credentials", "ssid", "join"),
     "ota_update_esp": ("over", "air", "upload", "firmware", "http"),
     "codec_decode_frame": ("wire", "bytes", "protocol", "parse", "hex"),

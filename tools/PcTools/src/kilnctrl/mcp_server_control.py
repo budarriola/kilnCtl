@@ -464,3 +464,261 @@ def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: fl
     return f"refused - could not set zone {zone} model{detail}"
 
 
+# ---------------------------------------------------------------------------
+# control_set_zone_limits -- the gap this fills: the only pre-existing zones
+# writer, config_presets.load_config_preset() (config_presets.py -- applies
+# a whole bench_fixture.json-shaped preset via zones_http_client.
+# build_post_body()), overwrites PID gains and control_mode for EVERY zone
+# along with whatever limit it also carries, which would regress a bench's
+# already-tuned gains just to fix one zone's max_temp_c/min_temp_c. This
+# tool touches ONLY those two fields, reusing the same GET-merge-POST path
+# (zones_http_client.build_post_body()) cases_heat.py's
+# _restore_zone_limit()/_post_zones_restore() already use to restore a
+# zone's max_temp_c after HP-07 lowers it -- see that module for the sibling
+# use of the same pattern.
+# ---------------------------------------------------------------------------
+def _profile_or_autotune_running_reason() -> Optional[str]:
+    """None if neither a profile firing nor an autotune run is currently in
+    progress; otherwise a human-readable reason naming which one. Shared
+    gate for any write tool that must not touch persistent zone config
+    mid-run -- the same rule cases_heat.py's bench cases already respect for
+    the hidden profile slot (profiles_get_exec_status()'s state/AutotuneClient.
+    get_status()'s state, not merely "not idle": profile state 2 is 'paused',
+    which is still a live run with heat history riding on the current
+    config, not a safe window to change zone limits in)."""
+    try:
+        st = _srv._profiles.get_exec_status()
+    except ProfilesQueryError as exc:
+        return f"could not read profile exec status ({exc}) -- refusing to guess"
+    if st.state_name in ("running", "paused"):
+        return f"a profile is currently {st.state_name} (#{st.profile_id} {st.name!r})"
+    try:
+        at = _srv._autotune.get_status()
+    except AutotuneQueryError as exc:
+        return f"could not read autotune status ({exc}) -- refusing to guess"
+    # AutotuneStatus.STATE_NAMES: 0=idle, 5=done, 6=aborted are the only
+    # non-running states; everything else (settling/stepping/relay_approach/
+    # relay_cycling) is a live run.
+    if at.state not in (0, 5, 6):
+        return f"autotune is currently {at.state_name!r} on zone {at.zone}"
+    return None
+
+
+def _read_abs_max_temp_c(host: str) -> "tuple[Optional[float], str]":
+    """Fetch the safety processor's independent overtemp ceiling
+    (abs_max_temp_c, S1, safety_cfg_store.h param id 0x0104) over GET
+    /api/safety/commissioning -- the same field mcp_server_safety.py's
+    _describe_commissioning() renders as "S1 abs_max_temp_c=...". Returns
+    (value_or_None, a human-readable description). None means "no active
+    ceiling to compare against": either the fetch failed, or the field is
+    genuinely unset/<=0, which leaves S1 DORMANT (never trips) per
+    safety_guards.c's own `if (cfg->abs_max_temp_c > 0.0f)` gate -- treating
+    that as a hard 0-degree limit here would be inventing a constraint the
+    firmware itself does not enforce."""
+    try:
+        data = safety_cfg_http_client.get_commissioning(host)
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return None, f"abs_max_temp_c unknown (GET /api/safety/commissioning failed: {exc})"
+    params = {p["name"]: p for p in data.get("params", []) if "name" in p}
+    reliable = bool(data.get("unset_reporting_reliable"))
+    p = params.get("abs_max_temp_c")
+    if p is None:
+        return None, "abs_max_temp_c not reported by this board's commissioning response"
+    is_set = bool(p.get("set")) and reliable
+    if not is_set:
+        return None, "abs_max_temp_c unset/not commissioned (S1 dormant, never trips)"
+    value = float(p.get("value", 0.0))
+    if value <= 0.0:
+        return None, f"abs_max_temp_c={value:g} (<=0, S1 dormant, never trips)"
+    return value, f"abs_max_temp_c={value:g}C (S1 ARMED)"
+
+
+def _zone_by_index(zones: "list[dict]", index: int) -> "Optional[dict]":
+    for z in zones:
+        if z.get("index") == index:
+            return z
+    return None
+
+
+def _zone_collateral_diff(
+    before_zones: "list[dict]", after_zones: "list[dict]", zone: int, changed: "set[str]",
+) -> "list[str]":
+    """Compare every zone dict in `before_zones` against its counterpart in
+    `after_zones` (matched by "index") and report any field that changed
+    other than the ones this tool deliberately changed on `zone` -- PID
+    gains, control_mode, relay_mask, ramp rate, coupling, every field of
+    every OTHER zone, all of it. A zone present in one snapshot and missing
+    from the other is itself reported rather than silently skipped."""
+    diffs: "list[str]" = []
+    before_by_idx = {z.get("index"): z for z in before_zones}
+    after_by_idx = {z.get("index"): z for z in after_zones}
+    for idx in sorted(set(before_by_idx) | set(after_by_idx), key=lambda v: (v is None, v)):
+        bz = before_by_idx.get(idx)
+        az = after_by_idx.get(idx)
+        if bz is None or az is None:
+            diffs.append(f"zone {idx}: present in only one snapshot (before={bz is not None}, after={az is not None})")
+            continue
+        for key in sorted(set(bz) | set(az)):
+            if idx == zone and key in changed:
+                continue
+            if bz.get(key) != az.get(key):
+                diffs.append(f"zone {idx}.{key}: {bz.get(key)!r} -> {az.get(key)!r}")
+    return diffs
+
+
+@_srv._tool()
+def control_set_zone_limits(
+    zone: int,
+    max_temp_c: Optional[float] = None,
+    min_temp_c: Optional[float] = None,
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Set a zone's persistent max_temp_c (ceiling) and/or min_temp_c
+    (floor), touching ONLY those two fields over the GET-merge-POST
+    /api/zones path (zones_http_client.build_post_body()) -- every other
+    field the board reports for every zone (PID gains, control_mode,
+    relay_mask, ramp rate, coupling matrix, ...) is echoed back exactly as
+    read, never overwritten. This is the narrow tool the facade was missing:
+    the only pre-existing zones writer, load_config_preset()
+    (config_presets.py), overwrites PID gains and control_mode for every
+    zone along with whatever limit a preset also carries, which would
+    regress a bench's already-tuned gains just to fix one zone's limit.
+
+    Pass at least one of `max_temp_c`/`min_temp_c`; the other is left at its
+    current value. Refused unconditionally:
+      - if neither `max_temp_c` nor `min_temp_c` is given;
+      - unless `confirm is True` exactly (a dry run otherwise, reporting
+        what WOULD be written, the current values, and the abs_max reading
+        below -- no POST is ever sent without this);
+      - while a profile is running or paused, or an autotune run is in any
+        state other than idle/done/aborted -- zone limits are not changed
+        mid-run;
+      - if `zone` is not one of the indices GET /api/zones currently
+        reports;
+      - if both limits (the one(s) given, the other read from the board's
+        current value) would leave min_temp_c >= max_temp_c;
+      - if the requested `max_temp_c` exceeds the safety processor's own
+        independent overtemp ceiling (`abs_max_temp_c`, S1) when that
+        ceiling is known and armed -- a zone must never be configured above
+        the second set of eyes the Pico provides. If abs_max_temp_c is
+        unset/dormant or its fetch fails, this check is skipped (reported
+        in the result, never silently) rather than inventing a limit the
+        firmware itself does not enforce.
+
+    After a confirmed write, re-fetches GET /api/zones and FAILS LOUD
+    (never reports "ok") if:
+      - the target zone's newly-set field(s) don't read back as requested
+        (within 0.05 C, matching the wire's own ~%.9g round-trip noise
+        floor other zones_http_client callers use); or
+      - ANY other field of ANY zone (including the target zone's own other
+        fields) differs between the before and after snapshots -- proof
+        this tool did not collaterally touch anything besides what it
+        named, which a whole-page GET-merge-POST always risks getting
+        wrong on some field this module doesn't yet map correctly.
+
+    Host is auto-resolved the same way the OTA/control tools do (board's
+    current Wi-Fi station IP, falling back to the fallback-AP address); pass
+    `host` explicitly for kilnctl.local or a board reachable only from a
+    different network than this link's serial port. Uses the same
+    http_auth ADMIN-session seam as every other admin-tier write tool in
+    this package (zones_http_client.get_zones()/post_zones() already route
+    through it) -- never prints, logs, or echoes a credential.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as load_config_preset()
+
+    if max_temp_c is None and min_temp_c is None:
+        return "error: pass at least one of max_temp_c/min_temp_c"
+
+    resolved = _ota_resolve_host(host)
+
+    running_reason = _profile_or_autotune_running_reason()
+    if running_reason is not None:
+        return f"refused: {running_reason} -- zone limits are not changed mid-run (host={resolved})"
+
+    try:
+        before = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: GET /api/zones failed (host={resolved}): {exc}"
+
+    zones = before.get("zones") or []
+    valid_indices = sorted(z.get("index") for z in zones if "index" in z)
+    if zone not in valid_indices:
+        return f"refused: zone {zone} is out of range -- board reports zones {valid_indices} (host={resolved})"
+
+    current = _zone_by_index(zones, zone) or {}
+    effective_max = max_temp_c if max_temp_c is not None else current.get("max_temp_c")
+    effective_min = min_temp_c if min_temp_c is not None else current.get("min_temp_c")
+    if (isinstance(effective_max, (int, float)) and isinstance(effective_min, (int, float))
+            and effective_min >= effective_max):
+        return (f"refused: min_temp_c ({effective_min:g}) must be strictly less than "
+                f"max_temp_c ({effective_max:g}) (host={resolved})")
+
+    abs_max, abs_max_desc = _read_abs_max_temp_c(resolved)
+    if max_temp_c is not None and abs_max is not None and max_temp_c > abs_max:
+        return (f"refused: requested max_temp_c={max_temp_c:g}C exceeds the safety processor's "
+                f"independent overtemp ceiling ({abs_max_desc}) -- a zone must never be "
+                f"configured above abs_max_temp_c (host={resolved})")
+
+    changed_fields: "set[str]" = set()
+    zone_override: "dict[str, Any]" = {"index": zone}
+    if max_temp_c is not None:
+        zone_override["max_temp_c"] = max_temp_c
+        changed_fields.add("max_temp_c")
+    if min_temp_c is not None:
+        zone_override["min_temp_c"] = min_temp_c
+        changed_fields.add("min_temp_c")
+
+    if confirm is not True:
+        wanted_desc = ", ".join(f"{k}={v:g}" for k, v in zone_override.items() if k != "index")
+        return (
+            f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set zone {zone}: "
+            f"{wanted_desc} (current: max_temp_c={current.get('max_temp_c')!r}, "
+            f"min_temp_c={current.get('min_temp_c')!r}; {abs_max_desc}; host={resolved})"
+        )
+
+    try:
+        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: could not build POST body from the GET snapshot: {exc}"
+
+    try:
+        post_result = zones_http_client.post_zones(resolved, body)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: POST /api/zones failed (host={resolved}): {exc}"
+    if post_result != "ok":
+        return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
+
+    try:
+        after = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: POST /api/zones returned ok, but the confirming re-fetch of GET "
+                f"/api/zones failed (host={resolved}): {exc} -- state UNKNOWN, re-check before "
+                f"trusting this")
+
+    after_zones = after.get("zones") or []
+    after_zone = _zone_by_index(after_zones, zone)
+    if after_zone is None:
+        return f"FAILED: zone {zone} missing from the re-fetched GET /api/zones response (host={resolved})"
+
+    mismatches = []
+    for key in sorted(changed_fields):
+        wanted = zone_override[key]
+        got = after_zone.get(key)
+        if not isinstance(got, (int, float)) or abs(float(got) - float(wanted)) > 0.05:
+            mismatches.append(f"{key}: wanted {wanted:g}, board now reports {got!r}")
+    if mismatches:
+        return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
+                f"landed -- {'; '.join(mismatches)} (host={resolved}). Do not trust this as applied.")
+
+    collateral = _zone_collateral_diff(zones, after_zones, zone, changed_fields)
+    if collateral:
+        return (f"FAILED: zone {zone}'s {', '.join(sorted(changed_fields))} landed correctly, but "
+                f"other field(s) changed unexpectedly -- {'; '.join(collateral)} (host={resolved}). "
+                f"This tool must touch only the named fields; investigate before trusting this "
+                f"board's config.")
+
+    applied_desc = ", ".join(f"{k}={after_zone.get(k):g}" for k in sorted(changed_fields))
+    return f"ok - zone {zone}: {applied_desc} (confirmed by read-back; {abs_max_desc}; host={resolved})"
+
+
