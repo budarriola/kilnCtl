@@ -34,6 +34,7 @@
 // writes.
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1615,6 +1616,101 @@ static void run_section14_offscreen_checked_before_hidden(void)
     free(br_text);
 }
 
+// Local mirror of kiln_ui_click_by_name()'s offscreen bounds check (2026-09-25
+// KILN_UI_CLICK_OFFSCREEN, see run_section14_offscreen_checked_before_hidden()
+// above). kiln_ui.c itself is not host-compilable (needs real LVGL/FreeRTOS),
+// so this reimplements the same four comparisons -- cx < 0, cx >= disp_w,
+// cy < 0, cy >= disp_h -- as a pure function this file CAN exercise with a
+// point/resolution matrix. That would silently drift from the real source if
+// left on its own, so run_section15_point_on_panel_boundary_matrix() below
+// pins the exact token spelling of all four comparisons in kiln_ui.c's
+// function body first (same source-text-scan technique the rest of this file
+// uses) -- if kiln_ui.c's operators ever change, that scan fails and this
+// mirror's numeric coverage is never silently testing a stale copy of the
+// real logic. Left in kiln_ui.h's coordinate space: cx/cy are int16_t there
+// (kiln_ui_tap_target_t), disp_w/disp_h are int32_t (lv_display_get_*
+// resolution's own return type) -- kept as int32_t here for headroom on the
+// disp_w/disp_h bound itself, matching the real signature.
+static bool point_on_panel(int32_t cx, int32_t cy, int32_t disp_w, int32_t disp_h)
+{
+    if (cx < 0 || cx >= disp_w || cy < 0 || cy >= disp_h) {
+        return false; /* KILN_UI_CLICK_OFFSCREEN in the real function */
+    }
+    return true;
+}
+
+// 2026-09-25: point_on_panel()/kiln_ui_click_by_name()'s offscreen check,
+// left untested by run_section14 above (which pins ordering and call shape
+// but never the boundary arithmetic itself -- an off-by-one here, e.g.
+// `cx > disp_w` instead of `cx >= disp_w`, would report the real display's
+// rightmost/bottommost column as offscreen, or a genuinely offscreen point
+// one past it as on-panel, and nothing in section14 would catch it).
+static void run_section15_point_on_panel_boundary_matrix(void)
+{
+    TEST_SECTION("kiln_ui_click_by_name()'s offscreen bounds check: exact "
+                 "comparison tokens pinned in kiln_ui.c, then point_on_panel()'s "
+                 "boundary matrix (inside/edges/just-outside/negative) run "
+                 "against them");
+
+    // --- pin the exact comparison tokens in kiln_ui.c first ---
+    char *ui_text = read_file_any(KILN_UI_C_CANDIDATES, 3);
+    char *ui_stripped = ui_text ? strip_c_comments(ui_text) : NULL;
+    if (!ui_stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/kiln_ui.c");
+    } else {
+        size_t len = 0;
+        const char *body = find_function_body(ui_stripped, "kiln_ui_click_result_t kiln_ui_click_by_name(", &len);
+        char *fn = body ? dup_range(body, len) : NULL;
+        TEST_CHECK(fn != NULL, "found kiln_ui_click_by_name()'s function body");
+        if (fn) {
+            TEST_CHECK(strstr(fn, "targets[match].cx < 0") != NULL,
+                       "kiln_ui_click_by_name() must reject cx < 0 (negative x is offscreen) -- "
+                       "point_on_panel()'s matrix below assumes this exact comparison.");
+            TEST_CHECK(strstr(fn, "targets[match].cx >= disp_w") != NULL,
+                       "kiln_ui_click_by_name() must reject cx >= disp_w (disp_w itself is one "
+                       "past the last column, so this must be >=, not >) -- point_on_panel()'s "
+                       "matrix below assumes this exact comparison.");
+            TEST_CHECK(strstr(fn, "targets[match].cy < 0") != NULL,
+                       "kiln_ui_click_by_name() must reject cy < 0 (negative y is offscreen) -- "
+                       "point_on_panel()'s matrix below assumes this exact comparison.");
+            TEST_CHECK(strstr(fn, "targets[match].cy >= disp_h") != NULL,
+                       "kiln_ui_click_by_name() must reject cy >= disp_h (disp_h itself is one "
+                       "past the last row, so this must be >=, not >) -- point_on_panel()'s "
+                       "matrix below assumes this exact comparison.");
+            free(fn);
+        }
+    }
+    free(ui_stripped);
+    free(ui_text);
+
+    // --- boundary matrix, kiln_ui.h's real 480x320 panel resolution ---
+    const int32_t w = 480, h = 320;
+    struct { int32_t cx, cy; bool expect_on_panel; const char *label; } cases[] = {
+        { 240, 160, true,  "inside, roughly centred" },
+        { 0,   0,   true,  "top-left corner, (0,0)" },
+        { w-1, h-1, true,  "bottom-right corner, (w-1,h-1)" },
+        { 0,   h-1, true,  "bottom-left corner, (0,h-1)" },
+        { w-1, 0,   true,  "top-right corner, (w-1,0)" },
+        { w,   160, false, "just outside right edge, (w,y)" },
+        { 240, h,   false, "just outside bottom edge, (x,h)" },
+        { w,   h,   false, "just outside both edges, (w,h)" },
+        { -1,  160, false, "negative x, (-1,y)" },
+        { 240, -1,  false, "negative y, (x,-1)" },
+        { -1,  -1,  false, "both negative, (-1,-1)" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool got = point_on_panel(cases[i].cx, cases[i].cy, w, h);
+        TEST_CHECK(got == cases[i].expect_on_panel, cases[i].label);
+    }
+
+    // --- a degenerate/never-real resolution shouldn't crash or misreport ---
+    TEST_CHECK(point_on_panel(0, 0, 0, 0) == false,
+               "a 0x0 reported resolution (e.g. a dispatch that never reached "
+               "lvgl_port_task, disp_w/disp_h left zero-initialised) must report "
+               "every point offscreen, never on-panel by falling through a "
+               "degenerate bound.");
+}
+
 static void run_section13_ui_walk_handoff_wired(void)
 {
     TEST_SECTION("lvgl_port_collect_tap_targets() cross-task handoff: seq-matched "
@@ -1726,4 +1822,5 @@ void run_test_display_power_wiring(void)
     run_section12_inject_failed_wired();
     run_section13_ui_walk_handoff_wired();
     run_section14_offscreen_checked_before_hidden();
+    run_section15_point_on_panel_boundary_matrix();
 }
