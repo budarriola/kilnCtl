@@ -58,13 +58,18 @@
   // press used to run the confirm dialog's own unconditional
   // `finish(...)`, closing and cancelling the BOTTOM modal while the login
   // modal -- the one actually on screen and focused -- stayed open. This
-  // tiny stack is the shared fix: every modal pushes an id when it becomes
-  // visible and pops it when it stops being visible (including the
-  // login-modal "suspended while forgot-password is up" case, which pops on
-  // suspend and pushes again on resume), and each modal's own Escape/Tab
-  // handler bails out immediately unless its id is the current top -- so
-  // only the visually topmost modal ever reacts to a key, regardless of
-  // listener registration order or which pair of modals is stacked.
+  // tiny stack is the shared fix: every modal pushes an id when it opens
+  // and pops it when it closes, and each modal's own Escape/Tab handler
+  // bails out immediately unless its id is the current top -- so only the
+  // topmost modal ever reacts to a key, regardless of listener
+  // registration order or which pair of modals is stacked. A login modal
+  // "suspended while forgot-password is up" KEEPS its slot (the reset
+  // modal simply sits above it) rather than popping and re-pushing: a
+  // re-push on resume would jump the login above anything opened on top of
+  // the reset modal in the meantime (e.g. a kcAlert landing while the
+  // /reset POST is in flight). Every Escape handler that acts also calls
+  // stopImmediatePropagation(), so the modal uncovered by that close can
+  // never see the same keypress and close as well (two layers per press).
   var kcModalStack = [];
   var kcModalIdSeq = 0;
   function kcModalPush() {
@@ -237,6 +242,9 @@
         if (!kcModalIsTop(kcModalId)) return;
         if (evt.key === 'Escape' || evt.keyCode === 27) {
           evt.preventDefault();
+          // One Escape closes one layer: a listener registered after this
+          // one must not see the modal uncovered by this close as topmost.
+          if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
           finish(!!opts.alertOnly);
           return;
         }
@@ -472,10 +480,12 @@
         // as Escape/Cancel: nothing may hide the modal under a request
         // whose outcome would otherwise be lost.
         suspend: function () {
-          if (submitting || settled) return false;
+          // `suspended` too: a second suspend would let a second
+          // openForgotPasswordModal() push a second stack id.
+          if (submitting || settled || suspended) return false;
           suspended = true;
           loginModalEl.setAttribute('hidden', '');
-          kcModalPop(kcModalId); // the modal that's about to open owns the stack top now
+          // kcModalId stays on the stack: the reset modal pushes above it.
           return true;
         },
         resume: function (noticeText) {
@@ -484,7 +494,8 @@
           loginPassEl.value = '';
           loginErrorEl.textContent = noticeText || '';
           loginModalEl.removeAttribute('hidden');
-          kcModalId = kcModalPush();
+          // No re-push: kcModalId kept its slot while suspended (see
+          // kcModalStack's header comment).
           kcFocusFirstEmpty([loginUserEl, loginPassEl]);
         }
       };
@@ -499,6 +510,7 @@
           if (suspended) return; // the reset modal owns Escape right now
           // Same outcome as the Cancel button.
           evt.preventDefault();
+          if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
           finish(false);
           return;
         }
@@ -803,6 +815,8 @@
     forgotSubmit2El.disabled = false;
     forgotResetToken = null;
     forgotModalEl.removeAttribute('hidden');
+    // Never leak an id if this is somehow re-opened while still open.
+    if (forgotModalKcId !== null) kcModalPop(forgotModalKcId);
     forgotModalKcId = kcModalPush();
     // Focus default (ROADMAP.md modal-accessibility follow-up): username if
     // empty, else the 6-digit TOTP code field on this reset step.

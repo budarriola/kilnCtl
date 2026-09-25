@@ -71,6 +71,26 @@ const RANGE_L = extractRange(
   '  // ---- Forgot-password reset flow (docs/TOTP_PASSWORD_RESET_PLAN.md) -----'
 );
 
+// Range S: the real kcModalStack/kcFocusFirstEmpty helpers shared by every
+// modal (never a hand-copied stand-in, which could drift from app.js).
+const RANGE_S = extractRange(
+  '  // ---- kcModalStack -------------------------------------------------------',
+  '  // ---- kcSafetyTcIsSeparate ----------------------------------------------'
+);
+
+// Range C: the themed confirm/alert modal (buildConfirmModal/
+// openConfirmModal), used by the stacked-modal Escape group.
+const RANGE_C = extractRange(
+  '  var confirmModalEl = null, confirmTitleEl = null, confirmTextEl = null,',
+  '  // One modal on screen at a time. There is exactly one overlay/panel, so a'
+);
+
+if (RANGE_S.indexOf('function kcModalIsTop') === -1 || RANGE_S.indexOf('function kcFocusFirstEmpty') === -1) {
+  throw new Error('sanity: extracted range does not include the kcModalStack helpers');
+}
+if (RANGE_C.indexOf('function openConfirmModal') === -1) {
+  throw new Error('sanity: extracted range does not include openConfirmModal');
+}
 if (RANGE_D.indexOf('function openForgotPasswordModal') === -1) {
   throw new Error('sanity: extracted range does not include openForgotPasswordModal');
 }
@@ -102,6 +122,7 @@ function makeFakeDom() {
       value: '',
       textContent: '',
       disabled: false,
+      style: {},
       _listeners: {},
       _innerHTML: '',
       addEventListener(type, fn) {
@@ -188,28 +209,10 @@ function makeFakeDom() {
 function fakeResp(spec) {
   return {
     status: spec.status,
+    ok: spec.status >= 200 && spec.status < 300,
+    headers: { get: () => null },
     json: () => Promise.resolve(spec.json || {}),
     text: () => Promise.resolve(spec.text || ''),
-  };
-}
-
-// Stand-ins for the kcModalStack/kcFocusFirstEmpty helpers app.js declares
-// well outside RANGE_D/RANGE_L (near kcEscapeHtml, so every modal subsystem
-// shares one stack) -- a real, working implementation (not a fake), since
-// the point of these tests is to exercise the actual stacking/focus
-// behaviour, just against a fake DOM instead of a browser.
-function makeModalStackStubs() {
-  const stack = [];
-  let seq = 0;
-  return {
-    kcModalPush: function () { const id = ++seq; stack.push(id); return id; },
-    kcModalPop: function (id) { const i = stack.lastIndexOf(id); if (i !== -1) stack.splice(i, 1); },
-    kcModalIsTop: function (id) { return stack.length > 0 && stack[stack.length - 1] === id; },
-    kcFocusFirstEmpty: function (fields) {
-      for (const el of fields) { if (el && !el.value) { el.focus(); return; } }
-      const last = fields[fields.length - 1];
-      if (last) last.focus();
-    },
   };
 }
 
@@ -253,15 +256,17 @@ function makeContext(opts) {
     // code must never reach for them; if it tried, this would throw
     // ReferenceError, which the tests below treat as a failure.
   };
-  Object.assign(ctx, makeModalStackStubs());
   vm.createContext(ctx);
+  // The real shared modal stack goes in first, in every context.
+  vm.runInContext(RANGE_S, ctx);
   if (opts.withLogin) {
     // Real login modal: drop the stubs so RANGE_L's own declarations win.
     delete ctx.loginActiveCtl;
     delete ctx.openLoginModal;
     ctx.setTimeout = setTimeout;
     ctx.clearTimeout = clearTimeout;
-    vm.runInContext(RANGE_L + '\n' + RANGE_D, ctx);
+    ctx.AbortController = AbortController;
+    vm.runInContext((opts.withConfirm ? RANGE_C + '\n' : '') + RANGE_L + '\n' + RANGE_D, ctx);
   } else {
     vm.runInContext(RANGE_D, ctx);
   }
@@ -609,6 +614,93 @@ function flush() {
     dom.document.dispatch('keydown', { key: 'Escape', preventDefault() {} });
     await p;
     assert(settled === false, 'Escape cancels the login modal once it is topmost again');
+  }
+
+  // Group 15 (review of the same follow-up): the REAL confirm modal stacked
+  // with the real login/reset modals. One Escape press closes exactly one
+  // layer, the topmost; Escape on a confirm never resolves it as confirmed;
+  // the stack is empty once every modal has closed (nothing left registered
+  // to swallow a later Escape).
+  {
+    const esc = () => ({ key: 'Escape', preventDefault() {}, stopImmediatePropagation() { this._stopped = true; } });
+
+    // 15a: login escalates on top of an open confirm.
+    {
+      const { ctx, dom } = makeContext({ withLogin: true, withConfirm: true });
+      let c, l;
+      ctx.openConfirmModal('Start firing?', {}).then((ok) => { c = ok; });
+      ctx.openLoginModal('Administrator login required').then((ok) => { l = ok; });
+      dom.document.dispatch('keydown', esc());
+      await flush();
+      assert(l === false && c === undefined, 'login over confirm: one Escape cancels only the login');
+      dom.document.dispatch('keydown', esc());
+      await flush();
+      assert(c === false, 'login over confirm: second Escape cancels the confirm (never "confirmed")');
+      assert(ctx.kcModalStack.length === 0, 'login over confirm: stack empty after both close');
+    }
+
+    // 15b: confirm opens on top of a pending login.
+    {
+      const { ctx, dom } = makeContext({ withLogin: true, withConfirm: true });
+      let c, l;
+      ctx.openLoginModal('Administrator login required').then((ok) => { l = ok; });
+      ctx.openConfirmModal('Start firing?', {}).then((ok) => { c = ok; });
+      dom.document.dispatch('keydown', esc());
+      await flush();
+      assert(c === false && l === undefined, 'confirm over login: one Escape cancels only the confirm');
+      dom.document.dispatch('keydown', esc());
+      await flush();
+      assert(l === false, 'confirm over login: second Escape cancels the login');
+      assert(ctx.kcModalStack.length === 0, 'confirm over login: stack empty after both close');
+    }
+
+    // 15c: a kcAlert lands on top of the reset modal, then the reset
+    // modal closes underneath it (a /reset success arriving late). The
+    // resumed login must stay BELOW the alert, and one Escape must not
+    // close both the alert and the login.
+    {
+      const { ctx, dom } = makeContext({ withLogin: true, withConfirm: true });
+      let a, l;
+      ctx.openLoginModal('Administrator login required').then((ok) => { l = ok; });
+      dom.registry['.kc-login-forgot-link'].dispatch('click');
+      ctx.openConfirmModal('Board unreachable.', { alertOnly: true }).then((ok) => { a = ok; });
+      ctx.closeForgotModal('Password reset. Log in with the new password.');
+      dom.document.dispatch('keydown', esc());
+      await flush();
+      assert(a === true && l === undefined, 'alert over resumed login: one Escape closes only the alert');
+      dom.document.dispatch('keydown', esc());
+      await flush();
+      assert(l === false, 'alert over resumed login: second Escape cancels the login');
+      assert(ctx.kcModalStack.length === 0, 'alert over resumed login: stack empty afterwards');
+    }
+
+    // 15d: every login exit path pops its id -- success, Cancel, backdrop,
+    // and a reset detour -- so no id is ever left behind.
+    {
+      const { ctx, dom } = makeContext({
+        withLogin: true, withConfirm: true,
+        fetchResponses: [{ status: 401, text: 'bad' }, { status: 200 }],
+      });
+      let l;
+      ctx.openLoginModal('Administrator login required').then((ok) => { l = ok; });
+      dom.registry['.kc-login-forgot-link'].dispatch('click');
+      dom.registry['kc-forgot-cancel1'].dispatch('click');
+      dom.registry['kc-login-username'].value = 'bench';
+      dom.registry['kc-login-password'].value = 'x';
+      ctx.loginFormEl.dispatch('submit', { preventDefault() {} });
+      await flush();
+      assert(l === undefined && ctx.kcModalStack.length === 1, 'failed login POST keeps exactly one stack entry');
+      dom.registry['kc-login-password'].value = 'y';
+      ctx.loginFormEl.dispatch('submit', { preventDefault() {} });
+      await flush();
+      assert(l === true && ctx.kcModalStack.length === 0, 'successful login pops its stack entry');
+      let l2;
+      ctx.openLoginModal('Administrator login required').then((ok) => { l2 = ok; });
+      const overlay = ctx.loginModalEl;
+      overlay.dispatch('click', { preventDefault() {}, target: overlay });
+      await flush();
+      assert(l2 === false && ctx.kcModalStack.length === 0, 'backdrop cancel pops its stack entry');
+    }
   }
 
   // Group 10: no localStorage/sessionStorage reference exists in this code
