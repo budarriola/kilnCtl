@@ -133,8 +133,12 @@ static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, 
         // Swallow diagnostics (2026-09-24): reason is derived from the state
         // THIS call observed on entry, before display_power_policy_step()
         // moved it on -- rule 4 (wake) fires only from OFF, rule 5's
-        // dismissal only from ERROR_HOLD, so idle->policy_state at this
-        // point (not yet overwritten below) unambiguously tells them apart.
+        // dismissal only from ERROR_HOLD. A third path also swallows: a
+        // touch on the same call that first sees a NEW error
+        // (error_entered_this_tick) is swallowed from ANY entry state; it is
+        // labelled WAKE if the panel was OFF and ERROR_HOLD otherwise, and
+        // the next press then dismisses the hold -- a legitimate double
+        // swallow.
         idle->swallow_count++;
         idle->last_swallow_reason = (idle->policy_state == DISPLAY_POWER_OFF)
                                          ? SCREEN_IDLE_SWALLOW_WAKE

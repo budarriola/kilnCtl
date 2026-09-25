@@ -376,7 +376,7 @@ def _click_then_page(ui, name: str, expected_page: str,
         # helper.
         retries_done = 0
         last_click = click
-        any_swallow_observed = swallow_retries > 0
+        total_swallow_retries = swallow_retries
         while (
             retries_done < max_retries
             and page_before is not None
@@ -384,37 +384,42 @@ def _click_then_page(ui, name: str, expected_page: str,
         ):
             retries_done += 1
             last_click, retry_swallow_retries = _click_resolving_swallow(ui, name)
-            any_swallow_observed = any_swallow_observed or retry_swallow_retries > 0
+            total_swallow_retries += retry_swallow_retries
             if last_click.get("result") != "ok":
                 break
             retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
             page, waited_s = retry_page, waited_s + retry_waited_s
             if page == expected_page:
                 return None, page, waited_s
-        # Now that a swallow is directly observable (click.get("result") ==
-        # "swallowed"), rather than only ever inferred from a page that
-        # failed to change, distinguish the two FAIL shapes plainly: if no
-        # click in this whole attempt (initial or any retry) ever actually
-        # reported "swallowed", the page's failure to move is NOT explained
-        # by the known wake/dismiss race -- it is a genuine UI defect (the
-        # tap landed on the widget and nothing happened) and is reported as
-        # such, distinct from a page that failed to change after a real,
-        # observed swallow.
+        # Attribution now that a swallow is directly observable
+        # (click_by_name() returns "swallowed", resolved by
+        # _click_resolving_swallow()'s immediate re-click) rather than only
+        # ever inferred from a page that failed to change. Judged on the LAST
+        # click in the chain, never on "was any swallow seen at all": a
+        # swallow that an immediate re-click resolved to an un-swallowed "ok"
+        # does NOT explain a page that still failed to move after that "ok"
+        # -- labelling it a swallow would relabel a real defect as the known
+        # wake/dismiss race. Caveat: firmware reports "ok" (not "swallowed")
+        # when its bounded verdict wait in kiln_ui_click_by_name() times out,
+        # so "genuine_defect" means "no swallow was REPORTED", not a proof.
+        last_result = last_click.get("result")
         if page_before is None:
             attribution = "page_before_unreadable"
         elif page != page_before:
             attribution = "wrong_page"
-        elif any_swallow_observed:
-            attribution = "swallowed_or_wrong_page"
+        elif last_result == "swallowed":
+            # A retry's click stayed swallowed through its whole
+            # _CLICK_THEN_PAGE_SWALLOW_RETRIES budget.
+            attribution = "swallowed"
+        elif last_result != "ok":
+            attribution = "retry_click_failed"
         elif retries_done > 0:
-            # Only call it a genuine defect once at least one retry was
-            # actually attempted and STILL never reported "swallowed" --
-            # with no retry at all (max_retries=0), a single unexplained
-            # non-move is exactly the old "wrong_page" shape: not enough
-            # evidence yet to rule out a swallow that a retry would have
-            # revealed.
+            # At least two clicks were delivered un-swallowed and the page
+            # never moved.
             attribution = "genuine_defect"
         else:
+            # max_retries=0: one un-swallowed "ok" and no move -- the old
+            # single-attempt shape, not enough evidence either way.
             attribution = "wrong_page"
         observed = {
             "click": click,
@@ -426,23 +431,36 @@ def _click_then_page(ui, name: str, expected_page: str,
         if retries_done > 0:
             observed["retry_click"] = last_click
             observed["retries"] = retries_done
-        reason = (
-            f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
-            f"expected {expected_page!r}"
-        )
-        if attribution == "genuine_defect":
-            reason += (
-                f" (retried {retries_done} time{'s' if retries_done != 1 else ''}, "
-                "no swallow observed on any attempt -- likely a genuine UI defect, "
-                "not a wake/dismiss race)"
+        if total_swallow_retries:
+            observed["swallow_retries"] = total_swallow_retries
+        retried = f"retried {retries_done} time{'s' if retries_done != 1 else ''}"
+        if attribution == "swallowed":
+            reason = (
+                f"click_by_name({name!r}) kept returning 'swallowed' and page stayed "
+                f"{page!r}, expected {expected_page!r} ({retried})"
             )
-        elif retries_done > 0:
-            reason += (
-                f" (retried {retries_done} time{'s' if retries_done != 1 else ''})"
-                + J.BLANKED_SCREEN_HINT
+        elif attribution == "retry_click_failed":
+            reason = (
+                f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
+                f"expected {expected_page!r}; retry click returned {last_result!r} ({retried})"
             )
         else:
-            reason += f" (page moved from {page_before!r}; not retried)" + J.BLANKED_SCREEN_HINT
+            reason = (
+                f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
+                f"expected {expected_page!r}"
+            )
+            if attribution == "genuine_defect":
+                reason += (
+                    f" ({retried}, every final click delivered un-swallowed -- likely a "
+                    "genuine UI defect, not a wake/dismiss race"
+                    + (f"; {total_swallow_retries} earlier swallow(s) were resolved by an "
+                       "immediate re-click" if total_swallow_retries else "")
+                    + ")"
+                )
+            elif retries_done > 0:
+                reason += f" ({retried})" + J.BLANKED_SCREEN_HINT
+            else:
+                reason += f" (page moved from {page_before!r}; not retried)" + J.BLANKED_SCREEN_HINT
         return (
             CaseResult(Verdict.FAIL, reason=reason, observed=observed),
             page,

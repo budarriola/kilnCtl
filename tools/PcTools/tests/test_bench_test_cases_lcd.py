@@ -682,12 +682,67 @@ class ClickThenPageTest(unittest.TestCase):
         # "swallowed" -- _CountingNavUi always says "ok" -- so this is
         # attributed as a genuine UI defect, not the wake/dismiss race.
         self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
-        self.assertIn("no swallow observed", fail.reason)
+        self.assertIn("every final click delivered un-swallowed", fail.reason)
         # Default max_retries=2: the original tap plus exactly two retries,
         # never more.
         self.assertEqual(ui.clicks, ["settings", "settings", "settings"])
         self.assertIn("retry_click", fail.observed)
         self.assertEqual(fail.observed.get("retries"), 2)
+
+    def test_swallow_resolved_then_ok_unmoved_is_still_genuine_defect(self):
+        # Review fix 2026-09-24: the first click reports "swallowed", the
+        # immediate re-click reports un-swallowed "ok", and the page still
+        # never moves across two more "ok" retries. The resolved swallow does
+        # not explain three un-swallowed clicks doing nothing -- this must be
+        # attributed as a genuine defect, never relabelled as a swallow.
+        class _SwallowOnceThenDeadNav(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.calls = 0
+
+            def click_by_name(self, name):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"result": "swallowed", "cx": 0, "cy": 0}
+                return {"result": "ok", "cx": 0, "cy": 0}  # dead widget: never navigates
+
+        ui = _SwallowOnceThenDeadNav(page="home", page_targets={"home": []}, nav_map={})
+        fail, page, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
+        self.assertEqual(fail.observed.get("swallow_retries"), 1)
+        self.assertIn("1 earlier swallow(s)", fail.reason)
+        self.assertEqual(ui.calls, 4)  # swallowed + ok, then two ok retries
+
+    def test_initial_swallow_resolved_by_reclick_passes(self):
+        class _SwallowOnceThenNav(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.calls = 0
+
+            def click_by_name(self, name):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"result": "swallowed", "cx": 0, "cy": 0}
+                return super().click_by_name(name)
+
+        ui = _SwallowOnceThenNav(page="home", page_targets={"home": [], "config": []},
+                                 nav_map={"settings": "config"})
+        fail, page, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNone(fail)
+        self.assertEqual(page, "config")
+        self.assertEqual(ui.calls, 2)
+
+    def test_always_swallowed_fails_bounded_never_ok(self):
+        # A board that swallows every tap (e.g. stuck re-entering
+        # ERROR_HOLD) must FAIL within the swallow budget, never pass.
+        ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
+                            click_result="swallowed")
+        fail, page, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertEqual(len(ui.clicks), 1 + C._CLICK_THEN_PAGE_SWALLOW_RETRIES)
 
     def test_double_swallow_recovers_on_second_retry(self):
         # 2026-09-24 LCD-08 bench run 20260924T233113Z_lcd: the original

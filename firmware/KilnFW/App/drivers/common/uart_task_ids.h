@@ -545,15 +545,18 @@
  *               activity (real or injected); saturates at UINT32_MAX rather
  *               than wrapping.
  *
- *   Bytes [6..27] (touch/UI pull diagnostics -- input_enabled(1)/
+ *   Bytes [6..22] (touch/UI pull diagnostics -- input_enabled(1)/
  *   touch_read_cb_count(4)/injected_delivered_count(4)/kiln_ui_show
  *   entries(4)/exits(4), see uart_bridge_touch.c's own layout comment) are
  *   unchanged and not repeated here.
  *
- *   Bytes [23..29] (2026-09-24, tap-swallow observability -- APPENDED, an
- *   older PC-side decoder that only reads [0..22] keeps working unmodified
- *   against a newer board, and a newer decoder reading a short reply from
- *   older firmware must treat these as absent, not zero):
+ *   Bytes [23..28] (2026-09-24, tap-swallow observability -- APPENDED. A
+ *   newer decoder reading a short reply from older firmware must treat these
+ *   as absent, not zero. NOT transparent to an older PC decoder:
+ *   devices_touch.py's parse_touch_response() accepts only the exact lengths
+ *   it knows, so a pre-2026-09-24 PcTools decodes this 29-byte reply as a
+ *   refusal and get_state() raises TouchQueryError -- loud, never a misparse,
+ *   but update PcTools (and restart the MCP server) with this firmware):
  *     [23]    power_state -- TOUCH_POWER_STATE_* below, mirrors
  *             display_power_state_t (display_power_policy.h) byte-for-byte.
  *             Distinct from byte1's screen_on: ERROR_HOLD reads screen_on=1

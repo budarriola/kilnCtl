@@ -194,8 +194,9 @@ void lvgl_port_set_input_enabled(bool enabled);
  * so a caller can later ask lvgl_port_get_inject_verdict() whether THAT
  * specific press was swallowed by screen_idle -- see touch_inject_t's `seq`
  * field comment in lvgl_port.c. Returns 0 on either failure path
- * (lvgl_port_start() hasn't run yet, or the lock timed out) and for a
- * release, which rides the press's own seq and has no verdict of its own. */
+ * (lvgl_port_start() hasn't run yet, or the lock timed out). A release
+ * returns the seq of the press it ends (it mints no new one and has no
+ * verdict of its own); callers ignore it. */
 uint32_t lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
 
 /* Bounded, non-blocking lookup of an injected PRESS's swallow verdict
