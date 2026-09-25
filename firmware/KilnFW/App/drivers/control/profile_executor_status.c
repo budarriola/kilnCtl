@@ -175,7 +175,14 @@ bool profile_executor_pause(void)
      * PROFILE-owned relay back to MANUAL (not NONE -- a paused firing still
      * "belongs" to the operator's session, it's just not driving right now;
      * resuming reclaims PROFILE below). Chosen over auto-pause-on-touch so
-     * a manual command never has the side effect of pausing a firing. */
+     * a manual command never has the side effect of pausing a firing.
+     * This relay_authority reclaim is NOT the same as system_mode_gate's own
+     * relay-ON refusal: relay_authority_heat_run_active() (docs/SYSTEM_MODE_
+     * GATE_PLAN.md, owner decision 2026-09-25 Q1) reads the heat claim, not
+     * this relay-ownership mask, and that claim is released only in halt()
+     * below, never here -- so a manual relay-ON is still blanket-refused by
+     * kiln_io_owner.c's mode gate while PAUSED, even though this function
+     * just handed the relay mask itself back to MANUAL ownership. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_MANUAL);
     s_exec.state = PROFILE_EXEC_PAUSED;
     run_snapshot_buf_t pause_snap;

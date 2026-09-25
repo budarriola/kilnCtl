@@ -1222,6 +1222,20 @@ static esp_err_t danger_relay_post_handler(httpd_req_t *req)
                                  "available until it ends");
         return ESP_OK;
     }
+    if (rr == DASHBOARD_RELAY_ERR_OWNED) {
+        /* review fix, 2026-09-25 (advisory): also not a "should not happen"
+         * case -- relay_authority_manual_blocked_by_owner() can still refuse
+         * a relay the running profile/autotune/sweep owns even when
+         * ERR_RUNNING above didn't apply (e.g. a different relay index than
+         * the one the blanket mode-gate check covers, or a claim held
+         * outside the mode gate's own bookkeeping). Same 409 treatment as
+         * ERR_RUNNING, not the generic 400 below, since this is also a
+         * "come back once the run ends" conflict, not a malformed request. */
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "that relay is owned by an active firing/autotune/sweep -- manual "
+                                 "relay control is not available until it ends");
+        return ESP_OK;
+    }
     if (rr != DASHBOARD_RELAY_OK) {
         /* Should not happen while danger mode is active -- relay_on_blocked()
          * skips every OTHER gate that could produce these -- except

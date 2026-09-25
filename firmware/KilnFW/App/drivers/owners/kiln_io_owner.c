@@ -202,8 +202,11 @@ static SemaphoreHandle_t s_slot_lock;
  * is active, on all three transports that reach this one choke point.
  * Checked LAST, after every gate above, so a more specific refusal (safety
  * fault, update in progress, unacknowledged crash) is still reported first
- * when more than one applies. danger_mode_active() above skips this too, for
- * the same "explicit accept-risk bench test" reason it skips the other two. */
+ * when more than one applies. Unlike the other two, danger_mode_active()
+ * above does NOT skip this check -- review fix, 2026-09-25: it is the one
+ * gate danger mode does not bypass, so a firing/autotune run still refuses a
+ * manual relay-ON even in danger mode (see relay_on_blocked()'s danger-mode
+ * branch below). */
 static bool system_mode_gate_blocks_relay(void)
 {
     /* review fix, 2026-09-25: this used to call profile_executor_get_status()/
