@@ -21,8 +21,18 @@ void wifi_status_ui_get_text(char *out, size_t out_cap)
 
     switch (wifi_prov_get_state()) {
     case WIFI_PROV_STATE_CONNECTED: {
+        /* Non-blocking cached read (2026-09-25 LCD freeze follow-up) --
+         * this formatter is called every tick from ui_home_refresh_cb's
+         * never-deleted LVGL timer (ui_page_home.c) and from
+         * ui_page_network.c, both on lvgl_port_task. The direct
+         * wifi_prov_get_sta_ip() round-trips through the owner-task queue
+         * and can block the caller up to WIFI_OWNER_WAIT_MS (12s) behind a
+         * scan/connect already in flight -- exactly the freeze class fixed
+         * for the saved-networks list. wifi_prov_get_cached_sta_ip_netmask()
+         * never blocks and never touches the owner queue. */
         char ip[16];
-        if (wifi_prov_get_sta_ip(ip, sizeof(ip)) != ESP_OK) {
+        char netmask[16];
+        if (wifi_prov_get_cached_sta_ip_netmask(ip, sizeof(ip), netmask, sizeof(netmask)) != ESP_OK) {
             ip[0] = '\0';
         }
         char mdns_host[MDNS_NAME_BUF_LEN];

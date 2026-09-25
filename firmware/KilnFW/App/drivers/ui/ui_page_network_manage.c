@@ -223,6 +223,51 @@ static void apply_connect_job_result(void)
  * is enough -- set right before lv_msgbox_create() below. */
 static char s_pending_forget_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
 
+/* ---- Forget job -- 2026-09-25 LCD freeze follow-up. wifi_prov_forget_
+ * network() is a plain NVS write with no radio operation, but it still
+ * posts through wifi_prov_post_and_wait() and can queue behind a scan or
+ * connect already in flight on the single owner task, blocking the caller
+ * up to WIFI_OWNER_WAIT_MS (12s) -- the same freeze class as the saved-list
+ * read this file already fixed. Moved off lvgl_port_task, same shape as
+ * s_connect_job/connect_worker_task above. */
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool busy;
+    bool done;
+    esp_err_t err;
+} forget_job_t;
+
+static forget_job_t s_forget_job;
+static char s_forget_job_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+
+static void forget_worker_task(void *arg)
+{
+    (void)arg;
+    esp_err_t err = wifi_prov_forget_network(s_forget_job_ssid, strlen(s_forget_job_ssid));
+    xSemaphoreTake(s_forget_job.lock, portMAX_DELAY);
+    s_forget_job.err = err;
+    s_forget_job.done = true;
+    s_forget_job.busy = false;
+    xSemaphoreGive(s_forget_job.lock);
+    vTaskDelete(NULL);
+}
+
+static void apply_forget_job_result(void)
+{
+    if (!s_forget_job.lock) return;
+    xSemaphoreTake(s_forget_job.lock, portMAX_DELAY);
+    bool done = s_forget_job.done;
+    esp_err_t err = s_forget_job.err;
+    if (done) s_forget_job.done = false;
+    xSemaphoreGive(s_forget_job.lock);
+    if (!done) return;
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_forget_network(%s) failed: %s", s_forget_job_ssid, esp_err_to_name(err));
+    }
+    refresh_saved_list();
+}
+
 static void refresh_cb(lv_timer_t *timer);
 
 /* ---- Scan/Saved toggle ---- */
@@ -312,16 +357,32 @@ static void scan_row_clicked_cb(lv_event_t *e)
 
 static void forget_confirm_yes_cb(lv_event_t *e)
 {
-    /* Deliberately left synchronous -- see ui_page_network.c's original
-     * comment on this exact call: wifi_prov_forget_network() is a plain NVS
-     * write, no radio operation. */
     lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
-    esp_err_t err = wifi_prov_forget_network(s_pending_forget_ssid, strlen(s_pending_forget_ssid));
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "wifi_prov_forget_network(%s) failed: %s", s_pending_forget_ssid, esp_err_to_name(err));
-    }
     lv_msgbox_close(mbox);
-    refresh_saved_list();
+
+    if (!s_forget_job.lock) {
+        ESP_LOGW(TAG, "wifi_prov_forget_network(%s) not started: no job lock", s_pending_forget_ssid);
+        return;
+    }
+
+    xSemaphoreTake(s_forget_job.lock, portMAX_DELAY);
+    bool already_busy = s_forget_job.busy;
+    if (!already_busy) {
+        s_forget_job.busy = true;
+        s_forget_job.done = false;
+    }
+    xSemaphoreGive(s_forget_job.lock);
+    if (already_busy) return; /* one forget at a time */
+
+    snprintf(s_forget_job_ssid, sizeof(s_forget_job_ssid), "%s", s_pending_forget_ssid);
+
+    BaseType_t created = xTaskCreate(forget_worker_task, "wifi_forget_ui", 4096, NULL, 5, NULL);
+    if (created != pdPASS) {
+        xSemaphoreTake(s_forget_job.lock, portMAX_DELAY);
+        s_forget_job.busy = false;
+        xSemaphoreGive(s_forget_job.lock);
+        ESP_LOGW(TAG, "wifi_prov_forget_network(%s) failed to start worker task", s_forget_job_ssid);
+    }
 }
 
 static void forget_confirm_no_cb(lv_event_t *e)
@@ -456,6 +517,7 @@ static void refresh_cb(lv_timer_t *timer)
 
     apply_scan_job_result();
     apply_connect_job_result();
+    apply_forget_job_result();
 
     if (s_list_showing_saved) {
         lv_obj_add_flag(s_scan_list, LV_OBJ_FLAG_HIDDEN);
@@ -551,8 +613,9 @@ lv_obj_t *ui_page_network_manage_build(void)
      * on first tap was a bug. */
     s_scan_job.lock = xSemaphoreCreateMutex();
     s_connect_job.lock = xSemaphoreCreateMutex();
-    if (!s_scan_job.lock || !s_connect_job.lock) {
-        ESP_LOGE(TAG, "ui_page_network_manage: mutex allocation failed -- Scan/connect disabled");
+    s_forget_job.lock = xSemaphoreCreateMutex();
+    if (!s_scan_job.lock || !s_connect_job.lock || !s_forget_job.lock) {
+        ESP_LOGE(TAG, "ui_page_network_manage: mutex allocation failed -- Scan/connect/forget disabled");
     }
 
     lv_obj_t *scr = lv_obj_create(NULL);
