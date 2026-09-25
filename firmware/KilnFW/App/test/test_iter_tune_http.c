@@ -59,6 +59,8 @@ int g_test_count = 0;
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "hal_kv.h"  /* worst-case shadow blob fixture, test_status_reports_shadow_summary() */
+#include "fake_kv.h" /* fake_kv_reset_all() */
 
 // Forward declarations so the #included driver file below (which calls
 // these before this file's own definitions appear lower down) does not
@@ -543,10 +545,39 @@ static void test_status_reports_shadow_summary(void)
     TEST_CHECK(err == ESP_OK, "status handler returns ESP_OK once the shadow store is loaded");
     TEST_CHECK(strncmp(s_resp_body,
                        "{\"shadow\":{\"firings_scored\":0,\"accept_count\":0,\"reject_count\":0,"
-                       "\"insufficient_count\":0,\"no_matched_pairs_count\":0},\"zones\":[",
+                       "\"insufficient_count\":0,\"no_matched_pairs_count\":0,\"alloc_failed_count\":0},"
+                       "\"zones\":[",
                        strlen("{\"shadow\":{\"firings_scored\":0,\"accept_count\":0,\"reject_count\":0,"
-                              "\"insufficient_count\":0,\"no_matched_pairs_count\":0},\"zones\":[")) == 0,
+                              "\"insufficient_count\":0,\"no_matched_pairs_count\":0,"
+                              "\"alloc_failed_count\":0},\"zones\":[")) == 0,
                "status JSON opens with the shadow counters object, then zones");
+
+    // Worst case: every counter at UINT32_MAX (ten digits each). A persisted
+    // v2 blob is written raw -- layout pinned by firing_shadow.c's own
+    // _Static_assert (36 B: u8 version, 3 reserved, six u32 counters,
+    // u8 last_verdict, 3 reserved, float) -- so this proves the handler's
+    // fixed chunk still fits all six counters rather than silently falling
+    // back to "shadow":null.
+    uint8_t raw[36];
+    memset(raw, 0xFF, sizeof(raw));
+    raw[0] = 2; // FIRING_SHADOW_STORE_VERSION
+    hal_kv_init_partition("kiln_nvs");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "shadow_tune", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK,
+               "open the shadow store for the worst-case fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, "sdwblob", raw, sizeof(raw)) == HAL_OK, "worst-case blob written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    firing_shadow_reset_for_test();
+    firing_shadow_store_start();
+    reset_capture();
+    err = iter_tune_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "status handler returns ESP_OK with every shadow counter at UINT32_MAX");
+    TEST_CHECK(strstr(s_resp_body, "\"no_matched_pairs_count\":4294967295,\"alloc_failed_count\":4294967295}") !=
+                   NULL,
+               "worst-case shadow object is emitted in full (alloc_failed_count included), not truncated to null");
+    firing_shadow_reset_for_test();
+    fake_kv_reset_all();
 }
 
 int main(void)

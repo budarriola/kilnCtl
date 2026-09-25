@@ -9843,6 +9843,74 @@ static void test_firing_stats_zone_tick_feeds_shadow_with_real_zone_index(void)
     firing_shadow_reset_for_test();
 }
 
+// 2026-09-24 review add: the CALL SITE of firing_shadow_abandon_firing() --
+// test_firing_shadow.c proves the function itself discards state, but not
+// that firing_stats_persist()'s PSRAM-stack refusal branch actually calls it.
+// Drives the real refusal (fake_kv_set_write_safe_here(false)) between an
+// abandoned partial firing (zone 1, segment 0, ~500 C) and a clean firing
+// identical to the reference (zone 1, segment 0, ~100 C). Had the partial
+// firing's open segment survived the refusal, the clean firing's segment-0
+// ticks would append onto it (same segment index -> no new segment begins)
+// instead of opening a fresh ~100 C segment, and the comparison against the
+// reference would find no matched class.
+static void test_firing_stats_persist_refusal_abandons_shadow_firing(void)
+{
+    TEST_SECTION("firing_stats_persist() -- the PSRAM-stack refusal branch abandons firing_shadow's "
+                 "in-progress firing, so it cannot leak into the next firing");
+
+    firing_shadow_reset_for_test();
+    firing_shadow_store_start();
+
+    #define SHADOW_ABANDON_TICKS 90
+    float targets[SHADOW_ABANDON_TICKS];
+    float actuals[SHADOW_ABANDON_TICKS];
+    for (int i = 0; i < SHADOW_ABANDON_TICKS; i++) {
+        targets[i] = roundf((100.0f + 120.0f / 3600.0f * (float)(i + 1)) * 10.0f) / 10.0f;
+        actuals[i] = roundf((targets[i] - 0.2f) * 10.0f) / 10.0f;
+    }
+
+    // Reference firing.
+    for (int i = 0; i < SHADOW_ABANDON_TICKS; i++) {
+        firing_shadow_zone_tick(1, true, actuals[i], targets[i], false, 0, 1.0f);
+    }
+    firing_shadow_finish_firing();
+    firing_shadow_status_t st0;
+    TEST_CHECK(firing_shadow_get_status(&st0), "shadow status after the reference firing");
+
+    // Partial firing, then a halt whose persist is refused.
+    for (int i = 0; i < 30; i++) {
+        firing_shadow_zone_tick(1, true, 500.0f, 500.0f + 0.5f * (float)i, false, 0, 1.0f);
+    }
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 12;
+    rec.zone_mask = 0x02;
+    fake_kv_set_write_safe_here(false);
+    firing_stats_persist(&rec);
+    fake_kv_set_write_safe_here(true);
+
+    firing_shadow_status_t st1;
+    TEST_CHECK(firing_shadow_get_status(&st1), "shadow status after the refused persist");
+    TEST_CHECK(st1.firings_scored == st0.firings_scored, "the refused persist scored nothing");
+
+    // Clean firing, identical to the reference.
+    for (int i = 0; i < SHADOW_ABANDON_TICKS; i++) {
+        firing_shadow_zone_tick(1, true, actuals[i], targets[i], false, 0, 1.0f);
+    }
+    firing_shadow_finish_firing();
+    #undef SHADOW_ABANDON_TICKS
+
+    firing_shadow_status_t st2;
+    TEST_CHECK(firing_shadow_get_status(&st2), "shadow status after the clean firing");
+    TEST_CHECK(st2.firings_scored == st0.firings_scored + 1, "the clean firing produced exactly one verdict");
+    TEST_CHECK(st2.no_matched_pairs_count == st0.no_matched_pairs_count,
+               "the clean firing matched the reference -- the abandoned firing's open segment did not "
+               "absorb its ticks");
+
+    firing_shadow_reset_for_test();
+    fake_kv_reset_all();
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -10007,6 +10075,7 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_ramp_and_dwell_buckets_are_kept_separate();
     test_firing_stats_normalized_iae_is_length_invariant();
     test_firing_stats_zone_tick_feeds_shadow_with_real_zone_index();
+    test_firing_stats_persist_refusal_abandons_shadow_firing();
     test_firing_stats_persist_load_round_trip_and_ring_depth();
     test_firing_stats_load_migrates_known_old_size_blob();
     test_firing_stats_load_discards_unknown_size_blob();

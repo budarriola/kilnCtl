@@ -281,7 +281,9 @@ int main(int argc, char **argv)
     const char *verdict_name =
         verdict == FIRING_COMPARE_ACCEPT ? "ACCEPT" :
         verdict == FIRING_COMPARE_REJECT_DEGRADED ? "REJECT_DEGRADED" :
-        verdict == FIRING_COMPARE_INSUFFICIENT ? "INSUFFICIENT" : "NO_MATCHED_PAIRS";
+        verdict == FIRING_COMPARE_INSUFFICIENT ? "INSUFFICIENT" :
+        verdict == FIRING_COMPARE_NO_MATCHED_PAIRS ? "NO_MATCHED_PAIRS" :
+        verdict == FIRING_COMPARE_ALLOC_FAILED ? "ALLOC_FAILED" : "?";
 
     printf("\n=== firing_compare (null comparison: same profile+preset, per-channel\n"
            "    start delta 0.10-0.15C) ===\n");

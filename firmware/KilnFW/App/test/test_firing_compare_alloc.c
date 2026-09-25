@@ -3,7 +3,7 @@
 // off the profile_executor task's stack into one malloc each, because
 // firing_shadow_finish_firing() made firing_compare() reachable from that
 // stack). Proves, for a failure at EACH of the three allocations:
-//   - the verdict is FIRING_COMPARE_NO_MATCHED_PAIRS (never ACCEPT), and it
+//   - the verdict is FIRING_COMPARE_ALLOC_FAILED (never ACCEPT, never NO_MATCHED_PAIRS), and it
 //     is also what lands in *out;
 //   - every block that WAS allocated is freed (no leak on the early return);
 // and, with no failure injected, that the normal path still reaches a real

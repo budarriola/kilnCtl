@@ -141,6 +141,34 @@ static void test_wrong_version_and_truncated_blob_rejected(void)
     TEST_CHECK(status.firings_scored == 0, "truncated blob is never trusted");
 }
 
+// Store v1 -> v2 upgrade: a real v1 blob (32 B, version 1, no
+// alloc_failed_count) left by older firmware must be rejected, never read
+// through the v2 layout.
+static void test_v1_blob_rejected_after_upgrade(void)
+{
+    fs_reset_all();
+    hal_kv_init_partition(FIRING_SHADOW_NVS_PARTITION);
+
+    uint8_t v1[32];
+    memset(v1, 0, sizeof(v1));
+    v1[0] = 1;  // version 1
+    v1[4] = 7;  // firings_scored = 7 (little-endian u32 at offset 4)
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, FIRING_SHADOW_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
+                            FIRING_SHADOW_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for v1 fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, FIRING_SHADOW_NVS_KEY, v1, sizeof(v1)) == HAL_OK, "v1 blob written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    firing_shadow_reset_for_test();
+    firing_shadow_store_start();
+    firing_shadow_status_t status;
+    TEST_CHECK(firing_shadow_get_status(&status), "get_status tolerates a v1 blob");
+    TEST_CHECK(status.firings_scored == 0 && status.alloc_failed_count == 0,
+               "a 32 B v1 blob is never read through the 36 B v2 layout");
+}
+
 static void test_invalid_and_out_of_range_ticks_ignored(void)
 {
     fs_reset_all();
@@ -219,6 +247,7 @@ void run_test_firing_shadow(void)
     test_second_firing_produces_and_persists_verdict();
     test_never_touches_iter_tune_namespace();
     test_wrong_version_and_truncated_blob_rejected();
+    test_v1_blob_rejected_after_upgrade();
     test_invalid_and_out_of_range_ticks_ignored();
     test_abandon_firing_discards_in_progress_state_only();
 }

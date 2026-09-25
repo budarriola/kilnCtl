@@ -1075,6 +1075,31 @@ static void test_carry_limit(void)
     TEST_CHECK(memcmp(&before, &after, sizeof(before)) == 0, "gains reverted exactly");
 }
 
+static void test_alloc_failed_carries_never_scored(void)
+{
+    TEST_SECTION("iter_tune: FIRING_COMPARE_ALLOC_FAILED carries exactly like NO_MATCHED_PAIRS -- "
+                 "never scored, never applied, never grows the step");
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    iter_tune_enable(&st, g3(1.0f, 0.01f, 0.5f));
+    iter_tune_gains_t before = iter_tune_active_gains(&st);
+    iter_tune_propose_perturbation(&st, NULL);
+    uint8_t pi = st.param;
+    float step_before = st.step_frac[pi];
+    firing_compare_result_t r = verdict(FIRING_COMPARE_ALLOC_FAILED);
+    for (int i = 0; i < ITER_TUNE_MAX_CARRIES; i++) {
+        TEST_CHECK(iter_tune_process_comparison(&st, &r, NULL, 0) == ITER_TUNE_RESULT_CARRIED,
+                   "ALLOC_FAILED carried");
+        TEST_CHECK(st.has_pending, "trial stays armed across an ALLOC_FAILED comparison");
+    }
+    TEST_CHECK(st.trials_scored == 0, "ALLOC_FAILED never counted as a scored trial");
+    TEST_CHECK(st.step_frac[pi] == step_before, "ALLOC_FAILED never grows the step (not INSUFFICIENT)");
+    TEST_CHECK(iter_tune_process_comparison(&st, &r, NULL, 0) == ITER_TUNE_RESULT_CARRY_EXHAUSTED,
+               "ALLOC_FAILED shares the carry cap");
+    iter_tune_gains_t after = iter_tune_active_gains(&st);
+    TEST_CHECK(memcmp(&before, &after, sizeof(before)) == 0, "gains reverted exactly, never applied");
+}
+
 static void test_fault_disables_stickily(void)
 {
     TEST_SECTION("iter_tune: a fault discards the trial and disables the zone, sticky");
@@ -1278,6 +1303,7 @@ void run_test_iter_tune(void)
     test_lag_signed_distinguishes_lead_from_lag();
     test_lag_signed_includes_saturated_short_ticks();
     test_no_matched_pairs_is_first_class();
+    test_alloc_failed_carries_never_scored();
     test_different_profiles_still_compare();
     test_owner_floor_refuses_small_wins();
     test_veto_rejects_a_trade();

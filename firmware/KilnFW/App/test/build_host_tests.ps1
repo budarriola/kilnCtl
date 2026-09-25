@@ -2450,7 +2450,7 @@ try {
     # allocates raw[]/norm[]/in_band[] (reachable from the profile_executor
     # task stack via firing_shadow_finish_firing()). This #includes
     # firing_compare.c with malloc/free redirected to counting fakes to prove
-    # each allocation failure returns NO_MATCHED_PAIRS without leaking -- so
+    # each allocation failure returns ALLOC_FAILED without leaking -- so
     # it cannot share an executable that links the real firing_compare.c.
     $exeFca = Join-Path $outDir "kilnctl_host_tests_firing_compare_alloc.exe"
     $fcaObjDir = Join-Path $outDir "fca"

@@ -36,15 +36,18 @@ static esp_err_t iter_tune_status_get_handler(httpd_req_t *req)
     // the rest of this file.
     {
         firing_shadow_status_t shadow;
-        char chunk[176];
+        // 208: worst case (six 10-digit counters) is 193 bytes incl. NUL
+        // since alloc_failed_count joined the object (store v2).
+        char chunk[208];
         int n;
         if (firing_shadow_get_status(&shadow)) {
             n = snprintf(chunk, sizeof(chunk),
                          "{\"shadow\":{\"firings_scored\":%lu,\"accept_count\":%lu,\"reject_count\":%lu,"
-                         "\"insufficient_count\":%lu,\"no_matched_pairs_count\":%lu},",
+                         "\"insufficient_count\":%lu,\"no_matched_pairs_count\":%lu,"
+                         "\"alloc_failed_count\":%lu},",
                          (unsigned long)shadow.firings_scored, (unsigned long)shadow.accept_count,
                          (unsigned long)shadow.reject_count, (unsigned long)shadow.insufficient_count,
-                         (unsigned long)shadow.no_matched_pairs_count);
+                         (unsigned long)shadow.no_matched_pairs_count, (unsigned long)shadow.alloc_failed_count);
         } else {
             n = snprintf(chunk, sizeof(chunk), "{\"shadow\":null,");
         }
