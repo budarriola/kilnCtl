@@ -72,39 +72,31 @@ STORES:
     convert_safety_config_blob() refuses a target below the current format
     version by name.
 
-NOT YET SUPPORTED (best-effort tool, refuses rather than guesses):
-  - The ESP's raw zones_cfg_t NVS/blob record
-    (firmware/KilnFW/App/drivers/persist/zones_config_json.h,
-    ZONES_CFG_VERSION, currently 26) IS deterministically decodable -- every
-    historical shape from `zone_cfg_v1_t` on carries
-    `_Static_assert(sizeof(...) == N, ...)` and per-field
-    `_Static_assert(offsetof(...) == N, ...)` pairs, the same class of
-    compile-time-verified layout this module already trusts for the
-    safety_config_blob store above. It stays unsupported here purely for
-    size, not indeterminism: 26 versions of `zones_cfg_t` plus 14+ versions
-    of the nested `zone_cfg_t` (zones_config_json.h is ~3500 lines) is a
-    large, incremental mirroring effort of its own -- rushing it risks
-    exactly the silently-wrong-output failure this module's whole design is
-    built to avoid. detect_kind() refuses a document shaped like this with a
-    message naming zones_config_json.h and this reason (size, not
-    non-determinism) rather than attempting a partial, unverified
-    conversion.
-  - kiln_cfg_store's "kilnpkg.json" package format (kiln_package.h) is
-    ALREADY JSON at the envelope level (kind "kilnctl_kiln_package" per
-    kiln_package.h; `kiln_package_export_json()`/`_import_json()`) -- not
-    the opaque binary container this docstring used to describe. Its
-    envelope holds `esp_blob_hex` (the exact bytes
-    `zones_config_export_blob()` would read from/write to flash, i.e. a raw
-    zones_cfg_t blob -- the format immediately above) and a `pico` array of
-    already-decoded `{id,type,flags,value_bits}` param entries, which carry
-    no version of their own (param ids only ever go up). Converting a
-    kilnpkg.json document to a different ZONES_CFG_VERSION therefore
-    reduces entirely to decoding/re-encoding its `esp_blob_hex` field with
-    the zones_cfg_t support above -- there is no separate container format
-    left to write once that lands. This module still refuses kind
-    "kilnctl_kiln_cfg_package" by name pending that prerequisite, pointing
-    at kiln_package.h and the zones_cfg_t note above rather than the old
-    "container format" framing.
+ZONES_CFG_T / KILN_PACKAGE (landed 2026-09-24, see the "zones_blob store" and
+"kiln_package store" section comments below for the full derivation):
+  - "zones_blob" (kind "kilnctl_zones_blob"): the ESP's raw zones_cfg_t
+    NVS/blob record (firmware/KilnFW/App/drivers/persist/
+    zones_config_json.h, ZONES_CFG_VERSION, currently 26). STAGE 1 ONLY:
+    decodes/encodes the CURRENT version byte-exactly (offsets cross-checked
+    against zone_cfg_v25_t's real `_Static_assert`s and against
+    ZONES_CONFIG_BLOB_MAX_SIZE, and pinned going forward by
+    check_zones_blob_mirror.py). STAGE 2 (the other 25 historical shapes,
+    firmware's `convert_versioned_blob_to_current()`) was assessed and NOT
+    attempted this pass -- porting even one branch correctly needs a real
+    captured or host-test-emitted blob of that exact version to check
+    against, which this session did not have time to produce for all 25.
+    `decode_zones_blob()`/`convert_zones_blob()` refuse any version other
+    than ZONES_CFG_VERSION by name, pointing here, rather than guessing.
+  - "kiln_package" (kind "kilnctl_kiln_package" -- KILN_PKG_KIND;
+    previously misnamed "kilnctl_kiln_cfg_package" in this docstring, which
+    never matched the real macro): kiln_cfg_store's "kilnpkg.json" envelope.
+    STAGE 3, built on zones_blob support immediately above: its
+    `esp_blob_hex` field is a raw zones_cfg_t blob, decoded/re-encoded with
+    the same functions, and `pkg_hash` is recomputed the same way
+    `kiln_package_compute_hash()` does. `pico` and `source_board_id` pass
+    through unchanged. Inherits zones_blob's STAGE 1 limit: a package whose
+    esp_blob_hex is not already at ZONES_CFG_VERSION refuses with the same
+    message.
 
 CRC. profile_persisted_t's crc32 tail is esp_crc32_le() (a standard
 reflected CRC-32, poly 0xEDB88320, no init complement, no final XOR -- the
@@ -202,26 +194,12 @@ class ConversionReport:
 # Kinds this module refuses by name, with a pointer to why -- see module
 # docstring's "NOT YET SUPPORTED" section. Checked before falling through to
 # "unrecognized document shape" so the caller gets a specific, actionable
-# message rather than a generic one.
-KNOWN_UNSUPPORTED_KINDS = {
-    "kilnctl_kiln_cfg_package": (
-        "kiln_cfg_store's kilnpkg.json package (kiln_package.h) is JSON-"
-        "enveloped already, but its esp_blob_hex field carries a raw "
-        "zones_cfg_t blob -- converting it needs zones_cfg_t support first "
-        "(unsupported below for size, not indeterminism: 26 ZONES_CFG_VERSION "
-        "shapes in zones_config_json.h). See config_convert.py's module "
-        "docstring."
-    ),
-    "kilnctl_zones_blob": (
-        "the ESP's raw zones_cfg_t NVS/blob record "
-        "(firmware/KilnFW/App/drivers/persist/zones_config_json.h, "
-        "ZONES_CFG_VERSION, currently 26) IS deterministically decodable "
-        "(_Static_assert'd sizes/offsets throughout) but is not yet "
-        "supported here -- 26 historical struct shapes across ~3500 lines "
-        "is a large mirroring effort this pass did not attempt. See "
-        "config_convert.py's module docstring."
-    ),
-}
+# message rather than a generic one. Empty as of 2026-09-24: every kind this
+# module used to refuse outright (kilnctl_zones_blob, kilnctl_kiln_package)
+# is now at least partially supported -- a document at an unsupported
+# *version* within a recognized kind still refuses, just later, from
+# convert_zones_blob()/convert_document(), with a version-specific message.
+KNOWN_UNSUPPORTED_KINDS = {}
 
 
 def detect_kind(doc: dict) -> str:
@@ -238,11 +216,16 @@ def detect_kind(doc: dict) -> str:
         return "profile_blob"
     if kind == "kilnctl_safety_config_blob":
         return "safety_config_blob"
+    if kind == "kilnctl_zones_blob":
+        return "zones_blob"
+    if kind == "kilnctl_kiln_package":
+        return "kiln_package"
     if kind in KNOWN_UNSUPPORTED_KINDS:
         raise ConfigConvertError(KNOWN_UNSUPPORTED_KINDS[kind])
     raise ConfigConvertError(
         f"could not identify a known config store from this document (kind={kind!r}). "
-        "Known kinds: kilnctl_backup, kilnctl_profile_blob, kilnctl_safety_config_blob. "
+        "Known kinds: kilnctl_backup, kilnctl_profile_blob, kilnctl_safety_config_blob, "
+        "kilnctl_zones_blob, kilnctl_kiln_package. "
         f"Not-yet-supported kinds: {sorted(KNOWN_UNSUPPORTED_KINDS)}"
     )
 
@@ -939,6 +922,399 @@ def convert_safety_config_blob(blob: bytes, target_version: int) -> "tuple[bytes
 
 
 # ---------------------------------------------------------------------------
+# zones_blob store -- mirrors firmware/KilnFW/App/drivers/persist/
+# zones_config_json.h's CURRENT (ZONES_CFG_VERSION 26) zone_cfg_t/
+# zone_timing_profile_t/zones_cfg_t layout byte-for-byte, little-endian
+# (Xtensa/ESP32-S3 is little-endian), natural C alignment (no #pragma pack
+# anywhere in that header).
+#
+# STAGE 1 ONLY (2026-09-24): decodes/encodes the CURRENT version exactly.
+# Every offset below was NOT hand-guessed from field declaration order --
+# zone_cfg_t has no historical version's worth of _Static_assert of its own
+# (only the FROZEN zone_cfg_vN_t snapshots do, since the current struct's
+# offsets shift every time a field is added), but zone_cfg_v25_t is declared
+# "field-for-field IDENTICAL to the current zone_cfg_t minus the tail field
+# autotune_baseline_k_dc" in that struct's own comment, and IS fully pinned
+# by _Static_assert(offsetof(...)) pairs through offset 240 plus
+# sizeof(zone_cfg_v25_t) == 244. Every offset up to 240 below was cross-
+# checked field-by-field against those real, compiled-checked asserts (and
+# transitively against v24/v23/v22/v16's own asserts, which agree at every
+# offset they share) before being typed in here; autotune_baseline_k_dc
+# itself lands at 244 (no padding needed, 244 is already 4-byte aligned) and
+# sizeof(zone_cfg_t) == 248. The zones_cfg_t container's own layout
+# (version/thermo_count/.../zones[]/timing_profile_count/timing_profiles[]/
+# pc_link_abort_silence_ms/crc32) was computed the same way, by hand, from
+# natural alignment rules -- and the result, 896 bytes total, matches
+# zones_config_accessors.h's independent ZONES_CONFIG_BLOB_MAX_SIZE #define
+# EXACTLY (that macro is sized to fit sizeof(zones_cfg_t) with headroom
+# reduced to zero on purpose, per that header's own comment; a real firmware
+# compile with a different total would either not compile past that macro's
+# _Static_assert or would fail check_zones_blob_mirror.py below, whichever
+# comes first) -- the strongest cross-check available without a live
+# compiler on this machine. Pinned going forward by
+# check_zones_blob_mirror.py, which re-derives the same struct-tail
+# _Static_assert lines from zones_config_json.h and fails loud if any of
+# them (or ZONES_CFG_VERSION/ZONE_NAME_MAX_LEN/SRC_GROUP_COUNT/
+# THERMO_CHANNEL_COUNT/TIMING_PROFILE_NAME_MAX_LEN/ZONES_CONFIG_BLOB_MAX_SIZE)
+# drift out of step with this module's constants below.
+#
+# STAGE 2 (older versions) was assessed and NOT attempted this pass: firmware
+# converts an arbitrary historical version straight to current in one
+# function, convert_versioned_blob_to_current() (zones_config_migrate.c),
+# not a chained N-1->N step -- porting even one of its 25 branches correctly
+# needs a real captured or host-test-emitted blob of that exact historical
+# version to check against, and this module's whole design (see module
+# docstring) is to refuse rather than guess. convert_zones_blob() below
+# refuses every source version other than ZONES_CFG_VERSION by name, pointing
+# here, rather than attempting an unverified partial port.
+# ---------------------------------------------------------------------------
+
+ZONES_CFG_VERSION = 26  # zones_config_json.h ZONES_CFG_VERSION
+ZONE_NAME_MAX_LEN = 15  # zones_config_accessors.h ZONE_NAME_MAX_LEN
+TIMING_PROFILE_NAME_MAX_LEN = 7  # zones_config_accessors.h TIMING_PROFILE_NAME_MAX_LEN
+SRC_GROUP_COUNT = 5  # zones_config_accessors.h SRC_GROUP_COUNT
+THERMO_CHANNEL_COUNT = 3  # uart_task_ids.h THERMO_CHANNEL_COUNT (== MAX31856_CHANNEL_COUNT)
+ZONES_CONFIG_BLOB_MAX_SIZE = 896  # zones_config_accessors.h ZONES_CONFIG_BLOB_MAX_SIZE
+
+_ZONE_NAME_LEN = ZONE_NAME_MAX_LEN + 1  # 16
+_TIMING_PROFILE_NAME_LEN = TIMING_PROFILE_NAME_MAX_LEN + 1  # 8
+
+# zone_cfg_t, 248 bytes. Field order and every 'x' pad byte below is
+# transcribed from the module comment's byte-by-byte derivation above.
+_ZONE_CFG_FMT = (
+    "<"
+    f"{_ZONE_NAME_LEN}s"          # name
+    "24f"                          # cal_offset_c .. fuzzy_strength_pct (24 floats)
+    f"{THERMO_CHANNEL_COUNT}f"     # coupling_coeff[]
+    f"{THERMO_CHANNEL_COUNT}f"     # coupling_tau_s[]
+    f"{THERMO_CHANNEL_COUNT}f"     # coupling_dead_time_s[]
+    "6B"                           # relay_mask, control_mode, tc_type, thermo_mask, ct_mask, timing_profile
+    f"{SRC_GROUP_COUNT}B"          # settings_source[]
+    "6B"                           # tuning_valid/method/rule/settled/extrapolation_converged/tau_consistent
+    "3x"                           # pad to 4-byte-align tuning_baseline_c
+    "4f"                           # tuning_baseline_c, tuning_step_ambient_c, tuning_raw_rise_c, tuning_rise_inf_c
+    "I"                            # tuning_seq
+    "B"                            # adaptive_tune_enabled
+    "3x"                           # pad to 4-byte-align coupling_diag_k_dc
+    "5f"                           # coupling_diag_k_dc, ease_off_window_mult, approach_rate_cap_c_per_hr,
+                                    # error_band_c, rate_band_c_per_s
+    "B"                            # relay_type
+    "3x"                           # pad to 4-byte-align progress_band_c
+    "f"                            # progress_band_c
+    "B"                            # zone_type
+    "B"                            # failsafe_state
+    "2x"                           # pad to 4-byte-align hyst_c
+    "f"                            # hyst_c
+    "H"                            # min_on_s
+    "H"                            # min_off_s
+    "f"                            # model_fit_temp_c
+    "f"                            # model_fit_ambient_c
+    "f"                            # coil_power_w
+    "f"                            # autotune_baseline_k_dc
+)
+_ZONE_CFG_STRUCT = struct.Struct(_ZONE_CFG_FMT)
+assert _ZONE_CFG_STRUCT.size == 248, f"zone_cfg_t layout must be 248 bytes, computed {_ZONE_CFG_STRUCT.size}"
+
+_ZONE_FLOAT1_FIELDS = (
+    "cal_offset_c", "pid_kp", "pid_ki", "pid_kd", "max_ramp_c_per_hr", "sanity_rate_c_per_min",
+    "max_temp_c", "min_temp_c", "heater_window_ms", "heater_min_on_ms", "heater_min_off_ms",
+    "guard_wrong_dir_window_s", "guard_wrong_dir_rate_c_per_min", "guard_off_settle_s",
+    "guard_runaway_rate_c_per_min", "guard_runaway_margin_c", "guard_drift_period_s",
+    "guard_sensor_fault_debounce_ticks", "guard_frozen_window_s", "cross_zone_max_delta_c",
+    "model_k_dc", "model_tau_s", "model_dead_time_s", "fuzzy_strength_pct",
+)
+assert len(_ZONE_FLOAT1_FIELDS) == 24
+
+# zone_timing_profile_t, 44 bytes.
+_TIMING_PROFILE_FMT = f"<{_TIMING_PROFILE_NAME_LEN}s9f"
+_TIMING_PROFILE_STRUCT = struct.Struct(_TIMING_PROFILE_FMT)
+assert _TIMING_PROFILE_STRUCT.size == 44, f"zone_timing_profile_t must be 44 bytes, computed {_TIMING_PROFILE_STRUCT.size}"
+_TIMING_PROFILE_FLOAT_FIELDS = (
+    "guard_progress_duty_min", "guard_progress_window_s", "guard_drift_hysteresis_c", "guard_frozen_eps_c",
+    "guard_cross_zone_period_s", "bangbang_hysteresis_c", "cooling_limited_margin_c", "cooling_limited_hold_s",
+    "ramp_lock_band_c",
+)
+assert len(_TIMING_PROFILE_FLOAT_FIELDS) == 9
+
+# zones_cfg_t header, 6 bytes + 2 pad, before zones[THERMO_CHANNEL_COUNT].
+_ZONES_HEADER_FMT = "<6B2x"
+_ZONES_HEADER_STRUCT = struct.Struct(_ZONES_HEADER_FMT)
+# Tail after zones[]: timing_profile_count (1B) + 3 pad, before
+# timing_profiles[THERMO_CHANNEL_COUNT], then pc_link_abort_silence_ms (f) + crc32 (I).
+_ZONES_TAIL_FMT = "<B3x"
+_ZONES_TAIL_STRUCT = struct.Struct(_ZONES_TAIL_FMT)
+_ZONES_FOOTER_FMT = "<fI"
+_ZONES_FOOTER_STRUCT = struct.Struct(_ZONES_FOOTER_FMT)
+
+_ZONES_CFG_TOTAL_SIZE = (
+    _ZONES_HEADER_STRUCT.size
+    + _ZONE_CFG_STRUCT.size * THERMO_CHANNEL_COUNT
+    + _ZONES_TAIL_STRUCT.size
+    + _TIMING_PROFILE_STRUCT.size * THERMO_CHANNEL_COUNT
+    + _ZONES_FOOTER_STRUCT.size
+)
+assert _ZONES_CFG_TOTAL_SIZE == ZONES_CONFIG_BLOB_MAX_SIZE, (
+    f"computed sizeof(zones_cfg_t) {_ZONES_CFG_TOTAL_SIZE} != ZONES_CONFIG_BLOB_MAX_SIZE "
+    f"{ZONES_CONFIG_BLOB_MAX_SIZE} -- see this module's zones_blob section comment"
+)
+
+
+def _decode_zone_cfg(raw: bytes) -> dict:
+    vals = list(_ZONE_CFG_STRUCT.unpack(raw))
+    out = {"name": _decode_name(vals.pop(0))}
+    for f in _ZONE_FLOAT1_FIELDS:
+        out[f] = vals.pop(0)
+    out["coupling_coeff"] = [vals.pop(0) for _ in range(THERMO_CHANNEL_COUNT)]
+    out["coupling_tau_s"] = [vals.pop(0) for _ in range(THERMO_CHANNEL_COUNT)]
+    out["coupling_dead_time_s"] = [vals.pop(0) for _ in range(THERMO_CHANNEL_COUNT)]
+    for f in ("relay_mask", "control_mode", "tc_type", "thermo_mask", "ct_mask", "timing_profile"):
+        out[f] = vals.pop(0)
+    out["settings_source"] = [vals.pop(0) for _ in range(SRC_GROUP_COUNT)]
+    for f in ("tuning_valid", "tuning_method", "tuning_rule", "tuning_settled",
+              "tuning_extrapolation_converged", "tuning_tau_consistent"):
+        out[f] = vals.pop(0)
+    for f in ("tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c", "tuning_rise_inf_c"):
+        out[f] = vals.pop(0)
+    out["tuning_seq"] = vals.pop(0)
+    out["adaptive_tune_enabled"] = vals.pop(0)
+    for f in ("coupling_diag_k_dc", "ease_off_window_mult", "approach_rate_cap_c_per_hr",
+              "error_band_c", "rate_band_c_per_s"):
+        out[f] = vals.pop(0)
+    out["relay_type"] = vals.pop(0)
+    out["progress_band_c"] = vals.pop(0)
+    out["zone_type"] = vals.pop(0)
+    out["failsafe_state"] = vals.pop(0)
+    out["hyst_c"] = vals.pop(0)
+    out["min_on_s"] = vals.pop(0)
+    out["min_off_s"] = vals.pop(0)
+    out["model_fit_temp_c"] = vals.pop(0)
+    out["model_fit_ambient_c"] = vals.pop(0)
+    out["coil_power_w"] = vals.pop(0)
+    out["autotune_baseline_k_dc"] = vals.pop(0)
+    assert not vals
+    return out
+
+
+def _encode_zone_cfg(z: dict) -> bytes:
+    args = [_encode_name(z["name"])[: _ZONE_NAME_LEN].ljust(_ZONE_NAME_LEN, b"\x00")]
+    args += [z[f] for f in _ZONE_FLOAT1_FIELDS]
+    args += list(z["coupling_coeff"])
+    args += list(z["coupling_tau_s"])
+    args += list(z["coupling_dead_time_s"])
+    args += [z[f] for f in ("relay_mask", "control_mode", "tc_type", "thermo_mask", "ct_mask", "timing_profile")]
+    args += list(z["settings_source"])
+    args += [z[f] for f in ("tuning_valid", "tuning_method", "tuning_rule", "tuning_settled",
+                             "tuning_extrapolation_converged", "tuning_tau_consistent")]
+    args += [z[f] for f in ("tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
+                             "tuning_rise_inf_c")]
+    args += [z["tuning_seq"], z["adaptive_tune_enabled"]]
+    args += [z[f] for f in ("coupling_diag_k_dc", "ease_off_window_mult", "approach_rate_cap_c_per_hr",
+                             "error_band_c", "rate_band_c_per_s")]
+    args += [z["relay_type"], z["progress_band_c"], z["zone_type"], z["failsafe_state"]]
+    args += [z["hyst_c"], z["min_on_s"], z["min_off_s"], z["model_fit_temp_c"], z["model_fit_ambient_c"],
+             z["coil_power_w"], z["autotune_baseline_k_dc"]]
+    return _ZONE_CFG_STRUCT.pack(*args)
+
+
+def _decode_timing_profile(raw: bytes) -> dict:
+    vals = list(_TIMING_PROFILE_STRUCT.unpack(raw))
+    out = {"name": _decode_name(vals.pop(0))}
+    for f in _TIMING_PROFILE_FLOAT_FIELDS:
+        out[f] = vals.pop(0)
+    assert not vals
+    return out
+
+
+def _encode_timing_profile(p: dict) -> bytes:
+    name = p["name"].encode("ascii", errors="replace")[:TIMING_PROFILE_NAME_MAX_LEN]
+    name = name + b"\x00" * (_TIMING_PROFILE_NAME_LEN - len(name))
+    args = [name] + [p[f] for f in _TIMING_PROFILE_FLOAT_FIELDS]
+    return _TIMING_PROFILE_STRUCT.pack(*args)
+
+
+def decode_zones_blob(blob: bytes) -> "tuple[int, dict]":
+    """Decode a raw zones_cfg_t NVS/flash blob into (version, fields_dict).
+    STAGE 1 ONLY -- refuses any version other than ZONES_CFG_VERSION (see
+    this module's zones_blob section comment for why older versions are not
+    yet supported), and any length that does not match exactly (firmware
+    never writes a short or padded record for the current version either)."""
+    if len(blob) < 1:
+        raise ConfigConvertError("zones_blob document is empty (need at least a version byte)")
+    version = blob[0]
+    if version != ZONES_CFG_VERSION:
+        raise ConfigConvertError(
+            f"zones_blob version {version} is not supported -- this module only decodes the CURRENT "
+            f"ZONES_CFG_VERSION ({ZONES_CFG_VERSION}). Porting the other {ZONES_CFG_VERSION - 1} historical "
+            "shapes (zones_config_migrate.c's convert_versioned_blob_to_current()) was assessed and not "
+            "attempted this pass -- see config_convert.py's zones_blob section comment. Refusing rather "
+            "than guessing."
+        )
+    if len(blob) != _ZONES_CFG_TOTAL_SIZE:
+        raise ConfigConvertError(
+            f"zones_blob claims version {ZONES_CFG_VERSION} but is {len(blob)} bytes, not "
+            f"{_ZONES_CFG_TOTAL_SIZE} -- refusing rather than guessing at a truncated or padded record"
+        )
+    off = 0
+    header = _ZONES_HEADER_STRUCT.unpack_from(blob, off)
+    off += _ZONES_HEADER_STRUCT.size
+    zones = []
+    for _ in range(THERMO_CHANNEL_COUNT):
+        zones.append(_decode_zone_cfg(blob[off: off + _ZONE_CFG_STRUCT.size]))
+        off += _ZONE_CFG_STRUCT.size
+    (timing_profile_count,) = _ZONES_TAIL_STRUCT.unpack_from(blob, off)
+    off += _ZONES_TAIL_STRUCT.size
+    timing_profiles = []
+    for _ in range(THERMO_CHANNEL_COUNT):
+        timing_profiles.append(_decode_timing_profile(blob[off: off + _TIMING_PROFILE_STRUCT.size]))
+        off += _TIMING_PROFILE_STRUCT.size
+    pc_link_abort_silence_ms, stored_crc = _ZONES_FOOTER_STRUCT.unpack_from(blob, off)
+    off += _ZONES_FOOTER_STRUCT.size
+    assert off == len(blob)
+
+    computed_crc = _zones_crc32(blob)
+    if computed_crc != stored_crc:
+        raise ConfigConvertError(
+            f"zones_blob crc32 mismatch: stored 0x{stored_crc:08x}, computed 0x{computed_crc:08x} -- "
+            "refusing a blob that fails its own integrity check rather than converting corrupt data"
+        )
+
+    fields = {
+        "version": header[0],
+        "thermo_count": header[1],
+        "relay_count": header[2],
+        "max_simultaneous_relays": header[3],
+        "continue_on_zone_trip": header[4],
+        "safety_tc_type": header[5],
+        "zones": zones,
+        "timing_profile_count": timing_profile_count,
+        "timing_profiles": timing_profiles,
+        "pc_link_abort_silence_ms": pc_link_abort_silence_ms,
+    }
+    return version, fields
+
+
+def _zones_crc32(blob_with_real_crc: bytes) -> int:
+    """zones_config_json_compute_crc(): esp_crc32_le over the whole struct
+    with the trailing crc32 field zeroed (never over the body alone)."""
+    body = blob_with_real_crc[: _ZONES_CFG_TOTAL_SIZE - 4]
+    return _crc32(body + b"\x00\x00\x00\x00")
+
+
+def encode_zones_blob(fields: dict) -> bytes:
+    """Encode fields (as returned by decode_zones_blob(), version must be
+    ZONES_CFG_VERSION) back to raw bytes, recomputing crc32 the same way
+    firmware's nvs_save() does. STAGE 1 ONLY -- see decode_zones_blob()."""
+    version = fields["version"]
+    if version != ZONES_CFG_VERSION:
+        raise ConfigConvertError(
+            f"cannot encode zones_blob at version {version} -- this module only encodes the CURRENT "
+            f"ZONES_CFG_VERSION ({ZONES_CFG_VERSION})"
+        )
+    header = _ZONES_HEADER_STRUCT.pack(
+        fields["version"], fields["thermo_count"], fields["relay_count"],
+        fields["max_simultaneous_relays"], fields["continue_on_zone_trip"], fields["safety_tc_type"],
+    )
+    zones_bytes = b"".join(_encode_zone_cfg(z) for z in fields["zones"])
+    if len(fields["zones"]) != THERMO_CHANNEL_COUNT:
+        raise ConfigConvertError(f"zones_blob must carry exactly {THERMO_CHANNEL_COUNT} zones, "
+                                  f"got {len(fields['zones'])}")
+    tail = _ZONES_TAIL_STRUCT.pack(fields["timing_profile_count"])
+    if len(fields["timing_profiles"]) != THERMO_CHANNEL_COUNT:
+        raise ConfigConvertError(f"zones_blob must carry exactly {THERMO_CHANNEL_COUNT} timing_profiles, "
+                                  f"got {len(fields['timing_profiles'])}")
+    profiles_bytes = b"".join(_encode_timing_profile(p) for p in fields["timing_profiles"])
+    body_no_crc = header + zones_bytes + tail + profiles_bytes + struct.pack("<f", fields["pc_link_abort_silence_ms"])
+    crc = _crc32(body_no_crc + b"\x00\x00\x00\x00")
+    return body_no_crc + struct.pack("<I", crc)
+
+
+def convert_zones_blob(blob: bytes, target_version: int) -> "tuple[bytes, ConversionReport]":
+    """STAGE 1 ONLY: source and target must both be ZONES_CFG_VERSION --
+    see decode_zones_blob()'s docstring for why older versions refuse rather
+    than convert."""
+    if target_version != ZONES_CFG_VERSION:
+        raise ConfigConvertError(
+            f"zones_blob target version {target_version} is not supported for ENCODING -- this module "
+            f"only encodes the CURRENT ZONES_CFG_VERSION ({ZONES_CFG_VERSION}). See config_convert.py's "
+            "zones_blob section comment."
+        )
+    source_version, fields = decode_zones_blob(blob)
+    report = ConversionReport(store="zones_blob", source_version=source_version, target_version=target_version)
+    report.add("document", "version", "kept", "source and target versions are identical "
+               "(only the current ZONES_CFG_VERSION is supported this pass)")
+    out = encode_zones_blob(fields)
+    return out, report
+
+
+# ---------------------------------------------------------------------------
+# kiln_package store -- kiln_cfg_store's "kilnpkg.json" envelope (kind
+# "kilnctl_kiln_package" -- KILN_PKG_KIND, firmware/KilnFW/App/drivers/
+# persist/kiln_package.h/.c). This was the module docstring's "NOT YET
+# SUPPORTED" item 2 (STAGE 3): it depended on zones_blob support (item 1,
+# STAGE 1/2 above) landing first, since its `esp_blob_hex` field IS a raw
+# zones_cfg_t blob and everything else in the envelope (`pico`, a flat array
+# of already-decoded {id,type,flags,value_bits} entries with no version of
+# its own -- param ids only ever go up, per kiln_package.h's own comment) is
+# already plain JSON needing no binary decoding at all.
+#
+# Converting a kiln_package document to another ZONES_CFG_VERSION therefore
+# reduces to: decode `esp_blob_hex` via the zones_blob functions above,
+# convert it, re-encode, and recompute `pkg_hash` over the NEW bytes exactly
+# the way kiln_package_compute_hash() does (pkg_schema u16 LE, esp_blob_len
+# u16 LE, esp_blob bytes, pico->count u16 LE, then each pico entry as
+# id(u16 LE)+type(u8)+flags(u8)+value_bits(u32 LE), esp_crc32_le over the
+# whole buffer -- the same CRC-32 this module already treats as
+# zlib.crc32()-equivalent elsewhere, see module docstring's CRC note).
+# `source_board_id` is carried through unchanged (it identifies the
+# EXPORTING board, not this document's own version) and is deliberately
+# OUTSIDE pkg_hash's input set, matching kiln_package.h's own "RULING"
+# comment on why.
+#
+# STAGE 1/2's limits apply transitively here: a kiln_package whose
+# esp_blob_hex is not already at ZONES_CFG_VERSION refuses with the same
+# message convert_zones_blob() gives, from the same code path.
+# ---------------------------------------------------------------------------
+
+
+def _kiln_pkg_compute_hash(pkg_schema: int, esp_blob: bytes, pico_entries: "list[dict]") -> int:
+    buf = bytearray()
+    buf += struct.pack("<HH", pkg_schema, len(esp_blob))
+    buf += esp_blob
+    buf += struct.pack("<H", len(pico_entries))
+    for e in pico_entries:
+        buf += struct.pack("<HBBI", e["id"], e["type"], e["flags"], e["value_bits"])
+    return _crc32(bytes(buf))
+
+
+def convert_kiln_package(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
+    """Convert a kilnctl_kiln_package envelope's esp_blob_hex (a raw
+    zones_cfg_t blob) to target_version, re-encoding pkg_hash over the
+    result. `pico` and `source_board_id` pass through unchanged -- see this
+    module's kiln_package section comment."""
+    try:
+        esp_blob = bytes.fromhex(doc["esp_blob_hex"])
+    except (KeyError, ValueError) as exc:
+        raise ConfigConvertError(f"kilnctl_kiln_package document must carry a valid hex 'esp_blob_hex': {exc}")
+    pico_entries = doc.get("pico", [])
+    if not isinstance(pico_entries, list):
+        raise ConfigConvertError("kilnctl_kiln_package document's 'pico' field must be a list")
+    pkg_schema = doc.get("pkg_schema", 1)
+
+    out_blob, zones_report = convert_zones_blob(esp_blob, target_version)
+    report = ConversionReport(store="kiln_package", source_version=zones_report.source_version,
+                               target_version=target_version)
+    for o in zones_report.outcomes:
+        report.add(o.scope, o.field, o.action, o.detail)
+    report.add("pico", "pico", "kept", "Pico param entries carry no version of their own -- passed through unchanged")
+
+    new_hash = _kiln_pkg_compute_hash(pkg_schema, out_blob, pico_entries)
+    out_doc = dict(doc)
+    out_doc["esp_blob_hex"] = out_blob.hex()
+    out_doc["pkg_hash"] = f"0x{new_hash:08x}"
+    return out_doc, report
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch
 # ---------------------------------------------------------------------------
 
@@ -972,6 +1348,19 @@ def convert_document(doc: dict, target_version: int) -> "tuple[dict, ConversionR
             raise ConfigConvertError(f"kilnctl_safety_config_blob document must carry a valid hex 'blob_hex': {exc}")
         out_blob, report = convert_safety_config_blob(blob, target_version)
         out_doc = {"kind": "kilnctl_safety_config_blob", "version": target_version, "blob_hex": out_blob.hex()}
+        return out_doc, report
+
+    if kind == "zones_blob":
+        try:
+            blob = bytes.fromhex(doc["blob_hex"])
+        except (KeyError, ValueError) as exc:
+            raise ConfigConvertError(f"kilnctl_zones_blob document must carry a valid hex 'blob_hex': {exc}")
+        out_blob, report = convert_zones_blob(blob, target_version)
+        out_doc = {"kind": "kilnctl_zones_blob", "version": target_version, "blob_hex": out_blob.hex()}
+        return out_doc, report
+
+    if kind == "kiln_package":
+        out_doc, report = convert_kiln_package(doc, target_version)
         return out_doc, report
 
     raise ConfigConvertError(f"unreachable: detect_kind returned unhandled kind {kind!r}")
