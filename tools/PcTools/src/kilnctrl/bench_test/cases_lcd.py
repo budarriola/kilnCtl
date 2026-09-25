@@ -201,8 +201,26 @@ def _wait_for_targets_change(ui, before_names: "set",
     return tap, time.monotonic() - start
 
 
+#: 2026-09-24 LCD-08 bench run 20260924T233113Z_lcd: the original click AND
+#: its one retry both landed on a still-'home' page (~4.06s of combined
+#: polling; see docs/BENCH_TEST_LOG.md for that run). A single retry
+#: recovers a single swallow (confirmed live the same day: the screen_idle
+#: wake-swallow race eats exactly one tap), but nothing bounds it to
+#: exactly one -- a second, independent swallow (e.g. the panel re-blanking
+#: between the first retry's click and its own page-poll, or a second
+#: display_power ERROR_HOLD dismiss-then-pass-through edge,
+#: firmware/KilnFW/App/drivers/persist/display_power_policy.c) is not a
+#: distinguishable failure shape from a genuinely stuck hop -- it just
+#: takes one more bounded attempt to tell them apart. Two retries (three
+#: attempts total) trade at most one more `timeout_s` of wall time for
+#: covering that double-swallow shape; a hop that is actually stuck still
+#: fails, just after three bounded waits instead of two.
+_CLICK_THEN_PAGE_MAX_RETRIES = 2
+
+
 def _click_then_page(ui, name: str, expected_page: str,
-                      timeout_s: float = _PAGE_POLL_TIMEOUT_S) -> "tuple[Optional[CaseResult], str, float]":
+                      timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                      max_retries: int = _CLICK_THEN_PAGE_MAX_RETRIES) -> "tuple[Optional[CaseResult], str, float]":
     """Click a tap target by name, then wait for the page to become
     `expected_page`, and -- unlike a bare ``ui.click_by_name()`` +
     ``_wait_for_page()`` with the wait's return value left unchecked --
@@ -226,9 +244,10 @@ def _click_then_page(ui, name: str, expected_page: str,
     identically to this) when the click said 'ok' but the page never
     changed.
 
-    Worst case: two clicks plus two full `timeout_s` page waits (~4 s at
-    the 2 s default) when both the first click and its one retry are
-    swallowed; a not_found click fails immediately with no wait at all."""
+    Worst case: ``1 + max_retries`` clicks plus that many full `timeout_s`
+    page waits (~6 s at the 2 s default with the default two retries) when
+    every attempt is swallowed; a not_found click fails immediately with no
+    wait at all."""
     try:
         page_before = ui.get_current_page()
     except Exception:
@@ -246,54 +265,68 @@ def _click_then_page(ui, name: str, expected_page: str,
         )
     page, waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
     if page != expected_page:
-        # One retry: click_by_name() said 'ok' (the target existed and an
-        # injection was issued) but the page never arrived within
-        # timeout_s -- the documented screen_idle/touch-poll swallow race
-        # this module's module docstring names, where the tap that landed
-        # was the one that woke an already-reblanked panel rather than
-        # actually reaching the widget underneath. A second click on an
-        # awake panel (screen_on is already true post-wake, so this retry's
+        # Retry up to max_retries times: click_by_name() said 'ok' (the
+        # target existed and an injection was issued) but the page never
+        # arrived within timeout_s -- the documented screen_idle/touch-poll
+        # swallow race this module's module docstring names, where the tap
+        # that landed was the one that woke an already-reblanked panel
+        # rather than actually reaching the widget underneath. A retry on
+        # an awake panel (screen_on is already true post-wake, so a retry's
         # own tap cannot itself be a NEW wake edge) either recovers cleanly
-        # or proves the hop is genuinely stuck -- retried once, not looped,
-        # so a real defect still fails within a bounded time.
+        # or proves the hop is genuinely stuck. The 2026-09-24 LCD-08 bench
+        # run (20260924T233113Z_lcd) showed a DOUBLE swallow -- the first
+        # click AND one retry both stayed on 'home' -- so a single retry is
+        # not enough to distinguish "rare double swallow" from "genuinely
+        # stuck"; retries are still bounded (max_retries, default 2), so a
+        # real defect still fails within a bounded time.
         #
-        # Retried ONLY when the board is still on the exact page it was on
-        # before the first click (the swallow shape: nothing happened). If
-        # the page moved somewhere else (a late or wrong transition), a
-        # second tap by the same name would land on a DIFFERENT page's
-        # widget of that name -- never do that; fail without a second tap.
-        # Every current caller clicks a pure navigation target (settings,
-        # Profiles, Temperature, Diagnostics), so a double tap on the
-        # unchanged source page is harmless; never route a Start/Stop/
-        # Confirm/PIN-digit/toggle click through this helper.
-        retry_click = None
-        if page_before is not None and page == page_before:
-            retry_click = ui.click_by_name(name)
-            if retry_click.get("result") == "ok":
-                retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
-                if retry_page == expected_page:
-                    return None, retry_page, waited_s + retry_waited_s
-                page, waited_s = retry_page, waited_s + retry_waited_s
+        # Retried ONLY as long as the board is still on the exact page it
+        # was on before the first click (the swallow shape: nothing
+        # happened). If the page moved somewhere else (a late or wrong
+        # transition), a further tap by the same name would land on a
+        # DIFFERENT page's widget of that name -- never do that; fail
+        # without a further tap. Every current caller clicks a pure
+        # navigation target (settings, Profiles, Temperature, Diagnostics),
+        # so a repeated tap on the unchanged source page is harmless; never
+        # route a Start/Stop/Confirm/PIN-digit/toggle click through this
+        # helper.
+        retries_done = 0
+        last_click = click
+        while (
+            retries_done < max_retries
+            and page_before is not None
+            and page == page_before
+        ):
+            retries_done += 1
+            last_click = ui.click_by_name(name)
+            if last_click.get("result") != "ok":
+                break
+            retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
+            page, waited_s = retry_page, waited_s + retry_waited_s
+            if page == expected_page:
+                return None, page, waited_s
         observed = {
             "click": click,
             "page_before": page_before,
             "page": page,
             "page_wait_s": round(waited_s, 3),
             "attribution": (
-                "swallowed_or_wrong_page" if retry_click is not None
+                "swallowed_or_wrong_page" if retries_done > 0
                 else "wrong_page" if page_before is not None
                 else "page_before_unreadable"
             ),
         }
-        if retry_click is not None:
-            observed["retry_click"] = retry_click
+        if retries_done > 0:
+            observed["retry_click"] = last_click
+            observed["retries"] = retries_done
         return (
             CaseResult(
                 Verdict.FAIL,
                 reason=(
                     f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
                     f"expected {expected_page!r}"
-                    + (" (retried once)" if retry_click is not None
+                    + (f" (retried {retries_done} time{'s' if retries_done != 1 else ''})"
+                       if retries_done > 0
                        else f" (page moved from {page_before!r}; not retried)")
                     + J.BLANKED_SCREEN_HINT
                 ),

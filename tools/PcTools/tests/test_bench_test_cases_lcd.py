@@ -677,11 +677,47 @@ class ClickThenPageTest(unittest.TestCase):
         fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
-        self.assertIn("retried once", fail.reason)
+        self.assertIn("retried 2 times", fail.reason)
         self.assertEqual(fail.observed.get("attribution"), "swallowed_or_wrong_page")
-        # Exactly one retry: two real taps, never more.
-        self.assertEqual(ui.clicks, ["settings", "settings"])
+        # Default max_retries=2: the original tap plus exactly two retries,
+        # never more.
+        self.assertEqual(ui.clicks, ["settings", "settings", "settings"])
         self.assertIn("retry_click", fail.observed)
+        self.assertEqual(fail.observed.get("retries"), 2)
+
+    def test_double_swallow_recovers_on_second_retry(self):
+        # 2026-09-24 LCD-08 bench run 20260924T233113Z_lcd: the original
+        # click AND its one (then-only) retry both stayed on 'home'. This is
+        # the regression test for that exact shape -- two swallows in a row,
+        # recovered by the third attempt now that max_retries defaults to 2.
+        class _RecoversOnThirdClick(PageNavUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.calls = 0
+
+            def click_by_name(self, name):
+                self.calls += 1
+                if self.calls <= 2:
+                    return {"result": "ok"}  # swallowed twice: no page change
+                return super().click_by_name(name)
+
+        ui = _RecoversOnThirdClick(page="home", page_targets={"home": [], "config": []},
+                                    nav_map={"settings": "config"})
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNone(fail)
+        self.assertEqual(page, "config")
+        self.assertEqual(ui.calls, 3)
+
+    def test_max_retries_zero_restores_single_attempt_behavior(self):
+        # Negative-test knob: max_retries=0 collapses back to the old
+        # never-retry behavior, so the retry loop itself (not some other
+        # path) is what's responsible for recovering a swallow.
+        ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={})
+        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=0)
+        self.assertIsNotNone(fail)
+        self.assertIn("not retried", fail.reason)
+        self.assertEqual(fail.observed.get("attribution"), "wrong_page")
+        self.assertEqual(ui.clicks, ["settings"])
 
     def test_not_found_attribution_never_retries(self):
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
@@ -819,7 +855,8 @@ class FirstHopTimeoutCaseTest(unittest.TestCase):
         }
         ui = _RecordingNavUi(page="home", page_targets=page_targets, nav_map={second: dest})
         srv = FakeSrvFull(ui)
-        with mock.patch.object(C._click_then_page, "__defaults__", (0.05,)):
+        with mock.patch.object(C._click_then_page, "__defaults__",
+                                (0.05, C._CLICK_THEN_PAGE_MAX_RETRIES)):
             result = case_fn({"srv": srv})
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("'settings'", result.reason)
