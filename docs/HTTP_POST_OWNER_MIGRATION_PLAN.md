@@ -141,36 +141,60 @@ critical section, not a mutex -- the guarded window is a handful of
 instructions). `ct_auto_zero_post_handler()` (`safety_cfg_http.c`) now
 validates/checks preconditions on `httpd_worker`, then hands off to a new
 `ct_auto_zero_job()` running on a one-shot `xTaskCreate` task
-(`http_async_job`, internal-RAM stack, 4096 B, `stack_margin_register()`ed
-unconditionally and tagged `# liveness: on-demand` in
-`tools/check_stack_margin_registration.ps1`). Response bodies/status codes
-are byte-identical to the old inline handler; the busy-refusal reply is the
-same synchronous `{"ok":false,"reason":"another commissioning operation is
-running"}` this route already used, sent on the original `req` (the helper
-never touches `req` on any refusal path). Host-test stubs
+(`http_async_job`, internal-RAM stack, raised 4096 -> 6144 B in the
+2026-09-25 fix-then-push review once the real resolved depth was measured
+(see below), `stack_margin_register()`ed unconditionally and tagged
+`# liveness: on-demand` in `tools/check_stack_margin_registration.ps1`).
+Every existing body and status is unchanged from the old inline handler,
+plus one new synchronous refusal for a concurrent second POST: the
+`{"ok":false,"reason":"another commissioning operation is running"}` busy
+reply is NEW as of A1, not something this route already sent -- pre-A1 a
+second concurrent POST simply ran inline behind the first on `httpd_worker`,
+since no busy state existed yet to refuse it with. It is sent on the
+original `req` (the helper never touches `req` on any refusal path).
+`http_async_job_try_start()` also distinguishes this ordinary busy
+contention from a resource failure (`begin()` or `xTaskCreate()` failing) --
+the caller replies busy only for real contention, and its own existing 500
+"out of memory" reply for a resource failure, never folding the two into one
+boolean (2026-09-25 fix-then-push review). Host-test stubs
 (`App/test/stubs/esp_http_server.h`, `stubs/freertos/task.h`) gained
 injectable `begin`/task-create failure and a `complete()` call counter;
 `test_http_async_job.c` covers admission, busy refusal, begin failure,
-task-create failure (undoes `begin` via one `complete()`), and
-begin/complete pairing through `run_job()` directly -- negative-tested by
-dropping the `complete()` call, confirming the new test failed, and
-restoring by hand with a forced full rebuild (61/61 executables). A target
-build produced a fresh ELF this pass: `check_kilnfw_dram_bss_budget.py`
-measures `.dram0.bss` at 98952 B against the 101000 B ceiling (2048 B
-headroom) -- this helper's added file-scope state (a `portMUX_TYPE`, a
-`bool`, one `TaskHandle_t`, one small run-context struct) is a few dozen
-bytes of that total, not measured in isolation. `http_async_job.c` was also
-missing from `drivers/CMakeLists.txt`'s SRCS list until this pass (caught by
-the full `run_all_checks.ps1` run, not by host tests, since the host-test
-harness links it separately -- the real target build failed at link time
-until this was added). Stack was not measured on real hardware this pass
-(board was mid heat-run); `check_all_task_stack_budgets.py`'s static ELF
-walk reports it INDETERMINATE (same class as `ota_pico_rollback`, sharing
-that task's 4096 B declared stack and a comparable job shape) because
+task-create failure (undoes `begin` via one `complete()`), begin/complete
+pairing through `run_job()` directly, and (2026-09-25 review) that
+`run_job()` clears `s_task_handle` atomically with `s_busy` rather than
+leaving it for a separate trampoline step -- negative-tested by dropping the
+`complete()` call, confirming the new test failed, and restoring by hand
+with a forced full rebuild (61/61 executables). A target build produced a
+fresh ELF this pass: `check_kilnfw_dram_bss_budget.py` measures `.dram0.bss`
+at 98952 B against the 101000 B ceiling (2048 B headroom) -- this helper's
+added file-scope state (a `portMUX_TYPE`, a `bool`, one `TaskHandle_t`, one
+small run-context struct) is a few dozen bytes of that total, not measured
+in isolation. `http_async_job.c` was also missing from
+`drivers/CMakeLists.txt`'s SRCS list until this pass (caught by the full
+`run_all_checks.ps1` run, not by host tests, since the host-test harness
+links it separately -- the real target build failed at link time until this
+was added).
+2026-09-25 fix-then-push review: the original landing's stack accounting was
+wrong on two counts. `check_all_task_stack_budgets.py`'s static ELF walk
+reported this task INDETERMINATE at a 32 B lower bound only, because
 `run_job()` dispatches through a function pointer (`http_async_job_fn_t`)
-the walk cannot follow -- its `CEILING_BYTES` entry (2736 B) matches
-`ota_pico_rollback`'s rather than being invented fresh, pending a real
-measurement.
+the walk cannot follow on its own -- and the `CEILING_BYTES` entry that
+landed (2736 B) was borrowed from `ota_pico_rollback` on the assumption the
+two tasks were a comparable shape. Both were wrong: `ota_pico_rollback`'s
+own resolved depth is only 1888 B, not a valid stand-in either way, and the
+real chain rooted at `ct_auto_zero_job` (`ct_auto_zero_job` ->
+`safety_cfg_write_apply_pairs` -> `apply_pairs_ex` ->
+`safety_cfg_store_refetch_locked` -> `safety_link_get_config_page`, a
+1024 B frame, -> `uart_protocol_send_broadcast` -> `frame_and_send`) is
+3280 B, not ~2700 B. `ct_auto_zero_job` is now wired in as an `extra_roots`
+entry (same technique as `bx_flash_worker`'s enumerated dispatch-target
+list) so the checker measures and grades this task's real depth: 3312 B
+total (32 B trampoline + 3280 B), against the ceiling raised to match --
+negative-tested by setting the ceiling one byte below 3312, confirming the
+checker FAILed, then restoring 3312 by hand. The 6144 B stack (up from
+4096 B) accounts for that 3312 B plus headroom for an `ESP_LOG` call through
+`uart_log_vprintf` (~830 B) that the earlier accounting had not included.
 `stack_margin_register()` is called with a fixed literal `"http_async_job"`,
 not the caller-supplied task name, since this helper is single-flight (one
 shared handle slot regardless of which future caller's job is running) and
