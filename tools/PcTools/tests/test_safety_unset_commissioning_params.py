@@ -75,6 +75,41 @@ class SafetyGetUnsetCommissioningParamsTest(unittest.TestCase):
         self.assertIn("unset_reporting_reliable=false", result)
         self.assertIn("abs_max_temp_c", result)
 
+    def test_link_down_prefix_is_prepended(self):
+        payload = _payload([
+            {"id": 0x0104, "name": "abs_max_temp_c", "type": "f32", "set": False},
+        ])
+        payload["link_up"] = False
+        with unittest.mock.patch.object(sc, "get_commissioning", return_value=payload):
+            result = mcp_server.safety_get_unset_commissioning_params()
+        self.assertTrue(result.startswith("NOTE: safety link is down"))
+        self.assertIn("0x0104", result)
+
+    def test_never_fetched_cache_prefix_is_prepended(self):
+        payload = _payload([
+            {"id": 0x0104, "name": "abs_max_temp_c", "type": "f32", "set": False},
+        ])
+        payload["cached_config_crc"] = 0
+        with unittest.mock.patch.object(sc, "get_commissioning", return_value=payload):
+            result = mcp_server.safety_get_unset_commissioning_params()
+        self.assertTrue(result.startswith("NOTE: cached_config_crc is 0"))
+
+    def test_unreliable_peer_ct_installed_zero_value_is_ignored(self):
+        """On an unreliable peer, ct_installed carrying set:true value:0 must
+        NOT relax ct_channel_map[0..2]'s requirement -- unset_applicable_
+        commissioning_params() only trusts a param's cached value when
+        unset_reporting_reliable is true, and this tool's own unreliable-peer
+        branch reports every applicable param unset regardless, so the
+        (would-be) relaxing value is ignored entirely."""
+        payload = _payload([
+            {"id": 0x0109, "name": "ct_installed", "type": "u8", "set": True, "value": 0},
+            {"id": 0x0106, "name": "ct_channel_map[0]", "type": "u8", "set": False},
+        ], reliable=False)
+        with unittest.mock.patch.object(sc, "get_commissioning", return_value=payload):
+            result = mcp_server.safety_get_unset_commissioning_params()
+        self.assertIn("unset_reporting_reliable=false", result)
+        self.assertIn("ct_channel_map[0]", result)
+
     def test_http_error_surfaces_as_error_string_not_exception(self):
         with unittest.mock.patch.object(
             sc, "get_commissioning", side_effect=sc.SafetyCfgHttpError("unreachable")

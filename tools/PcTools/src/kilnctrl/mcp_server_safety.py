@@ -975,8 +975,15 @@ def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
     channel_map[0..2] applicable only when ct_installed!=0 and ct_topology is
     per_zone; i_normal_a[0..2] applicable only when ct_installed!=0; every
     other param always applicable) -- a pure re-derivation, not a new wire
-    read, so it can never disagree with readiness's own count except by a
-    live change landing between the two calls.
+    read. It agrees with readiness's own count exactly when
+    unset_reporting_reliable is true: readiness_http.c (lines ~634-638)
+    counts the raw cached `p.set` flag directly, the same field this
+    function reads, so the two can only differ from a live change landing
+    between the two calls. When unset_reporting_reliable is false (a peer
+    too old or of unknown version to report set/unset reliably), readiness
+    treats every applicable param as unset regardless of what `set` says,
+    and this function's caller is warned separately below rather than
+    silently agreeing with a count that isn't trustworthy either way.
 
     Pure GET, no side effects -- safe at any time, including mid-firing.
     Host is auto-resolved the same way safety_get_commissioning() does; pass
@@ -991,21 +998,29 @@ def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
     except safety_cfg_http_client.SafetyCfgHttpError as exc:
         return f"error reading safety commissioning over HTTP (host={resolved}): {exc}"
 
+    prefix = ""
+    if not bool(data.get("link_up")):
+        prefix = "NOTE: safety link is down -- this listing reflects the last cached read, not a live one.\n"
+    elif bool(data.get("stale")):
+        prefix = "NOTE: cached commissioning data is stale.\n"
+    elif data.get("cached_config_crc") == 0:
+        prefix = "NOTE: cached_config_crc is 0 -- no config has ever been fetched from the safety processor.\n"
+
     if not bool(data.get("unset_reporting_reliable")):
         unset = safety_cfg_http_client.unset_applicable_commissioning_params(data)
         names = ", ".join(f"{p.get('name')} (id 0x{p.get('id', 0):04X})" for p in unset)
-        return ("WARNING: unset_reporting_reliable=false -- this peer cannot distinguish "
+        return prefix + ("WARNING: unset_reporting_reliable=false -- this peer cannot distinguish "
                 "'never commissioned' from a genuine value, so every applicable param is "
                 f"reported unset: {names}" if names else
                 "WARNING: unset_reporting_reliable=false, and no applicable params exist to report")
 
     unset = safety_cfg_http_client.unset_applicable_commissioning_params(data)
     if not unset:
-        return "ok - no applicable safety_cfg_store params are unset"
+        return prefix + "ok - no applicable safety_cfg_store params are unset"
     lines = [f"{len(unset)} applicable safety_cfg_store param(s) unset:"]
     for p in unset:
         lines.append(f"  id 0x{p.get('id', 0):04X}  {p.get('name')}  type={p.get('type')}")
-    return "\n".join(lines)
+    return prefix + "\n".join(lines)
 
 
 @_srv._tool()

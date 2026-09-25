@@ -35,8 +35,7 @@ rule (ct_channel_map[0..2] applicable only when ct_installed!=0 and
 ct_topology is per_zone; i_normal_a[0..2] applicable only when
 ct_installed!=0; everything else always applicable), run against the same
 GET response `safety_get_commissioning()` already fetches. The one before it was
-`totp_enroll_status`/
-`totp_reset_password` were added -- `docs/TOTP_PASSWORD_RESET_PLAN.md` WT-C,
+`totp_enroll_status`/`totp_reset_password`, 2026-09-24 -- `docs/TOTP_PASSWORD_RESET_PLAN.md` WT-C,
 wrapping the OPEN-tier `POST /api/auth/forgot`/`/api/auth/reset` routes and
 the ADMIN-tier `GET /api/auth/totp_status` read (wire contract in that plan's
 section 6a, for WT-A's firmware to follow). `totp_enroll_status` is
