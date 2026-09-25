@@ -60,7 +60,16 @@ static void run_job(http_async_job_run_ctx_t *rc)
     rc->fn(rc->async_req, rc->ctx);
     httpd_req_async_handler_complete(rc->async_req);
 
+    // s_task_handle is cleared in the SAME critical section as s_busy --
+    // 2026-09-25 fix-then-push review found that clearing them separately
+    // (this task nulling the handle only after run_job() already dropped
+    // s_busy) let a newly-admitted job's xTaskCreate() write s_task_handle
+    // before this trailing cleanup ran, and this cleanup would then null out
+    // the NEW job's handle instead of its own -- "reset one side of a pair"
+    // (CLAUDE.md). Atomic together, this task never touches s_task_handle
+    // again after this point.
     portENTER_CRITICAL(&s_mux);
+    s_task_handle = NULL;
     s_busy = false;
     portEXIT_CRITICAL(&s_mux);
 }
@@ -68,23 +77,22 @@ static void run_job(http_async_job_run_ctx_t *rc)
 static void http_async_job_task(void *arg)
 {
     run_job((http_async_job_run_ctx_t *)arg);
-    // Same "null the handle, then delete explicitly" pattern as
-    // ota_rollback_reboot_task() (ota_http_esp.c) -- a FreeRTOS task
-    // function must not simply return (CONFIG_FREERTOS_TASK_FUNCTION_
-    // WRAPPER=y panics on that), and stack_margin_read() must not read this
-    // task back as "alive" once it is gone.
-    s_task_handle = NULL;
+    // s_task_handle is cleared inside run_job()'s own critical section above,
+    // atomically with s_busy -- no separate write here (see run_job()'s
+    // comment). A FreeRTOS task function must still not simply return
+    // (CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y panics on that).
     vTaskDelete(NULL);
 }
 
-bool http_async_job_try_start(httpd_req_t *req, const char *task_name, uint32_t stack_bytes,
-                               http_async_job_fn_t fn, void *ctx)
+http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const char *task_name,
+                                                        uint32_t stack_bytes, http_async_job_fn_t fn,
+                                                        void *ctx)
 {
     portENTER_CRITICAL(&s_mux);
     if (s_busy) {
         portEXIT_CRITICAL(&s_mux);
         ESP_LOGW(TAG, "%s: refused, another async job is already running", task_name ? task_name : "?");
-        return false;
+        return HTTP_ASYNC_JOB_BUSY;
     }
     s_busy = true;
     portEXIT_CRITICAL(&s_mux);
@@ -97,14 +105,18 @@ bool http_async_job_try_start(httpd_req_t *req, const char *task_name, uint32_t 
         portENTER_CRITICAL(&s_mux);
         s_busy = false;
         portEXIT_CRITICAL(&s_mux);
-        return false;
+        return HTTP_ASYNC_JOB_RESOURCE_FAILURE;
     }
 
     s_run_ctx.fn = fn;
     s_run_ctx.ctx = ctx;
     s_run_ctx.async_req = async_req;
 
-    if (xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx, tskIDLE_PRIORITY + 1,
+    // Runs at httpd_worker's own priority (tskIDLE_PRIORITY+5,
+    // HTTPD_DEFAULT_CONFIG()) -- it is doing httpd_worker's own deferred
+    // work, so nothing lower-priority should preempt it (2026-09-25
+    // fix-then-push review; was tskIDLE_PRIORITY+1).
+    if (xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx, tskIDLE_PRIORITY + 5,
                      &s_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "%s: failed to create the job task", task_name ? task_name : "?");
         // Undo the begin() on the ASYNC copy -- per this helper's own doc
@@ -114,7 +126,7 @@ bool http_async_job_try_start(httpd_req_t *req, const char *task_name, uint32_t 
         portENTER_CRITICAL(&s_mux);
         s_busy = false;
         portEXIT_CRITICAL(&s_mux);
-        return false;
+        return HTTP_ASYNC_JOB_RESOURCE_FAILURE;
     }
 
     /* Registered unconditionally, success or not -- stack_margin_register()
@@ -136,5 +148,5 @@ bool http_async_job_try_start(httpd_req_t *req, const char *task_name, uint32_t 
      * one-job-at-a-time design needs revisiting, not just this literal. */
     stack_margin_register("http_async_job", &s_task_handle, stack_bytes);
 
-    return true;
+    return HTTP_ASYNC_JOB_STARTED;
 }

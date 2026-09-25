@@ -732,7 +732,23 @@ TASKS = [
          # the first (and, as of A1, only) call site instead --
          # safety_cfg_http.c's ct_auto_zero_post_handler().
          stack=lambda: extract_int_literal("drivers/http/safety_cfg_http.c",
-             r'http_async_job_try_start\([^,]+,\s*"http_async_job",\s*(\d+)')),
+             r'http_async_job_try_start\([^,]+,\s*"http_async_job",\s*(\d+)'),
+         # http_async_job_task's own body is the trampoline (run_job(), a
+         # bare fn(...) call the static walk can't follow through the
+         # http_async_job_fn_t pointer) -- ct_auto_zero_job() (this A1
+         # slice's only registered fn) is enumerated explicitly as an extra
+         # root, same technique as bx_flash_worker's dispatch-target list
+         # above. 2026-09-25 fix-then-push review: the walk from the
+         # trampoline alone reported a 32 B lower bound and let a 2736 B
+         # ceiling (borrowed from ota_pico_rollback, WRONG -- see that
+         # entry's own resolved depth of 1888 B) pass silently. Real
+         # resolved depth from ct_auto_zero_job down through
+         # safety_cfg_write_apply_pairs -> apply_pairs_ex ->
+         # safety_cfg_store_refetch_locked -> safety_link_get_config_page
+         # (a 1024 B frame) -> uart_protocol_send_broadcast ->
+         # frame_and_send is 3280 B; adding it here makes the checker
+         # measure and grade the real number instead of the trampoline's.
+         extra_roots=[("ct_auto_zero_job", "safety_cfg_http.c")]),
     dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_exit_reboot_task,\s*"recovery_exit_reboot",\s*(\d+)')),
@@ -939,16 +955,26 @@ CEILING_BYTES = {
     "profile_exec_wdt": 2496,
     "ota_rollback_reboot": 1216,
     "ota_pico_rollback": 2736,
-    # INDETERMINATE, same as ota_pico_rollback just above: run_job() dispatches
-    # through http_async_job_fn_t, a function pointer this static walk cannot
-    # follow, so the measured total is a 32 B lower bound only, not a real
-    # ceiling. Same declared stack (4096 B) as ota_pico_rollback and a
-    # comparable job shape (a few quick reads/a link status fetch already done
-    # by httpd_worker before handoff, then ct_auto_zero_job()'s SPI reads/NVS
-    # write on this task) -- ceiling set to match that sibling's rather than
-    # invented fresh, pending a real measurement once a caller of this walk
-    # can resolve indirect calls.
-    "http_async_job": 2736,
+    # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
+    # WRONG -- it was borrowed from ota_pico_rollback on the assumption the
+    # two tasks were a comparable shape, but ota_pico_rollback's OWN resolved
+    # depth is only 1888 B (see the walk's own report for that entry), so it
+    # was never a valid stand-in either way. With ct_auto_zero_job wired in as
+    # an extra_roots entry (this task's own trampoline, run_job(), dispatches
+    # through http_async_job_fn_t, a function pointer the static walk cannot
+    # follow on its own), this checker now measures the REAL resolved depth:
+    # http_async_job_task (32 B) + ct_auto_zero_job's deepest known chain
+    # (ct_auto_zero_job -> safety_cfg_write_apply_pairs -> apply_pairs_ex ->
+    # safety_cfg_store_refetch_locked -> safety_link_get_config_page, a
+    # 1024 B frame -> uart_protocol_send_broadcast -> frame_and_send, 3280 B)
+    # = 3312 B total, against a 6144 B declared stack (raised from 4096 B in
+    # the same review, after accounting for an ESP_LOG-through-uart_log_vprintf
+    # path adding roughly another 830 B on top of this walk's own ~3612 B
+    # estimate before that raise). Ceiling set to the number this walk
+    # actually measures, not a hand-copied guess -- still INDETERMINATE (the
+    # walk cannot follow every indirect call in this chain), so this is a
+    # real lower bound, not a proven worst case.
+    "http_async_job": 3312,
     "recovery_exit": 80,
     "backlight_pwm": 112,
     "i2c_owner_ns2009": 144,

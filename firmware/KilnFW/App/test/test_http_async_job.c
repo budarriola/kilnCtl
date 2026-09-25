@@ -48,9 +48,9 @@ static void test_admits_when_idle(void)
     reset_stubs();
     httpd_req_t req = {0};
 
-    bool started = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    http_async_job_start_result_t result = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
 
-    TEST_CHECK(started, "an idle helper must admit the job");
+    TEST_CHECK(result == HTTP_ASYNC_JOB_STARTED, "an idle helper must admit the job");
     TEST_CHECK(http_async_job_busy(), "busy must be set the moment the job is admitted");
 }
 
@@ -60,13 +60,13 @@ static void test_second_call_refused_while_busy(void)
     httpd_req_t req1 = {0};
     httpd_req_t req2 = {0};
 
-    bool first = http_async_job_try_start(&req1, "http_async_job", 4096, fake_job_fn, NULL);
-    TEST_CHECK(first, "first call must be admitted");
+    http_async_job_start_result_t first = http_async_job_try_start(&req1, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(first == HTTP_ASYNC_JOB_STARTED, "first call must be admitted");
 
     int complete_calls_before_second = g_test_stub_async_complete_calls;
-    bool second = http_async_job_try_start(&req2, "http_async_job", 4096, fake_job_fn, NULL);
+    http_async_job_start_result_t second = http_async_job_try_start(&req2, "http_async_job", 4096, fake_job_fn, NULL);
 
-    TEST_CHECK(!second, "a second call while busy must be refused");
+    TEST_CHECK(second == HTTP_ASYNC_JOB_BUSY, "a second call while busy must be refused with BUSY, not RESOURCE_FAILURE");
     TEST_CHECK(g_test_stub_async_complete_calls == complete_calls_before_second,
                "a busy refusal must not touch req2 at all -- no begin(), so no complete() either");
     TEST_CHECK(http_async_job_busy(), "the first job's busy flag must be untouched by the refused second call");
@@ -78,9 +78,9 @@ static void test_begin_failure_refuses_and_clears_busy(void)
     g_test_stub_async_begin_should_fail = 1;
     httpd_req_t req = {0};
 
-    bool started = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    http_async_job_start_result_t result = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
 
-    TEST_CHECK(!started, "a failed handoff begin() must refuse the job");
+    TEST_CHECK(result == HTTP_ASYNC_JOB_RESOURCE_FAILURE, "a failed handoff begin() must refuse with RESOURCE_FAILURE, not BUSY");
     TEST_CHECK(!http_async_job_busy(), "busy must be cleared again after a begin() failure");
     TEST_CHECK(g_test_stub_async_complete_calls == 0,
                "no async copy was ever created, so complete() must not be called");
@@ -92,9 +92,9 @@ static void test_task_create_failure_undoes_begin_and_clears_busy(void)
     g_test_stub_xtaskcreate_result = 0; // pdFAIL
     httpd_req_t req = {0};
 
-    bool started = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    http_async_job_start_result_t result = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
 
-    TEST_CHECK(!started, "a failed xTaskCreate() must refuse the job");
+    TEST_CHECK(result == HTTP_ASYNC_JOB_RESOURCE_FAILURE, "a failed xTaskCreate() must refuse with RESOURCE_FAILURE, not BUSY");
     TEST_CHECK(!http_async_job_busy(), "busy must be cleared again after a task-create failure");
     TEST_CHECK(g_test_stub_async_complete_calls == 1,
                "the async copy from begin() must be undone via exactly one complete() call");
@@ -124,6 +124,31 @@ static void test_run_job_calls_fn_then_completes_exactly_once_and_clears_busy(vo
     TEST_CHECK(!s_busy, "run_job() must clear busy once fn and complete() are done");
 }
 
+// 2026-09-25 fix-then-push review: run_job() used to clear s_busy in one
+// critical section and leave s_task_handle for the FreeRTOS trampoline to
+// null out afterward in a SEPARATE critical section -- a newly-admitted job
+// could run xTaskCreate() and write a fresh s_task_handle in between those
+// two, and the old task's trailing cleanup would then null out the NEW
+// job's handle instead of its own ("reset one side of a pair", CLAUDE.md).
+// This test proves run_job() alone now clears s_task_handle, atomically
+// with s_busy, with no separate trampoline step required.
+static void test_run_job_clears_task_handle_atomically_with_busy(void)
+{
+    reset_stubs();
+    httpd_req_t req = {0};
+    httpd_req_t *async_req = NULL;
+    TEST_CHECK(httpd_req_async_handler_begin(&req, &async_req) == ESP_OK, "test setup: begin must succeed");
+    s_busy = true;
+    s_task_handle = (TaskHandle_t)0x1; // any non-NULL sentinel -- run_job() must clear it
+
+    http_async_job_run_ctx_t rc = { .fn = fake_job_fn, .ctx = NULL, .async_req = async_req };
+    run_job(&rc);
+
+    TEST_CHECK(s_task_handle == NULL, "run_job() must clear s_task_handle itself, "
+                                       "not leave it for a separate trampoline step");
+    TEST_CHECK(!s_busy, "run_job() must clear busy in the same pass as the handle");
+}
+
 void run_test_http_async_job(void)
 {
     test_admits_when_idle();
@@ -131,4 +156,5 @@ void run_test_http_async_job(void)
     test_begin_failure_refuses_and_clears_busy();
     test_task_create_failure_undoes_begin_and_clears_busy();
     test_run_job_calls_fn_then_completes_exactly_once_and_clears_busy();
+    test_run_job_clears_task_handle_atomically_with_busy();
 }
