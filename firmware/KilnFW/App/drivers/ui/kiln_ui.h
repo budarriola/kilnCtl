@@ -167,6 +167,16 @@ typedef enum {
     KILN_UI_CLICK_NOT_FOUND,
     KILN_UI_CLICK_AMBIGUOUS,
     KILN_UI_CLICK_HIDDEN,
+    /* 2026-09-24: the injected press was actually delivered to LVGL but
+     * screen_idle_touch_swallow() swallowed it (display was OFF, or an
+     * ERROR_HOLD dismissal -- see screen_idle.h) -- so nothing UNDER the tap
+     * target was acted on, even though the target itself was found and
+     * visible. Distinct from KILN_UI_CLICK_OK precisely so a bench harness
+     * can tell "this click landed and did nothing because it was a wake/
+     * dismiss tap" apart from "this click landed and the page just didn't
+     * change", which used to look identical (see the 20260924T233113Z_lcd
+     * bench log's unexplained double swallow this was added to diagnose). */
+    KILN_UI_CLICK_SWALLOWED,
 } kiln_ui_click_result_t;
 
 /* Finds the tap target whose name exactly matches `name` (kiln_ui_collect_
@@ -183,6 +193,10 @@ typedef enum {
  *   KILN_UI_CLICK_AMBIGUOUS -- more than one VISIBLE target has this name;
  *                              nothing is injected
  *   KILN_UI_CLICK_HIDDEN    -- the (first) match is hidden; nothing injected
+ *   KILN_UI_CLICK_SWALLOWED -- exactly one visible match; press+release sent,
+ *                              but screen_idle swallowed the press (a wake or
+ *                              error-hold dismissal) -- it never reached the
+ *                              widget underneath
  *   KILN_UI_CLICK_OK        -- exactly one visible match; press+release sent
  * Called directly from the UART bridge task, same as lvgl_port_inject_
  * touch() itself and TOUCH_CMD_INJECT's handler -- see that function's

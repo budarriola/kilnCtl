@@ -21,6 +21,7 @@ from .protocol import (
     UI_TEST_CLICK_HIDDEN,
     UI_TEST_CLICK_NOT_FOUND,
     UI_TEST_CLICK_OK,
+    UI_TEST_CLICK_SWALLOWED,
     UI_TEST_CMD_CLICK_BY_NAME,
     UI_TEST_CMD_GET_CURRENT_PAGE,
     UI_TEST_CMD_LIST_TAP_TARGETS,
@@ -40,6 +41,7 @@ _CLICK_RESULT_NAMES = {
     UI_TEST_CLICK_NOT_FOUND: "not_found",
     UI_TEST_CLICK_AMBIGUOUS: "ambiguous",
     UI_TEST_CLICK_HIDDEN: "hidden",
+    UI_TEST_CLICK_SWALLOWED: "swallowed",
 }
 
 
@@ -148,12 +150,16 @@ class UiTestClient:
     def click_by_name(self, name: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
         """Inject a tap at the named target's centre.
 
-        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden","cx":int,"cy":int}``
+        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed","cx":int,"cy":int}``
         -- unlike touch.py's inject()/set_tap_dump(), a firmware-level refusal
         here (target not found, ambiguous, or hidden) is not an
         exceptional/transport failure, so it comes back as a result code
         rather than raising: only delivery failure or a malformed reply
         raises :class:`UiTestQueryError`/:class:`UiTestResponseError`.
+        ``"swallowed"`` means the press was delivered but
+        screen_idle_touch_swallow() ate it (a wake or ERROR_HOLD dismissal) --
+        the target was found and tapped, but nothing under it ran; a caller
+        should retry the click rather than treat it as a defect.
         """
         payload = self._query(UI_TEST_CMD_CLICK_BY_NAME, _pack_click_request(name), timeout)
         if len(payload) < 6:

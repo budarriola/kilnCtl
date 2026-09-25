@@ -29,6 +29,10 @@ _WAIT_FOR_POLL_S = 0.2
 #: wait_for's default budget when a step doesn't specify one.
 _DEFAULT_TIMEOUT_MS = 3000
 
+#: click's bounded retry budget for a "swallowed" result (see
+#: bench_test/cases_lcd.py's matching _CLICK_THEN_PAGE_SWALLOW_RETRIES).
+_CLICK_SWALLOW_MAX_RETRIES = 2
+
 
 class UiScriptError(ValueError):
     """Raised for a missing script, or one that fails validation."""
@@ -140,7 +144,17 @@ def _run_lcd_step(client, action: str, step: dict) -> dict:
     target = step.get("target")
     try:
         if action == "click":
+            # 2026-09-24: "swallowed" (screen_idle_touch_swallow() ate the
+            # injected press -- a wake or ERROR_HOLD dismissal, see
+            # bench_test/cases_lcd.py's _click_resolving_swallow()) is not a
+            # click failure: the press was delivered, just not to the target.
+            # Retry a small, bounded number of times before treating it like
+            # any other non-ok result.
             result = client.click_by_name(target)
+            retries = 0
+            while result["result"] == "swallowed" and retries < _CLICK_SWALLOW_MAX_RETRIES:
+                retries += 1
+                result = client.click_by_name(target)
             if result["result"] != "ok":
                 return {"ok": False, "detail": f"click {target!r}: {result['result']}"}
             return {"ok": True, "detail": None}

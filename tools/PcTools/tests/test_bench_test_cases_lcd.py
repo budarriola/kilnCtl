@@ -678,7 +678,11 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("retried 2 times", fail.reason)
-        self.assertEqual(fail.observed.get("attribution"), "swallowed_or_wrong_page")
+        # No click in this attempt (initial or either retry) ever reported
+        # "swallowed" -- _CountingNavUi always says "ok" -- so this is
+        # attributed as a genuine UI defect, not the wake/dismiss race.
+        self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
+        self.assertIn("no swallow observed", fail.reason)
         # Default max_retries=2: the original tap plus exactly two retries,
         # never more.
         self.assertEqual(ui.clicks, ["settings", "settings", "settings"])

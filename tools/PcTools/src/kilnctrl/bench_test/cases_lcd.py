@@ -23,6 +23,7 @@ from . import judgments as J
 from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
 from ..protocol import THERMO_CHANNEL_ALL
+from ..devices_touch import TOUCH_POWER_STATE_ERROR_HOLD, TOUCH_POWER_STATE_ON
 
 #: click_by_name() (uart_bridge_ui_test.c -> kiln_ui_click_by_name(),
 #: firmware/KilnFW/App/drivers/ui/kiln_ui.c) injects the synthetic touch
@@ -73,6 +74,34 @@ _WAKE_TOUCH_XY = (5, 5)
 _WAKE_SCREEN_ON_TIMEOUT_S = 1.0
 _WAKE_SCREEN_ON_POLL_S = 0.05
 
+#: 2026-09-24: `screen_on` alone cannot distinguish DISPLAY_POWER_ON from
+#: DISPLAY_POWER_ERROR_HOLD (both read `screen_on=True` -- display_power_
+#: policy.c's rule 5 only dismisses ERROR_HOLD on its OWN next touch, it does
+#: not blank the panel). A wake landing while the board is in ERROR_HOLD
+#: would previously read `screen_on=True` and proceed straight to clicking
+#: nav targets on a panel that is actually still showing the error page --
+#: any injected tap there is the *dismissal* tap, swallowed by rule 5, not a
+#: real navigation click. When `touch.get_state()` exposes the newer
+#: `power_state` field (2026-09-24 firmware or later), `_wake_and_home` waits
+#: for it to read ON specifically, sending one extra dismissal tap if it
+#: reads ERROR_HOLD. Bounded to a small number of dismissal attempts so a
+#: board stuck in ERROR_HOLD for a real reason still falls through to the
+#: case's own click and fails honestly rather than looping here forever.
+_ERROR_HOLD_DISMISS_MAX_ATTEMPTS = 2
+
+
+def _power_state_is_on(state) -> "bool | None":
+    """None when `state` predates the 2026-09-24 power_state field (older
+    firmware) -- caller falls back to `screen_on` alone in that case."""
+    power_state = getattr(state, "power_state", None)
+    if power_state is None:
+        return None
+    return power_state == TOUCH_POWER_STATE_ON
+
+
+def _power_state_is_error_hold(state) -> bool:
+    return getattr(state, "power_state", None) == TOUCH_POWER_STATE_ERROR_HOLD
+
 #: The shortest persisted display timeout is 1 minute
 #: (display_power_policy.c's DISPLAY_TIMEOUT_1_MIN), so a panel that reads
 #: on with less idle time than this still has >= 30 s before it can blank.
@@ -117,7 +146,11 @@ def _wake_and_home(ctx: dict) -> None:
         need_wake = True
         try:
             state = touch.get_state()
-            need_wake = (not state.screen_on) or state.idle_ms >= _WAKE_IDLE_MS_THRESHOLD
+            need_wake = (
+                (not state.screen_on)
+                or state.idle_ms >= _WAKE_IDLE_MS_THRESHOLD
+                or _power_state_is_error_hold(state)
+            )
         except Exception:
             need_wake = True
         if need_wake:
@@ -133,13 +166,34 @@ def _wake_and_home(ctx: dict) -> None:
                 # _WAKE_SCREEN_ON_TIMEOUT_S's comment. Never raises; a touch
                 # task that can't answer GET_STATE just falls through to the
                 # case's own click, same as before this wait existed.
+                # Waits for power_state==ON specifically when the firmware
+                # exposes it (see _power_state_is_on's comment) rather than
+                # merely screen_on, which is also true in ERROR_HOLD.
                 deadline = time.monotonic() + _WAKE_SCREEN_ON_TIMEOUT_S
+                dismiss_attempts = 0
                 while time.monotonic() < deadline:
                     try:
-                        if touch.get_state().screen_on:
-                            break
+                        state = touch.get_state()
                     except Exception:
                         break
+                    is_on = _power_state_is_on(state)
+                    if is_on is None:
+                        # Older firmware: fall back to the original screen_on-only check.
+                        if state.screen_on:
+                            break
+                    elif is_on:
+                        break
+                    elif (
+                        _power_state_is_error_hold(state)
+                        and dismiss_attempts < _ERROR_HOLD_DISMISS_MAX_ATTEMPTS
+                    ):
+                        dismiss_attempts += 1
+                        try:
+                            x, y = _WAKE_TOUCH_XY
+                            touch.inject(x, y, True)
+                            touch.inject(x, y, False)
+                        except Exception:
+                            break
                     time.sleep(_WAKE_SCREEN_ON_POLL_S)
     ui = srv._ui_test
     _navigate_home(ui)
@@ -217,6 +271,32 @@ def _wait_for_targets_change(ui, before_names: "set",
 #: fails, just after three bounded waits instead of two.
 _CLICK_THEN_PAGE_MAX_RETRIES = 2
 
+#: 2026-09-24: a click that comes back "swallowed" (kiln_ui_click_result_t's
+#: KILN_UI_CLICK_SWALLOWED -- the press was actually delivered to LVGL but
+#: screen_idle_touch_swallow() ate it as a wake/ERROR_HOLD-dismiss tap, see
+#: kiln_ui.h) is now DIRECTLY OBSERVABLE, not merely inferred from a page
+#: that failed to change. Retried immediately, on its own small bounded
+#: budget separate from _CLICK_THEN_PAGE_MAX_RETRIES's page-didn't-change
+#: retries below: a swallow is a known, expected race (the panel woke or
+#: dismissed an error on this exact tap), not the "maybe stuck, maybe raced"
+#: ambiguity the page-poll retries exist for.
+_CLICK_THEN_PAGE_SWALLOW_RETRIES = 2
+
+
+def _click_resolving_swallow(ui, name: str, max_swallow_retries: int = _CLICK_THEN_PAGE_SWALLOW_RETRIES) -> "tuple[dict, int]":
+    """click_by_name(), re-clicking immediately while the result reads
+    'swallowed' (bounded by `max_swallow_retries`) -- a swallow is a directly
+    observable, expected race (screen_idle ate the wake/dismiss tap), not the
+    "maybe stuck" ambiguity the caller's own page-poll retry budget exists
+    for, so it must not consume that separate budget. Returns
+    ``(final_click, swallow_retries_used)``."""
+    click = ui.click_by_name(name)
+    retries = 0
+    while click.get("result") == "swallowed" and retries < max_swallow_retries:
+        retries += 1
+        click = ui.click_by_name(name)
+    return click, retries
+
 
 def _click_then_page(ui, name: str, expected_page: str,
                       timeout_s: float = _PAGE_POLL_TIMEOUT_S,
@@ -252,13 +332,17 @@ def _click_then_page(ui, name: str, expected_page: str,
         page_before = ui.get_current_page()
     except Exception:
         page_before = None
-    click = ui.click_by_name(name)
+    click, swallow_retries = _click_resolving_swallow(ui, name)
     if click.get("result") != "ok":
         return (
             CaseResult(
                 Verdict.FAIL,
                 reason=f"click_by_name({name!r}) returned {click.get('result')!r}",
-                observed={"click": click, "attribution": "not_found"},
+                observed={
+                    "click": click,
+                    "attribution": "not_found",
+                    **({"swallow_retries": swallow_retries} if swallow_retries else {}),
+                },
             ),
             "",
             0.0,
@@ -292,46 +376,75 @@ def _click_then_page(ui, name: str, expected_page: str,
         # helper.
         retries_done = 0
         last_click = click
+        any_swallow_observed = swallow_retries > 0
         while (
             retries_done < max_retries
             and page_before is not None
             and page == page_before
         ):
             retries_done += 1
-            last_click = ui.click_by_name(name)
+            last_click, retry_swallow_retries = _click_resolving_swallow(ui, name)
+            any_swallow_observed = any_swallow_observed or retry_swallow_retries > 0
             if last_click.get("result") != "ok":
                 break
             retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
             page, waited_s = retry_page, waited_s + retry_waited_s
             if page == expected_page:
                 return None, page, waited_s
+        # Now that a swallow is directly observable (click.get("result") ==
+        # "swallowed"), rather than only ever inferred from a page that
+        # failed to change, distinguish the two FAIL shapes plainly: if no
+        # click in this whole attempt (initial or any retry) ever actually
+        # reported "swallowed", the page's failure to move is NOT explained
+        # by the known wake/dismiss race -- it is a genuine UI defect (the
+        # tap landed on the widget and nothing happened) and is reported as
+        # such, distinct from a page that failed to change after a real,
+        # observed swallow.
+        if page_before is None:
+            attribution = "page_before_unreadable"
+        elif page != page_before:
+            attribution = "wrong_page"
+        elif any_swallow_observed:
+            attribution = "swallowed_or_wrong_page"
+        elif retries_done > 0:
+            # Only call it a genuine defect once at least one retry was
+            # actually attempted and STILL never reported "swallowed" --
+            # with no retry at all (max_retries=0), a single unexplained
+            # non-move is exactly the old "wrong_page" shape: not enough
+            # evidence yet to rule out a swallow that a retry would have
+            # revealed.
+            attribution = "genuine_defect"
+        else:
+            attribution = "wrong_page"
         observed = {
             "click": click,
             "page_before": page_before,
             "page": page,
             "page_wait_s": round(waited_s, 3),
-            "attribution": (
-                "swallowed_or_wrong_page" if retries_done > 0
-                else "wrong_page" if page_before is not None
-                else "page_before_unreadable"
-            ),
+            "attribution": attribution,
         }
         if retries_done > 0:
             observed["retry_click"] = last_click
             observed["retries"] = retries_done
+        reason = (
+            f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
+            f"expected {expected_page!r}"
+        )
+        if attribution == "genuine_defect":
+            reason += (
+                f" (retried {retries_done} time{'s' if retries_done != 1 else ''}, "
+                "no swallow observed on any attempt -- likely a genuine UI defect, "
+                "not a wake/dismiss race)"
+            )
+        elif retries_done > 0:
+            reason += (
+                f" (retried {retries_done} time{'s' if retries_done != 1 else ''})"
+                + J.BLANKED_SCREEN_HINT
+            )
+        else:
+            reason += f" (page moved from {page_before!r}; not retried)" + J.BLANKED_SCREEN_HINT
         return (
-            CaseResult(
-                Verdict.FAIL,
-                reason=(
-                    f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
-                    f"expected {expected_page!r}"
-                    + (f" (retried {retries_done} time{'s' if retries_done != 1 else ''})"
-                       if retries_done > 0
-                       else f" (page moved from {page_before!r}; not retried)")
-                    + J.BLANKED_SCREEN_HINT
-                ),
-                observed=observed,
-            ),
+            CaseResult(Verdict.FAIL, reason=reason, observed=observed),
             page,
             waited_s,
         )

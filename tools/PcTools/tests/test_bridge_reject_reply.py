@@ -20,6 +20,7 @@ Run with: python -m unittest discover -s tools/PcTools/tests
 from __future__ import annotations
 
 import os
+import struct
 import sys
 import unittest
 
@@ -450,6 +451,35 @@ class DisplayTouchDriverErrorTests(unittest.TestCase):
         subcmd, value = devices.parse_touch_response(twentythree_byte)
         self.assertEqual(subcmd, TOUCH_CMD_GET_STATE)
         self.assertIsNotNone(value.input_enabled)
+        self.assertIsNone(value.power_state)  # not present at this length
+
+    def test_touch_get_state_power_swallow_fields_decode(self):
+        # 2026-09-24: the new 29-byte shape (23-byte diag reply + power_state,
+        # swallow_count, last_swallow_reason). Negative-test control for the
+        # (6, 23, 29) tightened length set below -- this is the one real new
+        # success length that must still decode.
+        twentythree_byte = bytes([TOUCH_CMD_GET_STATE, 1, 7, 0, 0, 0]) + bytes(17)
+        twentynine_byte = twentythree_byte + bytes([2]) + struct.pack("<I", 5) + bytes([1])
+        self.assertEqual(len(twentynine_byte), 29)
+        subcmd, value = devices.parse_touch_response(twentynine_byte)
+        self.assertEqual(subcmd, TOUCH_CMD_GET_STATE)
+        self.assertTrue(value.screen_on)
+        self.assertEqual(value.idle_ms, 7)
+        self.assertEqual(value.power_state, 2)  # TOUCH_POWER_STATE_ERROR_HOLD
+        self.assertEqual(value.swallow_count, 5)
+        self.assertEqual(value.last_swallow_reason, 1)  # TOUCH_SWALLOW_REASON_WAKE
+
+    def test_touch_get_state_28_byte_reply_is_refusal_not_truncated_success(self):
+        # The regression this guards: a length one byte short of (or past)
+        # the new 29-byte real success shape must never be silently misread
+        # as a truncated/overlong TouchState -- it must still fall into the
+        # refusal decode path, same as before 29 was added to the allowed set.
+        frame = _reject_frame(TOUCH_CMD_GET_STATE, "driver error")
+        self.assertNotIn(len(frame), (6, 23, 29))
+        subcmd, value = devices.parse_touch_response(frame)
+        self.assertEqual(subcmd, TOUCH_CMD_GET_STATE)
+        self.assertIsInstance(value, devices.OkReason)
+        self.assertFalse(value.ok)
 
 
 class DisplayWriteRefusalTests(unittest.TestCase):

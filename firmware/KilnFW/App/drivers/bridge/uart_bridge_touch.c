@@ -150,6 +150,48 @@ static void touch_bridge_task(void *arg)
                      * to match; the decoder stays tolerant of a shorter reply
                      * from older firmware regardless. */
                     reply_len = 23;
+
+                    /* APPENDED FIELDS ONLY past this point (2026-09-24) --
+                     * tap-swallow observability, see uart_task_ids.h's
+                     * TOUCH_CMD_GET_STATE doc comment for the exact layout.
+                     * screen_idle_get_power_diag() can only fail with
+                     * ESP_ERR_INVALID_STATE (idle not ready yet) or
+                     * ESP_ERR_TIMEOUT (lock contention) -- either way this
+                     * simply leaves reply_len at 23 and the caller gets the
+                     * pre-2026-09-24 reply shape, same "older/degraded
+                     * firmware" tolerance the decoder already has to have. */
+                    /* check_all_task_stack_budgets.ps1: touch_bridge_task's own
+                     * frame is tight (ceiling 2176 B) -- these three locals are
+                     * `static` rather than on-stack, per this codebase's
+                     * established convention for a task whose stack is already
+                     * near budget (see this file's module docstring / CLAUDE.md's
+                     * "Fix by moving large locals off the named task's own
+                     * stack"). Safe: touch_bridge_task is a single, non-reentrant
+                     * consumer of its own inbox queue -- nothing else writes
+                     * these between this assignment and its use two lines below. */
+                    static display_power_state_t s_power_diag_state;
+                    static uint32_t s_power_diag_swallow_count;
+                    static screen_idle_swallow_reason_t s_power_diag_last_reason;
+                    if (screen_idle_get_power_diag(ctx->idle, &s_power_diag_state,
+                                                   &s_power_diag_swallow_count,
+                                                   &s_power_diag_last_reason) == ESP_OK) {
+                        uint8_t wire_power_state;
+                        switch (s_power_diag_state) {
+                            case DISPLAY_POWER_OFF:        wire_power_state = TOUCH_POWER_STATE_OFF; break;
+                            case DISPLAY_POWER_ERROR_HOLD: wire_power_state = TOUCH_POWER_STATE_ERROR_HOLD; break;
+                            case DISPLAY_POWER_ON:
+                            default:                        wire_power_state = TOUCH_POWER_STATE_ON; break;
+                        }
+                        reply[23] = wire_power_state;
+                        bridge_put_u32_le(&reply[24], s_power_diag_swallow_count);
+                        switch (s_power_diag_last_reason) {
+                            case SCREEN_IDLE_SWALLOW_WAKE:       reply[28] = TOUCH_SWALLOW_REASON_WAKE; break;
+                            case SCREEN_IDLE_SWALLOW_ERROR_HOLD: reply[28] = TOUCH_SWALLOW_REASON_ERROR_HOLD; break;
+                            case SCREEN_IDLE_SWALLOW_NONE:
+                            default:                              reply[28] = TOUCH_SWALLOW_REASON_NONE; break;
+                        }
+                        reply_len = 29;
+                    }
                 }
                 break;
             }

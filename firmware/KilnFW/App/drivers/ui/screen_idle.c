@@ -129,6 +129,19 @@ static bool screen_idle_run_policy_locked(screen_idle_t *idle, uint32_t now_ms, 
                  (int)idle->policy_state, (int)out.state, (int)firing_active, (int)error_active,
                  (int)touch_event, (int)idle->recovery_mode);
     }
+    if (out.swallow_touch) {
+        // Swallow diagnostics (2026-09-24): reason is derived from the state
+        // THIS call observed on entry, before display_power_policy_step()
+        // moved it on -- rule 4 (wake) fires only from OFF, rule 5's
+        // dismissal only from ERROR_HOLD, so idle->policy_state at this
+        // point (not yet overwritten below) unambiguously tells them apart.
+        idle->swallow_count++;
+        idle->last_swallow_reason = (idle->policy_state == DISPLAY_POWER_OFF)
+                                         ? SCREEN_IDLE_SWALLOW_WAKE
+                                         : SCREEN_IDLE_SWALLOW_ERROR_HOLD;
+        ESP_LOGI(TAG, "touch swallowed (reason=%d total=%lu)", (int)idle->last_swallow_reason,
+                 (unsigned long)idle->swallow_count);
+    }
     idle->policy_state = out.state;
     idle->screen_on = (out.state != DISPLAY_POWER_OFF);
     // Header contract: "the caller must still update ITS OWN last-activity
@@ -426,5 +439,25 @@ esp_err_t screen_idle_get_state(const screen_idle_t *idle, bool *out_screen_on,
     TickType_t elapsed_ticks = xTaskGetTickCount() - last_activity_tick;
     uint64_t elapsed_ms = (uint64_t)elapsed_ticks * portTICK_PERIOD_MS;
     *out_idle_ms = (elapsed_ms > UINT32_MAX) ? UINT32_MAX : (uint32_t)elapsed_ms;
+    return ESP_OK;
+}
+
+esp_err_t screen_idle_get_power_diag(const screen_idle_t *idle,
+                                     display_power_state_t *out_power_state,
+                                     uint32_t *out_swallow_count,
+                                     screen_idle_swallow_reason_t *out_last_swallow_reason)
+{
+    if (!idle || !idle->ready) return ESP_ERR_INVALID_STATE;
+
+    screen_idle_t *mutable_idle = (screen_idle_t *)idle; /* see screen_idle_get_state()'s note */
+    if (!screen_idle_lock(mutable_idle)) return ESP_ERR_TIMEOUT;
+    display_power_state_t power_state = idle->policy_state;
+    uint32_t swallow_count = idle->swallow_count;
+    screen_idle_swallow_reason_t last_swallow_reason = idle->last_swallow_reason;
+    screen_idle_unlock(mutable_idle);
+
+    if (out_power_state) *out_power_state = power_state;
+    if (out_swallow_count) *out_swallow_count = swallow_count;
+    if (out_last_swallow_reason) *out_last_swallow_reason = last_swallow_reason;
     return ESP_OK;
 }

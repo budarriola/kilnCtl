@@ -1239,6 +1239,137 @@ static void run_section9_idle_lock_scope_denylist(void)
     free(text);
 }
 
+// 2026-09-24: makes a swallowed tap observable (KILN_UI_CLICK_SWALLOWED /
+// TOUCH_CMD_GET_STATE's power_state+swallow_count+last_swallow_reason
+// fields) -- proves screen_idle_run_policy_locked() actually counts a
+// swallow and attributes its reason from the PRE-overwrite policy_state
+// (the ordering this feature's correctness depends on: idle->policy_state
+// must be read for the reason BEFORE it is set to out.state a few lines
+// later, since rule 4/wake only ever fires from DISPLAY_POWER_OFF and rule
+// 5/error-hold-dismiss only ever fires from DISPLAY_POWER_ERROR_HOLD -- see
+// screen_idle.c's own comment at this call site).
+static void run_section10_swallow_diag_wired(void)
+{
+    TEST_SECTION("screen_idle_run_policy_locked() counts a swallow and "
+                 "attributes its reason before overwriting policy_state -- "
+                 "source-text scan (screen_idle.c is not host-compilable)");
+
+    char *text = read_file_any(SCREEN_IDLE_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/screen_idle.c from the host test's "
+                           "working directory");
+        return;
+    }
+
+    size_t body_len = 0;
+    const char *body =
+        find_function_body(text, "static bool screen_idle_run_policy_locked(", &body_len);
+    if (!body) {
+        TEST_CHECK(false, "could not find screen_idle_run_policy_locked()'s function body -- "
+                           "update this test if it was renamed/restructured");
+        free(text);
+        return;
+    }
+    char *fn = dup_range(body, body_len);
+    TEST_CHECK(fn != NULL, "malloc for the extracted function body succeeded");
+    if (!fn) {
+        free(text);
+        return;
+    }
+
+    TEST_CHECK(strstr(fn, "out.swallow_touch") != NULL &&
+                   strstr(fn, "idle->swallow_count++") != NULL,
+               "screen_idle_run_policy_locked() must increment idle->swallow_count when "
+               "out.swallow_touch is set -- if this fails, a swallowed touch is no longer "
+               "counted at all, defeating TOUCH_CMD_GET_STATE's swallow_count diagnostic.");
+
+    TEST_CHECK(strstr(fn, "idle->last_swallow_reason") != NULL &&
+                   strstr(fn, "SCREEN_IDLE_SWALLOW_WAKE") != NULL &&
+                   strstr(fn, "SCREEN_IDLE_SWALLOW_ERROR_HOLD") != NULL,
+               "screen_idle_run_policy_locked() must attribute last_swallow_reason to either "
+               "SCREEN_IDLE_SWALLOW_WAKE or SCREEN_IDLE_SWALLOW_ERROR_HOLD -- if this fails "
+               "the reason is no longer derived at all, or was collapsed to a single value.");
+
+    // Ordering check: the swallow-reason attribution block must appear
+    // BEFORE idle->policy_state is overwritten with out.state -- otherwise
+    // the reason would always read as whatever state the board is ABOUT TO
+    // enter, not the one the swallowed tap actually happened in (DISPLAY_
+    // POWER_OFF for a wake, DISPLAY_POWER_ERROR_HOLD for a dismiss).
+    const char *swallow_pos = strstr(fn, "idle->swallow_count++");
+    const char *state_write_pos = strstr(fn, "idle->policy_state = out.state");
+    TEST_CHECK(swallow_pos != NULL && state_write_pos != NULL && swallow_pos < state_write_pos,
+               "idle->swallow_count++/last_swallow_reason attribution must run BEFORE "
+               "idle->policy_state is overwritten with out.state -- if this fails the ordering "
+               "was changed and the reason attribution is now reading the WRONG (post-"
+               "transition) policy_state, silently mislabeling every wake as an error-hold "
+               "dismiss or vice versa.");
+
+    free(fn);
+    free(text);
+}
+
+// 2026-09-24: proves lvgl_port.c's seq/verdict handoff is actually wired --
+// lvgl_port_inject_touch() assigns a seq on press and touch_read_cb()
+// records a verdict against it under the SAME lock the struct already uses
+// (never a new lock held across an lv_* call).
+static void run_section11_inject_verdict_handoff_wired(void)
+{
+    TEST_SECTION("lvgl_port.c's inject seq/verdict handoff is wired: press "
+                 "gets a seq, touch_read_cb() records the verdict under "
+                 "touch_inject_lock() -- source-text scan (lvgl_port.c is not "
+                 "host-compilable)");
+
+    char *text = read_file_any(LVGL_PORT_C_CANDIDATES, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/ui/lvgl_port.c from the host test's "
+                           "working directory");
+        return;
+    }
+
+    size_t inject_len = 0;
+    const char *inject_body =
+        find_function_body(text, "uint32_t lvgl_port_inject_touch(", &inject_len);
+    if (!inject_body) {
+        TEST_CHECK(false, "could not find lvgl_port_inject_touch()'s function body, or it no "
+                           "longer returns uint32_t -- kiln_ui_click_by_name() depends on this "
+                           "return value to learn the swallow verdict for its own press.");
+        free(text);
+        return;
+    }
+    char *inject_fn = dup_range(inject_body, inject_len);
+    TEST_CHECK(inject_fn != NULL, "malloc for the extracted function body succeeded");
+    if (inject_fn) {
+        TEST_CHECK(strstr(inject_fn, "s_inject_seq_counter") != NULL,
+                   "lvgl_port_inject_touch() must assign/advance a sequence number on press -- "
+                   "if this fails, the caller has no way to identify which verdict later "
+                   "belongs to its own press.");
+        free(inject_fn);
+    }
+
+    size_t cb_len = 0;
+    const char *cb_body = find_function_body(text, "static void touch_read_cb(", &cb_len);
+    if (!cb_body) {
+        TEST_CHECK(false, "could not find touch_read_cb()'s function body -- update this test "
+                           "if it was renamed.");
+        free(text);
+        return;
+    }
+    char *cb_fn = dup_range(cb_body, cb_len);
+    TEST_CHECK(cb_fn != NULL, "malloc for the extracted function body succeeded");
+    if (cb_fn) {
+        TEST_CHECK(strstr(cb_fn, "s_inject_verdict_seq") != NULL &&
+                       strstr(cb_fn, "s_inject_verdict_swallowed") != NULL,
+                   "touch_read_cb() must record the swallow verdict (s_inject_verdict_seq/"
+                   "s_inject_verdict_swallowed) for the press it just processed -- if this "
+                   "fails, lvgl_port_get_inject_verdict() can never find a match and every "
+                   "click_by_name() call falls back to the conservative 'not swallowed' "
+                   "timeout, silently defeating KILN_UI_CLICK_SWALLOWED.");
+        free(cb_fn);
+    }
+
+    free(text);
+}
+
 void run_test_display_power_wiring(void)
 {
     run_section1_screen_idle_calls_policy();
@@ -1251,4 +1382,6 @@ void run_test_display_power_wiring(void)
     run_section7_flush_and_indev_cb_mutator_denylist();
     run_section8_timer_refresh_cb_blocking_denylist();
     run_section9_idle_lock_scope_denylist();
+    run_section10_swallow_diag_wired();
+    run_section11_inject_verdict_handoff_wired();
 }

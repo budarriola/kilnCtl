@@ -389,9 +389,32 @@ typedef struct {
     bool pressed;
     int32_t x, y;
     TickType_t last_update_tick;
+    /* 2026-09-24 tap-swallow observability: a monotonically increasing id
+     * assigned to every PRESS injection (a release keeps the id of the press
+     * it ends -- releases are never themselves swallow candidates, see
+     * screen_idle.h's touch_held comment). touch_read_cb() runs in a
+     * different task than the caller of lvgl_port_inject_touch() and only
+     * learns the real screen_idle_touch_swallow() verdict once it actually
+     * delivers this press on its own ~30ms LVGL poll -- this seq is the
+     * handoff kiln_ui_click_by_name() polls against (see
+     * lvgl_port_get_inject_verdict()) instead of guessing from whether the
+     * page changed. 0 is never assigned (reserved as "no verdict recorded
+     * yet" in s_inject_verdict_seq below). */
+    uint32_t seq;
 } touch_inject_t;
 
 static touch_inject_t s_inject;
+static uint32_t s_inject_seq_counter; /* guarded by s_inject.lock, same as the struct above */
+
+/* The most recently recorded swallow verdict, written ONLY by touch_read_cb()
+ * (lvgl_port_task) under s_inject.lock, read by lvgl_port_get_inject_verdict()
+ * from any task. Only ever holds the LATEST press's verdict -- a caller must
+ * check seq against the id lvgl_port_inject_touch() returned it, not merely
+ * "is a verdict present", since a second injection could otherwise overwrite
+ * the first's verdict before a slow poller reads it (see that function's
+ * bounded-timeout doc comment for why callers are expected to poll promptly). */
+static uint32_t s_inject_verdict_seq; /* 0 = none recorded yet */
+static bool s_inject_verdict_swallowed;
 
 /* Last injected sample actually written to the log, used by touch_read_cb() to
  * log transitions only (see the rationale at that call site). Deliberately NOT
@@ -417,7 +440,7 @@ static void touch_inject_unlock(void)
     xSemaphoreGive(s_inject.lock);
 }
 
-void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
+uint32_t lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
 {
     /* Both early returns below are silent by design (a NULL lock means
      * lvgl_port_start() hasn't run yet; a lock timeout means touch_read_cb
@@ -427,12 +450,16 @@ void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
      * lvgl_port_get_touch_diag()'s injected_delivered_count -- see that
      * function's declaration comment -- so this no longer needs its own
      * per-call log to answer the question the removed TEMP DIAGNOSTIC WARNs
-     * existed for. */
+     * existed for. 0 is returned on either failure path -- never a valid seq
+     * (see s_inject_seq_counter's declaration comment) -- so a caller polling
+     * lvgl_port_get_inject_verdict() with this return value simply never
+     * matches, which is the correct "no verdict, this never even queued"
+     * answer. */
     if (!s_inject.lock) {
-        return;
+        return 0;
     }
     if (!touch_inject_lock()) {
-        return;
+        return 0;
     }
 
     s_inject.pending = true;
@@ -440,8 +467,19 @@ void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
     s_inject.x = (int32_t)x;
     s_inject.y = (int32_t)y;
     s_inject.last_update_tick = xTaskGetTickCount();
+    /* A release keeps riding the press's own seq (nothing waits on a
+     * release's verdict -- see the struct comment) rather than minting a new
+     * one, so s_inject_seq_counter only ever advances on a press. */
+    if (pressed) {
+        if (++s_inject_seq_counter == 0) {
+            s_inject_seq_counter = 1; /* skip the reserved 0 on the rare wraparound */
+        }
+        s_inject.seq = s_inject_seq_counter;
+    }
+    uint32_t seq = s_inject.seq;
 
     touch_inject_unlock();
+    return seq;
 }
 
 /* --- Touch input device -----------------------------------------------
@@ -498,6 +536,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         bool inject_pressed = s_inject.pressed;
         int32_t inject_x = s_inject.x;
         int32_t inject_y = s_inject.y;
+        uint32_t inject_seq = s_inject.seq;
         TickType_t elapsed = xTaskGetTickCount() - s_inject.last_update_tick;
 
         if (have_injection && inject_pressed && elapsed > pdMS_TO_TICKS(TOUCH_INJECT_AUTORELEASE_MS)) {
@@ -576,6 +615,29 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
                 if (swallow) {
                     data->state = LV_INDEV_STATE_RELEASED;
                 }
+                /* Record the verdict for THIS press so kiln_ui_click_by_name()
+                 * (a different task, waiting on lvgl_port_inject_touch()'s
+                 * returned seq) can learn it instead of guessing from whether
+                 * the page changed -- see s_inject_verdict_seq's declaration
+                 * comment. Only a press has a swallow decision worth
+                 * recording (screen_idle_touch_swallow() always reports
+                 * *out_swallow=false for a release); a release is left alone
+                 * here so it never clobbers the press's own verdict with a
+                 * stale "false". */
+                if (inject_pressed && touch_inject_lock()) {
+                    s_inject_verdict_seq = inject_seq;
+                    s_inject_verdict_swallowed = swallow;
+                    touch_inject_unlock();
+                }
+            } else if (inject_pressed && touch_inject_lock()) {
+                /* No screen_idle wired up at all (p->idle == NULL, e.g. a
+                 * host/sim build with no auto-blank integration -- see
+                 * lvgl_port_start()'s doc comment): nothing can ever be
+                 * swallowed, so record that plainly rather than leaving a
+                 * waiter to time out for no reason. */
+                s_inject_verdict_seq = inject_seq;
+                s_inject_verdict_swallowed = false;
+                touch_inject_unlock();
             }
             if (inject_pressed && data->state == LV_INDEV_STATE_PRESSED) {
                 apply_touch_group_arbitration(data);
@@ -1142,6 +1204,30 @@ void lvgl_port_get_touch_diag(bool *input_enabled, uint32_t *touch_read_cb_count
     if (input_enabled) *input_enabled = s_input_enabled;
     if (touch_read_cb_count) *touch_read_cb_count = s_touch_read_cb_count;
     if (injected_delivered_count) *injected_delivered_count = s_injected_delivered_count;
+}
+
+bool lvgl_port_get_inject_verdict(uint32_t seq, bool *out_swallowed)
+{
+    if (seq == 0 || !s_inject.lock) {
+        return false; /* 0 is never a valid seq (lvgl_port_inject_touch()'s
+                       * own "queued nothing" sentinel) and no lock means
+                       * lvgl_port_start() hasn't run -- either way there is
+                       * nothing to have recorded. */
+    }
+    if (!touch_inject_lock()) {
+        return false; /* lock contention/timeout: same "could not determine"
+                       * answer as every other timeout in this file -- caller
+                       * (kiln_ui_click_by_name()) retries within its own
+                       * bounded poll rather than this call blocking longer. */
+    }
+    bool found = (s_inject_verdict_seq == seq);
+    bool swallowed = s_inject_verdict_swallowed;
+    touch_inject_unlock();
+
+    if (found && out_swallowed) {
+        *out_swallowed = swallowed;
+    }
+    return found;
 }
 
 /* ONE-OFF root-cause probe (2026-08-21): is s_port.lv_indev even non-NULL?

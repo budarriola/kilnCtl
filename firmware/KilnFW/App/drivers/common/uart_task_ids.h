@@ -544,11 +544,45 @@
  *   bytes2..5 = idle_ms, u32 LE -- milliseconds since the last touch
  *               activity (real or injected); saturates at UINT32_MAX rather
  *               than wrapping.
+ *
+ *   Bytes [6..27] (touch/UI pull diagnostics -- input_enabled(1)/
+ *   touch_read_cb_count(4)/injected_delivered_count(4)/kiln_ui_show
+ *   entries(4)/exits(4), see uart_bridge_touch.c's own layout comment) are
+ *   unchanged and not repeated here.
+ *
+ *   Bytes [23..29] (2026-09-24, tap-swallow observability -- APPENDED, an
+ *   older PC-side decoder that only reads [0..22] keeps working unmodified
+ *   against a newer board, and a newer decoder reading a short reply from
+ *   older firmware must treat these as absent, not zero):
+ *     [23]    power_state -- TOUCH_POWER_STATE_* below, mirrors
+ *             display_power_state_t (display_power_policy.h) byte-for-byte.
+ *             Distinct from byte1's screen_on: ERROR_HOLD reads screen_on=1
+ *             (the panel IS lit) but power_state=2, which is the only way to
+ *             tell an error-forced-on panel apart from a normal ON one.
+ *     [24..27] swallow_count, u32 LE -- cumulative count of every touch this
+ *             boot that screen_idle swallowed (screen_idle.h's
+ *             swallow_count), real or injected.
+ *     [28]    last_swallow_reason -- TOUCH_SWALLOW_REASON_* below, mirrors
+ *             screen_idle_swallow_reason_t; 0 (NONE) if swallow_count is
+ *             still 0.
+ *     29 bytes total, still well under BRIDGE_REPLY_MAX (253).
  */
 #define TOUCH_CMD_GET_STATE     0x01u
 #define TOUCH_CMD_INJECT        0x02u
 #define TOUCH_CMD_SET_TAP_DUMP  0x03u
 #define TOUCH_CMD_LOG_TAP_TARGETS 0x04u
+
+/* Mirrors display_power_state_t (display_power_policy.h) byte-for-byte --
+ * kept as its own wire enum, same rationale as UI_TEST_CLICK_* below, so a
+ * future reorder of the C enum can't silently renumber the wire value. */
+#define TOUCH_POWER_STATE_ON         0x00u
+#define TOUCH_POWER_STATE_OFF        0x01u
+#define TOUCH_POWER_STATE_ERROR_HOLD 0x02u
+
+/* Mirrors screen_idle_swallow_reason_t (screen_idle.h) byte-for-byte. */
+#define TOUCH_SWALLOW_REASON_NONE       0x00u
+#define TOUCH_SWALLOW_REASON_WAKE       0x01u
+#define TOUCH_SWALLOW_REASON_ERROR_HOLD 0x02u
 
 /* --- UI_TEST (task_id = UART_TASK_ID_UI_TEST) ---
  * The PC-side UI regression harness's window onto kiln_ui.c, added
@@ -605,6 +639,14 @@
 #define UI_TEST_CLICK_NOT_FOUND  0x01u
 #define UI_TEST_CLICK_AMBIGUOUS  0x02u
 #define UI_TEST_CLICK_HIDDEN     0x03u
+/* 2026-09-24: the press was delivered to LVGL but screen_idle swallowed it
+ * (wake or error-hold dismissal) -- see kiln_ui_click_result_t's own comment
+ * (kiln_ui.h). An older PC decoder that has never seen this value falls into
+ * whatever its own default/"unknown result" arm does; treat that as a
+ * decoder to update, not a wire compatibility break -- CLICK_BY_NAME's
+ * response shape (6 bytes) is unchanged, only this one byte's value range
+ * grew. */
+#define UI_TEST_CLICK_SWALLOWED  0x04u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

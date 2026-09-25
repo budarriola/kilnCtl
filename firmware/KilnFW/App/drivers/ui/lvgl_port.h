@@ -190,7 +190,26 @@ void lvgl_port_set_input_enabled(bool enabled);
  * before hit-testing, matching the existing physical-touch behavior: a wake
  * tap also activates whatever it lands on underneath, intentionally (see
  * touch_read_cb's comment for why this isn't gated). */
-void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
+/* Returns the sequence id assigned to THIS injection (non-zero) for a press,
+ * so a caller can later ask lvgl_port_get_inject_verdict() whether THAT
+ * specific press was swallowed by screen_idle -- see touch_inject_t's `seq`
+ * field comment in lvgl_port.c. Returns 0 on either failure path
+ * (lvgl_port_start() hasn't run yet, or the lock timed out) and for a
+ * release, which rides the press's own seq and has no verdict of its own. */
+uint32_t lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
+
+/* Bounded, non-blocking lookup of an injected PRESS's swallow verdict
+ * (screen_idle_touch_swallow()'s decision, recorded by touch_read_cb() the
+ * moment it actually delivers that press to LVGL -- see lvgl_port.c's
+ * s_inject_verdict_seq comment). `seq` must be a value lvgl_port_inject_
+ * touch() actually returned for a press (0 always misses). Returns true and
+ * fills `*out_swallowed` only once that exact press has been delivered and
+ * its verdict recorded; returns false (verdict not yet available, or this
+ * seq was superseded by a later press before being read) otherwise --
+ * callers needing a real answer must poll this with a short delay loop
+ * bounded to a few LVGL poll periods (~30 ms each), the same "waited on with
+ * a bounded timeout" contract kiln_ui_click_by_name() uses. */
+bool lvgl_port_get_inject_verdict(uint32_t seq, bool *out_swallowed);
 
 /* Requests the next lvgl_port_task loop iteration run
  * kiln_ui_log_tap_targets() on ITS OWN stack (8192 B, static, internal SRAM)

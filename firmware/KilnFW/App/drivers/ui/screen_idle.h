@@ -44,6 +44,18 @@
 extern "C" {
 #endif
 
+/* Why the LAST swallow was swallowed, for TOUCH_CMD_GET_STATE's diagnostic
+ * fields (uart_bridge_touch.c) -- distinct from "was it swallowed at all"
+ * (swallow_count > 0) so a bench log can tell a wake-swallow apart from an
+ * error-hold dismissal without re-deriving it from the state transition.
+ * NONE persists until the first swallow ever happens on this boot. Do not
+ * renumber -- wire values in uart_task_ids.h mirror these 1:1. */
+typedef enum {
+    SCREEN_IDLE_SWALLOW_NONE = 0,
+    SCREEN_IDLE_SWALLOW_WAKE = 1,       /* rule 4: first touch while OFF */
+    SCREEN_IDLE_SWALLOW_ERROR_HOLD = 2, /* rule 5: first touch while ERROR_HOLD */
+} screen_idle_swallow_reason_t;
+
 typedef struct {
     ILI9488Class *display;
     NS2009Class *touch; /* NULL if the touch controller never came up */
@@ -115,6 +127,18 @@ typedef struct {
      * correct, honest answer: recovery mode truly runs nothing that could
      * make either true. */
     bool recovery_mode;
+
+    /* Swallowed-touch diagnostics (2026-09-24, tap-swallow observability
+     * follow-up to the 20260924T233113Z_lcd bench log's unexplained double
+     * swallow): cumulative count of every touch_event that
+     * screen_idle_run_policy_locked() reported swallow_touch=true for, plus
+     * the reason of the LAST one, so a bench harness/operator can tell "was
+     * this tap actually swallowed" instead of inferring it from a page that
+     * failed to change. Written only under idle->lock, from the same call
+     * site that already updates policy_state/screen_on (see
+     * screen_idle_run_policy_locked()) -- no separate lock needed. */
+    uint32_t swallow_count;
+    screen_idle_swallow_reason_t last_swallow_reason;
 
     /* Snapshot of the two EXPENSIVE producer reads (firing_active from
      * profile_executor_get_status()+autotune_engine_is_active(),
@@ -212,6 +236,19 @@ esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y,
  * screen_idle.c. */
 esp_err_t screen_idle_get_state(const screen_idle_t *idle, bool *out_screen_on,
                                 uint32_t *out_idle_ms);
+
+/* Raw display_power_state_t (ON/OFF/ERROR_HOLD, not screen_idle_get_state()'s
+ * collapsed screen_on bool -- ERROR_HOLD reads screen_on=true there, since
+ * the panel IS lit, but a caller diagnosing a swallowed tap needs to tell
+ * ERROR_HOLD apart from a plain ON) plus the cumulative swallow counter and
+ * the last swallow's reason (SCREEN_IDLE_SWALLOW_NONE if none has happened
+ * yet this boot). Any out pointer may be NULL. Same lock/threading contract
+ * as screen_idle_get_state(). Wired into TOUCH_CMD_GET_STATE's reply by
+ * uart_bridge_touch.c. */
+esp_err_t screen_idle_get_power_diag(const screen_idle_t *idle,
+                                     display_power_state_t *out_power_state,
+                                     uint32_t *out_swallow_count,
+                                     screen_idle_swallow_reason_t *out_last_swallow_reason);
 
 #ifdef __cplusplus
 }

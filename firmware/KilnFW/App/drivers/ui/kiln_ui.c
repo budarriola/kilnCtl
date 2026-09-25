@@ -833,8 +833,26 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
      * unseen and no click would ever fire. */
     uint16_t cx = (uint16_t)targets[match].cx;
     uint16_t cy = (uint16_t)targets[match].cy;
-    lvgl_port_inject_touch(cx, cy, true);
+    uint32_t press_seq = lvgl_port_inject_touch(cx, cy, true);
+
+    /* Bounded wait for touch_read_cb() (lvgl_port_task, a different task) to
+     * actually deliver this press and record screen_idle's swallow verdict
+     * for it -- see lvgl_port_get_inject_verdict()'s doc comment. LVGL polls
+     * roughly every 30ms; 10 attempts at 10ms each (100ms) is comfortably
+     * more than one poll period even under load, while still small next to
+     * the 50ms press-hold below. A miss (timeout) is treated as "not
+     * swallowed" -- the same conservative default screen_idle_touch_swallow()
+     * itself uses on a lock timeout -- rather than blocking this call
+     * indefinitely or failing the whole click. */
+    bool swallowed = false;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (lvgl_port_get_inject_verdict(press_seq, &swallowed)) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
     vTaskDelay(pdMS_TO_TICKS(50));
     lvgl_port_inject_touch(cx, cy, false);
-    return KILN_UI_CLICK_OK;
+    return swallowed ? KILN_UI_CLICK_SWALLOWED : KILN_UI_CLICK_OK;
 }

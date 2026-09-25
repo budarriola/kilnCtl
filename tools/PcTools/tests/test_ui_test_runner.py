@@ -125,6 +125,28 @@ class RunUiStepTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(client.clicked, ["Start"])
 
+    def test_lcd_click_retries_swallowed_then_passes(self):
+        # 2026-09-24: a "swallowed" result (screen_idle_touch_swallow() ate
+        # the press) must not be treated as a click failure -- it should be
+        # retried transparently, bounded by _CLICK_SWALLOW_MAX_RETRIES.
+        client = _FakeUiTestClient()
+        results = iter([{"result": "swallowed"}, {"result": "ok", "cx": 1, "cy": 2}])
+        client.click_by_name = lambda name: (client.clicked.append(name), next(results))[1]
+        result = runner.run_ui_step("lcd", client, None, {"action": "click", "target": "Start"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.clicked, ["Start", "Start"])
+
+    def test_lcd_click_gives_up_after_swallow_retry_budget(self):
+        # Negative-test control: proves the retry is bounded, not unlimited --
+        # a click that is swallowed on every attempt must still fail rather
+        # than retry forever.
+        client = _FakeUiTestClient()
+        client.click_by_name = lambda name: (client.clicked.append(name), {"result": "swallowed"})[1]
+        result = runner.run_ui_step("lcd", client, None, {"action": "click", "target": "Start"})
+        self.assertFalse(result["ok"])
+        self.assertIn("swallowed", result["detail"])
+        self.assertEqual(len(client.clicked), 1 + runner._CLICK_SWALLOW_MAX_RETRIES)
+
     def test_lcd_wait_for_finds_target_immediately(self):
         client = _FakeUiTestClient()
         result = runner.run_ui_step("lcd", client, None,

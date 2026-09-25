@@ -83,6 +83,28 @@ def touch_log_tap_targets() -> bytes:
     return struct.pack("<B", TOUCH_CMD_LOG_TAP_TARGETS)
 
 
+#: TOUCH_CMD_GET_STATE's ``power_state`` byte (uart_task_ids.h TOUCH_POWER_STATE_*).
+TOUCH_POWER_STATE_ON = 0x00
+TOUCH_POWER_STATE_OFF = 0x01
+TOUCH_POWER_STATE_ERROR_HOLD = 0x02
+
+#: TOUCH_CMD_GET_STATE's ``last_swallow_reason`` byte (uart_task_ids.h TOUCH_SWALLOW_REASON_*).
+TOUCH_SWALLOW_REASON_NONE = 0x00
+TOUCH_SWALLOW_REASON_WAKE = 0x01
+TOUCH_SWALLOW_REASON_ERROR_HOLD = 0x02
+
+_POWER_STATE_NAMES = {
+    TOUCH_POWER_STATE_ON: "on",
+    TOUCH_POWER_STATE_OFF: "off",
+    TOUCH_POWER_STATE_ERROR_HOLD: "error_hold",
+}
+_SWALLOW_REASON_NAMES = {
+    TOUCH_SWALLOW_REASON_NONE: "none",
+    TOUCH_SWALLOW_REASON_WAKE: "wake",
+    TOUCH_SWALLOW_REASON_ERROR_HOLD: "error_hold",
+}
+
+
 @dataclass(frozen=True)
 class TouchState:
     """Decoded GET_STATE reply.
@@ -93,6 +115,13 @@ class TouchState:
     TOUCH_CMD_GET_STATE case for the wire layout and why appending rather
     than reordering/resizing matters. They are ``None`` when talking to
     older firmware that only ever sent the original 6-byte reply.
+
+    ``power_state``/``swallow_count``/``last_swallow_reason`` were appended
+    2026-09-24 (bytes 23..29) to make a swallowed touch observable to a PC
+    harness -- see screen_idle.h's screen_idle_swallow_reason_t and the
+    20260924T233113Z_lcd bench log's unexplained double swallow this was
+    added to diagnose. ``None`` when talking to firmware older than that
+    (a 6- or 23-byte reply).
     """
 
     screen_on: bool
@@ -102,19 +131,34 @@ class TouchState:
     injected_delivered_count: "int | None" = None
     show_entries: "int | None" = None
     show_exits: "int | None" = None
+    power_state: "int | None" = None
+    swallow_count: "int | None" = None
+    last_swallow_reason: "int | None" = None
 
     def describe(self) -> str:
         state = "on" if self.screen_on else "blanked"
         base = f"screen {state}, idle {self.idle_ms} ms"
         if self.input_enabled is None:
             return base + " (older firmware: no diag fields)"
-        return (
+        base = (
             base
             + f", input_enabled={self.input_enabled}"
             + f", touch_read_cb={self.touch_read_cb_count}"
             + f", injected_delivered={self.injected_delivered_count}"
             + f", show_entries={self.show_entries}"
             + f", show_exits={self.show_exits}"
+        )
+        if self.power_state is None:
+            return base + " (older firmware: no power-state/swallow fields)"
+        power_name = _POWER_STATE_NAMES.get(self.power_state, f"0x{self.power_state:02X}")
+        reason_name = _SWALLOW_REASON_NAMES.get(
+            self.last_swallow_reason, f"0x{self.last_swallow_reason:02X}"
+        )
+        return (
+            base
+            + f", power_state={power_name}"
+            + f", swallow_count={self.swallow_count}"
+            + f", last_swallow_reason={reason_name}"
         )
 
 
@@ -153,12 +197,20 @@ def parse_touch_response(payload: bytes) -> "tuple[int, object]":
         subcommand" and the refusal was dropped in
         ``TouchClient._handle_reply``.
 
-    A reply shorter than the full 23 bytes but at least 6 is accepted (older
+    GET_STATE (appended power/swallow fields, bytes 23..28 -- optional,
+    present only from firmware built 2026-09-24 or later):
+        byte23 = power_state (TOUCH_POWER_STATE_*)
+        bytes24..27 = swallow_count u32 LE
+        byte28 = last_swallow_reason (TOUCH_SWALLOW_REASON_*)
+
+    A reply shorter than the full 29 bytes but at least 6 is accepted (older
     firmware, or a firmware built before some later field was added) -- only
     the fields actually present are populated, the rest come back as None.
     (Two more fields, indev_exists and timer_handler_calls, briefly lived at
     bytes 23..27 as a one-off root-cause probe; removed 2026-08-21 once the
-    bug they were probing was fixed -- this decoder never read them.)
+    bug they were probing was fixed -- this decoder never read them, and that
+    byte range was reused 2026-09-24 for the unrelated power/swallow fields
+    above.)
     """
     if len(payload) < 1:
         raise TouchResponseError("TOUCH response is empty")
@@ -167,9 +219,10 @@ def parse_touch_response(payload: bytes) -> "tuple[int, object]":
         return subcommand, _decode_ok_reason(payload, TouchResponseError, "TOUCH write")
     if subcommand != TOUCH_CMD_GET_STATE:
         raise TouchResponseError(f"unknown TOUCH response subcommand 0x{subcommand:02X}")
-    # Exactly 6 (original fields only) or 23 (+ the 2026-08-21 diagnostic
-    # fields) -- uart_bridge.c's TOUCH_CMD_GET_STATE case only ever emits one
-    # of those two lengths on success, never anything in between (the old
+    # Exactly 6 (original fields only), 23 (+ the 2026-08-21 diagnostic
+    # fields), or 29 (+ the 2026-09-24 power/swallow fields) -- uart_bridge.c's
+    # TOUCH_CMD_GET_STATE case only ever emits one of those three lengths on
+    # success, never anything in between (the old
     # `< 6` check here nominally tolerated any longer length "for a
     # hypothetical in-between firmware build", but no such build ever
     # existed). Tightened to this exact set 2026-08-24, the same day
@@ -186,7 +239,7 @@ def parse_touch_response(payload: bytes) -> "tuple[int, object]":
     # or anything else a future reason string produces -- is decoded as the
     # refusal it is, rather than just excluded, so the caller learns why
     # instead of getting a generic malformed-response drop.
-    if len(payload) not in (6, 23):
+    if len(payload) not in (6, 23, 29):
         return subcommand, _decode_ok_reason(payload, TouchResponseError, "GET_STATE")
     screen_on = payload[1]
     if screen_on > 1:
@@ -205,6 +258,14 @@ def parse_touch_response(payload: bytes) -> "tuple[int, object]":
         (show_entries,) = struct.unpack_from("<I", payload, 15)
         (show_exits,) = struct.unpack_from("<I", payload, 19)
 
+    power_state = None
+    swallow_count = None
+    last_swallow_reason = None
+    if len(payload) >= 29:
+        power_state = payload[23]
+        (swallow_count,) = struct.unpack_from("<I", payload, 24)
+        last_swallow_reason = payload[28]
+
     return subcommand, TouchState(
         screen_on=bool(screen_on),
         idle_ms=idle_ms,
@@ -213,6 +274,9 @@ def parse_touch_response(payload: bytes) -> "tuple[int, object]":
         injected_delivered_count=injected_delivered_count,
         show_entries=show_entries,
         show_exits=show_exits,
+        power_state=power_state,
+        swallow_count=swallow_count,
+        last_swallow_reason=last_swallow_reason,
     )
 
 

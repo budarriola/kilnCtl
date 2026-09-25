@@ -21,6 +21,7 @@ from kilnctrl.protocol import (  # noqa: E402
     UI_TEST_CLICK_HIDDEN,
     UI_TEST_CLICK_NOT_FOUND,
     UI_TEST_CLICK_OK,
+    UI_TEST_CLICK_SWALLOWED,
     UI_TEST_CMD_CLICK_BY_NAME,
     UI_TEST_CMD_GET_CURRENT_PAGE,
     UI_TEST_CMD_LIST_TAP_TARGETS,
@@ -156,6 +157,14 @@ class ClickByNameTest(unittest.TestCase):
     def test_hidden_result(self):
         self._reply(UI_TEST_CLICK_HIDDEN)
         self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "hidden")
+
+    def test_swallowed_result(self):
+        # 2026-09-24: the press was delivered but screen_idle_touch_swallow()
+        # ate it (wake/ERROR_HOLD dismissal) -- distinct from "ok" (nothing
+        # under the tap target ran) and distinct from every prior refusal
+        # code, which all mean the target itself was not clickable.
+        self._reply(UI_TEST_CLICK_SWALLOWED)
+        self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "swallowed")
 
     def test_request_carries_name(self):
         # uart_task_ids.h's CLICK_BY_NAME request is raw ASCII with NO

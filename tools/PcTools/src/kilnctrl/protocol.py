@@ -209,6 +209,10 @@ UI_TEST_CLICK_OK = 0
 UI_TEST_CLICK_NOT_FOUND = 1
 UI_TEST_CLICK_AMBIGUOUS = 2
 UI_TEST_CLICK_HIDDEN = 3
+#: 2026-09-24: the injected press was delivered but screen_idle_touch_swallow()
+#: swallowed it (wake or ERROR_HOLD dismissal) -- see kiln_ui.h's
+#: KILN_UI_CLICK_SWALLOWED. Distinct from OK: nothing under the tap target ran.
+UI_TEST_CLICK_SWALLOWED = 4
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged
