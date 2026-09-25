@@ -118,7 +118,7 @@ _WAKE_IDLE_MS_THRESHOLD = 30_000
 #: reuse a constant).
 
 
-def _wake_and_home(ctx: dict) -> None:
+def _wake_and_home(ctx: dict) -> Optional[Dict[str, Any]]:
     """Runs before EVERY click-driven LCD case, not once per run: the
     shortest persisted display timeout is 1 minute, and the gaps between
     LCD cases (camera captures, other suites' cases in between) routinely
@@ -139,7 +139,15 @@ def _wake_and_home(ctx: dict) -> None:
     injection, transport hiccup) must never crash a case; if the wake
     itself fails, the case's own click/page-wait logic still runs and fails
     honestly on its own terms rather than this helper manufacturing a false
-    precondition failure."""
+    precondition failure.
+
+    Also checks for and best-effort dismisses a stray LCD-19 popup (PIN
+    keypad / Confirm Start / Confirm Stop) left open on `home` -- see
+    :func:`_lcd19_clear_stray_overlay`. Returns its result (``None`` when no
+    stray overlay was found) so a caller like LCD-01 can FAIL against the
+    overlay by name instead of misattributing a swallowed tap to its own
+    button. Most callers ignore the return value, same as before this
+    existed."""
     srv = _srv(ctx)
     touch = getattr(srv, "_touch", None)
     if touch is not None:
@@ -197,6 +205,35 @@ def _wake_and_home(ctx: dict) -> None:
                     time.sleep(_WAKE_SCREEN_ON_POLL_S)
     ui = srv._ui_test
     _navigate_home(ui)
+    return _lcd19_clear_stray_overlay(ctx, ui)
+
+
+def _lcd19_clear_stray_overlay(ctx: dict, ui) -> Optional[Dict[str, Any]]:
+    """LCD-19's PIN keypad and Confirm Start/Confirm Stop dialogs are
+    top-layer lv_msgbox popups that never move `get_current_page()` off
+    'home' (module comment above `_lcd19_overlay_names`) -- a prior run
+    that left one open (a torn-down bench session, an earlier case's own
+    dismiss that silently didn't take) would otherwise be invisible to
+    `_navigate_home()`, which only ever checks the page name. A case that
+    then taps "Start" would see the tap swallowed by the stray popup and
+    read as a genuinely unresponsive button, when the real cause is the
+    leftover overlay.
+
+    Returns ``None`` when the tap-target read failed or found no stray
+    overlay (no "Cancel"/"OK" present); otherwise a dict with the overlay's
+    ``names`` and the :func:`_dismiss_lcd19_overlay` result, for a caller to
+    fold into `observed` and to FAIL against by name rather than blaming
+    whatever button it was about to tap."""
+    names = _lcd19_overlay_names(ui)
+    if names is None:
+        return None
+    if "Cancel" not in names and "OK" not in names:
+        return None
+    try:
+        dismiss = _dismiss_lcd19_overlay(ctx, ui)
+    except Exception as exc:  # noqa: BLE001
+        dismiss = {"checked": False, "error": type(exc).__name__}
+    return {"names": sorted(names), "dismiss": dismiss}
 
 
 def _wait_for_page(ui, expected: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
@@ -787,7 +824,21 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
 # ---------------------------------------------------------------------------
 
 def _case_lcd01(ctx: dict) -> CaseResult:
-    _wake_and_home(ctx)
+    stray = _wake_and_home(ctx)
+    if stray is not None and not (stray.get("dismiss") or {}).get("dismissed"):
+        # A stray PIN keypad/Confirm popup left open from an earlier run
+        # swallows every tap aimed at the home page underneath it -- fail
+        # naming that overlay as the cause, not whatever this case's own
+        # Start-button check would otherwise (wrongly) blame.
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(
+                f"stray overlay left open before LCD-01 (tap targets={stray.get('names')}) "
+                "and it could not be dismissed -- the home page underneath is not reachable, "
+                "this is not a Start-button defect"
+            ),
+            observed={"stray_overlay": stray},
+        )
     srv = _srv(ctx)
     ui = srv._ui_test
     page = ui.get_current_page()
@@ -1884,26 +1935,95 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 # own confirm button.
 # ---------------------------------------------------------------------------
 
-def _lcd19_overlay_names(ui) -> Optional[set]:
+#: uart_bridge_ui_test.c's walk-timeout sentinel (count 0, truncated True --
+#: lvgl_port.c's 300ms window) is not the only shape a stalled read comes
+#: back as on this bench: a bare empty (untruncated) listing has been seen
+#: too. Neither is a real answer for any screen this module ever reads --
+#: home, the config hub, and every LCD-19 popup always have at least one
+#: tap target -- so both are treated as "no read yet, poll again", never as
+#: "the overlay is gone" or "the keypad has no buttons".
+def _lcd19_overlay_raw(ui) -> "tuple[Optional[set], bool]":
+    """One raw tap-target read. Returns ``(names, truncated)``: `names` is
+    ``None`` on a query failure OR an empty listing (see module note above),
+    never an empty ``set()`` standing in for "nothing is here". `truncated`
+    mirrors the firmware's own flag even when `names` is not None, so a
+    genuinely partial (but non-empty) list is still recorded."""
     try:
-        targets = ui.list_tap_targets().get("targets", [])
+        tap = ui.list_tap_targets()
     except Exception:
-        return None
-    return {t.get("name") for t in targets if not t.get("hidden")}
+        return None, False
+    targets = tap.get("targets", [])
+    truncated = bool(tap.get("truncated"))
+    if not targets:
+        return None, truncated
+    return {t.get("name") for t in targets if not t.get("hidden")}, truncated
+
+
+def _lcd19_poll_overlay(ui, satisfied, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                         interval_s: float = _PAGE_POLL_INTERVAL_S
+                         ) -> "tuple[Optional[set], float, int, bool]":
+    """Shared poll loop over :func:`_lcd19_overlay_raw`. ``satisfied(names,
+    history)`` decides when to stop, where `names` is the most recent read
+    (``None`` until a usable, non-empty listing arrives -- never a stand-in
+    for "the overlay is gone") and `history` is the list of every read so
+    far including `names` itself, oldest first.
+
+    Returns ``(names, elapsed_s, empty_polls, truncated_seen)``:
+    `empty_polls` counts every raw read that came back as the empty/timeout
+    sentinel (recorded, never judged -- a caller reports it in `observed`
+    rather than treating it as evidence of anything), and `truncated_seen`
+    is True if any read set the firmware's `truncated` flag, even one later
+    superseded by a full read. Never raises; a predicate that is never
+    satisfied still returns honestly once `timeout_s` elapses."""
+    start = time.monotonic()
+    empty_polls = 0
+    truncated_seen = False
+    history: "list[Optional[set]]" = []
+
+    def _read() -> Optional[set]:
+        nonlocal empty_polls, truncated_seen
+        names, truncated = _lcd19_overlay_raw(ui)
+        if truncated:
+            truncated_seen = True
+        if names is None:
+            empty_polls += 1
+        history.append(names)
+        return names
+
+    names = _read()
+    while not satisfied(names, history):
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        names = _read()
+    return names, time.monotonic() - start, empty_polls, truncated_seen
+
+
+def _lcd19_overlay_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                          interval_s: float = _PAGE_POLL_INTERVAL_S) -> Optional[set]:
+    """A single "real" overlay read for a caller that just needs a
+    signature to diff against (a pre-click baseline) rather than
+    diagnostics -- retries past the empty/timeout sentinel (see
+    :func:`_lcd19_overlay_raw`) instead of treating it as an actual empty
+    tap-target list. Still returns ``None`` if every read within
+    `timeout_s` came back empty/failed, so a caller checking for `None`
+    keeps working exactly as before."""
+    names, _, _, _ = _lcd19_poll_overlay(ui, lambda n, h: n is not None, timeout_s, interval_s)
+    return names
 
 
 def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
                              interval_s: float = _PAGE_POLL_INTERVAL_S,
-                             baseline: Optional[set] = None) -> "tuple[Optional[set], float]":
+                             baseline: Optional[set] = None
+                             ) -> "tuple[Optional[set], float, int, bool]":
     """Same click-then-read race as :func:`_wait_for_page`, for LCD-19's
     top-layer popups: both the PIN keypad and the Confirm Start/Confirm
     Stop dialogs are lv_msgbox popups raised asynchronously off the same
     LVGL-task touch poll as any page switch (see kiln_ui_click_by_name()'s
     comment), so an immediate tap-target read after Start/Stop/Cancel can
-    still see the pre-click set.
-
-    `present=False` (after dismissing a popup via Cancel) waits for an
-    empty set, as before.
+    still see the pre-click set. An empty/timeout read (see
+    :func:`_lcd19_overlay_raw`) is never treated as a real "gone" or
+    "present" answer either -- it just keeps polling.
 
     `present=True` (after opening a popup) does NOT wait for a bare
     non-empty set: the home page's own Start/nav buttons are *already*
@@ -1918,57 +2038,57 @@ def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIM
     `present=True` falls back to the old bare-non-empty wait -- callers
     opening a popup must pass their own pre-click baseline.
 
-    Never raises; a popup that never (dis)appears, or a set that never
-    diverges from `baseline`, is still reported honestly via whatever the
-    last poll saw."""
-    start = time.monotonic()
-    names = _lcd19_overlay_names(ui)
+    `present=False` waits for a real (non-empty) listing that simply has no
+    popup content -- see :func:`_dismiss_lcd19_overlay`, which polls for
+    "Cancel" specifically rather than using this branch, since every real
+    screen here always has *some* tap target.
 
-    def _satisfied(n: Optional[set]) -> bool:
+    Returns ``(names, elapsed_s, empty_polls, truncated_seen)`` -- see
+    :func:`_lcd19_poll_overlay`. Never raises; a popup that never
+    (dis)appears, or a set that never diverges from `baseline`, is still
+    reported honestly via whatever the last poll saw."""
+    def _satisfied(n: Optional[set], _history) -> bool:
         if n is None:
-            return True  # can't poll further -- stop and report honestly
+            return False  # no real read yet -- keep polling until timeout
         if present and baseline is not None:
             return n != baseline
         return bool(n) == present
 
-    while not _satisfied(names):
-        if time.monotonic() - start >= timeout_s:
-            break
-        time.sleep(interval_s)
-        names = _lcd19_overlay_names(ui)
-    return names, time.monotonic() - start
+    return _lcd19_poll_overlay(ui, _satisfied, timeout_s, interval_s)
 
 
 def _wait_stable_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
                         interval_s: float = _PAGE_POLL_INTERVAL_S,
-                        stable_reads: int = 2) -> "tuple[Optional[set], float]":
-    """Poll :func:`_lcd19_overlay_names` until the same set is read
-    ``stable_reads`` times in a row, or `timeout_s` elapses. Unlike
-    :func:`_wait_for_overlay_names`, this does not wait for a *specific*
-    target state -- it debounces the click-then-read race for a submit
-    whose expected good outcome is often "no visible change" (a wrong PIN
-    resets digit entry but the keypad's own button set -- digits, "OK",
-    "Cancel" -- never changes while it stays open, so there is no
+                        stable_reads: int = 2) -> "tuple[Optional[set], float, int, bool]":
+    """Poll :func:`_lcd19_overlay_raw` until the same real (non-empty)
+    listing is read ``stable_reads`` times in a row, or `timeout_s`
+    elapses. Unlike :func:`_wait_for_overlay_names`, this does not wait for
+    a *specific* target state -- it debounces the click-then-read race for
+    a submit whose expected good outcome is often "no visible change" (a
+    wrong PIN resets digit entry but the keypad's own button set -- digits,
+    "OK", "Cancel" -- never changes while it stays open, so there is no
     "OK"-appears/disappears signal to wait for the way there is for a page
-    switch). Reading the name set exactly once right after the click would
-    trivially "confirm" the pre-submission state, which was the bug this
-    replaces: two matching reads spaced by `interval_s` at least rule out
-    catching a genuinely in-flight LVGL transition. Never raises; a set
-    that never stabilizes within `timeout_s` is still returned honestly."""
-    start = time.monotonic()
-    last = _lcd19_overlay_names(ui)
-    count = 1
-    while count < stable_reads:
-        if time.monotonic() - start >= timeout_s:
-            break
-        time.sleep(interval_s)
-        cur = _lcd19_overlay_names(ui)
-        if cur == last:
-            count += 1
-        else:
-            last = cur
-            count = 1
-    return last, time.monotonic() - start
+    switch). An empty/timeout read (see :func:`_lcd19_overlay_raw`) never
+    counts toward the streak -- it is neither a stable state nor a
+    divergence, just a read to discard and retry. Reading the name set
+    exactly once right after the click would trivially "confirm" the
+    pre-submission state, which was the bug this replaces: two matching
+    real reads spaced by `interval_s` at least rule out catching a
+    genuinely in-flight LVGL transition. Never raises; a set that never
+    stabilizes within `timeout_s` is still returned honestly (whatever the
+    last read was, even a non-None one that never repeated).
+
+    Returns ``(names, elapsed_s, empty_polls, truncated_seen)`` -- see
+    :func:`_lcd19_poll_overlay`."""
+    def _satisfied(n: Optional[set], history: "list[Optional[set]]") -> bool:
+        if n is None:
+            return False
+        real = [x for x in history if x is not None]
+        if len(real) < stable_reads:
+            return False
+        return all(x == real[-1] for x in real[-stable_reads:])
+
+    return _lcd19_poll_overlay(ui, _satisfied, timeout_s, interval_s)
 
 
 def _entry_result_summary(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2009,26 +2129,76 @@ def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
     return ok_result.get("result") == "ok"
 
 
-def _dismiss_lcd19_overlay(ui) -> Dict[str, Any]:
+#: The PIN keypad's own "Cancel" footer button (ui_lcd_keypad.c) sits at
+#: y=325 on this bench unit's panel -- off the visible glass -- so
+#: click_by_name("Cancel") locates the target and reports "ok" (it only
+#: checks whether a target by that name exists, not whether the resulting
+#: tap landed anywhere real) without the keypad actually closing. Dismiss
+#: the keypad instead via a raw touch_inject press+release on its backdrop:
+#: the keypad spans x 40..440 (ui_lcd_keypad.c), and any point inside that
+#: span but off every key/footer button hits backdrop_click_cb(), which is
+#: wired to the same cancel handler as the (off-glass) Cancel button itself
+#: (ui_lcd_keypad.c:71-79). (20, 160) is inside the span and well clear of
+#: the digit grid and footer row. A Confirm Start/Confirm Stop dialog's own
+#: "Cancel" (ui_confirm.c) is on-glass, so that path still uses
+#: click_by_name -- this workaround is keypad-specific.
+_KEYPAD_BACKDROP_XY = (20, 160)
+
+
+def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
     """Best-effort: dismiss a PIN keypad or Confirm Start/Confirm Stop dialog
-    left open by this case, via "Cancel" only -- never the dialog's own
-    confirm button. Returns a dict recording what was found and whether the
-    dismiss actually took (verified by re-listing tap targets), for
-    inclusion in the case's `observed`."""
+    left open, never via the dialog's own confirm/OK/digit buttons. Returns
+    a dict recording what was found and whether the dismiss actually took,
+    for inclusion in a case's `observed`.
+
+    `dismissed` is only ever True when BOTH the dismiss action itself
+    reported success (the "Cancel" click result for a confirm dialog, or
+    both touch_inject calls' own `ok` for the keypad backdrop tap) AND a
+    subsequent listing comes back as a real (non-empty) set with no
+    "Cancel" in it -- an empty/timeout read (see :func:`_lcd19_overlay_raw`)
+    is never treated as "the popup is gone" the way `present=False`'s bare
+    ``bool(n) == False`` used to read (every real screen here always has at
+    least one tap target, so that never actually meant "gone" either)."""
     before = _lcd19_overlay_names(ui)
     if before is None:
         return {"checked": False}
     if "Cancel" not in before:
         return {"checked": True, "present": False}
-    click = ui.click_by_name("Cancel")
-    after, _ = _wait_for_overlay_names(ui, present=False)
-    dismissed = after is not None and "Cancel" not in after
-    return {
-        "checked": True,
-        "present": True,
-        "cancel_click_result": click.get("result"),
-        "dismissed": dismissed,
-    }
+    is_keypad = "OK" in before
+    result: Dict[str, Any] = {"checked": True, "present": True, "is_keypad": is_keypad}
+    action_ok = False
+    if is_keypad:
+        srv = _srv(ctx)
+        touch = getattr(srv, "_touch", None)
+        result["dismiss_method"] = "backdrop_touch_inject"
+        if touch is None:
+            result["error"] = "no touch client available"
+        else:
+            try:
+                x, y = _KEYPAD_BACKDROP_XY
+                press = touch.inject(x, y, True)
+                release = touch.inject(x, y, False)
+                result["press_ok"] = getattr(press, "ok", None)
+                result["release_ok"] = getattr(release, "ok", None)
+                action_ok = bool(getattr(press, "ok", False)) and bool(getattr(release, "ok", False))
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = type(exc).__name__
+    else:
+        click = ui.click_by_name("Cancel")
+        result["dismiss_method"] = "click_by_name_cancel"
+        result["cancel_click_result"] = click.get("result")
+        action_ok = click.get("result") == "ok"
+    if not action_ok:
+        result["dismissed"] = False
+        return result
+    after, _, empty_polls, truncated_seen = _lcd19_poll_overlay(
+        ui, lambda n, h: n is not None and "Cancel" not in n)
+    result["dismissed"] = after is not None and "Cancel" not in after
+    if empty_polls:
+        result["empty_polls"] = empty_polls
+    if truncated_seen:
+        result["truncated"] = truncated_seen
+    return result
 
 
 def _case_lcd19(ctx: dict) -> CaseResult:
@@ -2090,8 +2260,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                 click = ui.click_by_name("Start")
                 state["start_click_result"] = click.get("result")
                 if click.get("result") == "ok":
-                    names, _ = _wait_for_overlay_names(ui, present=True, baseline=baseline)
+                    names, _, empty_polls, truncated_seen = _wait_for_overlay_names(
+                        ui, present=True, baseline=baseline)
                     state["after_start_click_names"] = sorted(names) if names is not None else None
+                    if empty_polls:
+                        state["after_start_click_empty_polls"] = empty_polls
+                    if truncated_seen:
+                        state["after_start_click_truncated"] = truncated_seen
                     keypad_raised = names is not None and "OK" in names and "Cancel" in names
                 if keypad_raised:
                     wrong_pin = pin_cfg.get("wrong_pin")
@@ -2104,8 +2279,12 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # own button set never changes -- debounce two
                             # stable reads rather than trusting one
                             # immediate (tautologically "OK present") read.
-                            names, _ = _wait_stable_names(ui)
+                            names, _, empty_polls, truncated_seen = _wait_stable_names(ui)
                             state["after_wrong_pin_names"] = sorted(names) if names is not None else None
+                            if empty_polls:
+                                state["after_wrong_pin_empty_polls"] = empty_polls
+                            if truncated_seen:
+                                state["after_wrong_pin_truncated"] = truncated_seen
                             wrong_pin_refused = names is not None and "OK" in names and "Cancel" in names
                         # else: leave wrong_pin_refused at None -- the PIN
                         # typed on the board wasn't actually the intended
@@ -2117,8 +2296,12 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         if _entry_all_clicked_ok(entry):
                             # A correct PIN closes the keypad in favour of
                             # the Confirm Start dialog -- "OK" disappears.
-                            names, _ = _wait_stable_names(ui)
+                            names, _, empty_polls, truncated_seen = _wait_stable_names(ui)
                             state["after_right_pin_names"] = sorted(names) if names is not None else None
+                            if empty_polls:
+                                state["after_right_pin_empty_polls"] = empty_polls
+                            if truncated_seen:
+                                state["after_right_pin_truncated"] = truncated_seen
                             right_pin_started = (
                                 names is not None and "OK" not in names and "Cancel" in names
                             )
@@ -2127,8 +2310,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                 stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
                 state["stop_click_result"] = stop_click.get("result")
                 if stop_click.get("result") == "ok":
-                    names, _ = _wait_for_overlay_names(ui, present=True, baseline=baseline)
+                    names, _, empty_polls, truncated_seen = _wait_for_overlay_names(
+                        ui, present=True, baseline=baseline)
                     state["after_stop_click_names"] = sorted(names) if names is not None else None
+                    if empty_polls:
+                        state["after_stop_click_empty_polls"] = empty_polls
+                    if truncated_seen:
+                        state["after_stop_click_truncated"] = truncated_seen
                     if names is not None:
                         has_cancel = "Cancel" in names
                         has_ok = "OK" in names
@@ -2145,7 +2333,7 @@ def _case_lcd19(ctx: dict) -> CaseResult:
         # (UiTestQueryError on a lost reply); the policy restore below is
         # HTTP and must run regardless, so never let the dismiss abort it.
         try:
-            overlay = _dismiss_lcd19_overlay(ui)
+            overlay = _dismiss_lcd19_overlay(ctx, ui)
         except Exception as exc:  # noqa: BLE001
             overlay = {"checked": False, "error": type(exc).__name__}
         restore_status, restore_resp = client.set_policy(

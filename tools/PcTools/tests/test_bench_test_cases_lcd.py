@@ -1699,6 +1699,13 @@ class PopupUiTest(FakeUiTest):
     "Cancel" is clicked (never any other button -- the case must never
     press the popup's own confirm button)."""
 
+    #: Home always shows at least its own fire button in real firmware --
+    #: the fake's baseline (no-overlay) listing must be non-empty too, or
+    #: the "empty listing is never a real answer" fix (cases_lcd.py's
+    #: `_lcd19_overlay_raw`) would treat every no-overlay read here as a
+    #: stalled query and poll it out to the full timeout.
+    _BASELINE_NAMES = ["Start"]
+
     def __init__(self, trigger_name, overlay_names):
         super().__init__(page="home", targets=[])
         self._trigger_name = trigger_name
@@ -1706,7 +1713,9 @@ class PopupUiTest(FakeUiTest):
         self._overlay_open = False
 
     def list_tap_targets(self):
-        names = self._overlay_names if self._overlay_open else []
+        names = list(self._BASELINE_NAMES)
+        if self._overlay_open:
+            names += list(self._overlay_names)
         return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
 
     def click_by_name(self, name):
@@ -1717,6 +1726,29 @@ class PopupUiTest(FakeUiTest):
             self._overlay_open = False
             return {"result": "ok"}
         return {"result": "not_found"}
+
+    def close_overlay_via_backdrop(self):
+        """Models `backdrop_click_cb()` (ui_lcd_keypad.c) -- the touch-inject
+        dismiss path a paired :class:`BackdropTouch` fake calls into."""
+        self._overlay_open = False
+
+
+class BackdropTouch:
+    """A TouchClient double whose `inject()` at the keypad-backdrop point
+    (cases_lcd.py's `_KEYPAD_BACKDROP_XY`) closes the paired popup fake's
+    overlay, modeling `backdrop_click_cb()` -- any other point is recorded
+    but does nothing. Both press and release report ok."""
+
+    def __init__(self, ui, backdrop_xy=(20, 160)):
+        self._ui = ui
+        self._backdrop_xy = backdrop_xy
+        self.injected = []
+
+    def inject(self, x, y, pressed):
+        self.injected.append((x, y, pressed))
+        if (x, y) == self._backdrop_xy and not pressed:
+            self._ui.close_overlay_via_backdrop()
+        return mock.Mock(ok=True)
 
 
 class PinKeypadUiTest(FakeUiTest):
@@ -1747,7 +1779,10 @@ class PinKeypadUiTest(FakeUiTest):
         elif self._state == "confirm":
             names = ["Start", "Cancel"]
         else:
-            names = []
+            # Real home page always shows >=1 tap target even with no popup
+            # open -- an empty listing here would now be treated as "no
+            # read" (see cases_lcd.py's `_lcd19_overlay_raw`).
+            names = ["Start"]
         return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
 
     def click_by_name(self, name):
@@ -1855,8 +1890,8 @@ class WaitForOverlayNamesBaselineTest(unittest.TestCase):
                                    post={"Start", "settings", "OK", "Cancel"},
                                    stale_reads=2)
         baseline = C._lcd19_overlay_names(ui)  # consumes one read, itself "pre"
-        names, _waited = C._wait_for_overlay_names(ui, present=True, baseline=baseline,
-                                                     timeout_s=1.0, interval_s=0.01)
+        names, _waited, _empty, _trunc = C._wait_for_overlay_names(
+            ui, present=True, baseline=baseline, timeout_s=1.0, interval_s=0.01)
         self.assertIsNotNone(names)
         self.assertIn("OK", names)
         self.assertIn("Cancel", names)
@@ -1868,8 +1903,8 @@ class WaitForOverlayNamesBaselineTest(unittest.TestCase):
         same = {"Start", "settings"}
         ui = DelayedOverlayUiTest(pre=same, post=same, stale_reads=0)
         baseline = C._lcd19_overlay_names(ui)
-        names, waited = C._wait_for_overlay_names(ui, present=True, baseline=baseline,
-                                                    timeout_s=0.05, interval_s=0.01)
+        names, waited, _empty, _trunc = C._wait_for_overlay_names(
+            ui, present=True, baseline=baseline, timeout_s=0.05, interval_s=0.01)
         self.assertEqual(names, same)
         self.assertGreaterEqual(waited, 0.05)
 
@@ -1879,7 +1914,8 @@ class WaitForOverlayNamesBaselineTest(unittest.TestCase):
         # always passes a baseline now; this is not an endorsement.
         ui = DelayedOverlayUiTest(pre={"Start", "settings"},
                                    post={"Start", "settings", "OK", "Cancel"})
-        names, _waited = C._wait_for_overlay_names(ui, present=True, timeout_s=1.0, interval_s=0.01)
+        names, _waited, _empty, _trunc = C._wait_for_overlay_names(
+            ui, present=True, timeout_s=1.0, interval_s=0.01)
         self.assertEqual(names, {"Start", "settings"})  # returns immediately, stale
 
 
@@ -1988,7 +2024,9 @@ class Lcd19Test(unittest.TestCase):
         # left open on the board afterward.
         self.assertEqual(result.observed["overlay_dismiss"]["present"], True)
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
-        self.assertEqual(ui.list_tap_targets()["targets"], [])
+        self.assertEqual(
+            [t["name"] for t in ui.list_tap_targets()["targets"]], ["Start"]
+        )
 
     def test_start_click_that_changes_nothing_fails_with_names_recorded(self):
         # The Start click is acknowledged but no popup appears: the
@@ -2007,7 +2045,10 @@ class Lcd19Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIs(result.observed.get("keypad_raised"), False)
         self.assertIn("after_start_click_names", result.observed)
-        self.assertEqual(result.observed["after_start_click_names"], [])
+        # Baseline itself ("Start") is what a bare-non-empty check would
+        # have wrongly matched immediately -- it never diverges here, so
+        # the wait times out and reports that same unchanged set, not [].
+        self.assertEqual(result.observed["after_start_click_names"], ["Start"])
 
     def test_restore_runs_even_if_overlay_dismiss_raises(self):
         # The dismiss is a UART round trip that can raise; the HTTP policy
@@ -2129,14 +2170,22 @@ class Lcd19Test(unittest.TestCase):
         # be a real FAIL, not vacuously always True.
         ui = PopupUiTest(trigger_name="Stop", overlay_names=["1", "2", "3", "OK", "Cancel"])
         srv = FakeSrvFull(ui)
+        # "OK" is present alongside "Cancel" -- this is the keypad shape, so
+        # dismissal in `finally` must go through the backdrop touch-inject
+        # path, never click_by_name("Cancel") (see fix 2).
+        srv._touch = BackdropTouch(ui)
         with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
             ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
             result = C._case_lcd19(ctx)
         self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
         self.assertNotIn(mock.call("Start"), spy.call_args_list)
+        self.assertNotIn(mock.call("Cancel"), spy.call_args_list)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("Stop", result.reason)
+        self.assertEqual(result.observed["overlay_dismiss"]["dismiss_method"], "backdrop_touch_inject")
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
+        self.assertIn((20, 160, True), srv._touch.injected)
+        self.assertIn((20, 160, False), srv._touch.injected)
 
     def test_dismiss_overlay_not_needed_when_nothing_open(self):
         ui = PopupUiTest(trigger_name="Start", overlay_names=[])
@@ -2549,6 +2598,188 @@ class WakeAndHomeErrorHoldTest(unittest.TestCase):
         # Only the single initial wake press+release; the ERROR_HOLD branch
         # is never reached because get_state() has no power_state attr.
         self.assertEqual(srv._touch.injected, [(5, 5, True), (5, 5, False)])
+
+
+class _EmptyThenRealUiTest(FakeUiTest):
+    """``list_tap_targets()`` returns the walk-timeout sentinel (count 0,
+    ``truncated`` per `truncated_first`) for the first `empty_reads` polls,
+    then a real, non-empty listing -- models `uart_bridge_ui_test.c`'s
+    300ms LVGL walk window occasionally losing the race."""
+
+    def __init__(self, real_names, empty_reads=2, truncated_first=True):
+        super().__init__(page="home", targets=[])
+        self._real_names = real_names
+        self._empty_reads = empty_reads
+        self._truncated_first = truncated_first
+        self._reads = 0
+
+    def list_tap_targets(self):
+        self._reads += 1
+        if self._reads <= self._empty_reads:
+            return {"targets": [], "truncated": self._truncated_first}
+        return {
+            "targets": [{"name": n, "hidden": False} for n in self._real_names],
+            "truncated": False,
+        }
+
+
+class Lcd19OverlayFixesTest(unittest.TestCase):
+    """Direct unit tests for the three 2026-09-25 harness fixes (Opus
+    root-cause of logs/bench_test/20260925T150041Z_full and
+    20260925T150107Z_lcd): an empty/truncated tap-target listing must never
+    be read as a real answer; a dismiss must never be reported without
+    evidence; and the PIN keypad must be dismissed via the backdrop
+    touch-inject path, never the (off-glass) Cancel button."""
+
+    # -- Fix 1: empty/truncated listing is "no read yet", never a real set --
+
+    def test_empty_then_real_listing_is_not_mistaken_for_an_answer(self):
+        ui = _EmptyThenRealUiTest(real_names=["Start"], empty_reads=3)
+        names = C._lcd19_overlay_names(ui, timeout_s=1.0, interval_s=0.01)
+        self.assertEqual(names, {"Start"})
+
+    def test_wait_for_overlay_names_never_treats_empty_as_gone(self):
+        # present=False (waiting for a popup to disappear) must not be
+        # satisfied by the empty/timeout sentinel -- only by a real,
+        # non-empty listing with no popup content.
+        ui = _EmptyThenRealUiTest(real_names=["Start"], empty_reads=3)
+        names, _elapsed, empty_polls, truncated_seen = C._wait_for_overlay_names(
+            ui, present=False, timeout_s=1.0, interval_s=0.01)
+        self.assertEqual(names, {"Start"})
+        self.assertGreaterEqual(empty_polls, 3)
+        self.assertTrue(truncated_seen)
+
+    def test_wait_for_overlay_names_records_empty_polls_and_truncated_when_it_never_recovers(self):
+        # Every read stays empty/truncated for the whole timeout: the
+        # caller must still get an honest None, plus a count of the empty
+        # polls and that truncated was seen, never a fabricated set.
+        ui = _EmptyThenRealUiTest(real_names=["Start"], empty_reads=10_000)
+        names, _elapsed, empty_polls, truncated_seen = C._wait_for_overlay_names(
+            ui, present=True, timeout_s=0.1, interval_s=0.01)
+        self.assertIsNone(names)
+        self.assertGreater(empty_polls, 0)
+        self.assertTrue(truncated_seen)
+
+    def test_wait_stable_names_discards_empty_reads_from_the_streak(self):
+        ui = _EmptyThenRealUiTest(real_names=["1", "2", "OK", "Cancel"], empty_reads=2)
+        names, _elapsed, empty_polls, _trunc = C._wait_stable_names(
+            ui, timeout_s=1.0, interval_s=0.01, stable_reads=2)
+        self.assertEqual(names, {"1", "2", "OK", "Cancel"})
+        self.assertEqual(empty_polls, 2)
+
+    # -- Fix 2: dismiss requires real evidence, never a bare "ok" click --
+
+    def test_dismiss_never_reports_true_when_overlay_listing_never_clears(self):
+        # click_by_name("Cancel") reports "ok", but the listing keeps
+        # showing "Cancel" (or reads empty/timeout) afterward -- the
+        # original bug reported dismissed=True purely off the click result.
+        class _StuckDialogUiTest(FakeUiTest):
+            def __init__(self):
+                super().__init__(page="home", targets=[])
+
+            def list_tap_targets(self):
+                return {"targets": [{"name": "Start", "hidden": False},
+                                     {"name": "Cancel", "hidden": False}],
+                        "truncated": False}
+
+            def click_by_name(self, name):
+                return {"result": "ok"}
+
+        ui = _StuckDialogUiTest()
+        ctx = {"srv": FakeSrv(ui)}
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.05):
+            result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertEqual(result["dismiss_method"], "click_by_name_cancel")
+        self.assertEqual(result["cancel_click_result"], "ok")
+        self.assertFalse(result["dismissed"])
+
+    def test_dismiss_false_when_click_itself_is_not_ok(self):
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
+        ui.click_by_name("Stop")  # open the confirm dialog
+        real_click = ui.click_by_name
+        ui.click_by_name = lambda name: {"result": "not_found"} if name == "Cancel" else real_click(name)
+        ctx = {"srv": FakeSrv(ui)}
+        result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertFalse(result["dismissed"])
+        self.assertEqual(result["cancel_click_result"], "not_found")
+
+    def test_dismiss_true_only_after_real_evidence_of_a_clear_listing(self):
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
+        ui.click_by_name("Stop")
+        ctx = {"srv": FakeSrv(ui)}
+        result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertTrue(result["dismissed"])
+        self.assertEqual(result["dismiss_method"], "click_by_name_cancel")
+
+    # -- Fix 2b: backdrop touch-inject is chosen for the keypad, never a tap
+    #    on OK/digits/Confirm, and click_by_name("Cancel") is never used --
+
+    def test_keypad_overlay_dismissed_via_backdrop_not_cancel_click(self):
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "OK", "Cancel"])
+        ui.click_by_name("Start")
+        touch = BackdropTouch(ui)
+        srv = FakeSrv(ui)
+        srv._touch = touch
+        ctx = {"srv": srv}
+        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
+            result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertEqual(result["dismiss_method"], "backdrop_touch_inject")
+        self.assertTrue(result["dismissed"])
+        spy.assert_not_called()  # never OK, a digit, or Cancel
+        self.assertIn((20, 160, True), touch.injected)
+        self.assertIn((20, 160, False), touch.injected)
+
+    def test_keypad_dismiss_without_a_touch_client_is_honestly_not_dismissed(self):
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "OK", "Cancel"])
+        ui.click_by_name("Start")
+        ctx = {"srv": FakeSrv(ui)}  # no _touch attribute at all
+        result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertFalse(result["dismissed"])
+        self.assertIn("error", result)
+
+    def test_confirm_dialog_overlay_still_uses_cancel_click_not_backdrop(self):
+        # Only "Cancel" is present (no "OK") -- a Confirm Start/Stop dialog,
+        # whose own Cancel button is on-glass -- so this path is unaffected
+        # by the keypad-specific backdrop workaround.
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
+        ui.click_by_name("Stop")
+        ctx = {"srv": FakeSrv(ui)}  # no _touch at all -- must not be needed
+        result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertEqual(result["dismiss_method"], "click_by_name_cancel")
+        self.assertTrue(result["dismissed"])
+
+    # -- Fix 3: LCD-01 must FAIL against a stray overlay, never the Start
+    #    button, and must proceed normally once it is dismissed --
+
+    def test_lcd01_fails_naming_stray_overlay_when_it_cannot_dismiss(self):
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "OK", "Cancel"])
+        ui.click_by_name("Start")  # simulate a leftover keypad from a prior run
+        srv = FakeSrv(ui)
+        # No _touch client -- the keypad backdrop dismiss cannot be attempted,
+        # so this must FAIL naming the stray overlay, not blame Start.
+        result = C._case_lcd01({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("stray overlay", result.reason)
+        self.assertNotIn("Start button", result.reason)  # never blame Start
+        stray = result.observed["stray_overlay"]
+        self.assertIn("Cancel", stray["names"])
+        self.assertFalse(stray["dismiss"]["dismissed"])
+
+    def test_lcd01_proceeds_normally_once_stray_overlay_is_dismissed(self):
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
+        ui.click_by_name("Stop")  # leftover Confirm Stop dialog from a prior run
+        srv = FakeSrv(ui)
+        with mock.patch.object(lcd_sampler, "capture_full_frame",
+                                side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd01({"srv": srv})
+        # The overlay must be gone afterward (dismiss succeeded via
+        # click_by_name("Cancel") -- no keypad, no touch client needed) and
+        # the case must reach its normal home-page judgment path rather than
+        # failing over the overlay.
+        self.assertNotIn("Cancel", ui.list_tap_targets()["targets"] and
+                          {t["name"] for t in ui.list_tap_targets()["targets"]})
+        self.assertNotEqual(result.reason or "", "")
+        self.assertNotIn("stray overlay", (result.reason or ""))
 
 
 class Lcd21Test(unittest.TestCase):
