@@ -146,9 +146,12 @@ QueueHandle_t s_wifi_cmd_queue;
  *     (defensive -- see owner_reply()'s comment for why this should never
  *     actually be needed in correct operation, but a drain costs nothing and
  *     closes the class outright rather than relying on the protocol alone).
- *   - free_reply_slot(): producer, ONLY on a path where the owner never saw
- *     (queue-send itself failed) this exact generation. Bumps the
- *     generation and clears in_use, uncontested.
+ *   - free_reply_slot(): producer, on two paths -- the normal
+ *     xSemaphoreTake() success path (owner already replied, nothing else
+ *     will ever touch this generation), and the queue-send failure path
+ *     (the owner never saw this generation at all). Either way nothing else
+ *     can still be acting on the slot, so it bumps the generation and clears
+ *     in_use, uncontested.
  *   - abandon_or_free_reply_slot(): producer, on a xSemaphoreTake() timeout.
  *     Takes the mutex ONCE and makes one locked decision: if the owner
  *     already finished (`replied` is set -- it raced the timeout and won),

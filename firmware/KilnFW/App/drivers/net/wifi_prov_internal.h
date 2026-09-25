@@ -165,10 +165,13 @@ typedef struct {
  * into a small pool of module-owned (never stack-owned) reply slots
  * (s_reply_slots, wifi_prov.c) plus a generation number captured at claim
  * time. See wifi_prov.c's "reply slot pool" comment for the full protocol:
- * in short, a timed-out producer never frees or touches the slot itself --
- * it only marks it abandoned, and the OWNER is the only side that ever
- * decides whether to write+signal (generation still matches, not abandoned)
- * or to just recycle it (mismatch or abandoned), so there is exactly one
+ * in short, a timed-out producer makes ONE locked decision
+ * (abandon_or_free_reply_slot()): if the owner's reply already landed
+ * (`replied` true), the producer copies the result out and frees the slot
+ * itself (late success); otherwise it marks the slot abandoned and leaves
+ * freeing it to the owner, which recycles an abandoned slot instead of
+ * answering it. Either way the decision of "who frees this slot" is made
+ * under the pool mutex by whichever side reaches it, so there is exactly one
  * writer of "is this slot still alive" at every instant and never a write
  * or a signal aimed at a producer that already gave up. */
 typedef struct {

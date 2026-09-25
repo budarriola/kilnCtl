@@ -69,8 +69,8 @@ applies to every slice.
 
 ### W1 -- Wi-Fi: reply before the scan-and-join (shape A). HIGHEST value -- IMPLEMENTED, pending bench verification
 
-**Status (2026-09-25):** implemented in worktree `wifiw1`, review-fixed same
-day (Opus review of `532685a4`). `owner_task()` replies via a reply-slot pool
+**Status (2026-09-25):** landed; bench verification pending. Review-fixed same
+day (Opus review of `8f9ae877`). `owner_task()` replies via a reply-slot pool
 BEFORE calling `start_sta_join()`; `do_add_network()`/`do_set_mode()` set
 `out_join_after_reply` instead of joining themselves, and now also set
 `s_wifi.state = WIFI_PROV_STATE_CONNECTING` before returning, so a client

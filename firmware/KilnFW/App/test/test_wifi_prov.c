@@ -335,7 +335,7 @@ static void test_wifi_prov_start_sets_ram_storage(void)
 }
 
 // ---- W1 reply-slot-pool tests (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) ----
-// claim_reply_slot()/free_reply_slot()/abandon_reply_slot()/owner_reply() are
+// claim_reply_slot()/free_reply_slot()/abandon_or_free_reply_slot()/owner_reply() are
 // static in wifi_prov.c and reached here the same way do_*() is: this file
 // #includes wifi_prov.c directly. These exercise the pure claim/free/abandon/
 // reply protocol against the pool's own data structures -- the freertos/
@@ -541,6 +541,40 @@ static void test_do_add_network_sets_connecting_and_defers_the_join(void)
                "run later by owner_task(), does that");
 }
 
+// 2026-09-25 review fix (mirrors do_add_network() above): do_set_mode()'s
+// HOME branch has the identical reply-before-join hazard -- a client polling
+// GET /api/status right after "ok" could observe the PRE-join state if
+// CONNECTING weren't set until start_sta_join() got around to it. do_set_mode()
+// sets s_wifi.state = WIFI_PROV_STATE_CONNECTING itself, on the owner task,
+// before returning -- before the reply is visible to the waiting producer --
+// and defers the actual radio join to start_sta_join(), which owner_task()
+// runs only AFTER replying (out_join_after_reply).
+static void test_do_set_mode_home_sets_connecting_and_defers_the_join(void)
+{
+    TEST_SECTION("do_set_mode() HOME branch sets CONNECTING and defers the join to after the reply");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+    g_stub_wifi_connect_calls = 0;
+
+    // Seed a saved network so the HOME branch takes the join-pending path
+    // rather than the "no saved network" branch.
+    bool seed_join_after_reply = false;
+    esp_err_t seed_err = do_add_network("TestSSID", "TestPassword1", &seed_join_after_reply);
+    TEST_CHECK(seed_err == ESP_OK, "seeding a saved network succeeds");
+    g_stub_wifi_connect_calls = 0; // do_add_network() itself must not have joined either; reset for a clean assertion
+    s_wifi.state = WIFI_PROV_STATE_AP_MODE; // do_add_network() already set CONNECTING; reset so the assert below only passes if do_set_mode() itself sets it
+
+    bool join_after_reply = false;
+    esp_err_t err = do_set_mode(WIFI_PROV_MODE_HOME, &join_after_reply);
+
+    TEST_CHECK(err == ESP_OK, "setting HOME mode with a saved network succeeds");
+    TEST_CHECK(join_after_reply, "do_set_mode() HOME branch asks the owner to join AFTER it replies");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTING,
+               "state flips to CONNECTING synchronously, before the reply is visible to the producer");
+    TEST_CHECK(g_stub_wifi_connect_calls == 0,
+               "do_set_mode() itself never calls esp_wifi_connect() -- only start_sta_join(), "
+               "run later by owner_task(), does that");
+}
+
 void run_test_wifi_prov(void)
 {
     test_static_ip_confirmed_false_at_boot();
@@ -558,4 +592,5 @@ void run_test_wifi_prov(void)
     test_reply_slot_timeout_races_a_completed_reply_never_leaks();
     test_reply_slot_stale_generation_never_matches_after_reuse();
     test_do_add_network_sets_connecting_and_defers_the_join();
+    test_do_set_mode_home_sets_connecting_and_defers_the_join();
 }
