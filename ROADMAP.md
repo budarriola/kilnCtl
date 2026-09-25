@@ -76,6 +76,11 @@
 >   handlers. Autotune/adaptive-tune's own internal accept-path writes
 >   (calling `zones_config_set_*()` directly while a run IS active) stay
 >   ungated by design.
+>   **Narrowed, 2026-09-25 (later same day, owner decision):**
+>   `adaptive_tune_http.c`'s enable handler now gates only turning adaptive
+>   tune ON -- turning it OFF during a run is allowed, since it can only
+>   PREVENT a future change, never apply one. The revert handler is
+>   unaffected and still refuses unconditionally while a run is active.
 >   **Known gap, still open:** `kiln_cfg_http.c`, `backup_import.c`,
 >   `uart_bridge_ext_control.c`, `cfg_fs_format_http.c`, the UART
 >   `factory_reset_execute()` path, and `adaptive_tune_http.c`'s

@@ -265,6 +265,12 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    is active, not scoped to zones the run touches). Autotune/adaptive_tune's
    own internal accept-path writes (calling `zones_config_set_*()` directly
    while a run IS active) stay ungated by design.
+   **Narrowed, 2026-09-25 (later same day, owner decision):**
+   `adaptive_tune_http.c`'s `enable_post_handler()` now gates only the
+   `enabled=true` case — turning adaptive tune OFF during a run is allowed,
+   since it can only PREVENT a future change, never apply one (the same
+   shape as pausing a firing, not a config write). `revert_post_handler()`
+   is unaffected and still refuses unconditionally while a run is active.
    **Review fix (dead-code ordering):** `zones_http_post.c`, `kiln_cfg_http.c`
    and `backup_import.c` originally called the mode gate AFTER
    `ota_http_check_interlocks()`, which answers first while a firing is
@@ -275,11 +281,16 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    `test_zones_post_refused_by_mode_gate_before_interlock`.
    **Known test gaps (still open):** `kiln_cfg_http.c`, `backup_import.c`,
    `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL`, and
-   `adaptive_tune_http.c`'s `enable`/`revert` handlers have no host-test
-   harness exercising the HTTP/UART entry point itself — their gate wiring
-   is verified by code-pattern review and an ESP-IDF target build only, not
-   a host-test assertion. `zones_http_pid.c` and `iter_tune_http.c` DO have
-   handler-level tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+   `adaptive_tune_http.c`'s `enable`/`revert` handlers (including the
+   2026-09-25 enabled=false carve-out) have no host-test harness exercising
+   the HTTP/UART entry point itself — their gate wiring is verified by
+   code-pattern review and an ESP-IDF target build only, not a host-test
+   assertion; `test_adaptive_tune_http.c` deliberately hand-mirrors only
+   `status_get_handler()`'s render format and never links the rest of the
+   translation unit (its own header comment explains why), so it cannot
+   reach `enable_post_handler()`/`revert_post_handler()` either. `zones_http_pid.c`
+   and `iter_tune_http.c` DO have handler-level tests (`test_zones_http.c`,
+   `test_iter_tune_http.c`).
 5. **LANDED, 2026-09-25** — `SYS_ACTION_FACTORY_RESET` wired into
    `factory_reset.c` (after auth) and the UART-exclusive
    `factory_reset_execute()` entry point (`uart_bridge_system.c`);

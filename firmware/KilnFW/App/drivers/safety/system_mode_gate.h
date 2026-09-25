@@ -38,7 +38,7 @@
 // even while a firing was RUNNING/PAUSED), uart_bridge_ext_control.c's
 // SET_ZONE_PID/SET_ZONE_MODEL, kiln_cfg_http.c's apply submit,
 // backup_import.c's apply, iter_tune_http.c's restore_commissioned, and
-// adaptive_tune_http.c's enable/revert handlers -- and SYS_ACTION_FACTORY_
+// adaptive_tune_http.c's revert handler -- and SYS_ACTION_FACTORY_
 // RESET/SYS_ACTION_CFGFS_FORMAT (factory_reset.c's reset_post_handler(),
 // the UART-exclusive factory_reset_execute() entry point in
 // uart_bridge_system.c, and cfg_fs_format_http.c) the same way. Refusal
@@ -46,6 +46,13 @@
 // ota_http_check_interlocks(), then http_async_job_busy() where applicable
 // (A1) -- reversing that order made this gate's own 409 unreachable while a
 // firing was active, a dead-code bug found and fixed during review.
+//
+// Narrowed, 2026-09-25 (later same day, owner decision): adaptive_tune_http.c's
+// enable_post_handler() only gates the enabled=true (turn ON) case now --
+// enabled=false (turn OFF) is allowed during a run, since it can only PREVENT
+// a future change, never apply one, the same shape as pausing a firing rather
+// than a config write. revert_post_handler() is unaffected and still refuses
+// unconditionally while a run is active, same as every other wired writer.
 // system_mode_gate_check() still returns OK unconditionally for any action
 // nobody has wired a rule for yet (SYS_ACTION_START_PROFILE/
 // SYS_ACTION_START_AUTOTUNE/SYS_ACTION_OTA_START keep their own existing
@@ -72,7 +79,9 @@ typedef enum {
     SYS_ACTION_WRITE_ZONES_CONFIG,   // wired -- zones_http_post.c, zones_http_pid.c,
                                       // uart_bridge_ext_control.c, kiln_cfg_http.c,
                                       // backup_import.c, iter_tune_http.c,
-                                      // adaptive_tune_http.c (see rollout note)
+                                      // adaptive_tune_http.c's revert handler and its
+                                      // enable handler's enabled=true case only -- see
+                                      // rollout note's 2026-09-25 narrowing
     SYS_ACTION_RAW_RELAY_DEBUG_WRITE, // wired: kiln_io_owner.c's relay_on_blocked()
     SYS_ACTION_FACTORY_RESET,        // wired: factory_reset.c's reset_post_handler() and
                                       // uart_bridge_system.c's factory_reset_execute()

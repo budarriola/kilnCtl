@@ -172,8 +172,15 @@ static esp_err_t enable_post_handler(httpd_req_t *req)
      * wired call site. Adaptive tune's own INTERNAL accept-path writes
      * during a live run (adaptive_tune.c's ki/model accessors, called
      * directly, never through this handler) are deliberately NOT gated --
-     * only this externally-triggered toggle is. */
-    {
+     * only this externally-triggered toggle is.
+     *
+     * Owner decision, 2026-09-25 (later same day): narrowed further --
+     * turning adaptive tune OFF (enabled=false) is allowed during a run,
+     * because it can only PREVENT a future change, never apply one; it is
+     * the same shape as pausing a firing, not a config write. Only
+     * enabled=true (and revert_post_handler() below, which reverts already-
+     * applied gains) still refuses with 409 while a run is active. */
+    if (enabled) {
         sys_mode_snapshot_t mode_snap = { 0 };
         relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
         char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
