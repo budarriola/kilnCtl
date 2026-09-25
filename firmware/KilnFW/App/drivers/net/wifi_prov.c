@@ -79,6 +79,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_reply_results below */
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -120,7 +121,8 @@ struct wifi_prov_state s_wifi;
 
 QueueHandle_t s_wifi_cmd_queue;
 
-/* ---- Reply slot pool (2026-09-25, W1: docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) ----
+/* ---- Reply slot pool (2026-09-25, W1: docs/HTTP_POST_OWNER_MIGRATION_PLAN.md;
+ * revised 2026-09-25 review fixes -- see the plan doc's W1 section) ----
  *
  * Fixes the write-into-a-dead-stack-frame hazard wifi_cmd_t's doc comment
  * (wifi_prov_internal.h) describes: a producer used to hand the owner a
@@ -131,61 +133,98 @@ QueueHandle_t s_wifi_cmd_queue;
  * the command.
  *
  * Replacement: a small pool of module-owned reply slots (storage that is
- * never a producer's stack) plus a generation counter per slot. Exactly one
- * side ever decides a slot's fate at each point in its life, so there is
- * never a write or a signal aimed at a producer that already gave up:
+ * never a producer's stack) plus a generation counter per slot. Every
+ * decision about a slot's fate -- write the result, signal the semaphore,
+ * free the slot -- is made under s_reply_pool_mutex, and a `replied` flag
+ * (distinct from `abandoned`) lets whichever side gets to the mutex SECOND
+ * see accurately what the other side already did instead of racing outside
+ * the lock:
  *
  *   - claim_reply_slot(): producer, before posting. Picks a free slot, marks
- *     it in_use, captures its current generation into *out_gen, and drains
- *     any stale "given" signal left on its semaphore (defensive -- see
- *     owner_reply()'s comment for why this should never actually be needed
- *     in correct operation, but a drain costs nothing and closes the class
- *     outright rather than relying on the protocol alone).
+ *     it in_use, clears `replied`, captures its current generation into
+ *     *out_gen, and drains any stale "given" signal left on its semaphore
+ *     (defensive -- see owner_reply()'s comment for why this should never
+ *     actually be needed in correct operation, but a drain costs nothing and
+ *     closes the class outright rather than relying on the protocol alone).
  *   - free_reply_slot(): producer, ONLY on a path where the owner never saw
- *     (queue-send itself failed) or has already finished with (producer took
- *     the semaphore successfully and copied the result out) this exact
- *     generation. Bumps the generation and clears in_use, uncontested.
- *   - abandon_reply_slot(): producer, on timeout. Does NOT free or touch
- *     generation -- the owner might still be about to process this exact
- *     command. Only sets `abandoned`, gated on the generation still
- *     matching (defensive; it always will, since nothing else bumps it
- *     until the owner or this same producer does).
+ *     (queue-send itself failed) this exact generation. Bumps the
+ *     generation and clears in_use, uncontested.
+ *   - abandon_or_free_reply_slot(): producer, on a xSemaphoreTake() timeout.
+ *     Takes the mutex ONCE and makes one locked decision: if the owner
+ *     already finished (`replied` is set -- it raced the timeout and won),
+ *     the result is provably already sitting in s_reply_results[slot] with
+ *     nobody else ever going to touch it, so this copies it out, drains the
+ *     semaphore (0-tick, matches whatever owner_reply() gave), and frees the
+ *     slot itself -- the producer's own timeout path effectively becomes a
+ *     (very late) success. Otherwise it marks `abandoned` and leaves the
+ *     slot in_use, since the owner may still be about to act on this exact
+ *     generation and must be the one to free it (see owner_reply() below).
+ *     This closes the permanent-leak race the previous version had: giving
+ *     the semaphore outside the lock in owner_reply() left a window where a
+ *     producer's timeout fired, found "not abandoned yet" under a SEPARATE
+ *     lock acquisition, and marked an already-replied slot abandoned forever
+ *     (nobody frees an abandoned+in_use slot except owner_reply() on a LATER
+ *     command reusing the same generation, which never happens once
+ *     `abandoned` is set without a matching generation bump).
  *   - owner_reply(): owner, once it has computed a reply-bearing command's
- *     result. Holds the pool lock for its entire decision: if the slot's
- *     generation no longer matches (should not happen; fail closed and
- *     never write), or the slot was marked abandoned, the owner recycles the
+ *     result. Holds the pool lock for the ENTIRE operation -- decision,
+ *     result write, and xSemaphoreGive() all happen under
+ *     s_reply_pool_mutex. This is safe for a FreeRTOS mutex (giving a
+ *     semaphore never blocks or sleeps); the previous version's comment
+ *     claiming otherwise was wrong, and is exactly what made the race above
+ *     possible. If the slot's generation no longer matches (should not
+ *     happen; fail closed and never write) or the slot was already marked
+ *     abandoned by a producer that got here first, the owner recycles the
  *     slot itself (bump generation, clear in_use/abandoned) and skips both
  *     the write and the signal -- there is provably nobody left waiting on
- *     it, and the memory being recycled is the module's own, not a stack
- *     frame, so there is nothing left to corrupt. Otherwise it writes the
- *     result into the slot and gives the slot's semaphore; the slot is freed
- *     later by the producer that is (by construction) still waiting for it.
+ *     it. Otherwise it writes the result, sets `replied`, and gives the
+ *     slot's semaphore, all still under the lock; the slot is freed later by
+ *     the producer's normal xSemaphoreTake() success path (free_reply_slot()
+ *     via wifi_prov_post_and_wait()), or, if the timeout raced it, by
+ *     abandon_or_free_reply_slot() as described above.
  *
  * Pool size matches the command queue depth: xQueueSend's own 0-tick timeout
  * already refuses a command outright once WIFI_OWNER_QUEUE_LEN commands are
  * queued, so at most that many reply-bearing commands can ever be in flight
  * waiting for a slot at once; running out of slots is treated exactly like a
- * full queue (refuse the command, never block acquiring one). */
+ * full queue (refuse the command, never block acquiring one).
+ *
+ * s_reply_results lives in a separate EXT_RAM_BSS_ATTR (PSRAM) array, not
+ * inside wifi_reply_slot_t itself: wifi_result_t carries the whole saved-
+ * network list and is the dominant cost of this pool (measured: pulling it
+ * into PSRAM took check_kilnfw_dram_bss_budget's .dram0.bss back under
+ * budget -- see the plan doc's W1 section for the before/after numbers).
+ * Everything else (the protocol bookkeeping and the semaphore, which
+ * FreeRTOS requires in internal RAM) stays in s_reply_slots. Both arrays are
+ * indexed identically by slot number and are always accessed together under
+ * s_reply_pool_mutex, so splitting them changes nothing about the locking
+ * protocol above -- just where the bytes live. */
 typedef struct {
     bool in_use;
     bool abandoned;
+    bool replied;
     uint32_t generation;
     SemaphoreHandle_t sem;
     StaticSemaphore_t sem_storage;
-    wifi_result_t result;
 } wifi_reply_slot_t;
 
 #define WIFI_REPLY_SLOT_COUNT WIFI_OWNER_QUEUE_LEN
 
 static wifi_reply_slot_t s_reply_slots[WIFI_REPLY_SLOT_COUNT];
+static EXT_RAM_BSS_ATTR wifi_result_t s_reply_results[WIFI_REPLY_SLOT_COUNT];
 static StaticSemaphore_t s_reply_pool_mutex_storage;
 static SemaphoreHandle_t s_reply_pool_mutex;
 
-/* Created once, lazily, the first time any producer needs the pool -- mirrors
- * this module's existing style of deferring one-time setup to first use
- * rather than adding another wifi_prov_start() step. Every caller of the pool
- * functions below goes through wifi_prov_post_and_wait(), which always calls
- * this first. */
+/* Called once from wifi_prov_start() (see below), before s_wifi_cmd_queue is
+ * created and before the owner task exists -- app_main's task is still the
+ * only one that can touch this module at that point, so there is no cross-
+ * core race to guard against. The lazy first-use call this function used to
+ * be the only entry point for was racy in principle (two producers on
+ * different cores both observing s_reply_pool_mutex as NULL and both calling
+ * xSemaphoreCreateMutexStatic() on the same storage) even though it was
+ * never observed to actually lose that race on the bench. The guard against
+ * double-init stays (host tests call this directly, with no wifi_prov_start()
+ * bring-up at all, and it must stay idempotent for them). */
 static void ensure_reply_pool_init(void)
 {
     if (s_reply_pool_mutex) {
@@ -216,6 +255,7 @@ static int claim_reply_slot(uint32_t *out_gen)
     if (found >= 0) {
         s_reply_slots[found].in_use = true;
         s_reply_slots[found].abandoned = false;
+        s_reply_slots[found].replied = false;
         *out_gen = s_reply_slots[found].generation;
         /* Defensive drain -- see this pool's top-of-file comment. Should
          * never find anything (a slot is never left in_use==false with a
@@ -227,42 +267,77 @@ static int claim_reply_slot(uint32_t *out_gen)
     return found;
 }
 
-/* Producer side: free a slot the owner never saw (queue-send failed) or has
- * already fully handed back (the producer took the semaphore and copied the
- * result out). Never called by a producer that is declaring a timeout --
- * that path is abandon_reply_slot() below, precisely because the owner may
- * still be about to touch this slot. */
+/* Producer side: free a slot the owner never saw at all -- queue-send itself
+ * failed, so no generation was ever handed to the owner and nothing can race
+ * this. The normal "producer took the semaphore and got a result" path frees
+ * the slot inline in wifi_prov_post_and_wait() below via this same function,
+ * which is safe for the identical reason. A producer declaring a TIMEOUT must
+ * never call this directly -- that path is abandon_or_free_reply_slot()
+ * below, precisely because the owner may still be about to touch this slot,
+ * or may have already replied without the producer knowing it yet. */
 static void free_reply_slot(int slot)
 {
     xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
     s_reply_slots[slot].generation++;
     s_reply_slots[slot].in_use = false;
     s_reply_slots[slot].abandoned = false;
+    s_reply_slots[slot].replied = false;
     xSemaphoreGive(s_reply_pool_mutex);
 }
 
-/* Producer side: give up waiting. Marks the slot abandoned so that whenever
- * the owner does get to this command, it recycles the slot instead of
- * writing into it or signaling a semaphore nobody is waiting on -- see
- * owner_reply() below. Deliberately does NOT free the slot or touch its
- * generation: the owner may still be mid-flight toward this exact command,
- * and freeing here would let a new claimant reuse the slot while the owner
- * is still about to act on the old generation. */
-static void abandon_reply_slot(int slot, uint32_t gen)
+/* Producer side: called after xSemaphoreTake() times out. One locked
+ * decision instead of two separate lock acquisitions (claim vs. abandon) --
+ * that gap was exactly what let a previous version of this pool leak a slot
+ * permanently: owner_reply() decided "not abandoned" and wrote the result,
+ * but gave the semaphore AFTER releasing the lock; a producer's timeout could
+ * fire in between, take the lock, see abandoned==false (truthfully, at that
+ * instant), and mark the slot abandoned -- after which nobody was ever going
+ * to free it again, since owner_reply() had already made its one and only
+ * locked decision for this generation.
+ *
+ * Fix: owner_reply() now finishes its entire job (write result, set
+ * `replied`, give the semaphore) under the SAME lock acquisition, so by the
+ * time a producer's timeout gets the lock, `replied` already reflects the
+ * true, final state -- there is no window left where the two sides can
+ * disagree.
+ *
+ * *out_result is filled and this returns true when the owner had, in fact,
+ * already replied by the time this got the lock (a genuine race between a
+ * slow owner and the wait_ms deadline, not a bug): the result is copied out
+ * of s_reply_results, any pending "give" on the semaphore is drained (0-tick
+ * -- owner_reply() gives it under the same lock as setting `replied`, so if
+ * `replied` is true here the give has unconditionally already happened), and
+ * the slot is freed exactly like a normal successful wait. Otherwise this
+ * marks the slot abandoned and leaves it in_use for the owner to recycle
+ * later (owner_reply() below) -- returns false, *out_result untouched. */
+static bool abandon_or_free_reply_slot(int slot, uint32_t gen, wifi_result_t *out_result)
 {
+    bool got_late_reply = false;
     xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
     if (s_reply_slots[slot].generation == gen) {
-        s_reply_slots[slot].abandoned = true;
+        if (s_reply_slots[slot].replied) {
+            *out_result = s_reply_results[slot];
+            xSemaphoreTake(s_reply_slots[slot].sem, 0);
+            s_reply_slots[slot].generation++;
+            s_reply_slots[slot].in_use = false;
+            s_reply_slots[slot].abandoned = false;
+            s_reply_slots[slot].replied = false;
+            got_late_reply = true;
+        } else {
+            s_reply_slots[slot].abandoned = true;
+        }
     }
     xSemaphoreGive(s_reply_pool_mutex);
+    return got_late_reply;
 }
 
 /* Owner side (owner_task() only): called once a reply-bearing command's
  * result has been computed. The whole decision -- still-live vs.
- * abandoned/reused -- and, when abandoned/reused, the recycle, happen while
- * holding the pool lock, so a producer's abandon_reply_slot() call (also
- * lock-guarded) can never interleave with this in a way that leaves both
- * sides believing the other will act. */
+ * abandoned/reused -- AND, when still live, the result write and the
+ * semaphore give, all happen under s_reply_pool_mutex. Giving a FreeRTOS
+ * semaphore never blocks or sleeps, so holding a mutex across it is legal
+ * and is exactly what removes the race abandon_or_free_reply_slot() above
+ * describes: a producer's timeout can never observe a half-finished reply. */
 static void owner_reply(int slot, uint32_t gen, const wifi_result_t *result)
 {
     xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
@@ -273,19 +348,19 @@ static void owner_reply(int slot, uint32_t gen, const wifi_result_t *result)
         return;
     }
     if (s_reply_slots[slot].abandoned) {
-        /* Producer gave up already. Recycle ourselves -- it never will. */
+        /* Producer gave up already (and found `replied` false when it did,
+         * or it would have taken the late-reply path itself instead). Recycle
+         * ourselves -- it never will. */
         s_reply_slots[slot].generation++;
         s_reply_slots[slot].in_use = false;
         s_reply_slots[slot].abandoned = false;
         xSemaphoreGive(s_reply_pool_mutex);
         return;
     }
-    s_reply_slots[slot].result = *result;
-    xSemaphoreGive(s_reply_pool_mutex);
-    /* Given outside the lock -- xSemaphoreGive() must not run inside a
-     * critical section, and by the time we reach here the lock has already
-     * fully decided this producer is still the rightful owner of the slot. */
+    s_reply_results[slot] = *result;
+    s_reply_slots[slot].replied = true;
     xSemaphoreGive(s_reply_slots[slot].sem);
+    xSemaphoreGive(s_reply_pool_mutex);
 }
 
 /* Producer half of the request/response pair. Returns false if the owner task
@@ -315,12 +390,22 @@ bool wifi_prov_post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wa
     if (xQueueSend(s_wifi_cmd_queue, cmd, 0) == pdTRUE) {
         ok = xSemaphoreTake(s_reply_slots[slot].sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
         if (ok) {
-            *result = s_reply_slots[slot].result;
+            *result = s_reply_results[slot];
             free_reply_slot(slot);
         } else {
-            ESP_LOGW(WIFI_PROV_TAG, "owner task did not answer command %d within %ums -- failing closed",
-                     (int)cmd->type, (unsigned)wait_ms);
-            abandon_reply_slot(slot, gen);
+            /* One locked decision instead of a bare "mark abandoned": the
+             * owner may have already replied in the window between this
+             * xSemaphoreTake() timing out and getting here (see
+             * abandon_or_free_reply_slot()'s comment) -- treat that as a
+             * late success rather than leaking the slot. */
+            ok = abandon_or_free_reply_slot(slot, gen, result);
+            if (ok) {
+                ESP_LOGW(WIFI_PROV_TAG, "owner task answered command %d after the %ums wait -- late success",
+                         (int)cmd->type, (unsigned)wait_ms);
+            } else {
+                ESP_LOGW(WIFI_PROV_TAG, "owner task did not answer command %d within %ums -- failing closed",
+                         (int)cmd->type, (unsigned)wait_ms);
+            }
         }
     } else {
         ESP_LOGW(WIFI_PROV_TAG, "command queue full -- refusing command %d", (int)cmd->type);
@@ -585,6 +670,15 @@ esp_err_t wifi_prov_start(void)
      * refuses until it is set. If the task fails to create, this returns the
      * error and `started` is never set, so every producer fails closed rather
      * than running unserialized. */
+    /* Init the reply-slot pool here, synchronously, on app_main's task --
+     * before the queue exists and before the owner task is created, so there
+     * is no other task that could ever race ensure_reply_pool_init()'s
+     * lazy-init check across cores. The function stays callable elsewhere
+     * (host tests call it directly with no wifi_prov_start() bring-up) since
+     * it is idempotent; this call is what makes the lazy path a no-op on a
+     * real board. */
+    ensure_reply_pool_init();
+
     s_wifi_cmd_queue = xQueueCreate(WIFI_OWNER_QUEUE_LEN, sizeof(wifi_cmd_t));
     if (!s_wifi_cmd_queue) {
         ESP_LOGE(WIFI_PROV_TAG, "xQueueCreate(wifi_owner) failed");

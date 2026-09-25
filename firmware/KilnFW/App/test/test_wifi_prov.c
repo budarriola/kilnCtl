@@ -52,6 +52,10 @@ int g_stub_wifi_set_mode_calls = 0;
 // now calls esp_wifi_set_storage(RAM) once during wifi_prov_start();
 // test_wifi_prov_start_sets_ram_storage() below asserts on both counters.
 int g_stub_wifi_set_storage_calls = 0;
+// esp_wifi_connect() counter (2026-09-25 review fix) -- proves do_add_network()/
+// do_set_mode() defer the actual join to start_sta_join() (run by owner_task()
+// AFTER the reply) rather than connecting synchronously inside the command body.
+int g_stub_wifi_connect_calls = 0;
 wifi_storage_t g_stub_wifi_last_storage = WIFI_STORAGE_FLASH;
 int g_stub_wifi_restore_calls = 0;
 esp_err_t g_stub_ap_info_result = ESP_OK;
@@ -351,8 +355,9 @@ static void reset_reply_pool(void)
     for (int i = 0; i < WIFI_REPLY_SLOT_COUNT; i++) {
         s_reply_slots[i].in_use = false;
         s_reply_slots[i].abandoned = false;
+        s_reply_slots[i].replied = false;
         s_reply_slots[i].generation = 0;
-        memset(&s_reply_slots[i].result, 0, sizeof(s_reply_slots[i].result));
+        memset(&s_reply_results[i], 0, sizeof(s_reply_results[i]));
     }
 }
 
@@ -375,8 +380,9 @@ static void test_reply_slot_normal_roundtrip(void)
 
     TEST_CHECK(s_reply_slots[slot].in_use, "owner_reply() on a live slot does not free it -- the producer does");
     TEST_CHECK(!s_reply_slots[slot].abandoned, "owner_reply() on a live slot never marks it abandoned");
-    TEST_CHECK(s_reply_slots[slot].result.err == ESP_OK, "the result was written into the slot");
-    TEST_CHECK(s_reply_slots[slot].result.scan_count == 7, "the full result struct was written, not just err");
+    TEST_CHECK(s_reply_slots[slot].replied, "owner_reply() sets replied on a live slot");
+    TEST_CHECK(s_reply_results[slot].err == ESP_OK, "the result was written into s_reply_results");
+    TEST_CHECK(s_reply_results[slot].scan_count == 7, "the full result struct was written, not just err");
 
     // Producer's side of a successful wait: copy out, then free.
     free_reply_slot(slot);
@@ -393,16 +399,19 @@ static void test_reply_slot_abandon_then_owner_recycles(void)
     int slot = claim_reply_slot(&gen);
     TEST_CHECK(slot >= 0, "slot claimed");
 
-    // Producer gives up (timeout) -- marks abandoned, does NOT free or touch
-    // generation, since the owner may still be about to act on this exact
-    // command.
-    abandon_reply_slot(slot, gen);
-    TEST_CHECK(s_reply_slots[slot].abandoned, "abandon_reply_slot() marks the slot abandoned");
+    // Producer gives up (timeout) BEFORE the owner ever replied --
+    // abandon_or_free_reply_slot() must mark abandoned, not free, since the
+    // owner may still be about to act on this exact command.
+    wifi_result_t late;
+    memset(&late, 0, sizeof(late));
+    bool got_late = abandon_or_free_reply_slot(slot, gen, &late);
+    TEST_CHECK(!got_late, "no reply was pending yet -- this is a genuine timeout, not a race");
+    TEST_CHECK(s_reply_slots[slot].abandoned, "abandon_or_free_reply_slot() marks the slot abandoned");
     TEST_CHECK(s_reply_slots[slot].in_use, "abandon does not free the slot itself -- the owner recycles it");
     TEST_CHECK(s_reply_slots[slot].generation == gen, "abandon does not bump the generation");
 
     // Owner finally gets to the command. It must recycle the slot itself and
-    // must NOT write into .result or leave it claimable-but-answered.
+    // must NOT write into s_reply_results or leave it claimable-but-answered.
     wifi_result_t result;
     memset(&result, 0, sizeof(result));
     result.err = ESP_ERR_TIMEOUT; // a value that must NOT end up in the slot
@@ -412,8 +421,60 @@ static void test_reply_slot_abandon_then_owner_recycles(void)
     TEST_CHECK(!s_reply_slots[slot].abandoned, "the recycle clears the abandoned flag too");
     TEST_CHECK(s_reply_slots[slot].generation == gen + 1,
                "recycling bumps the generation so a future claimant never inherits the abandoned state");
-    TEST_CHECK(s_reply_slots[slot].result.err != ESP_ERR_TIMEOUT,
+    TEST_CHECK(s_reply_results[slot].err != ESP_ERR_TIMEOUT,
                "owner_reply() on an abandoned slot must NOT write the result -- nobody is waiting on it");
+}
+
+// 2026-09-25 review fix: the previous version of this pool gave the
+// semaphore OUTSIDE owner_reply()'s lock, which left a window where a
+// producer's timeout could race in, find "not abandoned yet" (truthfully, at
+// that instant) under a SEPARATE lock acquisition, and mark an
+// already-replied slot abandoned forever -- a permanent leak, since nothing
+// ever frees an abandoned+in_use slot again once its generation is stuck.
+// This test proves the fix: owner_reply() now finishes (write + replied flag
+// + give) in ONE locked operation, so a producer that reaches
+// abandon_or_free_reply_slot() AFTER that finishes sees replied==true and
+// takes the late-success path -- copy the result out, free the slot -- never
+// the leak path.
+static void test_reply_slot_timeout_races_a_completed_reply_never_leaks(void)
+{
+    TEST_SECTION("reply slot pool -- a timeout racing an already-completed reply frees the slot, never leaks it");
+    reset_reply_pool();
+
+    uint32_t gen;
+    int slot = claim_reply_slot(&gen);
+    TEST_CHECK(slot >= 0, "slot claimed");
+
+    // Owner "wins the race": replies before the producer's timeout call runs.
+    wifi_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.err = ESP_OK;
+    result.scan_count = 3;
+    owner_reply(slot, gen, &result);
+    TEST_CHECK(s_reply_slots[slot].replied, "owner_reply() completed and set replied before the timeout got here");
+
+    // Producer's xSemaphoreTake() timed out anyway (its own deadline fired
+    // independently of the owner's timing) and it calls the timeout path.
+    wifi_result_t late;
+    memset(&late, 0, sizeof(late));
+    bool got_late = abandon_or_free_reply_slot(slot, gen, &late);
+
+    TEST_CHECK(got_late, "a reply that already landed is treated as a late success, not a leak");
+    TEST_CHECK(late.err == ESP_OK, "the late result was copied out correctly");
+    TEST_CHECK(late.scan_count == 3, "the full late result struct was copied out, not just err");
+    TEST_CHECK(!s_reply_slots[slot].in_use, "the slot is freed immediately -- no leak");
+    TEST_CHECK(!s_reply_slots[slot].abandoned, "a late-success free never leaves the slot marked abandoned");
+    TEST_CHECK(!s_reply_slots[slot].replied, "the freed slot's replied flag is cleared for the next claimant");
+    TEST_CHECK(s_reply_slots[slot].generation == gen + 1, "freeing bumps the generation, same as any other free");
+
+    // The freed slot must be immediately reusable -- this is the actual
+    // symptom the bug produced: 6 leaked slots (this pool's whole capacity)
+    // meant every subsequent Wi-Fi call refused with "reply slot pool
+    // exhausted" until reboot.
+    uint32_t new_gen;
+    int slot2 = claim_reply_slot(&new_gen);
+    TEST_CHECK(slot2 == slot, "the freed slot is claimable again, not stuck forever");
+    TEST_CHECK(new_gen == gen + 1, "the reclaim sees the bumped generation");
 }
 
 static void test_reply_slot_stale_generation_never_matches_after_reuse(void)
@@ -424,7 +485,9 @@ static void test_reply_slot_stale_generation_never_matches_after_reuse(void)
     // First claimant abandons; owner recycles it (as in the test above).
     uint32_t old_gen;
     int slot = claim_reply_slot(&old_gen);
-    abandon_reply_slot(slot, old_gen);
+    wifi_result_t late;
+    memset(&late, 0, sizeof(late));
+    abandon_or_free_reply_slot(slot, old_gen, &late);
     wifi_result_t discard;
     memset(&discard, 0, sizeof(discard));
     owner_reply(slot, old_gen, &discard); // recycles
@@ -447,8 +510,35 @@ static void test_reply_slot_stale_generation_never_matches_after_reuse(void)
     TEST_CHECK(s_reply_slots[slot].in_use, "the second producer's live claim is untouched by a stale-generation reply");
     TEST_CHECK(s_reply_slots[slot].generation == new_gen,
                "generation is unchanged by the stale call -- it never matched");
-    TEST_CHECK(s_reply_slots[slot].result.err != ESP_ERR_INVALID_ARG,
+    TEST_CHECK(s_reply_results[slot].err != ESP_ERR_INVALID_ARG,
                "the stale reply's result must never be written into the new claimant's slot");
+}
+
+// 2026-09-25 review fix: reply-before-join means a client polling
+// GET /api/status right after "ok" could otherwise observe the PRE-join
+// state (UNPROVISIONED/AP_MODE) and stop polling, per
+// wifi_provision_page.html's poll() logic -- breaking first-time
+// provisioning over the fallback AP. do_add_network() now sets
+// s_wifi.state = WIFI_PROV_STATE_CONNECTING itself, on the owner task,
+// before returning -- i.e. before the reply is even visible to the waiting
+// producer -- and defers the actual radio join to start_sta_join(), which
+// owner_task() runs only AFTER replying (out_join_after_reply).
+static void test_do_add_network_sets_connecting_and_defers_the_join(void)
+{
+    TEST_SECTION("do_add_network() sets CONNECTING and defers the join to after the reply");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+    g_stub_wifi_connect_calls = 0;
+
+    bool join_after_reply = false;
+    esp_err_t err = do_add_network("TestSSID", "TestPassword1", &join_after_reply);
+
+    TEST_CHECK(err == ESP_OK, "adding a network with room in the list succeeds");
+    TEST_CHECK(join_after_reply, "do_add_network() asks the owner to join AFTER it replies");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTING,
+               "state flips to CONNECTING synchronously, before the reply is visible to the producer");
+    TEST_CHECK(g_stub_wifi_connect_calls == 0,
+               "do_add_network() itself never calls esp_wifi_connect() -- only start_sta_join(), "
+               "run later by owner_task(), does that");
 }
 
 void run_test_wifi_prov(void)
@@ -465,5 +555,7 @@ void run_test_wifi_prov(void)
     test_set_dhcp_resets_confirmation();
     test_reply_slot_normal_roundtrip();
     test_reply_slot_abandon_then_owner_recycles();
+    test_reply_slot_timeout_races_a_completed_reply_never_leaks();
     test_reply_slot_stale_generation_never_matches_after_reuse();
+    test_do_add_network_sets_connecting_and_defers_the_join();
 }

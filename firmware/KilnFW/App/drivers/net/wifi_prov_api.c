@@ -105,7 +105,20 @@ esp_err_t do_add_network(const char *new_ssid, const char *password, bool *out_j
      * comment. start_sta_join() re-runs the scan-based tie-break, so this may
      * join a different (stronger, already-in-range) saved network than the
      * one just added -- that's intended, not a bug: adding a network is
-     * "make this available", not "connect to this one specifically". */
+     * "make this available", not "connect to this one specifically".
+     *
+     * 2026-09-25 review fix: set CONNECTING here, before returning, still on
+     * owner_task() (the single writer of s_wifi) -- NOT after start_sta_join()
+     * actually runs. Without this, the reply now reaches the HTTP client
+     * before start_sta_join() does anything at all, so a client that polls
+     * GET /api/status right after "ok" could still see the PRE-add state
+     * (UNPROVISIONED or AP_MODE) and, per wifi_provision_page.html's poll()
+     * logic, conclude nothing is in progress and stop polling -- exactly the
+     * first-time provisioning-over-the-fallback-AP flow this slice's own
+     * side benefit targets. Setting it here makes the state transition
+     * visible atomically with the reply becoming visible, independent of
+     * however long start_sta_join()'s real scan takes afterward. */
+    s_wifi.state = WIFI_PROV_STATE_CONNECTING;
     *out_join_after_reply = true;
     return ESP_OK;
 }
@@ -279,7 +292,11 @@ esp_err_t do_set_mode(wifi_prov_mode_t mode, bool *out_join_after_reply)
     } else if (s_wifi.saved_nets.count > 0) {
         ESP_LOGI(WIFI_PROV_TAG, "home mode enabled, resuming join to saved network");
         /* W1: caller (owner_task()) runs start_sta_join() AFTER replying --
-         * see wifi_prov.c's reply-slot-pool comment. */
+         * see wifi_prov.c's reply-slot-pool comment. 2026-09-25 review fix:
+         * set CONNECTING here (same rationale as do_add_network() above) so
+         * the state a status poll sees changes atomically with the reply,
+         * not only once start_sta_join()'s real scan gets around to it. */
+        s_wifi.state = WIFI_PROV_STATE_CONNECTING;
         *out_join_after_reply = true;
     } else {
         s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;

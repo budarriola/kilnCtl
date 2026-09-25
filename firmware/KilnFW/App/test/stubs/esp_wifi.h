@@ -166,7 +166,18 @@ static inline esp_err_t esp_wifi_get_mode(wifi_mode_t *mode)
 }
 
 static inline esp_err_t esp_wifi_start(void) { return ESP_OK; }
-static inline esp_err_t esp_wifi_connect(void) { return ESP_OK; }
+
+/* Call counter so a host test can assert do_add_network()/do_set_mode()
+ * defer the actual join to start_sta_join() (called by owner_task() AFTER
+ * the reply, per the reply-slot pool's out_join_after_reply flag) instead of
+ * connecting synchronously inside the do_*() command body itself. */
+extern int g_stub_wifi_connect_calls;
+static inline esp_err_t esp_wifi_connect(void)
+{
+    g_stub_wifi_connect_calls++;
+    return ESP_OK;
+}
+
 static inline esp_err_t esp_wifi_disconnect(void) { return ESP_OK; }
 
 static inline esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *info)

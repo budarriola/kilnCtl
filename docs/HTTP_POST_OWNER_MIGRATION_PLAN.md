@@ -69,50 +69,29 @@ applies to every slice.
 
 ### W1 -- Wi-Fi: reply before the scan-and-join (shape A). HIGHEST value -- IMPLEMENTED, pending bench verification
 
-**Status (2026-09-25):** implemented in worktree `wifiw1`. Both parts of this
-slice landed together:
+**Status (2026-09-25):** implemented in worktree `wifiw1`, review-fixed same
+day (Opus review of `532685a4`). `owner_task()` replies via a reply-slot pool
+BEFORE calling `start_sta_join()`; `do_add_network()`/`do_set_mode()` set
+`out_join_after_reply` instead of joining themselves, and now also set
+`s_wifi.state = WIFI_PROV_STATE_CONNECTING` before returning, so a client
+polling `GET /api/status` right after `"ok"` never observes a pre-join state.
+The reply-slot pool's `owner_reply()` writes the result, sets a `replied`
+flag, and gives the semaphore all under one pool-mutex acquisition (giving a
+FreeRTOS semaphore never blocks, so this is legal); the producer's timeout
+path (`abandon_or_free_reply_slot()`) makes one locked decision: if the reply
+already landed, copy the result out and free the slot (late success); else
+mark abandoned for the owner to recycle. `s_reply_results[]` (the actual
+`wifi_result_t` payloads) lives in `EXT_RAM_BSS_ATTR` (PSRAM), not inline in
+the slot struct, to keep `.dram0.bss` under budget -- measured
+`.dram0.bss = 99592 B` against the 101000 B ceiling (1408 B headroom),
+`check_kilnfw_dram_bss_budget.ps1` on a fresh, non `-Fast` target build.
+`ensure_reply_pool_init()`
+is called once, synchronously, from `wifi_prov_start()` before the queue/task
+exist, removing a cross-core lazy-init race.
 
-- `owner_task()` (`wifi_prov.c`) now replies via a reply-slot pool (see
-  below) BEFORE calling `start_sta_join()`. `do_add_network()`/
-  `do_set_mode()` set an `out_join_after_reply` flag instead of calling
-  `start_sta_join()` themselves; the owner calls it after replying, still on
-  the same task (single writer preserved). The producers'
-  (`wifi_prov_add_network()`/`wifi_prov_set_mode()`) wait dropped from
-  `WIFI_OWNER_SCAN_WAIT_MS` (15000) to `WIFI_OWNER_WAIT_MS`.
-- The dead-stack-frame hazard is fixed with a fixed pool of module-owned
-  reply slots (`s_reply_slots[WIFI_REPLY_SLOT_COUNT]`, sized to
-  `WIFI_OWNER_QUEUE_LEN`), each with its own semaphore, generation counter,
-  and `abandoned` flag, guarded by one pool mutex. Producer:
-  `claim_reply_slot()` before posting, `free_reply_slot()` on a normal
-  round-trip or a queue-send failure, `abandon_reply_slot()` on timeout
-  (marks abandoned, does NOT free or bump generation -- the owner may still
-  be mid-flight). Owner: `owner_reply()` holds the lock for its whole
-  decision -- a generation mismatch or an abandoned slot means it recycles
-  the slot itself (bump generation, clear in_use/abandoned) and never
-  writes into `.result` or signals the semaphore; otherwise it writes the
-  result and signals outside the lock. This is the "reset one side of a
-  pair" class from CLAUDE.md: freeing/generation-bumping authority is split
-  cleanly so neither side reuses state the other still depends on.
-- Post-reply join failure observability is unchanged: `start_sta_join()`'s
-  own `ESP_LOGE`/state-transition side effects were never contingent on
-  running before vs. after the reply, only the order relative to the
-  producer's wait changed.
-- Client-visible contract unchanged: no new routes, no 202, same
-  `{"ok":...}` bodies, `route_tier_table.h` untouched.
-- Host tests: `test_wifi_prov.c` gained
-  `test_reply_slot_normal_roundtrip()`,
-  `test_reply_slot_abandon_then_owner_recycles()`, and
-  `test_reply_slot_stale_generation_never_matches_after_reuse()`, run against
-  the real `s_reply_slots`/`claim_reply_slot()`/`owner_reply()` internals
-  (this file `#include`s `wifi_prov.c` directly, the repo's usual pattern for
-  reaching `static` internals). Negative-tested by disabling the
-  generation-mismatch guard in `owner_reply()`: the
-  stale-generation test failed as expected (only that test), the guard was
-  restored by hand, and a forced full host-test rebuild via
-  `run_all_checks.ps1` confirmed a clean pass with no poisoned binaries.
-- **Pending bench verification** (not done from this worktree, per task
-  scope): provision over the AP, a `mode=home` round-trip, and confirming
-  `GET /api/status` stays responsive during the join.
+**Pending:** bench verification (not done from this worktree, per task
+scope) -- provision over the AP, a `mode=home` round-trip, and confirming
+`GET /api/status` stays responsive and reports `CONNECTING` during the join.
 
 - **Handlers:** `provision_post_handler()` for station credentials and for
   `mode=home` (`wifi_provision_http.c:655`). The same fix also frees
