@@ -25,6 +25,7 @@
 #include "relay_authority.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
+#include "thermo_channel_read.h"
 #include "thermo_combine.h"
 #include "zones_config_accessors.h"
 
@@ -71,35 +72,15 @@ static void history_buf_ensure_alloc(void)
  * profile_firing_ceiling_would_trip_on_start() documents. */
 static float live_current_max_zone_c(uint8_t zone_mask)
 {
-    float ch_raw_c[MAX31856_CHANNEL_COUNT];
-    bool ch_sensor_ok[MAX31856_CHANNEL_COUNT];
-    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
-        ch_raw_c[ci] = NAN;
-        ch_sensor_ok[ci] = false;
-    }
-    if (sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized)) {
-        MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-        size_t count = 0;
-        if (sim_backend_enabled()) {
-            sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
-        } else {
-            MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
-        }
-        for (size_t i = 0; i < count; i++) {
-            uint8_t ci = readings[i].channel;
-            if (ci >= MAX31856_CHANNEL_COUNT) continue;
-            ch_raw_c[ci] = readings[i].tc_temperature_c;
-            bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
-            ch_sensor_ok[ci] = !readings[i].spi_failed && !isnan(ch_raw_c[ci]) && !fault_bits_bad;
-        }
-    }
+    ThermoChannelSnapshot snap;
+    thermo_channels_read(s_exec.thermo_bus, &snap);
     float max_c = NAN;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if (!(zone_mask & (1u << zi))) continue;
         uint8_t tmask = 0;
         zones_config_get_thermo_mask(zi, &tmask);
         bool valid = false;
-        float combined = thermo_combine(ch_raw_c, ch_sensor_ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
+        float combined = thermo_combine(snap.raw_c, snap.ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
         if (!valid) continue;
         float calibrated = zones_config_apply_cal(zi, combined);
         if (!isfinite(calibrated)) continue;
@@ -160,26 +141,10 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
         return;
     }
 
-    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-    size_t count = 0;
-    if (sim_backend_enabled()) {
-        sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
-    } else {
-        MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
-    }
-
-    float base_ch_c[MAX31856_CHANNEL_COUNT];
-    bool base_ch_ok[MAX31856_CHANNEL_COUNT];
-    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
-        base_ch_c[ci] = NAN;
-        base_ch_ok[ci] = false;
-    }
-    for (size_t i = 0; i < count; i++) {
-        uint8_t ci = readings[i].channel;
-        if (ci >= MAX31856_CHANNEL_COUNT) continue;
-        base_ch_c[ci] = readings[i].tc_temperature_c;
-        base_ch_ok[ci] = !readings[i].spi_failed && !isnan(base_ch_c[ci]);
-    }
+    ThermoChannelSnapshot snap;
+    thermo_channels_read(s_exec.thermo_bus, &snap);
+    const float *base_ch_c = snap.raw_c;
+    const bool *base_ch_ok = snap.ok;
 
     uint8_t base_tmask = 0;
     zones_config_get_thermo_mask((uint8_t)first_active, &base_tmask);
@@ -216,10 +181,10 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
      * same board within centimetres of each other, and accepting the first
      * valid one means a single dead or CJRANGE-flagged channel doesn't cost
      * the whole run its ambient. */
-    for (size_t i = 0; i < count; i++) {
-        if (!readings[i].spi_failed && !isnan(readings[i].cj_temperature_c)) {
+    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+        if (!isnan(snap.cj_c[ci])) {
             *out_ambient_valid = true;
-            *out_ambient_c = readings[i].cj_temperature_c;
+            *out_ambient_c = snap.cj_c[ci];
             break;
         }
     }

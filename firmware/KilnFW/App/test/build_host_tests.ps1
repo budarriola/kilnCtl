@@ -652,6 +652,7 @@ try {
             "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/thermal_guard.c')`" " +
             "`"$(Join-Path $driversDir 'control/heater_output.c')`" `"$(Join-Path $driversDir 'control/thermo_combine.c')`" " +
+            "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
             "`"$(Join-Path $driversDir 'control/pid_fuzzy_confidence.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
@@ -712,6 +713,7 @@ try {
             "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
+            "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
     # stack_margin.c added DRAM_PSRAM_STATUS.md Phase 0 (4.2): autotune_engine.c's
     # autotune_engine_start() now calls stack_margin_register() (registration

@@ -91,6 +91,7 @@
                                  * fault-source mask for the operator instead of a bare hex value */
 #include "sim_backend.h"
 #include "stack_margin.h"
+#include "thermo_channel_read.h"
 #include "thermo_combine.h"
 #include "zones_config_accessors.h"
 

@@ -82,7 +82,7 @@ static AUTOTUNE_ENGINE_NOINLINE float autotune_zone_climb_window_floor_s(uint8_t
     return thermal_guard_derive_climb_window_floor_s(model_tau_s, model_dead_time_s, model_valid);
 }
 
-static void autotune_engine_tick_locked(void)
+static void autotune_engine_tick_locked_impl(const ThermoChannelSnapshot *pre_lock_snap)
 {
     TickType_t now = xTaskGetTickCount();
     uint32_t dt_ms = at_ticks_to_ms(now - s_at.prev_tick);
@@ -166,44 +166,32 @@ static void autotune_engine_tick_locked(void)
         raw_by_zone[z] = NAN;
         ok_by_zone[z] = false;
     }
-    if (sim_backend_enabled() || (s_at.thermo_bus && s_at.thermo_bus->initialized)) {
-        float ch_raw_c[MAX31856_CHANNEL_COUNT];
-        bool  ch_ok[MAX31856_CHANNEL_COUNT];
-        for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-            ch_raw_c[z] = NAN;
-            ch_ok[z] = false;
-        }
-        MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-        size_t count = 0;
-        if (sim_backend_enabled()) {
-            sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
-        } else {
-            MAX31856_read_all(s_at.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
-        }
-        for (size_t i = 0; i < count; i++) {
-            uint8_t ch = readings[i].channel;
-            if (ch >= MAX31856_CHANNEL_COUNT) continue;
-            bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
-            bool ok = !readings[i].spi_failed && !isnan(readings[i].tc_temperature_c) && !fault_bits_bad;
-            ch_raw_c[ch] = readings[i].tc_temperature_c;
-            ch_ok[ch] = ok;
-            if (ch == s_at.zone_index && !isnan(readings[i].cj_temperature_c)) {
-                cj_c = readings[i].cj_temperature_c;
-            }
-        }
+    /* Consumes the pre-lock snapshot task_entry() took (CLAUDE.md "never
+     * hold a module lock across a producer call" -- MAX31856_read_all()/
+     * sim_backend_read_all() moved out from under s_at.lock 2026-09-24, same
+     * fix and same tolerance as profile_executor.c's identical read).
+     * pre_lock_snap is NULL only when task_entry()'s own peek of
+     * state_is_running() missed a state that became running only after the
+     * peek -- this tick then simply reads as sensor-invalid across the
+     * board, and the very next tick's peek (now correctly seeing RUNNING)
+     * picks the real reading back up. */
+    if (pre_lock_snap != NULL) {
         /* Peer zones (autotune_finalize_fit()'s cross-gain rows): legacy
          * channel-equals-zone mapping, unchanged from before 10.8. */
         for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-            raw_by_zone[z] = ch_raw_c[z];
-            ok_by_zone[z] = ch_ok[z];
+            raw_by_zone[z] = pre_lock_snap->raw_c[z];
+            ok_by_zone[z] = pre_lock_snap->ok[z];
+        }
+        if (!isnan(pre_lock_snap->cj_c[s_at.zone_index])) {
+            cj_c = pre_lock_snap->cj_c[s_at.zone_index];
         }
         /* The zone actually under test: its real thermo_mask, combined,
          * is what drives the step, the guards, and the fit. */
         uint8_t tmask = 0;
         zones_config_get_thermo_mask(s_at.zone_index, &tmask);
         bool combined_valid = false;
-        float combined_c =
-            thermo_combine(ch_raw_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask, &combined_valid);
+        float combined_c = thermo_combine(pre_lock_snap->raw_c, pre_lock_snap->ok,
+                                           MAX31856_CHANNEL_COUNT, tmask, &combined_valid);
         raw_by_zone[s_at.zone_index] = combined_c;
         ok_by_zone[s_at.zone_index] = combined_valid;
         raw_c = combined_c;
@@ -812,6 +800,22 @@ static void autotune_engine_tick_locked(void)
     }
 }
 
+/* Test-only convenience wrapper preserving the pre-2026-09-24 signature/
+ * behavior: reads the bus itself, then runs the real tick. Production code
+ * (task_entry(), below) never calls this -- it reads pre-lock and calls
+ * autotune_engine_tick_locked_impl() directly, per this file's CLAUDE.md
+ * "never hold a module lock across a producer call" fix. Kept so
+ * test_autotune_engine_prestart.c's many direct call sites (driving one tick
+ * deterministically with s_at.lock not a real FreeRTOS lock in the host
+ * build, so no lock-across-producer hazard there) do not all need touching
+ * for this fix. */
+static void autotune_engine_tick_locked(void)
+{
+    ThermoChannelSnapshot snap;
+    thermo_channels_read(s_at.thermo_bus, &snap);
+    autotune_engine_tick_locked_impl(&snap);
+}
+
 static void task_entry(void *arg)
 {
     (void)arg;
@@ -839,11 +843,28 @@ static void task_entry(void *arg)
          * below whenever the engine turns out not to be running at all. */
         bool other_zone_active_hint = any_other_zone_profile_active(s_at.zone_index);
 
+        /* CLAUDE.md "never hold a module lock across a producer call": the
+         * MAX31856/sim-backend read autotune_engine_tick_locked() needs can
+         * block on the bus/thermo owner queue for up to
+         * MAX31856_LOCK_TIMEOUT_MS per channel, so it must not run while
+         * s_at.lock is held. Peeks state_is_running(s_at.state) without the
+         * lock first, same tolerated-race pattern as other_zone_active_hint
+         * just above: only bother with the read when the peek says this run
+         * is active, and if the peek disagrees with the definitive check
+         * right after the lock is taken, the snapshot is simply unused this
+         * tick (autotune_engine_tick_locked() self-corrects next tick, same
+         * as profile_executor.c's identical fix). */
+        bool peek_active = state_is_running(s_at.state);
+        ThermoChannelSnapshot pre_lock_snap;
+        if (peek_active) {
+            thermo_channels_read(s_at.thermo_bus, &pre_lock_snap);
+        }
+
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
         bool not_running = !state_is_running(s_at.state);
         if (!not_running) {
             s_at.other_zone_profile_active_hint = other_zone_active_hint;
-            autotune_engine_tick_locked();
+            autotune_engine_tick_locked_impl(peek_active ? &pre_lock_snap : NULL);
         }
         xSemaphoreGive(s_at.lock);
 

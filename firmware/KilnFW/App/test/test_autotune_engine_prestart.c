@@ -87,9 +87,29 @@ static void reset_extra_channel_stubs(void)
     s_stub_extra_ch_mask = 0;
 }
 
+// 2026-09-24 regression guard companion to profile_executor's own
+// s_test_max31856_max_lock_depth_seen (test_profile_executor_prestart.c):
+// g_test_stub_lock_depth (stubs/freertos/semphr.h) is a single process-wide
+// xSemaphoreTake/Give nesting counter. Recording the highest depth seen
+// during any MAX31856_read_all() call here lets a test prove
+// thermo_channels_read() -- the one shared read-and-filter helper both
+// profile_executor.c's executor_task_entry() and this file's task_entry()
+// now call BEFORE taking their own module lock -- never observes a nonzero
+// depth when called via autotune_engine's path.
+static int s_test_max31856_max_lock_depth_seen = -1;
+
+// Forward declarations: called from run_test_autotune_engine_prestart()
+// (defined earlier in this file) but defined near the bottom, next to the
+// other source-scan test helpers.
+static void test_tick_locked_wrapper_reads_outside_any_lock(void);
+static void test_task_entry_reads_before_taking_s_at_lock(void);
+
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
 {
     (void)bus;
+    if (s_test_max31856_max_lock_depth_seen < g_test_stub_lock_depth) {
+        s_test_max31856_max_lock_depth_seen = g_test_stub_lock_depth;
+    }
     size_t n = 0;
     if (max_readings >= 1) {
         memset(&out[n], 0, sizeof(out[n]));
@@ -6786,8 +6806,97 @@ void run_test_autotune_engine_prestart(void)
     test_reserve_refused_while_a_run_is_live_on_the_zone();
     test_run_starts_after_release();
     test_accept_is_gated_by_the_reservation_too();
+
+    // 2026-09-24 "never hold a module lock across a producer call" fix.
+    test_tick_locked_wrapper_reads_outside_any_lock();
+    test_task_entry_reads_before_taking_s_at_lock();
 }
 
+
+// 2026-09-24 "never hold a module lock across a producer call" fix
+// (companion to profile_executor's test_baseline_read_runs_outside_the_lock()
+// in test_profile_executor_prestart.c). autotune_engine_tick_locked() here
+// is the test-only backward-compatible wrapper preserving the pre-fix
+// signature/behavior (reads the bus itself, then calls
+// autotune_engine_tick_locked_impl()) -- production's task_entry() never
+// calls it; it calls _impl() directly with a pre-lock-read snapshot instead.
+// This test still proves the shared thermo_channels_read()/MAX31856_read_all()
+// path itself never observes a nonzero xSemaphoreTake/Give nesting depth,
+// same property test_task_entry_reads_before_taking_s_at_lock() below
+// establishes by source scan for the real production loop.
+static void test_tick_locked_wrapper_reads_outside_any_lock(void)
+{
+    TEST_SECTION("autotune_engine -- the tick's MAX31856 read never observes a nonzero lock depth");
+
+    static MAX31856BusClass bus;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_SETTLING;
+    s_at.zone_index = 0;
+    s_stub_ch0_temp_c = 50.0f;
+    s_stub_ch0_ok = true;
+
+    g_test_stub_lock_depth = 0;
+    s_test_max31856_max_lock_depth_seen = -1;
+    autotune_engine_tick_locked();
+
+    TEST_CHECK(s_test_max31856_max_lock_depth_seen == 0,
+               "sanity: MAX31856_read_all() must actually have been called this tick, at depth 0");
+}
+
+// Production's task_entry() (unreachable from host tests -- a real
+// `for (;;) { vTaskDelay(...); }` loop with no extraction seam, same
+// unreachability test_baseline_read_runs_outside_the_lock()'s own comment
+// documents for profile_executor.c's executor_task_entry()) cannot be
+// driven directly, so this proves the property by source order instead:
+// thermo_channels_read(...) must appear, textually, before
+// xSemaphoreTake(s_at.lock, portMAX_DELAY) inside task_entry()'s body.
+static bool source_scan_call_precedes(const char *text, const char *fn_sig, const char *next_fn_sig,
+                                       const char *first_needle, const char *second_needle,
+                                       const char **out_reason)
+{
+    const char *fn = strstr(text, fn_sig);
+    if (!fn) { *out_reason = "sanity: function definition not findable"; return false; }
+    const char *next_fn = strstr(fn + 1, next_fn_sig);
+    if (!next_fn) { *out_reason = "sanity: next function boundary not findable"; return false; }
+    const char *first = strstr(fn, first_needle);
+    const char *second = strstr(fn, second_needle);
+    if (!first || first >= next_fn) { *out_reason = "sanity: first call site not findable in function body"; return false; }
+    if (!second || second >= next_fn) { *out_reason = "sanity: second call site not findable in function body"; return false; }
+    *out_reason = NULL;
+    return first < second;
+}
+
+static void test_task_entry_reads_before_taking_s_at_lock(void)
+{
+    TEST_SECTION("autotune_engine -- task_entry() must call thermo_channels_read() BEFORE "
+                 "xSemaphoreTake(s_at.lock, ...), never while s_at.lock is held (CLAUDE.md: "
+                 "never hold a module lock across a producer call -- the MAX31856/sim read can "
+                 "block for up to MAX31856_LOCK_TIMEOUT_MS per channel)");
+
+    char *text = autotune_engine_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/autotune_engine.c to source-scan");
+        return;
+    }
+
+    const char *reason = NULL;
+    bool ok = source_scan_call_precedes(text, "static void task_entry(void *arg)",
+                                         "esp_err_t autotune_engine_start(",
+                                         "thermo_channels_read(", "xSemaphoreTake(s_at.lock", &reason);
+    if (reason) {
+        TEST_CHECK(false, reason);
+    } else {
+        TEST_CHECK(ok, "MUST GO RED if task_entry() takes s_at.lock before its thermo_channels_read() "
+                       "pre-lock peek/read -- move the read back before the lock");
+    }
+
+    free(text);
+}
 
 int main(void)
 {

@@ -59,6 +59,7 @@ extern bool profiles_validate_candidate(const profile_t *candidate, int mode, ch
                            * debugger, before this fix's ~250-300B estimated peak stack addition
                            * (solve_hold_for_zone()/gauss_solve_partial_pivot()) is trusted on
                            * hardware. */
+#include "thermo_channel_read.h"
 #include "thermo_combine.h"
 #include "zone_coupling_solve.h"
 #include "zones_config_accessors.h"
@@ -711,6 +712,28 @@ void executor_task_entry(void *arg)
          * before the lock below is taken. */
         reload_live_profile_if_changed();
 
+        /* CLAUDE.md "never hold a module lock across a producer call": the
+         * MAX31856/sim-backend read below can block on the bus/thermo owner
+         * queue for up to MAX31856_LOCK_TIMEOUT_MS per channel, and every
+         * other s_exec.lock caller (safety_link_frames.c's poll via
+         * profile_executor_get_status(), HTTP/LCD/telemetry status readers)
+         * waits with portMAX_DELAY -- so this read must not run while
+         * holding the lock. Peek s_exec.state without the lock first, same
+         * tolerated-race pattern as autotune_engine.c's task_entry() peeking
+         * s_at.zone_index for other_zone_active_hint: only bother with the
+         * SPI/sim read when the peek says RUNNING, since that is the only
+         * branch below that consumes it. If the peek disagrees with the
+         * definitive state read right after the lock is taken (a run
+         * starting or stopping in this exact window), the snapshot is
+         * simply stale/unused this one tick -- self-corrects next tick,
+         * same tolerance profile_executor_capture_baseline() already
+         * documents for its own pre-lock read. */
+        bool peek_running = (s_exec.state == PROFILE_EXEC_RUNNING);
+        ThermoChannelSnapshot pre_lock_snap;
+        if (peek_running) {
+            thermo_channels_read(s_exec.thermo_bus, &pre_lock_snap);
+        }
+
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
         s_exec.last_tick_tick = now; /* guard 9 -- updated every iteration regardless of run state */
@@ -792,41 +815,24 @@ void executor_task_entry(void *arg)
          * from "zone zi's one hard-wired channel" to "zone zi's combined
          * reading across every channel its thermo_mask names". Nothing
          * downstream needed to change to pick that up. */
-        float ch_raw_c[MAX31856_CHANNEL_COUNT];
-        bool ch_sensor_ok[MAX31856_CHANNEL_COUNT];
-        for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
-            ch_raw_c[ci] = NAN;
-            ch_sensor_ok[ci] = false;
-        }
-        if (sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized)) {
-            MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-            size_t count = 0;
-            if (sim_backend_enabled()) {
-                sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
-            } else {
-                MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
-            }
-            for (size_t i = 0; i < count; i++) {
-                uint8_t ci = readings[i].channel;
-                /* Recorded for every physical channel the bus answered,
-                 * regardless of which (if any) zone claims it this tick --
-                 * unlike the pre-10.8 "!s_exec.zones[zi].active continue"
-                 * this loop used to have, filtering by a single zone's
-                 * active flag here would blind every OTHER zone whose
-                 * thermo_mask also names this channel. Per-zone gating
-                 * happens below, once, per zone -- not here, once per
-                 * channel that happens to alias the same index as a zone
-                 * that isn't running. */
-                if (ci >= MAX31856_CHANNEL_COUNT) continue;
-                ch_raw_c[ci] = readings[i].tc_temperature_c;
-                /* THERMO_FAULT_OPEN|OVUV|TCRANGE make the temperature
-                 * meaningless per MAX31856Reading's own doc comment --
-                 * mirrors thermal_guard.h's sensor_ok contract without
-                 * pulling those bit constants into thermal_guard.c. */
-                bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
-                ch_sensor_ok[ci] = !readings[i].spi_failed && !isnan(ch_raw_c[ci]) && !fault_bits_bad;
+        /* Consume the pre-lock read taken above. If the peek missed (state
+         * became RUNNING only after the peek), pre_lock_snap was never
+         * filled -- fall back to an all-invalid snapshot rather than reading
+         * the bus here under the lock; this tick's sensor_ok reads false
+         * across the board and the very next tick's peek picks RUNNING up
+         * correctly, same self-correcting tolerance as the peek's own
+         * doc comment above. */
+        ThermoChannelSnapshot zero_snap;
+        if (!peek_running) {
+            memset(&zero_snap, 0, sizeof(zero_snap));
+            for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+                zero_snap.raw_c[ci] = NAN;
+                zero_snap.cj_c[ci] = NAN;
             }
         }
+        const ThermoChannelSnapshot *snap = peek_running ? &pre_lock_snap : &zero_snap;
+        const float *ch_raw_c = snap->raw_c;
+        const bool *ch_sensor_ok = snap->ok;
         float raw_c[MAX31856_CHANNEL_COUNT];    /* per ZONE: this zone's combined raw reading */
         bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE_PLAN.md sec 1 --
                                                     * snapshotted once per tick, same "one consistent

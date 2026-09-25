@@ -10319,9 +10319,76 @@ static void test_firing_stats_erase_degrades_when_cfg_fs_unmounted(void)
     TEST_CHECK(out.count == 0, "erase still clears the NVS half while cfg_fs stays unmounted");
 }
 
+// 2026-09-24 "never hold a module lock across a producer call" fix,
+// companion to test_baseline_read_runs_outside_the_lock() above (which
+// proves the same property dynamically for profile_executor_capture_
+// baseline()'s call to the shared thermo_channels_read() helper).
+// executor_task_entry()'s RUNNING-branch read cannot be driven the same
+// way -- it lives inside a real `for (;;) { vTaskDelay(...); }` loop with
+// no extraction seam (same unreachability this file already documents
+// elsewhere for this function) -- so this proves the property by source
+// order instead: thermo_channels_read(...) must appear, textually, before
+// xSemaphoreTake(s_exec.lock, portMAX_DELAY) inside executor_task_entry()'s
+// body.
+static char *profile_executor_c_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/control/profile_executor.c",
+        "App/drivers/control/profile_executor.c",
+        "firmware/KilnFW/App/drivers/control/profile_executor.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+static bool source_scan_call_precedes_pe(const char *text, const char *fn_sig, const char *next_fn_sig,
+                                          const char *first_needle, const char *second_needle,
+                                          const char **out_reason)
+{
+    const char *fn = strstr(text, fn_sig);
+    if (!fn) { *out_reason = "sanity: function definition not findable"; return false; }
+    const char *next_fn = strstr(fn + 1, next_fn_sig);
+    if (!next_fn) { *out_reason = "sanity: next function boundary not findable"; return false; }
+    const char *first = strstr(fn, first_needle);
+    const char *second = strstr(fn, second_needle);
+    if (!first || first >= next_fn) { *out_reason = "sanity: first call site not findable in function body"; return false; }
+    if (!second || second >= next_fn) { *out_reason = "sanity: second call site not findable in function body"; return false; }
+    *out_reason = NULL;
+    return first < second;
+}
+
+static void test_task_entry_reads_before_taking_s_exec_lock(void)
+{
+    TEST_SECTION("profile_executor -- executor_task_entry() must call thermo_channels_read() BEFORE "
+                 "xSemaphoreTake(s_exec.lock, ...), never while s_exec.lock is held (CLAUDE.md: never "
+                 "hold a module lock across a producer call -- the MAX31856/sim read can block for up "
+                 "to MAX31856_LOCK_TIMEOUT_MS per channel, and safety_link_frames.c's poll waits on "
+                 "this exact lock with portMAX_DELAY)");
+
+    char *text = profile_executor_c_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c to source-scan");
+        return;
+    }
+
+    const char *reason = NULL;
+    bool ok = source_scan_call_precedes_pe(text, "void executor_task_entry(void *arg)",
+                                            "void watchdog_task_entry(void *arg)",
+                                            "thermo_channels_read(", "xSemaphoreTake(s_exec.lock", &reason);
+    if (reason) {
+        TEST_CHECK(false, reason);
+    } else {
+        TEST_CHECK(ok, "MUST GO RED if executor_task_entry() takes s_exec.lock before its "
+                       "thermo_channels_read() pre-lock peek/read -- move the read back before the lock");
+    }
+
+    free(text);
+}
+
 int main(void)
 {
     run_test_profile_executor_prestart();
+    test_task_entry_reads_before_taking_s_exec_lock();
     test_fscf_partition_absent_behaves_like_before();
     test_fscf_migrates_then_prefers_file();
     test_fscf_dual_write_stays_in_sync_across_repeated_persists();
