@@ -836,6 +836,24 @@ class ClickThenPageTest(unittest.TestCase):
         fail, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=2)
         self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
 
+    def test_retry_click_inject_failed_attributed_and_not_reclicked(self):
+        # First click 'ok' but the page never moves; the page-unchanged
+        # retry's press is never queued. Attributed inject_failed (not the
+        # generic retry_click_failed), never a pass, and no further click.
+        class _OkThenInjectFailed(_CountingNavUi):
+            def click_by_name(self, name):
+                self.clicks.append(name)
+                r = "ok" if len(self.clicks) == 1 else "inject_failed"
+                return {"result": r, "cx": 0, "cy": 0}
+
+        ui = _OkThenInjectFailed(page="home", page_targets={"home": []}, nav_map={})
+        fail, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertEqual(fail.observed.get("attribution"), "inject_failed")
+        self.assertIn("'inject_failed'", fail.reason)
+        self.assertEqual(ui.clicks, ["settings", "settings"])
+
     def test_max_retries_zero_restores_single_attempt_behavior(self):
         # Negative-test knob: max_retries=0 collapses back to the old
         # never-retry behavior, so the retry loop itself (not some other

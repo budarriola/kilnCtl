@@ -448,6 +448,10 @@ def _click_then_page(ui, name: str, expected_page: str,
             # A retry's click stayed swallowed through its whole
             # _CLICK_THEN_PAGE_SWALLOW_RETRIES budget.
             attribution = "swallowed"
+        elif last_result == "inject_failed":
+            # A retry's press was never queued (lvgl_port_inject_touch()
+            # refused) -- attributed the same as a first-click inject_failed.
+            attribution = "inject_failed"
         elif last_result not in ("ok", "verdict_unknown"):
             attribution = "retry_click_failed"
         elif confirmed_ok_clicks >= 2:
@@ -481,7 +485,7 @@ def _click_then_page(ui, name: str, expected_page: str,
                 f"click_by_name({name!r}) kept returning 'swallowed' and page stayed "
                 f"{page!r}, expected {expected_page!r} ({retried})"
             )
-        elif attribution == "retry_click_failed":
+        elif attribution in ("retry_click_failed", "inject_failed"):
             reason = (
                 f"click_by_name({name!r}) returned 'ok' but page stayed {page!r}, "
                 f"expected {expected_page!r}; retry click returned {last_result!r} ({retried})"
