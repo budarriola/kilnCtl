@@ -734,12 +734,17 @@ TASKS = [
          # (zones_current_sweep_task.c, registered via &s_sweep.task, same
          # slot xTaskCreate() writes and the task itself clears to NULL on
          # exit) but no ceiling row of its own -- same on-demand shape as
-         # recovery_exit/ota_pico_rollback above. zone_sweep_task's own body
-         # calls straight into zone_sweep_run_all_zones() (pure engine,
-         # zones_current_sweep_engine.c) plus the push/plan/confirm helper
-         # functions in this same file -- no function-pointer dispatch on
-         # this task's own reachable graph, so the plain root below reaches
-         # the whole path with no indirect-dispatch gap to model.
+         # recovery_exit/ota_pico_rollback above. NOT dispatch-free:
+         # zone_sweep_run_all_zones() (zones_current_sweep_engine.c) calls
+         # the hw_deps/hw_hooks tables zone_sweep_task() builds (9 deps + 5
+         # hooks) through function pointers, which this walk cannot follow.
+         # Measured separately 2026-09-24 against the same ELF: deepest
+         # callback zone_sweep_hw_read_temp 560 B, so the real dispatch path
+         # is about 432 (task) + 256 (run_all_zones) + 560 = 1248 B, well
+         # under the 2896 B refetch path graded below. No extra_roots on
+         # purpose: this checker ADDS the deepest extra root to the task's
+         # whole deepest path (3456 B), which double-counts two paths that
+         # never nest. Re-measure the callbacks if the sweep engine grows.
          stack=lambda: extract_int_literal("drivers/control/zones_current_sweep_task.c",
              r'xTaskCreate\(zone_sweep_task,\s*"zone_sweep",\s*(\d+)')),
     dict(name="backlight_pwm", root="backlight_pwm_task",

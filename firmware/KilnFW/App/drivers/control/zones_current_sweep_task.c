@@ -1947,6 +1947,16 @@ static void zone_sweep_task(void *arg)
          * is only the moment the page is TOLD the run is over that moves. */
         s_sweep.state = ZONE_SWEEP_DONE;
     }
+    /* Null the stack-margin handle slot BEFORE giving up the heat claim and
+     * dropping s_sweep.active: either of those lets a new POST
+     * /api/zones/sweep/start pass zones_current_sweep_start()'s gates and
+     * xTaskCreate() a fresh sweep into this same &s_sweep.task slot, and a
+     * NULL written after that would clobber the new task's handle, so
+     * stack_margin_read() would report a running sweep as not alive. Same
+     * ordering, same reason, as ota_pico_rollback_task() (ota_http_pico.c).
+     * A reader that fetched the handle just before this line is benign:
+     * the task is still alive until vTaskDelete() below. */
+    s_sweep.task = NULL;
     /* Release the heat claim taken in zones_current_sweep_start() -- must
      * happen before s_sweep.active goes false, not after: the moment
      * s_sweep.active reads false, a waiting profile/autotune start can
@@ -1956,7 +1966,6 @@ static void zone_sweep_task(void *arg)
      * but still (briefly) holds exclusivity. */
     relay_authority_heat_sweep_claim_end();
     s_sweep.active = false;
-    s_sweep.task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -2368,9 +2377,9 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
      * ota_pico_rollback/ota_rollback_reboot (ota_http_*.c) -- stack_margin_
      * register() reads *task_handle_slot fresh at report time, so a creation
      * failure just reads back alive=false. &s_sweep.task is the same
-     * TaskHandle_t slot xTaskCreate() was just given above, and this
-     * function already sets it back to NULL when the task self-deletes
-     * (zone_sweep_task(), near its end), so a finished sweep correctly
+     * TaskHandle_t slot xTaskCreate() was just given above, and
+     * zone_sweep_task() sets it back to NULL before it releases the heat
+     * claim and self-deletes (see its end), so a finished sweep correctly
      * reports "not alive" rather than a stale handle -- CLAUDE.md "Register
      * every new task for stack-margin reporting". Idempotent by (name,
      * slot): a repeat sweep start re-registers the same pair as a no-op. */

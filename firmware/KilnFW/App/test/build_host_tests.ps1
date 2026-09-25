@@ -499,6 +499,12 @@ try {
             # convention as exe4/test_profile_executor_prestart.c's own link of
             # this file for the same helper.
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
+            # 2026-09-24 review of 81d71452: zones_current_sweep_start()
+            # (zones_current_sweep_task.c, #included via test_zones_http.c)
+            # now calls stack_margin_register() for the zone_sweep task --
+            # link the real registry, same as the other executables below
+            # that link stack_margin.c for their own registration calls.
+            "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
