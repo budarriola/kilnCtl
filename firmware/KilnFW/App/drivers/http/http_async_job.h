@@ -49,23 +49,44 @@ extern "C" {
  * must not call it. */
 typedef void (*http_async_job_fn_t)(httpd_req_t *async_req, void *ctx);
 
-/* Admits one job at a time. Returns true if admitted -- the caller must not
- * touch req again; fn will run on its own task and reply on the async copy.
- * Returns false if refused: another job is already running, the async
- * handoff itself failed (httpd_req_async_handler_begin()), or the job task
- * could not be created -- in every false case, req is left completely
- * untouched (undone via httpd_req_async_handler_complete() on the async
- * copy first, if one was created) and the caller must respond synchronously
- * on req itself.
+/* http_async_job_try_start()'s outcome. The caller MUST distinguish
+ * HTTP_ASYNC_JOB_BUSY (contention -- another job is already running, an
+ * entirely ordinary and expected outcome) from HTTP_ASYNC_JOB_RESOURCE_FAILURE
+ * (the async handoff itself failed or the job task could not be created --
+ * an out-of-memory-shaped failure) and reply accordingly: busy gets this
+ * route's own "another operation is running" reply, a resource failure
+ * gets the same 500 "out of memory" reply the handler already sends for its
+ * own allocation failures. Folding both into one boolean, as A1 originally
+ * did, misreports a resource failure as ordinary contention (2026-09-25
+ * fix-then-push review). */
+typedef enum {
+    HTTP_ASYNC_JOB_STARTED,          /* admitted -- caller must not touch req again */
+    HTTP_ASYNC_JOB_BUSY,             /* refused: another job is already running */
+    HTTP_ASYNC_JOB_RESOURCE_FAILURE, /* refused: async handoff or task creation failed */
+} http_async_job_start_result_t;
+
+/* Admits one job at a time. Returns HTTP_ASYNC_JOB_STARTED if admitted --
+ * the caller must not touch req again; fn will run on its own task and
+ * reply on the async copy. Returns HTTP_ASYNC_JOB_BUSY or
+ * HTTP_ASYNC_JOB_RESOURCE_FAILURE if refused (see that enum's own doc
+ * comment for the distinction) -- in every refusal case, req is left
+ * completely untouched (undone via httpd_req_async_handler_complete() on
+ * the async copy first, if one was created) and the caller must respond
+ * synchronously on req itself.
  *
  * task_name is used both for the FreeRTOS task name and for
  * stack_margin_register() -- pass the same literal every call site uses
  * ("http_async_job" for A1's ct_auto_zero) so occupancy stays one
  * registry row, not one per caller. stack_bytes must match what fn actually
  * needs; measure with get_stack_margin() after a real run and raise if
- * needed (stack bumps are pre-authorized, CLAUDE.md). */
-bool http_async_job_try_start(httpd_req_t *req, const char *task_name, uint32_t stack_bytes,
-                               http_async_job_fn_t fn, void *ctx);
+ * needed (stack bumps are pre-authorized, CLAUDE.md). The job runs at
+ * httpd_worker's own priority (HTTPD_DEFAULT_CONFIG()'s
+ * tskIDLE_PRIORITY+5), not an arbitrary lower one -- it is doing
+ * httpd_worker's own deferred work, so there is no reason to let unrelated
+ * lower-priority tasks preempt it (2026-09-25 fix-then-push review). */
+http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const char *task_name,
+                                                        uint32_t stack_bytes, http_async_job_fn_t fn,
+                                                        void *ctx);
 
 /* True while a job started by http_async_job_try_start() is still running.
  * Read-only precondition check for a second POST handler that must refuse
