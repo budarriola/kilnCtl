@@ -2003,11 +2003,15 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 
 
 # ---------------------------------------------------------------------------
-# LCD-19 -- PIN lock after lcd_timeout_min (observer of WEB-SEC-04's PIN
-# configuration, owned by another agent/wave). Reads a defensively-named
-# ctx["_lcd_pin"] dict; NOT_RUN if absent, since this wave does not own
-# wiring that key -- and Stop-is-never-gated is checked without assuming any
-# particular shape for the rest.
+# LCD-19 -- PIN lock after lcd_timeout_min. Reads ctx["_lcd_pin"] if
+# WEB-SEC-04 already ran this session and populated it; otherwise self-seeds
+# it via cases_web_rw.seed_lcd_pin(ctx) -- the exact same env-var lookup /
+# GET config / set_lcd_pin write path WEB-SEC-04 itself uses, so a
+# standalone bench_test_run(suite="lcd") run can exercise this case too.
+# NOT_RUN happens only when KILNCTL_LCD_PIN (or ctx["lcd_admin_pin"]) is
+# unset -- a FAIL happens instead if the env var is set but seeding itself
+# fails (malformed PIN, GET/set_lcd_pin failure). Stop-is-never-gated is
+# checked without assuming any particular shape for the rest.
 #
 # Both the PIN keypad (ui_lcd_keypad.c) and the Confirm Start/Confirm Stop
 # dialogs (ui_confirm.c) are top-layer lv_msgbox popups, not pages -- current
@@ -2366,6 +2370,7 @@ def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
 def _case_lcd19(ctx: dict) -> CaseResult:
     from . import cases_web_rw as _web  # local import: avoids a module-load cycle with cases_web_rw
 
+    pin_seed_state: Optional[Dict[str, Any]] = None
     pin_cfg = ctx.get("_lcd_pin")
     if pin_cfg is None:
         # A standalone LCD-suite run never executes WEB-SEC-04 (a different
@@ -2382,6 +2387,12 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             return CaseResult(verdict, reason=exc.reason, observed=exc.observed)
         pin_cfg = {"right_pin": seeded["right_pin"], "wrong_pin": seeded["wrong_pin"]}
         ctx["_lcd_pin"] = pin_cfg
+        # `seeded["state"]` is already PIN-free (admin_pin_set_before /
+        # set_lcd_pin_status or set_lcd_pin_skipped) -- surface it on
+        # `observed` under its own key so a self-seeded run's PASS/FAIL/
+        # INCONCLUSIVE result (and any early-abort path below) shows whether
+        # a real write happened, without ever repeating the PIN itself.
+        pin_seed_state = dict(seeded["state"])
     # 2026-09-24 (LCD-19 bench root cause): every other click-driven LCD
     # case wakes the panel and returns to `home` first (_wake_and_home's own
     # docstring above: the shortest display timeout is 1 minute, and the
@@ -2406,12 +2417,17 @@ def _case_lcd19(ctx: dict) -> CaseResult:
     client = _web._sec_client(ctx)
     status0, cfg0 = client.get_config()
     if status0 != 200 or cfg0 is None:
-        return CaseResult(Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed={"status": status0})
+        aborted: Dict[str, Any] = {"status": status0}
+        if pin_seed_state is not None:
+            aborted["pin_seed"] = pin_seed_state
+        return CaseResult(Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed=aborted)
     orig = _web._policy_from_config(cfg0)
 
     keypad_raised = wrong_pin_refused = right_pin_started = stop_not_gated = None
     result: Optional[CaseResult] = None
     state: Dict[str, Any] = {"orig": orig}
+    if pin_seed_state is not None:
+        state["pin_seed"] = pin_seed_state
     try:
         # WEB-SEC-04 always restores `lcd_enabled` to whatever it found
         # (normally false on this bench) -- this case must turn it on

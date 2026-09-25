@@ -2063,9 +2063,13 @@ class Lcd19SelfSeedTest(unittest.TestCase):
     that refusal."""
 
     def setUp(self):
-        os.environ.pop(CW._LCD_PIN_ENV, None)
-
-    def tearDown(self):
+        # mock.patch.dict + addCleanup restores whatever the process already
+        # had for KILNCTL_LCD_PIN afterward (e.g. the owner's real User-scope
+        # value) instead of unconditionally deleting it for the rest of the
+        # process, the way a bare os.environ.pop in tearDown would.
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         os.environ.pop(CW._LCD_PIN_ENV, None)
 
     def test_not_run_when_no_pin_configured_and_env_unset(self):
@@ -2127,12 +2131,65 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         blob = (result.reason or "") + json.dumps(result.observed or {}, default=str)
         self.assertNotIn("8642097", blob)
 
+    def test_self_seed_success_path_never_leaks_the_pin_and_reports_pin_seed(self):
+        # Same leak check as above, but on the success path (a real
+        # set_lcd_pin write happens and the case runs through to a verdict)
+        # rather than an immediate write-failure abort -- and additionally
+        # confirms the write is visible in `observed["pin_seed"]` without
+        # ever including the PIN value itself.
+        import json
+
+        os.environ[CW._LCD_PIN_ENV] = "9137456"
+        sec = FakeSec04Client(admin_pin_set=False)
+        ui = PinKeypadUiTest(right_pin="9137456", wrong_pin=CW._derive_wrong_lcd_pin("9137456"))
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": sec}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(sec.set_lcd_pin_calls, [("admin", "9137456")])
+        pin_seed = result.observed.get("pin_seed")
+        self.assertIsNotNone(pin_seed)
+        self.assertEqual(pin_seed.get("admin_pin_set_before"), False)
+        self.assertEqual(pin_seed.get("set_lcd_pin_status"), 200)
+        blob = (result.reason or "") + json.dumps(result.observed or {}, default=str)
+        self.assertNotIn("9137456", blob)
+
 
 class Lcd19Test(unittest.TestCase):
     def test_not_run_when_no_pin_configured(self):
-        srv = FakeSrvFull(FakeUiTest(page="home"))
-        result = C._case_lcd19({"srv": srv})
+        # This test must never reach the real board: on a machine where the
+        # owner's KILNCTL_LCD_PIN is genuinely set (User scope), an
+        # unpatched env plus no sec_client/host in ctx would make
+        # _case_lcd19 self-seed for real -- a live GET /api/auth/config,
+        # and possibly a real set_lcd_pin write. Force the env var unset for
+        # the duration of this test regardless of the real environment, and
+        # supply a fake sec client that must see zero calls, so this test
+        # can never touch a board even if it did fall through.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(CW._LCD_PIN_ENV, None)
+            sec = FakeSec04Client(admin_pin_set=False)
+            srv = FakeSrvFull(FakeUiTest(page="home"))
+            result = C._case_lcd19({"srv": srv, "sec_client": sec})
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
+        self.assertEqual(sec.set_lcd_pin_calls, [])
+
+    def test_negative_unpatched_env_and_no_fake_client_would_resolve_real_host(self):
+        # Proves the hazard the test above guards against is real: with
+        # KILNCTL_LCD_PIN set (as it is on the owner's machine) and no
+        # sec_client/host override in ctx -- i.e. the shape of the test
+        # above BEFORE it patched the environment and supplied a fake
+        # client -- _case_lcd19 does reach _sec_client's real-host fallback.
+        # Patch _ota_resolve_host to raise instead of actually resolving
+        # anything, and confirm _case_lcd19 propagates that raise rather
+        # than silently succeeding some other way.
+        from kilnctrl import mcp_server_ota
+
+        with mock.patch.dict(os.environ, {CW._LCD_PIN_ENV: "1234"}):
+            with mock.patch.object(
+                mcp_server_ota, "_ota_resolve_host", side_effect=RuntimeError("would resolve a real host")
+            ):
+                srv = FakeSrvFull(FakeUiTest(page="home"))
+                with self.assertRaises(RuntimeError):
+                    C._case_lcd19({"srv": srv})
 
     def test_wakes_and_homes_before_driving_the_keypad(self):
         # 2026-09-24 bench root cause (LCD-19, three identical runs:
