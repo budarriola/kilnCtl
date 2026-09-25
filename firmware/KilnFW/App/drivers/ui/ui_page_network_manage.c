@@ -335,9 +335,11 @@ static void forget_row_clicked_cb(lv_event_t *e)
     const char *ssid = (const char *)lv_event_get_user_data(e);
     snprintf(s_pending_forget_ssid, sizeof(s_pending_forget_ssid), "%s", ssid);
 
+    /* Cached, non-blocking -- see refresh_saved_list()'s comment below for
+     * why this page never calls wifi_prov_get_saved_networks() directly. */
     wifi_prov_saved_network_t saved[UI_PAGE_NETWORK_MANAGE_SAVED_MAX];
     size_t saved_count = 0;
-    wifi_prov_get_saved_networks(saved, UI_PAGE_NETWORK_MANAGE_SAVED_MAX, &saved_count);
+    wifi_prov_get_saved_networks_cached(saved, UI_PAGE_NETWORK_MANAGE_SAVED_MAX, &saved_count);
 
     lv_obj_t *mbox = lv_msgbox_create(NULL);
     lv_msgbox_add_title(mbox, "Forget network");
@@ -395,7 +397,15 @@ static void refresh_saved_list(void)
      * ui_page_network.c's original comment on this exact array for why. */
     static char ssid_ctx[UI_PAGE_NETWORK_MANAGE_SAVED_MAX][WIFI_PROV_SSID_MAX_LEN + 1];
     size_t count = 0;
-    wifi_prov_get_saved_networks(saved, UI_PAGE_NETWORK_MANAGE_SAVED_MAX, &count);
+    /* Non-blocking cached read (2026-09-25 LCD freeze fix) -- this runs from
+     * refresh_cb() on lvgl_port_task every UI_PAGE_NETWORK_MANAGE_REFRESH_MS,
+     * and the real wifi_prov_get_saved_networks() is a queued call to the
+     * Wi-Fi owner task sized to wait up to WIFI_OWNER_WAIT_MS (12s, see
+     * wifi_prov_api.c) behind a scan or connect already in flight ahead of
+     * it -- calling that here froze the whole LCD for the duration of any
+     * concurrent scan/connect. This shows the last-known list instead;
+     * see wifi_prov.h's wifi_prov_get_saved_networks_cached() doc comment. */
+    wifi_prov_get_saved_networks_cached(saved, UI_PAGE_NETWORK_MANAGE_SAVED_MAX, &count);
 
     if (count == 0) {
         lv_list_add_text(s_saved_list, "No saved networks");

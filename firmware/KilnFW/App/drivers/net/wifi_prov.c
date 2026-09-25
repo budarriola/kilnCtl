@@ -514,6 +514,10 @@ esp_err_t wifi_prov_start(void)
             nvs_load_saved_nets();
         }
     }
+    /* Prime the non-blocking cache immediately -- single-threaded here (the
+     * owner task doesn't exist yet), so this covers boards that never touch
+     * Scan/Saved before the UI's first refresh tick reads it. */
+    wifi_prov_update_saved_nets_cache();
 
     err = esp_netif_init();
     if (err != ESP_OK) {

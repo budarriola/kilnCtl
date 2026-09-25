@@ -82,7 +82,12 @@
 //   - wifi_prov_get_ap_client_count(): reads no s_wifi field at all beyond
 //     the started flag; it is an esp_wifi_ap_get_sta_list() call, and the
 //     Wi-Fi driver's API is internally thread-safe.
-// Everything reading COMPOUND state goes through the queue:
+//   - wifi_prov_get_saved_networks_cached() (2026-09-25, LCD freeze fix):
+//     the one exception to "compound state goes through the queue" below --
+//     it reads a dedicated short-spinlock-guarded MIRROR of the saved-list,
+//     not s_wifi.saved_nets itself, so the torn-read hazard that rule exists
+//     to avoid doesn't apply to it. See its own doc comment.
+// Everything else reading COMPOUND state goes through the queue:
 // wifi_prov_get_saved_networks(), wifi_prov_get_sta_ip(), wifi_prov_scan().
 #ifndef WIFI_PROV_H
 #define WIFI_PROV_H
@@ -247,6 +252,21 @@ typedef struct {
  * password never leaves NVS/RAM once saved. */
 esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t max_results,
                                         size_t *out_count);
+
+/* Non-blocking. Copies out the last-known saved-networks list from a short-
+ * spinlock-guarded mirror (never the queue), refreshed by the owner task
+ * whenever the real list changes and once at boot. Prefer this over
+ * wifi_prov_get_saved_networks() from ANY task that must never block --
+ * lvgl_port_task above all: that queued call is sized to wait behind a
+ * worst-case scan already in flight (WIFI_OWNER_WAIT_MS, 12s in
+ * wifi_prov_api.c), which is fine for an HTTP handler's own worker task but
+ * freezes the whole LCD if called directly from the UI's timer/event
+ * callbacks. The list this returns can be one add/forget behind the true
+ * state for at most as long as the next owner-task command takes to run --
+ * never seconds. Always succeeds; *out_count is 0 if wifi_prov_start()
+ * hasn't run yet or nothing is saved. */
+void wifi_prov_get_saved_networks_cached(wifi_prov_saved_network_t *out, size_t max_results,
+                                          size_t *out_count);
 
 /* Sets and persists the Wi-Fi mode (the provisioning page's single toggle).
  * Switching to WIFI_PROV_MODE_AP: any in-progress or future station join is

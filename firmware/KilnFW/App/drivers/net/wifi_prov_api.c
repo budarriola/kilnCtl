@@ -10,10 +10,11 @@
 
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- s_saved_nets_cache below */
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/portmacro.h"
+#include "freertos/portmacro.h" /* portMUX_TYPE -- s_saved_nets_cache_mux below */
 
 /* Scan results staging. Written ONLY by owner_task() (via do_scan() below),
  * copied out by the producer after its semaphore is given. Deliberately
@@ -75,6 +76,7 @@ esp_err_t do_add_network(const char *new_ssid, const char *password, bool *out_j
     }
     memcpy(s_wifi.saved_nets.nets[idx].password, password, password_len);
     s_wifi.saved_nets.nets[idx].password[password_len] = '\0';
+    wifi_prov_update_saved_nets_cache();
 
     esp_err_t err = nvs_save_saved_nets();
     if (err != ESP_OK) {
@@ -190,6 +192,7 @@ esp_err_t do_forget_network(const char *target)
     }
     s_wifi.saved_nets.count--;
     memset(&s_wifi.saved_nets.nets[s_wifi.saved_nets.count], 0, sizeof(s_wifi.saved_nets.nets[0]));
+    wifi_prov_update_saved_nets_cache();
 
     esp_err_t err = nvs_save_saved_nets();
     if (err != ESP_OK) {
@@ -239,6 +242,74 @@ esp_err_t do_get_saved_networks(size_t max_results, wifi_result_t *r)
     }
     r->saved_count = n;
     return ESP_OK;
+}
+
+/* ---- non-blocking saved-networks cache (2026-09-25, LCD freeze fix) ------
+ * ui_page_network_manage.c's refresh_cb() and forget_row_clicked_cb() used
+ * to call wifi_prov_get_saved_networks() directly from lvgl_port_task, once
+ * a second -- a queued call sized (WIFI_OWNER_WAIT_MS above, 12s) to wait
+ * behind a worst-case scan already ahead of it in the owner's queue. While a
+ * scan or connect was in flight the whole LCD froze for as long as that
+ * queued wait took. This mirror is a short-spinlock-guarded copy of
+ * s_wifi.saved_nets, small enough (WIFI_PROV_MAX_SAVED_NETWORKS *
+ * sizeof(wifi_prov_saved_network_t), 264 B today) to copy under a spinlock
+ * with no torn-read risk, refreshed by owner_task() itself (never a
+ * producer) every time the real list changes, plus once at boot after the
+ * initial nvs_load_saved_nets(). Same portMUX_TYPE-snapshot pattern as
+ * firing_shadow.c's s_status/s_status_mux -- see that file's comment for the
+ * torn-read rationale a plain struct-copy-without-a-lock would risk here
+ * too. The array itself lives in PSRAM (EXT_RAM_BSS_ATTR): it's list-sized,
+ * not touched with the cache disabled, and DRAM headroom on this board is
+ * down to ~1.4 KB (W1's 2026-09-25 reply-slot-pool DRAM measurement). */
+static portMUX_TYPE s_saved_nets_cache_mux = portMUX_INITIALIZER_UNLOCKED;
+static EXT_RAM_BSS_ATTR wifi_prov_saved_network_t s_saved_nets_cache[WIFI_PROV_MAX_SAVED_NETWORKS];
+static size_t s_saved_nets_cache_count;
+
+/* Runs on owner_task() (do_add_network()/do_forget_network()) or, once, on
+ * whatever task calls wifi_prov_start() before the owner task exists --
+ * single-threaded at that point, so the spinlock there is defence in depth,
+ * not load-bearing. */
+void wifi_prov_update_saved_nets_cache(void)
+{
+    size_t n = s_wifi.saved_nets.count;
+    if (n > WIFI_PROV_MAX_SAVED_NETWORKS) {
+        n = WIFI_PROV_MAX_SAVED_NETWORKS; /* defensive; count can never exceed this */
+    }
+
+    /* Build the copy on the stack first -- keep the critical section to a
+     * single memcpy + count store, never a strncpy loop, so the maximum hold
+     * time is fixed and tiny regardless of how many entries are saved. */
+    wifi_prov_saved_network_t tmp[WIFI_PROV_MAX_SAVED_NETWORKS];
+    for (size_t i = 0; i < n; i++) {
+        strncpy(tmp[i].ssid, s_wifi.saved_nets.nets[i].ssid, WIFI_PROV_SSID_MAX_LEN);
+        tmp[i].ssid[WIFI_PROV_SSID_MAX_LEN] = '\0';
+    }
+
+    portENTER_CRITICAL(&s_saved_nets_cache_mux);
+    memcpy(s_saved_nets_cache, tmp, n * sizeof(tmp[0]));
+    s_saved_nets_cache_count = n;
+    portEXIT_CRITICAL(&s_saved_nets_cache_mux);
+}
+
+void wifi_prov_get_saved_networks_cached(wifi_prov_saved_network_t *out, size_t max_results, size_t *out_count)
+{
+    if (!out_count) {
+        return;
+    }
+    if (!out || max_results == 0) {
+        *out_count = 0;
+        return;
+    }
+
+    portENTER_CRITICAL(&s_saved_nets_cache_mux);
+    size_t n = s_saved_nets_cache_count;
+    if (n > max_results) {
+        n = max_results;
+    }
+    memcpy(out, s_saved_nets_cache, n * sizeof(*out));
+    portEXIT_CRITICAL(&s_saved_nets_cache_mux);
+
+    *out_count = n;
 }
 
 esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t max_results, size_t *out_count)

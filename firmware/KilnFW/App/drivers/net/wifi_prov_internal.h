@@ -227,6 +227,15 @@ void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *o
 void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs);
 void nvs_load_saved_nets(void);
 esp_err_t nvs_save_saved_nets(void);
+
+/* ---- non-blocking saved-networks cache (wifi_prov_api.c) ------------------
+ * A short-spinlock-guarded mirror of s_wifi.saved_nets, refreshed by
+ * owner_task() (do_add_network()/do_forget_network()) and by
+ * wifi_prov_start()'s initial nvs_load_saved_nets() -- never by a producer.
+ * See wifi_prov.h's wifi_prov_get_saved_networks_cached() doc comment for
+ * why this exists: lvgl_port_task must never take the up-to-12s queued path
+ * a scan-in-flight can force wifi_prov_get_saved_networks() onto. */
+void wifi_prov_update_saved_nets_cache(void);
 esp_err_t nvs_save_mode(void);
 esp_err_t nvs_save_ap_ssid(void);
 esp_err_t nvs_save_ap_password(void);
