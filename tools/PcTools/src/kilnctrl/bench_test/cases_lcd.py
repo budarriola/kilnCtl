@@ -2364,9 +2364,24 @@ def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
 
 
 def _case_lcd19(ctx: dict) -> CaseResult:
+    from . import cases_web_rw as _web  # local import: avoids a module-load cycle with cases_web_rw
+
     pin_cfg = ctx.get("_lcd_pin")
     if pin_cfg is None:
-        return CaseResult(Verdict.NOT_RUN, reason="no PIN was configured in this session (ctx['_lcd_pin'] absent, owned by WEB-SEC-04)")
+        # A standalone LCD-suite run never executes WEB-SEC-04 (a different
+        # suite), so ctx["_lcd_pin"] is never populated that way here.
+        # Seed it ourselves through the exact same shared path WEB-SEC-04
+        # uses (cases_web_rw.seed_lcd_pin) -- this never calls set_lcd_pin
+        # through any other path, and still refuses (NOT_RUN, naming the
+        # env var) when KILNCTL_LCD_PIN is unset, same as before this case
+        # could self-seed.
+        try:
+            seeded = _web.seed_lcd_pin(ctx)
+        except _web.LcdPinSeedError as exc:
+            verdict = Verdict.NOT_RUN if exc.kind == "missing" else Verdict.FAIL
+            return CaseResult(verdict, reason=exc.reason, observed=exc.observed)
+        pin_cfg = {"right_pin": seeded["right_pin"], "wrong_pin": seeded["wrong_pin"]}
+        ctx["_lcd_pin"] = pin_cfg
     # 2026-09-24 (LCD-19 bench root cause): every other click-driven LCD
     # case wakes the panel and returns to `home` first (_wake_and_home's own
     # docstring above: the shortest display timeout is 1 minute, and the
@@ -2387,7 +2402,6 @@ def _case_lcd19(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
-    from . import cases_web_rw as _web  # local import: avoids a module-load cycle with cases_web_rw
 
     client = _web._sec_client(ctx)
     status0, cfg0 = client.get_config()

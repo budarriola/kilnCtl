@@ -651,49 +651,131 @@ def _derive_wrong_lcd_pin(right_pin: str) -> str:
     return right_pin[:-1] + flipped
 
 
-def _case_web_sec04(ctx: dict) -> CaseResult:
-    client = _sec_client(ctx)
+class LcdPinSeedError(Exception):
+    """Raised by :func:`seed_lcd_pin` when the PIN cannot be sourced and (if
+    needed) written. ``kind`` is ``"missing"`` when `KILNCTL_LCD_PIN` is
+    simply unset -- never a hard failure, since a bench session may
+    legitimately not want to touch the PIN -- or ``"fail"`` for anything
+    else (a malformed value, a failed GET, or a `set_lcd_pin` that didn't
+    confirm ``ok:true``). Never carries the PIN value itself. Each caller
+    (`_case_web_sec04` below, and `cases_lcd._case_lcd19`) maps `kind` to its
+    own verdict convention -- SKIP vs. NOT_RUN for "missing", FAIL either way
+    for "fail" -- rather than this shared helper picking one for both."""
+
+    def __init__(self, kind: str, reason: str, observed: Optional[dict] = None):
+        super().__init__(reason)
+        self.kind = kind
+        self.reason = reason
+        self.observed = observed or {}
+
+
+def _resolve_lcd_pin(ctx: dict) -> Dict[str, Any]:
+    """Source the board's admin LCD PIN from `KILNCTL_LCD_PIN` (or
+    ``ctx["lcd_admin_pin"]``) and read its current config -- the read-only
+    half of PIN seeding, shared by :func:`seed_lcd_pin` and
+    `_case_web_sec04`. Raises `LcdPinSeedError` for a missing/malformed
+    value or a failed GET (none of which ever touch the board or need a
+    restore afterward); the exception's `.reason`/`.observed` are always
+    safe to put straight into a `CaseResult` -- the PIN is never present in
+    either. Returns ``{"client", "right_pin", "wrong_pin", "orig", "cfg0"}``
+    on success.
+    """
     right_pin = ctx.get("lcd_admin_pin") or os.environ.get(_LCD_PIN_ENV)
     if not right_pin:
-        return CaseResult(
-            Verdict.SKIP,
-            reason=f"{_LCD_PIN_ENV} not set in the environment",
-            observed={},
-        )
+        # Checked before _sec_client(ctx) is ever called -- with no
+        # ctx["sec_client"]/ctx["host"] override, that call falls through to
+        # resolving a real board host, which a caller with no PIN configured
+        # (e.g. a test, or a bench session that never intends to touch the
+        # PIN) must never trigger just to learn that.
+        raise LcdPinSeedError("missing", f"{_LCD_PIN_ENV} not set in the environment")
     if not _lcd_pin_well_formed(right_pin):
         # Never echo the value (or its length) -- name the variable only.
-        return CaseResult(
-            Verdict.FAIL,
-            reason=f"{_LCD_PIN_ENV} is set but is not {_LCD_PIN_MIN_LEN}-{_LCD_PIN_MAX_LEN} ASCII digits",
-            observed={},
+        raise LcdPinSeedError(
+            "fail",
+            f"{_LCD_PIN_ENV} is set but is not {_LCD_PIN_MIN_LEN}-{_LCD_PIN_MAX_LEN} ASCII digits",
         )
     wrong_pin = _derive_wrong_lcd_pin(right_pin)
 
+    client = _sec_client(ctx)
     status0, cfg0 = client.get_config()
     if status0 != 200 or cfg0 is None:
-        return CaseResult(
-            Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed={"status": status0}
+        raise LcdPinSeedError(
+            "fail", f"GET /api/auth/config failed (status={status0})", {"status": status0}
         )
 
     orig = _policy_from_config(cfg0)
-    admin_pin_already_set = bool(cfg0.get("admin_pin_set"))
+    return {"client": client, "right_pin": right_pin, "wrong_pin": wrong_pin, "orig": orig, "cfg0": cfg0}
 
-    pin_set_ok = False
+
+def _write_lcd_pin_if_needed(client: Any, cfg0: dict, right_pin: str) -> "Tuple[bool, Dict[str, Any]]":
+    """Write `right_pin` via ``cmd=set_lcd_pin`` unless the board already has
+    an admin PIN set (module comment above `_LCD_PIN_ENV`: never overwrite
+    one). Never raises -- returns ``(pin_set_ok, state)`` so a caller with
+    its own try/finally (namely `_case_web_sec04`, which must still attempt
+    its policy restore even when this write fails) can decide what to do
+    next itself."""
+    admin_pin_already_set = bool(cfg0.get("admin_pin_set"))
+    state: Dict[str, Any] = {"admin_pin_set_before": admin_pin_already_set}
+    if admin_pin_already_set:
+        state["set_lcd_pin_skipped"] = "admin_pin_set was already true"
+        return True, state
+    pin_status, pin_resp = client.set_lcd_pin("admin", right_pin)
+    pin_set_ok = pin_status == 200 and bool(pin_resp) and pin_resp.get("ok") is True
+    state["set_lcd_pin_status"] = pin_status
+    return pin_set_ok, state
+
+
+def seed_lcd_pin(ctx: dict) -> Dict[str, Any]:
+    """Source, and if needed write, the board's admin LCD PIN -- the ONE
+    sanctioned path that ever calls ``cmd=set_lcd_pin`` (module comment
+    above `_LCD_PIN_ENV`). This is WEB-SEC-04's own seeding logic
+    (`_resolve_lcd_pin` + `_write_lcd_pin_if_needed`), composed here so
+    LCD-19 (`cases_lcd._case_lcd19`) can reuse the exact same path for a
+    standalone LCD-suite run that never executed WEB-SEC-04 (a different
+    suite) in the same session, rather than copying or re-deriving it.
+    LCD-19 has no policy state of its own to restore on a seeding failure
+    (unlike WEB-SEC-04), so this raises outright rather than returning a
+    partial result the way `_write_lcd_pin_if_needed` does for
+    `_case_web_sec04`.
+
+    Returns ``{"right_pin", "wrong_pin", "orig", "state"}`` on success --
+    ``orig`` is the pre-existing policy snapshot (`_policy_from_config`),
+    ``state`` a partial observed-state dict (admin_pin_set_before / whether
+    a write happened) with no PIN value in it. Raises `LcdPinSeedError`
+    otherwise; the exception's `.reason`/`.observed` are always safe to put
+    straight into a `CaseResult` -- the PIN is never present in either.
+    """
+    resolved = _resolve_lcd_pin(ctx)
+    pin_set_ok, state = _write_lcd_pin_if_needed(resolved["client"], resolved["cfg0"], resolved["right_pin"])
+    if not pin_set_ok:
+        raise LcdPinSeedError(
+            "fail", f"set_lcd_pin did not confirm ok:true (status={state.get('set_lcd_pin_status')})", state
+        )
+    return {
+        "right_pin": resolved["right_pin"], "wrong_pin": resolved["wrong_pin"],
+        "orig": resolved["orig"], "state": state,
+    }
+
+
+def _case_web_sec04(ctx: dict) -> CaseResult:
+    try:
+        resolved = _resolve_lcd_pin(ctx)
+    except LcdPinSeedError as exc:
+        verdict = Verdict.SKIP if exc.kind == "missing" else Verdict.FAIL
+        return CaseResult(verdict, reason=exc.reason, observed=exc.observed)
+
+    client = resolved["client"]
+    right_pin = resolved["right_pin"]
+    wrong_pin = resolved["wrong_pin"]
+    orig = resolved["orig"]
+
+    pin_set_ok, seed_state = _write_lcd_pin_if_needed(client, resolved["cfg0"], right_pin)
     enabled_ok = False
     readback_enabled: Optional[bool] = None
-    state: Dict[str, Any] = {"orig": orig, "admin_pin_set_before": admin_pin_already_set}
+    state: Dict[str, Any] = {"orig": orig}
+    state.update(seed_state)
 
     try:
-        if admin_pin_already_set:
-            # Never overwrite an existing admin PIN (module comment above)
-            # -- trust that KILNCTL_LCD_PIN already matches what's on the
-            # board and only verify the enable/readback round trip.
-            pin_set_ok = True
-            state["set_lcd_pin_skipped"] = "admin_pin_set was already true"
-        else:
-            pin_status, pin_resp = client.set_lcd_pin("admin", right_pin)
-            pin_set_ok = pin_status == 200 and bool(pin_resp) and pin_resp.get("ok") is True
-            state["set_lcd_pin_status"] = pin_status
         if pin_set_ok:
             en_status, en_resp = client.set_policy(
                 orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])

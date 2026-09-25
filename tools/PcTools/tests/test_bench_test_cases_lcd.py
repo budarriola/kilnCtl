@@ -26,6 +26,7 @@ from kilnctrl.devices_touch import (  # noqa: E402
     TOUCH_POWER_STATE_ERROR_HOLD,
     TOUCH_POWER_STATE_ON,
 )
+from test_bench_test_cases_web_rw import FakeSec04Client  # noqa: E402
 
 #: This whole file drives cases_lcd.py's click/page-poll helpers against a
 #: FakeUiTest double that never actually needs real wall-clock time to
@@ -2049,6 +2050,82 @@ class WaitForOverlayNamesBaselineTest(unittest.TestCase):
         names, _waited, _empty, _trunc = C._wait_for_overlay_names(
             ui, present=True, timeout_s=1.0, interval_s=0.01)
         self.assertEqual(names, {"Start", "settings"})  # returns immediately, stale
+
+
+class Lcd19SelfSeedTest(unittest.TestCase):
+    """A standalone LCD-suite run (e.g. ``bench_test_run(suite="lcd")`` with
+    only LCD-01/LCD-19 selected) never executes WEB-SEC-04 -- a different
+    suite -- so ctx["_lcd_pin"] is never populated the way it is when both
+    run in the same session. LCD-19 must be able to self-seed it through
+    the same shared `cases_web_rw.seed_lcd_pin` helper WEB-SEC-04 itself
+    uses, and must still NOT_RUN, naming the env var, when
+    KILNCTL_LCD_PIN is genuinely unset -- self-seeding is not a way around
+    that refusal."""
+
+    def setUp(self):
+        os.environ.pop(CW._LCD_PIN_ENV, None)
+
+    def tearDown(self):
+        os.environ.pop(CW._LCD_PIN_ENV, None)
+
+    def test_not_run_when_no_pin_configured_and_env_unset(self):
+        srv = FakeSrvFull(FakeUiTest(page="home"))
+        result = C._case_lcd19({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.NOT_RUN)
+        self.assertIn(CW._LCD_PIN_ENV, result.reason)
+
+    def test_self_seeds_from_env_when_ctx_lcd_pin_absent(self):
+        # No ctx["_lcd_pin"] at all (as if WEB-SEC-04 never ran this
+        # session), but KILNCTL_LCD_PIN is set and the board has no admin
+        # PIN yet -- LCD-19 must write it itself via the shared helper
+        # (never any path other than seed_lcd_pin's own set_lcd_pin call)
+        # and then proceed to drive the keypad with it.
+        os.environ[CW._LCD_PIN_ENV] = "1234"
+        sec = FakeSec04Client(admin_pin_set=False)
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin=CW._derive_wrong_lcd_pin("1234"))
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": sec}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(sec.set_lcd_pin_calls, [("admin", "1234")])
+        self.assertEqual(ctx["_lcd_pin"], {"right_pin": "1234", "wrong_pin": "1235"})
+        # The idle-branch keypad/PIN checks all completed (this fixture never
+        # exercises the firing/Stop branch, so `stop_not_gated` stays None
+        # and the overall verdict is judge_lcd_pin_lock's own by-design
+        # INCONCLUSIVE for an idle-only run -- not what this test is about).
+        self.assertEqual(result.observed.get("keypad_raised"), True)
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), True)
+
+    def test_self_seed_does_not_overwrite_an_existing_admin_pin(self):
+        # Same as WEB-SEC-04's own rule: never overwrite an admin PIN the
+        # board already has -- trust KILNCTL_LCD_PIN already matches it.
+        os.environ[CW._LCD_PIN_ENV] = "1234"
+        sec = FakeSec04Client(admin_pin_set=True)
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin=CW._derive_wrong_lcd_pin("1234"))
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": sec}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(sec.set_lcd_pin_calls, [])
+        self.assertEqual(ctx["_lcd_pin"]["right_pin"], "1234")
+        self.assertEqual(result.observed.get("keypad_raised"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), True)
+
+    def test_self_seed_write_failure_fails_and_never_drives_keypad(self):
+        os.environ[CW._LCD_PIN_ENV] = "1234"
+        sec = FakeSec04Client(admin_pin_set=False, set_lcd_pin_ok=False)
+        srv = FakeSrvFull(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        ctx = {"srv": srv, "sec_client": sec}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("_lcd_pin", ctx)
+
+    def test_self_seed_never_leaks_the_pin(self):
+        import json
+        os.environ[CW._LCD_PIN_ENV] = "8642097"
+        srv = FakeSrvFull(FakeUiTest(page="home"))
+        result = C._case_lcd19({"srv": srv, "sec_client": FakeSec04Client(admin_pin_set=False, set_lcd_pin_ok=False)})
+        blob = (result.reason or "") + json.dumps(result.observed or {}, default=str)
+        self.assertNotIn("8642097", blob)
 
 
 class Lcd19Test(unittest.TestCase):
