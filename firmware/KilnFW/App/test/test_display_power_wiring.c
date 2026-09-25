@@ -171,6 +171,21 @@ static const char *LVGL_PORT_C_CANDIDATES[] = {
     "App/drivers/ui/lvgl_port.c",
     "firmware/KilnFW/App/drivers/ui/lvgl_port.c",
 };
+static const char *KILN_UI_C_CANDIDATES[] = {
+    "../drivers/ui/kiln_ui.c",
+    "App/drivers/ui/kiln_ui.c",
+    "firmware/KilnFW/App/drivers/ui/kiln_ui.c",
+};
+static const char *KILN_UI_H_CANDIDATES[] = {
+    "../drivers/ui/kiln_ui.h",
+    "App/drivers/ui/kiln_ui.h",
+    "firmware/KilnFW/App/drivers/ui/kiln_ui.h",
+};
+static const char *UART_BRIDGE_UI_TEST_C_CANDIDATES[] = {
+    "../drivers/bridge/uart_bridge_ui_test.c",
+    "App/drivers/bridge/uart_bridge_ui_test.c",
+    "firmware/KilnFW/App/drivers/bridge/uart_bridge_ui_test.c",
+};
 
 static void run_section1_screen_idle_calls_policy(void)
 {
@@ -1370,6 +1385,143 @@ static void run_section11_inject_verdict_handoff_wired(void)
     free(text);
 }
 
+// 2026-09-24 KILN_UI_CLICK_INJECT_FAILED: kiln_ui_click_by_name() skips both
+// the verdict wait and the release when lvgl_port_inject_touch() returns 0.
+// Skipping the release is only safe if 0 really means "nothing was latched",
+// i.e. every `return 0` in lvgl_port_inject_touch() precedes its first write
+// to s_inject. This section pins that invariant, the early-return ordering in
+// kiln_ui_click_by_name(), and that the UART bridge maps every
+// kiln_ui_click_result_t member explicitly (a missed case falls into the
+// bridge's default arm and goes on the wire as NOT_FOUND).
+static void run_section12_inject_failed_wired(void)
+{
+    TEST_SECTION("KILN_UI_CLICK_INJECT_FAILED: 0 from lvgl_port_inject_touch() "
+                 "latches nothing, click_by_name() returns before the wait and "
+                 "release, and the bridge maps every click result -- "
+                 "source-text scan (none of these files is host-compilable)");
+
+    // --- lvgl_port_inject_touch(): every `return 0` precedes the latch. ---
+    char *port_text = read_file_any(LVGL_PORT_C_CANDIDATES, 3);
+    char *port_stripped = port_text ? strip_c_comments(port_text) : NULL;
+    if (!port_stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/lvgl_port.c");
+    } else {
+        size_t len = 0;
+        const char *body = find_function_body(port_stripped, "uint32_t lvgl_port_inject_touch(", &len);
+        char *fn = body ? dup_range(body, len) : NULL;
+        TEST_CHECK(fn != NULL, "found lvgl_port_inject_touch()'s function body");
+        if (fn) {
+            const char *latch = strstr(fn, "s_inject.pending = true");
+            const char *seq_skip_zero = strstr(fn, "s_inject_seq_counter = 1");
+            TEST_CHECK(latch != NULL,
+                       "lvgl_port_inject_touch() must latch the press via "
+                       "`s_inject.pending = true` -- update this scan if it was restructured.");
+            TEST_CHECK(seq_skip_zero != NULL,
+                       "lvgl_port_inject_touch() must skip the reserved seq 0 on wraparound "
+                       "(`s_inject_seq_counter = 1`) -- otherwise a latched press could return "
+                       "0 and kiln_ui_click_by_name() would skip its release, leaving a stuck "
+                       "press until the 5 s auto-release.");
+            int zero_returns = 0;
+            bool zero_after_latch = false;
+            for (const char *r = strstr(fn, "return 0;"); r; r = strstr(r + 1, "return 0;")) {
+                zero_returns++;
+                if (latch && r > latch) {
+                    zero_after_latch = true;
+                }
+            }
+            TEST_CHECK(zero_returns >= 1 && !zero_after_latch,
+                       "every `return 0;` in lvgl_port_inject_touch() must precede "
+                       "`s_inject.pending = true` -- a 0 return after the latch would make "
+                       "kiln_ui_click_by_name()'s INJECT_FAILED path skip the release of a "
+                       "press that WAS latched.");
+            free(fn);
+        }
+    }
+    free(port_stripped);
+    free(port_text);
+
+    // --- kiln_ui_click_by_name(): INJECT_FAILED returns before wait/release. ---
+    char *ui_text = read_file_any(KILN_UI_C_CANDIDATES, 3);
+    char *ui_stripped = ui_text ? strip_c_comments(ui_text) : NULL;
+    if (!ui_stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/kiln_ui.c");
+    } else {
+        size_t len = 0;
+        const char *body = find_function_body(ui_stripped, "kiln_ui_click_result_t kiln_ui_click_by_name(", &len);
+        char *fn = body ? dup_range(body, len) : NULL;
+        TEST_CHECK(fn != NULL, "found kiln_ui_click_by_name()'s function body");
+        if (fn) {
+            // "== 0)" with the closing paren, so `press_seq == 0xFF...` or
+            // `press_seq == 0 && ...` cannot satisfy it by prefix.
+            const char *guard = strstr(fn, "if (press_seq == 0)");
+            const char *ret = guard ? strstr(guard, "return KILN_UI_CLICK_INJECT_FAILED;") : NULL;
+            const char *wait = strstr(fn, "lvgl_port_get_inject_verdict(");
+            const char *release = strstr(fn, "lvgl_port_inject_touch(cx, cy, false)");
+            TEST_CHECK(guard != NULL && ret != NULL && wait != NULL && release != NULL &&
+                           ret < wait && ret < release,
+                       "kiln_ui_click_by_name() must return KILN_UI_CLICK_INJECT_FAILED on "
+                       "`press_seq == 0` BEFORE the lvgl_port_get_inject_verdict() wait and "
+                       "the release -- otherwise a never-queued press is reported as "
+                       "VERDICT_UNKNOWN after a 250 ms wait.");
+            free(fn);
+        }
+    }
+    free(ui_stripped);
+    free(ui_text);
+
+    // --- uart_bridge_ui_test.c: an explicit case for every enum member. ---
+    char *h_text = read_file_any(KILN_UI_H_CANDIDATES, 3);
+    char *h_stripped = h_text ? strip_c_comments(h_text) : NULL;
+    char *br_text = read_file_any(UART_BRIDGE_UI_TEST_C_CANDIDATES, 3);
+    char *br_stripped = br_text ? strip_c_comments(br_text) : NULL;
+    if (!h_stripped || !br_stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/kiln_ui.h or "
+                           "drivers/bridge/uart_bridge_ui_test.c");
+    } else {
+        const char *end = strstr(h_stripped, "} kiln_ui_click_result_t;");
+        const char *start = NULL;
+        for (const char *s = strstr(h_stripped, "typedef enum {"); s && (!end || s < end);
+             s = strstr(s + 1, "typedef enum {")) {
+            start = s;
+        }
+        TEST_CHECK(start != NULL && end != NULL, "found kiln_ui_click_result_t's enum body");
+        int members = 0;
+        if (start && end) {
+            for (const char *m = strstr(start, "KILN_UI_CLICK_"); m && m < end;
+                 m = strstr(m + 1, "KILN_UI_CLICK_")) {
+                char ident[64];
+                size_t n = 0;
+                while (n + 1 < sizeof(ident) && (isalnum((unsigned char)m[n]) || m[n] == '_')) {
+                    ident[n] = m[n];
+                    n++;
+                }
+                ident[n] = '\0';
+                members++;
+                char needle[80];
+                snprintf(needle, sizeof(needle), "case %s:", ident);
+                if (!strstr(br_stripped, needle)) {
+                    char msg[200];
+                    snprintf(msg, sizeof(msg),
+                             "uart_bridge_ui_test.c has no explicit `%s` -- it falls into the "
+                             "default arm and goes on the wire as UI_TEST_CLICK_NOT_FOUND", needle);
+                    TEST_CHECK(false, msg);
+                }
+            }
+        }
+        TEST_CHECK(members >= 7,
+                   "expected at least 7 kiln_ui_click_result_t members (OK..INJECT_FAILED) -- "
+                   "the enum scan found fewer, so it is not reading the real enum body.");
+        TEST_CHECK(strstr(br_stripped, "case KILN_UI_CLICK_INJECT_FAILED: wire_result = "
+                                       "UI_TEST_CLICK_INJECT_FAILED;") != NULL,
+                   "uart_bridge_ui_test.c must map KILN_UI_CLICK_INJECT_FAILED to "
+                   "UI_TEST_CLICK_INJECT_FAILED.");
+    }
+    free(h_stripped);
+    free(h_text);
+    free(br_stripped);
+    free(br_text);
+}
+
 void run_test_display_power_wiring(void)
 {
     run_section1_screen_idle_calls_policy();
@@ -1384,4 +1536,5 @@ void run_test_display_power_wiring(void)
     run_section9_idle_lock_scope_denylist();
     run_section10_swallow_diag_wired();
     run_section11_inject_verdict_handoff_wired();
+    run_section12_inject_failed_wired();
 }
