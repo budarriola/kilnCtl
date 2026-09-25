@@ -30,7 +30,9 @@
 >   so it can over-refuse or pass a start through that the real Pico ceiling
 >   would trip; (3) `profile_executor_run.c`'s baseline SPI read (around
 >   line 832) runs while holding `s_exec.lock`, against this file's own
->   "never hold a module lock across producer calls" rule. **Standing
+>   "never hold a module lock across producer calls" rule (FIXED 53f27b46;
+>   review found the same pattern in the RUNNING control tick and the
+>   autotune tick, fix in progress, worktree ticklock). **Standing
 >   tension, awaiting owner
 >   acknowledgement:** the Pico deliberately runs S1 tighter than
 >   `abs_max_temp_c` during a firing, which is in tension with the standing
