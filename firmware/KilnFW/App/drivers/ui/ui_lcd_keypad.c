@@ -24,38 +24,63 @@
  * itself DPI-derived and not meant to be reverse-engineered here) so this
  * arithmetic is exact, not a guess about theme internals. Mirrors the real
  * lv_obj_set_* calls in build_overlay() below -- keep both in sync. */
-#define UI_LCD_KEYPAD_HEADER_PAD_PX          4
+#define UI_LCD_KEYPAD_HEADER_PAD_PX          2
 #define UI_LCD_KEYPAD_HEADER_HEIGHT_PX       (2 * UI_LCD_KEYPAD_HEADER_PAD_PX + UI_THEME_FONT_LINE_HEIGHT_PX)
 
-#define UI_LCD_KEYPAD_CONTENT_PAD_PX         4
+#define UI_LCD_KEYPAD_CONTENT_PAD_PX         2
 #define UI_LCD_KEYPAD_INFO_ROW_HEIGHT_PX     UI_THEME_FONT_LINE_HEIGHT_PX
-#define UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX   56
-#define UI_LCD_KEYPAD_MATRIX_HEIGHT_PX       (3 * UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX)
+
+/* 2026-09-25 Opus review: the button matrix (s_bm) is an ordinary
+ * lv_buttonmatrix_create(content) with no style overrides of its own, so it
+ * picked up lv_theme_default.c's `card` style on LV_PART_MAIN (border_width
+ * BORDER_WIDTH plus pad_row/pad_column PAD_SMALL) on top of whatever height
+ * this file reserved for it -- that ate into the 3 visible key rows (map
+ * below has 4: "1 2 3" / "4 5 6" / "7 8 9" / "backspace 0 OK") and produced
+ * real on-screen keys of only ~31px, not the >=48px the assert below claims.
+ * build_overlay() now zeroes s_bm's own pad/border explicitly (matching
+ * header/content/footer, which already set theirs) so this arithmetic is
+ * exact rather than dependent on theme internals, and KEY_ROWS/KEY_HEIGHT_PX
+ * are derived from the map's real row count instead of assumed. */
+#define UI_LCD_KEYPAD_KEY_ROWS                4
+#define UI_LCD_KEYPAD_BM_PAD_PX               0
+#define UI_LCD_KEYPAD_BM_BORDER_PX            0
+#define UI_LCD_KEYPAD_BM_ROW_GAP_PX           4
+#define UI_LCD_KEYPAD_MATRIX_HEIGHT_PX        214
+#define UI_LCD_KEYPAD_KEY_HEIGHT_PX \
+    ((UI_LCD_KEYPAD_MATRIX_HEIGHT_PX - 2 * (UI_LCD_KEYPAD_BM_PAD_PX + UI_LCD_KEYPAD_BM_BORDER_PX) - \
+      (UI_LCD_KEYPAD_KEY_ROWS - 1) * UI_LCD_KEYPAD_BM_ROW_GAP_PX) / UI_LCD_KEYPAD_KEY_ROWS)
+
 /* content pad_top + info row + content pad_row (gap) + matrix + content pad_bottom */
 #define UI_LCD_KEYPAD_CONTENT_HEIGHT_PX \
     (UI_LCD_KEYPAD_CONTENT_PAD_PX + UI_LCD_KEYPAD_INFO_ROW_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_PAD_PX + \
      UI_LCD_KEYPAD_MATRIX_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_PAD_PX)
 
-#define UI_LCD_KEYPAD_FOOTER_HEIGHT_PX       56
-#define UI_LCD_KEYPAD_FOOTER_PAD_VER_PX      4
+#define UI_LCD_KEYPAD_FOOTER_HEIGHT_PX       52
+#define UI_LCD_KEYPAD_FOOTER_PAD_VER_PX      2
 #define UI_LCD_KEYPAD_FOOTER_BUTTON_HEIGHT_PX \
     (UI_LCD_KEYPAD_FOOTER_HEIGHT_PX - 2 * UI_LCD_KEYPAD_FOOTER_PAD_VER_PX)
 
-/* mbox itself carries the default theme's pad_zero (0 padding, 0 gap
- * between header/content/footer) -- see lv_theme_default.c's
- * `lv_obj_check_type(obj, &lv_msgbox_class)` branch -- so the three
- * sections stack with no extra gap between them. */
+/* The mbox itself (s_mbox) is also styled as an lv_theme_default.c `card`
+ * (see the `lv_obj_check_type(obj, &lv_msgbox_class)` branch), which layers
+ * its own BORDER_WIDTH (2px) around the whole header+content+footer stack
+ * on top of the pad_zero it also carries -- account for that border on both
+ * edges rather than let it push the total past the panel height unnoticed. */
+#define UI_LCD_KEYPAD_MBOX_BORDER_PX          2
+
 #define UI_LCD_KEYPAD_TOTAL_HEIGHT_PX \
-    (UI_LCD_KEYPAD_HEADER_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_HEIGHT_PX + UI_LCD_KEYPAD_FOOTER_HEIGHT_PX)
+    (UI_LCD_KEYPAD_HEADER_HEIGHT_PX + UI_LCD_KEYPAD_CONTENT_HEIGHT_PX + UI_LCD_KEYPAD_FOOTER_HEIGHT_PX + \
+     2 * UI_LCD_KEYPAD_MBOX_BORDER_PX)
 
 _Static_assert(UI_LCD_KEYPAD_TOTAL_HEIGHT_PX <= DISPLAY_WIDTH,
                "ui_lcd_keypad.c: the PIN keypad overlay's total height exceeds the "
                "320px landscape panel height (DISPLAY_WIDTH) -- shrink "
-               "UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX/FOOTER_HEIGHT_PX, don't let it "
+               "UI_LCD_KEYPAD_MATRIX_HEIGHT_PX/FOOTER_HEIGHT_PX, don't let it "
                "overflow the screen.");
-_Static_assert(UI_LCD_KEYPAD_BUTTON_ROW_HEIGHT_PX >= 48,
+_Static_assert(UI_LCD_KEYPAD_KEY_HEIGHT_PX >= 48,
                "ui_lcd_keypad.c: keypad button rows must stay comfortably tappable "
-               "(>= ~48px tall).");
+               "(>= ~48px tall) -- this is the DERIVED per-key height (matrix "
+               "height minus s_bm's own pad/border, split across KEY_ROWS real "
+               "rows), not an assumed row height.");
 _Static_assert(UI_LCD_KEYPAD_FOOTER_BUTTON_HEIGHT_PX >= 48,
                "ui_lcd_keypad.c: the Cancel footer button must stay comfortably "
                "tappable (>= ~48px tall).");
@@ -220,6 +245,14 @@ static void build_overlay(void)
     s_bm = lv_buttonmatrix_create(content);
     lv_buttonmatrix_set_map(s_bm, s_bm_map);
     lv_obj_set_size(s_bm, lv_pct(100), UI_LCD_KEYPAD_MATRIX_HEIGHT_PX);
+    /* Zero the theme's `card` pad/border explicitly (see this file's header
+     * comment) so UI_LCD_KEYPAD_KEY_HEIGHT_PX's arithmetic is exact rather
+     * than dependent on theme internals -- mirrors header/content/footer,
+     * which already set theirs. */
+    lv_obj_set_style_pad_all(s_bm, UI_LCD_KEYPAD_BM_PAD_PX, 0);
+    lv_obj_set_style_border_width(s_bm, UI_LCD_KEYPAD_BM_BORDER_PX, 0);
+    lv_obj_set_style_pad_row(s_bm, UI_LCD_KEYPAD_BM_ROW_GAP_PX, 0);
+    lv_obj_set_style_pad_column(s_bm, UI_LCD_KEYPAD_BM_ROW_GAP_PX, 0);
     lv_obj_add_event_cb(s_bm, bm_value_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *cancel_btn = lv_msgbox_add_footer_button(s_mbox, "Cancel");

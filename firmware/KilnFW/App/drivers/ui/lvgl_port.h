@@ -252,8 +252,17 @@ void lvgl_port_request_tap_dump(void);
  * indefinitely; the request is NOT cancelled and is still serviced whenever
  * lvgl_port_task next gets a turn, but this call does not wait for that.
  * Callers must treat a 0-with-truncated-true result the same as "no answer
- * available", never as "zero targets exist". Safe to call from any task. */
-size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated);
+ * available", never as "zero targets exist". Safe to call from any task.
+ *
+ * `out_disp_w`/`out_disp_h` (both optional -- pass NULL to skip) are filled
+ * with the display resolution as read by lvgl_port_task itself during the
+ * same walk, so a non-LVGL-task caller (kiln_ui_click_by_name(), on the
+ * UART bridge task) never has to call lv_display_get_*_resolution() on its
+ * own task -- LVGL itself may only be called from lvgl_port_task (see this
+ * file's header comment). Left unwritten (caller-owned buffer untouched) on
+ * a 0-with-truncated-true "no answer available" result. */
+size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated,
+                                      int32_t *out_disp_w, int32_t *out_disp_h);
 
 /* Pull-based touch/input diagnostics -- see the s_input_enabled /
  * s_touch_read_cb_count / s_injected_delivered_count declaration comment in

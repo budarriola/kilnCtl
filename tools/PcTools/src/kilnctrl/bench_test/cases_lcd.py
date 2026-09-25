@@ -418,6 +418,11 @@ def _click_then_page(ui, name: str, expected_page: str,
             immediate_attribution = "swallowed"
         elif click.get("result") == "inject_failed":
             immediate_attribution = "inject_failed"
+        elif click.get("result") == "offscreen":
+            # 2026-09-25: the target WAS found, but its reported centre lies
+            # off the panel (KILN_UI_CLICK_OFFSCREEN) -- distinct from a
+            # genuinely absent target, which "not_found" means.
+            immediate_attribution = "offscreen"
         else:
             immediate_attribution = "not_found"
         return (
@@ -614,7 +619,14 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     # timed out) is judged by the target-set change below exactly like 'ok'
     # -- never a pass on its own, never a hard not_found FAIL.
     if click.get("result") not in ("ok", "verdict_unknown"):
-        attribution = "inject_failed" if click.get("result") == "inject_failed" else "not_found"
+        if click.get("result") == "inject_failed":
+            attribution = "inject_failed"
+        elif click.get("result") == "offscreen":
+            # 2026-09-25: the target WAS found, but its reported centre lies
+            # off the panel -- distinct from a genuinely absent target.
+            attribution = "offscreen"
+        else:
+            attribution = "not_found"
         return (
             CaseResult(
                 Verdict.FAIL,

@@ -101,7 +101,7 @@ static void ui_test_bridge_task(void *arg)
                 bool collect_truncated = false;
                 size_t n = lvgl_port_collect_tap_targets(targets,
                                                          sizeof(targets) / sizeof(targets[0]),
-                                                         &collect_truncated);
+                                                         &collect_truncated, NULL, NULL);
 
                 reply[0] = UI_TEST_CMD_LIST_TAP_TARGETS;
                 size_t o = 3; /* byte1 (count), byte2 (truncated) filled in once the wire-fit

@@ -1565,18 +1565,35 @@ static void run_section14_offscreen_checked_before_hidden(void)
             const char *offscreen_ret = strstr(fn, "return KILN_UI_CLICK_OFFSCREEN;");
             const char *hidden_ret = strstr(fn, "return KILN_UI_CLICK_HIDDEN;");
             const char *ambiguous_ret = strstr(fn, "return KILN_UI_CLICK_AMBIGUOUS;");
+            /* 2026-09-25 review follow-up: kiln_ui_click_by_name() runs on the
+             * UART bridge task, not lvgl_port_task -- the one task LVGL may be
+             * called from -- so it must not call an lv_display_get_*_
+             * resolution() itself. It now gets disp_w/disp_h back from
+             * lvgl_port_collect_tap_targets()'s out params, which reads them
+             * on lvgl_port_task during the same walk (see that function's doc
+             * comment in lvgl_port.h). */
+            const char *collect = strstr(fn, "lvgl_port_collect_tap_targets(");
             const char *hres = strstr(fn, "lv_display_get_horizontal_resolution(");
             const char *vres = strstr(fn, "lv_display_get_vertical_resolution(");
+            const char *disp_w_use = strstr(fn, "targets[match].cx >= disp_w");
+            const char *disp_h_use = strstr(fn, "targets[match].cy >= disp_h");
             TEST_CHECK(offscreen_ret != NULL && hidden_ret != NULL && ambiguous_ret != NULL &&
                            offscreen_ret < hidden_ret && offscreen_ret < ambiguous_ret,
                        "kiln_ui_click_by_name() must return KILN_UI_CLICK_OFFSCREEN BEFORE "
                        "the hidden/visible split -- otherwise an off-screen-and-hidden target "
                        "reports HIDDEN instead of OFFSCREEN, or an off-screen widget slips "
                        "through to the AMBIGUOUS/OK path.");
-            TEST_CHECK(hres != NULL && vres != NULL,
+            TEST_CHECK(hres == NULL && vres == NULL,
+                       "kiln_ui_click_by_name() must NOT call lv_display_get_horizontal/"
+                       "vertical_resolution() itself -- it runs on the UART bridge task, and "
+                       "LVGL may only be called from lvgl_port_task; get the resolution back "
+                       "from lvgl_port_collect_tap_targets()'s out params instead.");
+            TEST_CHECK(collect != NULL && disp_w_use != NULL && disp_h_use != NULL &&
+                           collect < disp_w_use && collect < disp_h_use,
                        "kiln_ui_click_by_name() must bounds-check the match's centre against "
-                       "the real display resolution (lv_display_get_horizontal/vertical_"
-                       "resolution(NULL)), not a hardcoded constant.");
+                       "the disp_w/disp_h it got back from lvgl_port_collect_tap_targets(), "
+                       "not a hardcoded constant or a direct lv_display_get_*_resolution() "
+                       "call.");
             free(fn);
         }
     }

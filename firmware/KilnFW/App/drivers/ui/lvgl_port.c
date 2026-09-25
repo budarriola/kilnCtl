@@ -990,6 +990,10 @@ typedef struct {
     size_t out_max;
     size_t out_count;
     bool out_truncated;
+    int32_t out_disp_w; /* display resolution, read on lvgl_port_task during
+                         * the same walk (2026-09-25 -- see
+                         * lvgl_port_collect_tap_targets()'s doc comment) */
+    int32_t out_disp_h;
 } ui_walk_req_t;
 
 static ui_walk_req_t s_ui_walk;
@@ -998,7 +1002,8 @@ static ui_walk_req_t s_ui_walk;
 static TaskHandle_t s_ui_walk_owner_task;
 static EXT_RAM_BSS_ATTR kiln_ui_tap_target_t s_ui_walk_targets[UI_WALK_MAX_TARGETS];
 
-size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated)
+size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated,
+                                      int32_t *out_disp_w, int32_t *out_disp_h)
 {
     if (truncated) {
         *truncated = false;
@@ -1008,9 +1013,17 @@ size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool
     }
     /* Self-dispatch guard: a call from lvgl_port_task itself would wait the
      * full window on a request only this same task can service. The walk is
-     * already on the right task there, so do it directly. */
+     * already on the right task there, so do it directly -- and this task IS
+     * the one legal LVGL caller, so reading the resolution here is safe. */
     if (s_ui_walk_owner_task != NULL && xTaskGetCurrentTaskHandle() == s_ui_walk_owner_task) {
-        return kiln_ui_collect_tap_targets(out, max, truncated);
+        size_t n = kiln_ui_collect_tap_targets(out, max, truncated);
+        if (out_disp_w) {
+            *out_disp_w = lv_display_get_horizontal_resolution(NULL);
+        }
+        if (out_disp_h) {
+            *out_disp_h = lv_display_get_vertical_resolution(NULL);
+        }
+        return n;
     }
     if (!s_ui_walk.lock || !s_ui_walk.data || !s_ui_walk.done) {
         if (truncated) {
@@ -1077,6 +1090,12 @@ size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool
                     }
                     was_truncated = s_ui_walk.out_truncated;
                     memcpy(out, s_ui_walk_targets, n * sizeof(out[0]));
+                    if (out_disp_w) {
+                        *out_disp_w = s_ui_walk.out_disp_w;
+                    }
+                    if (out_disp_h) {
+                        *out_disp_h = s_ui_walk.out_disp_h;
+                    }
                 }
                 xSemaphoreGive(s_ui_walk.data);
             }
@@ -1126,6 +1145,11 @@ static void lvgl_port_task(void *arg)
                 s_ui_walk.out_count = kiln_ui_collect_tap_targets(s_ui_walk_targets, s_ui_walk.out_max,
                                                                   &walk_truncated);
                 s_ui_walk.out_truncated = walk_truncated;
+                /* lvgl_port_task is the one legal LVGL caller -- read the
+                 * resolution here so a requester on another task never has
+                 * to call an lv_display_get_*_resolution() itself. */
+                s_ui_walk.out_disp_w = lv_display_get_horizontal_resolution(NULL);
+                s_ui_walk.out_disp_h = lv_display_get_vertical_resolution(NULL);
                 s_ui_walk.served_seq = s_ui_walk.req_seq;
                 serviced = true;
             }

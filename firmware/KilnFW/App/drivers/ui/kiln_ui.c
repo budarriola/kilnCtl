@@ -791,7 +791,9 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
      * from a genuinely absent name, which is the correct, fail-safe verdict
      * for "could not confirm this target exists" (never a false click). */
     kiln_ui_tap_target_t targets[32];
-    size_t n = lvgl_port_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]), NULL);
+    int32_t disp_w = 0, disp_h = 0;
+    size_t n = lvgl_port_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]), NULL,
+                                              &disp_w, &disp_h);
 
     /* Prefer a visible match over a hidden one: a page that show/hides
      * sibling buttons with the same name (a modal's own trigger button,
@@ -837,8 +839,11 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
      * ahead of the hidden/visible split so an off-screen widget is reported
      * as off-screen even if it also happens to be hidden. */
     {
-        int32_t disp_w = lv_display_get_horizontal_resolution(NULL);
-        int32_t disp_h = lv_display_get_vertical_resolution(NULL);
+        /* disp_w/disp_h came back from lvgl_port_collect_tap_targets() above
+         * (2026-09-25) -- read on lvgl_port_task during the same walk, not
+         * here: this function runs on the UART bridge task, and LVGL may
+         * only be called from lvgl_port_task (see lvgl_port.h's header
+         * comment). */
         if (targets[match].cx < 0 || targets[match].cx >= disp_w ||
             targets[match].cy < 0 || targets[match].cy >= disp_h) {
             return KILN_UI_CLICK_OFFSCREEN;
