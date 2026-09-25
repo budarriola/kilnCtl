@@ -1995,8 +1995,10 @@ suspected to be related to this work, was root-caused separately (also in
       `profile_executor`'s and `autotune_engine`'s state, which
       `kiln_io_owner`/`thermo_owner` have no business knowing about — a
       policy layer above the owners, consulted by every producer-facing entry
-      point before a command is even built. Needs its own design pass before
-      it's built; do not implement ahead of the phases above landing.
+      point before a command is even built. **Design pass landed 2026-09-25**
+      (`docs/SYSTEM_MODE_GATE_PLAN.md`, `155bffd5`) -- design only, pending
+      owner review of its four open questions; do not implement ahead of
+      that review.
 - [ ] `profile_executor.c`/`relay_authority.c` gaining the same
       `relay_owner.c`-style queue is a candidate once the web/LCD callers
       that drive them are migrated — not urgent (current call pattern
