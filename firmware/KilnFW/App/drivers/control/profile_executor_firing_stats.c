@@ -10,7 +10,7 @@
 #include "profile_executor_internal.h"
 
 #include <math.h>
-#include <stddef.h> /* ptrdiff_t -- firing_shadow zone-index recovery, firing_stats_zone_tick() */
+#include <stdint.h> /* uintptr_t -- firing_shadow zone-index recovery, firing_stats_zone_tick() */
 #include <stdlib.h> /* free() -- blobs below are heap-allocated, see firing_stats_load() */
 #include <string.h>
 
@@ -106,29 +106,38 @@ void firing_stats_zone_tick(zone_runtime_t *z, float target_c, bool dwelling, ui
     /* Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): fed every tick of
      * every zone, valid or not -- firing_shadow_zone_tick() itself skips an
      * invalid sample, same exclusion rule as this function's own
-     * fs_excluded_sample_count path just below. zone_index is recovered by
-     * pointer arithmetic against s_exec.zones rather than adding a
-     * parameter to this function's signature or a field to zone_runtime_t
-     * -- this hook must not touch profile_executor.c's call site (another
-     * agent owns that file concurrently), and s_exec is already extern-
-     * visible via profile_executor_internal.h.
+     * fs_excluded_sample_count path just below. zone_index is recovered
+     * WITHOUT pointer subtraction rather than adding a parameter to this
+     * function's signature or a field to zone_runtime_t -- this hook must
+     * not touch profile_executor.c's call site (another agent owns that
+     * file concurrently), and s_exec is already extern-visible via
+     * profile_executor_internal.h.
      *
-     * On the real board every caller passes &s_exec.zones[zi] (profile_executor.c's
-     * only call site), so zi_shadow always lands in [0, MAX31856_CHANNEL_COUNT).
-     * test_profile_executor_prestart.c's own unit tests for this function,
-     * however, legitimately call it with standalone zone_runtime_t locals
-     * that are NOT part of s_exec.zones (see that file's firing_stats_zone_tick
-     * test section) -- pointer subtraction against an unrelated object is
-     * undefined behaviour and, in practice on this toolchain, yields an
-     * out-of-range result, so a hard assert() here would abort those
-     * pre-existing, otherwise-unrelated tests. The bounds check below is
-     * therefore a silent skip, not an assert: out of range means "not a
-     * real s_exec zone", which is an expected, non-fatal case for this
-     * function's existing test callers, not a defect. */
-    ptrdiff_t zi_shadow = z - s_exec.zones;
-    if (zi_shadow >= 0 && zi_shadow < MAX31856_CHANNEL_COUNT) {
-        firing_shadow_zone_tick((uint8_t)zi_shadow, z->actual_valid, z->actual_c, target_c, dwelling,
-                                 segment_index, dt_s);
+     * Coordinator review, 2026-09-24: `z - s_exec.zones` (the original form
+     * here) is undefined behaviour whenever `z` is not actually an element
+     * of that array, regardless of any bounds check performed on the
+     * result. test_profile_executor_prestart.c's own unit tests for this
+     * function legitimately call it with standalone zone_runtime_t locals
+     * that are NOT part of s_exec.zones (see that file's
+     * firing_stats_zone_tick test section), so that UB is live, not
+     * theoretical, in this tree. Fixed by comparing addresses as uintptr_t
+     * against the array's [begin, end) byte range instead: relational/
+     * equality comparison of unrelated-object addresses via uintptr_t is
+     * well-defined (unlike pointer subtraction or pointer relational
+     * comparison across unrelated objects), so a standalone local outside
+     * the array now deterministically resolves to "not a real s_exec zone"
+     * -- a silent skip, not an assert, since that is an expected, non-fatal
+     * case for this function's existing test callers, not a defect. */
+    uintptr_t z_addr = (uintptr_t)z;
+    uintptr_t zones_begin = (uintptr_t)&s_exec.zones[0];
+    uintptr_t zones_end = (uintptr_t)&s_exec.zones[MAX31856_CHANNEL_COUNT];
+    if (z_addr >= zones_begin && z_addr < zones_end) {
+        size_t byte_off = (size_t)(z_addr - zones_begin);
+        size_t zi_shadow = byte_off / sizeof(s_exec.zones[0]);
+        if ((byte_off % sizeof(s_exec.zones[0])) == 0 && zi_shadow < MAX31856_CHANNEL_COUNT) {
+            firing_shadow_zone_tick((uint8_t)zi_shadow, z->actual_valid, z->actual_c, target_c, dwelling,
+                                     segment_index, dt_s);
+        }
     }
 
     if (!z->actual_valid) {

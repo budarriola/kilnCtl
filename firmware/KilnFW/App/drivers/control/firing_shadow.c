@@ -6,6 +6,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_zone/s_current_set/s_previous_set/s_status below */
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -59,12 +60,18 @@ typedef struct {
     bool zone_captured; // capture-transient latch, reset once per firing (see header)
 } firing_shadow_zone_state_t;
 
-static firing_shadow_zone_state_t s_zone[MAX31856_CHANNEL_COUNT];
-static firing_score_set_t s_current_set;
-static firing_score_set_t s_previous_set;
+// check_kilnfw_dram_bss_budget.ps1 (this task's coordinator review): moved off
+// internal .dram0.bss into PSRAM, same pattern as autotune_engine.c's s_at.
+// Plain RAM state, no PSRAM-stack-writes-NVS hazard -- the only write path
+// (firing_shadow_store_persist's hal_kv_set_blob/commit) runs from
+// executor_task_entry(), which is INTERNAL-stacked (profile_executor_start.c),
+// never PSRAM-stacked.
+static EXT_RAM_BSS_ATTR firing_shadow_zone_state_t s_zone[MAX31856_CHANNEL_COUNT];
+static EXT_RAM_BSS_ATTR firing_score_set_t s_current_set;
+static EXT_RAM_BSS_ATTR firing_score_set_t s_previous_set;
 static bool s_have_previous;      // RAM only, per firing_shadow.h's contract -- never persisted
 
-static firing_shadow_status_t s_status;
+static EXT_RAM_BSS_ATTR firing_shadow_status_t s_status;
 static bool s_status_loaded;
 
 static void firing_shadow_store_persist(void)
