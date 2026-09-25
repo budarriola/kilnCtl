@@ -1,9 +1,10 @@
 """test_config_convert.py -- tests for kilnctrl.config_convert, the
 multi-store dispatcher (backup document delegated to kilnctrl.cfg_convert;
-the standalone profile_blob and safety_config_blob NVS records implemented
-here). See that module's docstring for scope and for what is deliberately
-NOT supported yet (kiln_cfg_store's package format, the ESP's raw
-zones_cfg_t blob).
+the standalone profile_blob, safety_config_blob, zones_blob and
+kiln_package records implemented here). See that module's docstring for
+scope, including the zones_blob Stage 2 gap (only the current
+ZONES_CFG_VERSION is decodable; older versions are refused loudly, not
+migrated -- see config_convert.py's zones_blob section comment for why).
 """
 import json
 import struct
@@ -48,9 +49,8 @@ def test_detect_kind_unknown_refuses():
         cc.detect_kind({"kind": "something_else"})
 
 
-def test_detect_kind_kiln_cfg_package_names_the_gap():
-    with pytest.raises(cc.ConfigConvertError, match="kiln_package.h"):
-        cc.detect_kind({"kind": "kilnctl_kiln_cfg_package"})
+def test_detect_kind_kiln_package():
+    assert cc.detect_kind({"kind": "kilnctl_kiln_package"}) == "kiln_package"
 
 
 def test_detect_kind_safety_config_blob():
@@ -60,9 +60,8 @@ def test_detect_kind_safety_config_blob():
         "safety_config_blob"
 
 
-def test_detect_kind_zones_blob_names_the_gap():
-    with pytest.raises(cc.ConfigConvertError, match="zones_config_json.h"):
-        cc.detect_kind({"kind": "kilnctl_zones_blob"})
+def test_detect_kind_zones_blob():
+    assert cc.detect_kind({"kind": "kilnctl_zones_blob"}) == "zones_blob"
 
 
 def test_detect_kind_not_a_dict():
@@ -823,6 +822,158 @@ def test_convert_document_backup_rejects_credentials_same_as_cfg_convert():
     doc = {"kind": "kilnctl_backup", "version": 4, "zones": [], "profiles": [], "kiln_auth": {"password": "x"}}
     with pytest.raises(backup_cfg_convert.CfgConvertError):
         cc.convert_document(doc, 4)
+
+
+# ---------------------------------------------------------------------------
+# zones_blob (zones_cfg_t)
+# ---------------------------------------------------------------------------
+
+
+def _make_zone(**overrides):
+    zone = {"name": "Z0"}
+    for f in cc._ZONE_FLOAT1_FIELDS:
+        zone[f] = 1.5
+    zone["coupling_coeff"] = [0.1, 0.2, 0.3]
+    zone["coupling_tau_s"] = [1.0, 2.0, 3.0]
+    zone["coupling_dead_time_s"] = [0.0, 0.0, 0.0]
+    for f in ("relay_mask", "control_mode", "tc_type", "thermo_mask", "ct_mask", "timing_profile"):
+        zone[f] = 1
+    zone["settings_source"] = [0, 1, 2, 3, 4]
+    for f in ("tuning_valid", "tuning_method", "tuning_rule", "tuning_settled",
+              "tuning_extrapolation_converged", "tuning_tau_consistent"):
+        zone[f] = 1
+    for f in ("tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c", "tuning_rise_inf_c"):
+        zone[f] = 2.5
+    zone["tuning_seq"] = 42
+    zone["adaptive_tune_enabled"] = 1
+    for f in ("coupling_diag_k_dc", "ease_off_window_mult", "approach_rate_cap_c_per_hr",
+              "error_band_c", "rate_band_c_per_s"):
+        zone[f] = 0.5
+    zone["relay_type"] = 1
+    zone["progress_band_c"] = 3.3
+    zone["zone_type"] = 1
+    zone["failsafe_state"] = 0
+    zone["hyst_c"] = 1.1
+    zone["min_on_s"] = 5
+    zone["min_off_s"] = 6
+    zone["model_fit_temp_c"] = -273.15
+    zone["model_fit_ambient_c"] = 20.0
+    zone["coil_power_w"] = 1500.0
+    zone["autotune_baseline_k_dc"] = 0.0
+    zone.update(overrides)
+    return zone
+
+
+def _make_timing_profile(**overrides):
+    tp = {"name": "Def"}
+    for f in cc._TIMING_PROFILE_FLOAT_FIELDS:
+        tp[f] = 0.0
+    tp.update(overrides)
+    return tp
+
+
+def _make_zones_fields(**overrides):
+    zone = _make_zone()
+    tp = _make_timing_profile()
+    fields = {
+        "version": cc.ZONES_CFG_VERSION,
+        "thermo_count": 3,
+        "relay_count": 3,
+        "max_simultaneous_relays": 0,
+        "continue_on_zone_trip": 0,
+        "safety_tc_type": 3,
+        "zones": [zone, zone, zone],
+        "timing_profile_count": 1,
+        "timing_profiles": [tp, tp, tp],
+        "pc_link_abort_silence_ms": 30000.0,
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_zones_blob_encode_decode_round_trip():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    assert len(blob) == cc.ZONES_CONFIG_BLOB_MAX_SIZE
+    version, decoded = cc.decode_zones_blob(blob)
+    assert version == cc.ZONES_CFG_VERSION
+    assert decoded["zones"][0]["coil_power_w"] == 1500.0
+    blob2 = cc.encode_zones_blob(decoded)
+    assert blob2 == blob
+
+
+def test_zones_blob_rejects_wrong_size():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    with pytest.raises(cc.ConfigConvertError):
+        cc.decode_zones_blob(blob[:-1])
+
+
+def test_zones_blob_rejects_old_version():
+    with pytest.raises(cc.ConfigConvertError, match="not supported"):
+        cc.decode_zones_blob(bytes([cc.ZONES_CFG_VERSION - 1]) + bytes(cc.ZONES_CONFIG_BLOB_MAX_SIZE - 1))
+
+
+def test_zones_blob_rejects_bad_crc():
+    fields = _make_zones_fields()
+    blob = bytearray(cc.encode_zones_blob(fields))
+    blob[-1] ^= 0xFF
+    with pytest.raises(cc.ConfigConvertError):
+        cc.decode_zones_blob(bytes(blob))
+
+
+def test_convert_zones_blob_refuses_other_target_version():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    with pytest.raises(cc.ConfigConvertError):
+        cc.convert_zones_blob(blob, cc.ZONES_CFG_VERSION - 1)
+
+
+def test_convert_document_zones_blob():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_zones_blob", "version": cc.ZONES_CFG_VERSION, "blob_hex": blob.hex()}
+    out_doc, report = cc.convert_document(doc, cc.ZONES_CFG_VERSION)
+    assert out_doc["kind"] == "kilnctl_zones_blob"
+    assert out_doc["version"] == cc.ZONES_CFG_VERSION
+    assert bytes.fromhex(out_doc["blob_hex"]) == blob
+    assert report.store == "zones_blob"
+
+
+# ---------------------------------------------------------------------------
+# kiln_package
+# ---------------------------------------------------------------------------
+
+
+def test_convert_kiln_package_recomputes_hash():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {
+        "kind": "kilnctl_kiln_package",
+        "pkg_schema": 1,
+        "name": "test-package",
+        "esp_blob_hex": blob.hex(),
+        "pico": [{"id": 1, "type": 2, "flags": 0, "value_bits": 100}],
+    }
+    out_doc, report = cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+    expected_hash = cc._kiln_pkg_compute_hash(1, blob, doc["pico"])
+    assert out_doc["pkg_hash"] == f"0x{expected_hash:08x}"
+    assert bytes.fromhex(out_doc["esp_blob_hex"]) == blob
+    assert report.store == "kiln_package"
+
+
+def test_convert_kiln_package_requires_esp_blob_hex():
+    with pytest.raises(cc.ConfigConvertError):
+        cc.convert_kiln_package({"kind": "kilnctl_kiln_package", "pico": []}, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_document_kiln_package():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": []}
+    out_doc, report = cc.convert_document(doc, cc.ZONES_CFG_VERSION)
+    assert out_doc["kind"] == "kilnctl_kiln_package"
+    assert "pkg_hash" in out_doc
 
 
 # ---------------------------------------------------------------------------

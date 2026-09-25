@@ -27,6 +27,14 @@ WHAT IS COMPARED:
     since the module already has an unrelated PROFILE_VERSION constant and
     a bare "CONFIG_STORE_FORMAT_VERSION" would invite confusion between the
     two unrelated stores it mirrors).
+  - ZONES_CFG_VERSION / ZONE_NAME_MAX_LEN / TIMING_PROFILE_NAME_MAX_LEN /
+    SRC_GROUP_COUNT / ZONES_CONFIG_BLOB_MAX_SIZE: firmware's #defines in
+    zones_config_json.h/zones_config_accessors.h against config_convert.py's
+    zones_blob module constants of the same names (landed 2026-09-24). This
+    still does not re-verify the full byte layout of zone_cfg_t/
+    zones_cfg_t -- that is guarded instead by config_convert.py's own
+    module-load-time asserts that its hand-derived struct.Struct sizes sum
+    to exactly ZONES_CONFIG_BLOB_MAX_SIZE, which is itself checked here.
 
 Fails closed (same convention as every other check in this family): if
 either source file's shape no longer matches this check's own extraction
@@ -41,15 +49,23 @@ from pathlib import Path
 PROFILES_HTTP_REL = "firmware/KilnFW/App/drivers/http/profiles_http.c"
 PROFILES_TYPES_REL = "firmware/KilnFW/App/drivers/persist/profiles_types.h"
 CONFIG_STORE_H_REL = "firmware/SaftyFW/src/config_store.h"
+ZONES_CONFIG_JSON_H_REL = "firmware/KilnFW/App/drivers/persist/zones_config_json.h"
+ZONES_CONFIG_ACCESSORS_H_REL = "firmware/KilnFW/App/drivers/persist/zones_config_accessors.h"
 CONFIG_CONVERT_REL = "tools/PcTools/src/kilnctrl/config_convert.py"
 
 FW_DEFINE_RE = re.compile(r"#define\s+(PROFILE_VERSION|PROFILE_NAME_MAX_LEN|PROFILE_MAX_SEGMENTS|"
-                          r"PROFILE_MAX_ON_OFF_RULES|CONFIG_STORE_FORMAT_VERSION)\s+(\d+)u?\b")
+                          r"PROFILE_MAX_ON_OFF_RULES|CONFIG_STORE_FORMAT_VERSION|ZONES_CFG_VERSION|"
+                          r"ZONE_NAME_MAX_LEN|TIMING_PROFILE_NAME_MAX_LEN|SRC_GROUP_COUNT|"
+                          r"ZONES_CONFIG_BLOB_MAX_SIZE)\s+(\d+)u?\b")
 TOOL_CONST_RE = re.compile(r"^(PROFILE_VERSION|PROFILE_NAME_MAX_LEN|PROFILE_MAX_SEGMENTS|"
-                           r"PROFILE_MAX_ON_OFF_RULES|SAFETY_CONFIG_STORE_FORMAT_VERSION)\s*=\s*(\d+)",
+                           r"PROFILE_MAX_ON_OFF_RULES|SAFETY_CONFIG_STORE_FORMAT_VERSION|"
+                           r"ZONES_CFG_VERSION|ZONE_NAME_MAX_LEN|TIMING_PROFILE_NAME_MAX_LEN|"
+                           r"SRC_GROUP_COUNT|ZONES_CONFIG_BLOB_MAX_SIZE)\s*=\s*(\d+)",
                            re.MULTILINE)
 
-CONSTANTS = ("PROFILE_VERSION", "PROFILE_NAME_MAX_LEN", "PROFILE_MAX_SEGMENTS", "PROFILE_MAX_ON_OFF_RULES")
+CONSTANTS = ("PROFILE_VERSION", "PROFILE_NAME_MAX_LEN", "PROFILE_MAX_SEGMENTS", "PROFILE_MAX_ON_OFF_RULES",
+             "ZONES_CFG_VERSION", "ZONE_NAME_MAX_LEN", "TIMING_PROFILE_NAME_MAX_LEN", "SRC_GROUP_COUNT",
+             "ZONES_CONFIG_BLOB_MAX_SIZE")
 # (firmware name, tool name) pairs where the tool deliberately uses a
 # different identifier than firmware's #define.
 RENAMED_CONSTANTS = (("CONFIG_STORE_FORMAT_VERSION", "SAFETY_CONFIG_STORE_FORMAT_VERSION"),)
@@ -68,6 +84,8 @@ def main() -> int:
         "profiles_http": repo_root / PROFILES_HTTP_REL,
         "profiles_types": repo_root / PROFILES_TYPES_REL,
         "config_store_h": repo_root / CONFIG_STORE_H_REL,
+        "zones_config_json_h": repo_root / ZONES_CONFIG_JSON_H_REL,
+        "zones_config_accessors_h": repo_root / ZONES_CONFIG_ACCESSORS_H_REL,
         "tool": repo_root / CONFIG_CONVERT_REL,
     }
     for label, path in paths.items():
@@ -80,6 +98,10 @@ def main() -> int:
     fw_defines.update(FW_DEFINE_RE.findall(strip_comments(paths["profiles_http"].read_text(encoding="utf-8"))))
     fw_defines.update(FW_DEFINE_RE.findall(strip_comments(paths["profiles_types"].read_text(encoding="utf-8"))))
     fw_defines.update(FW_DEFINE_RE.findall(strip_comments(paths["config_store_h"].read_text(encoding="utf-8"))))
+    fw_defines.update(FW_DEFINE_RE.findall(strip_comments(
+        paths["zones_config_json_h"].read_text(encoding="utf-8"))))
+    fw_defines.update(FW_DEFINE_RE.findall(strip_comments(
+        paths["zones_config_accessors_h"].read_text(encoding="utf-8"))))
     fw_defines = {k: int(v) for k, v in fw_defines.items()}
 
     tool_text = paths["tool"].read_text(encoding="utf-8")
