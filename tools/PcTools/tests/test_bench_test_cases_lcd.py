@@ -2009,6 +2009,49 @@ class Lcd19Test(unittest.TestCase):
         self.assertEqual(result.observed.get("wrong_pin_refused"), False)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
+    def test_dropped_digit_leaves_refused_none_but_records_why(self):
+        # 2026-09-24 bench root cause (20260925T055159Z_full): keypad_raised
+        # was true but wrong_pin_refused/right_pin_started/stop_not_gated
+        # all read None with nothing in `observed` to explain why --
+        # _entry_all_clicked_ok() correctly refuses to draw a conclusion
+        # when a digit click didn't land "ok", but the `entry` it inspected
+        # was discarded, so the INCONCLUSIVE was undiagnosable from
+        # summary.json alone. This models a dropped digit (one click
+        # reporting "swallowed" instead of "ok") and asserts the redacted
+        # entry summary now lands in `observed` -- result codes and a count
+        # only, never the digit identities/order/coordinates that would
+        # reconstruct the PIN.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        real_click = ui.click_by_name
+        call_count = {"n": 0}
+
+        def flaky_click(name):
+            if ui._state == "keypad" and name in "0123456789":
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    ui._entry += name  # firmware still recorded the digit
+                    return {"result": "swallowed", "cx": 1, "cy": 1}
+            return real_click(name)
+
+        ui.click_by_name = flaky_click
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        entry_summary = result.observed.get("wrong_pin_entry")
+        self.assertIsNotNone(entry_summary, "the dropped-click entry must be recorded even when no verdict follows")
+        self.assertEqual(entry_summary["present"], True)
+        self.assertEqual(entry_summary["digit_count"], 4)
+        self.assertEqual(entry_summary["digit_results"][0], "swallowed")
+        self.assertNotIn("cx", entry_summary)
+        self.assertNotIn("cy", entry_summary)
+        self.assertNotIn("right_pin_entry", result.observed)  # never reached: wrong_pin_refused is None
+        import json
+        blob = json.dumps(result.observed, default=str)
+        self.assertNotIn("0000", blob)
+        self.assertNotIn("1234", blob)
+
     def test_stop_opens_confirm_dialog_directly_not_gated(self):
         # A Confirm Stop dialog (ui_confirm.c) has only its confirm_label
         # ("Stop") + "Cancel" -- no "OK" -- distinguishing it from the PIN

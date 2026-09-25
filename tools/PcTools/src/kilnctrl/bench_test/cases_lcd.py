@@ -1922,6 +1922,25 @@ def _wait_stable_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
     return last, time.monotonic() - start
 
 
+def _entry_result_summary(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Redacted summary of an :meth:`UiTestClient.enter_pin` return value for
+    inclusion in a case's `observed`: click *result codes* only (e.g.
+    "ok"/"not_found"/"swallowed"), never the digit characters clicked, their
+    order, or their `cx`/`cy` coordinates -- on this keypad's static grid
+    layout, a coordinate directly identifies which digit button was pressed,
+    so echoing `cx`/`cy` per click would reconstruct the PIN itself from
+    "observed" even though the PIN string is never printed anywhere. This
+    exists so a future INCONCLUSIVE (like the 2026-09-24 bench run that left
+    `wrong_pin_refused`/`right_pin_started` at ``None`` with nothing in
+    `observed` explaining why) can be root-caused from summary.json alone,
+    without re-running against the board."""
+    if not entry:
+        return {"present": False}
+    digit_results = [d.get("result") for d in (entry.get("digit_results") or [])]
+    ok_result = (entry.get("ok_result") or {}).get("result")
+    return {"present": True, "digit_count": len(digit_results), "digit_results": digit_results, "ok_result": ok_result}
+
+
 def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
     """True only if every digit click_by_name AND the trailing "OK" click
     from :meth:`UiTestClient.enter_pin` reported ``result: "ok"``. A
@@ -2030,12 +2049,14 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                     right_pin = pin_cfg.get("right_pin")
                     if wrong_pin:
                         entry = ui.enter_pin(wrong_pin)
+                        state["wrong_pin_entry"] = _entry_result_summary(entry)
                         if _entry_all_clicked_ok(entry):
                             # A wrong PIN resets digit entry but the keypad's
                             # own button set never changes -- debounce two
                             # stable reads rather than trusting one
                             # immediate (tautologically "OK present") read.
                             names, _ = _wait_stable_names(ui)
+                            state["after_wrong_pin_names"] = sorted(names) if names is not None else None
                             wrong_pin_refused = names is not None and "OK" in names and "Cancel" in names
                         # else: leave wrong_pin_refused at None -- the PIN
                         # typed on the board wasn't actually the intended
@@ -2043,10 +2064,12 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # follows.
                     if wrong_pin_refused and right_pin:
                         entry = ui.enter_pin(right_pin)
+                        state["right_pin_entry"] = _entry_result_summary(entry)
                         if _entry_all_clicked_ok(entry):
                             # A correct PIN closes the keypad in favour of
                             # the Confirm Start dialog -- "OK" disappears.
                             names, _ = _wait_stable_names(ui)
+                            state["after_right_pin_names"] = sorted(names) if names is not None else None
                             right_pin_started = (
                                 names is not None and "OK" not in names and "Cancel" in names
                             )
