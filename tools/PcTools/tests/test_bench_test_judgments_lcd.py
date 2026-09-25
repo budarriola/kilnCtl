@@ -153,6 +153,63 @@ class LcdHomeIdleTest(unittest.TestCase):
         r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_bad_background_downgrades_color_mismatch_to_inconclusive(self):
+        # 2026-09-25 bench evidence (20260925T170424Z_full/summary.json):
+        # Start sampled [27,153,76] vs target [92,192,110] (distance 83,
+        # chroma 0.17 -- a real mismatch by both measures), but the
+        # background reference sampled [52,90,111] vs target [26,31,43]:
+        # chroma offset 0.0717 (under CAST_CHROMA_THRESHOLD, so the cast
+        # fallback never engaged) yet distance ~93.7, over double
+        # COLOR_MATCH_TOLERANCE (45) -- the background itself is plainly
+        # wrong, so the Start mismatch on the same frame is not trustworthy.
+        color_debug = {
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (27, 153, 76), "matches": False},
+            "bg_reference": {
+                "sampled_rgb": (52, 90, 111), "chroma_offset": 0.0717, "cast_threshold": 0.15,
+                "cast_suspected": False, "reads_as_bezel": False,
+                "distance": 93.7, "distance_tolerance": 45.0, "chroma_tolerance": 0.10,
+                "bg_out_of_tolerance": True,
+            },
+        }
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("background reference off", r.reason)
+
+    def test_good_background_with_wrong_button_still_fails(self):
+        # Negative direction: a clean background (bg_out_of_tolerance False)
+        # alongside a genuine Start-color mismatch must still be a hard FAIL
+        # -- the downgrade above must never apply when the background is
+        # trustworthy.
+        color_debug = {
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (214, 32, 32), "matches": False},
+            "bg_reference": {
+                "sampled_rgb": (24, 32, 44), "chroma_offset": 0.02, "cast_threshold": 0.15,
+                "cast_suspected": False, "reads_as_bezel": False,
+                "distance": 2.0, "distance_tolerance": 45.0, "chroma_tolerance": 0.10,
+                "bg_out_of_tolerance": False,
+            },
+        }
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_good_background_with_right_button_passes(self):
+        # Sibling positive case: a clean background reference alongside a
+        # genuine Start-color match is an ordinary PASS, unaffected by any
+        # of this diagnostic machinery.
+        r = J.judge_lcd_home_idle("home", _HOME_TARGETS, True, True, color_debug={
+            "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
+            "start": {"sampled_rgb": (92, 192, 110), "matches": True},
+            "bg_reference": {
+                "sampled_rgb": (24, 32, 44), "chroma_offset": 0.02, "cast_threshold": 0.15,
+                "cast_suspected": False, "reads_as_bezel": False,
+                "distance": 2.0, "distance_tolerance": 45.0, "chroma_tolerance": 0.10,
+                "bg_out_of_tolerance": False,
+            },
+        })
+        self.assertEqual(r.verdict, Verdict.PASS)
+
 
 _CONFIG_TARGETS = [
     {"name": "Profiles", "cx": 100, "cy": 100, "hidden": False},
@@ -525,6 +582,25 @@ class LcdPinLockTest(unittest.TestCase):
     def test_missing_data_is_inconclusive_not_pass(self):
         r = J.judge_lcd_pin_lock(None, None, None, None)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_missing_data_names_every_unresolved_stage(self):
+        r = J.judge_lcd_pin_lock(None, None, None, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        for stage in ("keypad_raised", "wrong_pin_refused", "right_pin_started", "stop_not_gated"):
+            self.assertIn(stage, r.reason)
+
+    def test_missing_data_names_only_the_unresolved_stage(self):
+        # 2026-09-25 fix: the reason must name which specific stage(s) came
+        # back None, not the generic "missing UI_TEST API or camera" that
+        # gave no way to tell a first-digit click race (LCD-19 bench
+        # evidence, 20260925T170357Z_full/summary.json) apart from a
+        # missing capability.
+        r = J.judge_lcd_pin_lock(True, None, True, True)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("wrong_pin_refused", r.reason)
+        self.assertNotIn("keypad_raised,", r.reason)
+        self.assertNotIn("right_pin_started", r.reason)
+        self.assertNotIn("stop_not_gated", r.reason)
 
 
 if __name__ == "__main__":

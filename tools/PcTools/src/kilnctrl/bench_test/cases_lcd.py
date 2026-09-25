@@ -817,17 +817,42 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
             crushed = min(range(3), key=lambda i: bg_sample.region[i])
             if bg_sample.region[crushed] < lcd_sampler.CAST_CHANNEL_CRUSH_MAX:
                 cast_channel = crushed
+        bg_distance = lcd_sampler.color_distance(bg_sample.region, _BG_RGB)
+        # Distinct from cast_suspected above (which gates on chroma alone,
+        # for dropping a crushed channel from the Start-button comparison):
+        # this instead catches a background reference that is plainly wrong
+        # by absolute distance and/or chroma but stays under the (looser,
+        # deliberately conservative -- see CAST_CHROMA_THRESHOLD's docstring)
+        # cast bar, e.g. 2026-09-25's bg sample RGB(52,90,111) against target
+        # RGB(26,31,43): chroma offset 0.0717 (under both CHROMA_MATCH_
+        # TOLERANCE and CAST_CHROMA_THRESHOLD -- same hue, just brighter) but
+        # distance ~93.7, over double COLOR_MATCH_TOLERANCE. A background
+        # reference this far off by either measure means the exposure/cast
+        # is suspect and a Start-button mismatch is no longer trustworthy
+        # evidence of a real firmware defect -- see judge_lcd_home_idle(),
+        # which downgrades a color FAIL to INCONCLUSIVE on this flag alone
+        # (never the reverse: a good background never excuses a genuinely
+        # wrong button color).
+        bg_out_of_tolerance = (
+            (not bg_on_bezel)
+            and (not cast_suspected)
+            and (bg_distance > lcd_sampler.COLOR_MATCH_TOLERANCE or bg_offset > lcd_sampler.CHROMA_MATCH_TOLERANCE)
+        )
         color_debug["bg_reference"] = {
             "region_xy": _BG_REFERENCE_XY,
             "sampled_rgb": bg_sample.region,
             "bezel_rgb": bg_sample.bezel,
             "target_rgb": _BG_RGB,
+            "distance": round(bg_distance, 2),
+            "distance_tolerance": lcd_sampler.COLOR_MATCH_TOLERANCE,
             "chroma_offset": round(bg_offset, 4),
+            "chroma_tolerance": lcd_sampler.CHROMA_MATCH_TOLERANCE,
             "cast_threshold": lcd_sampler.CAST_CHROMA_THRESHOLD,
             "reads_as_bezel": bg_on_bezel,
             "cast_suspected": cast_suspected,
             "cast_channel": cast_channel,
             "cast_channel_crush_max": lcd_sampler.CAST_CHANNEL_CRUSH_MAX,
+            "bg_out_of_tolerance": bg_out_of_tolerance,
         }
         if start is not None and not start.get("hidden"):
             sample = lcd_sampler.sample_widget_body(image_path, start["cx"], start["cy"], repo_root=ctx.get("repo_root"))

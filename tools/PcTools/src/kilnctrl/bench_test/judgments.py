@@ -828,6 +828,31 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
                 f"threshold {bg_ref.get('cast_threshold')}: check camera geometry and color cast "
                 "before treating this as a firmware color defect)"
             )
+        elif bg_ref and bg_ref.get("bg_out_of_tolerance"):
+            # The background reference itself is wrong by absolute distance
+            # and/or chroma (below the stronger cast_suspected bar above, but
+            # still outside the same tolerances a button color is judged
+            # against) -- 2026-09-25 evidence: bg sampled RGB(52,90,111)
+            # against target RGB(26,31,43), distance 93.7 (> COLOR_MATCH_
+            # TOLERANCE 45) while chroma offset 0.0717 stayed under
+            # CAST_CHROMA_THRESHOLD. A wrong background this way means camera
+            # exposure/cast is suspect, so a button mismatch on the SAME
+            # frame is not trustworthy evidence of a real firmware defect --
+            # downgrade to INCONCLUSIVE rather than FAIL. This never softens
+            # a mismatch when the background reads clean (see the sibling
+            # test asserting a good background + wrong button still FAILs).
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=(
+                    reason
+                    + f" (background reference off by distance {bg_ref.get('distance')} "
+                    f"[tolerance {bg_ref.get('distance_tolerance')}], chroma offset "
+                    f"{bg_ref.get('chroma_offset')} [tolerance {bg_ref.get('chroma_tolerance')}]: "
+                    "camera exposure/cast suspect, not treated as a firmware color defect)"
+                ),
+                observed=observed,
+                evidence=evidence,
+            )
         return CaseResult(Verdict.FAIL, reason=reason, observed=observed, evidence=evidence)
     # Only the checks a capture could actually have answered make this
     # INCONCLUSIVE. A board that does not list a hidden Pause target at all
@@ -1331,9 +1356,28 @@ def judge_lcd_pin_lock(keypad_raised: Optional[bool], wrong_pin_refused: Optiona
             observed=observed,
         )
     if None in (keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated):
+        # Name which stage(s) read None rather than a generic "missing
+        # UI_TEST API or camera" -- 2026-09-25 (LCD-19 bench evidence,
+        # 20260925T170357Z_full/summary.json): the keypad was confirmed
+        # raised, yet the case still ended up INCONCLUSIVE with no way to
+        # tell from this reason alone which downstream stage produced the
+        # unresolved None (a first-digit click race, since fixed in
+        # ui_test_client.enter_pin() -- see its
+        # _ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S comment -- rather than a
+        # missing API or camera at all).
+        stage_names = {
+            "keypad_raised": keypad_raised,
+            "wrong_pin_refused": wrong_pin_refused,
+            "right_pin_started": right_pin_started,
+            "stop_not_gated": stop_not_gated,
+        }
+        unresolved = [name for name, value in stage_names.items() if value is None]
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason="one or more PIN-lock checks could not be exercised (missing UI_TEST API or camera)",
+            reason=(
+                f"could not exercise: {', '.join(unresolved)} (missing UI_TEST API or camera, "
+                "or a click/entry step did not complete)"
+            ),
             observed=observed,
         )
     return CaseResult(Verdict.PASS, observed=observed)

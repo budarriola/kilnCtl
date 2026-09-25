@@ -12,6 +12,7 @@ import queue
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -254,8 +255,14 @@ class EnterPinTest(unittest.TestCase):
     def setUp(self):
         self.link = _ReplyPerSendLink()
         self.client = UiTestClient(self.link)
+        # Never actually sleep for the first-digit retry poll in tests.
+        self._retry_poll_patcher = mock.patch(
+            "kilnctrl.ui_test_client._ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S", 0.0
+        )
+        self._retry_poll_patcher.start()
 
     def tearDown(self):
+        self._retry_poll_patcher.stop()
         self.client.close()
 
     def _reply(self, code: int, cx: int = 1, cy: int = 1) -> None:
@@ -286,13 +293,63 @@ class EnterPinTest(unittest.TestCase):
         # A stale/closed keypad or a mistyped digit name must surface as
         # data (not_found), not an exception -- callers detect wrong-PIN vs.
         # no-keypad by polling tap-target names afterward, not by exception.
-        self._reply(UI_TEST_CLICK_NOT_FOUND)
+        # The FIRST digit's not_found is retried once (2026-09-25 fix, see
+        # below); a not_found on a LATER digit is not, so this uses digit
+        # index 1 (the "2") to keep exercising the plain not-retried path.
+        self._reply(UI_TEST_CLICK_OK)  # digit "1"
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "2"
+        for _ in range(2):
+            self._reply(UI_TEST_CLICK_OK)  # digits "3", "4"
+        self._reply(UI_TEST_CLICK_OK)  # OK
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][1]["result"], "not_found")
+        self.assertEqual(len(self.link.sent), 5)  # all 4 digits + OK still sent, no retry
+
+    def test_first_digit_not_found_retries_once_after_a_short_poll(self):
+        # 2026-09-25 (LCD-19 bench root cause, 20260925T170357Z_full/
+        # summary.json): the keypad overlay was confirmed raised, yet the
+        # very first digit click still came back not_found -- a startup
+        # race, not a genuinely absent target. One retry, after a short
+        # poll, recovers it.
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "1", first attempt
+        self._reply(UI_TEST_CLICK_OK)  # digit "1", retry
+        for _ in range(3):
+            self._reply(UI_TEST_CLICK_OK)  # digits "2", "3", "4"
+        self._reply(UI_TEST_CLICK_OK)  # OK
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][0]["result"], "ok")
+        self.assertEqual(len(result["digit_results"]), 4)
+        # 5 clicks (2 for digit "1" + 3 for "2"/"3"/"4") + 1 for OK.
+        self.assertEqual(len(self.link.sent), 6)
+        self.assertEqual(
+            self.link.sent[:2],
+            [struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + b"1"] * 2,
+        )
+
+    def test_first_digit_not_found_twice_is_not_retried_again(self):
+        # Never more than one retry: a persistently not_found first digit
+        # (a genuinely closed/absent keypad, not a startup race) still
+        # surfaces as not_found rather than looping.
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "1", first attempt
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "1", retry -- still not_found
         for _ in range(3):
             self._reply(UI_TEST_CLICK_OK)
         self._reply(UI_TEST_CLICK_OK)
         result = self.client.enter_pin("1234", timeout=1.0)
         self.assertEqual(result["digit_results"][0]["result"], "not_found")
-        self.assertEqual(len(self.link.sent), 5)  # all 4 digits + OK still sent
+        self.assertEqual(len(self.link.sent), 6)  # 2 for digit "1", not 3+
+
+    def test_first_digit_ok_is_never_retried(self):
+        # Never re-click a digit that was already reported clicked -- a
+        # blind retry on an "ok" first digit would type it twice and
+        # corrupt the PIN.
+        self._reply(UI_TEST_CLICK_OK)
+        for _ in range(3):
+            self._reply(UI_TEST_CLICK_OK)
+        self._reply(UI_TEST_CLICK_OK)
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][0]["result"], "ok")
+        self.assertEqual(len(self.link.sent), 5)  # exactly one click per digit + OK
 
     def test_empty_pin_still_presses_ok_only(self):
         self._reply(UI_TEST_CLICK_OK)

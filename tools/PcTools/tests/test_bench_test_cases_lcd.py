@@ -150,6 +150,57 @@ class Lcd01CastFallbackTest(unittest.TestCase):
         self.assertEqual(result.reason, "")
 
 
+class Lcd01BgOutOfToleranceTest(unittest.TestCase):
+    """cases_lcd's bg_out_of_tolerance derivation (2026-09-25,
+    20260925T170424Z_full/summary.json): a background reference that reads
+    plainly wrong by absolute distance/chroma, but under CAST_CHROMA_
+    THRESHOLD, must downgrade a Start-color FAIL to INCONCLUSIVE rather than
+    being silently ignored because the cast fallback never engaged."""
+
+    _BEZEL = (0, 1, 7)
+
+    def _run(self, bg_rgb, start_rgb):
+        srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        start = _HOME_TARGETS[0]
+        start_xy = (start["cx"], start["cy"] + lcd_sampler.LABEL_AVOID_OFFSET_PX)
+
+        def fake_sample_widget(image_path, x, y, *args, **kwargs):
+            if (x, y) == start_xy:
+                return lcd_sampler.RegionSample(region=start_rgb, bezel=self._BEZEL)
+            if (x, y) == (start["cx"], start["cy"]):  # Pause: hidden, reads as bezel
+                return lcd_sampler.RegionSample(region=self._BEZEL, bezel=self._BEZEL)
+            return lcd_sampler.RegionSample(region=bg_rgb, bezel=self._BEZEL)
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="x.jpg"),              mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
+            return C._case_lcd01({"srv": srv})
+
+    def test_bad_background_downgrades_wrong_button_to_inconclusive(self):
+        # 2026-09-25 bench evidence, near-exact: bg (52,90,111) vs target
+        # (26,31,43) -- chroma offset well under CAST_CHROMA_THRESHOLD, but
+        # absolute distance well over COLOR_MATCH_TOLERANCE. Start (27,153,76)
+        # vs ACCENT_4 (92,192,110) is a genuine mismatch by both measures.
+        result = self._run((52, 90, 111), (27, 153, 76))
+        bg_ref = result.observed["color_debug"]["bg_reference"]
+        self.assertFalse(bg_ref["cast_suspected"])
+        self.assertTrue(bg_ref["bg_out_of_tolerance"])
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("background reference off", result.reason)
+
+    def test_good_background_with_wrong_button_still_fails(self):
+        # Negative direction: a clean background reference must never
+        # downgrade a genuinely wrong button color.
+        result = self._run((26, 31, 43), (214, 32, 32))
+        bg_ref = result.observed["color_debug"]["bg_reference"]
+        self.assertFalse(bg_ref["bg_out_of_tolerance"])
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_good_background_with_right_button_passes(self):
+        result = self._run((26, 31, 43), (0x5C, 0xC0, 0x6E))
+        bg_ref = result.observed["color_debug"]["bg_reference"]
+        self.assertFalse(bg_ref["bg_out_of_tolerance"])
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+
 class Lcd01Test(unittest.TestCase):
     def test_camera_unavailable_degrades_to_inconclusive(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))

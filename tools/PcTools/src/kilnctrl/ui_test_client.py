@@ -13,6 +13,7 @@ import logging
 import queue
 import struct
 import threading
+import time
 from typing import Optional
 
 from .protocol import (
@@ -38,6 +39,23 @@ log = logging.getLogger(__name__)
 #: None of these read the physical panel, only in-memory LVGL state -- short
 #: timeout is fine, same reasoning as touch.py's DEFAULT_REPLY_TIMEOUT_S.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+#: enter_pin()'s first-digit retry poll, 2026-09-25 (LCD-19 bench root
+#: cause, 20260925T170357Z_full/summary.json): the keypad overlay was
+#: confirmed raised (list_tap_targets showed every digit plus OK/Cancel)
+#: immediately before enter_pin() ran, yet its very first click_by_name()
+#: call still came back "not_found" -- the overlay's tap-target registry and
+#: its actual clickable widgets were not yet in sync on that exact frame,
+#: the same class of race bench_test/cases_lcd.py's other click_by_name()
+#: callers poll-and-retry around (ui_test_client.py:208-232 module comment;
+#: cases_lcd.py's _click_resolving_swallow()/_click_then_page()). Every
+#: later digit and OK in that same run succeeded first try, so this is a
+#: narrow one-shot startup race, not a systemic keypad flake -- a short poll
+#: then a single retry is enough, same bounded-retry discipline as the rest
+#: of this module (never a bare re-click ). Kept tiny relative to
+#: DEFAULT_REPLY_TIMEOUT_S so a genuinely absent target still reports
+#: not_found promptly.
+_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S = 0.1
 
 _CLICK_RESULT_NAMES = {
     UI_TEST_CLICK_OK: "ok",
@@ -226,8 +244,25 @@ class UiTestClient:
         ``digit_results`` for a "not_found"/"hidden"/"ambiguous" entry (e.g.
         the keypad closed mid-entry) without this method itself raising or
         guessing what that means for the case's verdict.
+
+        The FIRST digit only is retried once, after a short poll, if its
+        click comes back "not_found" -- see
+        ``_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S``'s comment for the observed
+        race (the keypad overlay reads as raised a moment before its
+        widgets are actually clickable). This never re-clicks a digit that
+        was already reported clicked ("ok"/"swallowed"/"verdict_unknown"/
+        anything but "not_found") -- doing so on a digit that actually
+        landed would type it twice and corrupt the PIN -- and only ever
+        applies to the first digit, since every other digit and OK in the
+        bench evidence that motivated this succeeded on the first try.
         """
-        digit_results = [self.click_by_name(ch, timeout=timeout) for ch in pin]
+        digit_results = []
+        for index, ch in enumerate(pin):
+            click = self.click_by_name(ch, timeout=timeout)
+            if index == 0 and click.get("result") == "not_found":
+                time.sleep(_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S)
+                click = self.click_by_name(ch, timeout=timeout)
+            digit_results.append(click)
         ok_result = self.click_by_name("OK", timeout=timeout)
         return {"digit_results": digit_results, "ok_result": ok_result}
 
