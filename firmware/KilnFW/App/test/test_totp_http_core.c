@@ -161,6 +161,29 @@ static void test_reset_token_wrong_token_or_username(void)
                "the correct pair still consumes OK after two unrelated failed lookups");
 }
 
+static void test_reset_token_wrong_length_never_matches(void)
+{
+    TEST_SECTION("totp_reset_token -- a prefix, an extension or an empty token is NOT_FOUND");
+    totp_reset_token_table_t t;
+    totp_reset_token_table_init(&t);
+    totp_reset_token_store(&t, "ffffffffffffffffffffffffffffffff", "administrator", 1000u);
+
+    TEST_CHECK(totp_reset_token_consume(&t, "fffffffffffffffffffffffffffffff", "administrator", 1001u) ==
+                   TOTP_RESET_TOKEN_NOT_FOUND,
+               "a 31-char prefix of the real token is NOT_FOUND");
+    TEST_CHECK(totp_reset_token_consume(&t, "ffffffffffffffffffffffffffffffff0", "administrator", 1001u) ==
+                   TOTP_RESET_TOKEN_NOT_FOUND,
+               "the real token with one extra char appended is NOT_FOUND");
+    TEST_CHECK(totp_reset_token_consume(&t, "", "administrator", 1001u) == TOTP_RESET_TOKEN_NOT_FOUND,
+               "an empty token is NOT_FOUND");
+    TEST_CHECK(totp_reset_token_consume(&t, "fffffffffffffffffffffffffffffffe", "administrator", 1001u) ==
+                   TOTP_RESET_TOKEN_NOT_FOUND,
+               "a token differing only in its LAST char is NOT_FOUND (whole width compared)");
+    TEST_CHECK(totp_reset_token_consume(&t, "ffffffffffffffffffffffffffffffff", "administrator", 1002u) ==
+                   TOTP_RESET_TOKEN_OK,
+               "none of the above consumed the real token");
+}
+
 static void test_reset_token_table_capacity_evicts_soonest_expiry(void)
 {
     TEST_SECTION("totp_reset_token -- a full table of live tokens evicts the one closest to expiring");
@@ -246,6 +269,7 @@ void run_test_totp_http_core(void)
     test_reset_token_single_use();
     test_reset_token_expiry();
     test_reset_token_wrong_token_or_username();
+    test_reset_token_wrong_length_never_matches();
     test_reset_token_table_capacity_evicts_soonest_expiry();
     test_reset_token_store_reuses_expired_slot();
 }

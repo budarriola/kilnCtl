@@ -74,12 +74,22 @@ void totp_reset_token_store(totp_reset_token_table_t *t, const char *token_hex, 
 totp_reset_token_result_t totp_reset_token_consume(totp_reset_token_table_t *t, const char *token_hex,
                                                     const char *username, uint32_t now_ms)
 {
+    // The token is a bearer secret: compare it in constant time over its
+    // fixed width (never strcmp(), whose early exit leaks how many leading
+    // hex digits matched), and only once its length is exactly right.
+    if (token_hex == NULL || username == NULL || strnlen(token_hex, TOTP_RESET_TOKEN_HEX_LEN + 1u) !=
+                                                     TOTP_RESET_TOKEN_HEX_LEN) {
+        return TOTP_RESET_TOKEN_NOT_FOUND;
+    }
     for (unsigned i = 0; i < TOTP_RESET_TOKEN_SLOTS; i++) {
         totp_reset_token_slot_t *s = &t->slots[i];
         if (!s->active) {
             continue;
         }
-        if (strcmp(s->token_hex, token_hex) != 0 || strcmp(s->username, username) != 0) {
+        bool token_ok = totp_constant_time_equal((const uint8_t *)s->token_hex, (const uint8_t *)token_hex,
+                                                 TOTP_RESET_TOKEN_HEX_LEN);
+        bool user_ok = strcmp(s->username, username) == 0;
+        if (!(token_ok && user_ok)) {
             continue;
         }
         // Matched by (token, username): every other outcome below is
