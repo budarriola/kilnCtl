@@ -80,7 +80,7 @@ static void test_second_firing_produces_and_persists_verdict(void)
     TEST_CHECK(firing_shadow_get_status(&reloaded), "get_status reloads from NVS after reset");
     TEST_CHECK(reloaded.firings_scored == 1, "verdict-summary counter survives a simulated reboot");
     TEST_CHECK(reloaded.accept_count + reloaded.reject_count + reloaded.insufficient_count +
-                       reloaded.no_matched_pairs_count ==
+                       reloaded.no_matched_pairs_count + reloaded.alloc_failed_count ==
                    1,
                "exactly one verdict bucket incremented");
 }
@@ -157,6 +157,62 @@ static void test_invalid_and_out_of_range_ticks_ignored(void)
     TEST_CHECK(status.firings_scored == 0, "a firing with no valid ticks scores nothing");
 }
 
+// 2026-09-24 review advisory ("reset one side of a pair" class): the halt
+// path skips firing_shadow_finish_firing() entirely when the caller's stack
+// is PSRAM (firing_stats_persist()'s own caller_stack_is_external() guard),
+// so without an explicit abandon call, an in-progress firing's per-zone
+// segment state would silently carry into the next firing's first ticks.
+// This test drives firing_shadow_zone_tick() directly (this file includes
+// firing_shadow.c, so s_current_set/s_zone are visible) to prove
+// firing_shadow_abandon_firing() actually discards that state, and that a
+// clean firing fed afterward is scored as if the abandoned one never
+// happened -- not merged with it.
+static void test_abandon_firing_discards_in_progress_state_only(void)
+{
+    fs_reset_all();
+    hal_kv_init_partition(FIRING_SHADOW_NVS_PARTITION);
+
+    // First, a complete, ordinary firing -- becomes the RAM-only reference.
+    feed_one_firing(0, 100.0f, 120.0f, 90, 1.0f, 0.2f);
+    TEST_CHECK(s_have_previous, "first firing became the previous-firing reference");
+    TEST_CHECK(s_current_set.count == 0, "s_current_set is empty again after finish_firing()");
+
+    // Now start a second firing (a would-be halt-on-PSRAM-stack case): feed
+    // some ticks, building up in-progress per-zone segment state, but never
+    // call firing_shadow_finish_firing() -- simulating the guard refusing
+    // and skipping it.
+    for (int i = 0; i < 30; i++) {
+        firing_shadow_zone_tick(0, /*actual_valid=*/true, 150.0f, 150.0f + 5.0f * i, /*dwelling=*/false,
+                                 /*segment_index=*/0, 1.0f);
+    }
+    TEST_CHECK(s_zone[0].seg_active, "the abandoned firing left an open segment behind");
+
+    firing_shadow_abandon_firing();
+
+    TEST_CHECK(s_current_set.count == 0, "abandon_firing discards the in-progress score set");
+    TEST_CHECK(!s_zone[0].seg_active, "abandon_firing closes the open per-zone segment without scoring it");
+    TEST_CHECK(s_have_previous, "abandon_firing does not touch the previous-firing reference");
+
+    firing_shadow_status_t status_before;
+    TEST_CHECK(firing_shadow_get_status(&status_before), "get_status before the next clean firing");
+    uint32_t scored_before = status_before.firings_scored;
+
+    // A third, ordinary firing shaped exactly like the first -- if the
+    // abandoned firing's state had leaked forward, this firing's own
+    // segment tracking would start from a stale current_segment_index/
+    // zone_captured/seg rather than a clean slate, and could either double-
+    // count or silently skip its own first segment.
+    feed_one_firing(0, 100.0f, 120.0f, 90, 1.0f, 0.2f);
+
+    firing_shadow_status_t status_after;
+    TEST_CHECK(firing_shadow_get_status(&status_after), "get_status after the next clean firing");
+    TEST_CHECK(status_after.firings_scored == scored_before + 1,
+               "the clean firing after an abandon is scored normally, exactly once");
+    TEST_CHECK((firing_compare_verdict_t)status_after.last_verdict != FIRING_COMPARE_NO_MATCHED_PAIRS,
+               "the clean firing matches the (untouched) previous reference -- the abandoned "
+               "firing's partial state did not silently become part of either side of the pair");
+}
+
 void run_test_firing_shadow(void)
 {
     test_first_firing_has_no_verdict();
@@ -164,4 +220,5 @@ void run_test_firing_shadow(void)
     test_never_touches_iter_tune_namespace();
     test_wrong_version_and_truncated_blob_rejected();
     test_invalid_and_out_of_range_ticks_ignored();
+    test_abandon_firing_discards_in_progress_state_only();
 }

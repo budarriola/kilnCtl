@@ -29,7 +29,15 @@ NVS_KEY_LEN_CHECK(FIRING_SHADOW_NVS_NAMESPACE);
 #define FIRING_SHADOW_NVS_KEY "sdwblob"
 NVS_KEY_LEN_CHECK(FIRING_SHADOW_NVS_KEY);
 
-#define FIRING_SHADOW_STORE_VERSION 1u
+// v1 -> v2 (2026-09-24 review advisory): added alloc_failed_count, a
+// distinct counter for a firing_compare() malloc failure (FIRING_COMPARE_
+// ALLOC_FAILED) that v1 had no field for and would otherwise have folded
+// into no_matched_pairs_count, hiding a low-memory streak behind a
+// legitimate "nothing to compare" streak. firing_shadow_store_start() below
+// already treats any version other than the current one as never-persisted
+// (fail-closed) -- a board upgrading from v1 simply starts this counter, and
+// every other counter, at zero rather than misreading a v1 blob's layout.
+#define FIRING_SHADOW_STORE_VERSION 2u
 
 // Compact verdict-summary blob -- counts only, never a score set. Pinned
 // size/layout, same convention iter_tune_store_blob_t uses.
@@ -41,12 +49,13 @@ typedef struct {
     uint32_t reject_count;
     uint32_t insufficient_count;
     uint32_t no_matched_pairs_count;
+    uint32_t alloc_failed_count;
     uint8_t  last_verdict;
     uint8_t  reserved2[3];
     float    last_composite_normalised;
 } firing_shadow_store_blob_t;
 
-_Static_assert(sizeof(firing_shadow_store_blob_t) == 32,
+_Static_assert(sizeof(firing_shadow_store_blob_t) == 36,
                "firing_shadow_store_blob_t size must stay pinned");
 
 // Per-zone in-progress segment tracking. RAM only.
@@ -83,6 +92,7 @@ static void firing_shadow_store_persist(void)
     blob.reject_count = s_status.reject_count;
     blob.insufficient_count = s_status.insufficient_count;
     blob.no_matched_pairs_count = s_status.no_matched_pairs_count;
+    blob.alloc_failed_count = s_status.alloc_failed_count;
     blob.last_verdict = s_status.last_verdict;
     blob.last_composite_normalised = s_status.last_composite_normalised;
 
@@ -123,6 +133,7 @@ void firing_shadow_store_start(void)
             s_status.reject_count = blob.reject_count;
             s_status.insufficient_count = blob.insufficient_count;
             s_status.no_matched_pairs_count = blob.no_matched_pairs_count;
+            s_status.alloc_failed_count = blob.alloc_failed_count;
             s_status.last_verdict = blob.last_verdict;
             s_status.last_composite_normalised = blob.last_composite_normalised;
         }
@@ -229,6 +240,13 @@ void firing_shadow_finish_firing(void)
             case FIRING_COMPARE_NO_MATCHED_PAIRS:
                 s_status.no_matched_pairs_count++;
                 break;
+            case FIRING_COMPARE_ALLOC_FAILED:
+                // Distinct from no_matched_pairs_count (2026-09-24 review
+                // advisory): a malloc failure inside firing_compare() means
+                // the comparison never ran, not that this pair had nothing
+                // to say. Never scored as accept/reject/insufficient.
+                s_status.alloc_failed_count++;
+                break;
         }
         ESP_LOGI(TAG, "shadow verdict: %u (composite_normalised=%.3f), %u scored so far",
                  (unsigned)verdict, (double)result.composite_normalised,
@@ -240,6 +258,20 @@ void firing_shadow_finish_firing(void)
 
     s_previous_set = s_current_set; // RAM-only reference, never persisted (see firing_shadow.h)
     s_have_previous = true;
+    memset(&s_current_set, 0, sizeof(s_current_set));
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        memset(&s_zone[zi], 0, sizeof(s_zone[zi]));
+    }
+}
+
+void firing_shadow_abandon_firing(void)
+{
+    // RAM only -- no NVS open/write, so this is safe from any task's stack,
+    // including a PSRAM-stacked one. Deliberately leaves s_previous_set/
+    // s_have_previous and the persisted verdict-summary counters untouched:
+    // an abandoned, never-finished firing must not become the reference the
+    // NEXT real firing is compared against, and it was never scored, so
+    // there is nothing to persist.
     memset(&s_current_set, 0, sizeof(s_current_set));
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         memset(&s_zone[zi], 0, sizeof(s_zone[zi]));

@@ -69,8 +69,10 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
     // pattern as zones_config_json_compute_crc()/zones_config_cfg_fs_save(),
     // per that check's own fix guidance: never enlarge the stack, move the
     // large locals. A malloc failure (extremely tight heap moment) fails
-    // safe: NO_MATCHED_PAIRS, same verdict as a firing with nothing to
-    // compare, never a crash and never a false ACCEPT.
+    // safe: FIRING_COMPARE_ALLOC_FAILED, a verdict distinct from
+    // NO_MATCHED_PAIRS (2026-09-24 review advisory -- see that enumerator's
+    // own comment) so a caller can tell "the comparison never ran" apart from
+    // "this pair has nothing to say". Never a crash and never a false ACCEPT.
     size_t raw_bytes = sizeof(float) * FIRING_SUBSCORE_COUNT * FIRING_COMPARE_MAX_PAIRS;
     float *raw_mem = (float *)malloc(raw_bytes);
     float *norm_mem = (float *)malloc(raw_bytes);
@@ -79,7 +81,7 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
         free(raw_mem);
         free(norm_mem);
         free(in_band);
-        r.verdict = FIRING_COMPARE_NO_MATCHED_PAIRS;
+        r.verdict = FIRING_COMPARE_ALLOC_FAILED;
         if (out) *out = r;
         return r.verdict;
     }

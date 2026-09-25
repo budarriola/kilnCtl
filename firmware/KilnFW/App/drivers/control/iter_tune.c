@@ -287,10 +287,15 @@ iter_tune_result_t iter_tune_process_comparison(iter_tune_zone_state_t *state,
         return ITER_TUNE_RESULT_NO_TRIAL;
     }
 
-    if (!cmp || cmp->verdict == FIRING_COMPARE_NO_MATCHED_PAIRS) {
+    if (!cmp || cmp->verdict == FIRING_COMPARE_NO_MATCHED_PAIRS ||
+        cmp->verdict == FIRING_COMPARE_ALLOC_FAILED) {
         // n == 0 is a first-class outcome, not an error: this firing pair
-        // has nothing to say. Keep the trial armed for the next firing --
-        // but only so many times, so a stale trial cannot ride indefinitely
+        // has nothing to say. ALLOC_FAILED (a malloc failure inside
+        // firing_compare() itself, distinct from NO_MATCHED_PAIRS since
+        // 2026-09-24) means the comparison never ran at all -- treated at
+        // least as conservatively as NO_MATCHED_PAIRS here: never scored,
+        // never applied. Keep the trial armed for the next firing -- but
+        // only so many times, so a stale trial cannot ride indefinitely
         // against a moving plant.
         state->carries++;
         if (state->carries > ITER_TUNE_MAX_CARRIES) {

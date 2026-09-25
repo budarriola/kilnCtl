@@ -751,6 +751,14 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
                          "through a task with an internal-SRAM stack instead -- see "
                          "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
                          "worker for the established pattern.");
+        // "Reset one side of a pair" class (2026-09-24 review advisory):
+        // firing_shadow_finish_firing() is never reached below when this
+        // guard refuses, so without this call the shadow module's
+        // still-open per-zone segment state from THIS firing would silently
+        // carry into the next one's first ticks. firing_shadow_abandon_
+        // firing() is RAM-only (no NVS), so it is safe to call from this
+        // PSRAM-stacked task even though the rest of this function is not.
+        firing_shadow_abandon_firing();
         return;
     }
 

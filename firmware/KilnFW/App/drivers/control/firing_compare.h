@@ -182,6 +182,16 @@ typedef enum {
     FIRING_COMPARE_REJECT_DEGRADED = 1,     // the no-degradation veto fired
     FIRING_COMPARE_INSUFFICIENT = 2,        // nothing cleared Bar 1 (or Bar 2) -- refuse to act
     FIRING_COMPARE_NO_MATCHED_PAIRS = 3,    // n == 0 everywhere; this pair says nothing at all
+    // A malloc() failure inside firing_compare() itself, before any pair was
+    // even examined -- distinct from NO_MATCHED_PAIRS, which means "this pair
+    // genuinely has nothing to say" and is a legitimate, expected outcome.
+    // This one means "the comparison never actually ran". Every caller must
+    // treat it AT LEAST as conservatively as NO_MATCHED_PAIRS: never scored,
+    // never applied, never counted as evidence either way (2026-09-24 review
+    // advisory -- a shadow-mode counter that folded this into
+    // no_matched_pairs_count could not tell a genuine no-match streak from a
+    // low-memory streak).
+    FIRING_COMPARE_ALLOC_FAILED = 4,
 } firing_compare_verdict_t;
 
 // Optional measured noise floor (plan sec 3.1). `available == false` (the

@@ -77,6 +77,11 @@ typedef struct {
     uint32_t reject_count;
     uint32_t insufficient_count;
     uint32_t no_matched_pairs_count;
+    // A malloc() failure inside firing_compare() itself (FIRING_COMPARE_ALLOC_
+    // FAILED, 2026-09-24 review advisory) -- kept distinct from
+    // no_matched_pairs_count so a low-memory streak can never masquerade as a
+    // genuine "nothing to compare" streak. Store version 2 (see .c).
+    uint32_t alloc_failed_count;
     uint8_t  last_verdict;            // firing_compare_verdict_t narrowed to a byte
     float    last_composite_normalised;
 } firing_shadow_status_t;
@@ -116,6 +121,22 @@ bool firing_shadow_get_status(firing_shadow_status_t *out);
 // previous-firing reference, the cached status counters) without touching
 // NVS, so host tests get a clean slate between cases.
 void firing_shadow_reset_for_test(void);
+
+// Discards the CURRENT, still-in-progress firing's per-zone segment state
+// (s_current_set/s_zone) without finishing or scoring it, and WITHOUT
+// touching NVS -- RAM only, so this is safe to call from any task's stack,
+// including a PSRAM-stacked one. Does not touch the RAM-only previous-firing
+// reference (s_previous_set/s_have_previous) or the persisted verdict-summary
+// counters, so a future firing still compares against the last one that
+// actually finished, exactly as if this abandoned firing had never started.
+//
+// Call site: firing_stats_persist()'s caller_stack_is_external() guard
+// (2026-09-24 review advisory, "reset one side of a pair" class) -- when that
+// guard refuses (an operator halt landed on a PSRAM-stacked task),
+// firing_shadow_finish_firing() is never reached, and without this call the
+// next firing's first ticks would silently append onto this abandoned
+// firing's stale per-zone state instead of starting clean.
+void firing_shadow_abandon_firing(void);
 
 #ifdef __cplusplus
 }
