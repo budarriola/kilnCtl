@@ -137,6 +137,23 @@ def _capability_preflight_ok(ctx: dict) -> Tuple[bool, str]:
 #: `_case_hp07`'s "must ALWAYS be surfaced" restore-note handling).
 _CEILING_PREFLIGHT_MARGIN_C = 1.0
 
+#: Safety margin `_case_hp07` requires between `limit_c` and the highest
+#: OTHER (non-`target_zone`) zone's `max_temp_c` before it will lower
+#: `target_zone`'s ceiling at all. `abs_max_temp_c` on the Pico safety
+#: processor is not per-zone -- `safety_ceiling_policy_target_c()`
+#: (firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.c) mirrors it
+#: to the MAX of every zone's `max_temp_c`, never the minimum -- so as long
+#: as some other commissioned zone's ceiling clears this margin above
+#: `limit_c`, lowering `target_zone` alone leaves the Pico's mirrored
+#: ceiling unchanged and comfortably above where this case intends to
+#: provoke the ESP's own `thermal_guard.c` trip. Refusing here, rather than
+#: lowering and hoping, is how this case avoids a Pico S1 (`abs_max_temp_c`)
+#: trip racing (or beating) the ESP software guard it is actually trying to
+#: provoke -- a Pico trip needs `safety_clear_trip()`, not
+#: `profiles.stop()`, and would misreport a bench harness issue as a
+#: firmware safety fault.
+_HP07_PICO_CEILING_MARGIN_C = 5.0
+
 
 def _check_zone_ceilings(ctx: dict, zone_mask: int, target_c: float) -> Tuple[bool, str]:
     """Reads the live zones config ONCE and refuses (before ever touching
@@ -182,6 +199,45 @@ def _ceiling_problem(snapshot: dict, zone_mask: int, target_c: float) -> Tuple[b
                 f"{target_c:.1f}C + {_CEILING_PREFLIGHT_MARGIN_C:.1f}C margin -- possibly a "
                 f"leftover from a failed HP-07 restore; never raised automatically"
             )
+    return True, ""
+
+
+def _hp07_pico_ceiling_headroom_ok(
+    snapshot: dict, target_zone: int, limit_c: float, margin_c: float = _HP07_PICO_CEILING_MARGIN_C,
+) -> Tuple[bool, str]:
+    """Refuses HP-07 outright if lowering `target_zone`'s `max_temp_c` to
+    `limit_c` would leave the Pico's mirrored `abs_max_temp_c` -- the MAX of
+    every zone's `max_temp_c`, per `safety_ceiling_policy_target_c()` -- at
+    or near `limit_c` itself. HP-07 relies on some OTHER commissioned zone's
+    ceiling staying comfortably above `limit_c` so lowering only
+    `target_zone` never moves the Pico's own ceiling; if no other zone is
+    commissioned high enough (e.g. only `target_zone` has a real ceiling, or
+    all zones are already near ambient), the Pico's `abs_max_temp_c` would
+    drop to ~`limit_c` right alongside the ESP zone ceiling and its
+    independent S1 guard could trip at the same threshold the ESP's
+    `thermal_guard.c` is deliberately being driven past -- a race this case
+    must not run, since a Pico trip needs `safety_clear_trip()`, not
+    `profiles.stop()`, and would misreport a harness design issue as a
+    firmware safety fault. Best-effort like `_ceiling_problem`: a zone with
+    no `max_temp_c` at all is simply not a candidate, not an error."""
+    best_other = 0.0
+    for zone in snapshot.get("zones", []) or []:
+        idx = zone.get("index")
+        if idx is None or idx == target_zone:
+            continue
+        max_temp_c = zone.get("max_temp_c")
+        if max_temp_c is None or not (max_temp_c > 0.0):
+            continue
+        if max_temp_c > best_other:
+            best_other = max_temp_c
+    if best_other < limit_c + margin_c:
+        return False, (
+            f"no other commissioned zone's max_temp_c clears {limit_c:.1f}C + {margin_c:.1f}C "
+            f"margin (highest other zone: {best_other:.1f}C) -- lowering zone {target_zone} "
+            f"alone would pull the Pico's mirrored abs_max_temp_c (MAX across zones) down to "
+            f"~{limit_c:.1f}C too, risking a Pico S1 trip racing the ESP thermal_guard trip "
+            f"this case means to provoke"
+        )
     return True, ""
 
 
@@ -341,15 +397,62 @@ def _rest_gate(ctx: dict, timeout_s: float = REST_TIMEOUT_S, poll_s: float = RES
         sleep(poll_s)
 
 
+def _zone_diag_snapshot(ctx: dict) -> Dict[str, Any]:
+    """Read-only per-zone diagnostic snapshot for the heat-suite polling
+    loop (`_hp_run`). HP-02 failed on the bench (zone 2 rising only 1.88C)
+    with no per-zone data available to explain why, so each poll tick now
+    also captures `duty`/`heat_blocked`/`heat_blocked_sources` per zone from
+    `GET /api/profile_exec` (`dashboard_json.c`'s `append_zone_status_json()`,
+    emitted on both `/api/control` and `/api/profile_exec`; the else/no-
+    control_fields branch used here also carries `firing_stats`) plus the
+    single top-level `zone_blocked_mask` bitmask from `GET /api/status`
+    (`dashboard_status_http.c:654`, `relay_authority_latched_blocked_mask()`
+    in `dashboard_http.c:572` -- NOT present on `/api/profile_exec` or
+    `/api/control`, so it needs its own read). Both reads are plain GETs
+    through the same `_http_get_json` seam `_cleanup_bench_profile` already
+    uses; either failing (no host configured, board unreachable, malformed
+    body) yields an empty/partial snapshot rather than raising, since this
+    is diagnostic-only and must never affect whether a case passes or
+    fails on its own account."""
+    snapshot: Dict[str, Any] = {"zones": {}, "zone_blocked_mask": None}
+    host = ctx.get("host")
+    if not host:
+        return snapshot
+    get_json = ctx.get("_http_get_json", _http_get_json)
+    try:
+        status, body = get_json(host, "/api/profile_exec")
+        if status == 200 and isinstance(body, dict):
+            for zone in body.get("zones", []) or []:
+                idx = zone.get("zone", zone.get("index"))
+                if idx is None:
+                    continue
+                snapshot["zones"][idx] = {
+                    "duty": zone.get("duty"),
+                    "heat_blocked": zone.get("heat_blocked"),
+                    "heat_blocked_sources": zone.get("heat_blocked_sources"),
+                }
+    except Exception:
+        pass
+    try:
+        status, body = get_json(host, "/api/status")
+        if status == 200 and isinstance(body, dict) and "zone_blocked_mask" in body:
+            snapshot["zone_blocked_mask"] = body.get("zone_blocked_mask")
+    except Exception:
+        pass
+    return snapshot
+
+
 def _hp_run(ctx: dict, zone_mask: int, timeout_s: float = 480.0, poll_s: float = 2.0) -> Dict[str, Any]:
     """Common HP flow: rest gate, start, poll to DONE, collect start/end
-    zone temps, K4-energized samples and link-stats before/after. Always
-    tears down (stop + delete the bench slot) in `finally`. Stores its
-    result under `ctx["_hp01"]`/`ctx["_hp02"]` (by `zone_mask`) so SP-03 and
-    SP-06's observer cases can read it back within the same run."""
+    zone temps, K4-energized samples, per-zone diagnostic snapshots and
+    link-stats before/after. Always tears down (stop + delete the bench
+    slot) in `finally`. Stores its result under `ctx["_hp01"]`/`ctx["_hp02"]`
+    (by `zone_mask`) so SP-03 and SP-06's observer cases can read it back
+    within the same run."""
     result: Dict[str, Any] = {
         "ok": False, "reason": "", "start_zones": {}, "end_zones": {},
-        "energized_samples": [], "link_stats_before": {}, "link_stats_after": {},
+        "energized_samples": [], "zone_diag_samples": [],
+        "link_stats_before": {}, "link_stats_after": {},
     }
     rested, rest_reason = _rest_gate(ctx)
     if not rested:
@@ -374,6 +477,7 @@ def _hp_run(ctx: dict, zone_mask: int, timeout_s: float = 480.0, poll_s: float =
             st = srv._profiles.get_exec_status()
             state = st.state_name
             result["energized_samples"].append((state, _read_energized(ctx)))
+            result["zone_diag_samples"].append(_zone_diag_snapshot(ctx))
             if state in ("done", "faulted"):
                 break
             sleep(poll_s)
@@ -421,12 +525,40 @@ def _case_hp01(ctx: dict) -> CaseResult:
     return J.judge_relay_energized(run["energized_samples"])
 
 
+def _blocked_while_energized_zones(zone_diag_samples: List[Dict[str, Any]]) -> List[int]:
+    """Names any zone whose `duty` was reported > 0 while `heat_blocked` was
+    simultaneously reported set, across every polled diagnostic snapshot
+    (`_zone_diag_snapshot`). Duty>0-and-blocked is nonsensical in a healthy
+    run (a blocked zone should read duty 0), so this is a targeted symptom
+    check for a low-rise failure like HP-02's zone 2 (1.88C observed on the
+    bench with no per-zone data to explain it), not a general judge."""
+    flagged = set()
+    for snapshot in zone_diag_samples or []:
+        for idx, zone in (snapshot.get("zones") or {}).items():
+            duty = zone.get("duty")
+            if duty is not None and duty > 0 and zone.get("heat_blocked"):
+                flagged.add(idx)
+    return sorted(flagged)
+
+
 def _case_hp02(ctx: dict) -> CaseResult:
     run = _hp_run(ctx, zone_mask=0b111)
     ctx["_hp02"] = run
     if not run["ok"]:
         return CaseResult(Verdict.FAIL, reason=run["reason"], observed={"start": run["start_zones"], "end": run["end_zones"]})
-    return J.judge_all_zones_rise(_rises(run["start_zones"], run["end_zones"]), zone_mask=0b111, min_rise=5.0)
+    result = J.judge_all_zones_rise(_rises(run["start_zones"], run["end_zones"]), zone_mask=0b111, min_rise=5.0)
+    if result.verdict != Verdict.PASS:
+        blocked = _blocked_while_energized_zones(run["zone_diag_samples"])
+        observed = dict(result.observed or {})
+        observed["zone_diag_samples"] = run["zone_diag_samples"]
+        if blocked:
+            return CaseResult(
+                Verdict.FAIL,
+                reason=f"{result.reason} (zone(s) {blocked} had duty>0 while heat_blocked)",
+                observed=observed,
+            )
+        return CaseResult(Verdict.FAIL, reason=result.reason, observed=observed)
+    return result
 
 
 def _case_hp04(ctx: dict) -> CaseResult:
@@ -712,6 +844,18 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
 #: start time.
 _HP07_MARGIN_C = 3.0
 
+#: How far ABOVE the lowered `limit_c` HP-07's on/off trigger rule's
+#: threshold is set (2026-09-25 redesign -- see `_run_hp07_profile`'s
+#: docstring for why the segment's own RAMP target cannot be set above
+#: `limit_c` at all). A high, practically-unreachable threshold on this
+#: ~4W bench fixture (`project_bench_is_a_4w_test_fixture`) means the rule
+#: never sees `measured_c >= threshold` and therefore never turns the relay
+#: off -- full, continuous duty for the whole run, so the approach is not
+#: gated on a PID converging near `limit_c` (observed on hardware
+#: 2026-09-25, run 20260925T171042Z_heat: plateaued at 30.48C against a
+#: 31.18C limit and never crossed it in 240s).
+_HP07_TRIGGER_MARGIN_C = 50.0
+
 
 #: Retry count/delay for restoring a zone's `max_temp_c` after HP-07 --
 #: separate from `_HP07_MARGIN_C`. A board that rebooted mid-run (observed
@@ -790,15 +934,70 @@ def _restore_zone_limit(
 def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult:
     """The heat/poll/ack body of HP-07, once the zone's `max_temp_c` limit is
     already lowered (to `_HP07_MARGIN_C` above ambient) and the hidden slot
-    has not yet been started. Starts a profile whose target is exactly
-    `limit_c` (the value just POSTed) -- never above the just-lowered limit,
-    since `profile_executor_run.c`'s start-time re-validation refuses
-    outright (never clamps) a segment target greater than the zone's
-    *current* max_temp_c -- and lets the setpoint's approach/overshoot cross
-    that limit live, tripping `thermal_guard.c`'s runtime check
-    (`measurement_c >= max_temp_c`, evaluated every guard tick)."""
+    has not yet been started.
+
+    2026-09-25 redesign. Every prior run (most recently 20260925T171042Z_heat)
+    FAILed the same way: the segment's RAMP target was pinned to exactly
+    `limit_c` and a converging PID simply plateaus a fraction of a degree
+    below it on this ~4W bench fixture (observed: 30.48C against a 31.18C
+    limit, 240s, never crossing) -- there is no PID overshoot to rely on to
+    cross the ceiling live.
+
+    Checked in firmware first, per the task: can the segment's own RAMP
+    target simply be set a few degrees ABOVE `limit_c` instead, so the
+    setpoint itself sits past the ceiling? No --
+    `profile_executor_run.c`'s start-time re-validation (around line 430,
+    "PID_EXPANSION_PLAN.md sec 7.2: ... a target above the kiln's permitted
+    maximum is refused and NEVER stretched") walks every
+    `PROFILE_SEG_KIND_ZONE_RAMP` segment and REFUSES outright (never clamps)
+    if `target > zone_max_c` for any zone in `zone_mask`. This applies
+    unconditionally to the segment's `target_c`, so a target above the
+    just-lowered `limit_c` cannot be used to start the run at all -- the
+    same "refused, not clamped" behaviour this module's own earlier comments
+    already document.
+
+    That check (profile_executor_run.c ~429-450) only walks
+    `PROFILE_SEG_KIND_ZONE_RAMP` segments and inspects `seg->target_c`; it
+    never reads `profile_on_off_rule_t.temp_threshold_c` at all (confirmed
+    by grep: no start-time or save-time comparison of `temp_threshold_c`
+    against a zone's `max_temp_c` exists anywhere in
+    `firmware/KilnFW/App/drivers/http/profiles_http.c` or
+    `profile_executor_run.c` -- only a `PROFILE_TARGET_C_MIN`/`MAX` sanity
+    range applies, 0-2015C). And once an on/off trigger rule is attached to
+    a (segment, zone) pair, `profile_resolve_on_off_rule()` /
+    `on_off_trigger_decide()` (`profile_executor.c`) drive that zone's relay
+    from the rule's own BELOW/ABOVE comparison against `temp_threshold_c`,
+    not from the ramp target's PID at all -- so the RAMP segment's
+    `target_c` (checked against `max_temp_c`) and the relay's actual trigger
+    threshold (not checked against anything but the sanity range) are two
+    independent fields.
+
+    So the segment target stays pinned at `limit_c` (satisfies the ramp
+    ceiling check, same as before), and an on/off rule is attached with
+    `temp_threshold_c = limit_c + _HP07_TRIGGER_MARGIN_C` -- a threshold
+    this fixture cannot practically reach. `temp_cmp=BELOW` means the rule
+    commands the relay ON whenever `measured_c < threshold`, which is always
+    true here, so the relay is held full ON for the whole run instead of
+    backing off as a PID would near its setpoint. That deterministically
+    drives `measured_c` up through `limit_c` (rather than plateauing near
+    it), tripping `thermal_guard.c`'s runtime check
+    (`measurement_c >= max_temp_c`, evaluated every guard tick) instead of
+    depending on PID overshoot that this fixture does not reliably produce.
+
+    No zone config is written after the run starts (per owner decision, all
+    zone writes are refused 409 while RUNNING/PAUSED) -- the on/off rule is
+    attached via the SAME pre-start `POST /api/profile` save `_start_bench_profile`
+    already uses for HP-03, before `profiles.start()` is ever called."""
+    from .. import profile_edit_http_client as _pehc
+
+    rule = _pehc.OnOffRule(
+        zone_index=target_zone, segment_index=0, enable=True,
+        temp_cmp=_pehc.ON_OFF_TEMP_CMP_BELOW,
+        temp_source=_pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE,
+        temp_threshold_c=limit_c + _HP07_TRIGGER_MARGIN_C,
+    )
     ok, reason, ambient_at_start = _start_bench_profile(
-        ctx, zone_mask=1 << target_zone, target_c=limit_c,
+        ctx, zone_mask=1 << target_zone, target_c=limit_c, on_off_rules=[rule],
     )
     if not ok:
         return CaseResult(Verdict.FAIL, reason=reason)
@@ -847,16 +1046,22 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
 
 def _case_hp07(ctx: dict) -> CaseResult:
     """HP-01's profile, but the target zone's `max_temp_c` limit is lowered
-    to 3C above ambient BEFORE the profile starts, and the profile's own
-    target is set to exactly that (already-lowered) limit -- so the
-    setpoint's approach/overshoot crosses the limit live and the software
-    thermal guard trips it (a `dashboard` zone-config field, never a Pico/
-    safety trip). Expects FAULTED with fault_guard naming the over-max-temp
+    to `_HP07_MARGIN_C` above ambient BEFORE the profile starts (while
+    IDLE), and an on/off trigger rule is attached whose threshold sits well
+    above that lowered limit -- holding the relay full ON for the whole run
+    instead of letting a PID converge and plateau just under the ceiling.
+    See `_run_hp07_profile`'s docstring for the full 2026-09-25 redesign
+    (why the segment's own RAMP target cannot be pinned above the limit,
+    and why the on/off rule's threshold is a separate, unchecked field that
+    can be). Expects FAULTED with fault_guard naming the over-max-temp
     guard, and confirms the sticky bar's Acknowledge (`profiles.stop()`,
     mirroring the web UI's POST /api/profile_exec/stop) clears it. Restores
-    the zone's original max_temp_c in `finally`.
+    the zone's original max_temp_c in `finally`. No zone config is written
+    once the profile is running or paused (refused 409 by design) -- the
+    lowered limit is set once, while IDLE, before `profiles.start()`.
 
-    Found on hardware 2026-09-24 (run 20260924T072516Z_heat), TWICE:
+    Found on hardware 2026-09-24 (run 20260924T072516Z_heat), TWICE, and a
+    third time 2026-09-25 (run 20260925T171042Z_heat) after those two fixes:
 
     1. Lowering the limit BEFORE `profiles.start()` never reaches the
        runtime guard at all if the profile's OWN target is still above the
@@ -873,11 +1078,23 @@ def _case_hp07(ctx: dict) -> CaseResult:
        `ota_interlock.c:56-57`) -- deliberate, not a bug, and there is no
        software surface to lower a limit on a zone that is actively firing.
 
-    The only sequencing that reaches the runtime guard at all: lower the
-    limit while IDLE (allowed), then start a profile whose OWN target
-    equals that lowered limit (`profile_executor_run.c` refuses only a
-    target ABOVE the zone's current max_temp_c, so target == limit is
-    accepted), and let the live approach/overshoot cross it."""
+    3. The second fix (lower the limit while IDLE, pin the RAMP target to
+       exactly that limit) reaches the runtime guard's code path but never
+       trips it: a converging PID plateaus a fraction of a degree below its
+       setpoint on this ~4W bench fixture and never actually reaches
+       `measurement_c >= max_temp_c` (observed: 30.48C against a 31.18C
+       limit, 240s). Fixed by attaching an on/off trigger rule (see above)
+       so the relay is held full ON instead of backing off near the
+       setpoint -- deterministic on this fixture, not dependent on PID
+       overshoot that does not reliably occur.
+
+    Also refuses outright (before touching zone config at all) if lowering
+    `target_zone` alone would leave the Pico's mirrored `abs_max_temp_c`
+    (the MAX of every zone's `max_temp_c`, never the minimum) too close to
+    `limit_c` -- see `_hp07_pico_ceiling_headroom_ok`'s docstring. That
+    would risk the Pico's own S1 guard tripping instead of, or racing, the
+    ESP's `thermal_guard.c` trip this case means to provoke; a Pico trip
+    needs `safety_clear_trip()`, not `profiles.stop()`."""
     from .. import zones_http_client
 
     rested, rest_reason = _rest_gate(ctx)
@@ -920,6 +1137,9 @@ def _case_hp07(ctx: dict) -> CaseResult:
     ceiling_ok, ceiling_reason = _ceiling_problem(snapshot, 1 << target_zone, ambient + 15.0)
     if not ceiling_ok:
         return CaseResult(Verdict.FAIL, reason=f"refusing to lower/restore: {ceiling_reason}")
+    pico_ok, pico_reason = _hp07_pico_ceiling_headroom_ok(snapshot, target_zone, limit_c)
+    if not pico_ok:
+        return CaseResult(Verdict.FAIL, reason=f"refusing to lower: {pico_reason}")
 
     restore_note: Optional[str] = None
     result: Optional[CaseResult] = None

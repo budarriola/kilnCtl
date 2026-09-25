@@ -706,9 +706,12 @@ class HP07Test(unittest.TestCase):
     def setUp(self):
         self.fake_zhc = _FakeZonesHttpClient()
         self._saved = _install_fake_zones_http_client(self.fake_zhc)
+        self.fake_pehc = _FakeProfileEditHttpClient()
+        self._saved_pehc = _install_fake_profile_edit_http_client(self.fake_pehc)
 
     def tearDown(self):
         _restore_zones_http_client(self._saved)
+        _restore_profile_edit_http_client(self._saved_pehc)
 
     def _ctx(self, profiles):
         srv = _FakeSrv(
@@ -812,7 +815,10 @@ class HP07Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         limit = fake_zhc.posted_bodies[0]["preset"]["zones"][0]["max_temp_c"]
         self.assertEqual(limit, 27.0)
-        self.assertEqual(profiles.saved[0][3][0].target_c, limit)
+        # HP-07 now saves via POST /api/profile (on/off-rule attach path),
+        # not the raw UART save -- the pinned target lives in the fake
+        # profile_edit_http_client call, not `profiles.saved`.
+        self.assertEqual(self.fake_pehc.calls[0]["segments"][0].target_c, limit)
 
     def test_limit_restored_even_when_lowering_post_raises(self):
         """A lowering POST that raises (e.g. a read timeout after firmware
@@ -1198,3 +1204,211 @@ class HP08Test(unittest.TestCase):
         snapshots = ctx.get(C.HP_FIRING_HISTORY_SNAPSHOTS_KEY)
         self.assertEqual(len(snapshots), 1)
         self.assertEqual(snapshots[0]["records"][0]["profile_name"], C.BENCH_PROFILE_NAME)
+
+
+class ZoneDiagSnapshotTest(unittest.TestCase):
+    """`_zone_diag_snapshot` -- the coordinator's follow-up for HP-02, which
+    failed on the bench with zone 2 rising only 1.88C and no per-zone data
+    to explain why. Read-only: `/api/profile_exec` for per-zone
+    duty/heat_blocked/heat_blocked_sources, `/api/status` for the separate
+    top-level zone_blocked_mask."""
+
+    def test_reads_both_routes_and_merges(self):
+        calls = []
+
+        def get_json(host, path):
+            calls.append(path)
+            if path == "/api/profile_exec":
+                return 200, {"zones": [
+                    {"zone": 0, "duty": 0.5, "heat_blocked": False, "heat_blocked_sources": 0},
+                    {"zone": 2, "duty": 0.0, "heat_blocked": True, "heat_blocked_sources": 4},
+                ]}
+            if path == "/api/status":
+                return 200, {"zone_blocked_mask": 4}
+            return 404, {}
+
+        ctx = {"host": "10.0.0.5", "_http_get_json": get_json}
+        snap = C._zone_diag_snapshot(ctx)
+        self.assertEqual(calls, ["/api/profile_exec", "/api/status"])
+        self.assertEqual(snap["zones"][0]["duty"], 0.5)
+        self.assertFalse(snap["zones"][0]["heat_blocked"])
+        self.assertEqual(snap["zones"][2]["heat_blocked_sources"], 4)
+        self.assertEqual(snap["zone_blocked_mask"], 4)
+
+    def test_no_host_returns_empty_snapshot_without_calling(self):
+        ctx = {}
+        snap = C._zone_diag_snapshot(ctx)
+        self.assertEqual(snap["zones"], {})
+        self.assertIsNone(snap["zone_blocked_mask"])
+
+    def test_never_raises_on_a_failed_read(self):
+        """Diagnostic-only: a board that refuses/errors on either route must
+        not raise into the polling loop (`_hp_run` calls this every tick)."""
+        def raising_get(host, path):
+            raise OSError("board unreachable")
+
+        ctx = {"host": "10.0.0.5", "_http_get_json": raising_get}
+        snap = C._zone_diag_snapshot(ctx)
+        self.assertEqual(snap["zones"], {})
+        self.assertIsNone(snap["zone_blocked_mask"])
+
+    def test_status_route_missing_the_mask_key_leaves_it_none(self):
+        def get_json(host, path):
+            if path == "/api/profile_exec":
+                return 200, {"zones": []}
+            return 200, {"some_other_field": 1}
+
+        ctx = {"host": "10.0.0.5", "_http_get_json": get_json}
+        snap = C._zone_diag_snapshot(ctx)
+        self.assertIsNone(snap["zone_blocked_mask"])
+
+
+class BlockedWhileEnergizedZonesTest(unittest.TestCase):
+    def test_names_a_zone_with_duty_and_blocked_simultaneously(self):
+        samples = [
+            {"zones": {0: {"duty": 0.5, "heat_blocked": False}, 2: {"duty": 0.0, "heat_blocked": True}}},
+            {"zones": {0: {"duty": 0.4, "heat_blocked": False}, 2: {"duty": 0.3, "heat_blocked": True}}},
+        ]
+        self.assertEqual(C._blocked_while_energized_zones(samples), [2])
+
+    def test_empty_when_no_zone_is_both_duty_and_blocked(self):
+        samples = [
+            {"zones": {0: {"duty": 0.5, "heat_blocked": False}, 2: {"duty": 0.0, "heat_blocked": True}}},
+        ]
+        self.assertEqual(C._blocked_while_energized_zones(samples), [])
+
+    def test_tolerates_missing_or_none_fields(self):
+        samples = [{"zones": {0: {"duty": None, "heat_blocked": True}}}, {}]
+        self.assertEqual(C._blocked_while_energized_zones(samples), [])
+
+
+class HP02DiagnosticTest(unittest.TestCase):
+    """`_case_hp02`'s FAIL detail names any zone whose duty was > 0 while
+    heat_blocked was set, using the per-zone snapshots `_hp_run` now
+    collects every poll tick."""
+
+    def _ctx(self, profiles, get_json):
+        srv = _FakeSrv(
+            readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
+            profiles=profiles,
+        )
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+            "_http_get_json": get_json,
+        }
+        _always_ok_preflight(ctx)
+        return ctx
+
+    @staticmethod
+    def _stepped_thermo(final_readings):
+        """`_hp_run` reads thermo twice outside the poll loop (rest gate +
+        `start_zones`, both ambient) and once more for `end_zones` -- this
+        returns ambient for the first two calls and `final_readings`
+        thereafter, so a test can set a real start/end rise instead of a
+        flat, always-equal reading that would make every zone's rise 0."""
+        calls = {"n": 0}
+        ambient = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)]
+
+        def read():
+            calls["n"] += 1
+            return ambient if calls["n"] <= 2 else final_readings
+
+        return read
+
+    def test_fail_names_the_blocked_zone(self):
+        statuses = [
+            _ExecStatus("running", []),
+            _ExecStatus("done", []),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+
+        def get_json(host, path):
+            if path == "/api/profile_exec":
+                return 200, {"zones": [
+                    {"zone": 0, "duty": 0.5, "heat_blocked": False},
+                    {"zone": 1, "duty": 0.5, "heat_blocked": False},
+                    {"zone": 2, "duty": 0.6, "heat_blocked": True},
+                ]}
+            return 200, {}
+
+        ctx = self._ctx(profiles, get_json)
+        # Zone 2 barely rises (1.88C-style bench symptom) so judge_all_zones_rise FAILs.
+        ctx["srv"]._thermo.read = self._stepped_thermo(
+            [_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 25.9)]
+        )
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("[2]", result.reason)
+        self.assertIn("heat_blocked", result.reason)
+        self.assertIn("zone_diag_samples", result.observed)
+
+    def test_pass_is_unaffected_by_diagnostic_capture(self):
+        statuses = [
+            _ExecStatus("running", []),
+            _ExecStatus("done", []),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+
+        def get_json(host, path):
+            if path == "/api/profile_exec":
+                return 200, {"zones": [
+                    {"zone": 0, "duty": 0.5, "heat_blocked": False},
+                    {"zone": 1, "duty": 0.5, "heat_blocked": False},
+                    {"zone": 2, "duty": 0.5, "heat_blocked": False},
+                ]}
+            return 200, {}
+
+        ctx = self._ctx(profiles, get_json)
+        ctx["srv"]._thermo.read = self._stepped_thermo(
+            [_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 30.0)]
+        )
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_fail_reason_unchanged_when_no_zone_was_blocked_while_energized(self):
+        """A FAIL with no duty>0-and-blocked zone must not fabricate a
+        blocked-zone claim -- the original judge reason is kept as-is."""
+        statuses = [
+            _ExecStatus("running", []),
+            _ExecStatus("done", []),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+
+        def get_json(host, path):
+            return 200, {"zones": [
+                {"zone": 0, "duty": 0.5, "heat_blocked": False},
+                {"zone": 1, "duty": 0.5, "heat_blocked": False},
+                {"zone": 2, "duty": 0.5, "heat_blocked": False},
+            ]} if path == "/api/profile_exec" else (200, {})
+
+        ctx = self._ctx(profiles, get_json)
+        ctx["srv"]._thermo.read = self._stepped_thermo(
+            [_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 25.9)]
+        )
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("heat_blocked", result.reason)
+
+    def test_diag_samples_collected_across_poll_ticks(self):
+        statuses = [
+            _ExecStatus("running", []),
+            _ExecStatus("running", []),
+            _ExecStatus("done", []),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        calls = {"n": 0}
+
+        def get_json(host, path):
+            if path == "/api/profile_exec":
+                calls["n"] += 1
+                return 200, {"zones": [{"zone": 0, "duty": 0.5, "heat_blocked": False}]}
+            return 200, {}
+
+        ctx = self._ctx(profiles, get_json)
+        C._case_hp02(ctx)
+        run = ctx["_hp02"]
+        self.assertEqual(len(run["zone_diag_samples"]), 3)
+        self.assertEqual(calls["n"], 3)

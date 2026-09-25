@@ -180,6 +180,30 @@ class JudgeOnOffZoneCyclingTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("strayed", result.reason)
 
+    def test_passes_when_ramp_up_from_ambient_precedes_in_band_cycling(self):
+        """HP-03 regression: the run starts at ambient, well outside the
+        band, and only converges to cycle in-band later. Judging every
+        sample from profile start (the pre-fix behaviour) failed this
+        expected ramp-up; only samples from the first in-band arrival
+        onward are judged for straying."""
+        result = J.judge_on_off_zone_cycling(
+            relay_states=[True, True, True, False, True, False],
+            temps_c=[10.0, 20.0, 30.0, 35.0, 33.5, 34.5],
+            target_c=34.0, hyst_c=2.0,
+        )
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_fails_not_inconclusive_when_never_reaches_band(self):
+        """A run that never arrives in band must still FAIL -- not pass
+        vacuously because zero post-arrival samples were judged."""
+        result = J.judge_on_off_zone_cycling(
+            relay_states=[True, False, True, False],
+            temps_c=[10.0, 15.0, 20.0, 25.0],
+            target_c=34.0, hyst_c=2.0,
+        )
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("never reached band", result.reason)
+
 
 class JudgeFaultedRunTest(unittest.TestCase):
     def test_passes_on_a_clean_provoked_fault_and_clear(self):

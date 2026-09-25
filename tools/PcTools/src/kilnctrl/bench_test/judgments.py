@@ -2438,9 +2438,19 @@ def judge_on_off_zone_cycling(
 ) -> CaseResult:
     """HP-03: an on/off-type zone's relay toggles at least ``min_transitions``
     times over the run (proof it is actually cycling, not stuck on or off),
-    and every sampled temperature stays within ``hyst_c + margin_c`` of
-    ``target_c`` -- the margin is slack for real thermal lag/overshoot on a
-    hysteresis controller, not a second hysteresis band to tune against."""
+    and every sampled temperature -- ONCE the zone has first arrived within
+    ``hyst_c + margin_c`` of ``target_c`` -- stays within that same band.
+
+    The run starts at ambient, well outside the band, and the initial
+    ramp-up to `target_c` is expected to be outside it the whole way there
+    -- that is not a cycling defect, and judging every sample from profile
+    start (the pre-fix behaviour) failed every run on exactly this
+    ramp-up, never on an actual excursion once cycling had begun. Samples
+    before the first in-band arrival are excluded from the stray-temperature
+    check; the relay-transition count is still checked over the whole run.
+    A run that never arrives in band at all is still a FAIL, not a vacuous
+    PASS from zero judged samples -- on/off cycling was never actually
+    observed."""
     observed = {"relay_states": relay_states, "temps_c": temps_c, "target_c": target_c, "hyst_c": hyst_c}
     if len(relay_states) < 2:
         return CaseResult(Verdict.INCONCLUSIVE, reason="fewer than 2 relay samples collected", observed=observed)
@@ -2452,14 +2462,27 @@ def judge_on_off_zone_cycling(
             observed={**observed, "transitions": transitions},
         )
     band = hyst_c + margin_c
-    out_of_band = [t for t in temps_c if t is not None and abs(t - target_c) > band]
+    arrival_index = next(
+        (i for i, t in enumerate(temps_c) if t is not None and abs(t - target_c) <= band), None
+    )
+    if arrival_index is None:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"never reached band (+/-{band:.1f}C of target {target_c:.1f}C)",
+            observed={**observed, "transitions": transitions},
+        )
+    judged_temps = temps_c[arrival_index:]
+    out_of_band = [t for t in judged_temps if t is not None and abs(t - target_c) > band]
     if out_of_band:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"{len(out_of_band)} sample(s) strayed more than {band:.1f}C from target {target_c:.1f}C",
-            observed={**observed, "out_of_band": out_of_band},
+            reason=f"{len(out_of_band)} sample(s) strayed more than {band:.1f}C from target {target_c:.1f}C "
+            f"after first reaching band (sample {arrival_index})",
+            observed={**observed, "out_of_band": out_of_band, "arrival_index": arrival_index},
         )
-    return CaseResult(Verdict.PASS, observed={**observed, "transitions": transitions})
+    return CaseResult(
+        Verdict.PASS, observed={**observed, "transitions": transitions, "arrival_index": arrival_index}
+    )
 
 
 #: firmware/KilnFW/App/drivers/http/app.js's THERMAL_GUARD_WORDS -- 5 is
