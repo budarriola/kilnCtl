@@ -372,7 +372,10 @@ static void forget_confirm_yes_cb(lv_event_t *e)
         s_forget_job.done = false;
     }
     xSemaphoreGive(s_forget_job.lock);
-    if (already_busy) return; /* one forget at a time */
+    if (already_busy) {
+        ESP_LOGW(TAG, "forget(%s) dropped: a previous forget is still running", s_pending_forget_ssid);
+        return; /* one forget at a time */
+    }
 
     snprintf(s_forget_job_ssid, sizeof(s_forget_job_ssid), "%s", s_pending_forget_ssid);
 

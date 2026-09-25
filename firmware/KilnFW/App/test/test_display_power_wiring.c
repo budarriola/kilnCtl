@@ -1688,9 +1688,10 @@ static void run_section15_point_on_panel_boundary_matrix(void)
             // it -- not some other condition -- is what returns
             // KILN_UI_CLICK_OFFSCREEN.
             // Read raw ("rb", test_common.h's test_read_whole_file()) --
-            // this repo's working tree carries CRLF line endings, so the
-            // source's own line break here is "\r\n", not "\n". Accept
-            // either so this pin doesn't depend on which the checkout used.
+            // the committed blob is LF, but core.autocrlf can rewrite the
+            // working-tree copy to CRLF on checkout, so the source's own
+            // line break here can be either depending on the checkout.
+            // Accept both so this pin doesn't depend on which one landed.
             const char *full_cond_crlf =
                 "targets[match].cx < 0 || targets[match].cx >= disp_w ||\r\n"
                 "            targets[match].cy < 0 || targets[match].cy >= disp_h";

@@ -280,7 +280,7 @@ void cancel_ap_fallback_timer(void)
  * Both helpers below run ONLY on owner_task() -- they are called from
  * do_*() bodies, never from an event handler or a caller thread, so the
  * file's "s_wifi has exactly one writer" rule is unchanged. */
-static bool sta_link_is_live(int8_t *out_rssi)
+static bool sta_link_is_live(int8_t *out_rssi, esp_netif_ip_info_t *out_ip_info)
 {
     if (!s_wifi.sta_netif) {
         return false;
@@ -296,23 +296,45 @@ static bool sta_link_is_live(int8_t *out_rssi)
     if (out_rssi) {
         *out_rssi = ap_info.rssi;
     }
+    if (out_ip_info) {
+        *out_ip_info = ip_info;
+    }
     return true;
 }
 
 /* Runs on owner_task(). Returns true if the station is demonstrably up
  * (association + non-zero IP), repairing s_wifi.state/sta_rssi if they
  * disagreed. Callers use the return value to decide whether a "recover the
- * link" action is needed at all. */
+ * link" action is needed at all.
+ *
+ * Coordinator review follow-up (2026-09-25): this is also the only place
+ * left that notices a live station on a tick basis -- eec35084 removed
+ * do_get_sta_ip()'s per-tick refresh of the cheap-read IP cache
+ * (wifi_prov_get_cached_sta_ip_netmask()) in favor of a non-blocking read
+ * from the LVGL task. If post_event() (wifi_prov.c) drops a queued GOT_IP
+ * because the owner mailbox is full, reconcile_sta_state() is what next
+ * notices the station is actually up and flips state back to CONNECTED --
+ * but it never refreshed the IP cache itself, so a display could show
+ * CONNECTED with a stale or empty IP indefinitely after a dropped event.
+ * sta_link_is_live() already fetches ip_info to prove there's a lease;
+ * reuse that same read here instead of calling esp_netif_get_ip_info()
+ * again. */
 bool reconcile_sta_state(void)
 {
     if (s_wifi.mode != WIFI_PROV_MODE_HOME) {
         return false; /* AP mode: the station is intentionally not in use */
     }
     int8_t rssi = -127;
-    if (!sta_link_is_live(&rssi)) {
+    esp_netif_ip_info_t ip_info = { 0 };
+    if (!sta_link_is_live(&rssi, &ip_info)) {
         return false;
     }
     s_wifi.sta_rssi = rssi;
+    char ip_str[16];
+    char mask_str[16];
+    esp_ip4addr_ntoa(&ip_info.ip, ip_str, (uint32_t)sizeof(ip_str));
+    esp_ip4addr_ntoa(&ip_info.netmask, mask_str, (uint32_t)sizeof(mask_str));
+    wifi_prov_update_sta_ip_cache(ip_str, mask_str);
     if (s_wifi.state != WIFI_PROV_STATE_CONNECTED) {
         ESP_LOGW(WIFI_PROV_TAG,
                  "state said %d but the station is associated with a live IP -- correcting to CONNECTED",
