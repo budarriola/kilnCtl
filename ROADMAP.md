@@ -32,7 +32,10 @@
 >   line 832) runs while holding `s_exec.lock`, against this file's own
 >   "never hold a module lock across producer calls" rule (FIXED 53f27b46;
 >   review found the same pattern in the RUNNING control tick and the
->   autotune tick, fix in progress, worktree ticklock). **Standing
+>   autotune tick, FIXED c3a267b7 with review fixes 7bb7cb5a/d7b6bb28: shared
+>   `thermo_channels_read()` helper at four read sites, the baseline read now
+>   applies the fault-bit filter, a peek-missed start tick is skipped; not yet
+>   flashed). **Standing
 >   tension, awaiting owner
 >   acknowledgement:** the Pico deliberately runs S1 tighter than
 >   `abs_max_temp_c` during a firing, which is in tension with the standing
