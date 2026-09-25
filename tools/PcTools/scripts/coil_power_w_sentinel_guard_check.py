@@ -92,6 +92,13 @@ ALLOWED_FILES = {
     "firmware/KilnFW/App/drivers/http/backup_export.c",
     "firmware/KilnFW/App/drivers/http/backup_import.c",
     "firmware/KilnFW/App/test/test_backup_import.c",
+    # 2026-09-24 (b9a01fd0, zones blob golden test): ZF(coil_power_w) fills
+    # the field with a distinct float via the same generic ZBG_F macro used
+    # for every other float field in zone_cfg_t, to pin the struct's
+    # serialized byte layout -- it does not read, interpret, or do
+    # arithmetic with the sentinel meaning of 0.0f. Reviewed: no new
+    # producer/consumer, no sentinel hazard.
+    "firmware/KilnFW/App/test/test_zones_blob_golden.c",
 }
 
 # The one file that actually consumes the value (does arithmetic with it,
