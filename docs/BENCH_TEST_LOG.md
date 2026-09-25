@@ -1802,3 +1802,35 @@ anywhere; presence only reported as `[bool]`.
 - `20260924T203338Z_full_lcd-judge-fix-verify` suite=`full` exit_code=1 PASS=40 FAIL=3 INCONCLUSIVE=9 NOT_RUN=126 SKIP=29 esp_fw=Sep 24 2026 10:51:15 pico_fw=Pico build: d6309f4a built 2026-09-24 04:55:47Z log=`logs/bench_test/20260924T203338Z_full_lcd-judge-fix-verify/`
 - `20260924T221915Z_full_lcd-rerun-post-5afe9496` suite=`full` exit_code=1 PASS=40 FAIL=3 INCONCLUSIVE=9 NOT_RUN=126 SKIP=29 esp_fw=Sep 24 2026 10:51:15 pico_fw=Pico build: d6309f4a built 2026-09-24 04:55:47Z log=`logs/bench_test/20260924T221915Z_full_lcd-rerun-post-5afe9496/`
 - `20260924T233113Z_lcd` suite=`lcd` exit_code=1 PASS=5 FAIL=1 INCONCLUSIVE=0 NOT_RUN=15 SKIP=0 esp_fw=Sep 24 2026 16:28:18 pico_fw=Pico build: d6309f4a built 2026-09-24 04:55:47Z log=`logs/bench_test/20260924T233113Z_lcd/`
+
+## 2026-09-25 Bench update to origin/main 0fb8ad98 + full commission + reruns, host 192.168.1.156 (COM14)
+
+Bench agent updated the board from stale ESP fw 466b29b2 (ancestor of 0fb8ad98)
+to origin/main 0fb8ad98, built from a clean worktree (`C:\wt\bench0925_m4oyme`)
+via `build_kilnfw`/`build_saftyfw`, flashed via `flash_firmware(kiln_fw_root=...)`
+(verified OK, boot_guard_reset ran) and `debug_program(peer="pico", ...)`
+(Pico bf3cd244 -> 405d3c54). Dual reflash tripped S6a as expected
+(`trip_reason=6`, `trip_mask=0x0020`, link up, confirmed via `safety_get_diag`)
+and was cleared with `safety_clear_trip()`; re-read confirmed `trip_reason=0`.
+`check_task_liveness`: 31/38 alive, all 7 gaps by-design (on-demand/config-gated).
+`boot_guard_get`: recovery_mode=False throughout. No unacknowledged crash at any
+point (`get_heap_status` banner never fired). Readiness before and after
+flash: 17 ok / 1 not_done (`safety_commissioned`, 3 unset `i_normal_a[0..2]` --
+left unset per standing rule, CT not installed on this 4W fixture) / 3 other
+(`guard_cross_zone`, `calibration` deliberately_off; `ct_attribution`
+cannot_yet, load too small to attribute) -- unchanged by this session, all
+non-hardware-gated items already ok. `safety_ceiling_match` ok both times.
+cfgfs mounted, 9 files, no quarantine; `control_get_zones` read back clean,
+3 zones mode PID_FUZZY, range 0..80C matching Pico ceiling.
+
+- `20260925T225016Z_heat_bench_20260925_update` suite=`heat` exit_code=1 esp_fw=0fb8ad98 pico_fw=405d3c54: HP-02 FAIL (zone 2 did not rise >=5.0C), HP-03 PASS, HP-07 FAIL (trip_reason=0 != expected 6) log=`logs/bench_test/20260925T225016Z_heat_bench_20260925_update/`
+- `20260925T231908Z_lcd_bench_20260925_update` suite=`lcd` exit_code=3 esp_fw=0fb8ad98 pico_fw=405d3c54: LCD-01 INCONCLUSIVE (camera exposure/cast, background off-tolerance, not a firmware color defect), LCD-19 INCONCLUSIVE (could not exercise wrong_pin_refused/right_pin_started/stop_not_gated) log=`logs/bench_test/20260925T231908Z_lcd_bench_20260925_update/`
+
+W1: Wi-Fi/AP round-trip and STA-join latency probe were NOT run -- both require
+switching the board off its current home-network STA session, which risks
+stranding it off-network with no console access confirmed; reported as
+owner-pending rather than attempted. A3 (`crash_report/clear`) and A4
+(`backup/import`) latency measurements skipped: a crash record exists on this
+board (acknowledged, not absent, so not the sanctioned no-op case) and no
+backup was exported from this board immediately before this session, so
+neither sanctioned precondition was met.
