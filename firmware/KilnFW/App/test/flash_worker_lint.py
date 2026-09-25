@@ -264,6 +264,15 @@ ALLOWLIST = {
     # Pattern 2 (local caller_stack_is_external() guard), see this file's
     # own comment mirroring kiln_cfg_store.c's.
     "profile_executor_firing_stats.c",
+    # Pattern 2, borrowed rather than duplicated: firing_shadow_finish_firing()
+    # (ITER_TUNE_REDESIGN_PLAN.md step 8) has no caller_stack_is_external()
+    # check of its own -- its one call site, profile_executor_firing_stats.c's
+    # firing_stats_persist(), already refuses and returns BEFORE calling it
+    # when the calling task's stack is external (see that function's own
+    # guard, just above firing_shadow_finish_firing()'s call). Adding a
+    # second, redundant check here would just be pattern 2 duplicated across
+    # a call boundary with no additional caller.
+    "firing_shadow.c",
     # RE-JUSTIFIED 2026-09-06 (flash-safety review of the hal_kv migration):
     # the "init-time only" claim below was FALSE -- profiles_builtin_start()
     # is init-time, but profiles_builtin_set_hidden()/_restore_all() (this

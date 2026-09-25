@@ -179,6 +179,34 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_set_pid_result;
 }
 
+// ITER_TUNE_REDESIGN_PLAN.md step 8: iter_tune_status_get_handler() now
+// calls firing_shadow_get_status(), and firing_shadow.c is linked into this
+// executable for real (build_host_tests.ps1's $cmdIth) -- but firing_shadow.c
+// itself calls zone_model_at()/zones_config_get_progress_band_c() (real
+// implementations live in zones_config_accessors.c, not linked here, same
+// as this file's existing zones_config_set_pid()/autotune_engine_* fakes
+// avoid pulling in the full zones_config_accessors.c or autotune_engine.c
+// translation units). These two are never exercised by any test in this
+// file (no test here drives firing_shadow_zone_tick() to the point of
+// needing a real model) -- fixed, harmless stand-ins, same pattern as
+// test_profile_executor_prestart.c's own fakes of the same two functions.
+bool zone_model_at(uint8_t zone_index, float T_c, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    (void)zone_index;
+    (void)T_c;
+    if (out_k_dc) *out_k_dc = 0.0f;
+    if (out_tau_s) *out_tau_s = 0.0f;
+    if (out_dead_time_s) *out_dead_time_s = 0.0f;
+    return false;
+}
+
+bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
+{
+    (void)zone_index;
+    if (out_band_c) *out_band_c = 0.0f;
+    return false;
+}
+
 static bool s_reserve_result = true;   // false simulates autotune already owning the zone
 static int s_reserve_calls = 0;
 static int s_release_calls = 0;

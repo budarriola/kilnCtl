@@ -2419,7 +2419,16 @@ try {
     New-Item -ItemType Directory -Force -Path $ithObjDir | Out-Null
     $cmdIth = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$ithObjDir\\`" /Fe:`"$exeIth`" `"$(Join-Path $testDir 'test_iter_tune_http.c')`" " +
-            "`"$(Join-Path $driversDir 'control/iter_tune.c')`""
+            "`"$(Join-Path $driversDir 'control/iter_tune.c')`" " +
+            # ITER_TUNE_REDESIGN_PLAN.md step 8: iter_tune_http.c's status
+            # handler now calls firing_shadow_get_status() -- link the real
+            # module (already host-tested by test_firing_shadow.c, its own
+            # executable) plus its hal_kv dependency chain, same reasoning as
+            # test_profile_executor_prestart.c's own $cmd4 fix needed.
+            "`"$(Join-Path $driversDir 'control/firing_shadow.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`" " +
+            "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
 

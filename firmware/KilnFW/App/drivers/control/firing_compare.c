@@ -4,6 +4,7 @@
 #include "firing_compare.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 bool firing_compare_subscore_votes(firing_subscore_t sub)
@@ -60,11 +61,32 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
     firing_compare_result_t r;
     memset(&r, 0, sizeof(r));
 
-    float raw[FIRING_SUBSCORE_COUNT][FIRING_COMPARE_MAX_PAIRS];
-    float norm[FIRING_SUBSCORE_COUNT][FIRING_COMPARE_MAX_PAIRS];
+    // ITER_TUNE_REDESIGN_PLAN.md step 8 follow-up (check_executor_task_stack_
+    // budget.ps1): firing_shadow_finish_firing() now reaches this function
+    // from the profile_executor task's 4096 B stack (previously only
+    // iter_tune.c called it, off that stack). raw[]/norm[]/in_band[] heap-
+    // allocated in one block rather than as stack locals -- same established
+    // pattern as zones_config_json_compute_crc()/zones_config_cfg_fs_save(),
+    // per that check's own fix guidance: never enlarge the stack, move the
+    // large locals. A malloc failure (extremely tight heap moment) fails
+    // safe: NO_MATCHED_PAIRS, same verdict as a firing with nothing to
+    // compare, never a crash and never a false ACCEPT.
+    size_t raw_bytes = sizeof(float) * FIRING_SUBSCORE_COUNT * FIRING_COMPARE_MAX_PAIRS;
+    float *raw_mem = (float *)malloc(raw_bytes);
+    float *norm_mem = (float *)malloc(raw_bytes);
+    float *in_band = (float *)malloc(sizeof(float) * FIRING_COMPARE_MAX_PAIRS);
+    if (!raw_mem || !norm_mem || !in_band) {
+        free(raw_mem);
+        free(norm_mem);
+        free(in_band);
+        r.verdict = FIRING_COMPARE_NO_MATCHED_PAIRS;
+        if (out) *out = r;
+        return r.verdict;
+    }
+    float (*raw)[FIRING_COMPARE_MAX_PAIRS] = (float (*)[FIRING_COMPARE_MAX_PAIRS])raw_mem;
+    float (*norm)[FIRING_COMPARE_MAX_PAIRS] = (float (*)[FIRING_COMPARE_MAX_PAIRS])norm_mem;
     int   cnt[FIRING_SUBSCORE_COUNT] = {0};
     int   improved[FIRING_SUBSCORE_COUNT] = {0};
-    float in_band[FIRING_COMPARE_MAX_PAIRS];
     int   in_band_n = 0;
 
     for (uint8_t i = 0; i < baseline->count; i++) {
@@ -192,6 +214,10 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
             (any_bar1 && (!r.bar2_applied || any_bar2) && any_degraded_untrusted);
         r.verdict = FIRING_COMPARE_INSUFFICIENT;
     }
+
+    free(raw_mem);
+    free(norm_mem);
+    free(in_band);
 
     if (out) *out = r;
     return r.verdict;
