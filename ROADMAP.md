@@ -109,19 +109,18 @@
 >   429 body); live-board verification still pending WT-A. **WT-A firmware
 >   core landed in part** (`0f5151f0`, `totp.c`/`totp_config.c`: RFC 6238
 >   core plus NVS persistence, `totp_config_verify_and_consume()` persists
->   the matched replay-counter step before returning OK) -- its routes
->   (`auth_forgot_reset_http.c`, settings-page enrollment, the reset-gesture
->   disenroll call) are still pending, in worktree `C:\wt\totpfw_2yhb0w`.
+>   the matched replay-counter step before returning OK). **WT-A routes
+>   landed 2026-09-24** (`f5f06dee`, two opus reviews, fixes `2d061cb0`
+>   `4d32fefd` `9f28c985` `9708015f`): `/forgot` + `/reset`, enrollment,
+>   reset tokens cleared on enroll-confirm/disable, board-wide failure cap
+>   clears only on reboot. Not yet flashed; live-board verification pending.
 >   WT-D (host tests: RFC 6238 Appendix B vectors) landed alongside the core.
 >   **WT-B landed** (`62f8bd4e`, gesture follow-up `cafc80f3`): forgot-password
 >   flow in the login modal, settings-page enrollment with a client-side QR,
 >   `test_forgot_password_modal.js` (48) and `test_qrcode_encoder.js` (17).
->   **Known-red pending item:** `check_flash_worker_lint.ps1` is RED on main
->   because `totp_config.c` (`0f5151f0`) writes NVS outside the lint
->   allowlist; fix is assigned to the WT-A routes commit.
 > - [ ] **Follow-on, not started:** `docs/TOTP_LOGIN_2FA_PLAN.md` — optional
->   TOTP as a second factor at ordinary login (reset plan section 5), blocked
->   on the reset plan's WT-A landing first.
+>   TOTP as a second factor at ordinary login (reset plan section 5); WT-A has
+>   landed, so this now waits only on the owner's review of that plan.
 > - **Lazy login pop-up, landed** (`090aaa9f`, review fixes `58e10e11`):
 >   serves page shells without redirecting to a login page on load, replacing
 >   that with one shared, themed, cancelable login modal instead -- the
@@ -3947,11 +3946,10 @@ Owner instruction, 2026-09-21.
   suite against this fix -- no rerun yet.
 - [x] Replace the email forgot-password design with TOTP -- done, 2026-09-24
   (`84fa2e7b`, owner change); WT-C and WT-D landed; **WT-B landed**
-  (`62f8bd4e`, gesture follow-up `cafc80f3`); WT-A (firmware routes) still in
-  progress, in worktree `C:\wt\totpfw_2yhb0w`. See the top-of-file entry above.
-- [ ] `check_flash_worker_lint.ps1` is RED on main: `drivers/persist/totp_config.c`
-  (`0f5151f0`) writes NVS outside the lint allowlist. Fix is assigned to the
-  WT-A routes commit, not a separate pass.
+  (`62f8bd4e`, gesture follow-up `cafc80f3`); WT-A (firmware routes) landed
+  `f5f06dee`..`9708015f`. See the top-of-file entry above.
+- [x] `check_flash_worker_lint.ps1` red over `totp_config.c` -- green on main
+  at `9708015f` (re-run 2026-09-24).
 
 ---
 
