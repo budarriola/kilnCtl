@@ -56,6 +56,59 @@ _HOME_TARGETS = [
 ]
 
 
+class Lcd01CastFallbackTest(unittest.TestCase):
+    """cases_lcd's cast_channel derivation (7b487885 review): the degraded
+    two-channel fallback must engage only when the independent background
+    reference reads a channel clipped, and a fallback-only PASS must say so
+    in its reason. Numbers are the 2026-09-25 20260925T055234Z_lcd capture's
+    (bg (0,53,104), bezel (0,1,7), Start (0,152,96))."""
+
+    _BEZEL = (0, 1, 7)
+
+    def _run(self, bg_rgb, start_rgb):
+        srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))
+        start = _HOME_TARGETS[0]
+        start_xy = (start["cx"], start["cy"] + lcd_sampler.LABEL_AVOID_OFFSET_PX)
+
+        def fake_sample_widget(image_path, x, y, *args, **kwargs):
+            if (x, y) == start_xy:
+                return lcd_sampler.RegionSample(region=start_rgb, bezel=self._BEZEL)
+            if (x, y) == (start["cx"], start["cy"]):  # Pause: hidden, reads as bezel
+                return lcd_sampler.RegionSample(region=self._BEZEL, bezel=self._BEZEL)
+            return lcd_sampler.RegionSample(region=bg_rgb, bezel=self._BEZEL)
+
+        with mock.patch.object(lcd_sampler, "capture_full_frame", return_value="x.jpg"),              mock.patch.object(lcd_sampler, "sample_widget", side_effect=fake_sample_widget):
+            return C._case_lcd01({"srv": srv})
+
+    def test_clipped_reference_recovers_green_and_says_so(self):
+        result = self._run((0, 53, 104), (0, 152, 96))
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed["color_debug"]["bg_reference"]["cast_channel"], 0)
+        self.assertTrue(result.observed["color_debug"]["start"]["matched_via_cast_fallback"])
+        self.assertIn("degraded cast fallback", result.reason)
+        self.assertIn("ACCENT_1", result.reason)
+
+    def test_clipped_reference_still_fails_the_red_stop_color(self):
+        # The fire button's only other color is ACCENT_5 (Stop); with R
+        # crushed its G:B (0x55:0x5F) is far from ACCENT_4's.
+        result = self._run((0, 53, 104), (0, 0x55, 0x5F))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_cast_without_a_clipped_channel_does_not_engage_fallback(self):
+        # Chroma offset well over CAST_CHROMA_THRESHOLD, but every channel
+        # >= CAST_CHANNEL_CRUSH_MAX: a tint, not clipping -- no fallback.
+        result = self._run((12, 60, 110), (0, 152, 96))
+        self.assertTrue(result.observed["color_debug"]["bg_reference"]["cast_suspected"])
+        self.assertIsNone(result.observed["color_debug"]["bg_reference"]["cast_channel"])
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_uncast_pass_has_no_fallback_reason(self):
+        result = self._run((96, 126, 154), (68, 192, 130))
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertFalse(result.observed["color_debug"]["start"]["matched_via_cast_fallback"])
+        self.assertEqual(result.reason, "")
+
+
 class Lcd01Test(unittest.TestCase):
     def test_camera_unavailable_degrades_to_inconclusive(self):
         srv = FakeSrv(FakeUiTest(page="home", targets=_HOME_TARGETS))

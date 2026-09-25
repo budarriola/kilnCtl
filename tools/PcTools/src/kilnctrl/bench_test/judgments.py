@@ -841,6 +841,26 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
             observed=observed,
             evidence=evidence,
         )
+    start_dbg = (color_debug or {}).get("start") or {}
+    if start_dbg.get("matched_via_cast_fallback"):
+        # Still a PASS (the widget checks all held and the surviving two
+        # channels match), but say plainly that the color half is weaker
+        # evidence than usual -- see cases_lcd._try_capture_and_sample().
+        channel = "RGB"[start_dbg["cast_channel"]] if start_dbg.get("cast_channel") in (0, 1, 2) else "?"
+        return CaseResult(
+            Verdict.PASS,
+            reason=(
+                f"Start color matched only via the degraded cast fallback: the background reference "
+                f"read the {channel} channel clipped, so {channel} was dropped and only the other two "
+                f"channels' ratio was compared (degraded chroma distance "
+                f"{start_dbg.get('degraded_chroma_distance')}, tolerance {start_dbg.get('chroma_tolerance')}). "
+                f"This cannot tell ACCENT_4 from a hue differing mainly in {channel} (e.g. ACCENT_1 orange), "
+                "nor a camera white-balance cast from a panel that lost that channel -- fix the camera "
+                "white balance and re-run for a full-color check"
+            ),
+            observed=observed,
+            evidence=evidence,
+        )
     return CaseResult(Verdict.PASS, observed=observed, evidence=evidence)
 
 

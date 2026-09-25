@@ -720,6 +720,17 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                 start_matches = lcd_sampler.matches_color(
                     sample.region, _ACCENT_4_RGB, sample.bezel, cast_channel=cast_channel
                 )
+                # Record whether ONLY the degraded two-channel fallback made
+                # this match, so judge_lcd_home_idle() can say so in the
+                # verdict: with one channel dropped the check can no longer
+                # tell ACCENT_4 from a hue that differs mainly in that
+                # channel (ACCENT_1 orange shares ACCENT_4's G:B ~2:1), nor
+                # a camera cast from a panel that genuinely lost it.
+                matched_via_cast_fallback = bool(
+                    start_matches
+                    and cast_channel is not None
+                    and not lcd_sampler.matches_color(sample.region, _ACCENT_4_RGB, sample.bezel)
+                )
                 color_debug["start"] = {
                     "region_xy": (start["cx"], start["cy"]),
                     "sample_offset_px": lcd_sampler.LABEL_AVOID_OFFSET_PX,
@@ -752,6 +763,7 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                         else None
                     ),
                     "matches": start_matches,
+                    "matched_via_cast_fallback": matched_via_cast_fallback,
                 }
         if pause is not None:
             sample2 = lcd_sampler.sample_widget(image_path, pause["cx"], pause["cy"], repo_root=ctx.get("repo_root"))

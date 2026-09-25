@@ -291,6 +291,22 @@ class CastChannelFallbackTest(unittest.TestCase):
             S.matches_color(sampled, self._TARGET, bezel, cast_channel=None),
         )
 
+    def test_cast_channel_rejects_accent5_stop_red(self):
+        # The fire button's only other rendered color (Stop, ACCENT_5
+        # 0xD6555F): G:B ~0.9:1 must still miss ACCENT_4's ~1.75:1.
+        self.assertFalse(
+            S.matches_color((0, 0x55, 0x5F), self._TARGET, self._CRUSHED_BEZEL, cast_channel=0)
+        )
+
+    def test_cast_channel_known_blind_spot_accent1_orange(self):
+        # Documented limitation, pinned so it stays visible: ACCENT_1
+        # (0xE8974E) differs from ACCENT_4 mainly in R, so with R dropped
+        # the fallback cannot tell them apart. judge_lcd_home_idle()'s
+        # fallback PASS reason names this; do not "fix" by deleting.
+        self.assertTrue(
+            S.matches_color((0, 0x97, 0x4E), self._TARGET, self._CRUSHED_BEZEL, cast_channel=0)
+        )
+
     def test_chromaticity_excluding_drops_the_named_channel(self):
         self.assertEqual(S._chromaticity_excluding((10, 30, 60), 0), (30 / 90, 60 / 90))
         self.assertEqual(S._chromaticity_excluding((0, 0, 0), 1), (0.0, 0.0))
