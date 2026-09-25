@@ -107,34 +107,41 @@ static void firing_shadow_store_persist(void)
 void firing_shadow_store_start(void)
 {
     memset(&s_status, 0, sizeof(s_status));
-    s_status_loaded = true;
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, FIRING_SHADOW_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY,
                                     FIRING_SHADOW_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return; // never persisted yet on this board -- all-zero status is correct
+    if (err == HAL_OK) {
+        firing_shadow_store_blob_t blob;
+        size_t len = sizeof(blob);
+        err = hal_kv_get_blob(&h, FIRING_SHADOW_NVS_KEY, &blob, &len);
+        hal_kv_close(&h);
+        // missing, truncated, or unknown-version -- treated as never persisted
+        if (err == HAL_OK && len == sizeof(blob) && blob.version == FIRING_SHADOW_STORE_VERSION) {
+            s_status.firings_scored = blob.firings_scored;
+            s_status.accept_count = blob.accept_count;
+            s_status.reject_count = blob.reject_count;
+            s_status.insufficient_count = blob.insufficient_count;
+            s_status.no_matched_pairs_count = blob.no_matched_pairs_count;
+            s_status.last_verdict = blob.last_verdict;
+            s_status.last_composite_normalised = blob.last_composite_normalised;
+        }
     }
-    firing_shadow_store_blob_t blob;
-    size_t len = sizeof(blob);
-    err = hal_kv_get_blob(&h, FIRING_SHADOW_NVS_KEY, &blob, &len);
-    hal_kv_close(&h);
-    if (err != HAL_OK || len != sizeof(blob) || blob.version != FIRING_SHADOW_STORE_VERSION) {
-        return; // missing, truncated, or unknown-version -- treated as never persisted
-    }
-    s_status.firings_scored = blob.firings_scored;
-    s_status.accept_count = blob.accept_count;
-    s_status.reject_count = blob.reject_count;
-    s_status.insufficient_count = blob.insufficient_count;
-    s_status.no_matched_pairs_count = blob.no_matched_pairs_count;
-    s_status.last_verdict = blob.last_verdict;
-    s_status.last_composite_normalised = blob.last_composite_normalised;
+    // Published only once s_status is fully populated (review fix): a reader
+    // that sees s_status_loaded == true never sees a half-loaded struct.
+    s_status_loaded = true;
 }
 
 bool firing_shadow_get_status(firing_shadow_status_t *out)
 {
+    // Review fix: NO lazy load here. This is called from the httpd task
+    // (iter_tune_status_get_handler()); a lazy firing_shadow_store_start()
+    // from there would memset and rewrite s_status concurrently with the
+    // executor task's firing_shadow_finish_firing() incrementing it, losing
+    // a verdict. iter_tune_http_start() loads the store once at boot instead;
+    // until then this reports "not loaded" (the route emits "shadow":null).
     if (!s_status_loaded) {
-        firing_shadow_store_start();
+        return false;
     }
     if (out != NULL) {
         *out = s_status;
@@ -146,7 +153,7 @@ void firing_shadow_zone_tick(uint8_t zone_index, bool actual_valid, float actual
                               bool dwelling, uint8_t segment_index, float dt_s)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
-        return; // defensive: caller derives this by pointer arithmetic against s_exec.zones
+        return; // defensive: caller derives this from z's address within s_exec.zones
     }
     if (!actual_valid) {
         return; // excluded sample -- not scored, does not advance the open segment either

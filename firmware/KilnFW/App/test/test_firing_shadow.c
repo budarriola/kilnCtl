@@ -46,7 +46,10 @@ static void test_first_firing_has_no_verdict(void)
     hal_kv_init_partition(FIRING_SHADOW_NVS_PARTITION);
 
     firing_shadow_status_t status;
-    TEST_CHECK(firing_shadow_get_status(&status), "get_status always succeeds");
+    TEST_CHECK(!firing_shadow_get_status(&status),
+               "get_status reports not-loaded before firing_shadow_store_start() -- never loads lazily");
+    firing_shadow_store_start();
+    TEST_CHECK(firing_shadow_get_status(&status), "get_status succeeds once the store is loaded");
     TEST_CHECK(status.firings_scored == 0, "nothing scored before any firing");
 
     feed_one_firing(/*zone_index=*/0, 100.0f, 120.0f, 90, 1.0f, 0.2f);
@@ -72,6 +75,7 @@ static void test_second_firing_produces_and_persists_verdict(void)
     // store -- the RAM-only previous-firing reference is lost (by design),
     // but the persisted verdict-summary counters survive.
     firing_shadow_reset_for_test();
+    firing_shadow_store_start();
     firing_shadow_status_t reloaded;
     TEST_CHECK(firing_shadow_get_status(&reloaded), "get_status reloads from NVS after reset");
     TEST_CHECK(reloaded.firings_scored == 1, "verdict-summary counter survives a simulated reboot");
@@ -115,6 +119,7 @@ static void test_wrong_version_and_truncated_blob_rejected(void)
     hal_kv_close(&h);
 
     firing_shadow_reset_for_test();
+    firing_shadow_store_start();
     firing_shadow_status_t status;
     TEST_CHECK(firing_shadow_get_status(&status), "get_status tolerates a wrong-version blob");
     TEST_CHECK(status.firings_scored == 0, "wrong-version blob is never trusted");
@@ -131,6 +136,7 @@ static void test_wrong_version_and_truncated_blob_rejected(void)
     hal_kv_close(&h);
 
     firing_shadow_reset_for_test();
+    firing_shadow_store_start();
     TEST_CHECK(firing_shadow_get_status(&status), "get_status tolerates a truncated blob");
     TEST_CHECK(status.firings_scored == 0, "truncated blob is never trusted");
 }

@@ -219,6 +219,10 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
 esp_err_t iter_tune_http_start(void)
 {
     iter_tune_store_start();
+    // ITER_TUNE_REDESIGN_PLAN.md step 8: load shadow mode's verdict-summary
+    // counters once here, at boot, so the status GET handler never has to
+    // load them lazily from the httpd task (see firing_shadow_get_status()).
+    firing_shadow_store_start();
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (server == NULL) {

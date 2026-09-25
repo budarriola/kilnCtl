@@ -523,6 +523,32 @@ static void test_status_reports_schema_refused_version(void)
                "status JSON omits schema_refused_version entirely when nothing was refused");
 }
 
+// ITER_TUNE_REDESIGN_PLAN.md step 8: the status body opens with a top-level
+// "shadow" object -- null until firing_shadow_store_start() has run (the
+// handler never loads it lazily from the httpd task), the counters after.
+// Both shapes must still be one well-formed object continuing into "zones".
+static void test_status_reports_shadow_summary(void)
+{
+    firing_shadow_reset_for_test();
+    reset_capture();
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "status handler returns ESP_OK before the shadow store is loaded");
+    TEST_CHECK(strncmp(s_resp_body, "{\"shadow\":null,\"zones\":[", strlen("{\"shadow\":null,\"zones\":[")) == 0,
+               "status JSON reports shadow:null (not a lazy load) before firing_shadow_store_start()");
+
+    firing_shadow_store_start();
+    reset_capture();
+    err = iter_tune_status_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "status handler returns ESP_OK once the shadow store is loaded");
+    TEST_CHECK(strncmp(s_resp_body,
+                       "{\"shadow\":{\"firings_scored\":0,\"accept_count\":0,\"reject_count\":0,"
+                       "\"insufficient_count\":0,\"no_matched_pairs_count\":0},\"zones\":[",
+                       strlen("{\"shadow\":{\"firings_scored\":0,\"accept_count\":0,\"reject_count\":0,"
+                              "\"insufficient_count\":0,\"no_matched_pairs_count\":0},\"zones\":[")) == 0,
+               "status JSON opens with the shadow counters object, then zones");
+}
+
 int main(void)
 {
     TEST_SECTION("iter_tune_http");
@@ -534,6 +560,7 @@ int main(void)
     test_missing_zone_query_refuses_400();
     test_never_commissioned_zone_refuses_409();
     test_status_reports_schema_refused_version();
+    test_status_reports_shadow_summary();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

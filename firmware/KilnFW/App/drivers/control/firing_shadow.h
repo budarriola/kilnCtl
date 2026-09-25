@@ -105,8 +105,11 @@ void firing_shadow_finish_firing(void);
 // same convention as iter_tune_store_start(). Safe to call more than once.
 void firing_shadow_store_start(void);
 
-// True (and fills *out) once firing_shadow_store_start() has run. Always
-// succeeds; *out reads all-zero if nothing has ever been persisted.
+// True (and fills *out) once firing_shadow_store_start() has run; false
+// (and *out untouched) before that -- never loads lazily, since the caller is
+// the httpd task and a load there would race firing_shadow_finish_firing() on
+// the executor task. iter_tune_http_start() calls firing_shadow_store_start()
+// once at boot. *out reads all-zero if nothing has ever been persisted.
 bool firing_shadow_get_status(firing_shadow_status_t *out);
 
 // Test-only: resets every piece of RAM state (in-progress segments, the
