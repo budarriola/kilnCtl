@@ -1125,7 +1125,13 @@ try {
             "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
             "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
+    # docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1):
+    # kiln_io_owner.c's relay_on_blocked() now calls system_mode_gate_
+    # blocks_relay(), which calls the real system_mode_gate_check() -- linked
+    # here for the same reason every other real dependency of kiln_io_owner.c
+    # is linked into this executable rather than stubbed (it's a small, pure,
+    # host-compilable module with no ESP-IDF dependency of its own).
     # CT_COMMISSIONING_PLAN.md step 2: kiln_io.c now calls hal_time_now_us()
     # (kiln_io_relays_off_ms()'s relays_all_off_since_us tracking) -- fake_time.c
     # supplies it, same as every other executable that links the real kiln_io.c/
@@ -2120,6 +2126,19 @@ try {
 
     Invoke-HostTestExe -Name "log_store_mount_littlefs" -ExePath $exe49 -BuildCmd $cmd49
 
+    # ---- test_system_mode_gate.c: its own FIFTIETH, separate executable.
+    # docs/SYSTEM_MODE_GATE_PLAN.md's Phase 6 gate (2026-09-25) -- a small,
+    # fully self-contained pure module (no ESP-IDF dependency at all, unlike
+    # ota_interlock.c/readiness_gate.c which pull in more), so like exe35's
+    # s8_rate_guard_estimate there is nothing here to fake and no fake to
+    # collide with anything else already linked.
+    $exe50 = Join-Path $outDir "kilnctl_host_tests_system_mode_gate.exe"
+    $cmd50 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$outDir\\`" /Fe:`"$exe50`" `"$(Join-Path $testDir 'test_system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
+
+    Invoke-HostTestExe -Name "system_mode_gate" -ExePath $exe50 -BuildCmd $cmd50
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -2618,7 +2637,10 @@ try {
     # 60 -> 61: added test_firing_compare_alloc.c's own Invoke-HostTestExe
     # call -- firing_compare()'s heap-allocation failure path
     # (ITER_TUNE_REDESIGN_PLAN.md step 8 review).
-    $totalExpected = 61
+    # 61 -> 62: added test_system_mode_gate.c's own Invoke-HostTestExe call --
+    # docs/SYSTEM_MODE_GATE_PLAN.md Phase 6's pure gate module (owner decisions
+    # 2026-09-25).
+    $totalExpected = 62
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

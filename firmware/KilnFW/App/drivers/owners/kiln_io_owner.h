@@ -163,6 +163,23 @@ typedef enum {
      * numeric values and crosses neither the UART wire nor NVS" reasoning as
      * ERR_UPDATING's own comment above. */
     KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK,
+    /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): refused
+     * because a firing or autotune run is currently active -- system_mode_
+     * gate.h's SYS_ACTION_RAW_RELAY_DEBUG_WRITE, checked in relay_on_blocked()
+     * below. BLANKET refusal, not scoped to relays the run actually claims
+     * (the owner's explicit choice over the plan doc's own claimed-relays-
+     * only recommendation) -- ANY manual relay-ON is refused while either
+     * engine is running, on all three transports (HTTP's danger-mode relay
+     * route, the UART bridge's SET_RELAY/SET_RELAY_MASK, and the LCD's
+     * manual override) since all three already funnel through this one
+     * choke point. Distinct from ERR_OWNED (relay_authority_manual_blocked_
+     * by_owner(), a per-relay ownership claim checked earlier in
+     * handle_set_relay()/handle_set_relay_mask(), before relay_on_blocked()
+     * is even reached) -- this fires even for a relay no run claims, which
+     * ERR_OWNED never would. Appended, not inserted, for the same "plain
+     * enum, no explicit values, crosses neither the UART wire nor NVS"
+     * reasoning as ERR_UPDATING/ERR_CRASH_UNACK's own comments above. */
+    KILN_IO_OWNER_RELAY_ERR_RUNNING,
 } kiln_io_owner_relay_result_t;
 
 typedef enum {

@@ -151,6 +151,20 @@ bool relay_authority_manual_blocked_by_owner(uint8_t relay_index) { (void)relay_
 static bool s_stub_crash_unacked = false;
 bool crash_report_has_unacknowledged(void) { return s_stub_crash_unacked; }
 
+// docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): relay_on_blocked()
+// now also calls system_mode_gate_blocks_relay(), which reads these two facts.
+// Hardcoded idle/false is correct for every existing test in this file (none
+// of them exercises the new mode gate) -- no test here drives a firing or
+// autotune run, so this stub never needs to be mutable like the ones above.
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->state = PROFILE_EXEC_IDLE;
+    }
+}
+bool autotune_engine_is_active(void) { return false; }
+
 // -----------------------------------------------------------------------------
 
 static void test_relay_pin_mask_is_the_four_relay_pins(void)
@@ -226,16 +240,17 @@ static void test_relay_on_blocked_gates_on_unacknowledged_crash_report(void)
     uint32_t sources = 0;
     bool updating = false;
     bool crash_unack = false;
+    bool mode_blocked = false;
 
     s_stub_crash_unacked = false;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == false,
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == false,
                "no unacknowledged crash report, no other gate tripped -- relay-ON is NOT blocked");
     TEST_CHECK(crash_unack == false, "out_crash_unack stays false when nothing was refused");
 
     updating = false;
     crash_unack = false;
     s_stub_crash_unacked = true;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true,
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true,
                "an unacknowledged crash report alone blocks manual relay-ON");
     TEST_CHECK(crash_unack == true, "out_crash_unack is set so the caller reports ERR_CRASH_UNACK, not ERR_SAFETY");
     TEST_CHECK(updating == false, "out_updating is untouched by the crash-report gate");
@@ -243,7 +258,7 @@ static void test_relay_on_blocked_gates_on_unacknowledged_crash_report(void)
     // Back to acknowledged -- the gate must clear, not latch.
     crash_unack = false;
     s_stub_crash_unacked = false;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == false,
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == false,
                "once acknowledged, relay-ON is unblocked again on the very next call");
 
     s_stub_crash_unacked = false; // leave the stub in its default state for any test after this one
@@ -263,6 +278,7 @@ static void test_relay_on_blocked_precedence_with_multiple_gates_active(void)
     uint32_t sources;
     bool updating;
     bool crash_unack;
+    bool mode_blocked;
 
     // All three gates tripped at once -- safety must win.
     s_stub_danger_mode = false;
@@ -274,7 +290,7 @@ static void test_relay_on_blocked_precedence_with_multiple_gates_active(void)
     sources = 0;
     updating = false;
     crash_unack = false;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true, "any gate tripped -> blocked");
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true, "any gate tripped -> blocked");
     TEST_CHECK(sources == 0x04u, "the safety-fault sources are reported when safety is the highest-precedence gate");
     TEST_CHECK(updating == false,
                "relay_on_blocked() returns as soon as the safety gate trips -- out_updating is never touched");
@@ -290,7 +306,7 @@ static void test_relay_on_blocked_precedence_with_multiple_gates_active(void)
     sources = 0;
     updating = false;
     crash_unack = false;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true, "updating+crash_unack -> blocked");
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true, "updating+crash_unack -> blocked");
     TEST_CHECK(updating == true, "with safety clear, an in-progress update takes precedence over crash_unack");
     TEST_CHECK(crash_unack == false, "out_crash_unack is never touched once the updating gate already blocked");
 
@@ -302,7 +318,7 @@ static void test_relay_on_blocked_precedence_with_multiple_gates_active(void)
     sources = 0;
     updating = false;
     crash_unack = false;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == true, "crash_unack alone -> blocked");
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true, "crash_unack alone -> blocked");
     TEST_CHECK(crash_unack == true, "with safety and updating both clear, crash_unack is reached and reported");
 
     // Reset every stub to its default for any test after this one.
@@ -330,7 +346,8 @@ static void test_relay_on_blocked_danger_mode_bypasses_every_gate(void)
     uint32_t sources = 0;
     bool updating = false;
     bool crash_unack = false;
-    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack) == false,
+    bool mode_blocked = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == false,
                "danger mode bypasses safety+updating+crash_unack all at once -- relay-ON is NOT blocked");
     TEST_CHECK(updating == false, "danger mode's early return never touches out_updating");
     TEST_CHECK(crash_unack == false, "danger mode's early return never touches out_crash_unack");

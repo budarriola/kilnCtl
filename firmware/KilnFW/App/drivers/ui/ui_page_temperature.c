@@ -409,6 +409,12 @@ static void relay_toggle_cb(lv_event_t *e)
         snprintf(msg, sizeof(msg), "Relay %u refused -- unacked crash, ack on Diagnostics",
                  UI_RELAY_DISPLAY(ctx->relay_index));
         break;
+    case DASHBOARD_RELAY_ERR_RUNNING:
+        /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1).
+         * msg is char[64]; "Relay " + up to 3 digits + " refused -- firing/
+         * autotune active" is well under that, fits with room to spare. */
+        snprintf(msg, sizeof(msg), "Relay %u refused -- firing/autotune active", UI_RELAY_DISPLAY(ctx->relay_index));
+        break;
     case DASHBOARD_RELAY_ERR_IO_FAIL:
     default:
         snprintf(msg, sizeof(msg), "Relay %u: command failed", UI_RELAY_DISPLAY(ctx->relay_index));

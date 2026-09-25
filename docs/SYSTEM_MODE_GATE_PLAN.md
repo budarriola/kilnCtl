@@ -215,32 +215,49 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
 
 ### 3.6 Rollout slices
 
-1. **S** — land `system_mode_gate.h`/`.c` with the table above and its host
-   test, unwired (dead code, callable but not called) — proves the shape
-   compiles and the table is legible before any handler changes.
-2. **S** — call `system_mode_gate_check()` inside `profile_executor_run()`'s
-   and `autotune_engine`'s existing single choke points (2.2) purely to
-   retire `recovery_start_refusal.h`'s two HTTP-only call sites, so the
-   recovery-mode reason string in §2.4 stops being HTTP-only. Negative
-   test: force recovery mode in a host test, confirm the UART/LCD path's
-   *reason string* now matches HTTP's, not just the refusal itself. Lowest
-   risk slice — the underlying refusal already happens everywhere; only
-   the message changes.
-3. **M** — wire `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` into `kiln_io_owner`'s
-   single `relay_on_blocked()` choke point (the headline gap, §2.5) —
-   pending the owner's answer to Q1 below on the actual rule (which relays,
-   which run states). Because it's one already-unified choke point serving
-   all three transports, this slice alone closes the gap everywhere at once.
-4. **M** — wire `SYS_ACTION_WRITE_ZONES_CONFIG` into `zones_http.c` (§2.6,
-   no existing check at all) — pending Q2 below.
-5. **S** each — `SYS_ACTION_FACTORY_RESET`, `SYS_ACTION_CFGFS_FORMAT` once
-   their rules are confirmed (Q3 below); each is one table row plus wiring
-   at 1-2 call sites.
-6. **S** — `check_uri_handler_cap.ps1`-style mechanical check (or extend an
-   existing one) confirming every route in a to-be-decided "gated action"
-   allowlist actually calls `system_mode_gate_check()` before doing its
-   mutation, so this doesn't silently rot the way the recovery banner did
-   before `d89256fe`'s audit caught it.
+1. **LANDED** — `system_mode_gate.h`/`.c` with the table above and a host
+   test (`test_system_mode_gate.c`, 27 checks, negative-tested), unwired
+   beyond slice 3 below.
+2. **Deferred, not landed this pass** — call `system_mode_gate_check()`
+   inside `profile_executor_run()`'s and `autotune_engine`'s existing
+   single choke points (2.2) purely to retire `recovery_start_refusal.h`'s
+   two HTTP-only call sites, so the recovery-mode reason string in §2.4
+   stops being HTTP-only. Out of scope for this pass (only slice 3 was
+   requested); the underlying refusal already happens everywhere today, so
+   nothing regresses by deferring this — only the message stays HTTP-only
+   a while longer.
+3. **LANDED** — wired `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` into
+   `kiln_io_owner.c`'s single `relay_on_blocked()` choke point (the
+   headline gap, §2.5), encoding owner decision Q1 above (blanket refusal,
+   any relay, while `profile_running || autotune_running`). Because this is
+   one already-unified choke point, this slice closes the gap for all three
+   transports (HTTP's danger-mode relay route, UART's `SET_RELAY`/
+   `SET_RELAY_MASK`, the LCD's manual override) in one change:
+   `kiln_io_owner.h`'s new `KILN_IO_OWNER_RELAY_ERR_RUNNING`,
+   `dashboard_http.h`'s new `DASHBOARD_RELAY_ERR_RUNNING`, a UART reject
+   reason word `"running"`, and an LCD message
+   ("Relay N refused -- firing/autotune active"). **Finding, not a scope
+   change:** HTTP's only surviving manual-relay route
+   (`POST /api/diagnostics/danger/relay`) is gated by `danger_mode_active()`
+   up front, which bypasses `relay_on_blocked()`'s entire chain including
+   this new check — the same way it already bypasses the update-in-progress
+   and unacknowledged-crash checks. The blanket refusal is real and
+   enforced for UART and the LCD; it is not reachable via HTTP today because
+   HTTP's manual-relay path only exists inside an already-explicit
+   accept-the-risk bench mode.
+4. **Deferred, not landed this pass** — wire `SYS_ACTION_WRITE_ZONES_CONFIG`
+   into `zones_http.c` (§2.6, no existing check at all), per owner decision
+   Q2 above (refuse all zones/config writes while a firing or autotune run
+   is active, not scoped to zones the run touches).
+5. **Deferred, not landed this pass** — `SYS_ACTION_FACTORY_RESET`,
+   `SYS_ACTION_CFGFS_FORMAT`, per owner decision Q3 above (refuse outright
+   while running); each is one table row plus wiring at 1-2 call sites.
+6. **Deferred, not landed this pass** — `check_uri_handler_cap.ps1`-style
+   mechanical check (or extend an existing one) confirming every route in a
+   to-be-decided "gated action" allowlist actually calls
+   `system_mode_gate_check()` before doing its mutation, so this doesn't
+   silently rot the way the recovery banner did before `d89256fe`'s audit
+   caught it.
 
 Each slice lands independently and is negative-tested per COMMON.md/
 IMPLEMENTER.md discipline before merge; no slice depends on a later one.
@@ -257,36 +274,25 @@ IMPLEMENTER.md discipline before merge; no slice depends on a later one.
   wire format.
 - Not touching `route_tier_table.h` or any auth tier.
 
-## 5. Open questions for the owner
+## 5. Owner decisions (2026-09-25)
 
-1. **Manual relay writes during a firing (§2.5's headline gap)** — should a
-   manual relay-ON command be refused outright for a relay the running
-   profile/autotune session currently controls, or only refused for relays
-   *not* in use by the run (leaving, e.g., a spare zone free to hand-drive)?
-   **Recommendation:** refuse outright for any relay claimed by the running
-   profile/autotune session (`kiln_io_owner`'s existing per-relay
-   `RELAY_OWNER_*` claim already tells us which those are — reuse that fact
-   rather than re-deriving it), allow a manual write to an unclaimed relay.
-   This mirrors the existing per-relay ownership model rather than
-   introducing a blanket "no manual relay writes while firing anywhere."
-2. **Zones/config writes during a firing** — should *any* zones config
-   write be refused while a profile is running (mode-level refusal), or
-   should this stay purely value-based (today's guard-5 "is this bound
-   safe" check, no mode check at all)? **Recommendation:** mode-refuse
-   writes to zones actively in use by the running profile, allow writes to
-   zones the running profile doesn't touch — mirrors the existing
-   `SET_FIRING_CEILING` precedent of scoping refusals to what's actually
-   in play rather than a blanket "no writes while firing," and the same
-   shape as Q1's recommendation.
-3. **Factory reset / cfgfs format while firing** — refuse outright, or
-   allow (since these operate on persisted config, not live relay state)?
-   **Recommendation:** refuse outright while `profile_running` or
-   `autotune_running` — both are destructive, irreversible operations with
-   no legitimate reason to run mid-firing, and refusing costs nothing
-   (operator stops the firing first).
-4. **HTTP status code for a mode refusal** — reuse 409 (Conflict, matching
-   the live-profile-edit family's window-violation code) uniformly, or
-   keep OTA's existing 428 for its own interlock and use 409 only for new
-   gate wiring? **Recommendation:** 409 for all new `system_mode_gate`
-   refusals; leave OTA's existing 428 alone rather than reshaping an
-   already-shipped, tested contract for consistency's own sake.
+1. **Manual relay writes during a firing (§2.5's headline gap):**
+   **BLANKET-REFUSE** — any manual relay-ON write (HTTP's danger-mode relay
+   route, the UART bridge's `SET_RELAY`/`SET_RELAY_MASK`, and the LCD's
+   manual override) is refused while a firing or autotune session is
+   active, for ANY relay, not scoped to relays the run actually claims.
+   This is the owner's explicit choice over this doc's own claimed-relays-
+   only recommendation above. **Landed** — see §3.6 slice 3.
+2. **Zones/config writes during a firing:** **REFUSE ALL** — any zones/
+   config write is refused while a firing or autotune session is active,
+   not scoped to zones the run actually touches. Same override of this
+   doc's own scoped recommendation as Q1. **Not landed this pass** — see
+   §3.6 slice 4, deferred.
+3. **Factory reset / cfgfs format while firing:** refuse outright, as
+   recommended. **Not landed this pass** — see §3.6 slice 5, deferred.
+4. **HTTP status code for a mode refusal:** 409 for all new
+   `system_mode_gate` refusals, as recommended; OTA's existing 428
+   interlock is untouched. No new HTTP route was added by slice 3 (it
+   reuses the existing danger-mode relay route), so this has not yet had
+   an HTTP call site to apply to — the first zones/config or factory-reset/
+   cfgfs slice that adds one is where this takes effect.

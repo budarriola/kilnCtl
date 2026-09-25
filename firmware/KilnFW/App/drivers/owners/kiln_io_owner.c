@@ -7,19 +7,23 @@
 
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "autotune_engine.h" /* autotune_engine_is_active() -- see relay_on_blocked() below */
 #include "crash_report.h" /* crash_report_has_unacknowledged() -- see relay_on_blocked() below */
 #include "danger_mode.h" /* danger_mode_active() -- see relay_on_blocked() below */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- previously transitive via ota_http.h */
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
+#include "profile_executor.h" /* profile_executor_get_status() -- see relay_on_blocked() below */
 #include "relay_authority.h"
 #include "stack_margin.h"
+#include "system_mode_gate.h" /* SYS_ACTION_RAW_RELAY_DEBUG_WRITE -- see relay_on_blocked() below */
 
 static const char *TAG = "kiln_io_owner";
 
@@ -193,8 +197,42 @@ static SemaphoreHandle_t s_slot_lock;
  * (crash_report_has_unacknowledged()) rather than crash_report_get() itself
  * -- this function runs on owner_task with no lock held across it, but it is
  * still the single choke point for every relay-ON in the system, so it must
- * never block on NVS I/O the way crash_report_get() would. */
-static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *out_crash_unack)
+ * never block on NVS I/O the way crash_report_get() would.
+ *
+ * out_mode_blocked works the same as out_updating/out_crash_unack above, for
+ * the same reason: docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25
+ * (Q1) -- BLANKET-refuse any manual relay-ON while a firing or autotune run
+ * is active, on all three transports that reach this one choke point.
+ * Checked LAST, after every gate above, so a more specific refusal (safety
+ * fault, update in progress, unacknowledged crash) is still reported first
+ * when more than one applies. danger_mode_active() above skips this too, for
+ * the same "explicit accept-risk bench test" reason it skips the other two. */
+static bool system_mode_gate_blocks_relay(void)
+{
+    /* Heap, not a stack local -- owner_task's stack is small and
+     * profile_exec_status_t is 1384 bytes; same reasoning ota_http.c uses
+     * for the identical struct. Freed immediately after the one field
+     * needed here is copied out. */
+    profile_exec_status_t *pstat =
+        heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!pstat) {
+        /* Could not read the executor's state -- that is not the same as
+         * "no run is active." Fail closed, same as every other "no data ->
+         * treat as blocked" default in this module. */
+        return true;
+    }
+    profile_executor_get_status(pstat);
+    bool profile_running = (pstat->state == PROFILE_EXEC_RUNNING || pstat->state == PROFILE_EXEC_PAUSED);
+    heap_caps_free(pstat);
+
+    sys_mode_snapshot_t snap = {0};
+    snap.profile_running = profile_running;
+    snap.autotune_running = autotune_engine_is_active();
+    return system_mode_gate_check(SYS_ACTION_RAW_RELAY_DEBUG_WRITE, &snap, NULL, 0);
+}
+
+static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *out_crash_unack,
+                              bool *out_mode_blocked)
 {
     /* diagnostics page's explicit-accept danger-mode section (danger_mode.h)
      * -- an operator who ticked the accept-risk box gets every gate below
@@ -232,6 +270,14 @@ static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *ou
         }
         return true;
     }
+    if (system_mode_gate_blocks_relay()) {
+        ESP_LOGW(TAG, "relay-on refused: a firing or autotune run is active -- manual relay control is "
+                      "not available until it ends");
+        if (out_mode_blocked) {
+            *out_mode_blocked = true;
+        }
+        return true;
+    }
     return false;
 }
 
@@ -257,7 +303,7 @@ static bool sx_write_reg_touches_relay_on(uint8_t reg, uint8_t new_byte, uint32_
      * callers specifically), so this call site keeps discarding the
      * updating-vs-safety distinction rather than half-wiring it through a
      * result type that has nowhere to carry it yet. */
-    return relay_on_blocked(out_sources, NULL, NULL);
+    return relay_on_blocked(out_sources, NULL, NULL, NULL);
 }
 
 /* Generalized from the direction-only sx_set_dir_touches_relay() this
@@ -322,9 +368,11 @@ static void handle_set_relay(const owner_cmd_t *cmd, owner_result_t *r)
     if (on) {
         bool updating = false;
         bool crash_unack = false;
-        if (relay_on_blocked(&r->safety_sources, &updating, &crash_unack)) {
+        bool mode_blocked = false;
+        if (relay_on_blocked(&r->safety_sources, &updating, &crash_unack, &mode_blocked)) {
             r->relay_result = updating       ? KILN_IO_OWNER_RELAY_ERR_UPDATING
                                : crash_unack  ? KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK
+                               : mode_blocked ? KILN_IO_OWNER_RELAY_ERR_RUNNING
                                               : KILN_IO_OWNER_RELAY_ERR_SAFETY;
             return;
         }
@@ -348,9 +396,11 @@ static void handle_set_relay_mask(const owner_cmd_t *cmd, owner_result_t *r)
     if (any_on) {
         bool updating = false;
         bool crash_unack = false;
-        if (relay_on_blocked(&r->safety_sources, &updating, &crash_unack)) {
+        bool mode_blocked = false;
+        if (relay_on_blocked(&r->safety_sources, &updating, &crash_unack, &mode_blocked)) {
             r->relay_result = updating       ? KILN_IO_OWNER_RELAY_ERR_UPDATING
                                : crash_unack  ? KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK
+                               : mode_blocked ? KILN_IO_OWNER_RELAY_ERR_RUNNING
                                               : KILN_IO_OWNER_RELAY_ERR_SAFETY;
             return;
         }

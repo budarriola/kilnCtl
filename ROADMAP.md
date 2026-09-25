@@ -1,27 +1,43 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-25, the system-mode gate
-> design landed (pending owner review), two new bench MCP tools
-> (`control_set_zone_limits`, `safety_get_unset_commissioning_params`) landed,
-> and a further LCD-01/LCD-19 harness/firmware review-fix chain landed
-> (thirty-ninth sweep) — open items below.
-> - **System-mode command gate design, 2026-09-25 — DESIGN ONLY, pending owner
->   review, do not implement yet:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
+> landed for manual relay writes (owner decisions recorded, slice 3, review
+> fixes applied), two new bench MCP tools (`control_set_zone_limits`,
+> `safety_get_unset_commissioning_params`) landed, and a further LCD-01/
+> LCD-19 harness/firmware review-fix chain landed (thirty-ninth sweep) —
+> open items below.
+> - **System-mode command gate, 2026-09-25 — owner decisions recorded, slice 3
+>   (manual relay writes) LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
 >   `firmware/KilnFW/TODO.md` 10.14's Phase 6 (a single owning function/table
 >   deciding whether a *class* of command is allowed given current system mode
 >   — firing/autotune/OTA/recovery/safety-tripped/readiness — composed with,
 >   never replacing, the existing owner locks, the OTA/profile mutual
 >   interlock, and `readiness_gate.h`'s firing checklist, which already
->   unifies profile/autotune start refusals across HTTP/UART/LCD). Finds the
->   headline gap: `kiln_io_owner`'s single manual-relay-write choke point
->   (HTTP `/api/relay`, UART `SET_RELAY`/`SET_RELAY_MASK`, LCD manual
->   override) checks safety-trip and the OTA interlock but never
->   `PROFILE_EXEC_RUNNING`/autotune-running — a hand relay flip mid-firing is
->   ungated today even though starting a *new* profile mid-firing is heavily
->   gated. Also: zones/config writes and cfgfs format carry no mode check at
->   all, and recovery-mode's refusal reason is HTTP-only wording (the refusal
->   itself already fires on every transport). Four open questions for the
->   owner are in the doc's §5.
+>   unifies profile/autotune start refusals across HTTP/UART/LCD). `system_mode_
+>   gate.h`/`.c` landed with a host test (negative-tested), and
+>   `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` is wired into `kiln_io_owner.c`'s single
+>   `relay_on_blocked()` choke point: owner decision was **blanket refusal**
+>   (any relay, not scoped to what the run claims) of manual relay-ON while a
+>   firing or autotune session is active, enforced on all three transports —
+>   HTTP's danger-mode relay route (409 Conflict), UART's
+>   `SET_RELAY`/`SET_RELAY_MASK`, and the LCD's manual override.
+>   **Review fix, same day:** `danger_mode_request_start()` only refused an
+>   active profile, not autotune, so danger mode + autotune bypassed the gate
+>   over every transport; `relay_on_blocked()` now runs the mode gate even
+>   when danger mode is active — the one gate danger mode does not skip —
+>   correcting the original claim that this refusal was "not reachable via
+>   HTTP": it is, and refuses with 409. A second review fix moved the
+>   profile/autotune-running read behind a leaf getter
+>   (`relay_authority_heat_run_active()`, under `s_heat_claim_mux` only, no
+>   blocking call inside) to remove a lock-order cycle between `owner_task`
+>   and `profile_executor`/`autotune_engine`'s own tick locks (each tick holds
+>   its own module lock across a call back into `kiln_io_owner.c`, which used
+>   to wait on that same lock from `owner_task`). Owner also decided:
+>   zones/config writes should be refused ALL (not scoped) while running, and
+>   factory reset/cfgfs format should refuse outright while running — neither
+>   is wired yet (plan doc §3.6 slices 4/5, deferred), nor is the recovery-mode
+>   HTTP-only-wording slice 2. See the plan doc's §5 for the full owner
+>   decisions and §3.6 for per-slice status.
 > - **`safety_get_unset_commissioning_params` MCP tool landed, 2026-09-25**
 >   (`397208ba`, review fixes `2d38f97f`): a READ-ONLY MCP tool re-deriving
 >   `readiness_http.h`'s commissioning-required exclusion rule so the
