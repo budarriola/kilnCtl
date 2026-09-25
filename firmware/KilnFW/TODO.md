@@ -1962,33 +1962,13 @@ suspected to be related to this work, was root-caused separately (also in
       (longest/most blocking). OTA's transfer handlers are explicitly
       out-of-scope for migration — they legitimately need to hold a
       streaming HTTP body open across the whole transfer.
-- [ ] **Debug/PC-link UART side** (explicit user request): `uart_bridge.c`'s
-      per-subsystem tasks (THERMO/IO already migrated via the owners above)
-      post commands to an owning task instead of running the dispatch switch
-      body inline. DISPLAY half done: it was dead code and was deleted
-      2026-08-27 rather than migrated (`uart_bridge.h`/`uart_bridge_touch.c`
-      still keep `DISPLAY_CMD_*`/`UART_TASK_ID_DISPLAY` as wire-protocol
-      constants only, since `gui.py`/`actions.py`'s Display panel still
-      speaks them). **2026-09-24 survey**
-      (`docs/UART_BRIDGE_SUBSYSTEM_OWNER_SURVEY_2026-09-24.md`): SYSTEM and
-      INFO need no change (no shared hardware/state to arbitrate); TOUCH's
-      only real risk (`LOG_TAP_TARGETS` walking the live LVGL tree off
-      `lvgl_port_task`) was already fixed by an earlier, unrelated panic fix
-      (2026-09-19) in exactly this shape; WIFI/SAFETY already route through
-      `wifi_prov.c`/`safety_link.c`, which implement the same post-and-wait
-      or lock-protected-cache shape internally. Remaining open item:
-      UI_TEST's `LIST_TAP_TARGETS`/`CLICK_BY_NAME` (`uart_bridge_ui_test.c`)
-      walked the live LVGL tree directly on `ui_test_bridge_task`'s own
-      thread, the same class of bug TOUCH already had fixed -- **fixed
-      2026-09-24**: both now go through `lvgl_port_collect_tap_targets()`
-      (`lvgl_port.h`/`.c`), a bounded-wait, reply-carrying dispatch onto
-      `lvgl_port_task` (kept as a separate mechanism from `lvgl_port_
-      request_tap_dump()`'s fire-and-forget shape since these two callers
-      need the actual target list/match result back). Only the tree lookup
-      moved: `kiln_ui_click_by_name()`'s injection/verdict-wait/release half
-      is unchanged and still runs on the calling task, since moving the
-      verdict wait onto `lvgl_port_task` would block the very task that
-      produces the verdict.
+- [x] **Debug/PC-link UART side** (explicit user request): closed
+      2026-09-24 -- TOUCH and UI_TEST (`LIST_TAP_TARGETS`/`CLICK_BY_NAME`)
+      both route their LVGL tree walk through `lvgl_port_collect_tap_targets()`
+      on `lvgl_port_task`; SYSTEM/INFO need no owner (no shared state) and
+      WIFI/SAFETY already route through `wifi_prov.c`/`safety_link.c`. DISPLAY
+      was dead code, deleted 2026-08-27. See
+      `docs/UART_BRIDGE_SUBSYSTEM_OWNER_SURVEY_2026-09-24.md`.
 - [x] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
       owner (1/2/4) each handler calls into — not a separate final phase.
       Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`'s audit found
