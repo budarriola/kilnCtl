@@ -777,8 +777,21 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
      * array is fine for a call that never recurses and never runs
      * concurrently with itself (one UART bridge task, one command at a
      * time). */
+    /* Dispatched onto lvgl_port_task (lvgl_port_collect_tap_targets())
+     * rather than calling kiln_ui_collect_tap_targets() directly here on
+     * this task's own thread -- see kiln_ui_collect_tap_targets()'s own doc
+     * comment for the bug class this fixes and lvgl_port.c's definition
+     * comment for the mechanism. Only the tree lookup moves: everything
+     * below (matching, injection, the verdict wait, release) still runs
+     * here, unchanged, on the calling task -- moving the verdict wait onto
+     * lvgl_port_task would block the very task that produces the verdict.
+     * A dispatch timeout here (lvgl_port_task itself wedged or merely
+     * behind) surfaces as n == 0, i.e. no targets found, which the match
+     * loop below already treats as KILN_UI_CLICK_NOT_FOUND -- indistinguishable
+     * from a genuinely absent name, which is the correct, fail-safe verdict
+     * for "could not confirm this target exists" (never a false click). */
     kiln_ui_tap_target_t targets[32];
-    size_t n = kiln_ui_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]), NULL);
+    size_t n = lvgl_port_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]), NULL);
 
     /* Prefer a visible match over a hidden one: a page that show/hides
      * sibling buttons with the same name (a modal's own trigger button,

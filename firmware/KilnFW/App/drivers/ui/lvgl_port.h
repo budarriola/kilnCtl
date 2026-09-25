@@ -37,6 +37,7 @@
 #include "esp_err.h"
 #include "lvgl.h" /* lv_indev_t, for lvgl_port_get_indev() */
 
+#include "kiln_ui.h" /* kiln_ui_tap_target_t, for lvgl_port_collect_tap_targets() */
 #include "panel_spi.h"
 #include "screen_idle.h"
 #include "touch_dev.h"
@@ -230,6 +231,29 @@ bool lvgl_port_get_inject_verdict(uint32_t seq, bool *out_swallowed);
  * from (see this file's header comment); routing the walk through it makes
  * that true here too, not just for every other lv_* caller. */
 void lvgl_port_request_tap_dump(void);
+
+/* Cross-task equivalent of kiln_ui_collect_tap_targets(), for a caller that
+ * needs the actual list back rather than a fire-and-forget log dump (see
+ * lvgl_port.c's definition comment for the full design, and this fix's
+ * history: uart_bridge_ui_test.c's UI_TEST_CMD_LIST_TAP_TARGETS and kiln_ui_
+ * click_by_name() used to call kiln_ui_collect_tap_targets() directly from a
+ * task other than lvgl_port_task -- the same bug class TOUCH_CMD_LOG_TAP_
+ * TARGETS hit before lvgl_port_request_tap_dump() above fixed it). Dispatches
+ * the walk onto lvgl_port_task and blocks the calling task (never lvgl_port_
+ * task itself) for up to UI_WALK_WAIT_TIMEOUT_MS (300 ms, several lvgl_port_
+ * task poll periods) waiting for it to run.
+ *
+ * Same signature and truncation contract as kiln_ui_collect_tap_targets():
+ * writes up to `max` entries into `out` (a caller-owned buffer, copied into
+ * from an internal static result buffer only on a confirmed completion) and
+ * returns the count actually written. If lvgl_port_task does not service the
+ * request within the wait window -- itself stuck, or merely behind -- this
+ * returns 0 with `*truncated` set true (if non-NULL) rather than blocking
+ * indefinitely; the request is NOT cancelled and is still serviced whenever
+ * lvgl_port_task next gets a turn, but this call does not wait for that.
+ * Callers must treat a 0-with-truncated-true result the same as "no answer
+ * available", never as "zero targets exist". Safe to call from any task. */
+size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated);
 
 /* Pull-based touch/input diagnostics -- see the s_input_enabled /
  * s_touch_read_cb_count / s_injected_delivered_count declaration comment in

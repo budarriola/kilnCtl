@@ -81,12 +81,27 @@ static void ui_test_bridge_task(void *arg)
                  * (length-prefixed name + 5 more bytes) as it's collected
                  * would tangle kiln_ui.c's tree walk with this file's byte
                  * layout for no benefit -- the walk is already bounded (see
-                 * kiln_ui.h's doc comment) so the extra copy is cheap. */
+                 * kiln_ui.h's doc comment) so the extra copy is cheap.
+                 *
+                 * Dispatched onto lvgl_port_task (lvgl_port_collect_tap_
+                 * targets()) rather than calling kiln_ui_collect_tap_targets()
+                 * directly here on ui_test_bridge_task's own thread -- that
+                 * direct call used to walk the live LVGL tree off lvgl_port_
+                 * task, the same bug class TOUCH_CMD_LOG_TAP_TARGETS hit
+                 * (IllegalInstruction panic, 2026-09-19) before lvgl_port_
+                 * request_tap_dump() fixed it; this command needs the actual
+                 * list back, not a fire-and-forget dump, hence the new
+                 * bounded-wait dispatcher instead of reusing that one. A
+                 * dispatch timeout (lvgl_port_task itself wedged or merely
+                 * behind) reports the same way a genuinely truncated walk
+                 * would -- count 0, truncated true -- rather than a distinct
+                 * wire shape; see lvgl_port_collect_tap_targets()'s own doc
+                 * comment. */
                 kiln_ui_tap_target_t targets[32];
                 bool collect_truncated = false;
-                size_t n = kiln_ui_collect_tap_targets(targets,
-                                                       sizeof(targets) / sizeof(targets[0]),
-                                                       &collect_truncated);
+                size_t n = lvgl_port_collect_tap_targets(targets,
+                                                         sizeof(targets) / sizeof(targets[0]),
+                                                         &collect_truncated);
 
                 reply[0] = UI_TEST_CMD_LIST_TAP_TARGETS;
                 size_t o = 3; /* byte1 (count), byte2 (truncated) filled in once the wire-fit

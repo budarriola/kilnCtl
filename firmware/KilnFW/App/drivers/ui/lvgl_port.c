@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- s_ui_walk_targets */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h" /* esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback below --
@@ -929,6 +930,117 @@ void lvgl_port_request_tap_dump(void)
     s_tap_dump_requested = true;
 }
 
+/* --- Cross-task tap-target collection (kiln_ui_collect_tap_targets()) ------
+ * uart_bridge_ui_test.c's UI_TEST_CMD_LIST_TAP_TARGETS handler and kiln_ui.c's
+ * own kiln_ui_click_by_name() used to call kiln_ui_collect_tap_targets()
+ * directly from ui_test_bridge_task, walking the live LVGL tree from a task
+ * other than lvgl_port_task -- the same bug class TOUCH_CMD_LOG_TAP_TARGETS
+ * hit (IllegalInstruction panic, 2026-09-19, fixed by
+ * lvgl_port_request_tap_dump() above) and one kiln_ui.h's own doc comment on
+ * kiln_ui_collect_tap_targets() named as a known, unresolved gap at the time
+ * of that fix. This mirrors that fix's shape but needs an actual reply --
+ * the caller wants the target list back, not a fire-and-forget log dump --
+ * so a bounded-wait completion semaphore is added rather than reusing the
+ * plain boolean flag alone.
+ *
+ * The result buffer (s_ui_walk_targets) is a static array OWNED by this
+ * file, in PSRAM (EXT_RAM_BSS_ATTR, so it costs nothing against the
+ * internal-DRAM .dram0.bss ceiling this file's other statics share), not a
+ * pointer into the caller's own stack frame: a caller that gives up on the
+ * bounded wait below (lvgl_port_task itself is wedged, or just slow) must
+ * never leave lvgl_port_task free to keep writing into a stack frame that
+ * has since been reused for something else. Results are copied into the
+ * caller's `out` array only after a confirmed, non-timed-out completion.
+ *
+ * s_ui_walk.lock serializes callers (this module has exactly two: the
+ * UI_TEST bridge task and kiln_ui_click_by_name(), and per that function's
+ * own doc comment only one UART command runs at a time, so contention here
+ * is not expected in practice, but the lock makes it safe by construction
+ * rather than by convention). s_ui_walk.done is a binary semaphore lvgl_
+ * port_task gives exactly once per serviced request; a caller drains any
+ * stale "done" signal (non-blocking take) before issuing a new request, so
+ * a signal left over from a request its own earlier caller abandoned to a
+ * timeout can never be mistaken for the new request's completion. */
+#define UI_WALK_MAX_TARGETS 32
+#define UI_WALK_LOCK_TIMEOUT_MS 1000u
+#define UI_WALK_WAIT_TIMEOUT_MS 300u /* several lvgl_port_task poll periods
+                                      * (~50ms typical, see lvgl_port_task()
+                                      * below) -- comfortably under ui_test_
+                                      * client.py's DEFAULT_REPLY_TIMEOUT_S
+                                      * (2.0s), with margin left over for the
+                                      * reply's own UART encode/send time. */
+typedef struct {
+    SemaphoreHandle_t lock; /* guards requested/out_max while a request is
+                             * being issued or serviced */
+    SemaphoreHandle_t done; /* given by lvgl_port_task once a request is
+                             * serviced; taken by the requester */
+    volatile bool requested;
+    size_t out_max;
+    size_t out_count;
+    bool out_truncated;
+} ui_walk_req_t;
+
+static ui_walk_req_t s_ui_walk;
+static EXT_RAM_BSS_ATTR kiln_ui_tap_target_t s_ui_walk_targets[UI_WALK_MAX_TARGETS];
+
+size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated)
+{
+    if (truncated) {
+        *truncated = false;
+    }
+    if (!out || max == 0 || !s_ui_walk.lock || !s_ui_walk.done) {
+        return 0;
+    }
+    if (max > UI_WALK_MAX_TARGETS) {
+        max = UI_WALK_MAX_TARGETS;
+    }
+    if (xSemaphoreTake(s_ui_walk.lock, pdMS_TO_TICKS(UI_WALK_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        /* Another caller is mid-request and this one timed out waiting its
+         * turn -- report exactly the same shape as a dispatch timeout below
+         * (empty, truncated) rather than a distinct failure mode; either way
+         * the caller got no list and must not treat it as "zero targets". */
+        if (truncated) {
+            *truncated = true;
+        }
+        return 0;
+    }
+
+    /* Drain a stale completion left by an earlier, abandoned (timed-out)
+     * request before issuing this one -- see this block's header comment. */
+    (void)xSemaphoreTake(s_ui_walk.done, 0);
+
+    s_ui_walk.out_max = max;
+    s_ui_walk.out_count = 0;
+    s_ui_walk.out_truncated = false;
+    s_ui_walk.requested = true; /* set last: lvgl_port_task must see out_max
+                                 * already valid once it observes this */
+
+    size_t n = 0;
+    bool was_truncated = true;
+    if (xSemaphoreTake(s_ui_walk.done, pdMS_TO_TICKS(UI_WALK_WAIT_TIMEOUT_MS)) == pdTRUE) {
+        n = s_ui_walk.out_count;
+        was_truncated = s_ui_walk.out_truncated;
+        if (n > max) {
+            n = max; /* defensive; lvgl_port_task already clamps to out_max */
+        }
+        memcpy(out, s_ui_walk_targets, n * sizeof(out[0]));
+    } else {
+        /* lvgl_port_task never serviced this within the wait window (it is
+         * itself stuck, or simply behind). s_ui_walk.requested is left set
+         * on purpose -- lvgl_port_task will still service it whenever it
+         * next gets a turn, and the drain-before-issue above is what keeps
+         * that late completion from corrupting the NEXT caller's result. */
+        n = 0;
+        was_truncated = true;
+    }
+
+    xSemaphoreGive(s_ui_walk.lock);
+    if (truncated) {
+        *truncated = was_truncated;
+    }
+    return n;
+}
+
 static void lvgl_port_task(void *arg)
 {
     (void)arg;
@@ -942,6 +1054,15 @@ static void lvgl_port_task(void *arg)
              * clear-after-call that would stomp on it. */
             s_tap_dump_requested = false;
             kiln_ui_log_tap_targets();
+        }
+        if (s_ui_walk.requested) {
+            s_ui_walk.requested = false;
+            bool walk_truncated = false;
+            size_t n = kiln_ui_collect_tap_targets(s_ui_walk_targets, s_ui_walk.out_max,
+                                                    &walk_truncated);
+            s_ui_walk.out_count = n;
+            s_ui_walk.out_truncated = walk_truncated;
+            xSemaphoreGive(s_ui_walk.done);
         }
         s_timer_handler_calls++;
         uint32_t sleep_ms = lv_timer_handler();
@@ -973,6 +1094,14 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
     s_inject.lock = xSemaphoreCreateMutex();
     if (!s_inject.lock) {
         ESP_LOGE(TAG, "xSemaphoreCreateMutex (touch inject) failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    memset(&s_ui_walk, 0, sizeof(s_ui_walk));
+    s_ui_walk.lock = xSemaphoreCreateMutex();
+    s_ui_walk.done = xSemaphoreCreateBinary();
+    if (!s_ui_walk.lock || !s_ui_walk.done) {
+        ESP_LOGE(TAG, "xSemaphoreCreate (ui walk) failed");
         return ESP_ERR_NO_MEM;
     }
 

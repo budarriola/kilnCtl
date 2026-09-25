@@ -149,17 +149,22 @@ typedef struct {
  * written. If the walk finds more than `max` targets, `*truncated` (may be
  * NULL) is set true and the rest are dropped -- callers sizing `out` for a
  * wire reply should check it rather than assume `out` saw everything.
- * Called directly from UART_TASK_ID_UI_TEST's own task
- * (ui_test_uart_bridge, uart_bridge_ui_test.c, 8192 B stack), NOT marshalled
- * onto lvgl_port_task the way kiln_ui_log_tap_targets() now is (see that
- * function's declaration comment and lvgl_port_request_tap_dump()) -- this
- * function still reads live LVGL objects from a task other than LVGL's
- * sole owner. That pre-existing thread-safety gap was fixed for the
- * TOUCH_CMD_LOG_TAP_TARGETS path in 3f86e899 but NOT here: this task's
- * generous 8192 B stack (sized for kiln_ui_click_by_name()'s own locals,
- * see that task's creation comment) means it isn't at risk of the stack
- * overflow that motivated that fix, but the underlying race with
- * lvgl_port_task mutating the same tree concurrently is unresolved. */
+ * This function itself still reads live LVGL objects and so must still only
+ * ever be CALLED from lvgl_port_task, same as any other lv_* reader -- but
+ * as of the 2026-09-24 uart_bridge_ui_test owner-task fix, neither of its
+ * two real callers (UI_TEST_CMD_LIST_TAP_TARGETS in uart_bridge_ui_test.c,
+ * and kiln_ui_click_by_name() below) calls it directly from their own task
+ * any more. Both now go through lvgl_port_collect_tap_targets()
+ * (lvgl_port.h), which dispatches the call onto lvgl_port_task and blocks
+ * the ORIGINAL caller (never lvgl_port_task itself) on a bounded-wait
+ * completion -- the same shape lvgl_port_request_tap_dump() uses for
+ * kiln_ui_log_tap_targets(), extended with a reply since these two callers
+ * need the actual target list/match result back, not just a fire-and-forget
+ * dump. This closes the pre-existing thread-safety gap the 3f86e899
+ * TOUCH_CMD_LOG_TAP_TARGETS fix left open here (see that fix's own history
+ * for the IllegalInstruction panic it fixed on the sibling path). This
+ * function's own body is unchanged -- lvgl_port.c's dispatcher calls this
+ * exact function, from lvgl_port_task, when servicing a request. */
 size_t kiln_ui_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated);
 
 typedef enum {

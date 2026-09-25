@@ -1974,10 +1974,18 @@ suspected to be related to this work, was root-caused separately (also in
       (2026-09-19) in exactly this shape; WIFI/SAFETY already route through
       `wifi_prov.c`/`safety_link.c`, which implement the same post-and-wait
       or lock-protected-cache shape internally. Remaining open item:
-      UI_TEST's `LIST_TAP_TARGETS`/`CLICK_BY_NAME` still walk the live LVGL
-      tree directly on `ui_test_bridge_task`'s own thread, the same class of
-      bug TOUCH already had fixed -- give these the same
-      `lvgl_port_request_*()`-into-`lvgl_port_task` treatment.
+      UI_TEST's `LIST_TAP_TARGETS`/`CLICK_BY_NAME` (`uart_bridge_ui_test.c`)
+      walked the live LVGL tree directly on `ui_test_bridge_task`'s own
+      thread, the same class of bug TOUCH already had fixed -- **fixed
+      2026-09-24**: both now go through `lvgl_port_collect_tap_targets()`
+      (`lvgl_port.h`/`.c`), a bounded-wait, reply-carrying dispatch onto
+      `lvgl_port_task` (kept as a separate mechanism from `lvgl_port_
+      request_tap_dump()`'s fire-and-forget shape since these two callers
+      need the actual target list/match result back). Only the tree lookup
+      moved: `kiln_ui_click_by_name()`'s injection/verdict-wait/release half
+      is unchanged and still runs on the calling task, since moving the
+      verdict wait onto `lvgl_port_task` would block the very task that
+      produces the verdict.
 - [x] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
       owner (1/2/4) each handler calls into — not a separate final phase.
       Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`'s audit found
