@@ -1965,7 +1965,18 @@ suspected to be related to this work, was root-caused separately (also in
       2026-08-27 rather than migrated (`uart_bridge.h`/`uart_bridge_touch.c`
       still keep `DISPLAY_CMD_*`/`UART_TASK_ID_DISPLAY` as wire-protocol
       constants only, since `gui.py`/`actions.py`'s Display panel still
-      speaks them); the remaining subsystem migration above stays open.
+      speaks them). **2026-09-24 survey**
+      (`docs/UART_BRIDGE_SUBSYSTEM_OWNER_SURVEY_2026-09-24.md`): SYSTEM and
+      INFO need no change (no shared hardware/state to arbitrate); TOUCH's
+      only real risk (`LOG_TAP_TARGETS` walking the live LVGL tree off
+      `lvgl_port_task`) was already fixed by an earlier, unrelated panic fix
+      (2026-09-19) in exactly this shape; WIFI/SAFETY already route through
+      `wifi_prov.c`/`safety_link.c`, which implement the same post-and-wait
+      or lock-protected-cache shape internally. Remaining open item:
+      UI_TEST's `LIST_TAP_TARGETS`/`CLICK_BY_NAME` still walk the live LVGL
+      tree directly on `ui_test_bridge_task`'s own thread, the same class of
+      bug TOUCH already had fixed -- give these the same
+      `lvgl_port_request_*()`-into-`lvgl_port_task` treatment.
 - [x] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
       owner (1/2/4) each handler calls into — not a separate final phase.
       Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`'s audit found
