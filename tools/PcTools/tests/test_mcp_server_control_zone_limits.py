@@ -3,7 +3,7 @@
 tool that writes ONLY a zone's max_temp_c/min_temp_c over the GET-merge-POST
 /api/zones path, without touching PID gains/control_mode/etc the way
 load_config_preset() does. All against mocked zones_http_client/
-safety_cfg_http_client/profiles/autotune calls; no real socket, no live
+profiles/autotune calls; no real socket, no live
 board.
 
 Run with: python -m pytest tools/PcTools/tests/test_mcp_server_control_zone_limits.py -q
@@ -21,7 +21,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kilnctrl import mcp_server_ota  # noqa: E402
 from kilnctrl import mcp_server_control as mc  # noqa: E402
 from kilnctrl import zones_http_client  # noqa: E402
-from kilnctrl import safety_cfg_http_client  # noqa: E402
 
 
 def _zone(index, **overrides):
@@ -52,22 +51,12 @@ def _idle_autotune_status():
     return unittest.mock.Mock(state=0, state_name="idle", zone=0)
 
 
-def _commissioning(abs_max_value=200.0, set_=True, reliable=True):
-    return {
-        "unset_reporting_reliable": reliable,
-        "params": [
-            {"name": "abs_max_temp_c", "value": abs_max_value, "set": set_},
-        ],
-    }
-
-
 class _Base(unittest.TestCase):
     def setUp(self):
         self._patches = [
             unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5"),
             unittest.mock.patch.object(mc._srv._profiles, "get_exec_status", return_value=_idle_exec_status()),
             unittest.mock.patch.object(mc._srv._autotune, "get_status", return_value=_idle_autotune_status()),
-            unittest.mock.patch.object(safety_cfg_http_client, "get_commissioning", return_value=_commissioning()),
         ]
         for p in self._patches:
             p.start()
@@ -114,6 +103,12 @@ class RunningRefusalTest(_Base):
             result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
         self.assertIn("refused", result.lower())
 
+    def test_unknown_profile_state_refuses(self):
+        with unittest.mock.patch.object(mc._srv._profiles, "get_exec_status",
+                                         return_value=unittest.mock.Mock(state_name="unknown(9)", profile_id=0, name="")):
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
+        self.assertIn("refused", result.lower())
+
     def test_running_autotune_refuses(self):
         with unittest.mock.patch.object(mc._srv._autotune, "get_status",
                                          return_value=unittest.mock.Mock(state=2, state_name="stepping", zone=1)):
@@ -138,28 +133,70 @@ class ZoneRangeTest(_Base):
         self.assertIn("min_temp_c", result)
 
 
-class AbsMaxRefusalTest(_Base):
-    def test_max_above_abs_max_refused(self):
-        before = _snapshot([_zone(0, max_temp_c=36.4)])
-        with unittest.mock.patch.object(zones_http_client, "get_zones", return_value=before), \
-             unittest.mock.patch.object(safety_cfg_http_client, "get_commissioning",
-                                         return_value=_commissioning(abs_max_value=100.0)), \
-             unittest.mock.patch.object(zones_http_client, "post_zones") as post_mock:
-            result = mc.control_set_zone_limits(zone=0, max_temp_c=150.0, confirm=True)
-        self.assertIn("refused", result.lower())
-        self.assertIn("abs_max_temp_c", result)
-        post_mock.assert_not_called()
+class SafetyCeilingTest(_Base):
+    """The Pico's abs_max_temp_c is DERIVED from the zone maxima by the
+    firmware (safety_ceiling_policy.h), which raises it Pico-first and 409s
+    the POST if it can't -- so the tool must not refuse a raise client-side,
+    must surface the 409 clearly, and must warn when the Pico != target."""
 
-    def test_abs_max_unset_does_not_block(self):
+    def test_raise_above_current_ceiling_is_not_refused_client_side(self):
         before = _snapshot([_zone(0, max_temp_c=36.4)])
-        after = _snapshot([_zone(0, max_temp_c=500.0)])
+        before["safety_ceiling"] = {"target_c": 36.4, "pico_known": True, "pico_current_c": 36.4}
+        before["generation"] = 6
+        after = copy.deepcopy(before)
+        after["zones"][0]["max_temp_c"] = 80.0
+        after["safety_ceiling"] = {"target_c": 80.0, "pico_known": True, "pico_current_c": 80.0}
+        after["generation"] = 7  # firmware-derived, moves on every commit -- not collateral
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(safety_cfg_http_client, "get_commissioning",
-                                         return_value=_commissioning(set_=False)), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok") as post_mock:
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
+        post_mock.assert_called_once()
+        self.assertTrue(result.startswith("ok - zone 0"), result)
+        self.assertNotIn("WARNING", result)
+
+    def test_dry_run_reports_derived_raise(self):
+        before = _snapshot([_zone(0, max_temp_c=36.4)])
+        with unittest.mock.patch.object(zones_http_client, "get_zones", return_value=before):
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0)
+        self.assertIn("DRY RUN", result)
+        self.assertIn("RAISE", result)
+
+    def test_firmware_409_ceiling_raise_failed_is_surfaced(self):
+        before = _snapshot([_zone(0, max_temp_c=36.4)])
+        err = zones_http_client.ZonesHttpError(
+            "POST /api/zones refused: HTTP 409", 409,
+            '{"ok":false,"error":"safety_ceiling_raise_failed","reason":"relay is ARMED"}')
+        with unittest.mock.patch.object(zones_http_client, "get_zones", return_value=before), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "post_zones", side_effect=err):
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
+        self.assertTrue(result.startswith("refused"), result)
+        self.assertIn("UNCHANGED", result)
+        self.assertIn("ARMED", result)
+
+    def test_pico_ceiling_mismatch_after_write_warns(self):
+        before = _snapshot([_zone(0, max_temp_c=80.0)])
+        after = copy.deepcopy(before)
+        after["zones"][0]["max_temp_c"] = 60.0
+        # lowering landed on the ESP; the Pico's best-effort lower did not
+        after["safety_ceiling"] = {"target_c": 60.0, "pico_known": True, "pico_current_c": 80.0}
+        with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
              unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
-            result = mc.control_set_zone_limits(zone=0, max_temp_c=500.0, confirm=True)
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=60.0, confirm=True)
         self.assertIn("ok - zone 0", result)
+        self.assertIn("WARNING", result)
+        self.assertIn("safety_ceiling_match", result)
+
+    def test_max_zero_or_nonfinite_refused_before_any_io(self):
+        with unittest.mock.patch.object(zones_http_client, "get_zones") as get_mock:
+            for bad in (0.0, -5.0, float("nan"), float("inf")):
+                result = mc.control_set_zone_limits(zone=0, max_temp_c=bad, confirm=True)
+                self.assertTrue(result.startswith("refused"), (bad, result))
+            result = mc.control_set_zone_limits(zone=0, min_temp_c=float("nan"), confirm=True)
+            self.assertTrue(result.startswith("refused"), result)
+        get_mock.assert_not_called()
 
 
 class HappyPathTest(_Base):
@@ -243,6 +280,19 @@ class CollateralChangeTest(_Base):
         self.assertIn("FAILED", result)
         self.assertIn("zone 1", result)
         self.assertIn("control_mode", result)
+
+    def test_top_level_config_change_fails_loud(self):
+        before = _snapshot([_zone(0, max_temp_c=36.4)])
+        before["timing_profiles"] = [{"index": 0, "name": "default", "ramp_lock_band_c": 25.0}]
+        after = copy.deepcopy(before)
+        after["zones"][0]["max_temp_c"] = 80.0
+        after["timing_profiles"][0]["ramp_lock_band_c"] = 0.0
+        with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
+        self.assertIn("FAILED", result)
+        self.assertIn("timing_profiles", result)
 
 
 if __name__ == "__main__":

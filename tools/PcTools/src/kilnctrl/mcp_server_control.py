@@ -490,7 +490,9 @@ def _profile_or_autotune_running_reason() -> Optional[str]:
         st = _srv._profiles.get_exec_status()
     except ProfilesQueryError as exc:
         return f"could not read profile exec status ({exc}) -- refusing to guess"
-    if st.state_name in ("running", "paused"):
+    # Allow-list, fail closed: anything but idle/done/faulted (running,
+    # paused, or an unknown(N) state from newer firmware) refuses.
+    if st.state_name not in ("idle", "done", "faulted"):
         return f"a profile is currently {st.state_name} (#{st.profile_id} {st.name!r})"
     try:
         at = _srv._autotune.get_status()
@@ -504,33 +506,68 @@ def _profile_or_autotune_running_reason() -> Optional[str]:
     return None
 
 
-def _read_abs_max_temp_c(host: str) -> "tuple[Optional[float], str]":
-    """Fetch the safety processor's independent overtemp ceiling
-    (abs_max_temp_c, S1, safety_cfg_store.h param id 0x0104) over GET
-    /api/safety/commissioning -- the same field mcp_server_safety.py's
-    _describe_commissioning() renders as "S1 abs_max_temp_c=...". Returns
-    (value_or_None, a human-readable description). None means "no active
-    ceiling to compare against": either the fetch failed, or the field is
-    genuinely unset/<=0, which leaves S1 DORMANT (never trips) per
-    safety_guards.c's own `if (cfg->abs_max_temp_c > 0.0f)` gate -- treating
-    that as a hard 0-degree limit here would be inventing a constraint the
-    firmware itself does not enforce."""
-    try:
-        data = safety_cfg_http_client.get_commissioning(host)
-    except safety_cfg_http_client.SafetyCfgHttpError as exc:
-        return None, f"abs_max_temp_c unknown (GET /api/safety/commissioning failed: {exc})"
-    params = {p["name"]: p for p in data.get("params", []) if "name" in p}
-    reliable = bool(data.get("unset_reporting_reliable"))
-    p = params.get("abs_max_temp_c")
-    if p is None:
-        return None, "abs_max_temp_c not reported by this board's commissioning response"
-    is_set = bool(p.get("set")) and reliable
-    if not is_set:
-        return None, "abs_max_temp_c unset/not commissioned (S1 dormant, never trips)"
-    value = float(p.get("value", 0.0))
-    if value <= 0.0:
-        return None, f"abs_max_temp_c={value:g} (<=0, S1 dormant, never trips)"
-    return value, f"abs_max_temp_c={value:g}C (S1 ARMED)"
+# Top-level GET /api/zones keys that are firmware-derived telemetry, not
+# config this tool could have posted: they may legitimately change between
+# the before/after snapshots (generation bumps on every commit; safety_ceiling
+# is recomputed from the new zone maxima BY DESIGN when max_temp_c changes;
+# safety_tc_type(_known) is a Pico readback that can land at any moment), so
+# they are excluded from the collateral diff rather than producing a false
+# FAILED. Everything else at top level -- thermo_count, relay_count,
+# timing_profiles, relay_names, relay_types, pc_link_abort_silence_ms, ... --
+# rides the same whole-page POST and IS compared.
+_ZONE_LIMITS_TOP_TELEMETRY_KEYS = frozenset({
+    "generation", "safety_ceiling", "safety_tc_type", "safety_tc_type_known",
+    "ct_warn_mask", "safety_wiring", "relay_zone_owned_mask",
+    "on_off_hyst_c_default", "on_off_min_on_off_s_default",
+})
+# Per-zone measured telemetry with no POST field (a CT sweep can update it
+# independently of this write).
+_ZONE_LIMITS_ZONE_TELEMETRY_KEYS = frozenset({"normal_current_measured", "normal_current_a"})
+
+
+def _ceiling_target_from_zones(snapshot: dict) -> "Optional[float]":
+    """The Pico abs_max_temp_c target the firmware derives from a zones
+    snapshot -- safety_ceiling_policy_target_c(): max over zones with index <
+    thermo_count of max_temp_c, ignoring any <= 0. None when no zone
+    qualifies ("no ceiling opinion": firmware leaves the Pico untouched)."""
+    count = snapshot.get("thermo_count")
+    best: "Optional[float]" = None
+    for z in snapshot.get("zones") or []:
+        idx = z.get("index")
+        if isinstance(count, int) and isinstance(idx, int) and idx >= count:
+            continue
+        v = z.get("max_temp_c")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 and (best is None or v > best):
+            best = float(v)
+    return best
+
+
+def _describe_safety_ceiling(snapshot: dict) -> "tuple[str, Optional[str]]":
+    """(description, mismatch_warning_or_None) for GET /api/zones' own
+    read-only safety_ceiling block ({target_c, pico_known, pico_current_c}).
+    On this firmware the Pico's abs_max_temp_c is NOT an independent limit:
+    POST /api/zones derives it from the zone maxima and raises the Pico FIRST
+    (409 if that raise can't be confirmed, e.g. Pico ARMED) or lowers it
+    best-effort AFTER commit. The owner rule is that the two must be EQUAL;
+    a persistent gap is what readiness item safety_ceiling_match blocks
+    firing on. This tool cannot close that gap itself, so it reports it."""
+    sc = snapshot.get("safety_ceiling")
+    if not isinstance(sc, dict):
+        return "safety_ceiling not reported by GET /api/zones", None
+    target = sc.get("target_c")
+    known = bool(sc.get("pico_known"))
+    pico = sc.get("pico_current_c")
+    if not known:
+        return (f"safety ceiling target={target!r}C, Pico ceiling not yet confirmed this boot",
+                "the Pico's abs_max_temp_c has not been confirmed this boot, so equality with the "
+                "zone-derived target cannot be verified")
+    desc = f"safety ceiling target={target!r}C, Pico abs_max_temp_c={pico!r}C"
+    if (isinstance(target, (int, float)) and isinstance(pico, (int, float)) and target > 0
+            and abs(float(target) - float(pico)) > 0.05):
+        return desc, (f"Pico abs_max_temp_c ({pico:g}C) != zone-derived target ({target:g}C) -- "
+                      f"the firmware's ceiling sync did not land (typically the Pico was ARMED); "
+                      f"readiness item safety_ceiling_match blocks firing until it is reconciled")
+    return desc, None
 
 
 def _zone_by_index(zones: "list[dict]", index: int) -> "Optional[dict]":
@@ -541,17 +578,25 @@ def _zone_by_index(zones: "list[dict]", index: int) -> "Optional[dict]":
 
 
 def _zone_collateral_diff(
-    before_zones: "list[dict]", after_zones: "list[dict]", zone: int, changed: "set[str]",
+    before: dict, after: dict, zone: int, changed: "set[str]",
 ) -> "list[str]":
-    """Compare every zone dict in `before_zones` against its counterpart in
-    `after_zones` (matched by "index") and report any field that changed
-    other than the ones this tool deliberately changed on `zone` -- PID
-    gains, control_mode, relay_mask, ramp rate, coupling, every field of
-    every OTHER zone, all of it. A zone present in one snapshot and missing
-    from the other is itself reported rather than silently skipped."""
+    """Compare the before/after GET /api/zones snapshots and report any
+    field that changed other than the ones this tool deliberately changed on
+    `zone`: every field of every zone (PID gains, control_mode, relay_mask,
+    ramp rate, coupling, ...) and every top-level config field the same
+    whole-page POST carries (thermo_count, relay_count, timing_profiles,
+    relay_names, ...). Firmware-derived telemetry
+    (_ZONE_LIMITS_TOP_TELEMETRY_KEYS/_ZONE_LIMITS_ZONE_TELEMETRY_KEYS) is
+    skipped -- see those sets for why. A zone present in one snapshot and
+    missing from the other is itself reported rather than silently skipped."""
     diffs: "list[str]" = []
-    before_by_idx = {z.get("index"): z for z in before_zones}
-    after_by_idx = {z.get("index"): z for z in after_zones}
+    for key in sorted(set(before) | set(after)):
+        if key == "zones" or key in _ZONE_LIMITS_TOP_TELEMETRY_KEYS:
+            continue
+        if before.get(key) != after.get(key):
+            diffs.append(f"top-level {key}: {before.get(key)!r} -> {after.get(key)!r}")
+    before_by_idx = {z.get("index"): z for z in before.get("zones") or []}
+    after_by_idx = {z.get("index"): z for z in after.get("zones") or []}
     for idx in sorted(set(before_by_idx) | set(after_by_idx), key=lambda v: (v is None, v)):
         bz = before_by_idx.get(idx)
         az = after_by_idx.get(idx)
@@ -560,6 +605,8 @@ def _zone_collateral_diff(
             continue
         for key in sorted(set(bz) | set(az)):
             if idx == zone and key in changed:
+                continue
+            if key in _ZONE_LIMITS_ZONE_TELEMETRY_KEYS:
                 continue
             if bz.get(key) != az.get(key):
                 diffs.append(f"zone {idx}.{key}: {bz.get(key)!r} -> {az.get(key)!r}")
@@ -577,58 +624,59 @@ def control_set_zone_limits(
     """Set a zone's persistent max_temp_c (ceiling) and/or min_temp_c
     (floor), touching ONLY those two fields over the GET-merge-POST
     /api/zones path (zones_http_client.build_post_body()) -- every other
-    field the board reports for every zone (PID gains, control_mode,
-    relay_mask, ramp rate, coupling matrix, ...) is echoed back exactly as
-    read, never overwritten. This is the narrow tool the facade was missing:
-    the only pre-existing zones writer, load_config_preset()
-    (config_presets.py), overwrites PID gains and control_mode for every
-    zone along with whatever limit a preset also carries, which would
-    regress a bench's already-tuned gains just to fix one zone's limit.
+    field the board reports (PID gains, control_mode, relay_mask, ramp rate,
+    coupling matrix, timing profiles, ...) is echoed back exactly as read,
+    never overwritten. This is the narrow tool the facade was missing: the
+    only pre-existing zones writer, load_config_preset() (config_presets.py),
+    overwrites PID gains and control_mode for every zone along with whatever
+    limit a preset also carries.
+
+    SAFETY CEILING: on this firmware the Pico's abs_max_temp_c (S1) is NOT
+    an independent number -- POST /api/zones derives it as the max of the
+    positive zone max_temp_c values (safety_ceiling_policy.h) and keeps the
+    two equal itself: a RAISE of that max writes and confirms the Pico FIRST
+    and refuses the whole POST (HTTP 409 safety_ceiling_raise_failed) if it
+    can't -- the common case while the Pico is ARMED; a LOWER commits the
+    zone first and lowers the Pico best-effort afterward. This tool
+    therefore does not second-guess the raise client-side; it reports the
+    ceiling the change will imply (dry run), surfaces a 409 verbatim, and
+    after a write reports GET /api/zones' own safety_ceiling block, with a
+    WARNING when the Pico does not equal the derived target (readiness item
+    safety_ceiling_match then blocks firing until reconciled).
 
     Pass at least one of `max_temp_c`/`min_temp_c`; the other is left at its
-    current value. Refused unconditionally:
-      - if neither `max_temp_c` nor `min_temp_c` is given;
-      - unless `confirm is True` exactly (a dry run otherwise, reporting
-        what WOULD be written, the current values, and the abs_max reading
-        below -- no POST is ever sent without this);
-      - while a profile is running or paused, or an autotune run is in any
-        state other than idle/done/aborted -- zone limits are not changed
-        mid-run;
-      - if `zone` is not one of the indices GET /api/zones currently
-        reports;
-      - if both limits (the one(s) given, the other read from the board's
-        current value) would leave min_temp_c >= max_temp_c;
-      - if the requested `max_temp_c` exceeds the safety processor's own
-        independent overtemp ceiling (`abs_max_temp_c`, S1) when that
-        ceiling is known and armed -- a zone must never be configured above
-        the second set of eyes the Pico provides. If abs_max_temp_c is
-        unset/dormant or its fetch fails, this check is skipped (reported
-        in the result, never silently) rather than inventing a limit the
-        firmware itself does not enforce.
+    current value. Refused:
+      - if neither is given, or either is not a finite number, or
+        `max_temp_c` <= 0 (0 is the firmware's "no ceiling configured"
+        state -- this tool never disarms a zone ceiling);
+      - unless `confirm is True` exactly (a dry run otherwise -- no POST);
+      - unless the profile executor reads idle/done/faulted and autotune
+        reads idle/done/aborted (anything else, including an unreadable
+        state, refuses);
+      - if `zone` is not one of the indices GET /api/zones reports;
+      - if the resulting min_temp_c >= max_temp_c.
 
-    After a confirmed write, re-fetches GET /api/zones and FAILS LOUD
-    (never reports "ok") if:
-      - the target zone's newly-set field(s) don't read back as requested
-        (within 0.05 C, matching the wire's own ~%.9g round-trip noise
-        floor other zones_http_client callers use); or
-      - ANY other field of ANY zone (including the target zone's own other
-        fields) differs between the before and after snapshots -- proof
-        this tool did not collaterally touch anything besides what it
-        named, which a whole-page GET-merge-POST always risks getting
-        wrong on some field this module doesn't yet map correctly.
+    After a confirmed write, re-fetches GET /api/zones and FAILS LOUD if the
+    newly-set field(s) don't read back within 0.05 C, or if ANY other config
+    field (any zone, or top-level) differs between the before and after
+    snapshots. Firmware-derived telemetry that legitimately moves on this
+    write (generation, safety_ceiling, measured currents) is excluded.
 
-    Host is auto-resolved the same way the OTA/control tools do (board's
-    current Wi-Fi station IP, falling back to the fallback-AP address); pass
-    `host` explicitly for kilnctl.local or a board reachable only from a
-    different network than this link's serial port. Uses the same
-    http_auth ADMIN-session seam as every other admin-tier write tool in
-    this package (zones_http_client.get_zones()/post_zones() already route
-    through it) -- never prints, logs, or echoes a credential.
+    Uses the http_auth ADMIN-session seam via zones_http_client -- never
+    prints, logs, or echoes a credential.
     """
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as load_config_preset()
 
     if max_temp_c is None and min_temp_c is None:
         return "error: pass at least one of max_temp_c/min_temp_c"
+    for name, val in (("max_temp_c", max_temp_c), ("min_temp_c", min_temp_c)):
+        if val is None:
+            continue
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
+            return f"refused: {name}={val!r} is not a finite number"
+    if max_temp_c is not None and max_temp_c <= 0:
+        return (f"refused: max_temp_c={max_temp_c:g} -- <= 0 is the firmware's 'no ceiling configured' "
+                f"state; this tool never disarms a zone ceiling")
 
     resolved = _ota_resolve_host(host)
 
@@ -654,12 +702,6 @@ def control_set_zone_limits(
         return (f"refused: min_temp_c ({effective_min:g}) must be strictly less than "
                 f"max_temp_c ({effective_max:g}) (host={resolved})")
 
-    abs_max, abs_max_desc = _read_abs_max_temp_c(resolved)
-    if max_temp_c is not None and abs_max is not None and max_temp_c > abs_max:
-        return (f"refused: requested max_temp_c={max_temp_c:g}C exceeds the safety processor's "
-                f"independent overtemp ceiling ({abs_max_desc}) -- a zone must never be "
-                f"configured above abs_max_temp_c (host={resolved})")
-
     changed_fields: "set[str]" = set()
     zone_override: "dict[str, Any]" = {"index": zone}
     if max_temp_c is not None:
@@ -669,12 +711,30 @@ def control_set_zone_limits(
         zone_override["min_temp_c"] = min_temp_c
         changed_fields.add("min_temp_c")
 
+    ceiling_before_desc, _ = _describe_safety_ceiling(before)
+    proposed = {**before, "zones": [
+        ({**z, **{k: v for k, v in zone_override.items() if k != "index"}} if z.get("index") == zone else z)
+        for z in zones
+    ]}
+    target_before = _ceiling_target_from_zones(before)
+    target_after = _ceiling_target_from_zones(proposed)
+    if target_after is not None and (target_before is None or target_after > target_before + 0.01):
+        ceiling_effect = (f"derived Pico ceiling target {target_before!r} -> {target_after:g}C: the firmware "
+                          f"will RAISE the Pico first and refuse the POST (409) if it cannot confirm that "
+                          f"(expected while the Pico is ARMED)")
+    elif target_after is not None and target_before is not None and target_after < target_before - 0.01:
+        ceiling_effect = (f"derived Pico ceiling target {target_before:g} -> {target_after:g}C: the firmware "
+                          f"lowers the Pico best-effort after committing (may stay wider if ARMED)")
+    else:
+        ceiling_effect = f"derived Pico ceiling target unchanged ({target_after!r})"
+
     if confirm is not True:
         wanted_desc = ", ".join(f"{k}={v:g}" for k, v in zone_override.items() if k != "index")
         return (
             f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set zone {zone}: "
             f"{wanted_desc} (current: max_temp_c={current.get('max_temp_c')!r}, "
-            f"min_temp_c={current.get('min_temp_c')!r}; {abs_max_desc}; host={resolved})"
+            f"min_temp_c={current.get('min_temp_c')!r}; {ceiling_effect}; now: {ceiling_before_desc}; "
+            f"host={resolved})"
         )
 
     try:
@@ -685,6 +745,11 @@ def control_set_zone_limits(
     try:
         post_result = zones_http_client.post_zones(resolved, body)
     except zones_http_client.ZonesHttpError as exc:
+        if exc.status == 409 and "safety_ceiling_raise_failed" in (exc.detail or ""):
+            return (f"refused: the firmware could not raise/confirm the Pico's abs_max_temp_c to "
+                    f"{target_after!r}C first, so it left the zone config UNCHANGED (HTTP 409): "
+                    f"{exc.detail} -- the Pico refuses config writes while ARMED; see "
+                    f"safety_ceiling_policy.h (host={resolved})")
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -711,14 +776,16 @@ def control_set_zone_limits(
         return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
                 f"landed -- {'; '.join(mismatches)} (host={resolved}). Do not trust this as applied.")
 
-    collateral = _zone_collateral_diff(zones, after_zones, zone, changed_fields)
+    collateral = _zone_collateral_diff(before, after, zone, changed_fields)
     if collateral:
         return (f"FAILED: zone {zone}'s {', '.join(sorted(changed_fields))} landed correctly, but "
                 f"other field(s) changed unexpectedly -- {'; '.join(collateral)} (host={resolved}). "
                 f"This tool must touch only the named fields; investigate before trusting this "
                 f"board's config.")
 
+    ceiling_after_desc, ceiling_warning = _describe_safety_ceiling(after)
     applied_desc = ", ".join(f"{k}={after_zone.get(k):g}" for k in sorted(changed_fields))
-    return f"ok - zone {zone}: {applied_desc} (confirmed by read-back; {abs_max_desc}; host={resolved})"
-
-
+    result = f"ok - zone {zone}: {applied_desc} (confirmed by read-back; {ceiling_after_desc}; host={resolved})"
+    if ceiling_warning:
+        result += f"\nWARNING: {ceiling_warning}"
+    return result

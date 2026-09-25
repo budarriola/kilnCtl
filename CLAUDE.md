@@ -22,9 +22,13 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (191 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-25, when `safety_get_unset_commissioning_params`
-was added -- a READ-ONLY tool naming the specific safety_cfg_store params
+the rest behind a search facade (192 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-25, when `control_set_zone_limits`
+was added -- a narrow writer for one zone's `max_temp_c`/`min_temp_c` only
+(GET-merge-POST `/api/zones`, no PID/control_mode collateral; the Pico's
+`abs_max_temp_c` follows the zone maxima via firmware, so it reports that
+ceiling rather than gating on it). The one before it was
+`safety_get_unset_commissioning_params`, same day -- a READ-ONLY tool naming the specific safety_cfg_store params
 behind `GET /api/readiness`'s "safety_commissioned" count ("N of M applicable
 safety parameters still have no value"), which counts but never names them.
 No route needed changing: `GET /api/safety/commissioning` already reports
