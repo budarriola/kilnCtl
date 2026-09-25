@@ -424,12 +424,16 @@ typedef struct {
     uint8_t  warm_start_replayed_count;
 
     /* relay_authority's own latched per-zone block mask (relay_authority.h's
-     * relay_authority_latched_blocked_mask(), bit N = zone N), read out
-     * read-only here so a stale latch (see clear_stale_zone_latches_for_new_
-     * run()'s doc comment, HP-02 2026-09-25) is observable without a JTAG
-     * read. Independent of this run's own state -- populated even when
-     * state == PROFILE_EXEC_IDLE, since the whole point is a latch that can
-     * outlive the run that set it. */
+     * relay_authority_latched_blocked_mask(), bit N = zone N). This was
+     * NOT the first place it became observable -- dashboard_status_http.c:654
+     * already reports the same value as "zone_blocked_mask" on GET
+     * /api/status, off dashboard_status_t.zone_blocked_mask, before this
+     * field existed. This copy is co-located with the rest of a run's own
+     * exec fields (GET /api/profile_exec, HP-02 2026-09-25) purely for
+     * convenience -- a caller already polling profile_exec doesn't need a
+     * second request to /api/status just for this one value. Independent of
+     * this run's own state -- populated even when state == PROFILE_EXEC_IDLE,
+     * since the whole point is a latch that can outlive the run that set it. */
     uint8_t  zone_blocked_mask;
 } profile_exec_status_t;
 

@@ -245,11 +245,14 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * against this 960-byte fixed allowance.
      *
      * 2026-09-25 (HP-02 latch leak): added "zone_blocked_mask" (uint8 as
-     * %u, ~25B worst case: 19-char key + quotes/colon/comma + "255") --
+     * %u, ~23B worst case: 17-char key + quotes/colon/comma + "255") --
      * relay_authority's own latched per-zone block mask, read-only, so a
      * stale latch (relay_authority.h's relay_authority_zone_latched_
-     * blocked() doc comment) is observable from an existing ADMIN route
-     * instead of needing a new one (route count already 163/170). ~712B
+     * blocked() doc comment) is observable from this route without needing
+     * a new one (route count already 163/170). Not the first place this
+     * value is reported -- dashboard_status_http.c:654 already serializes
+     * the same value under the same key on GET /api/status; this is a
+     * convenience copy for a caller already polling profile_exec. ~710B
      * worst case now, still real headroom. */
     char *json = heap_caps_malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {

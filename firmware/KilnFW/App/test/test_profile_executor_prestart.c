@@ -1850,9 +1850,13 @@ static void test_escalate_guard_trip_all_zones_faulted_releases_relay_claim(void
 // zone 2 enters run C still latched blocked even though run C marks it
 // active -- duty would compute normally while every relay command is
 // silently refused at the relay_authority chokepoint. FAIL-BEFORE-FIX
-// evidence: commenting out this function's body (or its call site) makes
-// the final TEST_CHECK below fail; see the audit note this session's
-// SubagentHandback records for the rebuild-and-confirm procedure.
+// evidence: this test calls clear_stale_zone_latches_for_new_run() directly
+// below, so commenting out its BODY makes the final TEST_CHECK fail; its
+// production call site in profile_executor_run.c is NOT exercised by this
+// host test (profile_executor_run() itself is not called here) and is not
+// covered by this negative-test evidence -- see the audit note this
+// session's SubagentHandback records for the rebuild-and-confirm procedure
+// that was actually run (neutering the function body, not the call site).
 static void test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run(void)
 {
     TEST_SECTION("relay_authority per-zone latch -- a DONE run that is never explicitly halted/dismissed "

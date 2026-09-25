@@ -399,20 +399,26 @@ def check_no_stale_zone_latch(exec_body: dict) -> None:
     """Raise :class:`RunQueueFaultError` if relay_authority still shows any
     zone this run's own ``zone_mask`` activates as latched blocked.
 
-    HP-02, 2026-09-25: a 3-zone firing left one zone at +1.9C while the
-    others rose normally -- duty computed fine while every relay command for
-    that zone was silently refused at the relay_authority chokepoint by a
-    stale per-zone latch from an earlier, never-explicitly-halted run. Fixed
-    at the source (profile_executor_run.c), but this is cheap corroborating
-    evidence from the PC side that the fix is doing its job on a real board."""
+    A zone can land here for more than one reason -- e.g. a per-zone guard
+    that tripped earlier in THIS same run and simply hasn't been dismissed
+    yet is not a bug, just an active fault -- so this check does not assume
+    which one applies; it only reports the raw fact that a zone the run
+    controls is currently unable to command its relay. profile_executor_
+    run.c's clear_stale_zone_latches_for_new_run() (fixed 2026-09-25, HP-02)
+    closed the specific leak where a latch from an earlier, never-
+    explicitly-halted run outlived that run and silently blocked a zone a
+    LATER run activates; this check is cheap corroborating evidence from the
+    PC side that that fix keeps holding on a real board, not a claim that
+    every stuck-latch report is that same leak recurring."""
     mask = zone_blocked_mask(exec_body)
     zm = int(exec_body.get("zone_mask", 0))
     stuck = mask & zm
     if stuck:
         raise RunQueueFaultError(
             f"zone_blocked_mask=0x{mask:02x} includes active zone(s) 0x{stuck:02x} of "
-            f"zone_mask=0x{zm:02x} -- relay_authority's per-zone latch is stuck blocked "
-            "despite this run activating the zone (HP-02 2026-09-25 leak class); "
+            f"zone_mask=0x{zm:02x} -- relay_authority's per-zone latch is blocking a zone "
+            "this run activates (could be a fresh trip on this run, or a stale latch left "
+            "by an earlier one -- check the zone's own fault_guard/history to tell which); "
             "stopping the queue, not advancing to the next entry")
 
 
