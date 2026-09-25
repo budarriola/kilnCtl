@@ -63,7 +63,7 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
 
     // ITER_TUNE_REDESIGN_PLAN.md step 8 follow-up (check_executor_task_stack_
     // budget.ps1): firing_shadow_finish_firing() now reaches this function
-    // from the profile_executor task's 4096 B stack (previously only
+    // from the profile_executor task's stack (6144 B) (previously only
     // iter_tune.c called it, off that stack). raw[]/norm[]/in_band[] heap-
     // allocated in one block rather than as stack locals -- same established
     // pattern as zones_config_json_compute_crc()/zones_config_cfg_fs_save(),
