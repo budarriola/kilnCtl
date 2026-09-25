@@ -95,9 +95,7 @@ Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 | Guard | Provocation | Assert |
 |---|---|---|
 | S1 | Ramp the synthetic reading through the ceiling | Trips on the **3rd** consecutive reading above, not the 1st or 2nd |
-| S1 | `firing_max_c` = 900 in `CHAMBER_AGREED` | Ceiling becomes 1000, not `abs_max` |
-| S1 | `firing_max_c` = 5000 | **Clamped to `abs_max`** — the ESP cannot raise the ceiling |
-| S1 | `firing_max_c` = 900 in `EXTERNAL_OVERHEAT` | Ceiling stays `abs_max` — the field is ignored |
+| S1 | (RETIRED 2026-09-24) `firing_max_c` in either `tc_placement_mode` | No longer affects the ceiling at all -- `firing_max_c` never tightens or loosens S1; the ceiling is unconditionally `abs_max_temp_c`. See `test_safety_guards.c`'s replacement cases and `SAFETY_MODEL.md`'s S1 section. |
 | S2 | Hold setpoint+80 for 119 s, then 121 s | No trip, then trip |
 | S2 | Same, with context aged past `context_max_age_s` | **No trip** — inactive, not pessimistic |
 | S2 | Same, in `EXTERNAL_OVERHEAT` | No trip, guard disabled |
@@ -176,10 +174,10 @@ realistic rather than synthetic ramps.
 
 ### Two properties worth testing directly rather than by example
 
-**Monotonicity of the ceiling.** For any `firing_max_c`, the effective ceiling
-must be ≤ `abs_max_temp_c`. Property-test it over the whole float range,
-including NaN and infinities — the value arrives from another processor over a
-wire and `min()` with a NaN does not do what you want in C.
+**Monotonicity of the ceiling.** RETIRED 2026-09-24 along with `firing_max_c`'s
+effect on S1 -- the property now tested is simpler: the ceiling equals
+`abs_max_temp_c` for every value of `firing_max_c`, including NaN and
+infinities (`test_s1_ceiling_properties()` in `test_safety_guards.c`).
 
 **No guard reads a disabled input.** With `mains_voltage_v` unset,
 `p_avg_w` is NaN; assert no verdict changes. Same for the clock.

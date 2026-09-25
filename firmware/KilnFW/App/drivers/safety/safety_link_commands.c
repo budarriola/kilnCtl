@@ -54,7 +54,6 @@
 #include "kilnlink/kilnlink_ct_auto_zero_begin.h"
 #include "kilnlink/kilnlink_get_ct_auto_zero.h"
 #include "kilnlink/kilnlink_ct_auto_zero_status.h"
-#include "kilnlink/kilnlink_ceiling.h" /* SAFETY_CMD_SET_FIRING_CEILING (0x09) */
 #include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
@@ -236,94 +235,6 @@ esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level)
      * (link_task_handle_set_log_level() never replies on the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
-}
-
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09)
- * -- ROADMAP.md/TODO item long tracked as "confirmed still not built": no
- * call to kilnlink_ceiling_encode() existed anywhere under App/drivers/
- * before this. SaftyFW's own handler (link_task_handle_set_firing_ceiling(),
- * SaftyFW/src/tasks/link_task.c) and its consumer
- * (link_firing_ceiling_should_apply()/safety_guards.c's `min(abs_max_temp_c,
- * firing_max_c + firing_margin_c)`) have been complete and host-tested for a
- * while; this is only the ESP send side.
- *
- * `firing_max_c` is the caller's own already-computed "highest target this
- * firing will ever ask for" (profile_executor.c's profile_compute_firing_
- * max_c()) -- this function does not derive it, only range-checks and sends
- * it, same split as safety_link_send_set_config()'s tc_type. 0.0f or NaN
- * means "no firing / no ceiling known" (LINK_PROTOCOL.md sec 4) and is
- * always legal to send -- it is how a stopped firing hands S1 back to
- * abs_max_temp_c alone, which only ever LOOSENS the effective ceiling, never
- * tightens it (CLAUDE.md "abs_max same or looser"). A finite value below 0
- * or a non-finite value other than NaN is refused locally: neither can ever
- * be a legitimate "highest target" a profile asks for, and SaftyFW's own
- * link_frame_ceiling_is_active() bounds check treats an out-of-range decode
- * as "no ceiling" anyway, so there is no reason to ship it.
- *
- * Same fire-and-forget BROADCAST shape as safety_link_send_set_config()/
- * safety_link_send_clear_trip() above: link_task_handle_set_firing_ceiling()
- * never replies on the wire, so ESP_OK here is proof the frame was handed to
- * the UART, not proof the Pico accepted it -- callers must not log or act on
- * an unchecked return as success (CLAUDE.md's "logging unchecked success"
- * class). Returns ESP_ERR_INVALID_ARG for an out-of-range value,
- * ESP_ERR_INVALID_STATE if the driver isn't initialized. Safe to call from
- * any task, same as safety_link_send_clear_trip().
- *
- * Level-triggered, not edge-only: safety_build_and_send_context() also
- * resends the executor's current value (0.0f unless a firing is RUNNING/
- * PAUSED) every poll period via safety_link_resend_firing_ceiling() below --
- * LINK_PROTOCOL.md sec 4's "repeated in every context frame's shadow". The
- * Pico holds the ceiling in RAM only, so this is what restores it after a
- * Pico reboot mid-firing and clears a stale one after an ESP reboot. */
-static esp_err_t safety_link_send_firing_ceiling_impl(SafetyLinkClass *link, float firing_max_c, bool log_send)
-{
-    if (!link) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (isnan(firing_max_c)) {
-        /* NaN is one of the two legal "no ceiling" spellings (LINK_PROTOCOL.md
-         * sec 4) -- pass it through unmodified, same as the codec itself does
-         * (kilnlink_ceiling.h's own doc comment: "this codec passes the value
-         * through unmodified either way"). */
-    } else if (!isfinite(firing_max_c) || firing_max_c < 0.0f) {
-        ESP_LOGW(TAG, "set_firing_ceiling: refused locally, firing_max_c=%f is neither 0/NaN "
-                       "('no ceiling') nor a plausible positive target",
-                 (double)firing_max_c);
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!link->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    kilnlink_ceiling_t msg = { .firing_max_c = firing_max_c };
-    uint8_t payload[KILNLINK_CEILING_LEN];
-    kilnlink_ceiling_status_t status = KILNLINK_CEILING_OK;
-    size_t len = kilnlink_ceiling_encode(&msg, payload, sizeof(payload), &status);
-    if (len == 0) {
-        ESP_LOGE(TAG, "set_firing_ceiling: encode failed (status=%d)", (int)status);
-        return ESP_FAIL;
-    }
-
-    if (log_send) {
-        ESP_LOGI(TAG, "set_firing_ceiling: sending, firing_max_c=%f", (double)firing_max_c);
-    }
-    /* Same (dst_device, dst_task, src_task) triple as SET_LOG_LEVEL's own
-     * broadcast call site above -- fire-and-forget, no ACK expected
-     * (link_task_handle_set_firing_ceiling() never replies on the wire). */
-    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
-                                         UART_TASK_ID_SAFETY, payload, len);
-}
-
-esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
-{
-    return safety_link_send_firing_ceiling_impl(link, firing_max_c, true);
-}
-
-/* Poll-task resend (safety_link_internal.h) -- identical frame, no per-send
- * INFO line (it runs every poll period). */
-esp_err_t safety_link_resend_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
-{
-    return safety_link_send_firing_ceiling_impl(link, firing_max_c, false);
 }
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --

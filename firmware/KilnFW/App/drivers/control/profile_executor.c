@@ -611,29 +611,11 @@ static void reload_live_profile_if_changed(void)
         s_exec.live_edit_generation = gen;
     }
 
-    bool ceiling_resend = false;
-    float ceiling_firing_max_c = 0.0f;
     if (kind == PROFILE_LIVE_PICKUP_POLL_CHECKED) {
         if (result == PROFILE_LIVE_PICKUP_OK) {
             ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: live profile edit adopted at segment %u",
                      s_exec.segment_index);
             s_exec.live_edit_last_refusal.valid = false;
-            /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_
-             * CEILING (0x09) -- re-derive from the just-adopted s_exec.profile
-             * (the swap at line 603 already happened under this same lock
-             * acquisition) and resend unconditionally rather than tracking
-             * whether the max specifically changed: idempotent, cheap
-             * (fire-and-forget broadcast), and simpler than diffing old vs
-             * new max here. Computed under lock, sent after it is dropped --
-             * safety_link sends are producer calls and must never happen
-             * while s_exec.lock is held, same discipline as the run() commit
-             * point in profile_executor_run.c. */
-            /* Monotonic within one firing: never LOWER the ceiling -- see
-             * profile_firing_ceiling_after_live_edit()'s comment. */
-            s_exec.firing_ceiling_c =
-                profile_firing_ceiling_after_live_edit(s_exec.firing_ceiling_c, &s_exec.profile);
-            ceiling_resend = true;
-            ceiling_firing_max_c = s_exec.firing_ceiling_c;
         } else {
             /* MEDIUM-3 (review): recorded, not just logged, so pass 2's
              * planned GET /api/profile/live has something to read. */
@@ -647,15 +629,6 @@ static void reload_live_profile_if_changed(void)
     }
     xSemaphoreGive(s_exec.lock);
     free(candidate);
-
-    if (ceiling_resend) {
-        esp_err_t ceiling_err = safety_link_send_firing_ceiling(s_exec.safety, ceiling_firing_max_c);
-        if (ceiling_err != ESP_OK) {
-            ESP_LOGW(PE_TAG,
-                     "live profile edit adopted but SET_FIRING_CEILING resend failed (err=%s), firing_max_c=%.1f",
-                     esp_err_to_name(ceiling_err), (double)ceiling_firing_max_c);
-        }
-    }
 }
 
 /* profile_resolve_on_off_rule() -- see profile_executor_internal.h for the

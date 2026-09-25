@@ -26,8 +26,9 @@
 > `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT` frames from
 > `UPDATE_PROTOCOL.md` §4 to `update_task.c`. **Still not wired anywhere:**
 > `GET_FW_VERSION`, `SET_CLOCK` on the ESP send side (`SET_FIRING_CEILING`
-> landed 2026-09-24 as a per-poll resend, `6f8ed940`/`34f242c3`, see §10),
-> and `KilnFW` has no `CLEAR_TRIP` send path yet (no GUI trigger built) — see
+> landed 2026-09-24 as a per-poll resend, `6f8ed940`/`34f242c3`, then RETIRED
+> the same day, see §10), and `KilnFW` has no `CLEAR_TRIP` send path yet (no
+> GUI trigger built) — see
 > `firmware/CommonFW/README.md`'s checklist and this document's own §10 for
 > the itemised state of each frame.
 
@@ -451,65 +452,41 @@ dangerous. On seeing this bit set, `SaftyFW` **disables every context-consuming
 guard (S2, S3, S4) and raises a persistent warning.** S1 and S5–S12 are unaffected,
 because they never look at context.
 
-### `SAFETY_CMD_SET_FIRING_CEILING` = `0x09` (ESP → Pico)
+### `SAFETY_CMD_SET_FIRING_CEILING` = `0x09` (ESP → Pico) — **RETIRED 2026-09-24**
 
-Sent when a profile starts, when it is edited, and repeated in every context
-frame's shadow (see below). Carries the **highest target temperature this
-firing will ever ask for**.
+**Owner decision, 2026-09-24: "the safety limits should be the same[,] the
+safty processor is a backup incase the esp fails."** The per-firing tightening
+this command drove is removed. The ESP no longer sends `0x09` at all — there
+is no `safety_link_send_firing_ceiling()` any more, and nothing calls
+`kilnlink_ceiling_encode()`. S1's ceiling on the Pico is now unconditionally
+`abs_max_temp_c`, with no `firing_max_c`/`firing_margin_c` term. The opcode
+stays reserved (not reused for anything else) rather than deleted outright:
+SaftyFW's `link_task.c` still decodes a `0x09` frame if one arrives (e.g. from
+an older ESP build) and stores it in `firing_max_valid`/`firing_max_c`, but
+`safety_guards_tick()` no longer reads either field, so decoding it is inert
+and safe. This is deliberate — it avoids a link-protocol-version bump (ESP →
+Pico stays at version 12) and a `config_store` schema bump, since an older
+ESP talking to a current Pico still gets an unambiguous outcome: the frame
+decodes, changes nothing. CommonFW's wire codec (`kilnlink_ceiling.c`/`.h`)
+is unchanged and still host-tested (`test_ceiling.c`) purely as a decode
+contract for that backward-compatibility path.
+
+Wire layout, kept for reference (still accurate for anything that still
+constructs or parses this frame, e.g. a captured trace from an old ESP):
 
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | `0x09` |
 | 1..4 | f32 LE | `firing_max_c` — 0 or NaN = "no firing / no ceiling known" |
 
-This is small and worth more than it looks. Without it, S1's absolute limit has
-to be a single fixed number set high enough for the *hottest firing the kiln
-will ever do* — 1300 °C — which means a 900 °C bisque firing runs with 400 °C of
-unprotected headroom. With it, the Pico can enforce
-
-```
-effective_ceiling = min(abs_max_temp_c,  firing_max_c + firing_margin_c)
-```
-
-so every firing is protected to *its own* envelope, and the protection tightens
-automatically without anyone editing a threshold. `firing_margin_c` defaults to
-**100 °C** — generous enough that no legitimate overshoot reaches it.
-
-The ceiling only ever **tightens** S1; it can never raise it above
-`abs_max_temp_c`. A hostile or buggy ESP sending `firing_max_c = 5000` gets
-clamped, not obeyed. **The main controller is allowed to ask for more
-protection, never for less.** That asymmetry is what makes it safe to accept
-this field from the component under suspicion at all.
-
-**Start-time hazard and its ESP-side refusal (2026-09-24):** a profile whose
-peak target sits more than `firing_margin_c` below the kiln's *current*
-temperature — a cool-down-only profile started on an already-hot kiln — makes
-this same tightening trip S1 almost immediately after start, since
-`firing_max_c + firing_margin_c` lands below the live reading before the
-profile ever gets to act. `profile_executor_run()`
-(`firmware/KilnFW/App/drivers/control/profile_executor_run.c`,
-`profile_firing_ceiling_would_trip_on_start()` in
-`profile_executor_internal.h`) now refuses such a start up front (HTTP 400
-via the profiles start route, `dashboard_exec_http.c`'s ordinary run()-refusal
-path), naming both the profile's peak target and the kiln's current reading in
-the error. This is a courtesy check only — it fails **open** (never refuses)
-when the current reading is unavailable or non-finite, and never refuses a
-profile whose `firing_max_c` is not an active ceiling (0/NaN/negative, e.g. no
-positive ZONE_RAMP target), since the Pico's own S1 guard above remains the
-real backstop either way. It checks the DEFAULT margin, not the board's
-configured one: a larger configured margin can make it refuse a start the Pico
-would allow, and a smaller one lets through a start that still trips S1 (the
-same safe-direction outcome as no pre-check). The 100 °C margin used
-in this check (`PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR`) is a
-hand-mirrored copy of the Pico's `FIRING_MARGIN_C_DEFAULT`
-(`firmware/SaftyFW/src/safety_guards.c`) — CommonFW's wire codec
-(`kilnlink_ceiling.c`/`.h`) only carries `firing_max_c` itself, not this
-margin, so there is no shared definition to draw from; a drift between the
-two is caught by
-`firmware/KilnFW/App/test/firing_ceiling_margin_mirror_drift_check.py`
-(wired into the standing check suite as
-`check_firing_ceiling_margin_mirror_drift.ps1`), the same technique
-`approach_rate_cap_mirror_drift_check.py` uses for its own mirrored constant.
+The cool-down-on-hot-kiln start-time check (`profile_executor_run()`'s
+`profile_firing_ceiling_would_trip_on_start()`, HTTP 400 on a cool-down-only
+profile started on an already-hot kiln) was ESP-side UX riding on top of this
+tightening and was **removed along with it** — with S1 no longer tightening
+below `abs_max_temp_c`, that specific start-time trip can no longer happen,
+so the check had nothing left to guard against. `PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR`,
+`firing_ceiling_margin_mirror_drift_check.py` and
+`check_firing_ceiling_margin_mirror_drift.ps1` were deleted with it.
 
 ### `SAFETY_CMD_CLEAR_TRIP` = `0x0A` (ESP → Pico)
 
@@ -1458,7 +1435,7 @@ Neither firmware is complete; these are the ESP-side items. Sequenced in
 | 0.5 | Accept unsolicited status/diag/version/trip frames with no outstanding request (partly present — the poll cache already accepts unsolicited status) | `safety_link.c` |
 | 0.6 | **Redefine `SAFETY_FAULT_SRC_SAFETY_LINK` as "no telemetry within 1.5 s"** and wire the 30 s firing-abort. §7 | `safety_link.{c,h}`, `profile_executor.c` |
 | 0.7 | Request the Pico's build identity at boot, **with retry**, and on every `boot_id` change. Reuse the `INFO_CMD_GET_FW_VERSION` parser | `safety_link.c`, `pc_tools/` |
-| 0.8 | **Done 2026-09-24.** `SET_FIRING_CEILING` resent after every `PUSH_CONTEXT` while RUNNING/PAUSED (level-triggered, not edge) — the highest target the profile will ask for | `profile_executor.c`, `profiles_http.c` |
+| 0.8 | **Done 2026-09-24, then RETIRED the same day.** `SET_FIRING_CEILING` had been resent after every `PUSH_CONTEXT` while RUNNING/PAUSED (level-triggered, not edge) — owner decision reverted the whole tightening; see the `0x09` section above | `profile_executor.c`, `profiles_http.c` |
 | 0.9 | Surface `DIAG`, `FW_VERSION` (incl. **config CRC**) and `TRIP_EVENT` on the dashboard and over the PC link | `dashboard_http.c`, `uart_bridge.c` |
 | 0.10 | Bump `UART_PROTOCOL_VERSION` 4 → 5 with a note explaining the broadcast type | `uart_task_ids.h:52` |
 | 0.11 | Correct `docs/SAFETY_LINK.md` "Trap 1" and the R15 boot-artefact note; correct `docs/HARDWARE.md`'s optocoupler table. **Done 2026-08-16.** | `firmware/KilnFW/docs/` |
@@ -1553,7 +1530,11 @@ Two more, driven by the borrowed-thermocouple option:
 - [x] `SIM_PLANT` flag set when built against the simulated plant.
       **2026-09-04**: `safety_link_frames.c:497-498`,
       `#if CONFIG_KILNCTL_SIM_PLANT` sets `KILNLINK_CONTEXT_FLAG_SIM_PLANT`.
-- [x] `SET_FIRING_CEILING` (0x09) sent at profile start/edit/stop. **Built
+- [x] ~~`SET_FIRING_CEILING` (0x09) sent at profile start/edit/stop.~~
+      **RETIRED 2026-09-24, same day it was built** — owner decision: the
+      safety processor is a backup for the ESP and must not run a tighter
+      limit than the ESP's own. All of the below is historical; see the
+      `0x09` section above for the current (retired) state. **Built
       2026-09-24**: `safety_link_send_firing_ceiling()`
       (`safety_link_commands.c`) wraps `kilnlink_ceiling_encode()` as a
       fire-and-forget broadcast, same shape as `SET_CONFIG`/`CLEAR_TRIP`.
@@ -1598,7 +1579,7 @@ Two more, driven by the borrowed-thermocouple option:
 - [ ] `SET_CLOCK` (0x0C) — optional, diagnostic only. **Confirmed still not
       built** (2026-09-04): no `kilnlink_set_clock_encode()` call site.
       Marked optional by the doc itself; left undone — `SET_FIRING_CEILING`
-      above is now built.
+      above was briefly built, then retired the same day.
 - [x] `GET_STATUS` poll loop removed (no ACK'd `DATA` polls remain).
       **2026-09-04**: `safety_exchange()` (`safety_link_inbox.c:667`) sends
       via `uart_protocol_send_broadcast()`, not an ACK'd `DATA` frame — every

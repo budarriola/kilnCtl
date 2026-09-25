@@ -133,10 +133,13 @@ static void test_s1(void)
         TEST_CHECK(s.is_tripped, "is_tripped set");
     }
 
-    /* CHAMBER_AGREED with a firing target tightens the ceiling via min() --
-     * a reading between the (lower) firing-tightened ceiling and the
-     * (higher) abs_max_temp_c trips, proving the tighter number is the one
-     * actually used, not the fixed one. */
+    /* Owner decision 2026-09-24: the safety processor is a backup in case the
+     * ESP fails and must never run a tighter limit than the ESP's own. S1's
+     * ceiling is always abs_max_temp_c alone -- firing_max_c/firing_margin_c
+     * (still-decoded but now-inert SET_FIRING_CEILING config) must never
+     * tighten it, in CHAMBER_AGREED or any other tc_placement_mode. A reading
+     * that would have tripped the old firing-tightened ceiling but sits
+     * below abs_max_temp_c must NOT trip. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -146,37 +149,19 @@ static void test_s1(void)
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_margin_c = 100.0f;
         cfg.firing_max_valid = true;
-        cfg.firing_max_c = 900.0f; /* ceiling = min(1300, 900+100) = 1000 */
+        cfg.firing_max_c = 900.0f; /* old code would have tightened to min(1300, 900+100)=1000 */
         safety_guard_input_t in = base_input();
-        in.tc_c = 1050.0f; /* above the tightened 1000C ceiling, below abs_max_temp_c */
-        bool tripped = false;
-        for (int i = 0; i < 3 && !tripped; i++) {
-            tripped = safety_guards_tick(&s, &cfg, &in);
-        }
-        TEST_CHECK(tripped, "firing_max_c tightens S1's ceiling via min() in CHAMBER_AGREED");
-    }
-
-    /* The ceiling can only ever tighten: a hostile/buggy firing_max_c far
-     * above abs_max_temp_c must clamp to abs_max_temp_c, not be obeyed. */
-    {
-        safety_guard_state_t s;
-        safety_guards_reset(&s);
-        safety_guard_cfg_t cfg = base_cfg();
-        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
-        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
-        cfg.abs_max_temp_c = 1300.0f;
-        cfg.firing_max_valid = true;
-        cfg.firing_max_c = 5000.0f; /* min(1300, 5000+100) = 1300, unchanged */
-        safety_guard_input_t in = base_input();
-        in.tc_c = 1250.0f; /* under 1300 -- must NOT trip if clamp works */
+        in.tc_c = 1050.0f; /* above the old tightened 1000C ceiling, below abs_max_temp_c */
         bool tripped = false;
         for (int i = 0; i < 10 && !tripped; i++) {
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
-        TEST_CHECK(!tripped, "min() clamps a hostile firing_max_c to abs_max_temp_c, never loosens the ceiling");
+        TEST_CHECK(!tripped, "firing_max_c no longer tightens S1's ceiling in CHAMBER_AGREED -- backup rule");
     }
 
-    /* EXTERNAL_OVERHEAT ignores firing_max_c entirely, even when set. */
+    /* Same abs_max_temp_c-only ceiling holds regardless of tc_placement_mode:
+     * EXTERNAL_OVERHEAT never honoured firing_max_c even under the old code,
+     * and still doesn't. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -185,14 +170,36 @@ static void test_s1(void)
         cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_max_valid = true;
-        cfg.firing_max_c = 50.0f; /* would tighten to 150C in CHAMBER_AGREED -- must be ignored here */
+        cfg.firing_max_c = 50.0f; /* would have tightened to 150C in the old CHAMBER_AGREED code */
         safety_guard_input_t in = base_input();
-        in.tc_c = 200.0f; /* would trip if firing_max_c were honoured; must not trip fixed at 1300 */
+        in.tc_c = 200.0f; /* would trip if firing_max_c were honoured; must not trip -- ceiling is 1300 */
         bool tripped = false;
         for (int i = 0; i < 10 && !tripped; i++) {
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
-        TEST_CHECK(!tripped, "EXTERNAL_OVERHEAT uses the fixed ceiling and ignores firing_max_c");
+        TEST_CHECK(!tripped, "EXTERNAL_OVERHEAT uses abs_max_temp_c and ignores firing_max_c");
+    }
+
+    /* A reading genuinely above abs_max_temp_c still trips, regardless of
+     * firing_max_c -- confirms S1 backs off to abs_max_temp_c, it doesn't
+     * stop tripping altogether. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.abs_max_temp_c = 1300.0f;
+        cfg.firing_margin_c = 100.0f;
+        cfg.firing_max_valid = true;
+        cfg.firing_max_c = 900.0f;
+        safety_guard_input_t in = base_input();
+        in.tc_c = 1350.0f; /* above abs_max_temp_c itself */
+        bool tripped = false;
+        for (int i = 0; i < 3 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "a reading above abs_max_temp_c still trips S1 -- the guard is not disabled");
     }
 
     /* Latching: stays tripped until safety_guards_clear(). */
@@ -3634,17 +3641,22 @@ static void test_decide_clear_trip_outcome(void)
 /* GUARD_TEST_MATRIX.md: "Property tests: ceiling monotonicity over the float
  * range incl. NaN/Inf". S1's ceiling is not exposed outside the module, so
  * these tests probe it the same way test_s1() does -- through the
- * trip/no-trip behaviour at a reading pinned just above abs_max_temp_c. If
- * ceiling had been silently raised past abs_max_temp_c by a hostile/garbled
- * firing_max_c, that reading would fail to trip; the property under test is
- * that it always does. */
+ * trip/no-trip behaviour at a reading pinned just above abs_max_temp_c.
+ * Owner decision 2026-09-24 made this property unconditional: S1's ceiling
+ * is abs_max_temp_c alone, full stop, whatever firing_max_c/firing_margin_c
+ * (still-decoded but now-inert SET_FIRING_CEILING config) happen to hold --
+ * finite, NaN, or +/-Infinity. If ceiling had been silently raised past
+ * abs_max_temp_c by a hostile/garbled firing_max_c, or if some future edit
+ * reintroduced the firing_max_c tightening this file used to test for, a
+ * reading pinned just above abs_max_temp_c would fail to trip; the property
+ * under test is that it always does. */
 static void test_s1_ceiling_properties(void)
 {
-    TEST_SECTION("S1 -- ceiling monotonicity property (firing_max_c never raises the ceiling)");
+    TEST_SECTION("S1 -- ceiling monotonicity property (firing_max_c never affects the ceiling)");
 
     /* Property: for every firing_max_c below, a reading pinned just above
      * abs_max_temp_c must still trip S1 within the usual 3-tick streak --
-     * i.e. the effective ceiling never exceeds abs_max_temp_c, regardless of
+     * i.e. the effective ceiling is always abs_max_temp_c, regardless of
      * what firing_max_c claims. */
     {
         float firing_max_values[] = {
@@ -3653,7 +3665,7 @@ static void test_s1_ceiling_properties(void)
             (float)NAN,         /* NaN */
             (float)INFINITY,    /* +Infinity */
             -(float)INFINITY,   /* -Infinity -- the actual bug */
-            900.0f,              /* normal in-range value, ceiling tightens below abs_max_temp_c */
+            900.0f,              /* normal in-range value -- must NOT tighten the ceiling below abs_max_temp_c */
         };
         for (size_t i = 0; i < sizeof(firing_max_values) / sizeof(firing_max_values[0]); i++) {
             safety_guard_state_t s;

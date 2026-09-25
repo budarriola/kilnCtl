@@ -523,24 +523,6 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     return ESP_OK;
 }
 
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09)
- * -- this test file #includes profile_executor.c/profile_executor_run.c/
- * profile_executor_status.c directly (no other seam for the guards those
- * files test), so their new safety_link_send_firing_ceiling() call sites
- * need a fake body here, same convention as every other safety_link_send_*
- * fake in this file. Records the last call's argument and a running count
- * so a test can assert on both the derivation (firing_max_c) and that a
- * send happened (or, just as importantly, did NOT happen). */
-static int g_firing_ceiling_send_calls = 0;
-static float g_firing_ceiling_last_c = -1.0f;
-esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c)
-{
-    (void)link;
-    g_firing_ceiling_send_calls++;
-    g_firing_ceiling_last_c = firing_max_c;
-    return ESP_OK;
-}
-
 /* Puts heat_enable back in the state a RUNNING firing leaves it in: this
  * run holds a granted K4 request. The tests below drive profile_executor's
  * exit paths directly (they set s_exec.state by hand rather than going
@@ -572,8 +554,8 @@ uint32_t zones_config_generation(void)
 // if_changed() takes its cheap "unchanged" return every tick, matching this
 // file's pre-existing behavior for every test that doesn't specifically
 // exercise the live-edit pickup path. Settable (arm_live_edit_pickup() below)
-// for the SET_FIRING_CEILING live-edit test, which DOES need to drive the
-// real reload_live_profile_if_changed() body once.
+// for a live-edit test that DOES need to drive the real
+// reload_live_profile_if_changed() body once.
 static uint32_t s_test_live_profile_generation = 0;
 uint32_t live_profile_generation(void)
 {
@@ -1955,163 +1937,6 @@ static void test_guard9_fault_source_cleared_on_halt(void)
 // "factor the check out so a host test can drive it directly" reasoning as
 // escalate_guard_trip()/guard9_assert_stale_tick_fault() elsewhere in this
 // file.
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09)
- * -- profile_compute_firing_max_c() (profile_executor_internal.h) is the
- * ESP-side derivation: the highest target_c among a profile's ZONE_RAMP
- * segments. Must NOT add firing_margin_c itself (that happens entirely
- * Pico-side, safety_guards.c) and must skip RELAY_IO segments, which carry
- * no meaningful target_c. */
-static void test_profile_compute_firing_max_c_picks_highest_zone_ramp_target(void)
-{
-    TEST_SECTION("profile_compute_firing_max_c() -- highest ZONE_RAMP target_c wins, "
-                 "RELAY_IO segments ignored, no margin added");
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.segment_count = 3;
-    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
-    p.segments[0].target_c = 500.0f;
-    p.segments[1].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
-    p.segments[1].target_c = 9999.0f; /* must be ignored -- not a real target */
-    p.segments[2].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
-    p.segments[2].target_c = 1250.0f; /* the real peak */
-
-    float got = profile_compute_firing_max_c(&p);
-
-    TEST_CHECK(got == 1250.0f, "picks the higher of the two ZONE_RAMP targets, raw (no +margin)");
-}
-
-static void test_profile_compute_firing_max_c_null_and_empty(void)
-{
-    TEST_SECTION("profile_compute_firing_max_c() -- NULL profile and a profile with no ZONE_RAMP "
-                 "segments both resolve to 0.0f ('no ceiling'), never garbage or a crash");
-    TEST_CHECK(profile_compute_firing_max_c(NULL) == 0.0f, "NULL profile -> 0.0f");
-
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.segment_count = 1;
-    p.segments[0].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
-    p.segments[0].target_c = 800.0f; /* still must be ignored */
-    TEST_CHECK(profile_compute_firing_max_c(&p) == 0.0f, "no ZONE_RAMP segments -> 0.0f, not the RELAY_IO value");
-}
-
-static void test_profile_compute_firing_max_c_skips_non_finite_and_negative(void)
-{
-    TEST_SECTION("profile_compute_firing_max_c() -- NaN/+Inf/negative ZONE_RAMP targets never win; "
-                 "the result is always finite and >= 0");
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.segment_count = 4;
-    for (int i = 0; i < 4; i++) {
-        p.segments[i].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
-    }
-    p.segments[0].target_c = NAN;
-    p.segments[1].target_c = INFINITY; /* would win a plain '>' and then be refused by the send path */
-    p.segments[2].target_c = -40.0f;
-    p.segments[3].target_c = 900.0f;
-    TEST_CHECK(profile_compute_firing_max_c(&p) == 900.0f, "only the finite 900 C target counts");
-
-    p.segments[3].target_c = -5.0f;
-    TEST_CHECK(profile_compute_firing_max_c(&p) == 0.0f, "all non-finite/negative -> 0.0f ('no ceiling')");
-}
-
-static void test_firing_ceiling_after_live_edit_is_monotonic(void)
-{
-    TEST_SECTION("profile_firing_ceiling_after_live_edit() -- a live edit may RAISE the Pico's firing "
-                 "ceiling but never lower it mid-firing (a lowered running-segment target below the "
-                 "kiln's current temperature must not become an S1 trip)");
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.segment_count = 1;
-    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
-
-    p.segments[0].target_c = 700.0f; /* edit lowered the peak from 1000 */
-    TEST_CHECK(profile_firing_ceiling_after_live_edit(1000.0f, &p) == 1000.0f,
-               "a lowered peak keeps the ceiling already in force");
-
-    p.segments[0].target_c = 1100.0f; /* edit raised the peak */
-    TEST_CHECK(profile_firing_ceiling_after_live_edit(1000.0f, &p) == 1100.0f, "a raised peak is adopted at once");
-
-    TEST_CHECK(profile_firing_ceiling_after_live_edit(1000.0f, NULL) == 1000.0f,
-               "a NULL/empty edited profile never clears the ceiling mid-firing");
-}
-
-// CLAUDE.md SET_FIRING_CEILING hazard: profile_firing_ceiling_would_trip_on_
-// start() is the pure predicate the start-time refusal in
-// profile_executor_run.c is built on. It must refuse ONLY when the kiln is
-// demonstrably already hotter than the Pico's post-start ceiling would allow
-// (firing_max_c + the mirrored 100C margin), and must fail OPEN (never
-// refuse) on any non-finite input -- a courtesy check must never itself be
-// the thing that blocks a legitimate start.
-static void test_firing_ceiling_would_trip_on_start_refuses_cooldown_on_hot_kiln(void)
-{
-    TEST_SECTION("profile_firing_ceiling_would_trip_on_start() -- refuses only when current temp "
-                 "exceeds firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR");
-
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, 250.0f),
-               "current 250C is within the 100C margin of a 200C peak (ceiling 300C) -- not refused");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, 300.0f),
-               "current temp exactly AT the ceiling (300C) is not '>' it -- not refused");
-    TEST_CHECK(profile_firing_ceiling_would_trip_on_start(200.0f, 300.5f),
-               "current 300.5C exceeds a 200C peak's 300C ceiling by half a degree -- refused "
-               "(cool-down-only profile on a hot kiln, the hazard this check exists for)");
-    TEST_CHECK(profile_firing_ceiling_would_trip_on_start(50.0f, 900.0f),
-               "a near-room-temperature target on a 900C kiln is refused");
-}
-
-static void test_firing_ceiling_would_trip_on_start_fails_open_on_non_finite(void)
-{
-    TEST_SECTION("profile_firing_ceiling_would_trip_on_start() -- fails OPEN (never refuses) whenever "
-                 "the current reading is unavailable/non-finite, since this is a courtesy check, not "
-                 "a safety interlock -- the Pico's own S1 guard is the real backstop");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, NAN),
-               "NaN current temp (no live reading yet / all sensors invalid) never refuses");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(200.0f, INFINITY),
-               "+Inf current temp never refuses (garbled reading, not a real hazard signal)");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(INFINITY, 50.0f),
-               "+Inf firing_max_c (ceiling itself non-finite after adding the margin) never refuses");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(0.0f, 900.0f),
-               "firing_max_c 0 is the wire's 'no ceiling' (link_frame_ceiling_is_active() needs > 0) -- "
-               "a profile with no positive ZONE_RAMP target tightens nothing, so a 900C kiln is not refused");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(-5.0f, 900.0f),
-               "a negative firing_max_c is likewise never an active ceiling Pico-side -- not refused");
-    TEST_CHECK(!profile_firing_ceiling_would_trip_on_start(NAN, 900.0f),
-               "NaN firing_max_c (the other 'no ceiling' spelling) -- not refused");
-}
-
-static void test_get_status_reports_firing_ceiling_only_while_running_or_paused(void)
-{
-    TEST_SECTION("profile_executor_get_status() -- firing_ceiling_c is reported only while RUNNING/PAUSED; "
-                 "IDLE/DONE/FAULTED report 0.0f so safety_poll's per-poll resend clears a stale Pico ceiling");
-    SemaphoreHandle_t saved_lock = s_exec.lock;
-    profile_exec_state_t saved_state = s_exec.state;
-    float saved_ceiling = s_exec.firing_ceiling_c;
-    s_exec.lock = xSemaphoreCreateMutex();
-    s_exec.firing_ceiling_c = 1250.0f;
-
-    const struct {
-        profile_exec_state_t state;
-        float expect;
-        const char *msg;
-    } cases[] = {
-        {PROFILE_EXEC_RUNNING, 1250.0f, "RUNNING reports the ceiling"},
-        {PROFILE_EXEC_PAUSED, 1250.0f, "PAUSED reports the ceiling (a paused firing can resume heat)"},
-        {PROFILE_EXEC_DONE, 0.0f, "DONE reports 0.0f even though s_exec still holds the old value"},
-        {PROFILE_EXEC_FAULTED, 0.0f, "FAULTED reports 0.0f (a later autotune must run on abs_max alone)"},
-        {PROFILE_EXEC_IDLE, 0.0f, "IDLE reports 0.0f"},
-    };
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        s_exec.state = cases[i].state;
-        profile_exec_status_t out;
-        memset(&out, 0xAA, sizeof(out));
-        profile_executor_get_status(&out);
-        TEST_CHECK(out.firing_ceiling_c == cases[i].expect, cases[i].msg);
-    }
-
-    s_exec.lock = saved_lock;
-    s_exec.state = saved_state;
-    s_exec.firing_ceiling_c = saved_ceiling;
-}
-
 static void test_profile_zones_have_ceiling_refuses_on_zero(void)
 {
     TEST_SECTION("profile_zones_have_ceiling() -- refuses when a zone that CAN heat has max_temp_c == 0 "
@@ -2718,37 +2543,6 @@ static void test_halt_releases_heat_enable(void)
     TEST_CHECK(g_request_enable_false_calls == 1, "a second halt sends nothing more");
 }
 
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09):
- * a real operator halt out of RUNNING must clear the Pico's cached ceiling
- * (0.0f, the documented "no firing / no ceiling known" sentinel) exactly
- * once -- never left standing, and never sent again on a second, no-op
- * halt of an already-IDLE executor (the IDLE early-return in
- * profile_executor_halt() must still refuse to send a second time). */
-static void test_halt_clears_firing_ceiling(void)
-{
-    TEST_SECTION("profile_executor_halt() -- clears the Pico's cached firing ceiling");
-    reset_relay_claim_test_state();
-    arm_heat_enable_as_if_running();
-    s_exec.lock = xSemaphoreCreateMutex();
-    s_exec.state = PROFILE_EXEC_RUNNING;
-    s_exec.claimed_relay_mask = 0x0F;
-    s_exec.firing_ceiling_c = 1250.0f; /* as profile_executor_run() would have set it */
-    g_firing_ceiling_send_calls = 0;
-    g_firing_ceiling_last_c = -1.0f;
-
-    profile_executor_halt();
-
-    TEST_CHECK(g_firing_ceiling_send_calls == 1, "halt from RUNNING sends exactly one SET_FIRING_CEILING");
-    TEST_CHECK(g_firing_ceiling_last_c == 0.0f, "halt clears the ceiling with the 0.0f sentinel, not a leftover value");
-    TEST_CHECK(s_exec.firing_ceiling_c == 0.0f,
-               "halt also zeroes s_exec.firing_ceiling_c, so the per-poll resend cannot re-raise it");
-
-    /* A no-op halt on an already-IDLE executor must send nothing -- same
-     * discipline as g_request_enable_false_calls staying at 1 above. */
-    profile_executor_halt();
-    TEST_CHECK(g_firing_ceiling_send_calls == 1, "a second (no-op) halt sends no additional SET_FIRING_CEILING");
-}
-
 // docs/audits/profile_executor_panic_2026-09-24.md halt-clear follow-up: an
 // operator halt straight out of a mid-dwell RUNNING state used to leave
 // s_exec.dwelling/ramp_lock_held stale (halt() assigned s_exec.state =
@@ -2953,71 +2747,6 @@ static profile_segment_t relay_io_seg(uint8_t io_target, uint8_t io_state, uint8
     s.io_blocking = blocking;
     s.dwell_min = dwell_min;
     return s;
-}
-
-// The stub-controlled reload path: proves reload_live_profile_if_changed()
-// (profile_executor.c ~line 632) really does call profile_firing_ceiling_
-// after_live_edit() on a real adopted edit, and that s_exec.firing_ceiling_c
-// never drops as a result -- not just that the pure helper itself is
-// monotonic (already covered above), but that the caller actually uses it.
-static void test_reload_live_profile_if_changed_uses_monotonic_ceiling_helper(void)
-{
-    TEST_SECTION("reload_live_profile_if_changed() -- adopts a live edit and updates "
-                 "s_exec.firing_ceiling_c via profile_firing_ceiling_after_live_edit(), "
-                 "never lowering it");
-
-    memset(&s_exec, 0, sizeof(s_exec));
-    s_exec.lock = xSemaphoreCreateMutex();
-    s_exec.state = PROFILE_EXEC_RUNNING;
-    s_exec.profile_id = 7;
-    s_exec.live_edit_generation = 0;
-    s_exec.segment_index = 0;
-    s_exec.firing_ceiling_c = 1000.0f; /* peak of the currently-running profile */
-
-    profile_t running;
-    memset(&running, 0, sizeof(running));
-    running.segment_count = 1;
-    running.segments[0] = zone_ramp_seg(1000.0f, 100.0f, 0);
-    s_exec.profile = running;
-
-    s_test_live_profile_generation = 0;
-    s_test_live_profile_load_ok = false;
-    s_test_live_edit_window_violated = false;
-
-    /* Case A: edit LOWERS the running segment's target (700C, down from
-     * 1000C) -- adopted (content swap happens unconditionally once the
-     * window check passes), but the ceiling must NOT follow it down. */
-    profile_t lowered = running;
-    lowered.segments[0] = zone_ramp_seg(700.0f, 100.0f, 0);
-    arm_live_edit_pickup(&lowered);
-
-    reload_live_profile_if_changed();
-
-    TEST_CHECK(s_exec.profile.segments[0].target_c == 700.0f,
-               "the edit's lowered target IS adopted into s_exec.profile (content swap is unconditional)");
-    TEST_CHECK(s_exec.firing_ceiling_c == 1000.0f,
-               "but firing_ceiling_c stays at 1000C -- profile_firing_ceiling_after_live_edit() refused "
-               "to lower it, and reload_live_profile_if_changed() used its return value");
-    TEST_CHECK(!s_exec.live_edit_last_refusal.valid, "a within-window edit is not recorded as a refusal");
-
-    /* Case B: a second edit RAISES the peak past the original 1000C --
-     * the ceiling must follow it up. */
-    profile_t raised = running;
-    raised.segments[0] = zone_ramp_seg(1300.0f, 100.0f, 0);
-    arm_live_edit_pickup(&raised);
-
-    reload_live_profile_if_changed();
-
-    TEST_CHECK(s_exec.profile.segments[0].target_c == 1300.0f, "the raised edit is adopted");
-    TEST_CHECK(s_exec.firing_ceiling_c == 1300.0f,
-               "firing_ceiling_c is raised to match -- profile_firing_ceiling_after_live_edit() adopts "
-               "a higher peak at once");
-
-    vSemaphoreDelete(s_exec.lock);
-    s_exec.lock = NULL;
-    s_exec.state = PROFILE_EXEC_IDLE; /* never leave a fake RUNNING firing behind for the next test */
-    s_test_live_profile_generation = 0;
-    s_test_live_profile_load_ok = false;
 }
 
 // Test 1 (mandatory coverage item 1): cold kiln -- no warm start, starts at
@@ -3409,12 +3138,8 @@ static void test_warm_start_hotter_than_entire_profile_lands_on_last_segment(voi
     p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
     p.segments[1] = zone_ramp_seg(280.0f, 100.0f, 15);
 
-    // 350C: hotter than every segment (peak 280C) yet still within the mirrored
-    // 100C SET_FIRING_CEILING margin (280+100=380 > 350) -- this test is about
-    // the "hotter than everything" landing decision, not the cooldown-hazard
-    // refusal, which has its own dedicated tests below. A kiln genuinely hot
-    // enough to trip that refusal (e.g. 900C) is exactly the new hazard this
-    // check exists to catch, not a case this test should exercise.
+    // 350C: hotter than every segment (peak 280C) -- this test is about the
+    // "hotter than everything" landing decision only.
     warm_start_test_setup(&p, 350.0f); /* hotter than every segment in the profile */
     char err[128] = {0};
     bool ok = profile_executor_run(0, err, sizeof(err));
@@ -3425,113 +3150,6 @@ static void test_warm_start_hotter_than_entire_profile_lands_on_last_segment(voi
     TEST_CHECK(s_exec.segment_index == 1, "lands on the LAST segment of the profile (index 1), not the first");
     TEST_CHECK(s_exec.dwelling, "entered directly as a dwell -- see Q3, the soak still runs");
     TEST_CHECK(s_exec.segment_elapsed_s == 0, "the full soak is still ahead of it, not shortened");
-
-    profile_executor_halt();
-}
-
-// CLAUDE.md SET_FIRING_CEILING hazard: profile_executor_run() must refuse a
-// start whose peak target is more than the mirrored 100C margin below the
-// kiln's CURRENT reading (a cool-down-only profile started on a hot kiln),
-// naming both temperatures in err_msg for the HTTP layer to surface as-is
-// (dashboard_exec_http.c already turns any run() refusal into an HTTP 400
-// with {"ok":false,"error":err_msg} -- no HTTP-layer change needed).
-static void test_run_refuses_cooldown_only_profile_on_hot_kiln(void)
-{
-    TEST_SECTION("profile_executor_run() -- refuses to start a cool-down-only profile on an "
-                 "already-hot kiln (SET_FIRING_CEILING 0x09 hazard: the Pico would tighten S1's "
-                 "ceiling below the current temperature and trip almost immediately)");
-
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.zone_mask = 0x01;
-    p.segment_count = 1;
-    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5); /* peak 200C -> Pico ceiling would be 300C */
-
-    warm_start_test_setup(&p, 900.0f); /* kiln already at 900C, far past the 300C ceiling */
-    /* 96: the smallest err buffer any real caller passes
-     * (uart_bridge_ext_control.c's PROFILES_CMD_START) -- the reason, not
-     * just the two numbers, must survive that truncation. */
-    char err[96] = {0};
-    bool ok = profile_executor_run(0, err, sizeof(err));
-
-    TEST_CHECK(!ok, "refused before ever reaching RUNNING");
-    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "state must not have been mutated by a refused start");
-    TEST_CHECK(strstr(err, "200.0") != NULL, "err_msg names the profile's peak target");
-    TEST_CHECK(strstr(err, "900.0") != NULL, "err_msg names the kiln's current reading");
-    TEST_CHECK(strstr(err, "S1 would trip, refused") != NULL,
-               "the reason survives a 96-byte caller buffer (not truncated off the end)");
-
-    /* Worst-case widths still fit a 96-byte buffer whole. */
-    warm_start_test_setup(&p, 2400.0f);
-    s_test_profiles_http_get_out.segments[0] = zone_ramp_seg(1300.0f, 100.0f, 5);
-    g_stub_max_temp_c[0] = 1300.0f;
-    char err2[96] = {0};
-    ok = profile_executor_run(0, err2, sizeof(err2));
-    TEST_CHECK(!ok, "1300C peak on a 2400C reading is refused");
-    TEST_CHECK(strstr(err2, "refused") != NULL, "4-digit temperatures: the full message still fits in 96 bytes");
-}
-
-static void test_run_never_refuses_on_invalid_hot_reading(void)
-{
-    TEST_SECTION("profile_executor_run() -- a thermo bus that IS up but whose only target-zone reading is "
-                 "invalid (spi_failed) never refuses on this check, however hot the stale number reads");
-
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.zone_mask = 0x01;
-    p.segment_count = 1;
-    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
-
-    warm_start_test_setup(&p, 900.0f);
-    s_test_thermo_readings[0].spi_failed = true; /* bus up, reading present, but not valid */
-    char err[128] = {0};
-    bool ok = profile_executor_run(0, err, sizeof(err));
-
-    TEST_CHECK(ok, "an invalid reading is 'unknown', not 'too hot' -- not refused by this check");
-    TEST_CHECK(strstr(err, "S1 would trip") == NULL, "and err_msg carries no firing-ceiling refusal");
-
-    profile_executor_halt();
-}
-
-static void test_run_allows_cooldown_profile_within_margin(void)
-{
-    TEST_SECTION("profile_executor_run() -- a cool-down profile whose peak is within the mirrored "
-                 "100C margin of the current reading is NOT refused (only a genuine cool-down-on-hot- "
-                 "kiln hazard is blocked, not every profile with a lower first target)");
-
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.zone_mask = 0x01;
-    p.segment_count = 1;
-    p.segments[0] = zone_ramp_seg(250.0f, 100.0f, 5); /* peak 250C -> Pico ceiling 350C */
-
-    warm_start_test_setup(&p, 300.0f); /* within the 350C ceiling */
-    char err[128] = {0};
-    bool ok = profile_executor_run(0, err, sizeof(err));
-
-    TEST_CHECK(ok, "not refused -- current reading is within the margin-derived ceiling");
-    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "reaches RUNNING normally");
-
-    profile_executor_halt();
-}
-
-static void test_run_never_refuses_on_missing_live_reading(void)
-{
-    TEST_SECTION("profile_executor_run() -- a cold/no-sensor-yet board (no live reading available) "
-                 "never refuses on this check -- it fails OPEN, same as the pure predicate");
-
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    p.zone_mask = 0x01;
-    p.segment_count = 1;
-    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
-
-    warm_start_test_setup(&p, 50.0f);
-    reset_test_thermo_readings(); /* no thermo bus armed -- live_current_max_zone_c() reads NAN */
-    char err[128] = {0};
-    bool ok = profile_executor_run(0, err, sizeof(err));
-
-    TEST_CHECK(ok, "no live reading available -> never refused by this check");
 
     profile_executor_halt();
 }
@@ -9940,14 +9558,6 @@ void run_test_profile_executor_prestart(void)
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
-    test_profile_compute_firing_max_c_picks_highest_zone_ramp_target();
-    test_profile_compute_firing_max_c_null_and_empty();
-    test_profile_compute_firing_max_c_skips_non_finite_and_negative();
-    test_firing_ceiling_after_live_edit_is_monotonic();
-    test_firing_ceiling_would_trip_on_start_refuses_cooldown_on_hot_kiln();
-    test_firing_ceiling_would_trip_on_start_fails_open_on_non_finite();
-    test_reload_live_profile_if_changed_uses_monotonic_ceiling_helper();
-    test_get_status_reports_firing_ceiling_only_while_running_or_paused();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -9963,7 +9573,6 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();
-    test_halt_clears_firing_ceiling();
     test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();
@@ -10045,10 +9654,6 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_2015c_gas_kiln_profile_on_80c_zone();
     test_warm_start_descending_profile_does_not_jump_into_cooldown();
     test_warm_start_hotter_than_entire_profile_lands_on_last_segment();
-    test_run_refuses_cooldown_only_profile_on_hot_kiln();
-    test_run_allows_cooldown_profile_within_margin();
-    test_run_never_refuses_on_missing_live_reading();
-    test_run_never_refuses_on_invalid_hot_reading();
 
     // PWM/progress-window fix -- order-independent, each re-derives its own
     // fresh thermal_guard_state_t/heater_output_state_t (or memsets s_exec).

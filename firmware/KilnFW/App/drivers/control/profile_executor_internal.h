@@ -40,7 +40,7 @@
 
 #include "profile_executor.h"
 
-#include <math.h>    /* isfinite() -- profile_compute_firing_max_c() below */
+#include <math.h>    /* isfinite() */
 #include <stdbool.h>
 #include <stddef.h> /* offsetof() -- profile_firing_history_blob_t layout asserts below */
 #include <stdint.h>
@@ -900,17 +900,6 @@ typedef struct {
      * first tick because live_profile_generation() already differs from 0. */
     uint32_t live_edit_generation;
 
-    /* SAFETY_CMD_SET_FIRING_CEILING (0x09, CommonFW/docs/LINK_PROTOCOL.md
-     * sec 4): this run's firing_max_c as handed to the Pico. Set by
-     * profile_executor_run() from profile_compute_firing_max_c(), only ever
-     * RAISED by a live-edit pickup (reload_live_profile_if_changed() keeps
-     * max(old, new): lowering it mid-firing below a temperature the kiln
-     * already legitimately reached would make the Pico latch an S1 OVERTEMP
-     * trip over an edit the ESP accepted), zeroed by halt. Reported by
-     * profile_executor_get_status() only while RUNNING/PAUSED (0 otherwise),
-     * which is what safety_build_and_send_context() resends every poll. */
-    float    firing_ceiling_c;
-
     /* MEDIUM-3 (review): the last DEFINITIVE live-edit refusal this run has
      * seen -- window or HARD-validate (never "not applicable"/malloc/not-
      * running, none of which are definitive, see profile_live_pickup_
@@ -1469,110 +1458,6 @@ void history_unpack(const history_slot_t *slot, profile_history_entry_t *out);
 
 /* ---- run() feasibility/warm-start helpers (profile_executor_start.c) ----- */
 bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_zone);
-
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09) --
- * the raw peak this profile will ever ask a zone to reach, i.e. the highest
- * `target_c` among its PROFILE_SEG_KIND_ZONE_RAMP segments. RELAY_IO segments
- * carry no meaningful target_c and are skipped. The +firing_margin_c margin
- * and the min() against abs_max_temp_c both happen entirely Pico-side
- * (SaftyFW/src/safety_guards.c) -- this function must NOT add the margin
- * itself. Returns 0.0f ("no ceiling") for a NULL profile or one with no
- * ZONE_RAMP segments. Pure function, host-test-callable directly against a
- * hand-built profile_t, same as profile_zones_have_ceiling() above. */
-static inline float profile_compute_firing_max_c(const profile_t *p)
-{
-    float max_c = 0.0f;
-    if (!p) {
-        return 0.0f;
-    }
-    for (uint8_t i = 0; i < p->segment_count; i++) {
-        if (p->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
-            continue;
-        }
-        /* isfinite(): a NaN target already loses every compare below, but
-         * +Infinity would win it and then be refused by
-         * safety_link_send_firing_ceiling()'s own range check -- skip
-         * non-finite targets so this only ever returns a finite value >= 0.
-         * Negative targets never beat the 0.0f seed. */
-        if (isfinite(p->segments[i].target_c) && p->segments[i].target_c > max_c) {
-            max_c = p->segments[i].target_c;
-        }
-    }
-    return max_c;
-}
-
-/* The firing ceiling to adopt after a live edit is picked up mid-firing:
- * monotonic, never LOWER than the one already in force. The live-edit window
- * rule (live_edit_check_window()) lets the running segment's target_c drop,
- * possibly below a temperature the kiln already reached legitimately under
- * the old profile; lowering firing_max_c to match would make the Pico latch
- * an S1 OVERTEMP trip (S1_OVER_CEILING_STREAK_TO_TRIP consecutive readings
- * over new max + firing_margin_c) for an edit the ESP itself accepted. A
- * raise is adopted at once. Pure, host-test-callable. */
-static inline float profile_firing_ceiling_after_live_edit(float current_c, const profile_t *edited)
-{
-    float new_max_c = profile_compute_firing_max_c(edited);
-    return (new_max_c > current_c) ? new_max_c : current_c;
-}
-
-/* Mirrors SaftyFW's FIRING_MARGIN_C_DEFAULT (firmware/SaftyFW/src/
- * safety_guards.c, S1: `ceiling = min(abs_max_temp_c, firing_max_c +
- * effective_f(cfg->firing_margin_c, FIRING_MARGIN_C_DEFAULT))`) so this file
- * can refuse a start BEFORE asking the Pico to tighten S1 to a ceiling the
- * kiln is already hotter than, instead of letting S1 trip a few ticks after
- * SET_FIRING_CEILING lands. This is a courtesy pre-check, not a redefinition
- * of the guard: it does not know the board's actual `firing_margin_c` (that
- * value can be reconfigured via SET_PARAM 0x0201 and only the Pico enforces
- * it) or its `tc_placement_mode` (SaftyFW only applies this ceiling in
- * CHAMBER_AGREED -- see safety_guards.c line ~629), so it applies the
- * DEFAULT margin unconditionally, including in EXTERNAL_OVERHEAT where the
- * Pico would never have tightened the ceiling at all. That can make this
- * pre-check refuse a start the Pico would have allowed (EXTERNAL_OVERHEAT,
- * or a configured margin LARGER than the default). The reverse also exists
- * and is accepted: a configured margin SMALLER than the default makes the
- * Pico's real ceiling lower than the one checked here, so a start in that
- * gap is let through and still trips S1 -- the same safe-direction outcome
- * as having no pre-check at all, never a missed guard. Checked against
- * SaftyFW's constant by
- * firmware/KilnFW/App/test/firing_ceiling_margin_mirror_drift_check.py so
- * the two defaults cannot silently drift apart. */
-#define PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR 100.0f
-
-/* True if starting (or resuming) a firing whose peak target is
- * `firing_max_c` would ask the Pico to tighten S1's ceiling to
- * `firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR` while a
- * zone this firing targets is ALREADY hotter than that -- the "cool-down
- * profile started on a hot kiln" hazard CLAUDE.md's SET_FIRING_CEILING
- * section names. `current_max_zone_c` is the caller's already-computed
- * hottest currently-valid live reading among the profile's own target
- * zones; NaN/non-finite ("unknown", or no valid reading at all) never
- * refuses -- a board that cannot see its own temperature has no basis to
- * say it is too hot, and refusing on that would be a new hazard of its own,
- * not a fix for this one. Pure function, no s_exec, host-test-callable
- * directly against hand-built inputs. */
-static inline bool profile_firing_ceiling_would_trip_on_start(float firing_max_c, float current_max_zone_c)
-{
-    if (!isfinite(current_max_zone_c)) {
-        return false;
-    }
-    /* firing_max_c <= 0 is the wire's own "no ceiling" spelling (0.0f is what
-     * profile_compute_firing_max_c() returns for a profile with no positive
-     * ZONE_RAMP target): SaftyFW's link_frame_ceiling_is_active() requires
-     * isfinite() && > 0.0f before it tightens S1 at all, so such a start
-     * never tightens anything and must not be refused here either. */
-    if (!(firing_max_c > 0.0f)) {
-        return false;
-    }
-    float ceiling = firing_max_c + PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR;
-    if (!isfinite(ceiling)) {
-        /* Garbled input (NaN/huge firing_max_c) -- fail open here, same
-         * direction as safety_guards.c's own isfinite() guard on this exact
-         * arithmetic: this pre-check is a courtesy, the Pico's own isfinite()
-         * guard is the one that must never latch a nuisance trip forever. */
-        return false;
-    }
-    return current_max_zone_c > ceiling;
-}
 
 /* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored
  * profile_on_off_rule_t (if any) for (zone_index, segment_index) in `p` and

@@ -4,43 +4,8 @@
 > violation no longer reboots the board, board-lock and LCD-bench-runner review
 > fixes landed, and the forgot-password design was replaced with TOTP
 > (thirty-eighth sweep) — open items below.
-> - **SET_FIRING_CEILING (0x09) landed: ESP resends the running profile's peak
->   target plus margin as the Pico's S1 ceiling after every PUSH_CONTEXT
->   (level-triggered, not edge-only)** — `6f8ed940` wired the initial send at
->   profile start/live-edit pickup/halt (`profile_compute_firing_max_c()`,
->   `safety_link_send_firing_ceiling()`); `34f242c3` fixed edge-only sending
->   (a Pico reboot, lost halt frame, or a DONE/FAULTED exit with no operator
->   halt could otherwise strand a stale ceiling) by resending the ceiling on
->   every context-shadow poll and making it monotonic within a firing so a
->   live edit can never raise it back up; `4f7f5998` corrected
->   `LINK_PROTOCOL.md`'s stale "never sends SET_FIRING_CEILING" note.
->   **Cool-down-on-hot-kiln check landed:** `5840a82c` + review fixes
->   `341739ab` add a start-time check that refuses (HTTP 400, naming both
->   the profile's peak and the kiln's current temperature) starting a
->   cool-down-only profile whose peak reads below the kiln's own temperature;
->   the LCD profile-detail page shows a Cannot Start modal for the refusal,
->   the check fails open on invalid/unavailable readings by design, and
->   `tools/check_firing_ceiling_margin_mirror_drift.ps1` guards the check
->   against its own mirror drifting. **Open follow-ups from that review:**
->   (1) the LCD home screen's quick-start path only logs the refused start —
->   the operator sees nothing (FIXED deeab320: it now shows the same "Cannot Start"
->   modal as the profile detail page; not yet flashed);
->   (2) the check compares against the 100 C default margin, not the Pico's
->   actually-configured 0x0201 margin/placement mode from `safety_cfg_store`,
->   so it can over-refuse or pass a start through that the real Pico ceiling
->   would trip; (3) `profile_executor_run.c`'s baseline SPI read (around
->   line 832) runs while holding `s_exec.lock`, against this file's own
->   "never hold a module lock across producer calls" rule (FIXED 53f27b46;
->   review found the same pattern in the RUNNING control tick and the
->   autotune tick, FIXED c3a267b7 with review fixes 7bb7cb5a/d7b6bb28: shared
->   `thermo_channels_read()` helper at four read sites, the baseline read now
->   applies the fault-bit filter, a peek-missed start tick is skipped; not yet
->   flashed). **Standing
->   tension, awaiting owner
->   acknowledgement:** the Pico deliberately runs S1 tighter than
->   `abs_max_temp_c` during a firing, which is in tension with the standing
->   "Pico ceiling never tighter than the ESP's abs_max" rule and has not yet
->   been reconciled with it.
+> - **SET_FIRING_CEILING (0x09) reverted, 2026-09-24 owner decision:** "the safety limits should be the same[,] the safty processor is a backup incase the esp fails" -- the level-triggered resend (`6f8ed940`, `34f242c3`) and the Pico-side `min(abs_max_temp_c, firing_max_c + firing_margin_c)` tightening in `safety_guards.c` are removed; S1's ceiling is now unconditionally `abs_max_temp_c`, resolving the "standing tension" this entry used to flag against the "Pico ceiling never tighter than the ESP's abs_max" rule. The cool-down-on-hot-kiln start-time check
+>   (`5840a82c`/`341739ab`) and its LCD Cannot Start modal are UNRELATED to this ceiling and are NOT reverted -- they still refuse starting a cool-down-only profile whose peak reads below the kiln's current temperature. `check_firing_ceiling_margin_mirror_drift.ps1` and its Python check (mirrored the now-removed ceiling margin, not the start-time check) were deleted along with the ceiling code.
 > - **`exec_mode_state_check()` violation now latches FAULTED instead of
 >   rebooting** (`docs/audits/profile_executor_panic_2026-09-24.md` item 4):
 >   `002e71bd` replaces the target-build hard `assert()` at that call site with

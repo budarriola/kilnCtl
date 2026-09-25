@@ -2039,40 +2039,15 @@ esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type);
  * any task. */
 esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level);
 
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09) --
- * long tracked as "confirmed still not built" (no call to
- * kilnlink_ceiling_encode() anywhere under App/drivers/); this is that
- * caller. SaftyFW's handler (link_task_handle_set_firing_ceiling()) and
- * consumer (safety_guards.c's `min(abs_max_temp_c, firing_max_c +
- * firing_margin_c)`, margin default 100C) were already complete and
- * host-tested.
- *
- * `firing_max_c` is the caller's own precomputed "highest target this
- * firing will ever ask for" (control/profile_executor_internal.h's
- * profile_compute_firing_max_c()) -- this function does not derive it, only
- * range-checks and sends it. 0.0f or NaN means "no firing / no ceiling
- * known" (LINK_PROTOCOL.md sec 4) and is how a stopped firing hands S1 back
- * to abs_max_temp_c alone -- this only ever LOOSENS the effective ceiling,
- * never tightens it. Any other value must be >= 0 and finite or it is
- * refused locally.
- *
- * Same fire-and-forget BROADCAST shape as safety_link_send_set_config()/
- * safety_link_send_set_log_level(): link_task_handle_set_firing_ceiling()
- * never replies on the wire, so ESP_OK is proof the frame was handed to the
- * UART, not proof the Pico accepted it. Returns ESP_ERR_INVALID_ARG for an
- * out-of-range value, ESP_ERR_INVALID_STATE if the driver isn't
- * initialized. Safe to call from any task.
- *
- * These edge sends (start, live-edit pickup, halt) are not the only path:
- * the Pico keeps the ceiling in RAM only and never ACKs it, so
- * safety_build_and_send_context() (safety_link_frames.c) also resends
- * profile_executor_get_status()'s firing_ceiling_c after EVERY PUSH_CONTEXT
- * ("repeated in every context frame's shadow", LINK_PROTOCOL.md sec 4).
- * That value is 0.0f unless the executor is RUNNING/PAUSED, so a Pico
- * reboot mid-firing regains its ceiling within one poll, and a stale ceiling
- * (lost halt frame, ESP reboot mid-firing, DONE/FAULTED end of run) is
- * cleared within one poll instead of tightening S1 for a later autotune. */
-esp_err_t safety_link_send_firing_ceiling(SafetyLinkClass *link, float firing_max_c);
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING (0x09)
+ * is RETIRED (owner decision 2026-09-24: the safety processor is a backup in
+ * case the ESP fails and must never run a tighter limit than the ESP's own).
+ * The ESP no longer sends this command at all -- there is no
+ * safety_link_send_firing_ceiling() any more. The opcode stays reserved (not
+ * reused) so an older ESP build or a captured trace naming it still makes
+ * sense; SaftyFW still decodes a 0x09 frame if one arrives (from an older
+ * ESP), but safety_guards.c's S1 ignores the result and trips at
+ * abs_max_temp_c alone regardless. */
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --
  * tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP

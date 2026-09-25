@@ -246,9 +246,18 @@ Every one of them is a bench-tunable number, not a `#define` buried in a `.c`.
 
 The reason the board exists.
 
+**RETIRED 2026-09-24 (owner decision: the safety processor is a backup in
+case the ESP fails, and must not run a tighter limit than the ESP's own):**
+the `firing_max_c`/`firing_margin_c` tightening described below is removed.
+The ceiling is now unconditionally `abs_max_temp_c` in every
+`tc_placement_mode`, including `CHAMBER_AGREED`. The rest of this section is
+kept as historical rationale for why the tightening once existed, not as a
+description of current behavior.
+
 ```
-CHAMBER_AGREED:     ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)
-EXTERNAL_OVERHEAT:  ceiling = abs_max_temp_c            ← fixed, always
+(historical) CHAMBER_AGREED:     ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)
+(historical) EXTERNAL_OVERHEAT:  ceiling = abs_max_temp_c            ← fixed, always
+(current, both modes):           ceiling = abs_max_temp_c
 
 safety_tc_c > ceiling   for  3 consecutive valid readings  (~300 ms)
 ```

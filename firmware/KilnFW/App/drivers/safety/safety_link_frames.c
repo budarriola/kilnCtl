@@ -526,9 +526,6 @@ void safety_build_and_send_context(SafetyLinkClass *link)
                                   danger_mode_active())) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_HEAT_OWNER_ACTIVE;
     }
-    /* Read before the free below: 0.0f unless a firing is RUNNING/PAUSED
-     * (profile_executor_get_status()). */
-    float firing_ceiling_c = pstat->firing_ceiling_c;
     free(pstat); /* last read of pstat was just above -- nothing below needs it */
     if (any_zone_faulted) {
         ctx.flags |= KILNLINK_CONTEXT_FLAG_ANY_ZONE_FAULTED;
@@ -556,22 +553,6 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * broadcast call site above -- fire-and-forget, no ACK expected. */
     (void)uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                         UART_TASK_ID_SAFETY, payload, len);
-
-    /* SAFETY_CMD_SET_FIRING_CEILING (0x09) "repeated in every context
-     * frame's shadow" (LINK_PROTOCOL.md sec 4). The Pico keeps the ceiling in
-     * RAM only (link_task.c's s_firing_ceiling_have, cleared at its boot) and
-     * the command never ACKs, so an edge-only send at profile start/edit/halt
-     * would silently lose it on one dropped frame or a Pico reboot mid-firing
-     * (S1 back on abs_max_temp_c alone for the rest of the firing), and leave
-     * a stale one standing across an ESP reboot (tightening S1 for a later
-     * autotune that sends none). Resending the executor's live value every
-     * period makes both sides converge within one period, whatever reset
-     * either side went through. Sent after PUSH_CONTEXT so the Pico's
-     * context_valid gate is already satisfied when it lands. Result
-     * deliberately unchecked beyond the call: a failed UART write here is
-     * the same condition PUSH_CONTEXT's own send above already ignores, and
-     * the next period retries it. */
-    (void)safety_link_resend_firing_ceiling(link, firing_ceiling_c);
 }
 
 /* ------------------------------------------------------------------------ */

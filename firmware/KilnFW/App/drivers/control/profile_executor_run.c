@@ -56,41 +56,6 @@ static void history_buf_ensure_alloc(void)
     }
 }
 
-/* One-shot live read for the cool-down-on-a-hot-kiln pre-start check below
- * -- deliberately NOT s_exec.zones[]/thermo_owner, both of which either only
- * update while RUNNING (s_exec.zones[zi].actual_c is stale from the last
- * firing while IDLE, see executor_task_entry()'s "continue" branch for a
- * non-RUNNING state) or are reserved for writes/configuration
- * (thermo_owner.h's own header comment: MAX31856_read_all() callers,
- * including this file's sibling profile_executor.c, are explicitly out of
- * scope for that owner-task migration). Mirrors executor_task_entry()'s own
- * read-then-combine-per-zone shape (profile_executor.c ~line 795) against
- * only the zones this profile targets. Returns NAN if no zone in
- * `zone_mask` has a currently-valid reading -- including a board with no
- * thermocouple hardware initialized at all (sim disabled, thermo_bus not
- * up), which is exactly the "unknown, never refuse" case
- * profile_firing_ceiling_would_trip_on_start() documents. */
-static float live_current_max_zone_c(uint8_t zone_mask)
-{
-    ThermoChannelSnapshot snap;
-    thermo_channels_read(s_exec.thermo_bus, &snap);
-    float max_c = NAN;
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if (!(zone_mask & (1u << zi))) continue;
-        uint8_t tmask = 0;
-        zones_config_get_thermo_mask(zi, &tmask);
-        bool valid = false;
-        float combined = thermo_combine(snap.raw_c, snap.ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
-        if (!valid) continue;
-        float calibrated = zones_config_apply_cal(zi, combined);
-        if (!isfinite(calibrated)) continue;
-        if (!isfinite(max_c) || calibrated > max_c) {
-            max_c = calibrated;
-        }
-    }
-    return max_c;
-}
-
 /* Baseline thermocouple snapshot for the ramp-start/warm-start/ambient seeds
  * set further down (under s_exec.lock). Read HERE, before s_exec.lock is
  * ever taken -- CLAUDE.md's "never hold a module lock across a producer
@@ -98,9 +63,7 @@ static float live_current_max_zone_c(uint8_t zone_mask)
  * queue for up to ~200ms, and profile_executor_run() used to do this exact
  * read while already holding s_exec.lock, blocking every other s_exec.lock
  * caller (the dashboard/LCD status readers, profiles_stop(), etc.) for that
- * whole window. Mirrors live_current_max_zone_c() just above, which already
- * reads s_exec.thermo_bus/sim_backend_enabled() without the lock for the
- * same reason.
+ * whole window.
  *
  * first_active (the lowest zone index set in zone_mask) is purely a property
  * of the profile being started -- it does not depend on any s_exec state
@@ -381,37 +344,6 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
 
-    /* CLAUDE.md's SET_FIRING_CEILING (0x09) hazard: a profile whose peak
-     * target is more than PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR
-     * below the kiln's CURRENT temperature would ask the Pico to tighten S1
-     * to a ceiling already exceeded, tripping it within a few ticks of this
-     * start rather than ever letting the profile run (a cool-down-only
-     * profile started on a hot kiln). Refused here, at the door, rather than
-     * discovered as a latched S1 trip a few seconds into a run that reads
-     * {"ok":true}. Checked before the lock, same as the other feasibility
-     * checks above -- no s_exec state is touched, only a live hardware read
-     * and the profile's own already-validated zone_mask/segments. */
-    {
-        float firing_max_c = profile_compute_firing_max_c(&p);
-        float current_max_zone_c = live_current_max_zone_c(p.zone_mask);
-        if (profile_firing_ceiling_would_trip_on_start(firing_max_c, current_max_zone_c)) {
-            /* Kept under 96 bytes worst case: the smallest caller buffer is
-             * uart_bridge_ext_control.c's char[96] (then dashboard_exec_
-             * http.c's char[128]), and both temperatures AND the reason must
-             * survive truncation -- so no profile name (the caller already
-             * knows which one it asked for; the log line below has it). */
-            if (err_msg) {
-                snprintf(err_msg, err_cap, "peak %.1fC is >%.0fC below kiln %.1fC: safety S1 would trip, refused",
-                         (double)firing_max_c, (double)PROFILE_EXECUTOR_FIRING_CEILING_MARGIN_C_MIRROR,
-                         (double)current_max_zone_c);
-            }
-            ESP_LOGW(PE_TAG, "profile_executor_run(%u) '%s' refused: peak %.1fC, hottest target zone %.1fC "
-                             "(SET_FIRING_CEILING would put S1 below the kiln)",
-                     (unsigned)profile_id, p.name, (double)firing_max_c, (double)current_max_zone_c);
-            return false;
-        }
-    }
-
     /* Baseline/warm-start/ambient SPI read, taken before the lock -- see
      * profile_executor_capture_baseline()'s own doc comment. */
     bool baseline_valid = false;
@@ -585,10 +517,6 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
     s_exec.profile = p;
     s_exec.profile_id = profile_id;
-    /* SET_FIRING_CEILING (0x09): only reported (and so only resent by the
-     * safety poll task) once state is RUNNING/PAUSED -- a refusal below
-     * leaves state untouched and this value unobserved. */
-    s_exec.firing_ceiling_c = profile_compute_firing_max_c(&p);
     s_exec.segment_index = 0;
     s_exec.dwelling = false;
     s_exec.segment_elapsed_s = 0;
@@ -1180,26 +1108,6 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
     xSemaphoreGive(s_exec.lock);
     (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
-
-    /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING
-     * (0x09) -- outside s_exec.lock, same discipline as the heat_enable
-     * acquire above (a producer call, never held under the exec lock). `p`
-     * is the local, already-committed copy of this run's profile, still in
-     * scope. Fire-and-forget broadcast: a failure here is logged, never
-     * treated as success, and never blocks the firing that has already
-     * started. This immediate send is only the fast path -- the value is
-     * level-triggered: safety_build_and_send_context() resends
-     * profile_executor_get_status()'s firing_ceiling_c every poll period, so
-     * a lost frame or a Pico reboot mid-firing heals within one period. In
-     * the gap the Pico runs S1 on abs_max_temp_c alone (looser, never
-     * tighter). */
-    float firing_max_c = profile_compute_firing_max_c(&p);
-    esp_err_t ceiling_err = safety_link_send_firing_ceiling(s_exec.safety, firing_max_c);
-    if (ceiling_err != ESP_OK) {
-        ESP_LOGW(PE_TAG,
-                 "profile '%s' (id %u): SET_FIRING_CEILING send failed (err=%s), firing_max_c=%.1f",
-                 p.name, profile_id, esp_err_to_name(ceiling_err), (double)firing_max_c);
-    }
 
     /* First write of this run's breadcrumb, and the one that overwrites any
      * previous run's record in flash. From here on the stored record says a

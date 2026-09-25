@@ -98,23 +98,7 @@ void profile_executor_halt(void)
     exec_enter_terminal_state(PROFILE_EXEC_IDLE);
     s_exec.fault_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
-    s_exec.firing_ceiling_c = 0.0f;
     xSemaphoreGive(s_exec.lock);
-
-    /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_FIRING_CEILING
-     * (0x09) -- clear the Pico's cached ceiling on every real stop (the
-     * IDLE early-return above already refused a no-op halt, so reaching here
-     * means a firing that was RUNNING/PAUSED/DONE/FAULTED just ended).
-     * 0.0f is the documented "no firing / no ceiling known" sentinel
-     * (LINK_PROTOCOL.md sec 4) -- S1 falls back to abs_max_temp_c alone,
-     * which only ever LOOSENS the effective ceiling, never tightens it.
-     * Outside s_exec.lock, same producer-call discipline as every other
-     * safety_link send site in this file's siblings. */
-    esp_err_t ceiling_err = safety_link_send_firing_ceiling(s_exec.safety, 0.0f);
-    if (ceiling_err != ESP_OK) {
-        ESP_LOGW(PE_TAG, "profile_executor_halt: SET_FIRING_CEILING clear failed (err=%s)",
-                 esp_err_to_name(ceiling_err));
-    }
 
     if (fs_need_persist) {
         firing_stats_persist(&fs_rec);
@@ -308,14 +292,6 @@ void profile_executor_get_status(profile_exec_status_t *out)
      * moved past the run that latched it (docs/audits/
      * profile_executor_panic_2026-09-24.md). */
     out->mode_state_violation_count = s_exec.mode_state_violation_count;
-    /* SET_FIRING_CEILING (0x09): only a firing that can still command heat
-     * (RUNNING, or PAUSED and resumable) keeps a ceiling -- DONE/FAULTED/IDLE
-     * report 0.0f ("no ceiling") so the poll task's resend clears the Pico's
-     * copy without waiting for an operator halt. Clearing only ever LOOSENS
-     * S1 back to abs_max_temp_c. */
-    out->firing_ceiling_c = (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED)
-                                ? s_exec.firing_ceiling_c
-                                : 0.0f;
     if (s_exec.state != PROFILE_EXEC_IDLE) {
         out->profile_id = s_exec.profile_id;
         strncpy(out->profile_name, s_exec.profile.name, sizeof(out->profile_name) - 1);

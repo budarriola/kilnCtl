@@ -422,14 +422,6 @@ typedef struct {
      * order). Only the first warm_start_replayed_count entries are valid. */
     uint8_t  warm_start_replayed_segments[PROFILE_MAX_SEGMENTS];
     uint8_t  warm_start_replayed_count;
-    /* SAFETY_CMD_SET_FIRING_CEILING's firing_max_c for the firing in progress
-     * (s_exec.firing_ceiling_c) while RUNNING or PAUSED; 0.0f ("no firing /
-     * no ceiling known", LINK_PROTOCOL.md sec 4) in every other state.
-     * safety_build_and_send_context() resends this every poll period, so the
-     * Pico's RAM-only copy is level-triggered: it recovers from a lost frame
-     * and from a Pico reboot mid-firing, and an ESP reboot (which reports
-     * IDLE) clears whatever stale ceiling the Pico still held. */
-    float    firing_ceiling_c;
 } profile_exec_status_t;
 
 /* Snapshot for the dashboard's status API -- never blocks on the executor

@@ -73,10 +73,6 @@ safety_link_await_result_t safety_link_await_or_unknown(uint32_t timeout_ms, uin
 
 void safety_link_send_announce_version_burst(SafetyLinkClass *link);
 void safety_build_and_send_context(SafetyLinkClass *link);
-/* SAFETY_CMD_SET_FIRING_CEILING (0x09) level-triggered resend, called by
- * safety_build_and_send_context() every poll period -- same frame and range
- * check as safety_link_send_firing_ceiling(), without its per-send log line. */
-esp_err_t safety_link_resend_firing_ceiling(SafetyLinkClass *link, float firing_max_c);
 bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg);
 bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg);
 bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg);

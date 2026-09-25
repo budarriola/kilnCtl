@@ -182,20 +182,16 @@ typedef struct {
     float abs_max_temp_c;
     float firing_margin_c;
 
-    /* S1's firing_max_c is context, not config -- it arrives from the ESP
-     * over the isolated link at profile start (SAFETY_MODEL.md section 4,
-     * S1) and link_task does not exist yet (that's Phase 7). It is placed
-     * here, in the config struct, rather than in safety_guard_input_t,
-     * because this pure module has no separate per-tick context input in
-     * this phase and the task brief for Phase 4 is explicit that the field
-     * should live somewhere ready for Phase 7 to wire up rather than being
-     * invented fresh then. Until link_task sets firing_max_valid, S1
-     * behaves exactly as SAFETY_MODEL.md says it must "when no firing is
-     * running": ceiling = abs_max_temp_c, unconditionally. Re-examine
-     * whether this belongs in a context-shaped input instead once Phase 7
-     * actually produces one -- config that changes with what firing is
-     * running today is an odd fit for a struct otherwise reserved for
-     * bench-tunable numbers. */
+    /* firing_max_valid/firing_max_c still arrive from the ESP over the
+     * isolated link (SAFETY_CMD_SET_FIRING_CEILING, 0x09) and are still
+     * decoded and stored here by link_task/safety_core so a Pico talking to
+     * an older ESP that still sends 0x09 keeps working -- but as of the
+     * 2026-09-24 owner decision ("the safety processor is a backup in case
+     * the ESP fails, and must not run a tighter limit than the ESP's own"),
+     * safety_guards_tick() no longer reads either field: S1's ceiling is
+     * always abs_max_temp_c alone. Left in place, inert, rather than removed
+     * outright, to avoid a config_store schema/version bump and to keep
+     * decoding 0x09 safe for an older ESP. */
     bool  firing_max_valid;
     float firing_max_c;
 

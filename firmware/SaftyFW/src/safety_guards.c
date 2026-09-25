@@ -295,12 +295,12 @@ float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guar
 {
     switch (reason) {
     case SAFETY_TRIP_OVERTEMP:
-        /* S1. Reports the configured absolute ceiling (abs_max_temp_c), NOT
-         * the possibly-tighter effective_ceiling = min(abs_max_temp_c,
-         * firing_max_c + firing_margin_c) that actually decided a trip
-         * during a firing with a ceiling in effect -- safety_guards_tick()
-         * computes that min() internally and does not expose it. abs_max_temp_c
-         * has no substituted default (safety_guards.h: "0 = not commissioned,
+        /* S1. Reports the configured absolute ceiling (abs_max_temp_c) --
+         * owner decision 2026-09-24: this IS the ceiling that decides a trip,
+         * unconditionally (the safety processor is a backup and must never
+         * run tighter than the ESP's own limit; the former firing_max_c/
+         * firing_margin_c min() tightening was removed). abs_max_temp_c has
+         * no substituted default (safety_guards.h: "0 = not commissioned,
          * guard never trips"), so if this guard tripped, this value is real
          * and non-zero -- never a silently-substituted fallback. */
         return cfg->abs_max_temp_c;
@@ -625,31 +625,13 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * accumulate a streak toward one (SAFETY_MODEL.md section 4, S1: "has
      * no default and must be commissioned"). */
     if (cfg->abs_max_temp_c > 0.0f) {
-        float ceiling;
-        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
-            cfg->firing_max_valid) {
-            /* The ceiling can only ever tighten: min() means a hostile or
-             * buggy ESP asking for more headroom gets clamped, never
-             * obeyed (SAFETY_MODEL.md section 4, S1). */
-            float requested = cfg->firing_max_c + effective_f(cfg->firing_margin_c, FIRING_MARGIN_C_DEFAULT);
-            /* isfinite() guard: a non-finite requested (NaN OR -Infinity --
-             * garbled/hostile firing_max_c from the link) must fall back to
-             * abs_max_temp_c rather than enter the comparison below. NaN
-             * already fell through by luck of IEEE754 "any compare with NaN
-             * is false" semantics, but -Infinity does NOT -- "-Inf < finite"
-             * is true, so without this guard ceiling would latch to
-             * -Infinity and S1 would trip on every subsequent tick forever
-             * (a permanent nuisance-trip, not a missed-trip risk). */
-            ceiling = (isfinite(requested) && requested < cfg->abs_max_temp_c) ? requested : cfg->abs_max_temp_c;
-        } else {
-            /* EXTERNAL_OVERHEAT: fixed, always, firing_max_c ignored
-             * entirely regardless of firing_max_valid (SAFETY_MODEL.md
-             * section 4, S1: "applied to an externally-mounted sensor it
-             * would be nonsense"). CHAMBER_AGREED with no firing running
-             * (firing_max_valid == false) lands here too, which is exactly
-             * "ceiling = abs_max_temp_c" per the doc. */
-            ceiling = cfg->abs_max_temp_c;
-        }
+        /* Owner decision 2026-09-24: the safety processor is a backup in
+         * case the ESP fails, and must not run a tighter limit than the
+         * ESP's own ceiling. S1 always trips at abs_max_temp_c alone --
+         * the SET_FIRING_CEILING (0x09) tightening layered on top of it
+         * (firing_max_c + firing_margin_c, min()'d against abs_max_temp_c)
+         * has been removed. */
+        float ceiling = cfg->abs_max_temp_c;
 
         if (in->tc_valid && in->tc_c > ceiling) {
             if (state->s1_over_ceiling_streak < UINT8_MAX) {

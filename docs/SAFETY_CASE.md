@@ -1,6 +1,14 @@
 # Safety Case — the argument that this kiln controller is safe enough
 
 > **Status:** first pass, synthesized from existing docs · **Last reviewed:** 2026-09-04 (topology/H3 pass)
+>
+> **Superseded 2026-09-24:** every `ceiling = min(abs_max_temp_c, firing_max_c
+> + firing_margin_c)` formula quoted below describes code that has since been
+> reverted (owner decision: "the safty limits should be the same the safty
+> processor is a backup incase the esp fails" — SET_FIRING_CEILING/0x09 and
+> the Pico-side tightening it drove are removed). S1's ceiling is now
+> unconditionally `abs_max_temp_c`, with no `firing_max_c`/`firing_margin_c`
+> term at all — the formula text below is historical, not current behavior.
 > **Keep this file current.** A safety case that lags the code is worse than no
 > safety case, because it invites trust it has not earned. If this file cannot
 > be kept honest, delete it rather than let it drift.
