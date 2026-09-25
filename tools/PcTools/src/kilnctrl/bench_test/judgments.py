@@ -2548,6 +2548,20 @@ def parse_trip_mask(diag_text: str) -> "int | None":
     return int(m.group(1), 0)
 
 
+def parse_current_fault_sources(diag_text: str) -> "int | None":
+    """Parses the Pico's own mirrored view of which ESP fault sources are
+    currently asserted (`current_fault_sources`, only meaningful when
+    `current_fault_sources_known` is set -- see mcp_server_safety.py's diag
+    rendering). Used by HP-07 to confirm `escalate_guard_trip()`'s asserted
+    fault line was actually released (`clear_this_runs_faults()`,
+    profile_executor_relay_io.c) after the ack, distinct from the trip_reason/
+    trip_mask latch itself."""
+    m = re.search(r"current_fault_sources\s*[:=]?\s*(0x[0-9a-fA-F]+|\d+)", diag_text)
+    if not m:
+        return None
+    return int(m.group(1), 0)
+
+
 def safety_trip_mask_for_reason(trip_reason: int) -> int:
     """`trip_mask = 1 << (trip_reason - 1)`, 0 for trip_reason 0 (NONE) --
     mirrors link_frame_trip_mask_for_reason() (firmware/SaftyFW/src/tasks/

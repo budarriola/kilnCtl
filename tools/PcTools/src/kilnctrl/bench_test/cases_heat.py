@@ -147,11 +147,16 @@ _CEILING_PREFLIGHT_MARGIN_C = 1.0
 #: `limit_c`, lowering `target_zone` alone leaves the Pico's mirrored
 #: ceiling unchanged and comfortably above where this case intends to
 #: provoke the ESP's own `thermal_guard.c` trip. Refusing here, rather than
-#: lowering and hoping, is how this case avoids a Pico S1 (`abs_max_temp_c`)
-#: trip racing (or beating) the ESP software guard it is actually trying to
-#: provoke -- a Pico trip needs `safety_clear_trip()`, not
-#: `profiles.stop()`, and would misreport a bench harness issue as a
-#: firmware safety fault.
+#: lowering and hoping, is how this case avoids a SEPARATE, unintended Pico
+#: S1 (`abs_max_temp_c`) trip racing (or beating) the ESP software guard it
+#: is actually trying to provoke. Note this is distinct from the trip this
+#: case DOES intend to provoke: `escalate_guard_trip()`
+#: (profile_executor_relay_io.c) classifies `THERMAL_GUARD_TRIP_MAX_TEMP` as
+#: a GLOBAL fault, so even the intended ESP thermal_guard trip asserts the
+#: safety-link fault line and the Pico latches its own S6a
+#: (`SAFETY_TRIP_MAIN_FAULT`) -- `_case_hp07` must call `safety_clear_trip()`
+#: for that expected S6a too, not just `profiles.stop()`. This margin exists
+#: only to prevent a SECOND, different (S1) Pico trip from also firing.
 _HP07_PICO_CEILING_MARGIN_C = 5.0
 
 
@@ -216,10 +221,14 @@ def _hp07_pico_ceiling_headroom_ok(
     drop to ~`limit_c` right alongside the ESP zone ceiling and its
     independent S1 guard could trip at the same threshold the ESP's
     `thermal_guard.c` is deliberately being driven past -- a race this case
-    must not run, since a Pico trip needs `safety_clear_trip()`, not
-    `profiles.stop()`, and would misreport a harness design issue as a
-    firmware safety fault. Best-effort like `_ceiling_problem`: a zone with
-    no `max_temp_c` at all is simply not a candidate, not an error."""
+    must not run, since a wrongly-provoked S1 would misreport a harness
+    design issue as a firmware safety fault and would need its own
+    `safety_get_diag()`/`safety_clear_trip()` handling distinct from the S6a
+    this case DOES expect (see `_case_hp07`'s docstring: the intended ESP
+    thermal_guard trip is a GLOBAL fault and also latches the Pico's S6a,
+    which `_case_hp07` clears after confirming the reported reason/mask
+    match). Best-effort like `_ceiling_problem`: a zone with no `max_temp_c`
+    at all is simply not a candidate, not an error."""
     best_other = 0.0
     for zone in snapshot.get("zones", []) or []:
         idx = zone.get("index")
@@ -556,8 +565,9 @@ def _case_hp02(ctx: dict) -> CaseResult:
                 Verdict.FAIL,
                 reason=f"{result.reason} (zone(s) {blocked} had duty>0 while heat_blocked)",
                 observed=observed,
+                expected=result.expected,
             )
-        return CaseResult(Verdict.FAIL, reason=result.reason, observed=observed)
+        return CaseResult(Verdict.FAIL, reason=result.reason, observed=observed, expected=result.expected)
     return result
 
 
@@ -844,6 +854,12 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
 #: start time.
 _HP07_MARGIN_C = 3.0
 
+#: dwell_min passed to `_start_bench_profile` for HP-07 (default is 2) --
+#: long enough that a held-ON relay reliably crosses `limit_c` on this ~4W
+#: fixture before the profile's own dwell segment ends and it reaches DONE
+#: without ever tripping the guard. Advisory fix, 2026-09-25 review.
+_HP07_DWELL_MIN = 15
+
 #: How far ABOVE the lowered `limit_c` HP-07's on/off trigger rule's
 #: threshold is set (2026-09-25 redesign -- see `_run_hp07_profile`'s
 #: docstring for why the segment's own RAMP target cannot be set above
@@ -933,8 +949,16 @@ def _restore_zone_limit(
 
 def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult:
     """The heat/poll/ack body of HP-07, once the zone's `max_temp_c` limit is
-    already lowered (to `_HP07_MARGIN_C` above ambient) and the hidden slot
-    has not yet been started.
+    already lowered (to `_HP07_MARGIN_C` above ambient), `target_zone` has
+    already been typed `zone_type=1` (ZONE_TYPE_ON_OFF) in that SAME preset
+    POST -- required because `validate_on_off_rules()` (profiles_http.c)
+    refuses to save an on/off rule on a zone that is not so typed, and the
+    executor's tick loop only actuates on/off logic for zones with
+    `zone_on_off[zi]` set -- and the hidden slot has not yet been started.
+    A single on/off zone in `zone_mask` never approaches
+    `max_simultaneous_relays` (`profile_executor_run.c`'s start-time
+    on/off-zone-count refusal): HP-03 already runs the identical
+    one-zone-typed-on/off shape successfully, and HP-07 mirrors it exactly.
 
     2026-09-25 redesign. Every prior run (most recently 20260925T171042Z_heat)
     FAILed the same way: the segment's RAMP target was pinned to exactly
@@ -996,15 +1020,24 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
         temp_source=_pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE,
         temp_threshold_c=limit_c + _HP07_TRIGGER_MARGIN_C,
     )
+    # dwell_min lengthened (default 2min) so a converged on/off hold has
+    # enough real time to actually cross `limit_c` on this ~4W bench fixture
+    # before the profile's own dwell segment ends and it reaches DONE on its
+    # own -- advisory fix, 2026-09-25 review.
     ok, reason, ambient_at_start = _start_bench_profile(
         ctx, zone_mask=1 << target_zone, target_c=limit_c, on_off_rules=[rule],
+        dwell_min=_HP07_DWELL_MIN,
     )
     if not ok:
         return CaseResult(Verdict.FAIL, reason=reason)
     srv = _srv(ctx)
     sleep = ctx.get("_sleep", time.sleep)
     now = ctx.get("_now", time.monotonic)
-    deadline = now() + 240.0
+    #: Long enough to cover `_HP07_DWELL_MIN` (plus ramp time and margin) so
+    #: the poll loop does not itself time out before a lengthened dwell would
+    #: give the fixture a chance to cross `limit_c`.
+    poll_timeout_s = max(240.0, _HP07_DWELL_MIN * 60.0 + 60.0)
+    deadline = now() + poll_timeout_s
     st = None
     state = "running"
     #: Every poll's `actual_c` reading for the target zone -- kept so a
@@ -1018,14 +1051,24 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
         state = st.state_name
         zs = _zone_status(st, target_zone)
         actual_c_samples.append(getattr(zs, "actual_c", None) if zs is not None else None)
-        if state == "faulted":
+        if state in ("faulted", "done"):
             break
         sleep(2)
     observed = {"limit_c": limit_c, "ambient_at_start": ambient_at_start, "actual_c_samples": actual_c_samples}
+    if st is not None and state == "done":
+        # Distinct from the generic timeout below: the profile ran to
+        # completion on its own without ever tripping the guard -- e.g.
+        # dwell_min still too short, or the fixture's held-ON relay didn't
+        # reach limit_c in time. Advisory fix, 2026-09-25 review.
+        return CaseResult(
+            Verdict.FAIL,
+            reason="profile reached DONE without ever tripping the over-max-temp guard",
+            observed=observed,
+        )
     if st is None or state != "faulted":
         return CaseResult(
             Verdict.FAIL,
-            reason=f"never reached FAULTED within 240s (last state={state})",
+            reason=f"never reached FAULTED within {poll_timeout_s:.0f}s (last state={state})",
             observed=observed,
         )
     zone_status = _zone_status(st, target_zone)
@@ -1041,6 +1084,50 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
     merged_observed = dict(observed)
     if result.observed:
         merged_observed.update(result.observed)
+    if result.verdict != Verdict.PASS:
+        return CaseResult(result.verdict, reason=result.reason, observed=merged_observed)
+
+    # The ack (`profiles.stop()`) confirmed FAULTED and cleared cleanly on
+    # the ESP side, but `escalate_guard_trip()` classifies
+    # THERMAL_GUARD_TRIP_MAX_TEMP as a GLOBAL fault: it also asserted the
+    # safety-link fault line, which the Pico latches as its own S6a
+    # (SAFETY_TRIP_MAIN_FAULT, trip_reason 6). Confirm the ESP side released
+    # its fault source, then check the Pico's own diag and only clear an
+    # EXACT reason==6/mask==0x0020 match -- following cases_fl.py's
+    # `_case_fl11` pattern.
+    diag_text = srv.safety_get_diag()
+    current_fault_sources = J.parse_current_fault_sources(diag_text)
+    merged_observed["current_fault_sources_after_ack"] = current_fault_sources
+    if current_fault_sources:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(
+                f"ESP fault source(s) still asserted after ack (current_fault_sources="
+                f"0x{current_fault_sources:02x}) -- escalate_guard_trip's global fault was "
+                f"not released by profiles.stop()"
+            ),
+            observed=merged_observed,
+        )
+    trip_reason = J.parse_trip_reason(diag_text)
+    trip_mask = J.parse_trip_mask(diag_text)
+    expected_reason = 6  # S6a, SAFETY_TRIP_MAIN_FAULT
+    expected_mask = J.safety_trip_mask_for_reason(expected_reason)
+    merged_observed["trip_reason_after_ack"] = trip_reason
+    merged_observed["trip_mask_after_ack"] = trip_mask
+
+    cleared_after: Optional[bool] = None
+    if trip_reason == expected_reason and trip_mask == expected_mask:
+        srv.safety_clear_trip()
+        after_reason = J.parse_trip_reason(srv.safety_get_diag())
+        merged_observed["trip_reason_after_clear"] = after_reason
+        if after_reason is not None:
+            cleared_after = after_reason == 0
+
+    trip_result = J.judge_operator_trip(trip_reason, expected_reason, cleared_after, trip_mask=trip_mask)
+    if trip_result.observed:
+        merged_observed.update(trip_result.observed)
+    if trip_result.verdict != Verdict.PASS:
+        return CaseResult(trip_result.verdict, reason=trip_result.reason, observed=merged_observed)
     return CaseResult(result.verdict, reason=result.reason, observed=merged_observed)
 
 
@@ -1050,15 +1137,28 @@ def _case_hp07(ctx: dict) -> CaseResult:
     IDLE), and an on/off trigger rule is attached whose threshold sits well
     above that lowered limit -- holding the relay full ON for the whole run
     instead of letting a PID converge and plateau just under the ceiling.
-    See `_run_hp07_profile`'s docstring for the full 2026-09-25 redesign
-    (why the segment's own RAMP target cannot be pinned above the limit,
-    and why the on/off rule's threshold is a separate, unchecked field that
-    can be). Expects FAULTED with fault_guard naming the over-max-temp
-    guard, and confirms the sticky bar's Acknowledge (`profiles.stop()`,
-    mirroring the web UI's POST /api/profile_exec/stop) clears it. Restores
-    the zone's original max_temp_c in `finally`. No zone config is written
-    once the profile is running or paused (refused 409 by design) -- the
-    lowered limit is set once, while IDLE, before `profiles.start()`.
+    The same preset POST that lowers the limit also types `target_zone`
+    `zone_type=1` (ZONE_TYPE_ON_OFF), since `validate_on_off_rules()`
+    (profiles_http.c) refuses to save an on/off rule on a zone not so typed;
+    the restore below puts `zone_type` back along with everything else. See
+    `_run_hp07_profile`'s docstring for the full 2026-09-25 redesign (why the
+    segment's own RAMP target cannot be pinned above the limit, and why the
+    on/off rule's threshold is a separate, unchecked field that can be).
+    Expects FAULTED with fault_guard naming the over-max-temp guard. Because
+    `escalate_guard_trip()` classifies `THERMAL_GUARD_TRIP_MAX_TEMP` as a
+    GLOBAL fault, this ALSO asserts the safety-link fault line and the Pico
+    latches its own S6a (`SAFETY_TRIP_MAIN_FAULT`) -- after acknowledging via
+    `profiles.stop()` (mirroring the web UI's POST /api/profile_exec/stop),
+    this case confirms the ESP fault sources released, reads
+    `srv.safety_get_diag()`, and ONLY if `trip_reason == 6` and
+    `trip_mask == J.safety_trip_mask_for_reason(6)` (0x0020) calls
+    `srv.safety_clear_trip()` and verifies reason 0 afterward; any other
+    reported reason/mask is surfaced as a case failure instead (following
+    `_case_fl11`'s pattern in `cases_fl.py`), never auto-cleared. Restores
+    the zone's original max_temp_c (and zone_type, etc.) in `finally`. No
+    zone config is written once the profile is running or paused (refused
+    409 by design) -- the lowered limit is set once, while IDLE, before
+    `profiles.start()`.
 
     Found on hardware 2026-09-24 (run 20260924T072516Z_heat), TWICE, and a
     third time 2026-09-25 (run 20260925T171042Z_heat) after those two fixes:
@@ -1092,9 +1192,10 @@ def _case_hp07(ctx: dict) -> CaseResult:
     `target_zone` alone would leave the Pico's mirrored `abs_max_temp_c`
     (the MAX of every zone's `max_temp_c`, never the minimum) too close to
     `limit_c` -- see `_hp07_pico_ceiling_headroom_ok`'s docstring. That
-    would risk the Pico's own S1 guard tripping instead of, or racing, the
-    ESP's `thermal_guard.c` trip this case means to provoke; a Pico trip
-    needs `safety_clear_trip()`, not `profiles.stop()`."""
+    would risk the Pico's own S1 guard tripping additionally to, or racing,
+    the intended S6a described above -- a second, different trip this case
+    is not equipped to distinguish from the expected one, so it refuses
+    rather than risk misreporting."""
     from .. import zones_http_client
 
     rested, rest_reason = _rest_gate(ctx)
@@ -1117,7 +1218,21 @@ def _case_hp07(ctx: dict) -> CaseResult:
         restore_body = zones_http_client.build_post_body(snapshot, {})
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build a restore body from the snapshot: {exc}")
-    preset = {"zones": [{"index": target_zone, "max_temp_c": limit_c}]}
+    # `validate_on_off_rules()` (profiles_http.c) refuses an on/off rule
+    # attached to any zone whose `zone_type` is not ZONE_TYPE_ON_OFF (1) at
+    # save time, and the executor's tick loop only evaluates on/off actuation
+    # (`zone_on_off[zi]`, profile_executor.c) for zones so typed -- so the
+    # SAME preset that lowers `max_temp_c` must also type `target_zone` as
+    # on/off, in the same POST, as HP-03 does. `failsafe_state=False` and
+    # `min_on_s`/`min_off_s`=0 avoid any on/off gating delaying the relay
+    # from following the rule immediately. The restore below POSTs the whole
+    # original snapshot (`build_post_body(snapshot, {})`), which already puts
+    # `zone_type` (and these other fields) back -- no separate restore logic
+    # is needed for them.
+    preset = {"zones": [{
+        "index": target_zone, "max_temp_c": limit_c, "zone_type": 1,
+        "failsafe_state": False, "min_on_s": 0, "min_off_s": 0,
+    }]}
     try:
         limited_body = zones_http_client.build_post_body(snapshot, preset)
     except Exception as exc:
@@ -1139,7 +1254,10 @@ def _case_hp07(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"refusing to lower/restore: {ceiling_reason}")
     pico_ok, pico_reason = _hp07_pico_ceiling_headroom_ok(snapshot, target_zone, limit_c)
     if not pico_ok:
-        return CaseResult(Verdict.FAIL, reason=f"refusing to lower: {pico_reason}")
+        # INCONCLUSIVE, not FAIL: this is an unmet bench precondition (no
+        # other commissioned zone clears the required headroom today), not a
+        # genuine case failure. Advisory fix, 2026-09-25 review.
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"refusing to lower: {pico_reason}")
 
     restore_note: Optional[str] = None
     result: Optional[CaseResult] = None

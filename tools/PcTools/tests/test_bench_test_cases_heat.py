@@ -89,13 +89,45 @@ class _FakeThermoClient:
         return self._readings
 
 
+def _diag_text(trip_reason=0, trip_mask=None, current_fault_sources=0):
+    """Minimal text `parse_trip_reason`/`parse_trip_mask`/
+    `parse_current_fault_sources` (judgments.py) can parse -- shape doesn't
+    have to match the real device's `SafetyDiag.describe()` exactly, only the
+    field names/values those regexes look for."""
+    if trip_mask is None:
+        trip_mask = (1 << (trip_reason - 1)) if trip_reason else 0
+    return (
+        f"trip_reason: {trip_reason} | trip_mask: 0x{trip_mask:04x} | "
+        f"current_fault_sources: 0x{current_fault_sources:02x}"
+    )
+
+
 class _FakeSrv:
-    def __init__(self, readings=None, profiles=None):
+    def __init__(self, readings=None, profiles=None, diag_sequence=None):
         self._thermo = _FakeThermoClient(readings if readings is not None else [
             _Reading(0, 24.0), _Reading(1, 24.2), _Reading(2, 23.9),
         ])
         self._profiles = profiles or _FakeProfilesClient()
         self._safety = _FakeSafetyClient()
+        #: `srv.safety_get_diag()`/`srv.safety_clear_trip()` -- called
+        #: directly on `srv`, same as cases_fl.py's `_case_fl11`, distinct
+        #: from `srv._safety.get_link_stats()` above. Default: no trip, no
+        #: fault sources asserted, so existing HP-07 tests that never mention
+        #: this stay PASS-as-before.
+        self._diag_sequence = list(diag_sequence) if diag_sequence is not None else [_diag_text()]
+        self.safety_clear_trip_called = 0
+
+    def safety_get_diag(self):
+        if len(self._diag_sequence) > 1:
+            return self._diag_sequence.pop(0)
+        return self._diag_sequence[0]
+
+    def safety_clear_trip(self):
+        self.safety_clear_trip_called += 1
+        # A real clear makes the next diag read report reason 0, unless the
+        # test queued its own explicit post-clear text.
+        if len(self._diag_sequence) <= 1:
+            self._diag_sequence = [_diag_text()]
 
 
 def _always_ok_preflight(ctx):
@@ -713,10 +745,14 @@ class HP07Test(unittest.TestCase):
         _restore_zones_http_client(self._saved)
         _restore_profile_edit_http_client(self._saved_pehc)
 
-    def _ctx(self, profiles):
+    def _ctx(self, profiles, diag_sequence=None):
+        # Default: the expected shape once FAULTED is acked -- the ESP
+        # released its fault source and the Pico shows exactly S6a
+        # (trip_reason 6, mask 0x0020), which `_case_hp07` clears.
         srv = _FakeSrv(
             readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
             profiles=profiles,
+            diag_sequence=diag_sequence if diag_sequence is not None else [_diag_text(trip_reason=6)],
         )
         clock = {"t": 0.0}
         ctx = {
@@ -1007,6 +1043,160 @@ class HP07Test(unittest.TestCase):
         self.assertIn("36.4", result.reason)
         self.assertEqual(self.fake_zhc.posted_bodies, [])
         self.assertEqual(profiles.started, [])
+
+    def test_pico_headroom_refusal_is_inconclusive_before_any_post(self):
+        """Advisory fix, 2026-09-25 review: an unmet bench precondition (no
+        other zone clears the required headroom), not a genuine case
+        failure -- and it must refuse before touching zone config at all."""
+        self.fake_zhc.snapshot["zones"][1]["max_temp_c"] = 10.0
+        self.fake_zhc.snapshot["zones"][2]["max_temp_c"] = 10.0
+        profiles = _FakeProfilesClientHP()
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(self.fake_zhc.posted_bodies, [])
+        self.assertEqual(profiles.started, [])
+
+    def _faulted_statuses(self):
+        return [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP()]),
+        ]
+
+    def test_posted_on_off_rule_fields(self):
+        from kilnctrl import profile_edit_http_client as pehc
+
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        rule = self.fake_pehc.calls[0]["on_off_rules"][0]
+        self.assertEqual(rule.zone_index, 0)
+        self.assertEqual(rule.temp_cmp, pehc.ON_OFF_TEMP_CMP_BELOW)
+        self.assertEqual(rule.temp_source, pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE)
+        self.assertEqual(rule.temp_threshold_c, 27.0 + 50.0)
+
+    def test_lowering_preset_types_zone_as_on_off(self):
+        """validate_on_off_rules() (profiles_http.c) refuses an on/off rule
+        on a zone not typed ZONE_TYPE_ON_OFF -- the SAME preset POST that
+        lowers max_temp_c must also type target_zone this way."""
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        preset_zone = self.fake_zhc.posted_bodies[0]["preset"]["zones"][0]
+        self.assertEqual(preset_zone["zone_type"], 1)
+        self.assertEqual(preset_zone["failsafe_state"], False)
+        self.assertEqual(preset_zone["min_on_s"], 0)
+        self.assertEqual(preset_zone["min_off_s"], 0)
+
+    def test_s6a_exact_match_clears_and_passes(self):
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(profiles, diag_sequence=[_diag_text(trip_reason=6)])
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ctx["srv"].safety_clear_trip_called, 1)
+        self.assertEqual(result.observed.get("trip_reason_after_clear"), 0)
+
+    def test_s6a_wrong_reason_does_not_clear_and_fails(self):
+        """A different guard latched (e.g. S6b, LINK_DEAD=7) must surface as
+        a case failure, never be auto-cleared -- following cases_fl.py's
+        `_case_fl11` pattern."""
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(profiles, diag_sequence=[_diag_text(trip_reason=7)])
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(ctx["srv"].safety_clear_trip_called, 0)
+
+    def test_s6a_wrong_mask_does_not_clear_and_fails(self):
+        """reason matches (6) but the mask shows a second guard also
+        latched -- plan section 6 rule 5: must not clear on a reason-only
+        match."""
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(profiles, diag_sequence=[_diag_text(trip_reason=6, trip_mask=0x0060)])
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(ctx["srv"].safety_clear_trip_called, 0)
+
+    def test_esp_fault_sources_still_asserted_fails(self):
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(profiles, diag_sequence=[_diag_text(trip_reason=6, current_fault_sources=0x02)])
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("current_fault_sources", result.reason)
+        self.assertEqual(ctx["srv"].safety_clear_trip_called, 0)
+
+    def test_done_without_tripping_is_distinct_fail(self):
+        """Advisory fix, 2026-09-25 review: the profile reaching DONE on its
+        own (never crossing the guard) must be distinguishable from a plain
+        poll timeout."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("done", [_ZoneExecStatusHP()]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("DONE without ever tripping", result.reason)
+
+
+class Hp07PicoCeilingHeadroomOkTest(unittest.TestCase):
+    """`_hp07_pico_ceiling_headroom_ok` in isolation -- the pure preflight
+    that refuses HP-07 outright if no other zone's max_temp_c clears the
+    Pico ceiling margin."""
+
+    @staticmethod
+    def _snap(zones):
+        return {"zones": zones}
+
+    def test_refuses_when_no_other_zone_clears_margin(self):
+        snap = self._snap([
+            {"index": 0, "max_temp_c": 27.0},
+            {"index": 1, "max_temp_c": 30.0},  # < 27 + 5 margin
+            {"index": 2, "max_temp_c": 20.0},
+        ])
+        ok, reason = C._hp07_pico_ceiling_headroom_ok(snap, target_zone=0, limit_c=27.0)
+        self.assertFalse(ok)
+        self.assertIn("30.0", reason)
+
+    def test_passes_when_one_other_zone_clears_margin(self):
+        snap = self._snap([
+            {"index": 0, "max_temp_c": 27.0},
+            {"index": 1, "max_temp_c": 40.0},
+            {"index": 2, "max_temp_c": 10.0},
+        ])
+        ok, reason = C._hp07_pico_ceiling_headroom_ok(snap, target_zone=0, limit_c=27.0)
+        self.assertTrue(ok, reason)
+
+    def test_exact_boundary_passes(self):
+        # `best_other < limit_c + margin_c` refuses only STRICTLY below --
+        # exactly at the margin must be accepted.
+        snap = self._snap([{"index": 0, "max_temp_c": 27.0}, {"index": 1, "max_temp_c": 32.0}])
+        ok, reason = C._hp07_pico_ceiling_headroom_ok(snap, target_zone=0, limit_c=27.0, margin_c=5.0)
+        self.assertTrue(ok, reason)
+
+    def test_just_under_boundary_refuses(self):
+        snap = self._snap([{"index": 0, "max_temp_c": 27.0}, {"index": 1, "max_temp_c": 31.999}])
+        ok, reason = C._hp07_pico_ceiling_headroom_ok(snap, target_zone=0, limit_c=27.0, margin_c=5.0)
+        self.assertFalse(ok)
+
+    def test_ignores_target_zones_own_value(self):
+        # target_zone's own (large) ceiling must never count as "other".
+        snap = self._snap([{"index": 0, "max_temp_c": 300.0}, {"index": 1, "max_temp_c": 10.0}])
+        ok, reason = C._hp07_pico_ceiling_headroom_ok(snap, target_zone=0, limit_c=27.0)
+        self.assertFalse(ok)
+
+    def test_ignores_none_zero_and_negative_other_values(self):
+        snap = self._snap([
+            {"index": 0, "max_temp_c": 27.0},
+            {"index": 1, "max_temp_c": None},
+            {"index": 2, "max_temp_c": 0.0},
+            {"index": 3, "max_temp_c": -5.0},
+        ])
+        ok, reason = C._hp07_pico_ceiling_headroom_ok(snap, target_zone=0, limit_c=27.0)
+        self.assertFalse(ok)
 
 
 class ZoneCeilingPreflightTest(unittest.TestCase):
