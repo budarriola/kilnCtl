@@ -189,6 +189,7 @@ def _start_bench_profile(
     ctx: dict, zone_mask: int, target_offset_c: float = 15.0,
     ramp_c_per_hr: float = 600.0, dwell_min: int = 2,
     target_c: Optional[float] = None,
+    on_off_rules: "Optional[list]" = None,
 ) -> Tuple[bool, str, Optional[float]]:
     """Refuses to start (never touches the board) if `capability_preflight`
     is not ok. Otherwise saves a fresh one-segment profile into
@@ -198,7 +199,21 @@ def _start_bench_profile(
     ambient_reference_c). An explicit `target_c` overrides the
     ambient + `target_offset_c` computation: HP-07 pins the target to a
     limit it already derived from an EARLIER ambient reading, and a fresh
-    re-read here that drifted up would otherwise put target above limit."""
+    re-read here that drifted up would otherwise put target above limit.
+
+    `on_off_rules`, when given (a list of
+    `profile_edit_http_client.OnOffRule`), is HP-03's hook for attaching a
+    per-(zone,segment) on/off trigger rule to the saved profile -- something
+    the raw UART PROFILES SAVE command (`srv._profiles.save()`, this
+    function's default path) cannot carry at all: `profiles_handle_message()`
+    (`uart_bridge_ext_control.c`) never reads rule bytes off that wire, so a
+    profile saved that way always has `on_off_rule_count == 0` regardless of
+    a zone's `zone_type`. When `on_off_rules` is given, the save goes over
+    `POST /api/profile` instead (ADMIN tier, same `http_auth` session every
+    other admin-tier PC tool uses) -- the one save path that already parses
+    `rule%u_*` form fields into `profile_on_off_rule_t` -- and the profile is
+    then started the normal way (UART `profiles.start()`), same as every
+    other caller of this function."""
     ok, reason = _capability_preflight_ok(ctx)
     if not ok:
         return False, reason, None
@@ -222,12 +237,26 @@ def _start_bench_profile(
     from .. import devices
 
     segments = [devices.ProfileSegment(target_c=target_c, ramp_c_per_hr=ramp_c_per_hr, dwell_min=dwell_min)]
-    try:
-        save_result = srv._profiles.save(BENCH_PROFILE_SLOT_ID, BENCH_PROFILE_NAME, zone_mask, segments)
-    except Exception as exc:
-        return False, f"profiles.save raised {type(exc).__name__}: {exc}", ambient
-    if not save_result.ok:
-        return False, f"profiles.save refused: {save_result.error}", ambient
+    if on_off_rules:
+        host = ctx.get("host")
+        if not host:
+            return False, "no host in ctx to POST /api/profile (on/off rule save)", ambient
+        from .. import profile_edit_http_client as _pehc
+
+        try:
+            _pehc.post_profile(
+                host, BENCH_PROFILE_SLOT_ID, BENCH_PROFILE_NAME, zone_mask, segments,
+                on_off_rules=on_off_rules,
+            )
+        except Exception as exc:
+            return False, f"POST /api/profile (on/off rule save) failed: {exc}", ambient
+    else:
+        try:
+            save_result = srv._profiles.save(BENCH_PROFILE_SLOT_ID, BENCH_PROFILE_NAME, zone_mask, segments)
+        except Exception as exc:
+            return False, f"profiles.save raised {type(exc).__name__}: {exc}", ambient
+        if not save_result.ok:
+            return False, f"profiles.save refused: {save_result.error}", ambient
     # From here on the hidden slot HAS been written, so every failure path
     # below must tear it down itself: the callers only enter their own
     # `finally: _cleanup_bench_profile(ctx)` once this function has returned
@@ -614,9 +643,31 @@ def _case_hp03(ctx: dict) -> CaseResult:
 
 def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: float) -> CaseResult:
     """HP-03's start/poll/judge body, once the on/off zone config is POSTed.
-    Split out so `_case_hp03` owns the restore and can surface it."""
+    Split out so `_case_hp03` owns the restore and can surface it.
+
+    Attaches a heating on/off trigger rule for (segment 0, `target_zone`) to
+    the saved profile -- without one, `profile_resolve_on_off_rule()`
+    (`profile_executor.c`) finds no rule for this segment/zone and the zone's
+    relay can never be commanded ("no rule for segment", precedence level 6:
+    `desired` stays at its fail-safe default forever), regardless of the
+    on/off zone config just written. phase_mask/direction_mask are both left
+    0 (tautology: any phase, any direction) since this profile is one
+    ramp-then-dwell segment covering the whole run -- narrowing either axis
+    would only risk suppressing the relay during part of it for no reason.
+    temp_cmp=BELOW + temp_source=MEASURED_THIS_ZONE reproduces a standard
+    heating on/off thermostat: relay ON while this zone's own TC reads below
+    the threshold (with the configured hysteresis band), OFF above it."""
+    from .. import profile_edit_http_client as _pehc
+
+    rule = _pehc.OnOffRule(
+        zone_index=target_zone, segment_index=0, enable=True,
+        temp_cmp=_pehc.ON_OFF_TEMP_CMP_BELOW,
+        temp_source=_pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE,
+        temp_threshold_c=target_c,
+    )
     ok, reason, _ambient = _start_bench_profile(
         ctx, zone_mask=1 << target_zone, target_offset_c=10.0,
+        on_off_rules=[rule],
     )
     if not ok:
         return CaseResult(Verdict.FAIL, reason=reason)

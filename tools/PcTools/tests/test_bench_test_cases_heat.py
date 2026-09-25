@@ -164,6 +164,37 @@ class CapabilityPreflightGateTest(unittest.TestCase):
         self.assertIn("unacknowledged crash", reason)
 
 
+class _FakeProfileEditHttpClient:
+    """Stand-in for kilnctrl.profile_edit_http_client -- records what
+    post_profile() was called with, so HP-03's on/off-rule attach path can
+    be exercised without a board or real HTTP."""
+
+    def __init__(self, raise_exc=None):
+        self.calls = []
+        self.raise_exc = raise_exc
+
+    def post_profile(self, host, profile_id, name, zone_mask, segments, on_off_rules=None, timeout=8.0):
+        self.calls.append({
+            "host": host, "profile_id": profile_id, "name": name,
+            "zone_mask": zone_mask, "segments": segments, "on_off_rules": on_off_rules,
+        })
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return {"ok": True, "id": profile_id, "warnings": []}
+
+
+def _install_fake_profile_edit_http_client(fake):
+    import kilnctrl.profile_edit_http_client as real
+    saved = real.post_profile
+    real.post_profile = fake.post_profile
+    return saved
+
+
+def _restore_profile_edit_http_client(saved):
+    import kilnctrl.profile_edit_http_client as real
+    real.post_profile = saved
+
+
 class BenchProfileBuilderTest(unittest.TestCase):
     def test_starts_at_bench_slot_with_offset_target(self):
         srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
@@ -197,6 +228,73 @@ class BenchProfileBuilderTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("name too long", reason)
         self.assertEqual(profiles.started, [])
+
+    def test_on_off_rules_go_through_http_not_uart_save(self):
+        """Backward compat: `on_off_rules=None` (every existing caller) must
+        keep using the UART SAVE path unchanged -- covered by
+        test_starts_at_bench_slot_with_offset_target above, which passes no
+        `on_off_rules` and still asserts against `srv._profiles.saved`. This
+        test proves the OTHER half: passing `on_off_rules` routes the save
+        over POST /api/profile instead, with the UART SAVE never touched."""
+        import kilnctrl.profile_edit_http_client as pehc
+
+        fake = _FakeProfileEditHttpClient()
+        saved = _install_fake_profile_edit_http_client(fake)
+        try:
+            srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+            ctx = {"srv": srv, "host": "10.0.0.5"}
+            _always_ok_preflight(ctx)
+            rule = pehc.OnOffRule(
+                zone_index=2, segment_index=0, temp_cmp=pehc.ON_OFF_TEMP_CMP_BELOW,
+                temp_source=pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE, temp_threshold_c=30.0,
+            )
+            ok, reason, ambient = C._start_bench_profile(
+                ctx, zone_mask=1 << 2, target_offset_c=10.0, on_off_rules=[rule],
+            )
+        finally:
+            _restore_profile_edit_http_client(saved)
+        self.assertTrue(ok, reason)
+        self.assertEqual(ambient, 20.0)
+        self.assertEqual(srv._profiles.saved, [], "UART SAVE must not be used when on_off_rules is given")
+        self.assertEqual(srv._profiles.started, [C.BENCH_PROFILE_SLOT_ID])
+        self.assertEqual(len(fake.calls), 1)
+        call = fake.calls[0]
+        self.assertEqual(call["host"], "10.0.0.5")
+        self.assertEqual(call["profile_id"], C.BENCH_PROFILE_SLOT_ID)
+        self.assertEqual(call["zone_mask"], 1 << 2)
+        self.assertEqual(call["on_off_rules"], [rule])
+
+    def test_on_off_rules_http_failure_refuses_and_never_starts(self):
+        """NEGATIVE: a POST /api/profile failure must refuse the start, same
+        as an ordinary UART save refusal (test_save_refusal_propagates)."""
+        fake = _FakeProfileEditHttpClient(raise_exc=RuntimeError("400: bad on/off rule"))
+        saved = _install_fake_profile_edit_http_client(fake)
+        try:
+            srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+            ctx = {"srv": srv, "host": "10.0.0.5"}
+            _always_ok_preflight(ctx)
+            import kilnctrl.profile_edit_http_client as pehc
+
+            rule = pehc.OnOffRule(zone_index=2, segment_index=0)
+            ok, reason, _ambient = C._start_bench_profile(
+                ctx, zone_mask=1 << 2, on_off_rules=[rule],
+            )
+        finally:
+            _restore_profile_edit_http_client(saved)
+        self.assertFalse(ok)
+        self.assertIn("bad on/off rule", reason)
+        self.assertEqual(srv._profiles.started, [])
+
+    def test_on_off_rules_without_host_refuses_before_any_http(self):
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv}  # no "host" key
+        _always_ok_preflight(ctx)
+        import kilnctrl.profile_edit_http_client as pehc
+
+        rule = pehc.OnOffRule(zone_index=2, segment_index=0)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=1 << 2, on_off_rules=[rule])
+        self.assertFalse(ok)
+        self.assertIn("no host", reason)
 
     def test_no_valid_thermo_reading_refuses(self):
         srv = _FakeSrv(readings=[])
@@ -374,9 +472,12 @@ class HP03Test(unittest.TestCase):
     def setUp(self):
         self.fake_zhc = _FakeZonesHttpClient()
         self._saved = _install_fake_zones_http_client(self.fake_zhc)
+        self.fake_pehc = _FakeProfileEditHttpClient()
+        self._saved_pehc = _install_fake_profile_edit_http_client(self.fake_pehc)
 
     def tearDown(self):
         _restore_zones_http_client(self._saved)
+        _restore_profile_edit_http_client(self._saved_pehc)
 
     def _ctx(self, profiles):
         srv = _FakeSrv(
@@ -498,6 +599,44 @@ class HP03Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("zone 2 zones config restore failed", result.reason)
         self.assertEqual(calls["n"], 3, "expected on/off POST + two restore attempts")
+
+    def test_on_off_rule_attached_with_correct_fields(self):
+        """The defect under fix: HP-03 must attach an enabled on/off rule for
+        (zone=target_zone, segment 0) to the profile it saves, or the relay
+        can never switch (profile_resolve_on_off_rule() with no match)."""
+        import kilnctrl.profile_edit_http_client as pehc
+
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=False)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        calls = {"n": 0}
+        rested = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)]
+        on_target = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 34.0)]
+
+        def _read():
+            calls["n"] += 1
+            return rested if calls["n"] <= 2 else on_target
+
+        ctx["srv"]._thermo.read = _read
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(len(self.fake_pehc.calls), 1)
+        rules = self.fake_pehc.calls[0]["on_off_rules"]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule.zone_index, 2)
+        self.assertEqual(rule.segment_index, 0)
+        self.assertTrue(rule.enable)
+        self.assertEqual(rule.temp_cmp, pehc.ON_OFF_TEMP_CMP_BELOW)
+        self.assertEqual(rule.temp_source, pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE)
+        # threshold is ambient(24) + the on/off target offset (10) = 34
+        self.assertEqual(rule.temp_threshold_c, 34.0)
+        # the UART SAVE path must not be used when a rule is attached
+        self.assertEqual(profiles.saved, [])
 
     def test_on_off_post_raising_still_restores(self):
         """A POST that raises may still have been committed by firmware."""
