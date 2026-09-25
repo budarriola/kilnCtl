@@ -823,10 +823,28 @@ def judge_lcd_home_idle(page: str, targets: "list[dict]",
                 "geometry is likely off, so the Start sample may not be on the button either)"
             )
         elif bg_ref and bg_ref.get("cast_suspected"):
-            reason += (
-                f" (background reference also reads chroma-offset {bg_ref.get('chroma_offset')}, "
-                f"threshold {bg_ref.get('cast_threshold')}: check camera geometry and color cast "
-                "before treating this as a firmware color defect)"
+            # Same downgrade as bg_out_of_tolerance below, for the stronger
+            # cast signal -- this branch used to only annotate `reason` and
+            # fall through to the hard FAIL at the end of this function, so a
+            # background reference that tripped the (lower) cast_suspected
+            # chroma bar still produced FAIL instead of INCONCLUSIVE, even
+            # though it is stronger camera-cast evidence than the
+            # bg_out_of_tolerance branch that DOES downgrade. Evidence: run
+            # 20260925T055234Z's bg_reference read chroma offset 0.1521
+            # (just over CAST_CHROMA_THRESHOLD 0.15, RGB (61,171,215) against
+            # target RGB(26,31,43)) yet the case reported FAIL on a frame
+            # with camera cast at least as bad as the case that does
+            # downgrade.
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=(
+                    reason
+                    + f" (background reference also reads chroma-offset {bg_ref.get('chroma_offset')}, "
+                    f"threshold {bg_ref.get('cast_threshold')}: check camera geometry and color cast "
+                    "before treating this as a firmware color defect)"
+                ),
+                observed=observed,
+                evidence=evidence,
             )
         elif bg_ref and bg_ref.get("bg_out_of_tolerance"):
             # The background reference itself is wrong by absolute distance

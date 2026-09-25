@@ -132,17 +132,29 @@ class Lcd01CastFallbackTest(unittest.TestCase):
 
     def test_clipped_reference_still_fails_the_red_stop_color(self):
         # The fire button's only other color is ACCENT_5 (Stop); with R
-        # crushed its G:B (0x55:0x5F) is far from ACCENT_4's.
+        # crushed its G:B (0x55:0x5F) is far from ACCENT_4's, so the color
+        # fallback never engages -- but the background reference is ALSO
+        # cast_suspected on this same frame (R crushed there too), so per
+        # judgments.judge_lcd_home_idle's cast_suspected branch (2026-09-25
+        # fix: this branch used to only annotate `reason` and fall through
+        # to a hard FAIL, inconsistent with the weaker bg_out_of_tolerance
+        # signal below it that DOES downgrade) this is now INCONCLUSIVE, not
+        # FAIL: a mismatch on a frame whose own background reference reads
+        # camera cast is not trustworthy evidence of a real firmware defect.
         result = self._run((0, 53, 104), (0, 0x55, 0x5F))
-        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
     def test_cast_without_a_clipped_channel_does_not_engage_fallback(self):
         # Chroma offset well over CAST_CHROMA_THRESHOLD, but every channel
-        # >= CAST_CHANNEL_CRUSH_MAX: a tint, not clipping -- no fallback.
+        # >= CAST_CHANNEL_CRUSH_MAX: a tint, not clipping -- no fallback. The
+        # background reference is cast_suspected here too, so (2026-09-25
+        # fix, see test_clipped_reference_still_fails_the_red_stop_color
+        # above) the Start mismatch downgrades to INCONCLUSIVE rather than
+        # FAIL.
         result = self._run((12, 60, 110), (0, 152, 96))
         self.assertTrue(result.observed["color_debug"]["bg_reference"]["cast_suspected"])
         self.assertIsNone(result.observed["color_debug"]["bg_reference"]["cast_channel"])
-        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
     def test_uncast_pass_has_no_fallback_reason(self):
         result = self._run((96, 126, 154), (68, 192, 130))

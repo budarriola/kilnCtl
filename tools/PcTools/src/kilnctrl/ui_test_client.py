@@ -252,9 +252,23 @@ class UiTestClient:
         widgets are actually clickable). This never re-clicks a digit that
         was already reported clicked ("ok"/"swallowed"/"verdict_unknown"/
         anything but "not_found") -- doing so on a digit that actually
-        landed would type it twice and corrupt the PIN -- and only ever
-        applies to the first digit, since every other digit and OK in the
-        bench evidence that motivated this succeeded on the first try.
+        landed would type it twice and corrupt the PIN -- and applies to the
+        first digit and the trailing "OK" click, the two clicks in this
+        sequence not immediately preceded by another click that already
+        proved the keypad clickable: the first digit follows only the
+        keypad-raised poll (a widget-appears-but-not-yet-clickable race, per
+        the comment above), and "OK" is the first click after `pin`'s LAST
+        digit -- one click removed from the last CONFIRMED-landed one, on a
+        run of clicks with no inter-click poll. 2026-09-25 bench evidence
+        (20260925T191709Z_lcd/summary.json): all 6 wrong-PIN digit clicks
+        reported "ok", yet the trailing "OK" click reported "not_found" --
+        the same class of race as the first digit, just on the closing click
+        instead of the opening one, so it gets the same one-shot retry
+        rather than a new mechanism. This never re-clicks an "OK" that was
+        already reported clicked ("ok"/"swallowed"/"verdict_unknown"/
+        anything but "not_found"), for the same reason the first-digit retry
+        doesn't: re-clicking a landed OK submits/resubmits, corrupting the
+        wrong-PIN-reset or granted-PIN path it just triggered.
         """
         digit_results = []
         for index, ch in enumerate(pin):
@@ -264,6 +278,9 @@ class UiTestClient:
                 click = self.click_by_name(ch, timeout=timeout)
             digit_results.append(click)
         ok_result = self.click_by_name("OK", timeout=timeout)
+        if ok_result.get("result") == "not_found":
+            time.sleep(_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S)
+            ok_result = self.click_by_name("OK", timeout=timeout)
         return {"digit_results": digit_results, "ok_result": ok_result}
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> bytes:

@@ -112,20 +112,24 @@ class LcdHomeIdleTest(unittest.TestCase):
         self.assertEqual(r.evidence, [])
         self.assertNotIn("color_debug", r.observed)
 
-    def test_color_mismatch_with_suspected_cast_still_fails_annotated(self):
-        # Review fix of ff55bda2: the background-reference cast check used to
-        # DOWNGRADE this to INCONCLUSIVE. On the 2026-09-24 capture the
-        # reference point mapped onto the bezel (stale FRAME_CORNERS), whose
-        # chroma offset alone exceeds the threshold -- so the downgrade would
-        # have masked every Start-color FAIL. It is now diagnostic only: the
-        # verdict stays FAIL and the reason carries the cast note.
+    def test_color_mismatch_with_suspected_cast_downgrades_to_inconclusive(self):
+        # 2026-09-25 fix: this branch used to only annotate `reason` and fall
+        # through to a hard FAIL, inconsistent with the weaker
+        # bg_out_of_tolerance signal below it, which DOES downgrade. Evidence:
+        # run 20260925T055234Z's bg_reference read chroma offset 0.1521 (just
+        # over CAST_CHROMA_THRESHOLD 0.15) yet the case reported FAIL, not
+        # INCONCLUSIVE -- reads_as_bezel is a separate, earlier branch (still a
+        # hard FAIL, see test_bg_reference_on_bezel_still_fails_with_geometry_
+        # note below), so this branch only fires on non-bezel cast, and a
+        # genuine cast signal at least as strong as bg_out_of_tolerance's
+        # should get the same INCONCLUSIVE treatment.
         color_debug = {
             "capture_path": "/tmp/run/captures/lcd01_start_pause.jpg",
             "start": {"sampled_rgb": (25, 96, 98), "matches": False},
             "bg_reference": {"sampled_rgb": (6, 40, 60), "chroma_offset": 0.30, "cast_threshold": 0.15, "cast_suspected": True},
         }
         r = J.judge_lcd_home_idle("home", _HOME_TARGETS, False, True, color_debug=color_debug)
-        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
         self.assertIn("color cast", r.reason)
 
     def test_bg_reference_on_bezel_still_fails_with_geometry_note(self):

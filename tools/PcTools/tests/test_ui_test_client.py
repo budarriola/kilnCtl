@@ -357,6 +357,48 @@ class EnterPinTest(unittest.TestCase):
         self.assertEqual(result["digit_results"], [])
         self.assertEqual(self.link.sent, [struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + b"OK"])
 
+    def test_trailing_ok_not_found_retries_once_after_a_short_poll(self):
+        # 2026-09-25 (LCD-19 bench root cause, 20260925T191709Z_lcd/
+        # summary.json): all 6 wrong-PIN digit clicks reported "ok", yet the
+        # trailing "OK" click reported "not_found" -- same click-then-read
+        # race class as the first digit, on the closing click instead of the
+        # opening one. One retry, after a short poll, recovers it.
+        for _ in range(4):
+            self._reply(UI_TEST_CLICK_OK)  # digits "1".."4"
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # OK, first attempt
+        self._reply(UI_TEST_CLICK_OK)  # OK, retry
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["ok_result"]["result"], "ok")
+        # 4 digits + 2 for OK (first attempt + retry).
+        self.assertEqual(len(self.link.sent), 6)
+        self.assertEqual(
+            self.link.sent[-2:],
+            [struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + b"OK"] * 2,
+        )
+
+    def test_trailing_ok_not_found_twice_is_not_retried_again(self):
+        # Never more than one retry: a persistently not_found OK (a genuinely
+        # closed/absent keypad) still surfaces as not_found rather than
+        # looping.
+        for _ in range(4):
+            self._reply(UI_TEST_CLICK_OK)
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # OK, first attempt
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # OK, retry -- still not_found
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["ok_result"]["result"], "not_found")
+        self.assertEqual(len(self.link.sent), 6)  # 4 digits + 2 for OK, not 3+
+
+    def test_trailing_ok_ok_is_never_retried(self):
+        # Never re-click an "OK" that already landed -- a blind retry would
+        # resubmit the PIN a second time (double-submit a granted PIN, or
+        # re-trigger the wrong-PIN reset path).
+        for _ in range(4):
+            self._reply(UI_TEST_CLICK_OK)
+        self._reply(UI_TEST_CLICK_OK)  # OK
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["ok_result"]["result"], "ok")
+        self.assertEqual(len(self.link.sent), 5)  # exactly one click per digit + one OK
+
 
 if __name__ == "__main__":
     unittest.main()
