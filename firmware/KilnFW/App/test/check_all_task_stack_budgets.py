@@ -164,6 +164,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import stack_budget_lib as lib  # noqa: E402
+import lvgl_callback_discovery  # noqa: E402
 
 REPO_ROOT = lib.REPO_ROOT
 DEFAULT_ELF = lib.DEFAULT_ELF
@@ -172,6 +173,31 @@ DEFAULT_SDKCONFIG = lib.DEFAULT_SDKCONFIG
 APP_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App")
 
 UNMODELED_OVERHEAD_BYTES = 300  # see module docstring "OVERHEAD CONSTANT, STATED HONESTLY"
+
+# MECHANICAL DISCOVERY OF lvgl's extra_roots (2026-09-24), replacing a hand-kept
+# list that only ever covered timer/flush/touch callbacks -- see
+# lvgl_callback_discovery.py's own module docstring for the full rationale and
+# the FAIL-vs-NOTE justification for unresolved names. Run once at import time
+# (source scan only, no ELF needed yet) so TASKS below can reference the result
+# directly, the same way every other row's `stack=` callable is source-derived
+# rather than hand-typed.
+#
+# MIN_PLAUSIBLE_LVGL_CALLBACKS is the vacuity floor this check's own task
+# description demanded ("print the count found; fail if 0 or implausibly
+# low" -- see feedback_powershell_filter_no_char_classes-class bugs where a
+# broken scan quietly returns nothing and reads as "no callbacks exist").
+# Measured 2026-09-24: 75 raw registration-site matches (56 lv_obj_add_event_cb
+# + 6 lv_timer_create + 1 lv_display_set_flush_cb + 1 lv_indev_set_read_cb + 11
+# .on_confirm= + 0 .on_cancel=, hand-counted independently and matching the
+# scanner's own raw_count exactly) resolving to 79 unique concrete roots, 0
+# unresolved bare names, 4 dynamic (struct-field, genuinely not scannable)
+# forwards in ui_topbar.c. 40 is set well under half of that observed 75 so
+# an honest future drop in UI callback count (a page removed) does not itself
+# trip the floor -- only a scan that is mechanically broken (e.g. a directory-
+# exclusion regression that walks into nothing) should.
+MIN_PLAUSIBLE_LVGL_CALLBACKS = 40
+_LVGL_ROOTS, _LVGL_DISCOVERY_ERRORS, _LVGL_DISCOVERY_NOTES, _LVGL_RAW_COUNT = \
+    lvgl_callback_discovery.discover(APP_DIR)
 
 
 def _read(rel_path):
@@ -754,29 +780,34 @@ TASKS = [
          # lvgl_port_task's own body is thin -- practically all of its real
          # depth lives behind lv_timer_handler()'s internal function-pointer
          # dispatch (stack_budget_lib.has_unresolved_dispatch() confirms this
-         # task is flagged), which this walk cannot follow at all. These are
-         # the KNOWN callback entry points lv_timer_handler() invokes that
-         # way and that this codebase registers -- the display flush
-         # callback, the touch indev read callback, and every page's
-         # lv_timer_create() refresh callback (see grep for lv_timer_create
-         # across drivers/ui/ui_page_*.c). Measuring each as its OWN root and
-         # adding the deepest of them onto this task's base turns "752 B
-         # measured, real depth invisible" into a real, source-derived lower
-         # bound instead -- still not a full measurement (LVGL's own
-         # internals -- animations, other registered lv_obj event callbacks,
-         # anything a future page adds -- stay unresolved, which is why this
-         # task still reports INDETERMINATE, never a bare pass; see
-         # check_all_task_stack_budgets.py's main()).
-         extra_roots=[
-             ("ili9488_flush_cb", "lvgl_port.c"),
-             ("touch_read_cb", "lvgl_port.c"),
-             ("refresh_cb", "ui_page_diagnostics.c"),
-             ("ui_home_refresh_cb", "ui_page_home.c"),
-             ("refresh_cb", "ui_page_network.c"),
-             ("refresh_cb", "ui_page_network_manage.c"),
-             ("refresh_cb", "ui_page_temperature.c"),
-             ("tick_timer_cb", "ui_lcd_lock.c"),
-         ]),
+         # task is flagged), which this walk cannot follow at all. extra_roots
+         # is now MECHANICALLY DISCOVERED (2026-09-24, lvgl_callback_discovery.py)
+         # by scanning firmware/KilnFW/App for every lv_obj_add_event_cb/
+         # lv_timer_create/lv_display_set_flush_cb/lv_indev_set_read_cb/
+         # ui_confirm on_confirm+on_cancel registration site and resolving the
+         # callback argument to a concrete symbol (including one level of
+         # parameter-forwarding, e.g. ui_topbar.c's build_icon()/
+         # build_icon_named() helpers, and through ui_confirm.c's own indirect
+         # confirm_yes_cb/confirm_close_cb -> on_confirm/on_cancel hop) -- a
+         # hand-kept list of 8 names used to cover only timer/flush/touch
+         # callbacks and had NO lv_obj event callbacks at all, missing chains
+         # like confirm_yes_cb -> ui_home_confirm_start_yes_cb ->
+         # ui_home_do_start (measured by hand at 2512 B, invisible before this
+         # change). See lvgl_callback_discovery.py's module docstring for the
+         # scan's exact coverage, the FAIL-vs-NOTE decision for unresolved
+         # names (bare unresolved identifier is FATAL, same severity as any
+         # other extra_roots resolution failure below; a callback argument that
+         # is a dynamic struct-field expression, not a bare name, is reported
+         # as a NOTE and left as an accepted, pre-existing indirect-dispatch
+         # gap -- architecturally the same class of gap lv_timer_handler()'s
+         # own dispatch already leaves open, not a new one this change
+         # introduces), and the vacuity floor (MIN_PLAUSIBLE_LVGL_CALLBACKS)
+         # enforced in main() below. Measuring each discovered root as its own
+         # path and adding the deepest onto this task's base still leaves
+         # genuinely dynamic dispatch (LVGL's own internals, animations, the 4
+         # noted struct-field forwards) unresolved, which is why this task
+         # still reports INDETERMINATE, never a bare pass; see main().
+         extra_roots=_LVGL_ROOTS),
     dict(name="screen_idle", root="screen_idle_task",
          stack=lambda: extract_int_literal("drivers/ui/screen_idle.c",
              r'xTaskCreatePinnedToCore\(screen_idle_task,\s*"screen_idle",\s*(\d+)')),
@@ -1046,6 +1077,26 @@ def main():
     results = []
     errors = []
     excluded = []
+
+    # lvgl extra_roots discovery report -- printed UNCONDITIONALLY per this
+    # check's own requirement ("print the count found"), not only on failure,
+    # so a silently-broken scan is visible on every green run too.
+    print(f"check_all_task_stack_budgets: lvgl callback discovery: "
+          f"{_LVGL_RAW_COUNT} registration site(s) found, "
+          f"{len(_LVGL_ROOTS)} unique root(s) resolved, "
+          f"{len(_LVGL_DISCOVERY_NOTES)} dynamic/unresolvable note(s), "
+          f"{len(_LVGL_DISCOVERY_ERRORS)} resolution error(s)")
+    for _note in _LVGL_DISCOVERY_NOTES:
+        print(f"  NOTE: {_note}")
+    if _LVGL_RAW_COUNT < MIN_PLAUSIBLE_LVGL_CALLBACKS:
+        errors.append(
+            f"lvgl callback discovery: only {_LVGL_RAW_COUNT} registration site(s) found "
+            f"(floor {MIN_PLAUSIBLE_LVGL_CALLBACKS}) -- treated as a broken scan "
+            f"(wrong directory, regex regression, etc.), not an empty UI; see "
+            f"lvgl_callback_discovery.py")
+    if _LVGL_DISCOVERY_ERRORS:
+        for _err in _LVGL_DISCOVERY_ERRORS:
+            errors.append(f"lvgl callback discovery: {_err}")
 
     # SOURCE-SIDE STRUCTURAL GUARD, run before any row is measured: no root may
     # be gated by something this table cannot describe. See
