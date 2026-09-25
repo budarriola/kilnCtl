@@ -6,7 +6,14 @@ partition into the unused flash directly above it. The 20-slot compromise and th
 "cut firing-stats depth" option recorded in `docs/LIVE_PROFILE_EDIT_PLAN.md` section 12
 item 1 are both rejected and that section should be amended to point here.
 
-This plan is written against the tree at `8006ddd5`. Nothing below has been implemented.
+This plan is written against the tree at `8006ddd5`.
+
+**Status:** tasks 1-11 of section 7's ordered task list landed (100 user
+slots plus the live-edit slot and the hidden bench-harness slot; the widened
+bitmaps; the PSRAM-backed profile store; the grown `cfg` partition, flashed
+to the bench at `5f58ba09`; the raised `BACKUP_BODY_MAX`/PSRAM import buffer;
+web/LCD grouping; firing-stats hygiene; and docs). Only task 12, the bench
+migration to the full 100-slot geometry (section 6), remains.
 
 ---
 

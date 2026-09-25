@@ -1959,10 +1959,13 @@ suspected to be related to this work, was root-caused separately (also in
       out-of-scope for migration — they legitimately need to hold a
       streaming HTTP body open across the whole transfer.
 - [ ] **Debug/PC-link UART side** (explicit user request): `uart_bridge.c`'s
-      per-subsystem tasks (THERMO/IO already migrated via the owners above;
-      DISPLAY is dead code and should be deleted rather than migrated) post
-      commands to an owning task instead of running the dispatch switch
-      body inline.
+      per-subsystem tasks (THERMO/IO already migrated via the owners above)
+      post commands to an owning task instead of running the dispatch switch
+      body inline. DISPLAY half done: it was dead code and was deleted
+      2026-08-27 rather than migrated (`uart_bridge.h`/`uart_bridge_touch.c`
+      still keep `DISPLAY_CMD_*`/`UART_TASK_ID_DISPLAY` as wire-protocol
+      constants only, since `gui.py`/`actions.py`'s Display panel still
+      speaks them); the remaining subsystem migration above stays open.
 - [x] **Phase 5: HTTP handler migration**, per-domain, alongside whichever
       owner (1/2/4) each handler calls into — not a separate final phase.
       Closed 2026-09-22: `docs/HTTP_HANDLER_OWNERSHIP.md`'s audit found

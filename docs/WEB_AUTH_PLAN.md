@@ -1492,12 +1492,11 @@ credential records intact.
 confirm the rollback assertion goes RED, restore by hand, confirm GREEN, and
 force a full rebuild.
 
-**Status, 2026-09-17 — landed (the "Clear login credentials" ADMIN route).**
-The rest of this section (exclusion from export/import/backup/slot-apply/
-factory-reset, and the fail-closed OTA-rollback handling) was already landed;
-the one remaining unmet acceptance item was the explicitly labelled ADMIN
-route this section calls for, plus the danger-zone disclosure line, and both
-now ship:
+**Status, 2026-09-17 — closed.** Every acceptance item in this section has
+landed: exclusion from export/import/backup/slot-apply/factory-reset and the
+fail-closed OTA-rollback handling landed earlier; the explicitly labelled
+ADMIN "Clear login credentials" route this section called for, plus the
+danger-zone disclosure line, shipped in this pass:
 
 - `web_auth_store.h`/`.c` — `web_auth_store_clear_all_credentials()`: clears
   both roles' web passwords AND both roles' LCD PINs (both `web_auth`/`lcd_auth`

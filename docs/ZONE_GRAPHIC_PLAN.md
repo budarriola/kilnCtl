@@ -1,19 +1,19 @@
 # Zone graphic — a configuration-verification instrument on the web zones page
 
-> **Status:** **stage 1 landed 2026-09-18** — the relay device type, its
-> storage and its migration, the data layer only. **Stages 3, 4 and 5 landed
-> 2026-09-18** — the artwork, the unknown/fail-closed rules, and the badges
-> with click popups — covered by `tools/check_zone_graphic_render.ps1`.
-> **Stage 2 landed 2026-09-18:** `"relay_types"` is on the `GET`,
-> `relay_type_N=` on the `POST`, and each unowned relay carries a device-type
-> dropdown beside its name field, so `kgDeviceType()` now receives real types.
-> `UNSET` stays selectable and renders as the unknown glyph. The array costs a
-> measured 24 bytes; no buffer grew. **2026-09-22:** the bench board now runs
-> firmware that includes this page (`dde785bf`, the most recent commit
-> touching these files, is an ancestor of the bench firmware commit
-> `63a48ab3`); the on-hardware set/reboot/read-back round trip is still
-> unexecuted. Until then, the render function is verified against real
-> captured `/api/zones` and `/api/status` JSON instead. **Opened:** 2026-09-18.
+> **Status: fully implemented, hardware verification pending.** All 5 stages
+> landed 2026-09-18 — the relay device type/storage/migration data layer
+> (stage 1); `"relay_types"` on the `GET`, `relay_type_N=` on the `POST`, and
+> the device-type dropdown beside each unowned relay's name field feeding
+> `kgDeviceType()` real types, with `UNSET` selectable and rendering as the
+> unknown glyph, the array costing a measured 24 bytes with no buffer growth
+> (stage 2); and the artwork, the unknown/fail-closed rules, and the badges
+> with click popups (stages 3-5), covered by `tools/check_zone_graphic_render.ps1`.
+> **2026-09-22:** the bench board now runs firmware that includes this page
+> (`dde785bf`, the most recent commit touching these files, is an ancestor of
+> the bench firmware commit `63a48ab3`); the on-hardware set/reboot/read-back
+> round trip is still unexecuted — that is the only remaining item. Until
+> then, the render function is verified against real captured `/api/zones`
+> and `/api/status` JSON instead. **Opened:** 2026-09-18.
 >
 > **Visual target:** [`docs/images/zone_graphic_reference_stacked_rings.jpg`](images/zone_graphic_reference_stacked_rings.jpg),
 > owner-supplied. The artwork stages build against that image rather than
