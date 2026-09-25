@@ -10,6 +10,7 @@
 #include "profile_executor_internal.h"
 
 #include <math.h>
+#include <stddef.h> /* ptrdiff_t -- firing_shadow zone-index recovery, firing_stats_zone_tick() */
 #include <stdlib.h> /* free() -- blobs below are heap-allocated, see firing_stats_load() */
 #include <string.h>
 
@@ -28,6 +29,10 @@
                                      section 5 item 7 */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- firing_stats_get_dualwrite_status() below */
 #include "profiles_builtin.h" /* g_builtin_profile_count/PROFILE_BUILTIN_ID_BASE -- last-run cache sizing/indexing */
+#include <assert.h>
+#include "firing_shadow.h" /* ITER_TUNE_REDESIGN_PLAN.md step 8, "shadow mode" -- scores every
+                             * firing and writes only its own compact verdict-summary NVS
+                             * namespace; never writes a gain, never calls iter_tune_*. */
 
 /* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
  *
@@ -97,6 +102,23 @@ void firing_stats_zone_tick(zone_runtime_t *z, float target_c, bool dwelling, ui
                                     uint8_t segment_index, float dt_s)
 {
     z->fs_duration_s += (uint32_t)(dt_s + 0.5f);
+
+    /* Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): fed every tick of
+     * every zone, valid or not -- firing_shadow_zone_tick() itself skips an
+     * invalid sample, same exclusion rule as this function's own
+     * fs_excluded_sample_count path just below. zone_index is recovered by
+     * pointer arithmetic against s_exec.zones rather than adding a
+     * parameter to this function's signature or a field to zone_runtime_t
+     * -- this hook must not touch profile_executor.c's call site (another
+     * agent owns that file concurrently), and s_exec is already extern-
+     * visible via profile_executor_internal.h. */
+    ptrdiff_t zi_shadow = z - s_exec.zones;
+    assert(zi_shadow >= 0 && zi_shadow < MAX31856_CHANNEL_COUNT);
+    if (zi_shadow >= 0 && zi_shadow < MAX31856_CHANNEL_COUNT) {
+        firing_shadow_zone_tick((uint8_t)zi_shadow, z->actual_valid, z->actual_c, target_c, dwelling,
+                                 segment_index, dt_s);
+    }
+
     if (!z->actual_valid) {
         z->fs_excluded_sample_count++;
         return;
@@ -710,6 +732,17 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
                          "worker for the established pattern.");
         return;
     }
+
+    /* Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): finishes this firing's
+     * in-progress score set, compares it against the previous finished
+     * firing (RAM only), and persists a compact verdict-summary NVS blob of
+     * its own -- relies on the caller_stack_is_external() guard just above
+     * (already refused and returned by this point if unsafe), so it does no
+     * stack check of its own. Runs before this function's own NVS work
+     * below so a failure in either is independent of the other. Never
+     * writes a gain, never calls any iter_tune_* function. */
+    firing_shadow_finish_firing();
+
     /* HEAP, not the executor task's 4096 B stack (2026-09-09 panic,
      * docs/audits/executor_panic_stack_overflow_2026-09-09.md): this is the
      * WRITE-path twin of the same 1364 B blob that firing_stats_load() above
