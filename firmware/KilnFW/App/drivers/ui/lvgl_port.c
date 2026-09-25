@@ -957,10 +957,12 @@ void lvgl_port_request_tap_dump(void)
  * own doc comment only one UART command runs at a time, so contention here
  * is not expected in practice, but the lock makes it safe by construction
  * rather than by convention). s_ui_walk.done is a binary semaphore lvgl_
- * port_task gives exactly once per serviced request; a caller drains any
- * stale "done" signal (non-blocking take) before issuing a new request, so
- * a signal left over from a request its own earlier caller abandoned to a
- * timeout can never be mistaken for the new request's completion. */
+ * port_task gives exactly once per serviced request. Each request carries a
+ * sequence number and a caller accepts a completion only when served_seq
+ * matches its own, copying out under s_ui_walk.data (which lvgl_port_task
+ * holds across the whole walk), so a request abandoned to a timeout -- even
+ * one whose walk is still in flight when the next request is issued -- can
+ * never be mistaken for, or tear, a later request's result. */
 #define UI_WALK_MAX_TARGETS 32
 #define UI_WALK_LOCK_TIMEOUT_MS 1000u
 #define UI_WALK_WAIT_TIMEOUT_MS 300u /* several lvgl_port_task poll periods
@@ -970,17 +972,30 @@ void lvgl_port_request_tap_dump(void)
                                       * (2.0s), with margin left over for the
                                       * reply's own UART encode/send time. */
 typedef struct {
-    SemaphoreHandle_t lock; /* guards requested/out_max while a request is
-                             * being issued or serviced */
+    SemaphoreHandle_t lock; /* serializes requesters; held across one whole
+                             * request/wait/copy-out cycle. Never taken by
+                             * lvgl_port_task. */
+    SemaphoreHandle_t data; /* guards every field below AND s_ui_walk_targets.
+                             * Held by lvgl_port_task across one whole walk
+                             * (taken with a zero timeout -- a busy lock just
+                             * defers the walk to the next loop iteration, so
+                             * lvgl_port_task never blocks on a requester) and
+                             * by a requester while issuing a request and
+                             * across its copy-out. Lock order: lock -> data. */
     SemaphoreHandle_t done; /* given by lvgl_port_task once a request is
                              * serviced; taken by the requester */
-    volatile bool requested;
+    bool requested;
+    uint32_t req_seq;    /* bumped per issued request */
+    uint32_t served_seq; /* req_seq value the buffer contents answer */
     size_t out_max;
     size_t out_count;
     bool out_truncated;
 } ui_walk_req_t;
 
 static ui_walk_req_t s_ui_walk;
+/* lvgl_port_task's handle, for lvgl_port_collect_tap_targets()'s
+ * self-dispatch guard. NULL until the task is created. */
+static TaskHandle_t s_ui_walk_owner_task;
 static EXT_RAM_BSS_ATTR kiln_ui_tap_target_t s_ui_walk_targets[UI_WALK_MAX_TARGETS];
 
 size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated)
@@ -988,7 +1003,19 @@ size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool
     if (truncated) {
         *truncated = false;
     }
-    if (!out || max == 0 || !s_ui_walk.lock || !s_ui_walk.done) {
+    if (!out || max == 0) {
+        return 0;
+    }
+    /* Self-dispatch guard: a call from lvgl_port_task itself would wait the
+     * full window on a request only this same task can service. The walk is
+     * already on the right task there, so do it directly. */
+    if (s_ui_walk_owner_task != NULL && xTaskGetCurrentTaskHandle() == s_ui_walk_owner_task) {
+        return kiln_ui_collect_tap_targets(out, max, truncated);
+    }
+    if (!s_ui_walk.lock || !s_ui_walk.data || !s_ui_walk.done) {
+        if (truncated) {
+            *truncated = true;
+        }
         return 0;
     }
     if (max > UI_WALK_MAX_TARGETS) {
@@ -1005,34 +1032,62 @@ size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool
         return 0;
     }
 
-    /* Drain a stale completion left by an earlier, abandoned (timed-out)
-     * request before issuing this one -- see this block's header comment. */
-    (void)xSemaphoreTake(s_ui_walk.done, 0);
-
-    s_ui_walk.out_max = max;
-    s_ui_walk.out_count = 0;
-    s_ui_walk.out_truncated = false;
-    s_ui_walk.requested = true; /* set last: lvgl_port_task must see out_max
-                                 * already valid once it observes this */
-
     size_t n = 0;
     bool was_truncated = true;
-    if (xSemaphoreTake(s_ui_walk.done, pdMS_TO_TICKS(UI_WALK_WAIT_TIMEOUT_MS)) == pdTRUE) {
-        n = s_ui_walk.out_count;
-        was_truncated = s_ui_walk.out_truncated;
-        if (n > max) {
-            n = max; /* defensive; lvgl_port_task already clamps to out_max */
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t window = pdMS_TO_TICKS(UI_WALK_WAIT_TIMEOUT_MS);
+
+    /* Drain a stale completion left by an earlier, abandoned (timed-out)
+     * request. Not load-bearing on its own -- the sequence check below is
+     * what rejects a late completion for an older request, including one
+     * whose walk was already in flight when this request was issued -- but
+     * it saves a spurious wakeup. */
+    (void)xSemaphoreTake(s_ui_walk.done, 0);
+
+    if (xSemaphoreTake(s_ui_walk.data, window) == pdTRUE) {
+        const uint32_t my_seq = ++s_ui_walk.req_seq;
+        s_ui_walk.out_max = max;
+        s_ui_walk.requested = true;
+        xSemaphoreGive(s_ui_walk.data);
+
+        for (;;) {
+            const TickType_t elapsed = xTaskGetTickCount() - start;
+            if (elapsed >= window) {
+                break;
+            }
+            if (xSemaphoreTake(s_ui_walk.done, window - elapsed) != pdTRUE) {
+                break;
+            }
+            /* Accept a completion only if it answers THIS request, and copy
+             * out under the data lock so lvgl_port_task cannot start another
+             * walk into s_ui_walk_targets mid-copy. lvgl_port_task gives
+             * `done` only after releasing `data`; bounded by what is left of
+             * the window, never by a zero timeout, so a brief hold by the
+             * task cannot turn a served request into a false timeout. */
+            bool mine = false;
+            const TickType_t used = xTaskGetTickCount() - start;
+            if (xSemaphoreTake(s_ui_walk.data, used < window ? window - used : 0) == pdTRUE) {
+                if (s_ui_walk.served_seq == my_seq) {
+                    mine = true;
+                    n = s_ui_walk.out_count;
+                    if (n > max) {
+                        n = max; /* defensive; the walk already clamps to out_max */
+                    }
+                    was_truncated = s_ui_walk.out_truncated;
+                    memcpy(out, s_ui_walk_targets, n * sizeof(out[0]));
+                }
+                xSemaphoreGive(s_ui_walk.data);
+            }
+            if (mine) {
+                break;
+            }
         }
-        memcpy(out, s_ui_walk_targets, n * sizeof(out[0]));
-    } else {
-        /* lvgl_port_task never serviced this within the wait window (it is
-         * itself stuck, or simply behind). s_ui_walk.requested is left set
-         * on purpose -- lvgl_port_task will still service it whenever it
-         * next gets a turn, and the drain-before-issue above is what keeps
-         * that late completion from corrupting the NEXT caller's result. */
-        n = 0;
-        was_truncated = true;
     }
+    /* On a timeout s_ui_walk.requested is left set on purpose: lvgl_port_task
+     * still services it whenever it next gets a turn, and the sequence check
+     * above keeps that late completion from ever being taken as a LATER
+     * caller's answer. n == 0 with was_truncated == true is the "no answer
+     * available" shape documented in lvgl_port.h. */
 
     xSemaphoreGive(s_ui_walk.lock);
     if (truncated) {
@@ -1055,14 +1110,27 @@ static void lvgl_port_task(void *arg)
             s_tap_dump_requested = false;
             kiln_ui_log_tap_targets();
         }
-        if (s_ui_walk.requested) {
-            s_ui_walk.requested = false;
-            bool walk_truncated = false;
-            size_t n = kiln_ui_collect_tap_targets(s_ui_walk_targets, s_ui_walk.out_max,
-                                                    &walk_truncated);
-            s_ui_walk.out_count = n;
-            s_ui_walk.out_truncated = walk_truncated;
-            xSemaphoreGive(s_ui_walk.done);
+        /* Zero-timeout take: a requester holds `data` only briefly (issuing
+         * a request, or its copy-out), and a busy lock just defers the walk
+         * to the next iteration -- lvgl_port_task never blocks on a
+         * requester. `done` is given only after `data` is released. The
+         * unlocked peek at `requested` only skips the lock on idle loops;
+         * it is re-checked under the lock below. */
+        if (s_ui_walk.requested && s_ui_walk.data && xSemaphoreTake(s_ui_walk.data, 0) == pdTRUE) {
+            bool serviced = false;
+            if (s_ui_walk.requested) {
+                s_ui_walk.requested = false;
+                bool walk_truncated = false;
+                s_ui_walk.out_count = kiln_ui_collect_tap_targets(s_ui_walk_targets, s_ui_walk.out_max,
+                                                                  &walk_truncated);
+                s_ui_walk.out_truncated = walk_truncated;
+                s_ui_walk.served_seq = s_ui_walk.req_seq;
+                serviced = true;
+            }
+            xSemaphoreGive(s_ui_walk.data);
+            if (serviced) {
+                xSemaphoreGive(s_ui_walk.done);
+            }
         }
         s_timer_handler_calls++;
         uint32_t sleep_ms = lv_timer_handler();
@@ -1099,8 +1167,9 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
 
     memset(&s_ui_walk, 0, sizeof(s_ui_walk));
     s_ui_walk.lock = xSemaphoreCreateMutex();
+    s_ui_walk.data = xSemaphoreCreateMutex();
     s_ui_walk.done = xSemaphoreCreateBinary();
-    if (!s_ui_walk.lock || !s_ui_walk.done) {
+    if (!s_ui_walk.lock || !s_ui_walk.data || !s_ui_walk.done) {
         ESP_LOGE(TAG, "xSemaphoreCreate (ui walk) failed");
         return ESP_ERR_NO_MEM;
     }
@@ -1270,6 +1339,7 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
      * site's &task_handle. 8192 must match sizeof(s_lvgl_task_stack) above. */
     static TaskHandle_t s_lvgl_task_handle;
     s_lvgl_task_handle = created_handle;
+    s_ui_walk_owner_task = created_handle;
     stack_margin_register("lvgl", &s_lvgl_task_handle, sizeof(s_lvgl_task_stack));
 
     ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
