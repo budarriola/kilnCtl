@@ -290,7 +290,11 @@ ride an existing one was a deliberate constraint, not just a style choice.
   secret (NOT committed to NVS — see below) and returns JSON
   `{"ok": true, "secret_base32", "otpauth_uri", "board_time_utc",
   "sntp_synced"}`. A second call before confirming replaces the
-  still-pending secret (no accumulation of abandoned attempts). The page
+  still-pending secret (no accumulation of abandoned attempts). Both
+  `totp_enroll_begin` and `totp_enroll_confirm` answer `{"ok": false}`
+  unless NO secret is stored (an enrolled or unreadable one refuses) --
+  replacing an enrolled secret must go through `totp_disable` first, or
+  an admin session alone could swap the owner's factor for its own. The page
   renders `otpauth_uri` as a QR code itself (client-side encoder, see
   section 2's superseded QR bullet) -- firmware returns only the string.
 - `cmd=totp_enroll_confirm&code=NNNNNN`: validates `code` against the
