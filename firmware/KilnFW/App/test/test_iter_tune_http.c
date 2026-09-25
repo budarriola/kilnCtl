@@ -576,6 +576,11 @@ static void test_status_reports_shadow_summary(void)
     TEST_CHECK(strstr(s_resp_body, "\"no_matched_pairs_count\":4294967295,\"alloc_failed_count\":4294967295}") !=
                    NULL,
                "worst-case shadow object is emitted in full (alloc_failed_count included), not truncated to null");
+    TEST_CHECK(strstr(s_resp_body, "{\"shadow\":{\"firings_scored\":4294967295,\"accept_count\":4294967295,"
+                                   "\"reject_count\":4294967295,\"insufficient_count\":4294967295,") != NULL,
+               "worst-case shadow object's two halves join into one contiguous object");
+    TEST_CHECK(strstr(s_resp_body, "\"shadow\":null") == NULL && strstr(s_resp_body, "\"truncated\"") == NULL,
+               "worst-case shadow object takes neither the null nor the truncated fallback");
     firing_shadow_reset_for_test();
     fake_kv_reset_all();
 }

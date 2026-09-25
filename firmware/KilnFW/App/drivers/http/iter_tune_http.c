@@ -36,22 +36,33 @@ static esp_err_t iter_tune_status_get_handler(httpd_req_t *req)
     // the rest of this file.
     {
         firing_shadow_status_t shadow;
-        // 208: worst case (six 10-digit counters) is 193 bytes incl. NUL
-        // since alloc_failed_count joined the object (store v2).
-        char chunk[208];
-        int n;
+        // Emitted as two writes so the buffer stays at 176 B (httpd stack
+        // blob class: never grow an httpd stack buffer). Worst case, every
+        // counter at 10 digits: first half 91 chars, second half 101 chars.
+#define SHADOW_FMT_A "{\"shadow\":{\"firings_scored\":%lu,\"accept_count\":%lu,\"reject_count\":%lu,"
+#define SHADOW_FMT_B "\"insufficient_count\":%lu,\"no_matched_pairs_count\":%lu,\"alloc_failed_count\":%lu},"
+        char chunk[176];
+        // Each "%lu" (3 chars) expands to at most 10 digits for a uint32_t.
+        _Static_assert(sizeof(SHADOW_FMT_A) + 3 * (10 - 3) <= sizeof(chunk), "shadow chunk A overflows");
+        _Static_assert(sizeof(SHADOW_FMT_B) + 3 * (10 - 3) <= sizeof(chunk), "shadow chunk B overflows");
+        int n = -1;
         if (firing_shadow_get_status(&shadow)) {
-            n = snprintf(chunk, sizeof(chunk),
-                         "{\"shadow\":{\"firings_scored\":%lu,\"accept_count\":%lu,\"reject_count\":%lu,"
-                         "\"insufficient_count\":%lu,\"no_matched_pairs_count\":%lu,"
-                         "\"alloc_failed_count\":%lu},",
-                         (unsigned long)shadow.firings_scored, (unsigned long)shadow.accept_count,
-                         (unsigned long)shadow.reject_count, (unsigned long)shadow.insufficient_count,
-                         (unsigned long)shadow.no_matched_pairs_count, (unsigned long)shadow.alloc_failed_count);
-        } else {
-            n = snprintf(chunk, sizeof(chunk), "{\"shadow\":null,");
+            n = snprintf(chunk, sizeof(chunk), SHADOW_FMT_A, (unsigned long)shadow.firings_scored,
+                         (unsigned long)shadow.accept_count, (unsigned long)shadow.reject_count);
         }
-        httpd_resp_sendstr_chunk(req, (n > 0 && (size_t)n < sizeof(chunk)) ? chunk : "{\"shadow\":null,");
+        if (n > 0 && (size_t)n < sizeof(chunk)) {
+            httpd_resp_sendstr_chunk(req, chunk);
+            n = snprintf(chunk, sizeof(chunk), SHADOW_FMT_B, (unsigned long)shadow.insufficient_count,
+                         (unsigned long)shadow.no_matched_pairs_count, (unsigned long)shadow.alloc_failed_count);
+            // The first half is already on the wire, so a "shadow":null
+            // fallback is no longer possible; close the object instead so
+            // the JSON stays valid (unreachable per the asserts above).
+            httpd_resp_sendstr_chunk(req, (n > 0 && (size_t)n < sizeof(chunk)) ? chunk : "\"truncated\":true},");
+        } else {
+            httpd_resp_sendstr_chunk(req, "{\"shadow\":null,");
+        }
+#undef SHADOW_FMT_A
+#undef SHADOW_FMT_B
     }
 
     uint8_t refused_version = 0;
