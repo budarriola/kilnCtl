@@ -132,59 +132,50 @@ scope) -- provision over the AP, a `mode=home` round-trip, and confirming
   reply is now handled after `start_sta_join()`, which matches what happens
   today.
 
-### A1 -- Shared async-job helper, first user `ct_auto_zero` (shape B). HIGH value
+### A1 -- Shared async-job helper, first user `ct_auto_zero` (shape B). LANDED 2026-09-25
 
-- **Handler:** `ct_auto_zero_post_handler()` (`safety_cfg_http.c:1405`). It
-  polls the Pico every 200 ms for up to `SAFETY_CT_AUTO_ZERO_TIMEOUT_MS` =
-  15000 (`safety_cfg_http.c:1302-1303,1523-1546`). A normal run takes about
-  10-12 s. During that time, httpd serves nothing else.
-- **New module:** `drivers/http/http_async_job.c/.h`, exposing
-  `http_async_job_submit(req, fn, ctx, ctx_size)`. The helper allows one
-  job at a time across all users. Each job runs on a one-shot task created
-  with plain `xTaskCreate` (an **internal-RAM stack**, because the job
-  commits calibration). The task is named `http_async_job`, registered with
-  `stack_margin_register()` and tagged `# liveness: on-demand` in
-  `tools/check_stack_margin_registration.ps1`'s `$requiredNames`, following
-  the `ota_pico_rollback` pattern (`ota_http_pico.c:586,608`). Start at 4096
-  B. Measure with `get_stack_margin` after a real run, and raise it if
-  needed (stack bumps are pre-authorized). The job always ends with
-  `httpd_req_async_handler_complete()`, including on every error path.
-- **Why a one-shot task, not a permanent owner:** every user of this helper
-  is a rare commissioning or maintenance action. A permanent task would
-  keep 4-8 KB of internal heap allocated at all times for nothing. The stack
-  comes from the heap, so `.dram0.bss` grows only by the few static handles.
-- **Why not reuse `bx_flash_worker`:** it serializes every cfg_fs write, and
-  a 15 s job on it would stall those writes. The job task may still
-  *dispatch* cfg_fs writes onto `bx_flash_worker`. That is not a re-entry,
-  because the job runs on a different task (`check_flash_worker_lint.ps1`).
-- **Response contract:** unchanged. Every current `{"ok":...}` body and
-  status is sent from the job instead. When the helper is busy, the handler
-  replies synchronously, before `async_handler_begin`, with the refusal
-  shape this route already uses: `200 {"ok":false,"reason":"another
-  commissioning operation is running"}`. This needs no new client code.
-  Keep reading the body, checking auth and checking preconditions on
-  `httpd_worker` before the handoff. Put everything the job needs into its
-  ctx. The job must not call `http_auth_*`, cookie or client-IP functions.
-- **What changes:** today, httpd itself stops any other HTTP handler from
-  running while a measurement is in progress. That implicit serialization
-  goes away. The handler's re-check after the measurement
-  (`safety_cfg_http.c:1552`) already handles a relay, profile or autotune
-  starting mid-measurement from the LCD or UART, so it covers HTTP too. The
-  implementer must confirm this by reading the code, not assume it.
-- **Lock order:** unchanged. The job calls `profile_executor_get_status()`
-  and `autotune_engine_is_active()` one after the other, each taking its own
-  lock briefly. It must never hold one lock while calling the other
-  (`s_exec.lock` before `s_at.lock`).
-- **Host test:** put the helper's admission logic (idle/busy/refuse, and the
-  rule that every submit is paired with exactly one complete) in a pure
-  function. Add `httpd_req_async_handler_begin/complete` to
-  `App/test/stubs/esp_http_server.h` and write a host test that checks
-  begin/complete stay paired on every path, including the busy path and a
-  failure to create the task. Include a negative test: drop one `complete`
-  and confirm the test fails.
-- **Risk:** medium. A job that never completes leaks a socket
-  (`httpd_accept_conn: error in accept (23)`), so the job's bounded timeout
-  is also the bound on how long the socket is held.
+`drivers/http/http_async_job.c/.h` (`http_async_job_try_start()`/
+`http_async_job_busy()`) wraps `httpd_req_async_handler_begin()`/
+`_complete()` behind a one-job-at-a-time admission gate (a `portMUX_TYPE`
+critical section, not a mutex -- the guarded window is a handful of
+instructions). `ct_auto_zero_post_handler()` (`safety_cfg_http.c`) now
+validates/checks preconditions on `httpd_worker`, then hands off to a new
+`ct_auto_zero_job()` running on a one-shot `xTaskCreate` task
+(`http_async_job`, internal-RAM stack, 4096 B, `stack_margin_register()`ed
+unconditionally and tagged `# liveness: on-demand` in
+`tools/check_stack_margin_registration.ps1`). Response bodies/status codes
+are byte-identical to the old inline handler; the busy-refusal reply is the
+same synchronous `{"ok":false,"reason":"another commissioning operation is
+running"}` this route already used, sent on the original `req` (the helper
+never touches `req` on any refusal path). Host-test stubs
+(`App/test/stubs/esp_http_server.h`, `stubs/freertos/task.h`) gained
+injectable `begin`/task-create failure and a `complete()` call counter;
+`test_http_async_job.c` covers admission, busy refusal, begin failure,
+task-create failure (undoes `begin` via one `complete()`), and
+begin/complete pairing through `run_job()` directly -- negative-tested by
+dropping the `complete()` call, confirming the new test failed, and
+restoring by hand with a forced full rebuild (61/61 executables). A target
+build produced a fresh ELF this pass: `check_kilnfw_dram_bss_budget.py`
+measures `.dram0.bss` at 98952 B against the 101000 B ceiling (2048 B
+headroom) -- this helper's added file-scope state (a `portMUX_TYPE`, a
+`bool`, one `TaskHandle_t`, one small run-context struct) is a few dozen
+bytes of that total, not measured in isolation. `http_async_job.c` was also
+missing from `drivers/CMakeLists.txt`'s SRCS list until this pass (caught by
+the full `run_all_checks.ps1` run, not by host tests, since the host-test
+harness links it separately -- the real target build failed at link time
+until this was added). Stack was not measured on real hardware this pass
+(board was mid heat-run); `check_all_task_stack_budgets.py`'s static ELF
+walk reports it INDETERMINATE (same class as `ota_pico_rollback`, sharing
+that task's 4096 B declared stack and a comparable job shape) because
+`run_job()` dispatches through a function pointer (`http_async_job_fn_t`)
+the walk cannot follow -- its `CEILING_BYTES` entry (2736 B) matches
+`ota_pico_rollback`'s rather than being invented fresh, pending a real
+measurement.
+`stack_margin_register()` is called with a fixed literal `"http_async_job"`,
+not the caller-supplied task name, since this helper is single-flight (one
+shared handle slot regardless of which future caller's job is running) and
+`check_stack_margin_registration.ps1`'s static scan requires a literal name
+argument to see a call site at all.
 
 ### A2 -- `bench_preset` onto A1's helper. MEDIUM-HIGH value
 

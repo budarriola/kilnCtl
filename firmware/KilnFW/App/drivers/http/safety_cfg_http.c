@@ -14,10 +14,13 @@
 #include "estop_verification.h"
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_post_handler()'s poll loop
+#include "freertos/task.h" // vTaskDelay/pdMS_TO_TICKS -- ct_auto_zero_job()'s poll loop
 
 #include "hal_time.h" /* hal_time_now_us() -- HAL_INCLUDE_BOUNDARY: this file must not include esp_timer.h
                         * directly, same convention safety_ceiling_sync.c's own include documents */
+#include "http_async_job.h" /* docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1 -- ct_auto_zero_post_handler()
+                              * hands the ~10-15s measurement+commit off to http_async_job_try_start()
+                              * instead of blocking httpd_worker inline. */
 #include "http_form.h"
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- 2026-09-15 review HIGH 3,
                               * commissioning_post_handler()'s own comment below */
@@ -1284,20 +1287,21 @@ static esp_err_t ct_trim_post_handler(httpd_req_t *req)
  * entry the operator typed on purpose is not "the sweep clobbering it
  * silently").
  *
- * Blocks the ENTIRE esp_http_server task for the full measurement
- * (~10-12s at CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES/SAFTYFW_PERIOD_
- * CURRENT_TASK_MS, current_task.c) -- esp_http_server here runs as a single
- * task, not one worker thread per connection, so every other HTTP request
- * (dashboard poll, another commissioning action, OTA, etc.) is stalled for
- * up to ~15s while this handler runs. That is accepted, not overlooked:
- * this is an operator-driven, one-at-a-time commissioning action that
- * itself requires every relay off and no profile/autotune running (see the
- * precondition gate below), so nothing else on the board should be making
- * HTTP calls that matter during the window anyway. This is a DIFFERENT
- * hazard from the link_task/current_task blocking problem this whole
- * async-BEGIN/poll design (link_frame.h's own comment) exists to avoid on
- * the Pico side -- that one risks the 30ms link watchdog deadline, not just
- * HTTP responsiveness. */
+ * docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1 (2026-09-25): the
+ * measurement (~10-12s at CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES/
+ * SAFTYFW_PERIOD_CURRENT_TASK_MS, current_task.c) and the commit that
+ * follows it used to block the ENTIRE esp_http_server task inline -- a
+ * single shared worker, not one thread per connection, so every other HTTP
+ * request (dashboard poll, another commissioning action, OTA, etc.) stalled
+ * for up to ~15s while this handler ran. ct_auto_zero_post_handler() now
+ * does only the fast parts (body parse, preconditions) on httpd_worker and
+ * hands the slow tail to ct_auto_zero_job() on its own task via
+ * http_async_job_try_start() (http_async_job.h) -- see that header's doc
+ * comment for the handoff contract. This is a DIFFERENT hazard from the
+ * link_task/current_task blocking problem the Pico's own async-BEGIN/poll
+ * design (link_frame.h's own comment) exists to avoid -- that one risks the
+ * 30ms link watchdog deadline, not just HTTP responsiveness, and is
+ * unchanged by this slice. */
 #define SAFETY_CT_AUTO_ZERO_BODY_MAX 64
 #define SAFETY_CT_AUTO_ZERO_POLL_MS 200u
 #define SAFETY_CT_AUTO_ZERO_TIMEOUT_MS 15000u
@@ -1402,6 +1406,238 @@ static const char *ct_auto_zero_check_postconditions(bool relays_on_after, uint3
     return NULL;
 }
 
+/* Everything ct_auto_zero_post_handler() needs after the handoff --
+ * heap-allocated (MALLOC_CAP_INTERNAL, same reasoning as every other
+ * heap-scoped struct in this handler: the job's commit path reaches flash
+ * via safety_cfg_store_set_ct_cal_input(), and internal DRAM for every
+ * allocation in a handler with ANY flash-writing path removes the question
+ * rather than depending on this particular one's lifetime not overlapping
+ * the write). override_manual is NOT carried through -- it is only ever
+ * consulted by ct_auto_zero_check_preconditions(), which already ran to
+ * completion before the handoff. */
+typedef struct {
+    uint8_t channel;
+    bool confirm;
+    bool has_existing;
+    safety_ct_cal_source_t existing_source;
+    float existing_a_fs;
+    float existing_zero_mv;
+} ct_auto_zero_job_ctx_t;
+
+/* The slow tail of ct_auto_zero_post_handler() (docs/HTTP_POST_OWNER_
+ * MIGRATION_PLAN.md slice A1) -- runs on its own task via
+ * http_async_job_try_start(), not on httpd_worker. Every response body/
+ * status this function sends is BYTE FOR BYTE what the pre-A1 inline
+ * handler sent from this same point onward -- existing callers
+ * (PcTools' ct_auto_zero client, test_safety_cfg_http.c) see no
+ * difference. Must not call http_auth_*, cookie or client-IP functions
+ * (http_async_job.h's doc comment) -- everything below already ran before
+ * the handoff, on the original req, on httpd_worker. Must not call
+ * httpd_req_async_handler_complete() itself -- http_async_job.c's run_job()
+ * does that once this function returns, on every path, including each of
+ * this function's own early returns. */
+static void ct_auto_zero_job(httpd_req_t *async_req, void *arg)
+{
+    ct_auto_zero_job_ctx_t *jc = (ct_auto_zero_job_ctx_t *)arg;
+    uint8_t channel = jc->channel;
+    bool confirm = jc->confirm;
+    bool has_existing = jc->has_existing;
+    safety_ct_cal_source_t existing_source = jc->existing_source;
+    float existing_a_fs = jc->existing_a_fs;
+    float existing_zero_mv = jc->existing_zero_mv;
+    free(jc);
+
+    bool have_io = s_hw_io != NULL;
+
+    // --- Measure -------------------------------------------------------------
+    esp_err_t begin_err = safety_link_send_ct_auto_zero_begin(s_link, channel);
+    if (begin_err != ESP_OK) {
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_sendstr(async_req, "{\"ok\":false,\"reason\":\"could not send the auto-zero request\"}");
+        return;
+    }
+
+    /* "Reset one side of a pair" hazard: DONE latches on the Pico until the
+     * NEXT BEGIN (see kilnlink_ct_auto_zero_status.h), so if THIS request's
+     * BEGIN frame is lost on the wire, the very first poll below can see a
+     * DONE that is actually the previous measurement's stale result --
+     * accepting it silently would commit an old channel's old reading under
+     * this request's name. The disambiguator is `state` reaching IN_PROGRESS:
+     * a fresh BEGIN always drives the state to IN_PROGRESS before it ever
+     * reaches DONE, so DONE is only trusted once this loop has actually
+     * observed that transition for itself. */
+    kilnlink_ct_auto_zero_status_t az = {0};
+    uint32_t waited_ms = 0;
+    bool done = false;
+    bool stale_done = false;
+    bool observed_in_progress = false;
+    while (waited_ms < SAFETY_CT_AUTO_ZERO_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(SAFETY_CT_AUTO_ZERO_POLL_MS));
+        waited_ms += SAFETY_CT_AUTO_ZERO_POLL_MS;
+        if (safety_link_get_ct_auto_zero_status(s_link, &az) != ESP_OK) {
+            continue; // transient poll miss -- keep trying within the overall timeout
+        }
+        if (az.channel != channel) {
+            continue; // status for some other channel's earlier request
+        }
+        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_IN_PROGRESS) {
+            observed_in_progress = true;
+            continue;
+        }
+        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_DONE) {
+            if (!observed_in_progress) {
+                stale_done = true;
+            } else {
+                done = true;
+            }
+            break;
+        }
+    }
+    if (stale_done) {
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_sendstr(async_req, "{\"ok\":false,\"reason\":\"measurement did not start -- the Pico "
+                                        "still reports a stale result from an earlier request; check the "
+                                        "safety link\"}");
+        return;
+    }
+    if (!done) {
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_sendstr(async_req, "{\"ok\":false,\"reason\":\"measurement did not complete in time -- "
+                                        "check the Pico link\"}");
+        return;
+    }
+
+    // --- Re-check preconditions: the measurement above took ~10-12s, during
+    // which a relay, profile, or autotune could have started and stopped
+    // again without ever being caught by the point-in-time gate above. See
+    // ct_auto_zero_check_postconditions()'s own comment. ---
+    bool relays_on_after = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
+    uint32_t off_ms_after = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
+    // Second narrow heap-scoped profile_exec_status_t read, same reasoning
+    // and same internal-DRAM choice as the first one above -- not a stack
+    // local, so there is no frame cost to "declaring a second one" any more.
+    bool profile_running_or_paused_after;
+    {
+        profile_exec_status_t *pstat2 = heap_caps_malloc(sizeof(*pstat2), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!pstat2) {
+            httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+            return;
+        }
+        memset(pstat2, 0, sizeof(*pstat2));
+        profile_executor_get_status(pstat2);
+        profile_running_or_paused_after =
+            (pstat2->state == PROFILE_EXEC_RUNNING || pstat2->state == PROFILE_EXEC_PAUSED);
+        free(pstat2);
+    }
+    bool autotune_active_after = autotune_engine_is_active();
+    const char *post_refusal = ct_auto_zero_check_postconditions(
+        relays_on_after, off_ms_after, waited_ms, profile_running_or_paused_after, autotune_active_after);
+    if (post_refusal) {
+        char resp[192];
+        int len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", post_refusal);
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_send(async_req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+        return;
+    }
+
+    float gain = safety_cfg_store_ct_cal_channel_gain(channel);
+    float measured_zero_mv = ct_auto_zero_counts_to_mv(az.zero_counts, gain);
+    float delta_mv = has_existing ? (measured_zero_mv - existing_zero_mv) : measured_zero_mv;
+
+    // "current flowing with every relay off is S3's fault condition and must
+    // not be calibrated away" -- CT_COMMISSIONING_PLAN.md step 2.
+    if (fabsf(delta_mv) > 100.0f) {
+        char resp[256];
+        int len = snprintf(resp, sizeof(resp),
+                            "{\"ok\":false,\"reason\":\"measured zero (%.2f mV) differs from the stored "
+                            "value (%.2f mV) by more than 100 mV -- this looks like real current, not "
+                            "offset drift; refusing to calibrate it away\",\"measured_zero_mv\":%.3f,"
+                            "\"previous_zero_mv\":%.3f,\"delta_mv\":%.3f}",
+                            (double)measured_zero_mv, (double)existing_zero_mv, (double)measured_zero_mv,
+                            (double)existing_zero_mv, (double)delta_mv);
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_send(async_req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+        return;
+    }
+
+    if (!confirm) {
+        char resp[300];
+        int len = snprintf(resp, sizeof(resp),
+                            "{\"ok\":true,\"phase\":\"measured\",\"channel\":%u,\"samples\":%u,"
+                            "\"measured_zero_mv\":%.3f,\"previous_zero_mv\":%.3f,\"delta_mv\":%.3f,"
+                            "\"manual_conflict\":%s}",
+                            (unsigned)channel, (unsigned)az.samples_taken, (double)measured_zero_mv,
+                            (double)existing_zero_mv, (double)delta_mv,
+                            (has_existing && existing_source == SAFETY_CT_CAL_SOURCE_MANUAL) ? "true"
+                                                                                              : "false");
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_send(async_req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+        return;
+    }
+
+    // --- Commit (confirm=1) -- same order as ct_cal_post_handler(): Pico
+    // first, ESP-local record only once the Pico side has accepted it. ---
+    // has_existing is guaranteed true here -- ct_auto_zero_check_preconditions()
+    // above already refused the whole request when the channel has no A_fs
+    // yet, so existing_a_fs is always a real, previously-validated value.
+    float a_fs_for_convert = existing_a_fs;
+    float k_ct_v_per_a = 0.0f;
+    uint16_t zero_counts = az.zero_counts;
+    if (!safety_ct_cal_convert(a_fs_for_convert, measured_zero_mv, gain, &k_ct_v_per_a, &zero_counts)) {
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_sendstr(async_req, "{\"ok\":false,\"reason\":\"measured value rejected by conversion "
+                                        "(out of range)\"}");
+        return;
+    }
+
+    static const uint16_t K_CT_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0308, 0x0309, 0x030A };
+    static const uint16_t ZERO_COUNTS_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0302, 0x0303, 0x0304 };
+    safety_cfg_post_pair_t pairs[2];
+    pairs[0].param_id = K_CT_IDS[channel];
+    snprintf(pairs[0].value_text, sizeof(pairs[0].value_text), "%.9g", (double)k_ct_v_per_a);
+    pairs[1].param_id = ZERO_COUNTS_IDS[channel];
+    snprintf(pairs[1].value_text, sizeof(pairs[1].value_text), "%u", (unsigned)zero_counts);
+
+    char reason[160];
+    bool ok = safety_cfg_write_apply_pairs(s_link, pairs, 2, true /* always commit on confirm */, reason, sizeof(reason), NULL);
+
+    bool persisted = false;
+    esp_err_t nvs_err = ESP_OK;
+    if (ok) {
+        persisted = safety_cfg_store_set_ct_cal_input(channel, a_fs_for_convert, measured_zero_mv,
+                                                        SAFETY_CT_CAL_SOURCE_AUTO_ZERO, NULL, NULL,
+                                                        &nvs_err) &&
+                    nvs_err == ESP_OK;
+    }
+
+    char resp[300];
+    int len;
+    if (ok && persisted) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"phase\":\"committed\",\"channel\":%u,\"zero_mv\":%.3f,"
+                        "\"persisted\":true}",
+                        (unsigned)channel, (double)measured_zero_mv);
+    } else if (ok) {
+        len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"phase\":\"committed\",\"channel\":%u,\"zero_mv\":%.3f,"
+                        "\"persisted\":false,\"err\":\"%s\"}",
+                        (unsigned)channel, (double)measured_zero_mv, esp_err_to_name(nvs_err));
+    } else {
+        char escaped[192];
+        size_t o = 0;
+        for (const char *c = reason; *c && o + 2 < sizeof(escaped); c++) {
+            if (*c == '"' || *c == '\\') {
+                escaped[o++] = '\\';
+            }
+            escaped[o++] = *c;
+        }
+        escaped[o] = '\0';
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", escaped);
+    }
+    httpd_resp_set_type(async_req, "application/json");
+    httpd_resp_send(async_req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+}
+
 static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
 {
     char body[SAFETY_CT_AUTO_ZERO_BODY_MAX];
@@ -1499,186 +1735,37 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
     }
 
-    // --- Measure -------------------------------------------------------------
-    esp_err_t begin_err = safety_link_send_ct_auto_zero_begin(s_link, channel);
-    if (begin_err != ESP_OK) {
+    // --- Hand off the measurement + commit to their own task -- everything
+    // above this point is fast (a handful of quick reads/a link status
+    // fetch, no blocking wait), so it stays on httpd_worker; everything
+    // ct_auto_zero_job() does from here is the ~10-15s slow tail this slice
+    // moves off it. See http_async_job.h's doc comment for the handoff
+    // contract and ct_auto_zero_job()'s own comment for why the response
+    // bodies/status codes are unchanged. ---
+    ct_auto_zero_job_ctx_t *jc = heap_caps_malloc(sizeof(*jc), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!jc) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    jc->channel = channel;
+    jc->confirm = confirm;
+    jc->has_existing = has_existing;
+    jc->existing_source = existing_source;
+    jc->existing_a_fs = existing_a_fs;
+    jc->existing_zero_mv = existing_zero_mv;
+
+    if (!http_async_job_try_start(req, "http_async_job", 4096, ct_auto_zero_job, jc)) {
+        // Refused -- another async job (this route, or a future A2/A3/A4
+        // user of the same helper) is already running, or the async handoff
+        // itself failed. req is untouched by http_async_job_try_start() in
+        // every refusal case, so responding on it synchronously here is
+        // safe. Same refusal shape this route already used for every other
+        // precondition failure above.
+        free(jc);
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"could not send the auto-zero request\"}");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
     }
-
-    /* "Reset one side of a pair" hazard: DONE latches on the Pico until the
-     * NEXT BEGIN (see kilnlink_ct_auto_zero_status.h), so if THIS request's
-     * BEGIN frame is lost on the wire, the very first poll below can see a
-     * DONE that is actually the previous measurement's stale result --
-     * accepting it silently would commit an old channel's old reading under
-     * this request's name. The disambiguator is `state` reaching IN_PROGRESS:
-     * a fresh BEGIN always drives the state to IN_PROGRESS before it ever
-     * reaches DONE, so DONE is only trusted once this loop has actually
-     * observed that transition for itself. */
-    kilnlink_ct_auto_zero_status_t az = {0};
-    uint32_t waited_ms = 0;
-    bool done = false;
-    bool stale_done = false;
-    bool observed_in_progress = false;
-    while (waited_ms < SAFETY_CT_AUTO_ZERO_TIMEOUT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(SAFETY_CT_AUTO_ZERO_POLL_MS));
-        waited_ms += SAFETY_CT_AUTO_ZERO_POLL_MS;
-        if (safety_link_get_ct_auto_zero_status(s_link, &az) != ESP_OK) {
-            continue; // transient poll miss -- keep trying within the overall timeout
-        }
-        if (az.channel != channel) {
-            continue; // status for some other channel's earlier request
-        }
-        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_IN_PROGRESS) {
-            observed_in_progress = true;
-            continue;
-        }
-        if (az.state == KILNLINK_CT_AUTO_ZERO_STATE_DONE) {
-            if (!observed_in_progress) {
-                stale_done = true;
-            } else {
-                done = true;
-            }
-            break;
-        }
-    }
-    if (stale_done) {
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measurement did not start -- the Pico "
-                                        "still reports a stale result from an earlier request; check the "
-                                        "safety link\"}");
-    }
-    if (!done) {
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measurement did not complete in time -- "
-                                        "check the Pico link\"}");
-    }
-
-    // --- Re-check preconditions: the measurement above took ~10-12s, during
-    // which a relay, profile, or autotune could have started and stopped
-    // again without ever being caught by the point-in-time gate above. See
-    // ct_auto_zero_check_postconditions()'s own comment. ---
-    bool relays_on_after = have_io && kiln_io_get_relay_shadow(s_hw_io) != 0u;
-    uint32_t off_ms_after = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
-    // Second narrow heap-scoped profile_exec_status_t read, same reasoning
-    // and same internal-DRAM choice as the first one above -- not a stack
-    // local, so there is no frame cost to "declaring a second one" any more.
-    bool profile_running_or_paused_after;
-    {
-        profile_exec_status_t *pstat2 = heap_caps_malloc(sizeof(*pstat2), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!pstat2) {
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-            return ESP_OK;
-        }
-        memset(pstat2, 0, sizeof(*pstat2));
-        profile_executor_get_status(pstat2);
-        profile_running_or_paused_after =
-            (pstat2->state == PROFILE_EXEC_RUNNING || pstat2->state == PROFILE_EXEC_PAUSED);
-        free(pstat2);
-    }
-    bool autotune_active_after = autotune_engine_is_active();
-    const char *post_refusal = ct_auto_zero_check_postconditions(
-        relays_on_after, off_ms_after, waited_ms, profile_running_or_paused_after, autotune_active_after);
-    if (post_refusal) {
-        char resp[192];
-        int len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", post_refusal);
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
-    }
-
-    float gain = safety_cfg_store_ct_cal_channel_gain(channel);
-    float measured_zero_mv = ct_auto_zero_counts_to_mv(az.zero_counts, gain);
-    float delta_mv = has_existing ? (measured_zero_mv - existing_zero_mv) : measured_zero_mv;
-
-    // "current flowing with every relay off is S3's fault condition and must
-    // not be calibrated away" -- CT_COMMISSIONING_PLAN.md step 2.
-    if (fabsf(delta_mv) > 100.0f) {
-        char resp[256];
-        int len = snprintf(resp, sizeof(resp),
-                            "{\"ok\":false,\"reason\":\"measured zero (%.2f mV) differs from the stored "
-                            "value (%.2f mV) by more than 100 mV -- this looks like real current, not "
-                            "offset drift; refusing to calibrate it away\",\"measured_zero_mv\":%.3f,"
-                            "\"previous_zero_mv\":%.3f,\"delta_mv\":%.3f}",
-                            (double)measured_zero_mv, (double)existing_zero_mv, (double)measured_zero_mv,
-                            (double)existing_zero_mv, (double)delta_mv);
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
-    }
-
-    if (!confirm) {
-        char resp[300];
-        int len = snprintf(resp, sizeof(resp),
-                            "{\"ok\":true,\"phase\":\"measured\",\"channel\":%u,\"samples\":%u,"
-                            "\"measured_zero_mv\":%.3f,\"previous_zero_mv\":%.3f,\"delta_mv\":%.3f,"
-                            "\"manual_conflict\":%s}",
-                            (unsigned)channel, (unsigned)az.samples_taken, (double)measured_zero_mv,
-                            (double)existing_zero_mv, (double)delta_mv,
-                            (has_existing && existing_source == SAFETY_CT_CAL_SOURCE_MANUAL) ? "true"
-                                                                                              : "false");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
-    }
-
-    // --- Commit (confirm=1) -- same order as ct_cal_post_handler(): Pico
-    // first, ESP-local record only once the Pico side has accepted it. ---
-    // has_existing is guaranteed true here -- ct_auto_zero_check_preconditions()
-    // above already refused the whole request when the channel has no A_fs
-    // yet, so existing_a_fs is always a real, previously-validated value.
-    float a_fs_for_convert = existing_a_fs;
-    float k_ct_v_per_a = 0.0f;
-    uint16_t zero_counts = az.zero_counts;
-    if (!safety_ct_cal_convert(a_fs_for_convert, measured_zero_mv, gain, &k_ct_v_per_a, &zero_counts)) {
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"measured value rejected by conversion "
-                                        "(out of range)\"}");
-    }
-
-    static const uint16_t K_CT_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0308, 0x0309, 0x030A };
-    static const uint16_t ZERO_COUNTS_IDS[SAFETY_CT_CAL_CHANNELS] = { 0x0302, 0x0303, 0x0304 };
-    safety_cfg_post_pair_t pairs[2];
-    pairs[0].param_id = K_CT_IDS[channel];
-    snprintf(pairs[0].value_text, sizeof(pairs[0].value_text), "%.9g", (double)k_ct_v_per_a);
-    pairs[1].param_id = ZERO_COUNTS_IDS[channel];
-    snprintf(pairs[1].value_text, sizeof(pairs[1].value_text), "%u", (unsigned)zero_counts);
-
-    char reason[160];
-    bool ok = safety_cfg_write_apply_pairs(s_link, pairs, 2, true /* always commit on confirm */, reason, sizeof(reason), NULL);
-
-    bool persisted = false;
-    esp_err_t nvs_err = ESP_OK;
-    if (ok) {
-        persisted = safety_cfg_store_set_ct_cal_input(channel, a_fs_for_convert, measured_zero_mv,
-                                                        SAFETY_CT_CAL_SOURCE_AUTO_ZERO, NULL, NULL,
-                                                        &nvs_err) &&
-                    nvs_err == ESP_OK;
-    }
-
-    char resp[300];
-    int len;
-    if (ok && persisted) {
-        len = snprintf(resp, sizeof(resp),
-                        "{\"ok\":true,\"phase\":\"committed\",\"channel\":%u,\"zero_mv\":%.3f,"
-                        "\"persisted\":true}",
-                        (unsigned)channel, (double)measured_zero_mv);
-    } else if (ok) {
-        len = snprintf(resp, sizeof(resp),
-                        "{\"ok\":true,\"phase\":\"committed\",\"channel\":%u,\"zero_mv\":%.3f,"
-                        "\"persisted\":false,\"err\":\"%s\"}",
-                        (unsigned)channel, (double)measured_zero_mv, esp_err_to_name(nvs_err));
-    } else {
-        char escaped[192];
-        size_t o = 0;
-        for (const char *c = reason; *c && o + 2 < sizeof(escaped); c++) {
-            if (*c == '"' || *c == '\\') {
-                escaped[o++] = '\\';
-            }
-            escaped[o++] = *c;
-        }
-        escaped[o] = '\0';
-        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", escaped);
-    }
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, resp, len > 0 && (size_t)len < sizeof(resp) ? (size_t)len : strlen(resp));
+    return ESP_OK;
 }
 
 /* ---------------------------------------------------------------------- */

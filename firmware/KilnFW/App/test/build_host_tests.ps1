@@ -141,6 +141,15 @@ try {
         (Join-Path $testDir "test_httpd_socket_budget.c"),
         (Join-Path $testDir "test_stack_margin.c"),
         (Join-Path $testDir "test_stack_margin_registry.c"),
+        # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: http_async_job.c's
+        # own host tests. No ESP-IDF dependency beyond the stub
+        # esp_http_server.h/freertos headers already used across this
+        # executable, and no static-symbol conflict with anything else
+        # linked here, so it joins the main combined executable rather than
+        # needing its own (unlike test_safety_cfg_http.c, which #includes
+        # safety_cfg_http.c and so needs its own fakes -- see that build
+        # step's own comment).
+        (Join-Path $testDir "test_http_async_job.c"),
         (Join-Path $testDir "test_log_store.c"),
         (Join-Path $testDir "test_cfg_fs.c"),
         (Join-Path $testDir "test_cfg_fs_format_gate.c"),
@@ -615,6 +624,14 @@ try {
             # not otherwise linked into this executable (its own
             # safety_cfg_store fake is separate and does not touch hal_kv).
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: safety_cfg_
+            # http.c (#included above) now calls http_async_job_try_start()
+            # (ct_auto_zero_post_handler()'s handoff), so http_async_job.c
+            # must link for real here too -- it in turn calls
+            # stack_margin_register(), not otherwise linked into this
+            # executable.
+            "`"$(Join-Path $driversDir 'http/http_async_job.c')`" " +
+            "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3

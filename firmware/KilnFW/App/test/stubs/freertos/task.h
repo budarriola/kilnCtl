@@ -63,7 +63,17 @@ static inline void vTaskDelay(TickType_t ticks) { (void)ticks; }
  * same reasoning as xTaskCreatePinnedToCore() above -- boot_button_start()
  * is never called by the tests (only its pure boot_button_step()/
  * state_refuses_bypass() logic is), but the translation unit still needs
- * this symbol to link. */
+ * this symbol to link.
+ *
+ * 2026-09-25: g_test_stub_xtaskcreate_result below lets
+ * http_async_job.c's host tests (test_http_async_job.c) exercise the
+ * "task creation itself fails" refusal path -- default pdPASS (1) preserves
+ * every existing host test's behavior (none of them depend on this call
+ * failing). selectany, same reasoning as freertos/semphr.h's
+ * g_test_stub_semaphore_take_default: this header is included by more than
+ * one .c file in the same test executable. */
+__declspec(selectany) BaseType_t g_test_stub_xtaskcreate_result = 1; /* pdPASS */
+
 static inline BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint32_t stack_depth,
                                       void *arg, UBaseType_t priority, TaskHandle_t *out_handle)
 {
@@ -75,7 +85,7 @@ static inline BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint
     if (out_handle) {
         *out_handle = NULL;
     }
-    return pdPASS;
+    return g_test_stub_xtaskcreate_result;
 }
 
 /* 2026-08-24: added for stack_margin.c's host build (linked into

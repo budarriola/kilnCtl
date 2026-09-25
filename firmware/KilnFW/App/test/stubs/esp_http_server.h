@@ -17,6 +17,7 @@
 #define TEST_STUB_ESP_HTTP_SERVER_H
 
 #include <stddef.h>
+#include <stdlib.h>
 
 #include "esp_err.h"
 
@@ -87,5 +88,55 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s);
 size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field);
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size);
 int httpd_req_to_sockfd(httpd_req_t *r);
+
+/* Added 2026-09-25 for http_async_job.c's host tests
+ * (test_http_async_job.c) -- the first driver code to call the real
+ * ESP-IDF async-handoff pair (esp_http_server.h:856/873). Defined here as
+ * static inline (not "declared once, defined per test file" like the
+ * group above) because their behavior is fixed and shared rather than
+ * per-test-customized: begin() heap-allocates a copy of *r (a dummy
+ * identity is enough -- host tests are single-threaded and nothing here
+ * distinguishes one httpd_req_t's contents from another beyond what the
+ * caller put in user_ctx/content_len, which the copy preserves), unless a
+ * test has set g_test_stub_async_begin_should_fail, matching how a real
+ * board can run out of the fixed session/async slot pool. complete() frees
+ * the copy and counts itself in g_test_stub_async_complete_calls so a test
+ * can assert begin/complete stay paired on every code path, including a
+ * dropped complete() (the required negative test). selectany: this header
+ * is included by more than one .c file in the same test executable, same
+ * reasoning as freertos/semphr.h's g_test_stub_lock_depth. */
+__declspec(selectany) int g_test_stub_async_begin_should_fail = 0;
+__declspec(selectany) int g_test_stub_async_complete_calls = 0;
+
+static inline esp_err_t httpd_req_async_handler_begin(httpd_req_t *r, httpd_req_t **out)
+{
+    if (g_test_stub_async_begin_should_fail) {
+        if (out) {
+            *out = NULL;
+        }
+        return ESP_FAIL;
+    }
+    httpd_req_t *copy = (httpd_req_t *)calloc(1, sizeof(httpd_req_t));
+    if (!copy) {
+        if (out) {
+            *out = NULL;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    if (r) {
+        *copy = *r;
+    }
+    if (out) {
+        *out = copy;
+    }
+    return ESP_OK;
+}
+
+static inline esp_err_t httpd_req_async_handler_complete(httpd_req_t *r)
+{
+    g_test_stub_async_complete_calls++;
+    free(r);
+    return ESP_OK;
+}
 
 #endif // TEST_STUB_ESP_HTTP_SERVER_H

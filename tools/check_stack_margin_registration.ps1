@@ -153,6 +153,7 @@ $requiredNames = @(
     "recovery_exit",  # liveness: on-demand -- transient task an HTTP handler (ota_http_recovery.c) creates per POST /api/ota/esp/recovery_exit call
     "ota_rollback_reboot",  # liveness: on-demand -- transient task ota_http_esp.c's rollback handler creates on demand
     "ota_pico_rollback",  # liveness: on-demand -- transient task ota_http_pico.c's rollback handler creates on demand
+    "http_async_job",  # liveness: on-demand -- transient task http_async_job.c creates on demand for a slow POST handler's job (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1; first caller is safety_cfg_http.c's ct_auto_zero_post_handler())
     "profile_executor", "profile_exec_wdt",
     "safety_owner_evt", "safety_proto_rx", "safety_poll",
     "screen_idle", "telemetry_log", "thermo_owner", "link_watchdog",

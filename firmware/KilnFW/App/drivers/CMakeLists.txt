@@ -344,6 +344,10 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/ota_http_recovery.c"
                        "http/ota_http_util.c"
                        "http/ota_image_crc.c"
+                       # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: the
+                       # shared single-flight async-job helper, first used by
+                       # safety_cfg_http.c's ct_auto_zero_post_handler().
+                       "http/http_async_job.c"
                        # WEB_AUTH_PLAN.md section 5 -- fail-closed HTTP
                        # enforcement point. http_auth_enforce.c is pure
                        # logic (host-tested, test_http_auth_enforce.c);

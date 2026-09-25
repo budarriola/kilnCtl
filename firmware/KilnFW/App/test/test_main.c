@@ -90,6 +90,7 @@ void run_test_dram_margin(void);
 void run_test_httpd_socket_budget(void);
 void run_test_stack_margin(void);
 void run_test_stack_margin_registry(void);
+void run_test_http_async_job(void);
 void run_test_log_store(void);
 void run_test_cfg_fs(void);
 void run_test_cfg_fs_format_gate(void);
@@ -205,6 +206,7 @@ int main(void)
     run_test_httpd_socket_budget();
     run_test_stack_margin();
     run_test_stack_margin_registry();
+    run_test_http_async_job();
     run_test_log_store();
     run_test_cfg_fs();
     run_test_cfg_fs_format_gate();

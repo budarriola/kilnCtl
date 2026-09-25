@@ -724,6 +724,15 @@ TASKS = [
     dict(name="ota_pico_rollback", root="ota_pico_rollback_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
              r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
+    dict(name="http_async_job", root="http_async_job_task",
+         # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: the shared
+         # single-flight async-job helper (http_async_job.c). The stack size
+         # is a parameter, not a literal in http_async_job.c's own
+         # xTaskCreate() call, so the source-derived regex reads it out of
+         # the first (and, as of A1, only) call site instead --
+         # safety_cfg_http.c's ct_auto_zero_post_handler().
+         stack=lambda: extract_int_literal("drivers/http/safety_cfg_http.c",
+             r'http_async_job_try_start\([^,]+,\s*"http_async_job",\s*(\d+)')),
     dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_exit_reboot_task,\s*"recovery_exit_reboot",\s*(\d+)')),
@@ -930,6 +939,16 @@ CEILING_BYTES = {
     "profile_exec_wdt": 2496,
     "ota_rollback_reboot": 1216,
     "ota_pico_rollback": 2736,
+    # INDETERMINATE, same as ota_pico_rollback just above: run_job() dispatches
+    # through http_async_job_fn_t, a function pointer this static walk cannot
+    # follow, so the measured total is a 32 B lower bound only, not a real
+    # ceiling. Same declared stack (4096 B) as ota_pico_rollback and a
+    # comparable job shape (a few quick reads/a link status fetch already done
+    # by httpd_worker before handoff, then ct_auto_zero_job()'s SPI reads/NVS
+    # write on this task) -- ceiling set to match that sibling's rather than
+    # invented fresh, pending a real measurement once a caller of this walk
+    # can resolve indirect calls.
+    "http_async_job": 2736,
     "recovery_exit": 80,
     "backlight_pwm": 112,
     "i2c_owner_ns2009": 144,
