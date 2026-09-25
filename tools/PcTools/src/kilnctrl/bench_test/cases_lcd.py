@@ -219,21 +219,41 @@ def _lcd19_clear_stray_overlay(ctx: dict, ui) -> Optional[Dict[str, Any]]:
     read as a genuinely unresponsive button, when the real cause is the
     leftover overlay.
 
-    Returns ``None`` when the tap-target read failed or found no stray
-    overlay (no "Cancel"/"OK" present); otherwise a dict with the overlay's
-    ``names`` and the :func:`_dismiss_lcd19_overlay` result, for a caller to
-    fold into `observed` and to FAIL against by name rather than blaming
-    whatever button it was about to tap."""
+    Only ever acts while the page is 'home': `_navigate_home()` (this
+    function's own caller, :func:`_wake_and_home`) is best-effort and can
+    leave the board parked on some other page (e.g. a stuck "network" page
+    from a failed hop) -- this function's own click/touch_inject fallback
+    assumes home's own overlays (ui_lcd_keypad.c / ui_confirm.c) and must
+    never fire against an unrelated same-named widget on a different page
+    (Wi-Fi provisioning's own "Cancel", a "Cannot Start" dialog's "OK", an
+    on-glass profile-detail/review "OK" confirm -- none of these are the
+    LCD-19 popups this helper exists to clear). Returns a dict recording the
+    page actually seen, rather than a bare ``None``, so a caller (LCD-01) can
+    tell "nothing to do, page wasn't home" apart from "checked home, nothing
+    there" instead of both collapsing to the same silent ``None``.
+
+    Returns a dict with ``present: False`` when the tap-target read failed,
+    the page wasn't 'home', or 'home' was checked and found clean; otherwise
+    (``present: True``) a dict with the overlay's ``names`` and the
+    :func:`_dismiss_lcd19_overlay` result, for a caller to fold into
+    `observed` and to FAIL against by name rather than blaming whatever
+    button it was about to tap."""
+    try:
+        page = ui.get_current_page()
+    except Exception:
+        page = None
+    if page != "home":
+        return {"checked": True, "present": False, "page": page}
     names = _lcd19_overlay_names(ui)
     if names is None:
-        return None
+        return {"checked": False, "present": False, "page": page}
     if "Cancel" not in names and "OK" not in names:
-        return None
+        return {"checked": True, "present": False, "page": page}
     try:
         dismiss = _dismiss_lcd19_overlay(ctx, ui)
     except Exception as exc:  # noqa: BLE001
         dismiss = {"checked": False, "error": type(exc).__name__}
-    return {"names": sorted(names), "dismiss": dismiss}
+    return {"checked": True, "present": True, "page": page, "names": sorted(names), "dismiss": dismiss}
 
 
 def _wait_for_page(ui, expected: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
@@ -825,7 +845,7 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
 
 def _case_lcd01(ctx: dict) -> CaseResult:
     stray = _wake_and_home(ctx)
-    if stray is not None and not (stray.get("dismiss") or {}).get("dismissed"):
+    if stray is not None and stray.get("present") and not (stray.get("dismiss") or {}).get("dismissed"):
         # A stray PIN keypad/Confirm popup left open from an earlier run
         # swallows every tap aimed at the home page underneath it -- fail
         # naming that overlay as the cause, not whatever this case's own
@@ -839,6 +859,12 @@ def _case_lcd01(ctx: dict) -> CaseResult:
             ),
             observed={"stray_overlay": stray},
         )
+    # `stray.get("checked") is False` means the stray-overlay read itself
+    # timed out/failed (see _lcd19_clear_stray_overlay) -- not evidence of a
+    # popup either way, but worth keeping in `observed` rather than
+    # discarding, since it is otherwise indistinguishable from "checked and
+    # clean" in a summary.json read after the fact.
+    stray_read_failed = bool(stray) and stray.get("checked") is False
     srv = _srv(ctx)
     ui = srv._ui_test
     page = ui.get_current_page()
@@ -848,10 +874,18 @@ def _case_lcd01(ctx: dict) -> CaseResult:
 
     if page != "home":
         # Wrong page entirely -- no point spending a webcam capture on it.
-        return J.judge_lcd_home_idle(page, targets, None, None)
+        result = J.judge_lcd_home_idle(page, targets, None, None)
+        if stray_read_failed:
+            result.observed = dict(result.observed or {})
+            result.observed["stray_overlay_read_failed"] = True
+        return result
     start_matches_accent4, pause_is_hidden, color_debug = _try_capture_and_sample(ctx, targets)
     result = J.judge_lcd_home_idle(page, targets, start_matches_accent4, pause_is_hidden, color_debug=color_debug)
-    return _downgrade_if_corners_stale(ctx, result, color_debug.get("capture_path"))
+    result = _downgrade_if_corners_stale(ctx, result, color_debug.get("capture_path"))
+    if stray_read_failed:
+        result.observed = dict(result.observed or {})
+        result.observed["stray_overlay_read_failed"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1959,14 +1993,28 @@ def _lcd19_overlay_raw(ui) -> "tuple[Optional[set], bool]":
     return {t.get("name") for t in targets if not t.get("hidden")}, truncated
 
 
-def _lcd19_poll_overlay(ui, satisfied, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                         interval_s: float = _PAGE_POLL_INTERVAL_S
+def _lcd19_poll_overlay(ui, satisfied, timeout_s: Optional[float] = None,
+                         interval_s: Optional[float] = None
                          ) -> "tuple[Optional[set], float, int, bool]":
     """Shared poll loop over :func:`_lcd19_overlay_raw`. ``satisfied(names,
     history)`` decides when to stop, where `names` is the most recent read
     (``None`` until a usable, non-empty listing arrives -- never a stand-in
     for "the overlay is gone") and `history` is the list of every read so
     far including `names` itself, oldest first.
+
+    `timeout_s`/`interval_s` default to (and are resolved against, at call
+    time, not at import time) the module-level `_PAGE_POLL_TIMEOUT_S`/
+    `_PAGE_POLL_INTERVAL_S` -- a bare ``= _PAGE_POLL_TIMEOUT_S`` default
+    binds the value once when this function is defined, so a test's
+    ``mock.patch.object(cases_lcd, "_PAGE_POLL_TIMEOUT_S", ...)`` would
+    silently do nothing for any of this module's several LCD-19 tests that
+    call through a caller (`_dismiss_lcd19_overlay`, `_case_lcd19`) with no
+    override of their own -- exactly what made this module's test file take
+    ~3.5 minutes instead of a fraction of that. Resolving the sentinel here
+    (and in :func:`_lcd19_overlay_names`, :func:`_wait_for_overlay_names`,
+    :func:`_wait_stable_names`, the same three layers a no-override caller
+    passes through) makes that patch effective without changing either
+    production default.
 
     Returns ``(names, elapsed_s, empty_polls, truncated_seen)``:
     `empty_polls` counts every raw read that came back as the empty/timeout
@@ -1975,6 +2023,10 @@ def _lcd19_poll_overlay(ui, satisfied, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
     is True if any read set the firmware's `truncated` flag, even one later
     superseded by a full read. Never raises; a predicate that is never
     satisfied still returns honestly once `timeout_s` elapses."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if interval_s is None:
+        interval_s = _PAGE_POLL_INTERVAL_S
     start = time.monotonic()
     empty_polls = 0
     truncated_seen = False
@@ -1999,8 +2051,8 @@ def _lcd19_poll_overlay(ui, satisfied, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
     return names, time.monotonic() - start, empty_polls, truncated_seen
 
 
-def _lcd19_overlay_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                          interval_s: float = _PAGE_POLL_INTERVAL_S) -> Optional[set]:
+def _lcd19_overlay_names(ui, timeout_s: Optional[float] = None,
+                          interval_s: Optional[float] = None) -> Optional[set]:
     """A single "real" overlay read for a caller that just needs a
     signature to diff against (a pre-click baseline) rather than
     diagnostics -- retries past the empty/timeout sentinel (see
@@ -2012,8 +2064,8 @@ def _lcd19_overlay_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
     return names
 
 
-def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                             interval_s: float = _PAGE_POLL_INTERVAL_S,
+def _wait_for_overlay_names(ui, present: bool, timeout_s: Optional[float] = None,
+                             interval_s: Optional[float] = None,
                              baseline: Optional[set] = None
                              ) -> "tuple[Optional[set], float, int, bool]":
     """Same click-then-read race as :func:`_wait_for_page`, for LCD-19's
@@ -2057,8 +2109,8 @@ def _wait_for_overlay_names(ui, present: bool, timeout_s: float = _PAGE_POLL_TIM
     return _lcd19_poll_overlay(ui, _satisfied, timeout_s, interval_s)
 
 
-def _wait_stable_names(ui, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                        interval_s: float = _PAGE_POLL_INTERVAL_S,
+def _wait_stable_names(ui, timeout_s: Optional[float] = None,
+                        interval_s: Optional[float] = None,
                         stable_reads: int = 2) -> "tuple[Optional[set], float, int, bool]":
     """Poll :func:`_lcd19_overlay_raw` until the same real (non-empty)
     listing is read ``stable_reads`` times in a row, or `timeout_s`
@@ -2135,11 +2187,14 @@ def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
 #: checks whether a target by that name exists, not whether the resulting
 #: tap landed anywhere real) without the keypad actually closing. Dismiss
 #: the keypad instead via a raw touch_inject press+release on its backdrop:
-#: the keypad spans x 40..440 (ui_lcd_keypad.c), and any point inside that
-#: span but off every key/footer button hits backdrop_click_cb(), which is
-#: wired to the same cancel handler as the (off-glass) Cancel button itself
-#: (ui_lcd_keypad.c:71-79). (20, 160) is inside the span and well clear of
-#: the digit grid and footer row. A Confirm Start/Confirm Stop dialog's own
+#: the msgbox itself spans x 40..440 (ui_lcd_keypad.c) in 480x320 space, and
+#: a point OUTSIDE that span hits the full-screen backdrop object underneath
+#: it, which is wired to the same cancel handler as the (off-glass) Cancel
+#: button itself (backdrop_click_cb(), ui_lcd_keypad.c:71-79). (20, 160) is
+#: LEFT of the 400 px msgbox (x < 40) and lands on that full-screen backdrop
+#: -- a tap anywhere INSIDE the x 40..440 span instead lands on the msgbox
+#: itself (its digit grid or footer row, depending on y), not the backdrop.
+#: A Confirm Start/Confirm Stop dialog's own
 #: "Cancel" (ui_confirm.c) is on-glass, so that path still uses
 #: click_by_name -- this workaround is keypad-specific.
 _KEYPAD_BACKDROP_XY = (20, 160)
@@ -2164,7 +2219,19 @@ def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
         return {"checked": False}
     if "Cancel" not in before:
         return {"checked": True, "present": False}
-    is_keypad = "OK" in before
+    # "OK" in before is not by itself proof of the PIN keypad: the "Cannot
+    # Start" dialog (ui_page_home_actions.c:115-123) and the on-glass OK
+    # confirms on the profile-detail/review pages (ui_page_profile_detail.c:486,
+    # ui_page_profile_builder_review.c:97,113) are also plain OK+Cancel
+    # dialogs, and treating one of those as the keypad would route its
+    # dismiss through the (wrong, off-glass) backdrop_touch_inject path
+    # instead of the on-glass click_by_name("Cancel") those dialogs actually
+    # need. The keypad's own buttonmatrix additionally always lists its
+    # digit keys by their literal text ("0".."9", ui_lcd_keypad.c's
+    # s_bm_map, collected verbatim by kiln_ui.c's buttonmatrix tap-target
+    # walk) -- no other OK+Cancel dialog in this codebase has digit-named
+    # targets, so requiring them narrows this to the keypad specifically.
+    is_keypad = "OK" in before and {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"} <= before
     result: Dict[str, Any] = {"checked": True, "present": True, "is_keypad": is_keypad}
     action_ok = False
     if is_keypad:
@@ -2267,7 +2334,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         state["after_start_click_empty_polls"] = empty_polls
                     if truncated_seen:
                         state["after_start_click_truncated"] = truncated_seen
-                    keypad_raised = names is not None and "OK" in names and "Cancel" in names
+                    # `names is None` (every read within the poll window came
+                    # back empty/timeout) is left at `keypad_raised`'s
+                    # initial `None` -- INCONCLUSIVE, not a fabricated
+                    # "keypad didn't raise" False the same read failure would
+                    # otherwise have produced.
+                    if names is not None:
+                        keypad_raised = "OK" in names and "Cancel" in names
                 if keypad_raised:
                     wrong_pin = pin_cfg.get("wrong_pin")
                     right_pin = pin_cfg.get("right_pin")

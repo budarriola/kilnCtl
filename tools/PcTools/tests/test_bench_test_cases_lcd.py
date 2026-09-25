@@ -2168,7 +2168,7 @@ class Lcd19Test(unittest.TestCase):
         # If the PIN keypad ("OK" present) appears instead of Confirm Stop
         # directly, Stop was gated -- a safety regression -- and this must
         # be a real FAIL, not vacuously always True.
-        ui = PopupUiTest(trigger_name="Stop", overlay_names=["1", "2", "3", "OK", "Cancel"])
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "OK", "Cancel"])
         srv = FakeSrvFull(ui)
         # "OK" is present alongside "Cancel" -- this is the keypad shape, so
         # dismissal in `finally` must go through the backdrop touch-inject
@@ -2715,7 +2715,7 @@ class Lcd19OverlayFixesTest(unittest.TestCase):
     #    on OK/digits/Confirm, and click_by_name("Cancel") is never used --
 
     def test_keypad_overlay_dismissed_via_backdrop_not_cancel_click(self):
-        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "OK", "Cancel"])
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "OK", "Cancel"])
         ui.click_by_name("Start")
         touch = BackdropTouch(ui)
         srv = FakeSrv(ui)
@@ -2730,7 +2730,7 @@ class Lcd19OverlayFixesTest(unittest.TestCase):
         self.assertIn((20, 160, False), touch.injected)
 
     def test_keypad_dismiss_without_a_touch_client_is_honestly_not_dismissed(self):
-        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "OK", "Cancel"])
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "OK", "Cancel"])
         ui.click_by_name("Start")
         ctx = {"srv": FakeSrv(ui)}  # no _touch attribute at all
         result = C._dismiss_lcd19_overlay(ctx, ui)
@@ -2752,7 +2752,7 @@ class Lcd19OverlayFixesTest(unittest.TestCase):
     #    button, and must proceed normally once it is dismissed --
 
     def test_lcd01_fails_naming_stray_overlay_when_it_cannot_dismiss(self):
-        ui = PopupUiTest(trigger_name="Start", overlay_names=["1", "OK", "Cancel"])
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "OK", "Cancel"])
         ui.click_by_name("Start")  # simulate a leftover keypad from a prior run
         srv = FakeSrv(ui)
         # No _touch client -- the keypad backdrop dismiss cannot be attempted,
@@ -2780,6 +2780,68 @@ class Lcd19OverlayFixesTest(unittest.TestCase):
                           {t["name"] for t in ui.list_tap_targets()["targets"]})
         self.assertNotEqual(result.reason or "", "")
         self.assertNotIn("stray overlay", (result.reason or ""))
+
+    # -- 2026-09-25 Opus review fixes --
+
+    def test_ok_cancel_dialog_without_digits_uses_cancel_click_not_backdrop(self):
+        # "Cannot Start" (ui_page_home_actions.c) and the on-glass OK
+        # confirms on the profile-detail/review pages are OK+Cancel dialogs
+        # with no digit keys -- the old `"OK" in before` check alone would
+        # have misidentified this as the PIN keypad and routed its dismiss
+        # through the (wrong) backdrop touch-inject path instead of the
+        # on-glass Cancel button this dialog actually has.
+        ui = PopupUiTest(trigger_name="Start", overlay_names=["OK", "Cancel"])
+        ui.click_by_name("Start")
+        ctx = {"srv": FakeSrv(ui)}  # no _touch at all -- must not be needed
+        result = C._dismiss_lcd19_overlay(ctx, ui)
+        self.assertEqual(result["dismiss_method"], "click_by_name_cancel")
+        self.assertTrue(result["dismissed"])
+        self.assertFalse(result["is_keypad"])
+
+    def test_stray_overlay_check_skips_a_non_home_page_with_no_click_or_inject(self):
+        # _navigate_home() is best-effort and can leave the board parked on
+        # some other page (e.g. a stuck Wi-Fi "network" page, which also
+        # happens to have its own "Back"/"Cancel" targets) -- this must never
+        # be mistaken for an LCD-19 popup: no click, no touch_inject.
+        class _NetworkPageUiTest(FakeUiTest):
+            def __init__(self):
+                super().__init__(page="network", targets=[
+                    {"name": "Back", "hidden": False},
+                    {"name": "Cancel", "hidden": False},
+                ])
+
+            def click_by_name(self, name):
+                raise AssertionError(f"must not click {name!r} off a non-home page")
+
+        ui = _NetworkPageUiTest()
+        touch = BackdropTouch(ui)
+        srv = FakeSrv(ui)
+        srv._touch = touch
+        result = C._lcd19_clear_stray_overlay({"srv": srv}, ui)
+        self.assertEqual(result, {"checked": True, "present": False, "page": "network"})
+        self.assertEqual(touch.injected, [])
+
+    def test_keypad_raised_stays_inconclusive_when_every_post_start_read_is_empty(self):
+        # Every tap-target read after the Start click comes back empty (the
+        # walk-timeout sentinel, never a real answer) -- keypad_raised must
+        # stay None (INCONCLUSIVE), not become a fabricated False the way
+        # `names is not None and ...` used to collapse both cases to.
+        class _AlwaysEmptyAfterStartUiTest(PopupUiTest):
+            def list_tap_targets(self):
+                if self._overlay_open:
+                    return {"targets": [], "truncated": True}
+                return super().list_tap_targets()
+
+        ui = _AlwaysEmptyAfterStartUiTest(trigger_name="Start", overlay_names=["OK", "Cancel"])
+        srv = FakeSrvFull(ui)
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+        }
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.05):
+            result = C._case_lcd19(ctx)
+        self.assertIsNone(result.observed.get("keypad_raised"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
 
 class Lcd21Test(unittest.TestCase):
