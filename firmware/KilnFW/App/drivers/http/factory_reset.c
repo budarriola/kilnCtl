@@ -385,7 +385,7 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
         mode_reason[0] = '\0';
         if (system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, mode_reason, sizeof(mode_reason))) {
             ESP_LOGW(TAG, "factory_reset_execute: refused by system mode gate: %s", mode_reason);
-            return ESP_ERR_INVALID_STATE;
+            return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
         }
     }
 

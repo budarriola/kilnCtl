@@ -108,11 +108,16 @@ static void system_bridge_task(void *arg)
                 if (err == ESP_ERR_INVALID_ARG) {
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u out of range -- rejected, nothing erased",
                              msg->payload[1]);
-                } else if (err == ESP_ERR_INVALID_STATE) {
+                } else if (err == FACTORY_RESET_ERR_MODE_GATE_REFUSED) {
                     /* system_mode_gate refused (owner decision Q3) -- a
                      * firing or autotune run is active. Nothing erased, no
                      * reboot -- distinct from the erase-failure case below,
-                     * which DOES still reboot. */
+                     * which DOES still reboot. Review fix, 2026-09-25: this
+                     * used to compare against ESP_ERR_INVALID_STATE, which
+                     * the erase loop itself can also return (partial erase
+                     * already happened), making "nothing erased" a lie on
+                     * that overlap -- see factory_reset.h's doc comment on
+                     * FACTORY_RESET_ERR_MODE_GATE_REFUSED. */
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u refused by system mode gate -- "
                                   "a firing or autotune run is active, nothing erased",
                              msg->payload[1]);

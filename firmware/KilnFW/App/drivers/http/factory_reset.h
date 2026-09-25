@@ -33,13 +33,29 @@ typedef enum {
     FACTORY_RESET_SCOPE_ALL = 3,
 } factory_reset_scope_t;
 
+/* Review fix, 2026-09-25: ESP_ERR_INVALID_STATE is ambiguous here -- the
+ * erase loop's own hal_kv_erase_partition() failures are mapped through
+ * hal_status_to_esp_err() and can legitimately produce ESP_ERR_INVALID_STATE
+ * too, AFTER one or more partitions have already been erased. Reusing it for
+ * "the system_mode_gate refused, nothing erased" made uart_bridge_system.c's
+ * log line ("nothing erased") a lie on that overlap. This sentinel is never
+ * returned by hal_status_to_esp_err() (whose whole range is non-negative)
+ * or anywhere else in this file, so a caller can tell the two apart without
+ * guessing. */
+#define FACTORY_RESET_ERR_MODE_GATE_REFUSED ((esp_err_t)-1000)
+
 /* Erases the NVS partition(s) for `scope` and schedules a reboot ~500ms out
  * (same reboot_task() this file's HTTP handler uses, so a reply already
  * queued by the caller -- HTTP response or this UART command's ACK -- has a
  * chance to actually leave before the restart). Returns the first partition
  * erase's error, if any; the reboot is scheduled unconditionally either way,
  * same reasoning as reset_post_handler(). ESP_ERR_INVALID_ARG for an
- * out-of-range scope (no erase attempted, no reboot scheduled). */
+ * out-of-range scope (no erase attempted, no reboot scheduled).
+ * FACTORY_RESET_ERR_MODE_GATE_REFUSED if system_mode_gate refused (a firing
+ * or autotune run is active) -- no erase attempted, no reboot scheduled,
+ * and this is the ONLY function in this file that can return it, so a
+ * caller need not guess whether an ESP_ERR_INVALID_STATE meant "refused" or
+ * "erase partially failed". */
 esp_err_t factory_reset_execute(factory_reset_scope_t scope);
 
 #ifdef __cplusplus

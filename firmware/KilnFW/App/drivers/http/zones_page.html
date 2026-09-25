@@ -3843,6 +3843,17 @@ function pollAdaptiveTune() {
         fetch('/api/adaptive_tune/enable', {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'zone=' + zone + '&enabled=' + (enabled ? '1' : '0'),
+        }).then(function (r) {
+          // Review fix, 2026-09-25: a refusal (e.g. system_mode_gate's 409
+          // while a firing or autotune run is active) used to be silently
+          // swallowed here -- the response status was never checked, so a
+          // refused enable looked identical to a successful one. The body
+          // on a refusal is text/plain, not JSON, so read it with r.text().
+          if (!r.ok) {
+            return r.text().then(function (body) {
+              window.kcAlert('Enable failed: ' + (body || ('HTTP ' + r.status)));
+            });
+          }
         }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
       });
     });
@@ -3858,10 +3869,21 @@ function pollAdaptiveTune() {
         fetch('/api/adaptive_tune/revert', {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'zone=' + zone,
-        }).then(function (r) { return r.json(); }).then(function (j) {
-          if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); }
-          pollAdaptiveTune();
-        }).catch(function () { pollAdaptiveTune(); });
+        }).then(function (r) {
+          // Review fix, 2026-09-25: calling r.json() unconditionally threw
+          // on a refusal, since system_mode_gate's 409 body is text/plain,
+          // not JSON -- the thrown SyntaxError skipped the .then(j) branch
+          // entirely and fell straight to .catch(), which never calls
+          // kcAlert, so a refused revert looked like nothing happened.
+          if (!r.ok) {
+            return r.text().then(function (body) {
+              window.kcAlert('Revert failed: ' + (body || ('HTTP ' + r.status)));
+            });
+          }
+          return r.json().then(function (j) {
+            if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); }
+          });
+        }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
       });
     });
   }).catch(function (authErr) {

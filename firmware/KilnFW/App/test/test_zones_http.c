@@ -1489,6 +1489,8 @@ static void test_zones_pid_post_accepts_while_idle(void)
     float kp = 0.0f, ki = 0.0f, kd = 0.0f;
     TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "zone 0 must still be readable after the write");
     TEST_CHECK_NEAR(kp, 0.0318, 1e-6, "kp must be applied exactly");
+    TEST_CHECK_NEAR(ki, 0.00012, 1e-6, "ki must be applied exactly");
+    TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
 }
 
 static void test_zones_pid_post_bumps_generation(void)

@@ -844,17 +844,20 @@ function attachLongPress(el, onLongPress) {
 //
 // 2026-09-01 second follow-up: firmware commit 9d7dbc8 added a dedicated
 // POST /api/zones/pid (zones_http.c's zones_pid_post_handler()) that
-// parses ONLY zone/kp/ki/kd and carries NO ota_http_check_interlocks()
-// gate at all -- a PID-only edit is safe in any executor state, including
-// DURING a running firing, which is what this popup was actually built
-// for. This replaces the earlier "fetch the whole /api/zones config and
-// echo every field back through the whole-page POST /api/zones" approach
-// that first version had to use before this endpoint existed: that whole-
-// page path is untouched and still refuses mid-firing (deliberately --
-// relay mapping, guard limits, coupling etc. have no business changing
-// under a hot kiln), so it was never going to satisfy "adjust while
-// running" and the echo-building complexity it required is gone now that
-// there is a real narrow endpoint to point at instead.
+// parses ONLY zone/kp/ki/kd, replacing the earlier "fetch the whole
+// /api/zones config and echo every field back through the whole-page
+// POST /api/zones" approach that first version had to use before this
+// endpoint existed.
+//
+// Correction, 2026-09-25 (system_mode_gate review): this endpoint's
+// carve-out -- letting a PID-only edit through even DURING a running
+// firing -- was revoked per owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md):
+// zones_http_pid.c now runs the same system_mode_gate_check(
+// SYS_ACTION_WRITE_ZONES_CONFIG) every other zone/config writer runs, and
+// refuses (409) while a firing or autotune run is active, PAUSED included.
+// The popup below is NOT special-cased any more; the whole-page
+// POST /api/zones path (relay mapping, guard limits, coupling, etc.)
+// refuses for the same reason it always did.
 //
 // Bound mirrors zones_http.h's ZONE_PID_GAIN_MAX (1000.0) EXACTLY -- read
 // there, not invented here; zones_pid_post_handler() parses kp/ki/kd with
@@ -1045,10 +1048,11 @@ function applyPidPopup() {
   var firstError = kpR.error || kiR.error || kdR.error;
   if (firstError) { msgEl.textContent = firstError; return; }
   var zi = pidPopupZone;
-  // POST /api/zones/pid (zones_http.c's zones_pid_post_handler()) --
+  // POST /api/zones/pid (zones_http_pid.c's zones_pid_post_handler()) --
   // application/x-www-form-urlencoded, exactly zone/kp/ki/kd, nothing else
-  // (see this section's own header comment). No interlock: works whether
-  // or not a firing is running.
+  // (see this section's own header comment). Correction, 2026-09-25: this
+  // DOES refuse (409, system_mode_gate) while a firing or autotune run is
+  // active -- the carve-out this comment used to describe was revoked.
   var body = 'zone=' + zi + '&kp=' + kpR.value + '&ki=' + kiR.value + '&kd=' + kdR.value;
   var applyBtn = document.getElementById('pidPopupApplyBtn');
   applyBtn.disabled = true;
@@ -1084,11 +1088,12 @@ function applyPidPopup() {
       updatePidPopupBumplessWarning();
     });
   }).catch(function (e) {
-    // zones_pid_post_handler() sends 400 (bad zone/kp/ki/kd, plain text)
-    // or a 500 JSON {"ok":false,"error":...} on an nvs_save() failure --
-    // both land here and are shown verbatim rather than a generic
-    // "failed". There is no interlock refusal to handle any more (see
-    // this section's own header comment).
+    // zones_pid_post_handler() sends 400 (bad zone/kp/ki/kd, plain text),
+    // a 409 (text/plain, system_mode_gate refused -- a firing or autotune
+    // run is active, corrected 2026-09-25 -- see this section's own header
+    // comment), or a 500 JSON {"ok":false,"error":...} on an nvs_save()
+    // failure -- all three land here and are shown verbatim rather than a
+    // generic "failed".
     applyBtn.disabled = false;
     // Quiet note, not an error -- but never leave "Applying..." standing.
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) {

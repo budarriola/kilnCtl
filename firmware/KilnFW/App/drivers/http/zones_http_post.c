@@ -31,17 +31,8 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * mid-run moved the firing onto a different physical relay and left the
      * old one wherever it was last commanded, with nobody driving it off --
      * a contact that stays closed because the code that owned it stopped
-     * looking at it.
-     *
-     * ota_http_check_interlocks() is that shared gate rather than a private
-     * profile-is-RUNNING check, deliberately: it also covers a hot zone and
-     * a commanded heater, and reads the kiln's ACTUAL current state rather
-     * than profile_executor's own view (see its doc comment for why that
-     * distinction matters). ota_http_req_ack_no_safety() carries the same
-     * per-request operator acknowledgement every other caller passes, so a
-     * board with no safety processor can still be configured -- saving this
-     * page streams nothing over the link, exactly as backup_http's restore
-     * argues for itself. */
+     * looking at it. See the ota_http_check_interlocks() call below for why
+     * that shared gate, not a private profile-is-RUNNING check, is used. */
     /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * not scoped to which field changed -- while a firing or autotune run is

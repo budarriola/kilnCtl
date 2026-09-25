@@ -33,10 +33,14 @@ def system_restart_uart() -> bytes:
 def system_factory_reset(scope: int = FACTORY_RESET_SCOPE_ALL) -> bytes:
     """0x02 FACTORY_RESET: byte1=scope (0=wifi 1=kiln 2=profiles 3=all).
 
-    Mirrors POST /api/factory_reset exactly: same per-partition NVS erase,
-    same unconditional reboot ~500ms later. No reply frame either way -- the
-    ACK is the only delivery confirmation, and the reboot itself (a fresh
-    unsolicited GET_FW_VERSION push) is the real evidence the erase happened.
+    Mirrors POST /api/factory_reset's per-partition NVS erase and reboot
+    ~500ms later, but not unconditionally, 2026-09-25: system_mode_gate now
+    refuses this while a firing or autotune run is active, same as the HTTP
+    route, with no reply frame either way (a refusal is silent, same as
+    success) -- the ACK is the only delivery confirmation on the accepted
+    path, and the reboot itself (a fresh unsolicited GET_FW_VERSION push) is
+    the real evidence the erase happened; the absence of that reboot, with
+    a run known to be active, is the signal a refusal occurred.
     An out-of-range scope byte is rejected by the firmware with no erase and
     no reboot, so validate it here too rather than letting a typo silently
     no-op on the device.
