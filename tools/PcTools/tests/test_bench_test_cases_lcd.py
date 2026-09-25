@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -25,6 +26,46 @@ from kilnctrl.devices_touch import (  # noqa: E402
     TOUCH_POWER_STATE_ERROR_HOLD,
     TOUCH_POWER_STATE_ON,
 )
+
+#: This whole file drives cases_lcd.py's click/page-poll helpers against a
+#: FakeUiTest double that never actually needs real wall-clock time to
+#: settle -- every poll/retry loop in cases_lcd.py (``_wait_for_page``,
+#: ``_click_then_page``, ``_wake_and_home``'s screen_on wait, etc.) exists
+#: to ride out a REAL board's LVGL flush/screen_idle timing, which has no
+#: counterpart here. Before cases_lcd.py's poll/retry helpers were fixed to
+#: resolve their `timeout_s`/`interval_s` defaults at call time instead of
+#: at function-definition time (2026-09-25 -- the same class of bug
+#: f40e8d37's parent commit fixed for the `_lcd19_*` helpers), a bare
+#: ``mock.patch.object(cases_lcd, "_PAGE_POLL_TIMEOUT_S", ...)`` could not
+#: shrink any of these waits: the function's own default argument value was
+#: already bound to the *original* 2.0s constant at import time, so every
+#: FAIL/retry path in this file burned real seconds sleeping for no reason
+#: -- this file took ~222s to run as a result (`--durations=15` showed
+#: WakeAndHomeTest/Lcd08/09/14/16* dominating). Patching the module
+#: constants module-wide for every test in this file (rather than adding a
+#: separate patch to each slow test) is safe because production code never
+#: reads these constants at import time either -- only at call time, now
+#: that the sentinel fix landed -- and a handful of tests below still layer
+#: their own narrower patch on top of this one, which mock supports fine.
+_TIMING_PATCHERS: "list" = []
+
+
+def setUpModule():
+    patches = [
+        mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.05),
+        mock.patch.object(C, "_PAGE_POLL_INTERVAL_S", 0.01),
+        mock.patch.object(C, "_WAKE_SCREEN_ON_TIMEOUT_S", 0.05),
+        mock.patch.object(C, "_WAKE_SCREEN_ON_POLL_S", 0.01),
+    ]
+    for p in patches:
+        p.start()
+        _TIMING_PATCHERS.append(p)
+
+
+def tearDownModule():
+    for p in _TIMING_PATCHERS:
+        p.stop()
+    _TIMING_PATCHERS.clear()
 
 
 class FakeUiTest:
@@ -669,6 +710,46 @@ _PROFILES_PAGE_TARGETS = {
     ],
     "profile_detail": [],
 }
+
+
+class PollTimeoutSentinelTakesEffectTest(unittest.TestCase):
+    """Negative test for the 2026-09-25 fix itself: proves that patching
+    ``cases_lcd._PAGE_POLL_TIMEOUT_S`` actually shortens a caller's wait when
+    that caller passes no explicit `timeout_s` of its own -- i.e. that the
+    default is resolved at CALL time, not bound once when the function was
+    defined. Before the fix, ``_wait_for_page``'s signature was
+    ``timeout_s: float = _PAGE_POLL_TIMEOUT_S``: that default value is
+    captured at import time, so this same patch would have done nothing and
+    this test would have measured ~2.0s (this module's setUpModule() patches
+    it to 0.05s for every other test in this file, which is exactly why this
+    test exists: to prove that patch is not a no-op)."""
+
+    def test_patched_page_poll_timeout_shortens_wait_for_page(self):
+        ui = FakeUiTest(page="home")  # never reaches "config"
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.01), \
+             mock.patch.object(C, "_PAGE_POLL_INTERVAL_S", 0.001):
+            start = time.monotonic()
+            page, waited_s = C._wait_for_page(ui, "config")
+            elapsed = time.monotonic() - start
+        self.assertEqual(page, "home")
+        # Bounded well under the production 2.0s default -- if the sentinel
+        # resolution regressed back to a bare bound default, this would
+        # measure ~2.0s (or this file's setUpModule()-patched 0.05s) instead.
+        self.assertLess(elapsed, 0.3)
+        self.assertLess(waited_s, 0.3)
+
+    def test_unpatched_call_uses_this_files_setupmodule_patch_not_production_default(self):
+        """Sanity companion: with no per-test override, the wait still stays
+        short because setUpModule() already patched the module constant to
+        0.05s for the whole file -- confirming the same call-time resolution
+        applies when a test relies on the module-wide patch instead of its
+        own local one."""
+        ui = FakeUiTest(page="home")
+        start = time.monotonic()
+        page, _ = C._wait_for_page(ui, "config")
+        elapsed = time.monotonic() - start
+        self.assertEqual(page, "home")
+        self.assertLess(elapsed, 0.5)
 
 
 class ClickThenPageTest(unittest.TestCase):

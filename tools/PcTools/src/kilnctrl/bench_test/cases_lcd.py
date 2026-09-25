@@ -256,13 +256,24 @@ def _lcd19_clear_stray_overlay(ctx: dict, ui) -> Optional[Dict[str, Any]]:
     return {"checked": True, "present": True, "page": page, "names": sorted(names), "dismiss": dismiss}
 
 
-def _wait_for_page(ui, expected: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                    interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[str, float]":
+def _wait_for_page(ui, expected: str, timeout_s: "Optional[float]" = None,
+                    interval_s: "Optional[float]" = None) -> "tuple[str, float]":
     """Poll ``ui.get_current_page()`` until it equals `expected` or
     `timeout_s` elapses. Returns ``(last_page_seen, waited_s)`` -- never
     raises, and never fabricates a match: a page that never arrives comes
     back as whatever the last poll actually saw, so a caller's existing
-    ``page != expected`` check still fails the case honestly."""
+    ``page != expected`` check still fails the case honestly.
+
+    `timeout_s`/`interval_s` default to (and are resolved against, at call
+    time, not at import time) the module-level `_PAGE_POLL_TIMEOUT_S`/
+    `_PAGE_POLL_INTERVAL_S` -- a bare ``= _PAGE_POLL_TIMEOUT_S`` default
+    binds the value once when this function is defined, which would defeat
+    a test's ``mock.patch.object(cases_lcd, "_PAGE_POLL_TIMEOUT_S", ...)``.
+    See :func:`_lcd19_poll_overlay`'s docstring for the same pattern."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if interval_s is None:
+        interval_s = _PAGE_POLL_INTERVAL_S
     start = time.monotonic()
     page = ui.get_current_page()
     while page != expected:
@@ -273,12 +284,19 @@ def _wait_for_page(ui, expected: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
     return page, time.monotonic() - start
 
 
-def _wait_for_page_change(ui, before: str, timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                           interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[str, float]":
+def _wait_for_page_change(ui, before: str, timeout_s: "Optional[float]" = None,
+                           interval_s: "Optional[float]" = None) -> "tuple[str, float]":
     """Same race as :func:`_wait_for_page`, for a caller that does not know
     the destination page's name in advance (a page transition mediated by
     the destination page's own definition) -- poll until the page differs
-    from `before` instead of matching a fixed target."""
+    from `before` instead of matching a fixed target.
+
+    `timeout_s`/`interval_s` are resolved at call time -- see
+    :func:`_wait_for_page`'s docstring."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if interval_s is None:
+        interval_s = _PAGE_POLL_INTERVAL_S
     start = time.monotonic()
     page = ui.get_current_page()
     while page == before:
@@ -290,8 +308,8 @@ def _wait_for_page_change(ui, before: str, timeout_s: float = _PAGE_POLL_TIMEOUT
 
 
 def _wait_for_targets_change(ui, before_names: "set",
-                              timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                              interval_s: float = _PAGE_POLL_INTERVAL_S) -> "tuple[dict, float]":
+                              timeout_s: "Optional[float]" = None,
+                              interval_s: "Optional[float]" = None) -> "tuple[dict, float]":
     """Same race as :func:`_wait_for_page`, for pages whose name never
     changes even though their content does -- ui_page_diagnostics.c's
     sub-tabs are internal to that one page (its own ``s_pages[]`` array,
@@ -299,7 +317,14 @@ def _wait_for_targets_change(ui, before_names: "set",
     top-level page registry), so ``get_current_page()`` stays 'diagnostics'
     across every tab and cannot detect this transition. Poll
     ``list_tap_targets()`` instead, until its name set differs from
-    `before_names` or `timeout_s` elapses."""
+    `before_names` or `timeout_s` elapses.
+
+    `timeout_s`/`interval_s` are resolved at call time -- see
+    :func:`_wait_for_page`'s docstring."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if interval_s is None:
+        interval_s = _PAGE_POLL_INTERVAL_S
     start = time.monotonic()
     tap = ui.list_tap_targets()
     names = {t.get("name") for t in tap.get("targets", [])}
@@ -340,7 +365,7 @@ _CLICK_THEN_PAGE_MAX_RETRIES = 2
 _CLICK_THEN_PAGE_SWALLOW_RETRIES = 2
 
 
-def _click_resolving_swallow(ui, name: str, max_swallow_retries: int = _CLICK_THEN_PAGE_SWALLOW_RETRIES) -> "tuple[dict, int]":
+def _click_resolving_swallow(ui, name: str, max_swallow_retries: "Optional[int]" = None) -> "tuple[dict, int]":
     """click_by_name(), re-clicking immediately while the result reads
     'swallowed' (bounded by `max_swallow_retries`) -- a swallow is a
     directly observable, expected race (screen_idle ate the wake/dismiss
@@ -354,7 +379,13 @@ def _click_resolving_swallow(ui, name: str, max_swallow_retries: int = _CLICK_TH
     an immediate blind re-click could land on the page that press already
     opened. It is returned as-is for the caller to resolve against the
     observable page/target change, whose own retry is guarded by an
-    unchanged page. Returns ``(final_click, swallow_retries_used)``."""
+    unchanged page. Returns ``(final_click, swallow_retries_used)``.
+
+    `max_swallow_retries` is resolved at call time against
+    `_CLICK_THEN_PAGE_SWALLOW_RETRIES` -- see :func:`_wait_for_page`'s
+    docstring for why a bare default would defeat a test's patch."""
+    if max_swallow_retries is None:
+        max_swallow_retries = _CLICK_THEN_PAGE_SWALLOW_RETRIES
     click = ui.click_by_name(name)
     retries = 0
     while click.get("result") == "swallowed" and retries < max_swallow_retries:
@@ -364,8 +395,8 @@ def _click_resolving_swallow(ui, name: str, max_swallow_retries: int = _CLICK_TH
 
 
 def _click_then_page(ui, name: str, expected_page: str,
-                      timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                      max_retries: int = _CLICK_THEN_PAGE_MAX_RETRIES) -> "tuple[Optional[CaseResult], str, float, int]":
+                      timeout_s: "Optional[float]" = None,
+                      max_retries: "Optional[int]" = None) -> "tuple[Optional[CaseResult], str, float, int]":
     """Click a tap target by name, then wait for the page to become
     `expected_page`, and -- unlike a bare ``ui.click_by_name()`` +
     ``_wait_for_page()`` with the wait's return value left unchecked --
@@ -400,7 +431,16 @@ def _click_then_page(ui, name: str, expected_page: str,
     Worst case: ``(1 + max_retries) * (1 + _CLICK_THEN_PAGE_SWALLOW_RETRIES)``
     clicks (9 at the defaults, only when every click is 'swallowed') plus
     ``1 + max_retries`` full `timeout_s` page waits (~6 s at the 2 s
-    default); a not_found click fails immediately with no wait at all."""
+    default); a not_found click fails immediately with no wait at all.
+
+    `timeout_s`/`max_retries` are resolved at call time against
+    `_PAGE_POLL_TIMEOUT_S`/`_CLICK_THEN_PAGE_MAX_RETRIES` -- see
+    :func:`_wait_for_page`'s docstring for why a bare default would defeat
+    a test's patch."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if max_retries is None:
+        max_retries = _CLICK_THEN_PAGE_MAX_RETRIES
     try:
         page_before = ui.get_current_page()
     except Exception:
@@ -585,7 +625,7 @@ def _click_then_page(ui, name: str, expected_page: str,
     return None, page, waited_s, swallow_retries
 
 def _click_then_targets_change(ui, name: str, prev_names: "set",
-                                timeout_s: float = _PAGE_POLL_TIMEOUT_S) -> "tuple[Optional[CaseResult], Optional[dict], float, bool]":
+                                timeout_s: "Optional[float]" = None) -> "tuple[Optional[CaseResult], Optional[dict], float, bool]":
     """Diagnostics-sub-tab analogue of :func:`_click_then_page`: a sub-tab
     switch never changes kiln_ui's top-level page name
     (``_wait_for_targets_change``'s docstring), so the same
@@ -613,7 +653,13 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     actually differs from ``prev_names``. A caller must not treat an
     unchanged read as the new tab's content: it is the previous tab's
     targets (or a dead tab bar that answers 'ok' and does nothing), and
-    reading per-tab values off it would confirm the wrong tab."""
+    reading per-tab values off it would confirm the wrong tab.
+
+    `timeout_s` is resolved at call time against `_PAGE_POLL_TIMEOUT_S` --
+    see :func:`_wait_for_page`'s docstring for why a bare default would
+    defeat a test's patch."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
     click = ui.click_by_name(name)
     # 'verdict_unknown' (the press was injected; only its swallow verdict
     # timed out) is judged by the target-set change below exactly like 'ok'
@@ -1683,13 +1729,20 @@ def _targets_signature(targets: "list[dict]") -> tuple:
 
 
 def _wait_for_targets_signature_change(ui, before_sig: tuple,
-                                        timeout_s: float = _PAGE_POLL_TIMEOUT_S,
-                                        interval_s: float = _PAGE_POLL_INTERVAL_S
+                                        timeout_s: "Optional[float]" = None,
+                                        interval_s: "Optional[float]" = None
                                         ) -> "tuple[dict, float]":
     """Same polling shape as :func:`_wait_for_targets_change`, but keyed on
     :func:`_targets_signature` rather than a bare name set -- see that
     function's docstring for why a name set is blind to a Prev/Next-only
-    change."""
+    change.
+
+    `timeout_s`/`interval_s` are resolved at call time -- see
+    :func:`_wait_for_page`'s docstring."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if interval_s is None:
+        interval_s = _PAGE_POLL_INTERVAL_S
     start = time.monotonic()
     tap = ui.list_tap_targets()
     sig = _targets_signature(tap.get("targets", []))
@@ -1703,7 +1756,7 @@ def _wait_for_targets_signature_change(ui, before_sig: tuple,
 
 
 def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
-                                   timeout_s: float = _PAGE_POLL_TIMEOUT_S,
+                                   timeout_s: "Optional[float]" = None,
                                    confirm: bool = True,
                                    ) -> "tuple[Optional[CaseResult], Optional[dict], float, bool, bool, bool]":
     """Raw-touch analogue of :func:`_click_then_targets_change`, for the
@@ -1736,7 +1789,12 @@ def _tap_next_then_targets_change(ctx: dict, ui, prev_sig: tuple,
     "navigation broke". ``retried`` is True when a boundary hop needed its
     second tap; the caller records it, because a dropped INTERIOR tap is
     invisible at the time and only shows up later as the final boundary
-    hop needing (and being rescued by) that retry."""
+    hop needing (and being rescued by) that retry.
+
+    `timeout_s` is resolved at call time against `_PAGE_POLL_TIMEOUT_S` --
+    see :func:`_wait_for_page`'s docstring."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
     srv = _srv(ctx)
     touch = getattr(srv, "_touch", None)
     tap = ui.list_tap_targets()
