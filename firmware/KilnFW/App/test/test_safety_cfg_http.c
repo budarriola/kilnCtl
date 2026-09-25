@@ -145,7 +145,21 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
     s_stub_req_body_sent += n;
     return (int)n;
 }
-esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s) { (void)r; (void)s; return ESP_OK; }
+// 2026-09-25 fix-then-push re-review: was a pure no-op, so no test in this
+// file could assert on a body sent via httpd_resp_sendstr() (the http_async_
+// job_busy() 409 refusals and ct_auto_zero_job()'s own replies all use this,
+// not httpd_resp_send()) -- now captures into the same s_stub_last_httpd_resp
+// buffer httpd_resp_send() above already uses, so either path is observable.
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
+{
+    (void)r;
+    if (s) {
+        snprintf(s_stub_last_httpd_resp, sizeof(s_stub_last_httpd_resp), "%s", s);
+    } else {
+        s_stub_last_httpd_resp[0] = '\0';
+    }
+    return ESP_OK;
+}
 
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 
@@ -643,6 +657,14 @@ static kilnlink_ct_auto_zero_status_t s_stub_ct_auto_zero_status = {
     .state = KILNLINK_CT_AUTO_ZERO_STATE_DONE, .channel = 0, .samples_taken = 200,
     .samples_target = 200, .zero_counts = 61,
 };
+// 2026-09-25 fix-then-push re-review: to drive ct_auto_zero_job() end-to-end
+// (not just its pure sub-helpers) past its own stale-DONE hazard guard, which
+// requires an observed IN_PROGRESS poll before it will trust a later DONE,
+// this stub reports IN_PROGRESS for the first N calls (default 0, so every
+// existing test's immediate-DONE behavior is unchanged) and
+// s_stub_ct_auto_zero_status afterward.
+static int s_stub_ct_auto_zero_in_progress_polls = 0;
+static int s_stub_ct_auto_zero_poll_calls = 0;
 esp_err_t safety_link_send_ct_auto_zero_begin(SafetyLinkClass *link, uint8_t channel)
 {
     (void)link; (void)channel;
@@ -651,7 +673,13 @@ esp_err_t safety_link_send_ct_auto_zero_begin(SafetyLinkClass *link, uint8_t cha
 esp_err_t safety_link_get_ct_auto_zero_status(SafetyLinkClass *link, kilnlink_ct_auto_zero_status_t *out)
 {
     (void)link;
-    if (out) *out = s_stub_ct_auto_zero_status;
+    if (out) {
+        *out = s_stub_ct_auto_zero_status;
+        if (s_stub_ct_auto_zero_poll_calls < s_stub_ct_auto_zero_in_progress_polls) {
+            out->state = KILNLINK_CT_AUTO_ZERO_STATE_IN_PROGRESS;
+        }
+    }
+    s_stub_ct_auto_zero_poll_calls++;
     return ESP_OK;
 }
 uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io)
@@ -784,6 +812,8 @@ static void reset_all(void)
     s_stub_set_ct_cal_input_k = 1.0f;
     s_stub_set_ct_cal_input_zc = 0;
     s_stub_set_ct_cal_input_calls = 0;
+    s_stub_ct_auto_zero_in_progress_polls = 0;
+    s_stub_ct_auto_zero_poll_calls = 0;
     for (size_t i = 0; i < SAFETY_CT_CAL_CHANNELS; i++) {
         s_stub_ct_trim_offset_a[i] = 0.0f;
         s_stub_ct_trim_gain[i] = 1.0f;
@@ -2578,6 +2608,120 @@ static void test_commissioning_post_in_range_gain_is_accepted(void)
     TEST_CHECK(s_stub_set_param_calls == 1, "the trim was staged to the Pico");
 }
 
+/* ---- 2026-09-25 fix-then-push re-review, item 2 ---------------------------
+ *
+ * s_busy (http_async_job.c) is a static in a SEPARATE translation unit from
+ * this file, so nothing here can reset it directly, and the host xTaskCreate()
+ * stub never actually runs a job fn body -- once http_async_job_try_start()
+ * admits a job in a host test, the module reads busy forever after. Both
+ * tests below are therefore appended at the very end of main()'s call list
+ * ("order tests last") rather than given their own reset, so they cannot
+ * corrupt any earlier test's assumptions about http_async_job_busy(). */
+
+static void noop_async_job_fn(httpd_req_t *async_req, void *ctx)
+{
+    (void)async_req;
+    (void)ctx;
+}
+
+static void test_commissioning_post_refuses_while_async_job_busy(void)
+{
+    TEST_SECTION("commissioning_post_handler -- refuses with the busy 409 body and stages nothing "
+                 "while an http_async_job (ct_auto_zero's measurement) is running. MUST RUN LAST: "
+                 "admits a job that the host xTaskCreate() stub never actually runs, so "
+                 "http_async_job_busy() reads true for every test after this one in this executable.");
+    reset_all();
+
+    httpd_req_t admit_req = { .content_len = 0 };
+    http_async_job_start_result_t start_result =
+        http_async_job_try_start(&admit_req, "http_async_job", 6144, noop_async_job_fn, NULL);
+    TEST_CHECK(start_result == HTTP_ASYNC_JOB_STARTED, "the admission itself succeeds in this host test");
+    TEST_CHECK(http_async_job_busy(), "the module now reads busy (host stub never runs the job body)");
+
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "stub_field";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[128];
+    snprintf(body, sizeof(body), "id=260&value=120.0&commit=1");
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (the refusal is a 200-shaped JSON body, not a "
+                              "tool error)");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "another commissioning operation is running") != NULL,
+               "the busy refusal body was sent");
+    TEST_CHECK(s_stub_set_param_calls == 0, "nothing was staged to the Pico while busy");
+    TEST_CHECK(s_stub_commit_calls == 0, "no commit was issued while busy");
+}
+
+/* ct_auto_zero_job()'s own re-check of the CT-cal snapshot (safety_cfg_http.c,
+ * 2026-09-25 fix-then-push review): the ~10-15s measurement window is long
+ * enough for another writer to have stored a NEW cal for this same channel
+ * since jc->existing_* was snapshotted before the handoff. This drives
+ * ct_auto_zero_job() itself (not just its pure sub-helpers) past its BEGIN,
+ * its poll loop (which requires an observed IN_PROGRESS before it will trust
+ * a later DONE -- s_stub_ct_auto_zero_in_progress_polls makes the stub report
+ * that transition), and its postcondition/delta-mV checks, to prove the
+ * commit path refuses rather than clobbers a stale snapshot. */
+static void test_ct_auto_zero_job_refuses_stale_ct_cal_without_commit(void)
+{
+    TEST_SECTION("ct_auto_zero_job -- refuses to commit when the store's CT-cal input for this "
+                 "channel changed during the measurement window, and performs zero store writes. "
+                 "MUST RUN LAST (see the busy test just above -- same s_busy constraint, and this "
+                 "test itself also leaves the module busy for anything after it).");
+    reset_all();
+
+    s_stub_ct_auto_zero_begin_result = true;
+    s_stub_ct_auto_zero_in_progress_polls = 1; // first poll IN_PROGRESS, then DONE
+    s_stub_ct_auto_zero_status.state = KILNLINK_CT_AUTO_ZERO_STATE_DONE;
+    s_stub_ct_auto_zero_status.channel = 0;
+    s_stub_ct_auto_zero_status.samples_taken = 200;
+    s_stub_ct_auto_zero_status.samples_target = 200;
+    s_stub_ct_auto_zero_status.zero_counts = 61; // -> ~68.7 mV at the fixed 0.715 stub gain
+
+    // The store now reports a DIFFERENT A_fs for this channel than the job's
+    // own ctx snapshot -- simulating another writer (ct_cal_post_handler(),
+    // a backup restore) committing during the 10-15s measurement window.
+    s_stub_ct_cal_has_value[0] = true;
+    s_stub_ct_cal_source[0] = SAFETY_CT_CAL_SOURCE_MANUAL;
+    s_stub_ct_cal_a_fs[0] = 45.0f;
+    s_stub_ct_cal_zero_mv[0] = 68.7f;
+
+    // ct_auto_zero_job()'s postcondition re-check (kiln_io_relays_off_ms()/
+    // kiln_io_get_relay_shadow()) is gated on s_hw_io != NULL -- a module
+    // static this file cannot reach directly, so route through the same
+    // public entry point production code uses to set it. Its early
+    // ESP_ERR_INVALID_STATE return (no HTTP server in this host test) is
+    // irrelevant here -- s_hw_io/s_link are both assigned before that check.
+    SafetyLinkClass fake_link_for_io;
+    memset(&fake_link_for_io, 0, sizeof(fake_link_for_io));
+    kiln_io_t dummy_io;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    (void)safety_cfg_http_start(&fake_link_for_io, &dummy_io);
+
+    ct_auto_zero_job_ctx_t *jc = malloc(sizeof(*jc));
+    jc->channel = 0;
+    jc->confirm = true;
+    jc->has_existing = true;
+    jc->existing_source = SAFETY_CT_CAL_SOURCE_MANUAL;
+    jc->existing_a_fs = 30.0f; // differs from the store's 45.0f above -> "changed"
+    jc->existing_zero_mv = 68.7f; // close to the ~68.7 mV measured -> passes the 100 mV delta gate
+
+    httpd_req_t async_req = { .content_len = 0 };
+    ct_auto_zero_job(&async_req, jc); // frees jc itself
+
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "changed while this measurement was running") != NULL,
+               "the stale-CT-cal refusal body was sent");
+    TEST_CHECK(s_stub_set_ct_cal_input_calls == 0,
+               "the stale snapshot was never committed to the store");
+}
+
 int main(void)
 {
     test_rate_guard_gather_no_zone_identified_is_no_data();
@@ -2648,6 +2792,12 @@ int main(void)
     test_commissioning_post_gain_zero_is_refused();
     test_commissioning_post_gain_out_of_range_is_refused();
     test_commissioning_post_in_range_gain_is_accepted();
+
+    // 2026-09-25 fix-then-push re-review, item 2 -- MUST STAY LAST: both
+    // leave http_async_job.c's static s_busy permanently true in this host
+    // test (see each test's own comment).
+    test_commissioning_post_refuses_while_async_job_busy();
+    test_ct_auto_zero_job_refuses_stale_ct_cal_without_commit();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

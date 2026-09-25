@@ -9,6 +9,8 @@
 #include "esp_log.h"
 
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
+#include "http_async_job.h" /* http_async_job_busy() -- refuse an apply while ct_auto_zero's
+                              * async job is mid-commit, 2026-09-25 fix-then-push re-review */
 #include "http_form.h"
 #include "kiln_cfg_store.h"
 #include "kiln_cfg_swap_worker.h" /* item 5 -- the apply runs on its own task, not this one */
@@ -351,6 +353,18 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(TAG, "kiln config apply id=%ld refused by interlock: %s", (long)id, reason);
         return ota_http_send_interlock_refusal(req, gate, reason);
+    }
+
+    /* Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+     * running: kiln_cfg_swap_apply() pushes K_CT 0x0308-0x030A via
+     * safety_cfg_write_apply_package_and_confirm(), the same commit path the
+     * job's own COMMIT_CONFIG uses, so letting both run at once risks one
+     * clobbering the other's write (2026-09-25 fix-then-push re-review). Set
+     * explicitly, same as the apply-in-flight 409 a few lines below -- no
+     * HTTPD_409_CONFLICT enumerator in this esp_http_server. */
+    if (http_async_job_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "another commissioning operation is running");
     }
 
     /* Section 5.3 table row 4, checked HERE rather than inside the apply.

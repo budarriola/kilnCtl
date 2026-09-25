@@ -969,8 +969,9 @@ CEILING_BYTES = {
     # 1024 B frame -> uart_protocol_send_broadcast -> frame_and_send, 3280 B)
     # = 3312 B total, against a 6144 B declared stack (raised from 4096 B in
     # the same review, after accounting for an ESP_LOG-through-uart_log_vprintf
-    # path adding roughly another 830 B on top of this walk's own ~3612 B
-    # estimate before that raise). Ceiling set to the number this walk
+    # path adding roughly another 1344 B (esp_log_write ~128 B +
+    # uart_log_vprintf ~736 B + vsnprintf ~480 B) on top of this walk's own
+    # ~3612 B estimate before that raise). Ceiling set to the number this walk
     # actually measures, not a hand-copied guess -- still INDETERMINATE (the
     # walk cannot follow every indirect call in this chain), so this is a
     # real lower bound, not a proven worst case.

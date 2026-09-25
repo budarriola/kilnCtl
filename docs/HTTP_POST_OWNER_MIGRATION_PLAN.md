@@ -165,9 +165,13 @@ pairing through `run_job()` directly, and (2026-09-25 review) that
 `run_job()` clears `s_task_handle` atomically with `s_busy` rather than
 leaving it for a separate trampoline step -- negative-tested by dropping the
 `complete()` call, confirming the new test failed, and restoring by hand
-with a forced full rebuild (61/61 executables). A target build produced a
-fresh ELF this pass: `check_kilnfw_dram_bss_budget.py` measures `.dram0.bss`
-at 98952 B against the 101000 B ceiling (2048 B headroom) -- this helper's
+with a forced full rebuild (61/61 executables). A post-rebase target build
+(2026-09-25 fix-then-push re-review) produced a fresh ELF:
+`check_kilnfw_dram_bss_budget.py` measures `.dram0.bss` at 99624 B against
+the 101000 B ceiling (1376 B headroom) -- this figure moves with every pass
+that touches file-scope state anywhere in the image, so re-measure rather
+than trusting either this number or the prior pass's 98952 B going forward.
+This helper's
 added file-scope state (a `portMUX_TYPE`, a `bool`, one `TaskHandle_t`, one
 small run-context struct) is a few dozen bytes of that total, not measured
 in isolation. `http_async_job.c` was also missing from
@@ -194,7 +198,8 @@ total (32 B trampoline + 3280 B), against the ceiling raised to match --
 negative-tested by setting the ceiling one byte below 3312, confirming the
 checker FAILed, then restoring 3312 by hand. The 6144 B stack (up from
 4096 B) accounts for that 3312 B plus headroom for an `ESP_LOG` call through
-`uart_log_vprintf` (~830 B) that the earlier accounting had not included.
+`uart_log_vprintf` (~1344 B: `esp_log_write` ~128 B + `uart_log_vprintf`
+~736 B + `vsnprintf` ~480 B) that the earlier accounting had not included.
 `stack_margin_register()` is called with a fixed literal `"http_async_job"`,
 not the caller-supplied task name, since this helper is single-flight (one
 shared handle slot regardless of which future caller's job is running) and

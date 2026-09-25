@@ -2725,6 +2725,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     // operator cannot argue with.
     if (http_async_job_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
         return httpd_resp_sendstr(req, "another commissioning operation is running");
     }
 

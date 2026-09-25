@@ -747,6 +747,7 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
     // and letting both proceed concurrently risks one silently clobbering
     // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
     if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
         return ESP_OK;
     }
@@ -978,6 +979,7 @@ static esp_err_t relay_type_post_handler(httpd_req_t *req)
     // and letting both proceed concurrently risks one silently clobbering
     // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
     if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
         return ESP_OK;
     }
@@ -1053,6 +1055,7 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
     // and letting both proceed concurrently risks one silently clobbering
     // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
     if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
         return ESP_OK;
     }
@@ -1212,6 +1215,7 @@ static esp_err_t ct_trim_post_handler(httpd_req_t *req)
     // and letting both proceed concurrently risks one silently clobbering
     // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
     if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
         return ESP_OK;
     }
@@ -1829,7 +1833,8 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     // 32 B trampoline plus ~300 B of FreeRTOS/toolchain overhead this static
     // walk does not carry (~3612 B), and an ESP_LOG call through the
     // uart_log_vprintf hook anywhere on this path adds roughly another
-    // 830 B on top of that -- comfortably over the old 4096 B budget. 6144 B
+    // 1344 B on top of that (esp_log_write ~128 B + uart_log_vprintf ~736 B
+    // + vsnprintf ~480 B) -- comfortably over the old 4096 B budget. 6144 B
     // restores real headroom; check_all_task_stack_budgets.py's http_async_job
     // row now walks ct_auto_zero_job as an extra_root and grades against a
     // ceiling derived from this real depth, not a borrowed one.
@@ -1931,6 +1936,15 @@ static const struct {
 
 static esp_err_t bench_preset_post_handler(httpd_req_t *req)
 {
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
+    // running: this handler stages ~13 params then commits, and the job's
+    // own COMMIT_CONFIG at the end of its window could persist a half-staged
+    // preset if the two interleave (2026-09-25 fix-then-push re-review).
+    if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
     if (!s_link) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "safety link not available on this board");
         return ESP_OK;
@@ -2215,6 +2229,7 @@ static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
     // and letting both proceed concurrently risks one silently clobbering
     // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
     if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
         return ESP_OK;
     }
