@@ -42,23 +42,22 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * board with no safety processor can still be configured -- saving this
      * page streams nothing over the link, exactly as backup_http's restore
      * argues for itself. */
-    char interlock_reason[OTA_INTERLOCK_REASON_MAX];
-    interlock_reason[0] = '\0';
-    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req),
-                                                            interlock_reason, sizeof(interlock_reason));
-    if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by interlock: %s", interlock_reason);
-        return ota_http_send_interlock_refusal(req, gate, interlock_reason);
-    }
-
     /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * not scoped to which field changed -- while a firing or autotune run is
      * active, PAUSED included, distinct 409 from the OTA interlock's own
-     * 428/409 above. relay_authority_heat_run_active() is the same leaf,
+     * 428/409 below. relay_authority_heat_run_active() is the same leaf,
      * no-module-lock-held snapshot read kiln_io_owner.c's relay gate already
      * uses (CLAUDE.md's "cache a snapshot outside the lock" note) -- taken
-     * here with nothing else held. */
+     * here with nothing else held.
+     *
+     * Review fix, 2026-09-25: this must run BEFORE ota_http_check_interlocks()
+     * below, not after -- the interlock already refuses (409 "a profile is
+     * running"/"autotune is running", or 428 on link-down) for the exact same
+     * facts this gate checks, so with the gate second its own refusal body
+     * was dead code: the interlock always answered first and the mode-gate's
+     * 409 never reached a caller. Same ordering factory_reset.c already used
+     * (its own test asserts !g_probe_interlock_called). */
     {
         sys_mode_snapshot_t mode_snap = { 0 };
         relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
@@ -68,6 +67,24 @@ esp_err_t zones_post_handler(httpd_req_t *req)
             ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by system mode gate: %s", mode_reason);
             return system_mode_gate_http_send_refusal(req, mode_reason);
         }
+    }
+
+    /* ota_http_check_interlocks() is that shared gate rather than a private
+     * profile-is-RUNNING check, deliberately: it also covers a hot zone and
+     * a commanded heater, and reads the kiln's ACTUAL current state rather
+     * than profile_executor's own view (see its doc comment for why that
+     * distinction matters). ota_http_req_ack_no_safety() carries the same
+     * per-request operator acknowledgement every other caller passes, so a
+     * board with no safety processor can still be configured -- saving this
+     * page streams nothing over the link, exactly as backup_http's restore
+     * argues for itself. */
+    char interlock_reason[OTA_INTERLOCK_REASON_MAX];
+    interlock_reason[0] = '\0';
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req),
+                                                            interlock_reason, sizeof(interlock_reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by interlock: %s", interlock_reason);
+        return ota_http_send_interlock_refusal(req, gate, interlock_reason);
     }
 
     if (req->content_len <= 0 || req->content_len > ZONES_BODY_MAX) {

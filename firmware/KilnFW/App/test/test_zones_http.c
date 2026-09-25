@@ -279,10 +279,18 @@ const uint8_t tuning_recommendations_json_end[1] = { 0 };
 // directly), but every symbol the file references must resolve at link time.
 // Returns OK so that if a future test ever does drive the handler, it is the
 // handler's own logic under test rather than this stand-in refusing first.
+/* Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+ * spec): counts calls so a test can prove the system_mode_gate check runs
+ * and refuses BEFORE this interlock is ever reached, same
+ * !g_probe_interlock_called convention factory_reset.c's own test uses.
+ * Every pre-existing test in this file ignores this counter, so it is
+ * inert for them. */
+int g_probe_interlock_called = 0;
 ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
                                                  size_t reason_cap)
 {
     (void)ack_no_safety_processor;
+    g_probe_interlock_called++;
     if (reason_out && reason_cap > 0) {
         reason_out[0] = '\0';
     }
@@ -342,7 +350,17 @@ static size_t s_last_resp_len;
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    size_t n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    /* Review fix, 2026-09-25: HTTPD_RESP_USE_STRLEN (-1) used to fall into
+     * the "negative -> n=0" branch below and silently discard the body --
+     * inert until system_mode_gate_http_send_refusal() became the first
+     * caller in this suite to pass it. Real esp_http_server treats -1 as
+     * "compute strlen(buf)"; match that here. */
+    size_t n;
+    if (buf_len == HTTPD_RESP_USE_STRLEN) {
+        n = buf ? strlen(buf) : 0;
+    } else {
+        n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    }
     if (n >= sizeof(s_last_resp_body)) {
         n = sizeof(s_last_resp_body) - 1;
     }
@@ -1307,6 +1325,31 @@ static void run_zones_post(const char *body)
     TEST_CHECK(err == ESP_OK, "zones_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
 }
 
+// Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+// spec): zones_post_handler() used to call system_mode_gate_check() AFTER
+// ota_http_check_interlocks() -- which already refuses (409 "a profile is
+// running") for the exact same facts -- so the mode gate's own refusal body
+// was dead code, always beaten to the punch. Proven fixed here by asserting
+// g_probe_interlock_called stays 0: the gate must refuse and return before
+// the interlock is ever reached, same convention factory_reset.c's own test
+// uses.
+static void test_zones_post_refused_by_mode_gate_before_interlock(void)
+{
+    TEST_SECTION("zones_post_handler -- system_mode_gate refuses BEFORE ota_http_check_interlocks() is even "
+                 "called, while profile_executor reports RUNNING (review fix, 2026-09-25)");
+    s_test_profile_status.state = PROFILE_EXEC_RUNNING;
+    g_probe_interlock_called = 0;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    TEST_CHECK(g_probe_interlock_called == 0,
+              "ota_http_check_interlocks() must never be reached once system_mode_gate has already refused");
+    TEST_CHECK(!s_test_err_called, "the gate's refusal goes through system_mode_gate_http_send_refusal(), not "
+              "httpd_resp_send_err()");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a gate-refused submit");
+    TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
+              "refusal body must carry the PcTools discriminator marker");
+}
+
 static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(void)
 {
     TEST_SECTION("zones_post_handler -- max_simultaneous_relays trailing garbage rejected (FIX 2, inline strtol site 1)");
@@ -1398,21 +1441,54 @@ static void seed_two_zone_pid_baseline(void)
     TEST_CHECK(!s_test_err_called, "baseline seed must itself be accepted");
 }
 
-static void test_zones_pid_post_accepts_while_profile_running(void)
+static void test_zones_pid_post_refused_while_profile_running(void)
 {
-    TEST_SECTION("POST /api/zones/pid -- a PID-only change is ACCEPTED while profile_executor reports RUNNING");
+    TEST_SECTION("POST /api/zones/pid -- REFUSED by system_mode_gate while profile_executor reports RUNNING "
+                 "(review fix, 2026-09-25: the old mid-firing PID exception is REVOKED by owner decision Q2 -- "
+                 "see zones_http_pid.c's header comment)");
     seed_two_zone_pid_baseline();
-    s_test_profile_status.state = PROFILE_EXEC_RUNNING; /* zones_pid_post_handler() must not even look at this --
-                                                           * proven by the fact this still succeeds. */
+    float kp_before = 0.0f, ki_before = 0.0f, kd_before = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp_before, &ki_before, &kd_before), "must be able to read baseline gains");
+    s_test_profile_status.state = PROFILE_EXEC_RUNNING;
     run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
     s_test_profile_status.state = PROFILE_EXEC_IDLE;
-    TEST_CHECK(!s_test_err_called, "a PID-only submit must not be refused just because a firing is running");
-    TEST_CHECK(s_test_ok_called, "a PID-only submit must report success");
+    TEST_CHECK(!s_test_err_called, "the gate's refusal goes through system_mode_gate_http_send_refusal(), not "
+              "httpd_resp_send_err()");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a gate-refused submit");
+    TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
+              "refusal body must carry the PcTools discriminator marker");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "zone 0 must still be readable after the refusal");
+    TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp must be untouched by a refused submit");
+    TEST_CHECK_NEAR(ki, ki_before, 1e-9, "ki must be untouched by a refused submit");
+    TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd must be untouched by a refused submit");
+}
+
+static void test_zones_pid_post_refused_while_autotune_running(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- REFUSED by system_mode_gate while autotune reports active");
+    seed_two_zone_pid_baseline();
+    float kp_before = 0.0f, ki_before = 0.0f, kd_before = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp_before, &ki_before, &kd_before), "must be able to read baseline gains");
+    s_test_autotune_active = true;
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    s_test_autotune_active = false;
+    TEST_CHECK(!s_test_ok_called, "must not report success for a gate-refused submit");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "zone 0 must still be readable after the refusal");
+    TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp must be untouched by a refused submit");
+}
+
+static void test_zones_pid_post_accepts_while_idle(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- positive control: still accepted while nothing is running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    TEST_CHECK(!s_test_err_called, "a clean PID-only submit must not be refused while idle");
+    TEST_CHECK(s_test_ok_called, "a clean PID-only submit must report success while idle");
     float kp = 0.0f, ki = 0.0f, kd = 0.0f;
     TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "zone 0 must still be readable after the write");
     TEST_CHECK_NEAR(kp, 0.0318, 1e-6, "kp must be applied exactly");
-    TEST_CHECK_NEAR(ki, 0.00012, 1e-9, "ki (~1e-4 magnitude) must be applied exactly, not rounded toward zero");
-    TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
 }
 
 static void test_zones_pid_post_bumps_generation(void)
@@ -14727,7 +14803,10 @@ void run_test_zones_http(void)
     test_post_whole_page_cross_zone_legal_chain_accepted();
     test_post_zone0_follows_zone1_accepted();
 
-    test_zones_pid_post_accepts_while_profile_running();
+    test_zones_pid_post_refused_while_profile_running();
+    test_zones_pid_post_refused_while_autotune_running();
+    test_zones_pid_post_accepts_while_idle();
+    test_zones_post_refused_by_mode_gate_before_interlock();
     test_zones_pid_post_bumps_generation();
     test_zones_pid_post_rejects_kp_over_bound();
     test_zones_pid_post_rejects_negative_ki();

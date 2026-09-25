@@ -2588,30 +2588,6 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
 {
     *partial_write_out = false;
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
-     * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
-     * restoring a backup is exactly that, "sequence with A4" -- while a
-     * firing or autotune run is active, PAUSED included. Checked here, before
-     * pass 1 even starts, so this refusal is always the clean "nothing
-     * written" case, never entangled with the partial_write/500 path below.
-     * err_msg is prefixed with a sentinel the caller (backup_import_post_handler)
-     * strips before sending, so the HTTP layer can send a distinct 409
-     * (system_mode_gate_http_send_refusal) instead of the usual 400 -- no
-     * signature change needed, since this file's own handler is the only
-     * production caller. */
-    {
-        sys_mode_snapshot_t mode_snap = { 0 };
-        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
-        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
-        mode_reason[0] = '\0';
-        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
-            if (err_msg != NULL && err_cap > 0) {
-                snprintf(err_msg, err_cap, "MODE_GATE_REFUSED:%s", mode_reason);
-            }
-            return false;
-        }
-    }
-
     // Pass 1 for kiln_configs[] runs FIRST, unconditionally, before any
     // profile/zone candidate is even parsed -- same "validate everything,
     // then apply" discipline this file's own header comment describes for
@@ -2708,7 +2684,34 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)
 {
-    /* Interlock FIRST, before reading the body at all -- "refused while a
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
+     * restoring a backup is exactly that -- while a firing or autotune run
+     * is active, PAUSED included. Checked HERE, at the very top of the
+     * handler, before the interlock below and before the body is even read.
+     *
+     * Review fix, 2026-09-25: this used to be buried inside
+     * backup_import_apply(), which the interlock check below already made
+     * unreachable for the same facts (ota_http_check_interlocks() already
+     * refuses "a profile is running"/"autotune is running" first) -- a
+     * "MODE_GATE_REFUSED:" sentinel threaded back through err_msg for a
+     * refusal that could never actually happen. Moved to the top and ahead
+     * of the interlock, same ordering factory_reset.c already uses (its own
+     * test asserts !g_probe_interlock_called); the sentinel plumbing is
+     * gone since this is now a direct, immediate 409, not a deferred
+     * outcome of backup_import_apply(). */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(BACKUP_TAG, "backup import refused by system mode gate: %s", mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
+    }
+
+    /* Interlock next, before reading the body at all -- "refused while a
      * profile is running or the heaters are on" is exactly
      * ota_http_check_interlocks()'s own precondition list (profile RUNNING/
      * PAUSED, autotune active, any zone's heater commanded on, any zone over
@@ -2852,16 +2855,6 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     free(body);
 
     if (!ok) {
-        /* Owner decision Q2: a system_mode_gate refusal is a clean 409, never
-         * entangled with the partial-write 500/400 split below -- see the
-         * sentinel comment in backup_import_apply() above. */
-        static const char *MODE_GATE_PREFIX = "MODE_GATE_REFUSED:";
-        size_t prefix_len = strlen(MODE_GATE_PREFIX);
-        if (strncmp(err_msg, MODE_GATE_PREFIX, prefix_len) == 0) {
-            esp_err_t rc = system_mode_gate_http_send_refusal(req, err_msg + prefix_len);
-            free(plan);
-            return rc;
-        }
         /* task 6: a partial write (kiln_configs[] already committed before
          * profiles/zones failed) is a distinct 500 naming what already
          * landed -- a 400 promises nothing changed, and that would be a lie

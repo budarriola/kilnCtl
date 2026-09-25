@@ -63,8 +63,14 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
         // profile_executor_get_status() already reports true for PAUSED).
         if (snap->profile_running || snap->autotune_running) {
             if (reason != NULL && reason_cap > 0) {
+                /* Review fix, 2026-09-25: was 97 chars, one over
+                 * SYSTEM_MODE_GATE_REASON_MAX (96) -- silently truncated to
+                 * "...until it en". Shortened ("configuration" -> "config"),
+                 * keeping the exact substring "firing or autotune run is
+                 * active" PcTools's zones_http_client.
+                 * is_system_mode_gate_refusal() matches against. */
                 snprintf(reason, reason_cap,
-                         "refused -- a firing or autotune run is active; zone configuration cannot be "
+                         "refused -- a firing or autotune run is active; zone config cannot be "
                          "changed until it ends");
             }
             return true;

@@ -366,6 +366,29 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
     if ((size_t)scope >= NUM_SCOPES) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): refuse outright while a firing or autotune run
+     * is active, PAUSED included -- same unconditional rule reset_post_handler()
+     * (HTTP) already enforces above via execute_scope() directly. This
+     * function is UART's own entry point (uart_bridge_system.c's
+     * SYSTEM_CMD_FACTORY_RESET calls it directly, never through
+     * reset_post_handler()) and had NO such gate until this review fix --
+     * a firing could be wiped mid-run over UART with no refusal at all.
+     * Checked here rather than in the UART case itself so this is the one
+     * choke point both transports that call factory_reset_execute() share;
+     * reset_post_handler() is unaffected since it never calls this function. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "factory_reset_execute: refused by system mode gate: %s", mode_reason);
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
     return execute_scope(&kScopes[(size_t)scope]);
 }
 

@@ -11,6 +11,9 @@
 #include "firing_shadow.h"   // ITER_TUNE_REDESIGN_PLAN.md step 8 -- read-only status only
 #include "iter_tune.h"
 #include "iter_tune_store.h"
+#include "relay_authority.h"        // relay_authority_heat_run_active() -- system_mode_gate snapshot
+#include "system_mode_gate.h"       // SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25
+#include "system_mode_gate_http.h"  // system_mode_gate_http_send_refusal()
 #include "zones_config_accessors.h" // zones_config_set_pid(), MAX31856_CHANNEL_COUNT
 #include "wifi_provision_http.h"    // wifi_provision_http_get_server()
 
@@ -126,6 +129,25 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    }
+
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): this is a live PID-gain write into
+     * zones_config (zones_config_set_pid() below, this file's "ONLY
+     * sanctioned write path" per the header comment above) -- refuse it
+     * while a firing or autotune run is active, PAUSED included, same rule
+     * and snapshot accessor as every other wired call site. Checked before
+     * touching the iter_tune store or reserving the zone for external write. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "POST /api/iter_tune/restore_commissioned zone=%ld refused by system mode gate: %s",
+                     zone, mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
     }
 
     iter_tune_store_zone_t stored;

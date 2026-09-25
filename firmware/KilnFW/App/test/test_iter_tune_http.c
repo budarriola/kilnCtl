@@ -70,6 +70,21 @@ esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *r, const char *str);
 esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len);
 esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size_t val_size);
 
+// system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slice-3-
+// followup, 2026-09-25): iter_tune_restore_post_handler() now gates
+// restore_commissioned on SYS_ACTION_WRITE_ZONES_CONFIG. Fakes default idle
+// so every pre-existing test in this file keeps exercising exactly the
+// scenario it did before; test_restore_refused_while_profile_running()/
+// test_restore_refused_while_autotune_running() below flip these to prove
+// the refusal is wired, and leave the store/reservation untouched.
+static bool s_test_profile_running_for_mode_gate = false;
+static bool s_test_autotune_running_for_mode_gate = false;
+void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
+{
+    if (profile_running_out) *profile_running_out = s_test_profile_running_for_mode_gate;
+    if (autotune_running_out) *autotune_running_out = s_test_autotune_running_for_mode_gate;
+}
+
 #include "../drivers/http/iter_tune_http.c"
 
 // ---------------------------------------------------------------------
@@ -301,7 +316,16 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    size_t n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    // Review fix, 2026-09-25: HTTPD_RESP_USE_STRLEN (-1) used to fall into
+    // the `(buf_len < 0) ? 0` branch, silently discarding a caller that
+    // passes it (system_mode_gate_http_send_refusal() does) -- same bug
+    // found and fixed in test_zones_http.c's copy of this stub.
+    size_t n;
+    if (buf_len == HTTPD_RESP_USE_STRLEN) {
+        n = buf ? strlen(buf) : 0;
+    } else {
+        n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    }
     if (n >= sizeof(s_resp_body)) {
         n = sizeof(s_resp_body) - 1;
     }
@@ -386,6 +410,69 @@ static void test_successful_restore_persists_new_baseline(void)
     TEST_CHECK(out.has_baseline == 1, "has_baseline still set after restore");
     TEST_CHECK(out.baseline_kp == 12.0f, "persisted baseline_kp matches the restored gains, not the stale baseline (finding 2a)");
     TEST_CHECK(out.enabled == 0, "restore always leaves the zone disabled");
+}
+
+// system_mode_gate wiring (2026-09-25): refused while a firing is active,
+// touching neither the reservation, zones_config_set_pid(), nor the
+// persisted record at all.
+static void test_restore_refused_while_profile_running(void)
+{
+    reset_capture();
+    iter_tune_store_zone_t before = make_commissioned_zone(12.0f, 99.0f);
+    s_fake_store[0] = before;
+    s_fake_present[0] = true;
+    s_fake_query = "zone=0";
+    s_test_profile_running_for_mode_gate = true;
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_restore_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK (409 is in the HTTP status, not the return code)");
+    TEST_CHECK(s_resp_status == 409, "refused by mode gate reports 409");
+    TEST_CHECK(strstr(s_resp_body, "firing or autotune run is active") != NULL,
+               "refusal body carries the PcTools discriminator marker");
+    TEST_CHECK(s_reserve_calls == 0, "zone never reserved -- the gate runs before the reservation is even taken");
+    TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid never called");
+    TEST_CHECK(s_set_zone_calls == 0, "iter_tune_store_set_zone never called");
+
+    iter_tune_store_zone_t out;
+    TEST_CHECK(iter_tune_store_get_zone(0, &out), "zone 0 still present");
+    TEST_CHECK(out.baseline_kp == before.baseline_kp && out.enabled == before.enabled,
+               "persisted record is byte-for-byte unchanged while refused");
+
+    s_test_profile_running_for_mode_gate = false;
+}
+
+static void test_restore_refused_while_autotune_running(void)
+{
+    reset_capture();
+    s_fake_store[0] = make_commissioned_zone(12.0f, 99.0f);
+    s_fake_present[0] = true;
+    s_fake_query = "zone=0";
+    s_test_autotune_running_for_mode_gate = true;
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_restore_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK");
+    TEST_CHECK(s_resp_status == 409, "refused by mode gate reports 409");
+    TEST_CHECK(s_reserve_calls == 0, "zone never reserved");
+    TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid never called");
+
+    s_test_autotune_running_for_mode_gate = false;
+}
+
+// Positive control -- idle still restores normally (proves the gate isn't
+// accidentally wired to always-refuse).
+static void test_restore_accepts_while_idle(void)
+{
+    reset_capture();
+    s_fake_store[0] = make_commissioned_zone(12.0f, 99.0f);
+    s_fake_present[0] = true;
+    s_fake_query = "zone=0";
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_restore_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK while idle");
+    TEST_CHECK(s_set_pid_calls == 1, "zones_config_set_pid called while idle");
 }
 
 // Finding 2b: a refused zones_config_set_pid() must leave the persisted
@@ -590,6 +677,9 @@ int main(void)
     TEST_SECTION("iter_tune_http");
 
     test_successful_restore_persists_new_baseline();
+    test_restore_refused_while_profile_running();
+    test_restore_refused_while_autotune_running();
+    test_restore_accepts_while_idle();
     test_refused_apply_leaves_record_untouched();
     test_refuses_when_reservation_refused();
     test_reservation_brackets_entire_write_and_pairs_exactly();

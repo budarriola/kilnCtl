@@ -11,6 +11,9 @@
 #include "adaptive_tune.h"
 #include "http_form.h"
 #include "profile_executor.h" // MAX31856_CHANNEL_COUNT
+#include "relay_authority.h"       // relay_authority_heat_run_active() -- system_mode_gate snapshot
+#include "system_mode_gate.h"      // SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25
+#include "system_mode_gate_http.h" // system_mode_gate_http_send_refusal()
 #include "wifi_provision_http.h"
 
 static const char *TAG = "adaptive_tune_http";
@@ -161,6 +164,27 @@ static esp_err_t enable_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): this is the operator's own external toggle of
+     * adaptive tune (zones_config_set_adaptive_tune_enabled(), reached via
+     * adaptive_tune_set_enabled() below) -- refuse it while a firing or
+     * autotune run is active, PAUSED included, same rule as every other
+     * wired call site. Adaptive tune's own INTERNAL accept-path writes
+     * during a live run (adaptive_tune.c's ki/model accessors, called
+     * directly, never through this handler) are deliberately NOT gated --
+     * only this externally-triggered toggle is. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "POST /api/adaptive_tune/enable zone=%d refused by system mode gate: %s", zone,
+                     mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
+    }
+
     bool saved = adaptive_tune_set_enabled((uint8_t)zone, enabled);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, saved ? "{\"ok\":true}" : "{\"ok\":true,\"warning\":\"applied live, save failed\"}");
@@ -201,6 +225,23 @@ static esp_err_t revert_post_handler(httpd_req_t *req)
     if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
         return ESP_OK;
+    }
+
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+     * gate-slices-2/4/5 spec): revert is a live zones_config write
+     * (adaptive_tune_revert() -> zones_config_set_*(), per this handler's own
+     * header comment) -- refuse it while a firing or autotune run is active,
+     * PAUSED included, same rule as every other wired call site. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "POST /api/adaptive_tune/revert zone=%d refused by system mode gate: %s", zone,
+                     mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
     }
 
     char reason[96];

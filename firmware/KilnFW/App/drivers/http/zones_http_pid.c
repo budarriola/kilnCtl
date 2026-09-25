@@ -8,10 +8,26 @@
 #include "zones_http_internal.h"
 
 #include "esp_log.h"
+#include "relay_authority.h"
+#include "system_mode_gate.h"
+#include "system_mode_gate_http.h"
 
 /* ---- POST /api/zones/pid --------------------------------------------------
- * Narrow, deliberate exception to POST /api/zones's interlock: PID gain
- * (kp/ki/kd) edits ONLY, allowed even while a firing is RUNNING/PAUSED.
+ * Narrow endpoint versus the whole-page POST /api/zones submit: PID gain
+ * (kp/ki/kd) edits ONLY.
+ *
+ * Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+ * spec, owner decision Q2): this endpoint used to be a deliberate exception,
+ * allowed even while a firing was RUNNING/PAUSED. That carve-out is REVOKED
+ * -- owner decision Q2 is "refuse ALL zone/relay/guard config writes, not
+ * scoped to which field changed, while a firing or autotune run is active."
+ * This endpoint was a real gap: the UART bridge's identical write
+ * (CONTROL_CMD_SET_ZONE_PID, uart_bridge_ext_control.c's
+ * control_zones_write_refused()) was already gated, and that file's own
+ * comment claimed "the exact same write from the HTTP page ... was already
+ * refused" -- true of zones_http_post.c's whole-page submit, false of this
+ * narrow endpoint. Gated below, same SYS_ACTION_WRITE_ZONES_CONFIG rule and
+ * snapshot accessor as every other wired call site.
  *
  * WHY A SEPARATE ENDPOINT, NOT A DIFF AGAINST THE WHOLE-PAGE SUBMIT: this
  * handler's request body can name nothing but zone/kp/ki/kd -- there is no
@@ -88,6 +104,17 @@
 
 esp_err_t zones_pid_post_handler(httpd_req_t *req)
 {
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones/pid refused by system mode gate: %s", mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
+    }
+
     if (req->content_len <= 0 || req->content_len > ZONES_PID_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;

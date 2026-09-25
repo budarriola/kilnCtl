@@ -1732,24 +1732,28 @@ static void test_malformed_body_writes_nothing(void)
     TEST_CHECK(g_profile_save_calls == 0, "no profile may be saved either");
 }
 
-static void test_refused_by_system_mode_gate_during_firing_writes_nothing(void)
-{
-    TEST_SECTION("backup_import_apply -- system_mode_gate refuses (409, sentinel-prefixed err_msg) while a firing is active (owner Q2, 2026-09-25)");
-    reset_stub_state();
-    s_test_profile_running_for_mode_gate = true;
-
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[]}";
-    char err[160];
-    bool ok = test_backup_import_apply(body, err, sizeof(err));
-
-    TEST_CHECK(!ok, "refused while a firing is active, even with an otherwise-valid body");
-    TEST_CHECK(strncmp(err, "MODE_GATE_REFUSED:", strlen("MODE_GATE_REFUSED:")) == 0,
-               "err_msg carries the sentinel prefix backup_import_post_handler() strips before sending a 409");
-    TEST_CHECK(g_total_write_calls == 0, "nothing is written -- the gate runs before pass 1 even starts");
-    TEST_CHECK(g_profile_save_calls == 0, "no profile save either");
-
-    s_test_profile_running_for_mode_gate = false;
-}
+// Review fix, 2026-09-25: the mode-gate check used to live INSIDE
+// backup_import_apply() (a sentinel-prefixed err_msg,
+// "MODE_GATE_REFUSED:", that backup_import_post_handler() stripped before
+// sending a 409). It has since moved to the top of
+// backup_import_post_handler() itself, ahead of ota_http_check_interlocks(),
+// so the dead-code ordering bug found in review (mode gate answering AFTER
+// the OTA interlock, never reached) is fixed the same way as
+// zones_http_post.c's. backup_import_apply() no longer contains any
+// mode-gate logic at all -- the old test here (asserting the sentinel
+// prefix) tested code that no longer exists and has been removed.
+//
+// This file has no handler-level test harness (no staged httpd_req_t /
+// content_len driver for backup_import_post_handler(), unlike
+// test_zones_http.c's run_zones_post()) -- building one is out of scope for
+// this pass. The ordering fix itself is covered by:
+//   - direct code inspection: backup_import_post_handler() calls
+//     system_mode_gate_check() before ota_http_check_interlocks(), matching
+//     the pattern proven by test_zones_post_refused_by_mode_gate_before_interlock()
+//     in test_zones_http.c.
+//   - s_test_profile_running_for_mode_gate/s_test_autotune_running_for_mode_gate
+//     above remain in place (defaulted idle) for a future handler-level test
+//     to use once that harness exists.
 
 static void test_wrong_kind_refused(void)
 {
@@ -4068,7 +4072,6 @@ static void test_kiln_configs_partial_write_set_on_mid_pass_create_failure(void)
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
-    test_refused_by_system_mode_gate_during_firing_writes_nothing();
     test_wrong_kind_refused();
     test_unknown_version_refused();
     test_version1_body_imports_under_v2_reader();

@@ -2507,7 +2507,14 @@ try {
             "`"$(Join-Path $driversDir 'control/firing_shadow.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`" " +
             "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # gate-slice-3-followup, 2026-09-25): iter_tune_restore_post_
+            # handler() now calls system_mode_gate_check()/system_mode_gate_
+            # http_send_refusal() -- link both real, pure, leaf modules,
+            # same as $cmd50/$cmd4's own fix.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
 
