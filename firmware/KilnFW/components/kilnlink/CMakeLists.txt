@@ -67,11 +67,10 @@ idf_component_register(
          # per-field commissioning rejection reason (COMMISSIONING.md sec 3.1).
          "${KILNLINK_DIR}/src/kilnlink_set_log_level.c"
          "${KILNLINK_DIR}/src/kilnlink_commit_config_rejected.c"
-         # SAFETY_CMD_SET_FIRING_CEILING (0x09) now has a real ESP caller
-         # (safety_link_commands.c's safety_link_send_firing_ceiling(),
-         # LINK_PROTOCOL.md:1525's "confirmed still not built" item) so it
-         # moves out of this file's header-comment "pre-existing gap" list
-         # above and into the actually-linked set, same as SET_LOG_LEVEL did.
+         # SAFETY_CMD_SET_FIRING_CEILING (0x09): its ESP caller was removed
+         # 2026-09-24 (owner decision -- the Pico never runs tighter than the
+         # ESP), so nothing in KilnFW calls this codec now. It stays linked
+         # (unused, harmless) to keep the codec building on the ESP side.
          "${KILNLINK_DIR}/src/kilnlink_ceiling.c"
          # SAFETY_CMD_ROLLBACK_RESULT (0x25) -- the missing Pico->ESP reply
          # for a refused SAFETY_CMD_ROLLBACK, safety_link.c decodes this the

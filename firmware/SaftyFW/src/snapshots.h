@@ -252,6 +252,9 @@ static inline bool current_any_present(const current_snapshot_t *cur)
     return cur->present[0] || cur->present[1] || cur->present[2];
 }
 
+// RETIRED 2026-09-24 (owner decision: "the safety limits should be the
+// same"): no guard reads the result of this gate any more (S1 is always
+// abs_max_temp_c); kept host-tested because safety_core.c still computes it.
 // S1's firing-ceiling gate (SAFETY_MODEL.md section 4, S1 /
 // docs/GUARD_TEST_MATRIX.md section 6). `have_ceiling` is link_task_get_
 // firing_ceiling()'s own already-bounds-checked fact (link_frame_ceiling_
@@ -429,6 +432,7 @@ bool link_task_link_up(void);
 // it must never own a mutable time accumulator of its own.
 uint32_t link_task_get_relay_on_continuous_ms(void);
 
+// (0x09 is decoded-but-inert since 2026-09-24 -- no guard acts on this value.)
 // The most recently decoded SAFETY_CMD_SET_FIRING_CEILING (0x09) value that
 // link_frame_ceiling_is_active() judged an active ceiling (finite, strictly
 // positive) -- link_task.c's RX handler already applies that bounds check

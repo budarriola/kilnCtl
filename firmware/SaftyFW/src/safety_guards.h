@@ -840,10 +840,11 @@ safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tri
 // each; returns NaN for the rest (S5's dual count+time bar, S6a/S7's boolean
 // conditions, S6b's already-qualitative hard backstop, S9's escalation-not-a-
 // fresh-threshold nature) rather than guessing. S1's abs_max_temp_c is
-// reported as configured, not the possibly-tighter runtime
-// min(abs_max_temp_c, firing_max_c + firing_margin_c) safety_guards_tick()
-// computes internally and does not expose -- see the .c file's doc comment
-// on the SAFETY_TRIP_OVERTEMP case for the exact caveat.
+// reported as configured, and is exactly the ceiling safety_guards_tick()
+// uses: the former firing-time min(abs_max_temp_c, firing_max_c +
+// firing_margin_c) tightening was RETIRED 2026-09-24 (owner decision: "the
+// safety limits should be the same"), so firing_max_valid/firing_max_c no
+// longer affect any guard.
 float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guard_cfg_t *cfg);
 
 // Opus review of 51c084f/c49bb0e, finding 1: s15_warn[]/s14_warn[] were read

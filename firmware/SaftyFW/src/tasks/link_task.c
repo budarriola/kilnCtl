@@ -2301,6 +2301,10 @@ static void link_task_handle_announce_reboot(const kilnlink_frame_t *frame)
                  "link_up and every other guard are unaffected");
 }
 
+// RETIRED 2026-09-24 (owner decision: "the safety limits should be the
+// same"): the frame is still decoded and stored (no reply, framing/ACK
+// unaffected), but safety_guards_tick() no longer reads it -- S1 is always
+// abs_max_temp_c. The rest of this comment is history.
 // SAFETY_CMD_SET_FIRING_CEILING (0x09), CommonFW/docs/LINK_PROTOCOL.md
 // section 4 / SAFETY_MODEL.md section 4, S1 -- "the highest target
 // temperature this firing will ever ask for", so S1's absolute ceiling can

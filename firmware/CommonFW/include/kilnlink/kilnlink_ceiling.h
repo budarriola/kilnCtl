@@ -8,7 +8,11 @@
 extern "C" {
 #endif
 
-/* ESP -> Pico, SAFETY_CMD_SET_FIRING_CEILING = 0x09 -- docs/LINK_PROTOCOL.md
+/* RETIRED 2026-09-24: the ESP no longer sends 0x09 and SaftyFW decodes it
+ * but never tightens S1 with it (owner decision: the Pico's limits must equal
+ * the ESP's). The codec is kept so an older ESP's frame still decodes cleanly.
+ *
+ * ESP -> Pico, SAFETY_CMD_SET_FIRING_CEILING = 0x09 -- docs/LINK_PROTOCOL.md
  * sec 4. Sent when a profile starts, when it is edited, and repeated in
  * every context frame's shadow. Carries the highest target temperature this
  * firing will ever ask for, so the Pico can tighten S1's absolute limit to

@@ -632,6 +632,8 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
 // CLEAR_TRIP/SET_CONFIG.
 #define LINK_FRAME_SET_FIRING_CEILING_CMD 0x09u
 
+// (0x09 is decoded-but-inert since 2026-09-24: S1 no longer applies any
+// firing ceiling, so the tightening hazard described below cannot occur.)
 // Bounds check factored out of link_task_handle_set_firing_ceiling() so it is
 // host-testable, same "extraction for the test matrix" reasoning as
 // link_frame_decide_clear_trip() above. LINK_PROTOCOL.md/SAFETY_MODEL.md

@@ -39,8 +39,8 @@ It watches, independently:
   or both cross-checking each other,
 - **three current-sense channels** fed by external current transformers,
 - an **E-stop** input,
-- the main controller's **setpoints, measured temperatures, relay commands and
-  firing ceiling**, received over an isolated link,
+- the main controller's **setpoints, measured temperatures and relay
+  commands**, received over an isolated link,
 
 and when something has gone badly wrong it **de-energizes K4**, which opens an
 upstream mechanical line contactor and removes power from the elements — then

@@ -256,7 +256,12 @@ static TaskHandle_t s_task_handle = NULL;
 // TODO (Phase 9, config_store): load real commissioned values (abs_max_temp_c
 // above all) from flash once config_store.c exists. Until then this cfg is
 // permanently the conservative "nothing commissioned" state -- with ONE
-// exception: firing_max_valid/firing_max_c ARE written every tick now, by
+// exception (now inert: S1's firing-time tightening was
+// RETIRED 2026-09-24, owner decision: "the safety limits should be the
+// same") -- safety_guards_tick() no longer reads firing_max_valid/
+// firing_max_c, so the history below describes plumbing that still runs
+// but decides nothing): firing_max_valid/firing_max_c ARE written every
+// tick now, by
 // safety_core_build_input() below, from link_task's SET_FIRING_CEILING RX
 // state. That is deliberately not a config-store gap the same way
 // abs_max_temp_c is: safety_guards.h's own doc comment on those two fields is
@@ -900,6 +905,10 @@ static safety_guard_input_t safety_core_build_input(void)
         context_valid = age_ms < CONTEXT_MAX_AGE_MS;
     }
 
+    // INERT since 2026-09-24: S1 is unconditionally abs_max_temp_c (owner
+    // decision -- the Pico's limits must equal the ESP's, never tighter).
+    // These two fields are still written but no guard reads them; the
+    // original rationale is kept below as history.
     // S1's firing ceiling (SAFETY_CMD_SET_FIRING_CEILING, SAFETY_MODEL.md
     // section 4) -- pulled here, same "pulled, never pushed" discipline as
     // the context snapshot just above. link_task_get_firing_ceiling() already

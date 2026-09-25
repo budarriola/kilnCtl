@@ -555,7 +555,7 @@ var GROUPS = [
 
   { title: '2. Temperature guards', fields: [
       { id: 513, name: 'firing_margin_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 100,
-        guards: ['S1'], note: 'Added to the profile\'s peak. CHAMBER_AGREED only.' },
+        guards: ['S1'], note: 'Inert: the firing-ceiling tightening was retired 2026-09-24; S1 always uses abs_max_temp_c.' },
       { id: 514, name: 'overshoot_margin_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 75,
         guards: ['S2'], note: 'Generous on purpose -- ramp-end overshoot and TC placement spread ' +
           'both live inside this.' },

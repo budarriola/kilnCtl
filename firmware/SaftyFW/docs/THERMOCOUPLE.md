@@ -314,8 +314,9 @@ what happens, and S5 loses its fastest signal.
 ### Thresholds live in software, not in the part
 
 Tempting to push S1's ceiling into `LTHFTH/L` and let the part flag it. Don't:
-the ceiling is `min(abs_max, firing_max + margin)` in `CHAMBER_AGREED`, so it
-changes per firing; and a threshold in two places is a threshold that will
+the ceiling used to be `min(abs_max, firing_max + margin)` in `CHAMBER_AGREED`
+(retired 2026-09-24 -- S1 is now always `abs_max_temp_c`), and in any case a
+threshold in two places is a threshold that will
 disagree with itself. The part's comparators stay wide open and the guards do
 the comparing.
 
