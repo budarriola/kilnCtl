@@ -10308,6 +10308,10 @@ static void test_zone_sweep_hw_read_temp_filters_bad_fault_bits(void)
     memset(&dummy_thermo, 0, sizeof(dummy_thermo));
     dummy_thermo.initialized = true;
     zones_http_set_hw(NULL, &dummy_thermo, NULL);
+    // Restored at the end so later tests never inherit this test's config.
+    static zones_cfg_t saved_cfg;
+    saved_cfg = s_zones.cfg;
+    bool saved_valid = s_zones_config_valid;
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones_config_valid = true;
     s_zones.cfg.thermo_count = 1;
@@ -10362,8 +10366,20 @@ static void test_zone_sweep_hw_read_temp_filters_bad_fault_bits(void)
     zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
     TEST_CHECK(valid && fabsf(c - 501.0f) < 0.01f, "clearing the fault bit restores a valid reading");
 
+    // Channel indexing: a faulted channel OUTSIDE the zone's thermo_mask
+    // must not affect it, and the zone must read its own channel's value.
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 502.0f, false, 0x00u);
+    set_test_thermo_reading(1, 900.0f, false, 0x01u);
+    c = NAN; valid = false;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(valid && fabsf(c - 502.0f) < 0.01f,
+              "a faulted channel outside the zone's thermo_mask does not affect the zone's reading");
+
     zones_http_set_hw(NULL, NULL, NULL);
     reset_test_thermo_readings();
+    s_zones.cfg = saved_cfg;
+    s_zones_config_valid = saved_valid;
 }
 
 static void test_zone_sweep_run_one_zone_skips_unwired_zone(void)
