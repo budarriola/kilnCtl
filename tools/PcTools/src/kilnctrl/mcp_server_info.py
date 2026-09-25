@@ -812,6 +812,14 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
                 f"needs the safety-processor acknowledgement (X-Ota-Ack-No-Safety), which this "
                 f"tool does not send. Resolve the named precondition on the board first "
                 f"(host={resolved})")
+    if status == 409:
+        from . import zones_http_client  # local import: avoid a module-load-order cycle, same convention as the other local imports in this function
+        if zones_http_client.is_system_mode_gate_refusal(body):
+            return (f"refused: system_mode_gate refused this apply (HTTP 409) for id={id}: {body} -- "
+                    f"a firing or autotune run is active; applying a saved kiln config is not "
+                    f"available until it ends. Distinct from this route's own 428 refusals above "
+                    f"(host={resolved})")
+        return f"error: POST /api/kiln_configs/apply returned unexpected HTTP 409: {body} (host={resolved})"
     if status == 404:
         return f"error: no such kiln config id={id} (404): {body} (host={resolved})"
     if status not in (200, 202):
@@ -1166,6 +1174,12 @@ def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Op
     try:
         result = ota_http.format_cfgfs(resolved, resolved_password)
     except ota_http.OtaHttpError as exc:
+        from . import zones_http_client  # local import: avoid a module-load-order cycle, same convention as the other local imports in this function
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this format (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run is active; cfgfs format is not available until it "
+                    f"ends. Distinct from OTA's own 428 interlock (host={resolved}, "
+                    f"before file_count={before_count})")
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved}, before file_count={before_count})"
 

@@ -134,6 +134,24 @@ class HardwareDiffersRefusalTest(_Base):
         self.assertIn("404", result)
         self.assertIn("no such kiln config", result)
 
+    def test_system_mode_gate_409_is_surfaced_distinct_from_428(self):
+        """system_mode_gate_check() (SYS_ACTION_WRITE_ZONES_CONFIG's gate on
+        kiln_cfg_http.c's apply submit) refuses at submit time with a 409
+        whose body names a firing/autotune run -- must never be reported as
+        an unexpected-status error or confused with this route's own 428s."""
+        body = ("refused -- a firing or autotune run is active; zone configuration cannot be "
+                "changed until it ends")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(ac, "post_apply", return_value=(409, body)) as post_mock, \
+             unittest.mock.patch.object(ac, "poll_apply_status") as poll_mock:
+            result = msi.kiln_config_apply(id=3, confirm=True)
+        post_mock.assert_called_once()
+        self.assertIn("refused", result.lower())
+        self.assertIn("system_mode_gate", result)
+        self.assertIn("409", result)
+        self.assertNotIn("HTTP 428", result)
+        poll_mock.assert_not_called()
+
     def test_unexpected_status_is_an_error(self):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(ac, "post_apply", return_value=(409, "an apply is already running")):

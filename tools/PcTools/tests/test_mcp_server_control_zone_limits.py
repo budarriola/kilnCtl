@@ -175,6 +175,25 @@ class SafetyCeilingTest(_Base):
         self.assertIn("UNCHANGED", result)
         self.assertIn("ARMED", result)
 
+    def test_system_mode_gate_409_is_surfaced_distinct_from_ceiling_raise(self):
+        """system_mode_gate_http_send_refusal() sends plain text containing
+        'firing or autotune run is active' -- distinct from this same
+        module's own safety_ceiling_raise_failed 409 above, and never to be
+        confused with OTA's 428 interlock."""
+        before = _snapshot([_zone(0, max_temp_c=36.4)])
+        err = zones_http_client.ZonesHttpError(
+            "POST /api/zones refused: HTTP 409", 409,
+            "refused -- a firing or autotune run is active; zone configuration cannot be "
+            "changed until it ends")
+        with unittest.mock.patch.object(zones_http_client, "get_zones", return_value=before), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "post_zones", side_effect=err):
+            result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
+        self.assertTrue(result.startswith("refused"), result)
+        self.assertIn("system_mode_gate", result)
+        self.assertIn("409", result)
+        self.assertNotIn("HTTP 428", result)
+
     def test_pico_ceiling_mismatch_after_write_warns(self):
         before = _snapshot([_zone(0, max_temp_c=80.0)])
         after = copy.deepcopy(before)

@@ -89,6 +89,23 @@ class ConfirmedFormatTest(_Base):
         self.assertIn("error", result.lower())
         self.assertNotIn("ok - cfg partition formatted", result)
 
+    def test_system_mode_gate_409_is_surfaced_distinct_from_428(self):
+        """system_mode_gate_http_send_refusal() sends a 409 whose plain-text
+        body names a firing/autotune run -- must be reported distinctly from
+        a generic error and never look like the OTA 428 interlock refusal."""
+        err = ota_http.OtaHttpError(
+            "refused", status=409,
+            detail="refused -- a firing or autotune run is active; this action is not available "
+                   "until it ends")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs", side_effect=err):
+            result = msi.cfgfs_format(confirm=True, password="hunter2")
+        self.assertIn("refused", result.lower())
+        self.assertIn("system_mode_gate", result)
+        self.assertIn("409", result)
+        self.assertNotIn("HTTP 428", result)
+
     def test_readback_failure_after_post_does_not_claim_success(self):
         """The POST succeeded but the confirming re-read failed -- must be
         reported as an unverified after-state, never a plain 'ok'."""

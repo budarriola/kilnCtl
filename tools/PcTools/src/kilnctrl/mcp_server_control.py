@@ -750,6 +750,11 @@ def control_set_zone_limits(
                     f"{target_after!r}C first, so it left the zone config UNCHANGED (HTTP 409): "
                     f"{exc.detail} -- the Pico refuses config writes while ARMED; see "
                     f"safety_ceiling_policy.h (host={resolved})")
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run started after this tool's own precheck; distinct "
+                    f"from the safety-ceiling-raise 409 above and from OTA's 428 interlock "
+                    f"(host={resolved})")
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"

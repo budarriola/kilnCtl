@@ -47,12 +47,30 @@
 >   (`cfg_fs_format_http.c`, first line of the handler) now refuse outright
 >   while running. All four HTTP refusals share one sender,
 >   `system_mode_gate_http_send_refusal()` (slice 4), a 409 distinct from the
->   OTA interlock's 428. **Known gap:** `kiln_cfg_http.c`,
+>   OTA interlock's 428. **PcTools clients now distinguish this 409 from
+>   OTA's 428, 2026-09-25:** `zones_http_client.is_system_mode_gate_refusal()`
+>   matches the reason substring ("firing or autotune run is active") common
+>   to every `system_mode_gate_http_send_refusal()` body; `control_set_zone_limits`,
+>   `cfgfs_format`, and `kiln_config_apply` each surface it as an explicit
+>   "refused: system_mode_gate refused..." result distinct from their own
+>   other 409s and from OTA's 428, with dedicated fake-HTTP unit tests. (No
+>   HTTP `factory_reset` MCP tool exists in PcTools today -- only a UART
+>   `system_factory_reset()` -- so that item is N/A here, not overlooked.)
+>   **Known gap, still open:** `kiln_cfg_http.c`,
 >   `uart_bridge_ext_control.c`, and `cfg_fs_format_http.c` have no
 >   host-test harness at all (pre-existing, not introduced by this change),
 >   so their gate wiring is verified by code-pattern review and an ESP-IDF
->   target build only, not by a host-test assertion; a UART-level test and
->   PcTools 409-vs-428 client parsing are still open. The recovery-mode
+>   target build only, not by a host-test assertion. Evaluated 2026-09-25
+>   whether a small harness for `uart_bridge_ext_control.c`'s
+>   `SET_ZONE_PID`/`SET_ZONE_MODEL` gate could be added cheaply: no --
+>   `control_handle_message()` sits inside a 677-line file sharing static
+>   helpers and a large dependency surface (thermocouple channel accessors,
+>   `zones_config_*`, `unit_pref_get/set`, `profiles_builtin`,
+>   `profile_executor`, `relay_authority`, `run_state`, `kiln_io`) with the
+>   PROFILES-task half of the same file, none of it stubbed today -- cheaper
+>   to review by hand (confirmed present and correctly wired, see the
+>   slice 2/4/5 note above) than to build a fake-dependency harness for one
+>   pass. Left open rather than rushed. The recovery-mode
 >   HTTP-only-wording slice 2 mentioned in an earlier draft of this note
 >   was folded into the same-day zones/config work above rather than done
 >   separately. See the plan doc's §5 for the full owner decisions and §3.6

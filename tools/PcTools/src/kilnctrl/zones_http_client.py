@@ -140,6 +140,29 @@ class ZonesHttpGenerationMismatchError(ZonesHttpError):
     distinct, catchable failure mode from "a request failed"."""
 
 
+#: Substring of system_mode_gate_check()'s own reason text
+#: (firmware/KilnFW/App/drivers/safety/system_mode_gate.c, SYS_ACTION_WRITE_
+#: ZONES_CONFIG/SYS_ACTION_FACTORY_RESET/SYS_ACTION_CFGFS_FORMAT) common to
+#: every action it gates, used below to tell a mode-gate 409 apart from any
+#: other 409 an admin-tier write route can answer with (e.g. this module's
+#: own safety_ceiling_raise_failed, or kiln_cfg_http.c's own conflicts).
+#: Never matched against OTA's 428 -- that status is structurally distinct
+#: (system_mode_gate_http.c's own header comment, owner decision Q4) and
+#: this text does not appear in a 428 body.
+_SYSTEM_MODE_GATE_REFUSAL_MARKER = "firing or autotune run is active"
+
+
+def is_system_mode_gate_refusal(detail: Optional[str]) -> bool:
+    """True if an HTTP 409's plain-text body was sent by system_mode_gate_
+    http_send_refusal() (system_mode_gate_http.c) -- i.e. this write was
+    refused because a firing or autotune run is active, not for some other
+    409 reason (this module's own safety_ceiling_raise_failed, a different
+    route's own conflict, etc). A caller that only checks `status == 409`
+    without this distinction will misreport which of several possible 409
+    reasons actually happened."""
+    return bool(detail) and _SYSTEM_MODE_GATE_REFUSAL_MARKER in detail
+
+
 def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 
