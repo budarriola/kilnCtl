@@ -492,6 +492,13 @@ try {
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
+            # 2026-09-24: zones_current_sweep_engine.c (#included via
+            # test_zones_http.c) now reads through the shared thermo_channels_
+            # read() helper (thermo_channel_read.c) instead of duplicating the
+            # MAX31856 fault-bit filter inline -- link the real object in, same
+            # convention as exe4/test_profile_executor_prestart.c's own link of
+            # this file for the same helper.
+            "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +

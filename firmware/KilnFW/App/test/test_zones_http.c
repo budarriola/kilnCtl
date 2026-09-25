@@ -474,29 +474,77 @@ esp_err_t thermo_owner_command_config_channel(uint8_t channel, uint8_t tc_type, 
     (void)auto_convert;
     return ESP_OK;
 }
+// 2026-09-24: configurable, defaulting to the old fixed "no readings"
+// behaviour (s_test_thermo_read_ok == false) so every pre-existing test that
+// never calls set_test_thermo_reading() keeps seeing count 0 / ESP_OK exactly
+// as before. test_zone_sweep_hw_read_temp_filters_bad_fault_bits() (below)
+// is the first test that opts in, to pin thermo_channels_read()'s fault-bit
+// filter now that zone_sweep_read_zone_temp() reads through it.
+static bool            s_test_thermo_read_ok = false;
+static MAX31856Reading s_test_thermo_readings[MAX31856_CHANNEL_COUNT];
+static size_t          s_test_thermo_reading_count = 0;
+
+static void set_test_thermo_reading(uint8_t channel, float temp_c, bool spi_failed, uint8_t fault_status)
+{
+    s_test_thermo_read_ok = true;
+    if (channel >= MAX31856_CHANNEL_COUNT) return;
+    memset(&s_test_thermo_readings[channel], 0, sizeof(s_test_thermo_readings[channel]));
+    s_test_thermo_readings[channel].channel = channel;
+    s_test_thermo_readings[channel].tc_temperature_c = temp_c;
+    s_test_thermo_readings[channel].spi_failed = spi_failed;
+    s_test_thermo_readings[channel].fault_status = fault_status;
+    if (s_test_thermo_reading_count <= (size_t)channel) s_test_thermo_reading_count = (size_t)channel + 1;
+}
+
+static void reset_test_thermo_readings(void)
+{
+    s_test_thermo_read_ok = false;
+    s_test_thermo_reading_count = 0;
+    memset(s_test_thermo_readings, 0, sizeof(s_test_thermo_readings));
+}
+
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings,
                             size_t *out_count)
 {
     (void)bus;
-    (void)out;
-    (void)max_readings;
-    if (out_count) *out_count = 0;
+    if (!s_test_thermo_read_ok) {
+        if (out_count) *out_count = 0;
+        return ESP_OK;
+    }
+    size_t n = s_test_thermo_reading_count;
+    if (n > max_readings) n = max_readings;
+    if (out && n > 0) memcpy(out, s_test_thermo_readings, n * sizeof(out[0]));
+    if (out_count) *out_count = n;
     return ESP_OK;
 }
 
-// ---- thermo_combine.h -- only reached from zone_sweep_read_zone_temp(),
-// itself only reached from inside zone_sweep_task(), which the host tests
-// never run (xTaskCreate() is stubbed to never invoke its task function --
-// see stubs/freertos/task.h). Exists purely so the translation unit links.
+// ---- thermo_combine.h -- reached from zone_sweep_read_zone_temp(), itself
+// reached from zone_sweep_hw_read_temp() which
+// test_zone_sweep_hw_read_temp_filters_bad_fault_bits() (below) now calls
+// directly (zone_sweep_task() itself is still never run -- xTaskCreate() is
+// stubbed, see stubs/freertos/task.h -- but its per-zone read function is
+// reachable standalone, same as zone_sweep_hw_energize()/force_off() above).
+// A real average-of-ok-channels-in-mask implementation, matching production
+// thermo_combine.c's contract closely enough for this test's purposes:
+// *out_valid is false (and NAN returned) only when every masked channel is
+// !ok.
 float thermo_combine(const float *channel_c, const bool *channel_ok, uint8_t channel_count,
                      uint8_t thermo_mask, bool *out_valid)
 {
-    (void)channel_c;
-    (void)channel_ok;
-    (void)channel_count;
-    (void)thermo_mask;
-    if (out_valid) *out_valid = false;
-    return NAN;
+    float sum = 0.0f;
+    int n = 0;
+    for (uint8_t i = 0; i < channel_count; i++) {
+        if (!(thermo_mask & (1u << i))) continue;
+        if (!channel_ok[i]) continue;
+        sum += channel_c[i];
+        n++;
+    }
+    if (n == 0) {
+        if (out_valid) *out_valid = false;
+        return NAN;
+    }
+    if (out_valid) *out_valid = true;
+    return sum / (float)n;
 }
 
 // ---- kiln_io.h -- Task 1's sweep. kiln_io_set_relay_mask()/
@@ -10242,6 +10290,82 @@ static void test_zone_sweep_hw_bindings_route_through_owner(void)
     zones_http_set_hw(NULL, NULL, NULL);
 }
 
+// 2026-09-24: zone_sweep_read_zone_temp() (reached through the real
+// zone_sweep_hw_read_temp() binding, same convention as this function's
+// energize/force-off siblings just above) used to duplicate thermo_channel_
+// read.c's `!spi_failed && !isnan && !(fault_status & (0x01|0x02|0x40))`
+// filter inline. It now reads through the shared thermo_channels_read()
+// helper instead -- this pins that the fault-bit filter still behaves
+// identically at this call site now that it has one owner. No prior host
+// test reached zone_sweep_read_zone_temp() at all (its body comment used to
+// say so: xTaskCreate() is stubbed, so zone_sweep_task() itself never runs)
+// -- this is the first.
+static void test_zone_sweep_hw_read_temp_filters_bad_fault_bits(void)
+{
+    TEST_SECTION("zone_sweep_hw_read_temp(): the shared thermo_channels_read() "
+                 "fault-bit filter (0x01/0x02/0x40) applies at this call site too");
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+    zones_http_set_hw(NULL, &dummy_thermo, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].thermo_mask = 0x01u; // channel 0 only
+    s_zones.cfg.zones[0].cal_offset_c = 0.0f;
+
+    float c;
+    bool valid;
+
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 500.0f, false, 0x00u);
+    c = NAN; valid = false;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(valid && !isnan(c) && fabsf(c - 500.0f) < 0.01f,
+              "a healthy channel (no fault bits, not spi_failed) reads valid");
+
+    // The three bits thermo_channel_read.c treats as fault-bad, one at a
+    // time -- each must invalidate the reading even though spi_failed is
+    // false and the reported temperature is itself a plausible number.
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 500.0f, false, 0x01u);
+    c = NAN; valid = true;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(!valid, "fault_status 0x01 set -> invalid, matching thermo_channels_read()'s filter");
+
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 500.0f, false, 0x02u);
+    c = NAN; valid = true;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(!valid, "fault_status 0x02 set -> invalid");
+
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 500.0f, false, 0x40u);
+    c = NAN; valid = true;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(!valid, "fault_status 0x40 set -> invalid");
+
+    // A fault bit OUTSIDE the 0x01/0x02/0x40 mask must not be treated as bad
+    // -- proves this isn't just "any nonzero fault_status invalidates".
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 500.0f, false, 0x80u);
+    c = NAN; valid = false;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(valid && fabsf(c - 500.0f) < 0.01f,
+              "a fault bit outside 0x01/0x02/0x40 does not invalidate the reading");
+
+    // Recovery: clearing the fault bit on a later poll reads valid again --
+    // the filter is per-poll, not a latch.
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 501.0f, false, 0x00u);
+    c = NAN; valid = false;
+    zone_sweep_hw_read_temp(NULL, 0, &c, &valid);
+    TEST_CHECK(valid && fabsf(c - 501.0f) < 0.01f, "clearing the fault bit restores a valid reading");
+
+    zones_http_set_hw(NULL, NULL, NULL);
+    reset_test_thermo_readings();
+}
+
 static void test_zone_sweep_run_one_zone_skips_unwired_zone(void)
 {
     fake_sweep_ctx_t ctx;
@@ -14731,6 +14855,7 @@ void run_test_zones_http(void)
     test_zone_sweep_effective_ceiling_c();
     test_zone_sweep_timing_predicates();
     test_zone_sweep_hw_bindings_route_through_owner();
+    test_zone_sweep_hw_read_temp_filters_bad_fault_bits();
     test_zone_sweep_run_one_zone_skips_unwired_zone();
     test_zone_sweep_run_one_zone_abort_before_energize_never_turns_relay_on();
     test_zone_sweep_run_one_zone_normal_completion_sequencing();

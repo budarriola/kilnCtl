@@ -13,6 +13,7 @@
 #include "kiln_io.h"
 #include "profile_executor.h"
 #include "safety_trip_words.h"
+#include "thermo_channel_read.h"
 #include "thermo_combine.h"
 #include "thermo_owner.h"
 
@@ -870,43 +871,34 @@ void zone_sweep_force_relays_off(void)
 }
 
 /* Reads zone zi's combined, calibrated temperature the same way
- * profile_executor.c's control tick does (MAX31856_read_all() +
- * thermo_combine() over the zone's thermo_mask) -- duplicated rather than
- * shared because profile_executor.c is off-limits for this pass and its own
- * read is buried inside a much larger per-tick loop with no standalone
- * entry point. *out_valid false means "no usable reading", matching
- * thermo_combine()'s own convention. */
+ * profile_executor.c's control tick does (thermo_channels_read() +
+ * thermo_combine() over the zone's thermo_mask). This used to duplicate the
+ * per-channel spi_failed/isnan/fault_bits_bad filter inline -- profile_
+ * executor.c was off-limits for the earlier pass that wrote this function,
+ * and its own read was buried inside a much larger per-tick loop with no
+ * standalone entry point. Migrated 2026-09-24 to the shared
+ * thermo_channels_read() helper (thermo_channel_read.h) now that it exists,
+ * so the filter has one owner instead of two copies that can drift apart.
+ * Same effective behaviour on real hardware: thermo_channels_read()'s own
+ * bus-usable gate (`sim_backend_enabled() || (bus && bus->initialized)`)
+ * reduces to this call site's old `s_hw_thermo_bus && s_hw_thermo_bus->
+ * initialized` check whenever sim_backend_enabled() is false, i.e. every
+ * non-CONFIG_KILNCTL_SIM_PLANT build (the bench board). The one behavioural
+ * difference this migration introduces: a CONFIG_KILNCTL_SIM_PLANT build now
+ * also honours the sim backend at this call site, which it never did
+ * before (flagged rather than silently changed -- see the commit message).
+ * *out_valid false means "no usable reading", matching thermo_combine()'s
+ * own convention. */
 static void zone_sweep_read_zone_temp(uint8_t zi, float *out_c, bool *out_valid)
 {
     *out_c = NAN;
     *out_valid = false;
-    if (!s_hw_thermo_bus || !s_hw_thermo_bus->initialized) {
-        return;
-    }
-    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-    size_t count = 0;
-    if (MAX31856_read_all(s_hw_thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count) != ESP_OK && count == 0) {
-        return;
-    }
-    float ch_c[MAX31856_CHANNEL_COUNT];
-    bool ch_ok[MAX31856_CHANNEL_COUNT];
-    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
-        ch_c[ci] = NAN;
-        ch_ok[ci] = false;
-    }
-    for (size_t i = 0; i < count; i++) {
-        uint8_t ci = readings[i].channel;
-        if (ci >= MAX31856_CHANNEL_COUNT) {
-            continue;
-        }
-        ch_c[ci] = readings[i].tc_temperature_c;
-        bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
-        ch_ok[ci] = !readings[i].spi_failed && !isnan(ch_c[ci]) && !fault_bits_bad;
-    }
+    ThermoChannelSnapshot snap;
+    thermo_channels_read(s_hw_thermo_bus, &snap);
     uint8_t tmask = 0;
     zones_config_get_thermo_mask(zi, &tmask);
     bool valid = false;
-    float combined = thermo_combine(ch_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
+    float combined = thermo_combine(snap.raw_c, snap.ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
     *out_valid = valid;
     *out_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
 }
