@@ -2432,6 +2432,22 @@ try {
 
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
 
+    # ---- test_firing_compare_alloc.c: its own SEPARATE executable ---------
+    # ITER_TUNE_REDESIGN_PLAN.md step 8 review: firing_compare() now heap-
+    # allocates raw[]/norm[]/in_band[] (reachable from the profile_executor
+    # task stack via firing_shadow_finish_firing()). This #includes
+    # firing_compare.c with malloc/free redirected to counting fakes to prove
+    # each allocation failure returns NO_MATCHED_PAIRS without leaking -- so
+    # it cannot share an executable that links the real firing_compare.c.
+    $exeFca = Join-Path $outDir "kilnctl_host_tests_firing_compare_alloc.exe"
+    $fcaObjDir = Join-Path $outDir "fca"
+    New-Item -ItemType Directory -Force -Path $fcaObjDir | Out-Null
+    $cmdFca = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$fcaObjDir\\`" /Fe:`"$exeFca`" `"$(Join-Path $testDir 'test_firing_compare_alloc.c')`" " +
+            "`"$(Join-Path $driversDir 'control/firing_score.c')`""
+
+    Invoke-HostTestExe -Name "firing_compare_alloc" -ExePath $exeFca -BuildCmd $cmdFca
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -2582,7 +2598,10 @@ try {
     # 59 -> 60: added test_ota_pico_relay.c's own Invoke-HostTestExe call --
     # ota_pico_relay.c's relay state machine, untested until now
     # (docs/PICO_AUTO_UPDATE_PLAN.md).
-    $totalExpected = 60
+    # 60 -> 61: added test_firing_compare_alloc.c's own Invoke-HostTestExe
+    # call -- firing_compare()'s heap-allocation failure path
+    # (ITER_TUNE_REDESIGN_PLAN.md step 8 review).
+    $totalExpected = 61
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

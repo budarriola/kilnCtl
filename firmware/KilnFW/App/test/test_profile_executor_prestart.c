@@ -9772,6 +9772,77 @@ static void run_test_on_off_actuation(void)
     run_test_on_off_log_transition();
 }
 
+// ITER_TUNE_REDESIGN_PLAN.md step 8 (review add): firing_stats_zone_tick()
+// recovers the shadow-mode zone index from `z`'s ADDRESS within
+// s_exec.zones (uintptr_t range compare, profile_executor_firing_stats.c).
+// Proves (a) a real &s_exec.zones[1] tick reaches firing_shadow as zone 1 --
+// a baseline firing fed straight into firing_shadow_zone_tick(1, ...) then
+// finds matched pairs against it, which it could not if the mapping dropped
+// the tick or picked a different zone (the class key carries zone_index) --
+// and (b) a standalone zone_runtime_t local, as the tests above pass, is
+// silently not fed (the next comparison has nothing to match).
+static void test_firing_stats_zone_tick_feeds_shadow_with_real_zone_index(void)
+{
+    TEST_SECTION("firing_stats_zone_tick() -- &s_exec.zones[1] feeds firing_shadow as zone 1; a "
+                 "standalone zone_runtime_t local feeds nothing");
+
+    const zone_runtime_t saved = s_exec.zones[1];
+    firing_shadow_reset_for_test();
+    firing_shadow_store_start();
+    firing_shadow_status_t st0;
+    TEST_CHECK(firing_shadow_get_status(&st0), "shadow store loaded");
+
+    // 90 ticks of a 120 C/hr ramp, 0.1C-quantized, tracking 0.2C low.
+    #define SHADOW_MAP_TICKS 90
+    float targets[SHADOW_MAP_TICKS];
+    float actuals[SHADOW_MAP_TICKS];
+    for (int i = 0; i < SHADOW_MAP_TICKS; i++) {
+        targets[i] = roundf((100.0f + 120.0f / 3600.0f * (float)(i + 1)) * 10.0f) / 10.0f;
+        actuals[i] = roundf((targets[i] - 0.2f) * 10.0f) / 10.0f;
+    }
+
+    // Firing 1 (reference): fed straight into the shadow module as zone 1.
+    for (int i = 0; i < SHADOW_MAP_TICKS; i++) {
+        firing_shadow_zone_tick(1, true, actuals[i], targets[i], false, 0, 1.0f);
+    }
+    firing_shadow_finish_firing();
+
+    // Firing 2: the same data through the production hook, real array element.
+    memset(&s_exec.zones[1], 0, sizeof(s_exec.zones[1]));
+    for (int i = 0; i < SHADOW_MAP_TICKS; i++) {
+        s_exec.zones[1].actual_c = actuals[i];
+        s_exec.zones[1].actual_valid = true;
+        firing_stats_zone_tick(&s_exec.zones[1], targets[i], false, (uint32_t)(i + 1), 0, 1.0f);
+    }
+    firing_shadow_finish_firing();
+
+    firing_shadow_status_t st1;
+    TEST_CHECK(firing_shadow_get_status(&st1), "shadow status after firing 2");
+    TEST_CHECK(st1.firings_scored == st0.firings_scored + 1, "firing 2 produced exactly one shadow verdict");
+    TEST_CHECK(st1.no_matched_pairs_count == st0.no_matched_pairs_count,
+               "firing 2's ticks reached firing_shadow as ZONE 1 -- it matched firing 1's zone-1 segments");
+
+    // Firing 3: same data through a standalone local -- not an s_exec zone.
+    zone_runtime_t local;
+    memset(&local, 0, sizeof(local));
+    for (int i = 0; i < SHADOW_MAP_TICKS; i++) {
+        local.actual_c = actuals[i];
+        local.actual_valid = true;
+        firing_stats_zone_tick(&local, targets[i], false, (uint32_t)(i + 1), 0, 1.0f);
+    }
+    TEST_CHECK(local.fs_sample_count == SHADOW_MAP_TICKS, "the local's own firing stats still accumulate");
+    firing_shadow_finish_firing();
+
+    firing_shadow_status_t st2;
+    TEST_CHECK(firing_shadow_get_status(&st2), "shadow status after firing 3");
+    TEST_CHECK(st2.no_matched_pairs_count == st1.no_matched_pairs_count + 1,
+               "a standalone local's ticks never reach firing_shadow (nothing to match firing 2)");
+    #undef SHADOW_MAP_TICKS
+
+    s_exec.zones[1] = saved;
+    firing_shadow_reset_for_test();
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -9935,6 +10006,7 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_excludes_invalid_samples_not_zero();
     test_firing_stats_ramp_and_dwell_buckets_are_kept_separate();
     test_firing_stats_normalized_iae_is_length_invariant();
+    test_firing_stats_zone_tick_feeds_shadow_with_real_zone_index();
     test_firing_stats_persist_load_round_trip_and_ring_depth();
     test_firing_stats_load_migrates_known_old_size_blob();
     test_firing_stats_load_discards_unknown_size_blob();
