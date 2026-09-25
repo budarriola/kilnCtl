@@ -234,6 +234,68 @@ class ToleranceMathTest(unittest.TestCase):
         self.assertEqual(S._chromaticity((0, 0, 0)), (0.0, 0.0, 0.0))
 
 
+class CastChannelFallbackTest(unittest.TestCase):
+    """matches_color()'s ``cast_channel`` branch: 2026-09-25 bench evidence
+    (logs/bench_test/20260925T053101Z_lcd_post_flash_2e1c1c9e and
+    .../20260925T055234Z_lcd) -- a severe camera white-balance cast clipped
+    the R channel to ~0 across the WHOLE frame, including the bezel and a
+    known-dark background reference, which no per-channel gain correction
+    can undo (verified empirically: multiplying by any gain recoverable
+    from an on-panel near-white reference still left R near 0). Both the
+    absolute (1) and full-chromaticity (2) branches of matches_color() fail
+    for a genuinely-correct ACCENT_4 green sample under this cast; only the
+    two-channel (G/B) fallback, explicitly gated on ``cast_channel``, can
+    recover it -- and it must still reject a genuinely wrong hue."""
+
+    # Roughly the observed 20260925T053101Z_lcd_post_flash_2e1c1c9e sample:
+    # true green button, R channel clipped toward 0 by the frame-wide cast.
+    _CRUSHED_BEZEL = (0, 0, 9)
+    _CRUSHED_GREEN_SAMPLE = (3, 158, 103)
+    _TARGET = (0x5C, 0xC0, 0x6E)  # ACCENT_4 (92, 192, 110)
+
+    def test_without_cast_channel_the_crushed_sample_fails(self):
+        # Establishes the bug: neither existing branch saves a real match
+        # once R is clipped frame-wide.
+        self.assertFalse(S.matches_color(self._CRUSHED_GREEN_SAMPLE, self._TARGET, self._CRUSHED_BEZEL))
+
+    def test_cast_channel_recovers_the_crushed_green_sample(self):
+        self.assertTrue(
+            S.matches_color(self._CRUSHED_GREEN_SAMPLE, self._TARGET, self._CRUSHED_BEZEL, cast_channel=0)
+        )
+
+    def test_cast_channel_still_rejects_a_wrong_hue_under_the_same_cast(self):
+        # A genuinely wrong (non-green) button under the identical crushed-R
+        # cast condition -- e.g. a hypothetical red/orange accent whose G
+        # and B channels are close to each other, unlike ACCENT_4's G >> B.
+        # This is the required negative test: the fallback narrows to G/B
+        # ratios, but a wrong hue must still miss that narrower target too.
+        wrong_hue_sample = (2, 60, 62)  # G:B roughly 1:1, ACCENT_4 is ~1.75:1
+        self.assertFalse(
+            S.matches_color(wrong_hue_sample, self._TARGET, self._CRUSHED_BEZEL, cast_channel=0)
+        )
+
+    def test_cast_channel_still_rejects_a_dim_blanked_region(self):
+        # Brightness floor must still apply to the two surviving channels:
+        # a near-black/blanked region must not "match" just because its
+        # noise-level G/B ratio happens to land near ACCENT_4's.
+        dim_sample = (1, 5, 3)
+        self.assertFalse(S.matches_color(dim_sample, self._TARGET, self._CRUSHED_BEZEL, cast_channel=0))
+
+    def test_cast_channel_none_is_the_default_and_unchanged(self):
+        # Passing no cast_channel must behave exactly as before (no
+        # regression to the default signature/behavior).
+        sampled = (67, 181, 132)
+        bezel = (26, 31, 43)
+        self.assertEqual(
+            S.matches_color(sampled, self._TARGET, bezel),
+            S.matches_color(sampled, self._TARGET, bezel, cast_channel=None),
+        )
+
+    def test_chromaticity_excluding_drops_the_named_channel(self):
+        self.assertEqual(S._chromaticity_excluding((10, 30, 60), 0), (30 / 90, 60 / 90))
+        self.assertEqual(S._chromaticity_excluding((0, 0, 0), 1), (0.0, 0.0))
+
+
 class ParseSampleJsonTest(unittest.TestCase):
     def test_parses_region_and_bezel(self):
         stdout = '{"region":{"X":10,"Y":20,"W":8,"H":8,"R":92,"G":192,"B":110},"bezel":{"X":100,"Y":100,"W":8,"H":8,"R":26,"G":31,"B":43}}'

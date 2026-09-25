@@ -590,14 +590,24 @@ _ACCENT_1_RGB = (0xE8, 0x97, 0x4E)
 _ACCENT_5_RGB = (0xD6, 0x55, 0x5F)
 
 #: Mirrored from UI_THEME_COLOR_BG_HEX (ui_theme.h); the drift guard is
-#: test_bench_test_cases_lcd.py's ThemeMirrorDriftTest. Sampled at widget
-#: (5, 5), inside scr's 8 px outer padding: on home that is under the
-#: transparent top-left auth-reset corner zone (ui_page_home.c, bg_opa
-#: TRANSP) and above the transparent topbar, so it renders as screen
-#: background. It is only a few frame pixels from the panel edge, though,
-#: so geometry drift can put it on the bezel -- which is why it is
-#: diagnostic only (judge_lcd_home_idle) and never softens a verdict.
-_BG_REFERENCE_XY = (5, 5)
+#: test_bench_test_cases_lcd.py's ThemeMirrorDriftTest. It is diagnostic
+#: only (judge_lcd_home_idle) and never softens a verdict on its own --
+#: it only feeds ``cast_channel`` below, which is itself gated (see
+#: matches_color()'s docstring).
+#:
+#: 2026-09-25: moved off widget (5, 5). That point was originally chosen
+#: because it renders as plain screen background (ui_page_home.c's
+#: transparent top-left corner zone above the transparent topbar) -- but
+#: ui_page_home.c has since grown a temperature-graph widget spanning most
+#: of the left half of the home page, and (5, 5) now reliably samples that
+#: graph's gradient fill instead (bright, e.g. RGB(113,217,253) -- nowhere
+#: near dark background), which made this diagnostic's chroma_offset noisy
+#: and occasionally borderline against CAST_CHROMA_THRESHOLD even on
+#: ordinary, non-cast captures. (470, 5) -- just left of the topbar's
+#: right-side icons, right of the graph -- was checked against seven bench
+#: captures across three pages (home/config_hub/temperature) and reliably
+#: reads dark background with no widget on any of them.
+_BG_REFERENCE_XY = (470, 5)
 _BG_RGB = (0x1A, 0x1F, 0x2B)
 
 #: Mirrored from UI_THEME_COLOR_CARD_HEX/UI_THEME_COLOR_TEXT_PRIMARY_HEX
@@ -668,10 +678,48 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
     start_matches: Optional[bool] = None
     pause_hidden: Optional[bool] = None
     try:
+        # Background reference sample (2026-09-24), computed FIRST so its
+        # cast diagnosis can feed the Start-button match below. See
+        # matches_color()'s "cast_channel" branch: a severe camera white-
+        # balance cast can clip one whole channel to 0 across the entire
+        # frame (bezel and background included), which is unrecoverable
+        # information loss, not merely a dim reading -- when this reference
+        # (expected to read the theme's dark, but non-zero, background)
+        # shows exactly that signature, the crushed channel is dropped from
+        # the Start-button color comparison rather than trusted as signal.
+        # This never widens the check for an ordinary (uncast) frame: the
+        # gate below (CAST_CHANNEL_CRUSH_MAX) requires the reference itself
+        # to read essentially clipped, not just dark.
+        bg_sample = lcd_sampler.sample_widget(image_path, *_BG_REFERENCE_XY, repo_root=ctx.get("repo_root"))
+        bg_offset = lcd_sampler.chroma_offset(bg_sample.region, _BG_RGB)
+        bg_on_bezel = (
+            bg_sample.bezel is not None
+            and lcd_sampler.color_distance(bg_sample.region, bg_sample.bezel) < lcd_sampler.MIN_BEZEL_CONTRAST
+        )
+        cast_suspected = (not bg_on_bezel) and bg_offset > lcd_sampler.CAST_CHROMA_THRESHOLD
+        cast_channel: Optional[int] = None
+        if cast_suspected:
+            crushed = min(range(3), key=lambda i: bg_sample.region[i])
+            if bg_sample.region[crushed] < lcd_sampler.CAST_CHANNEL_CRUSH_MAX:
+                cast_channel = crushed
+        color_debug["bg_reference"] = {
+            "region_xy": _BG_REFERENCE_XY,
+            "sampled_rgb": bg_sample.region,
+            "bezel_rgb": bg_sample.bezel,
+            "target_rgb": _BG_RGB,
+            "chroma_offset": round(bg_offset, 4),
+            "cast_threshold": lcd_sampler.CAST_CHROMA_THRESHOLD,
+            "reads_as_bezel": bg_on_bezel,
+            "cast_suspected": cast_suspected,
+            "cast_channel": cast_channel,
+            "cast_channel_crush_max": lcd_sampler.CAST_CHANNEL_CRUSH_MAX,
+        }
         if start is not None and not start.get("hidden"):
             sample = lcd_sampler.sample_widget_body(image_path, start["cx"], start["cy"], repo_root=ctx.get("repo_root"))
             if sample.bezel is not None:
-                start_matches = lcd_sampler.matches_color(sample.region, _ACCENT_4_RGB, sample.bezel)
+                start_matches = lcd_sampler.matches_color(
+                    sample.region, _ACCENT_4_RGB, sample.bezel, cast_channel=cast_channel
+                )
                 color_debug["start"] = {
                     "region_xy": (start["cx"], start["cy"]),
                     "sample_offset_px": lcd_sampler.LABEL_AVOID_OFFSET_PX,
@@ -691,6 +739,18 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                         4,
                     ),
                     "chroma_tolerance": lcd_sampler.CHROMA_MATCH_TOLERANCE,
+                    "cast_channel": cast_channel,
+                    "degraded_chroma_distance": (
+                        round(
+                            lcd_sampler.color_distance(
+                                lcd_sampler._chromaticity_excluding(sample.region, cast_channel),
+                                lcd_sampler._chromaticity_excluding(_ACCENT_4_RGB, cast_channel),
+                            ),
+                            4,
+                        )
+                        if cast_channel is not None
+                        else None
+                    ),
                     "matches": start_matches,
                 }
         if pause is not None:
@@ -705,29 +765,6 @@ def _try_capture_and_sample(ctx: dict, targets: "list[dict]") -> "tuple[Optional
                     "off_tolerance": lcd_sampler.MIN_BEZEL_CONTRAST,
                     "is_hidden": pause_hidden,
                 }
-        # Background reference sample (2026-09-24), DIAGNOSTIC ONLY: compare
-        # a UI_THEME_COLOR_BG region's chromaticity to the theme value so a
-        # Start-button FAIL can say whether the capture itself looks off.
-        # judge_lcd_home_idle only uses this to annotate a FAIL reason; it
-        # never changes the verdict (see the comment there for the capture
-        # where this point landed on the bezel). A reference that reads as
-        # bezel is reported as such, never as a color cast.
-        bg_sample = lcd_sampler.sample_widget(image_path, *_BG_REFERENCE_XY, repo_root=ctx.get("repo_root"))
-        bg_offset = lcd_sampler.chroma_offset(bg_sample.region, _BG_RGB)
-        bg_on_bezel = (
-            bg_sample.bezel is not None
-            and lcd_sampler.color_distance(bg_sample.region, bg_sample.bezel) < lcd_sampler.MIN_BEZEL_CONTRAST
-        )
-        color_debug["bg_reference"] = {
-            "region_xy": _BG_REFERENCE_XY,
-            "sampled_rgb": bg_sample.region,
-            "bezel_rgb": bg_sample.bezel,
-            "target_rgb": _BG_RGB,
-            "chroma_offset": round(bg_offset, 4),
-            "cast_threshold": lcd_sampler.CAST_CHROMA_THRESHOLD,
-            "reads_as_bezel": bg_on_bezel,
-            "cast_suspected": (not bg_on_bezel) and bg_offset > lcd_sampler.CAST_CHROMA_THRESHOLD,
-        }
     except lcd_sampler.LcdCaptureError:
         pass
     return start_matches, pause_hidden, color_debug

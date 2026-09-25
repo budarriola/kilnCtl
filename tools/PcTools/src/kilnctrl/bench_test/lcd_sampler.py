@@ -93,9 +93,27 @@ FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
 #: Four points, inset from the widget-space corners toward the panel's
 #: centre, used only to sanity-check at runtime that FRAME_CORNERS (and
 #: thus DEFAULT_TRANSFORM) has not gone stale again the way the corners
-#: above just had. Each maps, through the transform, to a small patch of
-#: the home/idle page's own dark background (never covered by a widget on
-#: any LCD page this runner visits) -- see frame_corners_look_stale().
+#: above just had -- see frame_corners_look_stale(). This check only needs
+#: each point to land distinctly off the bezel (panel content, of whatever
+#: color), never specifically on dark background: frame_corners_look_stale()
+#: compares each sample only to the bezel, never to a target background
+#: color, so it tolerates whatever is actually drawn there.
+#:
+#: 2026-09-25 update: the LEFT two points, (5,5) and (5,315), were
+#: documented as landing on "dark background... never covered by a widget"
+#: -- that stopped being true once ui_page_home.c grew a temperature-graph
+#: widget spanning most of the left half of the home page (confirmed: those
+#: two points now read the graph's gradient fill, bright, on every capture
+#: examined, home page or not). That is harmless for THIS function (still
+#: clearly off-bezel, so still a valid "not stale" vote), but it broke the
+#: separate, stricter diagnostic in cases_lcd.py that DOES compare against a
+#: specific dark target color at the same (5, 5) point -- see
+#: cases_lcd.py's _BG_REFERENCE_XY, which was moved off this same spot for
+#: that reason. Left as-is here since moving it buys nothing: the graph
+#: covers effectively the whole left edge (checked y=5..315 at x=2..20 on
+#: seven captures spanning three pages), so no reliably-dark LEFT-side point
+#: exists on the home page any more to move to instead, and this function
+#: never needed "dark" in the first place.
 CORNER_CHECK_POINTS: Tuple[Tuple[float, float], ...] = (
     (5.0, 5.0),
     (float(LCD_WIDTH) - 5.0, 5.0),
@@ -497,6 +515,18 @@ CHROMA_MIN_BRIGHTNESS_RATIO = 0.5
 #: CHROMA_MATCH_TOLERANCE themselves.
 CAST_CHROMA_THRESHOLD = 0.15
 
+#: Absolute-value floor, in the SAME dark background reference sample
+#: CAST_CHROMA_THRESHOLD gates on, for deciding a channel is not merely dim
+#: but CRUSHED (clipped, unrecoverable) this frame -- see matches_color()'s
+#: ``cast_channel`` parameter. The theme's own darkest background
+#: (UI_THEME_COLOR_BG_HEX, 0x1a1f2b) floors every channel at 26, so a
+#: channel reading below this on that same reference is camera clipping,
+#: not real signal -- 2026-09-25 bench evidence measured it at exactly 0.0
+#: on both cast captures examined. Chosen well below 26 so an ordinary,
+#: merely-dim (not clipped) dark reading under ordinary exposure variance
+#: never trips it.
+CAST_CHANNEL_CRUSH_MAX = 10.0
+
 
 def color_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
@@ -533,10 +563,24 @@ def is_off(rgb: Tuple[int, int, int], bezel: Tuple[int, int, int], tol: float = 
     return color_distance(rgb, bezel) <= tol
 
 
+def _chromaticity_excluding(rgb: Tuple[float, float, float], channel: int) -> Tuple[float, float]:
+    """Like _chromaticity(), but normalises only the two channels other than
+    ``channel`` against each other -- see matches_color()'s ``cast_channel``
+    parameter. Never used unconditionally: dropping a channel throws away
+    real signal, and is only valid once a caller has independently proven
+    that channel's data is unusable this frame (not merely dark)."""
+    kept = [v for i, v in enumerate(rgb) if i != channel]
+    total = sum(kept)
+    if total <= 0:
+        return (0.0, 0.0)
+    return (kept[0] / total, kept[1] / total)
+
+
 def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel: Tuple[int, int, int],
                    tol: float = COLOR_MATCH_TOLERANCE, min_bezel_contrast: float = MIN_BEZEL_CONTRAST,
                    chroma_tol: float = CHROMA_MATCH_TOLERANCE,
-                   chroma_min_brightness_ratio: float = CHROMA_MIN_BRIGHTNESS_RATIO) -> bool:
+                   chroma_min_brightness_ratio: float = CHROMA_MIN_BRIGHTNESS_RATIO,
+                   cast_channel: Optional[int] = None) -> bool:
     """True if `rgb` is close to `target` AND distinctly different from
     the bezel -- a region cannot "match" a bright accent color while also
     reading as indistinguishable from the dark bezel (a camera fault or a
@@ -562,7 +606,32 @@ def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel
        numbers, never a theme source constant read informally. (2) only
        applies once the sample is at least `chroma_min_brightness_ratio` as
        bright (channel sum) as `target` -- a dark/blanked region has
-       noise-level channel ratios that can mimic any hue."""
+       noise-level channel ratios that can mimic any hue.
+
+    3. A degraded, two-channel chromaticity fallback, engaged only when the
+       caller passes ``cast_channel`` (0=R, 1=G, 2=B) -- see
+       cases_lcd.py's cast diagnostic. 2026-09-25 bench evidence: a severe
+       camera white-balance cast can crush one whole channel toward 0 across
+       the ENTIRE frame, bezel included (measured: a dark reference region
+       that should read the theme's near-black RGB(26,31,43) instead read
+       RGB(0,60,112) -- R clipped, not merely dim), which is destructive
+       information loss no per-channel gain correction can undo (verified:
+       multiplying the crushed channel by any recoverable gain derived from
+       a genuine near-white on-panel reference still left it near 0). (1)
+       and (2) both fail in this case for a genuinely-correct color, because
+       both still weigh the ruined channel. (3) drops that one channel
+       entirely and compares only the remaining two channels' ratio to each
+       other -- still comparing two *sampled* numbers, never a bare theme
+       constant, and still gated on the same brightness floor (applied to
+       the two surviving channels' own sum) so a near-black region can't
+       coast through on noise. This is deliberately NOT tried unconditionally:
+       a caller must first prove (independently of this widget's own sample)
+       that the named channel is unusable this frame -- otherwise a
+       genuinely wrong hue that happens to share the target's OTHER two
+       channels' ratio (e.g. a grey or blue button when the target is green)
+       would wrongly pass. See cases_lcd.py's cast_channel derivation and
+       test_bench_test_lcd_sampler.py's negative test (a red sample under
+       the same crushed-R condition must still fail)."""
     if color_distance(rgb, bezel) < min_bezel_contrast:
         return False
     if color_distance(rgb, target) <= tol:
@@ -570,6 +639,15 @@ def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel
     # Chromaticity is meaningless for a dim sample (see
     # CHROMA_MIN_BRIGHTNESS_RATIO): a blanked or unlit region must never
     # reach the scale-invariant comparison below.
-    if sum(rgb) < chroma_min_brightness_ratio * sum(target):
-        return False
-    return color_distance(_chromaticity(rgb), _chromaticity(target)) <= chroma_tol
+    if sum(rgb) >= chroma_min_brightness_ratio * sum(target):
+        if color_distance(_chromaticity(rgb), _chromaticity(target)) <= chroma_tol:
+            return True
+    if cast_channel is not None:
+        kept_rgb = [v for i, v in enumerate(rgb) if i != cast_channel]
+        kept_target = [v for i, v in enumerate(target) if i != cast_channel]
+        if sum(kept_rgb) < chroma_min_brightness_ratio * sum(kept_target):
+            return False
+        return color_distance(
+            _chromaticity_excluding(rgb, cast_channel), _chromaticity_excluding(target, cast_channel)
+        ) <= chroma_tol
+    return False
