@@ -1522,6 +1522,116 @@ static void run_section12_inject_failed_wired(void)
     free(br_text);
 }
 
+// 2026-09-24: lvgl_port_collect_tap_targets()'s cross-task handoff. The
+// result buffer (s_ui_walk_targets) is shared between lvgl_port_task (the
+// only task allowed to walk the LVGL tree) and the requester; a torn or stale
+// copy-out hands kiln_ui_click_by_name() a name/coordinate pair that does not
+// belong together, and it then injects a REAL touch at those coordinates.
+// None of this is host-runnable (lvgl_port.c needs LVGL and real FreeRTOS
+// threads), so this pins the four invariants that make it safe:
+//   1. the requester accepts a completion only when served_seq matches its
+//      own request's sequence (a late completion of an abandoned request is
+//      not taken as a later caller's answer), and copies out only inside that
+//      check and under s_ui_walk.data;
+//   2. the sequence is bumped under s_ui_walk.data;
+//   3. lvgl_port_task walks into s_ui_walk_targets and records served_seq
+//      only under s_ui_walk.data, taken with a ZERO timeout (it never blocks
+//      on a requester), and never takes s_ui_walk.data any other way;
+//   4. lvgl_port_task gives `done` only after releasing `data`.
+static void run_section13_ui_walk_handoff_wired(void)
+{
+    TEST_SECTION("lvgl_port_collect_tap_targets() cross-task handoff: seq-matched "
+                 "completion, copy-out and walk both under s_ui_walk.data, zero-timeout "
+                 "take on lvgl_port_task, done given after data released -- source-text "
+                 "scan (lvgl_port.c is not host-compilable)");
+
+    char *text = read_file_any(LVGL_PORT_C_CANDIDATES, 3);
+    char *stripped = text ? strip_c_comments(text) : NULL;
+    if (!stripped) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/lvgl_port.c");
+        free(text);
+        return;
+    }
+
+    // --- requester side ---
+    size_t len = 0;
+    const char *body = find_function_body(stripped, "size_t lvgl_port_collect_tap_targets(", &len);
+    char *fn = body ? dup_range(body, len) : NULL;
+    TEST_CHECK(fn != NULL, "found lvgl_port_collect_tap_targets()'s function body");
+    if (fn) {
+        const char *issue_take = strstr(fn, "xSemaphoreTake(s_ui_walk.data,");
+        const char *bump = strstr(fn, "++s_ui_walk.req_seq");
+        const char *issue_give = bump ? strstr(bump, "xSemaphoreGive(s_ui_walk.data)") : NULL;
+        TEST_CHECK(issue_take != NULL && bump != NULL && issue_give != NULL && issue_take < bump,
+                   "the requester must bump s_ui_walk.req_seq (`++s_ui_walk.req_seq`) while "
+                   "holding s_ui_walk.data -- otherwise lvgl_port_task can record a "
+                   "served_seq for a half-issued request.");
+
+        const char *seq_if = strstr(fn, "if (s_ui_walk.served_seq == my_seq) {");
+        TEST_CHECK(seq_if != NULL,
+                   "the requester must accept a completion only under "
+                   "`if (s_ui_walk.served_seq == my_seq) {` -- without it, a late completion "
+                   "of an earlier, timed-out request (or a walk still in flight when this "
+                   "request was issued) is taken as this caller's answer.");
+        if (seq_if) {
+            // The copy-out take is the LAST data take before the seq check.
+            const char *copy_take = NULL;
+            for (const char *t = strstr(fn, "xSemaphoreTake(s_ui_walk.data,"); t && t < seq_if;
+                 t = strstr(t + 1, "xSemaphoreTake(s_ui_walk.data,")) {
+                copy_take = t;
+            }
+            const char *copy = strstr(seq_if, "memcpy(out, s_ui_walk_targets,");
+            const char *copy_give = strstr(seq_if, "xSemaphoreGive(s_ui_walk.data)");
+            TEST_CHECK(copy_take != NULL && copy_take > issue_give && copy != NULL &&
+                           copy_give != NULL && copy < copy_give,
+                       "the copy-out (`memcpy(out, s_ui_walk_targets, ...)`) must sit inside "
+                       "the served_seq check, after a fresh take of s_ui_walk.data and before "
+                       "its release -- otherwise lvgl_port_task can start another walk into "
+                       "s_ui_walk_targets mid-copy (a torn name/coordinate pair).");
+            int copies = 0;
+            for (const char *c = strstr(fn, "s_ui_walk_targets"); c; c = strstr(c + 1, "s_ui_walk_targets")) {
+                copies++;
+            }
+            TEST_CHECK(copies == 1,
+                       "s_ui_walk_targets must be read exactly once in the requester (the "
+                       "seq-checked, locked copy-out) -- a second read is unguarded.");
+        }
+        free(fn);
+    }
+
+    // --- lvgl_port_task side ---
+    body = find_function_body(stripped, "static void lvgl_port_task(", &len);
+    fn = body ? dup_range(body, len) : NULL;
+    TEST_CHECK(fn != NULL, "found lvgl_port_task()'s function body");
+    if (fn) {
+        const char *take = strstr(fn, "xSemaphoreTake(s_ui_walk.data, 0)");
+        int takes = 0;
+        for (const char *t = strstr(fn, "xSemaphoreTake(s_ui_walk."); t; t = strstr(t + 1, "xSemaphoreTake(s_ui_walk.")) {
+            takes++;
+        }
+        TEST_CHECK(take != NULL && takes == 1,
+                   "lvgl_port_task must take s_ui_walk.data only with a zero timeout "
+                   "(`xSemaphoreTake(s_ui_walk.data, 0)`) and take no other s_ui_walk "
+                   "semaphore -- a blocking take here stalls the LVGL task on a requester.");
+        const char *walk = take ? strstr(take, "kiln_ui_collect_tap_targets(s_ui_walk_targets,") : NULL;
+        const char *served = take ? strstr(take, "s_ui_walk.served_seq = s_ui_walk.req_seq") : NULL;
+        const char *give_data = take ? strstr(take, "xSemaphoreGive(s_ui_walk.data)") : NULL;
+        const char *give_done = give_data ? strstr(give_data, "xSemaphoreGive(s_ui_walk.done)") : NULL;
+        TEST_CHECK(walk != NULL && served != NULL && give_data != NULL && walk < give_data &&
+                       served < give_data,
+                   "lvgl_port_task must walk into s_ui_walk_targets and record "
+                   "`s_ui_walk.served_seq = s_ui_walk.req_seq` while holding s_ui_walk.data.");
+        TEST_CHECK(give_done != NULL && strstr(fn, "xSemaphoreGive(s_ui_walk.done)") == give_done,
+                   "lvgl_port_task must give s_ui_walk.done only AFTER releasing "
+                   "s_ui_walk.data -- a requester woken while data is still held can burn "
+                   "its remaining window waiting for the lock.");
+        free(fn);
+    }
+
+    free(stripped);
+    free(text);
+}
+
 void run_test_display_power_wiring(void)
 {
     run_section1_screen_idle_calls_policy();
@@ -1537,4 +1647,5 @@ void run_test_display_power_wiring(void)
     run_section10_swallow_diag_wired();
     run_section11_inject_verdict_handoff_wired();
     run_section12_inject_failed_wired();
+    run_section13_ui_walk_handoff_wired();
 }
