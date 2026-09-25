@@ -6952,6 +6952,20 @@ static void test_task_entry_reads_before_taking_s_at_lock(void)
         TEST_CHECK(rd && lk && rd < e && lk < e && rd < lk,
                    "MUST GO RED if task_entry() takes s_at.lock before its thermo_channels_read() "
                    "pre-lock peek/read -- move the read back before the lock");
+        /* A peek that saw not-running took no reading, so the tick body must
+         * be gated on peek_active too (never fed a NULL/unfilled snapshot):
+         * an all-invalid tick bumps guard 6's streak and trips SENSOR_INVALID
+         * at a configured debounce of 1. Pin the gate, its position after the
+         * lock, and that the only tick call passes the filled snapshot. */
+        const char *gate = strstr(b, "if (!not_running && peek_active)");
+        const char *call = strstr(b, "autotune_engine_tick_locked_impl(");
+        TEST_CHECK(gate && gate < e && lk && gate > lk,
+                   "task_entry() gates the tick body on peek_active after taking s_at.lock "
+                   "(if (!not_running && peek_active))");
+        TEST_CHECK(ae_count_in_range(b, e, "autotune_engine_tick_locked_impl(") == 1 &&
+                       ae_count_in_range(b, e, "autotune_engine_tick_locked_impl(&pre_lock_snap)") == 1 &&
+                       call && gate && call > gate,
+                   "task_entry()'s only tick call passes &pre_lock_snap, inside the peek_active gate");
     }
 
     if (!ae_find_body(code, "static void autotune_engine_tick_locked_impl(", "static void task_entry(void *arg)", &b, &e)) {

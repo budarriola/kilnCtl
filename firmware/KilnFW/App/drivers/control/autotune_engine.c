@@ -839,8 +839,9 @@ static void task_entry(void *arg)
          * window (peek missed it) is not ticked either, for this one tick --
          * never ticked on a missing reading, which would bump guard 6's
          * sensor_fault_streak and could trip SENSOR_INVALID outright at a
-         * configured debounce of 1. prev_tick is left alone, so the next
-         * tick's dt_ms covers both periods. Same rule as profile_executor.c's
+         * configured debounce of 1. prev_tick is left alone: autotune_begin_
+         * run_locked() set it at the start, so the next tick's dt_ms runs
+         * from that start, not two periods. Same rule as profile_executor.c's
          * executor_task_entry(). */
         bool peek_active = state_is_running(s_at.state);
         ThermoChannelSnapshot pre_lock_snap;

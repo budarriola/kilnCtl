@@ -10421,6 +10421,12 @@ static void test_task_entry_reads_before_taking_s_exec_lock(void)
     TEST_CHECK(skip && skip < e && lk && skip > lk,
                "executor_task_entry() skips the RUNNING tick body when the pre-lock peek missed "
                "(if (!peek_running) after xSemaphoreTake(s_exec.lock ...))");
+    /* ...and before the body consumes anything: dt/prev_control_tick and
+     * the pre-lock snapshot must not be touched on a skipped tick. */
+    const char *dt_upd = strstr(b, "s_exec.prev_control_tick = now");
+    const char *use = strstr(b, "pre_lock_snap.raw_c");
+    TEST_CHECK(skip && dt_upd && use && dt_upd < e && use < e && skip < dt_upd && skip < use,
+               "the !peek_running skip precedes the prev_control_tick update and the snapshot's use");
 
     free(code);
 }

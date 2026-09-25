@@ -798,8 +798,9 @@ void executor_task_entry(void *arg)
          * Reading the bus here instead would reintroduce the lock-held producer
          * call this peek exists to avoid. Relays are already off (every
          * not-RUNNING tick forced them off), last_tick_tick above still feeds
-         * guard 9, and prev_control_tick is left alone so the next tick's
-         * dt_ms honestly covers both periods. */
+         * guard 9, and prev_control_tick is left alone: run()/resume() set it
+         * at their commit point, so the next tick's dt_ms runs from that
+         * commit (about one period plus the peek-to-lock gap), not two. */
         if (!peek_running) {
             xSemaphoreGive(s_exec.lock);
             continue;
