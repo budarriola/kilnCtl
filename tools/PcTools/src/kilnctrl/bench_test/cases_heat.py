@@ -19,6 +19,7 @@ helpers cases_smoke.py defines; imported from there rather than duplicated.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -158,17 +159,28 @@ def _check_zone_ceilings(ctx: dict, zone_mask: int, target_c: float) -> Tuple[bo
         snapshot = get_zones(host)
     except Exception:
         return True, ""
+    return _ceiling_problem(snapshot, zone_mask, target_c)
+
+
+def _ceiling_problem(snapshot: dict, zone_mask: int, target_c: float) -> Tuple[bool, str]:
+    """The pure half of `_check_zone_ceilings`, against an already-fetched
+    GET /api/zones snapshot (HP-07 reuses it on the snapshot it is about to
+    bake into its own restore body). `max_temp_c <= 0` is skipped:
+    0.0 is firmware's "no ceiling configured" sentinel, which
+    `profile_executor_run.c`'s `profile_zones_have_ceiling()` refuses with
+    its own specific message -- it is not a lowered leftover."""
     for zone in snapshot.get("zones", []) or []:
         idx = zone.get("index")
         if idx is None or not (zone_mask & (1 << idx)):
             continue
         max_temp_c = zone.get("max_temp_c")
-        if max_temp_c is None:
+        if max_temp_c is None or not (max_temp_c > 0.0):
             continue
         if max_temp_c < target_c + _CEILING_PREFLIGHT_MARGIN_C:
             return False, (
                 f"zone {idx} max_temp_c {max_temp_c:.1f}C is below planned target "
-                f"{target_c:.1f}C -- likely leftover from an HP-07 restore failure"
+                f"{target_c:.1f}C + {_CEILING_PREFLIGHT_MARGIN_C:.1f}C margin -- possibly a "
+                f"leftover from a failed HP-07 restore; never raised automatically"
             )
     return True, ""
 
@@ -561,43 +573,72 @@ def _case_hp03(ctx: dict) -> CaseResult:
         on_off_body = zones_http_client.build_post_body(snapshot, preset)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build the on/off preset body: {exc}")
+    result: Optional[CaseResult] = None
+    restore_note: Optional[str] = None
+    inflight: Optional[BaseException] = None
     try:
-        post_result = zones_http_client.post_zones(host, on_off_body)
-    except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (on/off config) failed: {exc}")
-    if post_result != "ok":
-        return CaseResult(Verdict.FAIL, reason=f"POST /api/zones (on/off config) refused: {post_result}")
-    try:
-        ok, reason, _ambient = _start_bench_profile(
-            ctx, zone_mask=1 << target_zone, target_offset_c=10.0,
-        )
-        if not ok:
-            return CaseResult(Verdict.FAIL, reason=reason)
-        srv = _srv(ctx)
-        sleep = ctx.get("_sleep", time.sleep)
-        now = ctx.get("_now", time.monotonic)
-        deadline = now() + 360.0
-        relay_states: List[bool] = []
-        temps_c: List[Optional[float]] = []
-        state = "running"
-        while now() < deadline:
-            st = srv._profiles.get_exec_status()
-            state = st.state_name
-            zs = _zone_status(st, target_zone)
-            if zs is not None:
-                relay_states.append(bool(zs.relay_commanded_on))
-            zone_temps = _zone_temps(ctx)
-            temps_c.append(zone_temps.get(target_zone))
-            if state in ("done", "faulted"):
-                break
-            sleep(2)
-        return J.judge_on_off_zone_cycling(relay_states, temps_c, target_c=target_c, hyst_c=hyst_c)
+        # Inside the try so the restore still runs if this POST raises after
+        # firmware already committed it (e.g. a read timeout) -- same
+        # reasoning as HP-07's lowering POST.
+        try:
+            post_result = zones_http_client.post_zones(host, on_off_body)
+        except Exception as exc:
+            result = CaseResult(Verdict.FAIL, reason=f"POST /api/zones (on/off config) failed: {exc}")
+        else:
+            if post_result != "ok":
+                result = CaseResult(Verdict.FAIL, reason=f"POST /api/zones (on/off config) refused: {post_result}")
+            else:
+                try:
+                    result = _run_hp03_profile(ctx, target_zone, target_c, hyst_c)
+                except Exception as exc:
+                    result = CaseResult(Verdict.FAIL, reason=f"HP-03 run raised {type(exc).__name__}: {exc}")
+    except BaseException as exc:
+        inflight = exc
+        raise
     finally:
         _cleanup_bench_profile(ctx)
-        try:
-            zones_http_client.post_zones(host, restore_body)
-        except Exception:
-            pass
+        restore_error = _post_zones_restore(ctx, host, restore_body)
+        if restore_error is not None:
+            restore_note = (
+                f"zone {target_zone} zones config restore failed ({restore_error}) -- "
+                f"may be left as on/off (zone_type 1); restore by hand"
+            )
+            _surface_restore_failure_on_inflight(inflight, restore_note)
+    if restore_note:
+        if result is None:
+            return CaseResult(Verdict.FAIL, reason=restore_note)
+        combined = f"{result.reason}; {restore_note}" if result.reason else restore_note
+        return CaseResult(Verdict.FAIL, reason=combined, observed=result.observed)
+    return result
+
+
+def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: float) -> CaseResult:
+    """HP-03's start/poll/judge body, once the on/off zone config is POSTed.
+    Split out so `_case_hp03` owns the restore and can surface it."""
+    ok, reason, _ambient = _start_bench_profile(
+        ctx, zone_mask=1 << target_zone, target_offset_c=10.0,
+    )
+    if not ok:
+        return CaseResult(Verdict.FAIL, reason=reason)
+    srv = _srv(ctx)
+    sleep = ctx.get("_sleep", time.sleep)
+    now = ctx.get("_now", time.monotonic)
+    deadline = now() + 360.0
+    relay_states: List[bool] = []
+    temps_c: List[Optional[float]] = []
+    state = "running"
+    while now() < deadline:
+        st = srv._profiles.get_exec_status()
+        state = st.state_name
+        zs = _zone_status(st, target_zone)
+        if zs is not None:
+            relay_states.append(bool(zs.relay_commanded_on))
+        zone_temps = _zone_temps(ctx)
+        temps_c.append(zone_temps.get(target_zone))
+        if state in ("done", "faulted"):
+            break
+        sleep(2)
+    return J.judge_on_off_zone_cycling(relay_states, temps_c, target_c=target_c, hyst_c=hyst_c)
 
 
 #: Margin above ambient the lowered `max_temp_c` limit is set to (HP-07).
@@ -619,19 +660,11 @@ _HP07_RESTORE_ATTEMPTS = 2
 _HP07_RESTORE_RETRY_DELAY_S = 5.0
 
 
-def _restore_zone_limit(
-    ctx: dict, host: str, restore_body: str, target_zone: int,
-    lowered_limit_c: float, original_max_temp_c: Optional[float],
-) -> Optional[str]:
-    """POSTs `restore_body` to put zone `target_zone`'s `max_temp_c` back to
-    its pre-HP-07 value, retrying once after a short delay in case the board
-    rebooted mid-run and simply is not ready to accept an HTTP POST yet on
-    the first attempt. Returns None on a confirmed "ok" restore, or a
-    message naming the zone, the value the restore attempt(s) left behind,
-    and the original value it should have restored -- callers must surface
-    this loudly (never swallow it): a zone left at `lowered_limit_c` refuses
-    every subsequent case's own profile start (see `_check_zone_ceilings`,
-    which exists specifically to catch this class of leftover)."""
+def _post_zones_restore(ctx: dict, host: str, restore_body: str) -> Optional[str]:
+    """POSTs a GET-snapshot-derived `restore_body` back to /api/zones,
+    retrying once after `_HP07_RESTORE_RETRY_DELAY_S`. Returns None on an
+    "ok" response, else the last attempt's error text. Shared by HP-03 and
+    HP-07, the two cases that change persistent zone config."""
     from .. import zones_http_client
 
     sleep = ctx.get("_sleep", time.sleep)
@@ -647,6 +680,43 @@ def _restore_zone_limit(
             last_error = f"refused: {restore_result}"
         if attempt < _HP07_RESTORE_ATTEMPTS:
             sleep(_HP07_RESTORE_RETRY_DELAY_S)
+    return last_error
+
+
+def _surface_restore_failure_on_inflight(inflight: Optional[BaseException], note: str) -> None:
+    """A BaseException that is not an Exception (KeyboardInterrupt,
+    SystemExit, a thread-abort) escapes the case's own `except Exception`
+    and the runner's, so a restore failure computed in `finally` would be
+    dropped with the return value that never happens. Attach it to the
+    in-flight exception and write it to stderr so it can never be silent."""
+    if inflight is None:
+        return
+    try:
+        inflight.add_note(note)
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(f"bench_test heat: {note}\n")
+    except Exception:
+        pass
+
+
+def _restore_zone_limit(
+    ctx: dict, host: str, restore_body: str, target_zone: int,
+    lowered_limit_c: float, original_max_temp_c: Optional[float],
+) -> Optional[str]:
+    """POSTs `restore_body` to put zone `target_zone`'s `max_temp_c` back to
+    its pre-HP-07 value, retrying once after a short delay in case the board
+    rebooted mid-run and simply is not ready to accept an HTTP POST yet on
+    the first attempt. Returns None on a confirmed "ok" restore, or a
+    message naming the zone, the value the restore attempt(s) left behind,
+    and the original value it should have restored -- callers must surface
+    this loudly (never swallow it): a zone left at `lowered_limit_c` refuses
+    every subsequent case's own profile start (see `_check_zone_ceilings`,
+    which exists specifically to catch this class of leftover)."""
+    last_error = _post_zones_restore(ctx, host, restore_body)
+    if last_error is None:
+        return None
     original_note = f"{original_max_temp_c:.1f}C" if original_max_temp_c is not None else "unknown"
     return (
         f"zone {target_zone} max_temp_c restore failed after {_HP07_RESTORE_ATTEMPTS} "
@@ -778,9 +848,19 @@ def _case_hp07(ctx: dict) -> CaseResult:
         if zone.get("index") == target_zone:
             original_max_temp_c = zone.get("max_temp_c")
             break
+    # The restore body is this snapshot, so a ceiling ALREADY left low by an
+    # earlier failed restore would be "restored" to that same leftover value
+    # and perpetuated; and one at/below `limit_c` would make the "lowering"
+    # POST RAISE the limit. Refuse both rather than guess an original value:
+    # anything that would fail the normal cases' own ceiling preflight
+    # (ambient + 15C target + margin) needs an operator, not this case.
+    ceiling_ok, ceiling_reason = _ceiling_problem(snapshot, 1 << target_zone, ambient + 15.0)
+    if not ceiling_ok:
+        return CaseResult(Verdict.FAIL, reason=f"refusing to lower/restore: {ceiling_reason}")
 
     restore_note: Optional[str] = None
     result: Optional[CaseResult] = None
+    inflight: Optional[BaseException] = None
     try:
         # Lower the limit WHILE IDLE -- the profile has not been started yet,
         # so this POST is not subject to the RUNNING interlock 409 above.
@@ -808,6 +888,11 @@ def _case_hp07(ctx: dict) -> CaseResult:
                         Verdict.FAIL,
                         reason=f"_run_hp07_profile raised {type(exc).__name__}: {exc}",
                     )
+    except BaseException as exc:
+        # KeyboardInterrupt/SystemExit: the restore below still runs, but
+        # its note can only reach anyone via the exception itself.
+        inflight = exc
+        raise
     finally:
         # Unconditional: stop whatever is still running and delete the
         # hidden slot before touching zone config again.
@@ -815,6 +900,8 @@ def _case_hp07(ctx: dict) -> CaseResult:
         restore_note = _restore_zone_limit(
             ctx, host, restore_body, target_zone, limit_c, original_max_temp_c,
         )
+        if restore_note:
+            _surface_restore_failure_on_inflight(inflight, restore_note)
     if restore_note:
         # A failed restore must surface in the verdict, never be silently
         # swallowed -- a zone left with a 3C-above-ambient max_temp_c would

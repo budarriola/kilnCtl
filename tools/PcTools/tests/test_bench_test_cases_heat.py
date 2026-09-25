@@ -452,6 +452,75 @@ class HP03Test(unittest.TestCase):
         self.assertEqual(profiles.started, [])
 
 
+    def test_compacted_status_list_finds_zone_by_field(self):
+        """Only zone 2 participates, so `st.zones` is a length-1 list -- the
+        old positional `st.zones[2]` never saw a relay sample at all."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=False)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        calls = {"n": 0}
+        rested = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)]
+        on_target = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 34.0)]
+
+        def _read():
+            calls["n"] += 1
+            return rested if calls["n"] <= 2 else on_target
+
+        ctx["srv"]._thermo.read = _read
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_restore_failure_is_surfaced_not_swallowed(self):
+        """HP-03 changes persistent zone config too; a failed restore used to
+        be `except Exception: pass` with the "ok" text never checked."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        import kilnctrl.zones_http_client as real
+        fake_post = self.fake_zhc.post_zones
+        calls = {"n": 0}
+
+        def post(host, body):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return fake_post(host, body)
+            return "refused: busy"
+
+        real.post_zones = post
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("zone 2 zones config restore failed", result.reason)
+        self.assertEqual(calls["n"], 3, "expected on/off POST + two restore attempts")
+
+    def test_on_off_post_raising_still_restores(self):
+        """A POST that raises may still have been committed by firmware."""
+        import kilnctrl.zones_http_client as real
+        fake_post = self.fake_zhc.post_zones
+        calls = {"n": 0}
+
+        def post(host, body):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                fake_post(host, body)
+                raise OSError("read timed out")
+            return fake_post(host, body)
+
+        real.post_zones = post
+        profiles = _FakeProfilesClientHP()
+        ctx = self._ctx(profiles)
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(profiles.started, [])
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+
+
 class HP07Test(unittest.TestCase):
     def setUp(self):
         self.fake_zhc = _FakeZonesHttpClient()
@@ -700,6 +769,59 @@ class HP07Test(unittest.TestCase):
         self.assertTrue(all(s == 25.8 for s in samples[2:]))
 
 
+    def test_keyboard_interrupt_still_restores_and_attaches_failure(self):
+        """A BaseException escapes every `except Exception`, including the
+        runner's; a failed restore must then ride on the exception itself."""
+        class _InterruptedProfilesClient(_FakeProfilesClientHP):
+            def get_exec_status(self):
+                raise KeyboardInterrupt()
+
+        profiles = _InterruptedProfilesClient(exec_statuses=[_ExecStatus("running", [_ZoneExecStatusHP()])])
+        ctx = self._ctx(profiles)
+        import kilnctrl.zones_http_client as real
+        fake_post = self.fake_zhc.post_zones
+        calls = {"n": 0}
+
+        def post(host, body):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return fake_post(host, body)
+            raise OSError("board unreachable")
+
+        real.post_zones = post
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            C._case_hp07(ctx)
+        self.assertEqual(calls["n"], 3, "restore must still be attempted twice")
+        notes = getattr(cm.exception, "__notes__", [])
+        self.assertTrue(any("zone 0 max_temp_c restore failed" in n and "300.0" in n for n in notes), notes)
+
+    def test_keyboard_interrupt_with_good_restore_adds_no_note(self):
+        class _InterruptedProfilesClient(_FakeProfilesClientHP):
+            def get_exec_status(self):
+                raise KeyboardInterrupt()
+
+        profiles = _InterruptedProfilesClient(exec_statuses=[_ExecStatus("running", [_ZoneExecStatusHP()])])
+        ctx = self._ctx(profiles)
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            C._case_hp07(ctx)
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertFalse(getattr(cm.exception, "__notes__", []))
+
+    def test_refuses_to_bake_a_leftover_low_ceiling_into_its_restore(self):
+        """The restore body is the pre-lowering snapshot; a ceiling already
+        left low (36.4C, the 2026-09-24 leftover) must not be lowered and
+        then "restored" to itself, and must never be raised by this case."""
+        self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 36.4
+        profiles = _FakeProfilesClientHP()
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("refusing to lower/restore", result.reason)
+        self.assertIn("36.4", result.reason)
+        self.assertEqual(self.fake_zhc.posted_bodies, [])
+        self.assertEqual(profiles.started, [])
+
+
 class ZoneCeilingPreflightTest(unittest.TestCase):
     """`_check_zone_ceilings` / its wiring into `_start_bench_profile`:
     refuses a normal (implicit-target) heat case before ever touching the
@@ -756,6 +878,34 @@ class ZoneCeilingPreflightTest(unittest.TestCase):
         _always_ok_preflight(ctx)
         ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
         self.assertTrue(ok, reason)
+
+
+    def test_zero_ceiling_sentinel_is_not_flagged_as_a_leftover(self):
+        """max_temp_c == 0.0 is firmware's "no ceiling configured" state,
+        refused by profile_zones_have_ceiling() with its own message."""
+        self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 0.0
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv, "host": "10.0.0.5"}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertTrue(ok, reason)
+
+    def test_non_participating_low_zone_is_ignored(self):
+        self.fake_zhc.snapshot["zones"][1]["max_temp_c"] = 30.0
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv, "host": "10.0.0.5"}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertTrue(ok, reason)
+
+    def test_never_writes_zones_config(self):
+        self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 30.0
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv, "host": "10.0.0.5"}
+        _always_ok_preflight(ctx)
+        C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertEqual(self.fake_zhc.posted_bodies, [])
+        self.assertEqual(self.fake_zhc.snapshot["zones"][0]["max_temp_c"], 30.0)
 
 
 class HP08Test(unittest.TestCase):
