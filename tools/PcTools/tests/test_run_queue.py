@@ -244,6 +244,31 @@ class CheckNoFaultTest(unittest.TestCase):
             rq.check_no_fault(_exec([0, 2, 0]))
 
 
+class CheckNoStaleZoneLatchTest(unittest.TestCase):
+    # HP-02, 2026-09-25: relay_authority's per-zone latch could survive a
+    # DONE-without-halt run and stick a zone at near-zero relay-on time in a
+    # later run that reactivates it, while every other field (fault_guard,
+    # duty) still reported normally. See run_queue.zone_blocked_mask()'s and
+    # check_no_stale_zone_latch()'s own doc comments, and
+    # profile_executor_run.c's clear_stale_zone_latches_for_new_run() for the
+    # firmware-side fix this corroborates from the PC side.
+
+    def test_no_overlap_ok(self):
+        rq.check_no_stale_zone_latch({"zone_mask": 0x07, "zone_blocked_mask": 0x00})
+
+    def test_blocked_bit_outside_active_mask_ok(self):
+        # zone 3 latched but not part of this run's zone_mask -- harmless.
+        rq.check_no_stale_zone_latch({"zone_mask": 0x07, "zone_blocked_mask": 0x08})
+
+    def test_active_zone_latched_raises(self):
+        # zone 2 (bit 2) is both active in this run and still latched blocked.
+        with self.assertRaises(rq.RunQueueFaultError):
+            rq.check_no_stale_zone_latch({"zone_mask": 0x07, "zone_blocked_mask": 0x04})
+
+    def test_missing_field_defaults_to_unblocked(self):
+        rq.check_no_stale_zone_latch({"zone_mask": 0x07})  # must not raise
+
+
 class CheckTargetsWithinCeilingTest(unittest.TestCase):
     def test_within_ceiling_ok(self):
         rq.check_targets_within_ceiling(_plan([20, 45, 60, 45]), _zones([80.0, 80.0, 80.0]))

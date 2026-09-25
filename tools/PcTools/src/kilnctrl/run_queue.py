@@ -383,6 +383,39 @@ def check_not_faulted(exec_body: dict) -> None:
             "queue, not advancing to the next entry")
 
 
+def zone_blocked_mask(exec_body: dict) -> int:
+    """relay_authority's latched per-zone block mask from a
+    ``GET /api/profile_exec`` body's ``zone_blocked_mask`` (bit N = zone N
+    still held blocked by relay_authority's own leaf latch --
+    profile_executor_state.h's field doc comment, relay_authority.h's
+    ``relay_authority_zone_latched_blocked()``). Read independent of
+    ``state`` on purpose: the latch can outlive the run that set it -- that
+    was exactly the HP-02 (2026-09-25) leak, fixed by
+    profile_executor_run.c's ``clear_stale_zone_latches_for_new_run()``."""
+    return int(exec_body.get("zone_blocked_mask", 0))
+
+
+def check_no_stale_zone_latch(exec_body: dict) -> None:
+    """Raise :class:`RunQueueFaultError` if relay_authority still shows any
+    zone this run's own ``zone_mask`` activates as latched blocked.
+
+    HP-02, 2026-09-25: a 3-zone firing left one zone at +1.9C while the
+    others rose normally -- duty computed fine while every relay command for
+    that zone was silently refused at the relay_authority chokepoint by a
+    stale per-zone latch from an earlier, never-explicitly-halted run. Fixed
+    at the source (profile_executor_run.c), but this is cheap corroborating
+    evidence from the PC side that the fix is doing its job on a real board."""
+    mask = zone_blocked_mask(exec_body)
+    zm = int(exec_body.get("zone_mask", 0))
+    stuck = mask & zm
+    if stuck:
+        raise RunQueueFaultError(
+            f"zone_blocked_mask=0x{mask:02x} includes active zone(s) 0x{stuck:02x} of "
+            f"zone_mask=0x{zm:02x} -- relay_authority's per-zone latch is stuck blocked "
+            "despite this run activating the zone (HP-02 2026-09-25 leak class); "
+            "stopping the queue, not advancing to the next entry")
+
+
 def profile_total_planned_s(plan_body: dict) -> float:
     """``total_planned_s`` from a ``GET /api/profile_plan`` body --
     dashboard_http.c's own duration estimate for the profile
@@ -920,6 +953,7 @@ def _poll_capture_until(cfg: RunQueueConfig, fh, stop_predicate: Callable[[dict,
         control_body = get_control(cfg.host, cfg.http_timeout_s) if cfg.capture_control_bd else None
         check_no_fault(exec_body)
         check_not_faulted(exec_body)
+        check_no_stale_zone_latch(exec_body)
         fh.write(_capture_line(cfg.now(), exec_body, status_body, control_body) + "\n")
         fh.flush()
         if stop_predicate(exec_body, status_body):

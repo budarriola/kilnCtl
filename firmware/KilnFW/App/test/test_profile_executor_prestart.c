@@ -314,9 +314,39 @@ bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, u
     return s_test_relay_authority_zone_blocked;
 }
 
+/* Real, persistent fake -- mirrors relay_authority.c's own static
+ * s_zone_blocked[] array: it survives across separate profile_executor_run()/
+ * halt() calls within one test the same way the real module's file-scope
+ * static does across separate firings on a real board, since nothing in
+ * profile_executor.c's own state (s_exec, memset by reset_relay_claim_test_
+ * state()) is the same storage. Deliberately NOT cleared by reset_relay_
+ * claim_test_state() -- that would silently defeat any test relying on the
+ * latch surviving a simulated "new run", which is exactly what test_stale_
+ * per_zone_latch_leaks_from_undismissed_done_into_new_run() below tests.
+ * reset_relay_authority_latch_stub() clears it explicitly for tests that
+ * need a clean board. */
+static bool s_test_zone_latch[MAX31856_CHANNEL_COUNT];
+static void reset_relay_authority_latch_stub(void)
+{
+    memset(s_test_zone_latch, 0, sizeof(s_test_zone_latch));
+}
 void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
 {
-    (void)zone_index; (void)blocked;
+    if (zone_index < MAX31856_CHANNEL_COUNT) {
+        s_test_zone_latch[zone_index] = blocked;
+    }
+}
+bool relay_authority_zone_latched_blocked(uint8_t zone_index)
+{
+    return (zone_index < MAX31856_CHANNEL_COUNT) && s_test_zone_latch[zone_index];
+}
+uint8_t relay_authority_latched_blocked_mask(void)
+{
+    uint8_t mask = 0;
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        if (s_test_zone_latch[i]) mask |= (uint8_t)(1u << i);
+    }
+    return mask;
 }
 
 /* Instrumentation for the relay-claim-release tests below (see
@@ -1808,6 +1838,73 @@ static void test_escalate_guard_trip_all_zones_faulted_releases_relay_claim(void
     TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once, on the "
                                             "trip that actually ends the run");
     TEST_CHECK(g_last_release_mask == 0x0F, "must release exactly claimed_relay_mask");
+}
+
+// 2026-09-25, HP-02: a 3-zone firing left zone 2 at +1.9C while zones 0/1
+// rose ~14C. Proves the leak by hand -- run A trips zone 2's per-zone guard
+// and reaches DONE on its own (never halted/dismissed, exactly the
+// production schedule-exhausted path in profile_executor.c, which never
+// calls clear_this_runs_faults()); run B activates only zone 0 and also
+// finishes on its own, never touching zone 2; run C reactivates zone 2.
+// Without clear_stale_zone_latches_for_new_run() (profile_executor_run.c),
+// zone 2 enters run C still latched blocked even though run C marks it
+// active -- duty would compute normally while every relay command is
+// silently refused at the relay_authority chokepoint. FAIL-BEFORE-FIX
+// evidence: commenting out this function's body (or its call site) makes
+// the final TEST_CHECK below fail; see the audit note this session's
+// SubagentHandback records for the rebuild-and-confirm procedure.
+static void test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run(void)
+{
+    TEST_SECTION("relay_authority per-zone latch -- a DONE run that is never explicitly halted/dismissed "
+                 "must not leave zone 2 blocked once a later run reactivates it (2026-09-25, HP-02)");
+    reset_relay_claim_test_state();
+    reset_relay_authority_latch_stub();
+
+    /* Run A: 3-zone firing, zone 2 trips its own per-zone guard. Continue-
+     * on-trip is on so zones 0/1 keep going -- mirrors HP-02 (z0/z1 rose
+     * fine, z2 alone was starved), and matters here only so run A does not
+     * itself immediately fault the whole run. */
+    g_continue_on_zone_trip = true;
+    s_exec.zones[0].active = true;
+    s_exec.zones[1].active = true;
+    s_exec.zones[2].active = true;
+    bool run_a_faulted = escalate_guard_trip(2, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 2 guard 1");
+    TEST_CHECK(!run_a_faulted, "sanity: zones 0/1 still healthy -- run A must not fault yet");
+    TEST_CHECK(s_test_zone_latch[2], "sanity: escalate_guard_trip() must latch zone 2 blocked");
+
+    /* Run A reaches its natural end (DONE) without ever being halted or
+     * dismissed -- profile_executor_halt() (the only caller of
+     * clear_this_runs_faults()) is never called here, exactly like the real
+     * schedule-exhausted DONE path in profile_executor.c. */
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    TEST_CHECK(s_test_zone_latch[2], "reaching DONE without a halt() must NOT clear zone 2's latch -- "
+                                      "only clear_this_runs_faults()/clear_stale_zone_latches_for_new_run() do");
+
+    /* Run B: a single-zone (zone 0 only) firing starts directly over the
+     * undismissed DONE state from run A -- profile_executor_run()'s state
+     * guard only refuses starting over RUNNING/PAUSED/FAULTED, not DONE.
+     * Zone 2 is never active in run B, so even a proper halt() of run B
+     * would skip it (clear_this_runs_faults() only clears zones marked
+     * active in the run being halted). Run B also reaches DONE on its own. */
+    memset(s_exec.zones, 0, sizeof(s_exec.zones));
+    s_exec.zones[0].active = true;
+    clear_stale_zone_latches_for_new_run(0x01); /* run B's own zone_mask -- must not touch zone 2 */
+    TEST_CHECK(s_test_zone_latch[2], "starting run B (zone 0 only) must not disturb zone 2's latch");
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    TEST_CHECK(s_test_zone_latch[2], "zone 2 must still read latched after run B, which never activated it");
+
+    /* Run C: a fresh 3-zone firing reactivates zone 2. The fix under test:
+     * profile_executor_run() must release relay_authority's stale latch for
+     * every zone the NEW run activates. */
+    memset(s_exec.zones, 0, sizeof(s_exec.zones));
+    s_exec.zones[0].active = true;
+    s_exec.zones[1].active = true;
+    s_exec.zones[2].active = true;
+    clear_stale_zone_latches_for_new_run(0x07); /* run C's zone_mask */
+
+    TEST_CHECK(!s_test_zone_latch[2], "run C reactivating zone 2 must release its stale latch from run A");
+    TEST_CHECK(!s_test_zone_latch[0] && !s_test_zone_latch[1],
+              "harmless no-op for zones that were never blocked");
 }
 
 static void test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted(void)
@@ -9554,6 +9651,7 @@ void run_test_profile_executor_prestart(void)
     test_escalate_guard_trip_abort_policy_releases_relay_claim();
     test_escalate_guard_trip_all_zones_faulted_releases_relay_claim();
     test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted();
+    test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run();
     test_pause_keeps_claim_resume_reclaims_it();
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();

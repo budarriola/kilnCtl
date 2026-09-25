@@ -242,7 +242,15 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * level fields, "mode_state_fault_latched" (bool, ~35B worst case) and
      * "mode_state_violation_count" (uint32, ~45B worst case at
      * "4294967295") -- ~80B more, 687B worst case now, still real headroom
-     * against this 960-byte fixed allowance. */
+     * against this 960-byte fixed allowance.
+     *
+     * 2026-09-25 (HP-02 latch leak): added "zone_blocked_mask" (uint8 as
+     * %u, ~25B worst case: 19-char key + quotes/colon/comma + "255") --
+     * relay_authority's own latched per-zone block mask, read-only, so a
+     * stale latch (relay_authority.h's relay_authority_zone_latched_
+     * blocked() doc comment) is observable from an existing ADMIN route
+     * instead of needing a new one (route count already 163/170). ~712B
+     * worst case now, still real headroom. */
     char *json = heap_caps_malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
         ESP_LOGE(DASH_TAG, "GET /api/profile_exec: malloc(%u) failed for the response buffer",
@@ -260,7 +268,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         "\"ramp_lock_lagging_mask\":%u,\"ramp_stretch_segment_s\":%.2f,\"ramp_stretch_total_s\":%.2f,"
         "\"ramp_dwell_credit_applied_s\":%.2f,"
         "\"fault_reason\":\"%s\",\"fault_guard\":%u,\"mode_state_fault_latched\":%s,"
-        "\"mode_state_violation_count\":%lu,"
+        "\"mode_state_violation_count\":%lu,\"zone_blocked_mask\":%u,"
         "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
         exec_state_name(st->state), st->profile_id, name_escaped, st->zone_mask, st->segment_index,
         st->segment_count, st->dwelling ? "true" : "false", (double)st->target_c,
@@ -269,6 +277,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         (double)st->ramp_stretch_segment_s, (double)st->ramp_stretch_total_s,
         (double)st->ramp_dwell_credit_applied_s, reason_escaped, st->fault_guard,
         st->mode_state_fault_latched ? "true" : "false", (unsigned long)st->mode_state_violation_count,
+        (unsigned)st->zone_blocked_mask,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
     size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE)
                    ? DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1

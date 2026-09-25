@@ -1202,6 +1202,13 @@ void exec_enter_terminal_state(profile_exec_state_t st);
 bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *detail);
 void guard9_assert_stale_tick_fault(void);
 void clear_this_runs_faults(void);
+/* Run-START counterpart to clear_this_runs_faults() (run-HALT): releases
+ * relay_authority's per-zone latch for every zone this NEW run activates,
+ * closing the leak clear_this_runs_faults() leaves for a zone that was
+ * never active in whatever run last halted (see profile_executor_run.c's
+ * call-site comment and relay_authority.h's corrected doc comment).
+ * Must be called with s_exec.lock held. */
+void clear_stale_zone_latches_for_new_run(uint8_t zone_mask);
 void force_relay_mask_off(uint8_t zi, uint8_t mask);
 void sweep_unowned_relays(void);
 

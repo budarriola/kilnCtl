@@ -67,12 +67,24 @@ void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked);
 
 /* The latched per-zone block on its own, without the global fault-source
  * check relay_authority_zone_blocked() folds in. Needed because the latch
- * survives the run that set it: profile_executor.c clears it only from
- * clear_this_runs_faults(), i.e. when the NEXT firing starts and marks that
- * zone active. Until then the zone silently refuses heat -- an autotune run
- * on it settled for three minutes, drove nothing, and reported "response too
- * small to fit (trace flat or noise-dominated)", blaming the kiln for a latch
- * left behind by an earlier trip. Reboot was the only other way out. */
+ * survives the run that set it. Two things clear it, and only two:
+ * clear_this_runs_faults() (profile_executor_halt()'s own cleanup, which
+ * only clears a zone that was marked ACTIVE in the run being halted --
+ * skipping a zone that faulted in an earlier run but isn't part of the run
+ * being halted now), and clear_stale_zone_latches_for_new_run() (called from
+ * profile_executor_run() when a NEW run starts, releasing the latch for
+ * every zone THAT run activates). Before the latter existed (fixed
+ * 2026-09-25, HP-02), a zone whose guard tripped in a run that reached
+ * DONE/FAULTED and was never explicitly halted/dismissed -- profile_
+ * executor_run()'s own state guard only refuses starting over RUNNING/
+ * PAUSED/FAULTED, not DONE -- stayed latched blocked across every
+ * subsequent run, including ones that did reactivate it, computing duty
+ * normally while every relay command was silently refused here: an
+ * autotune run on it once settled for three minutes, drove nothing, and
+ * reported "response too small to fit (trace flat or noise-dominated)",
+ * blaming the kiln for a latch left behind by an earlier trip; a 3-zone
+ * firing (HP-02) left one zone at +1.9C while its siblings rose normally.
+ * Reboot was the only other way out before this fix. */
 bool relay_authority_zone_latched_blocked(uint8_t zone_index);
 
 /* Bit N (0-based zone index) set for each zone currently latched-blocked --

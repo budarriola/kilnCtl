@@ -422,6 +422,15 @@ typedef struct {
      * order). Only the first warm_start_replayed_count entries are valid. */
     uint8_t  warm_start_replayed_segments[PROFILE_MAX_SEGMENTS];
     uint8_t  warm_start_replayed_count;
+
+    /* relay_authority's own latched per-zone block mask (relay_authority.h's
+     * relay_authority_latched_blocked_mask(), bit N = zone N), read out
+     * read-only here so a stale latch (see clear_stale_zone_latches_for_new_
+     * run()'s doc comment, HP-02 2026-09-25) is observable without a JTAG
+     * read. Independent of this run's own state -- populated even when
+     * state == PROFILE_EXEC_IDLE, since the whole point is a latch that can
+     * outlive the run that set it. */
+    uint8_t  zone_blocked_mask;
 } profile_exec_status_t;
 
 /* Snapshot for the dashboard's status API -- never blocks on the executor

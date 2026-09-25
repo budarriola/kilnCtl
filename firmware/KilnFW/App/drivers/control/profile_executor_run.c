@@ -56,6 +56,21 @@ static void history_buf_ensure_alloc(void)
     }
 }
 
+/* See profile_executor_run()'s own call-site comment for the full "why".
+ * Called with s_exec.lock already held (same as clear_this_runs_faults(),
+ * which this is the run-START counterpart to) -- relay_authority is a leaf,
+ * so no ordering concern calling it from here. Exposed via
+ * profile_executor_internal.h so the host tests can exercise it directly,
+ * the same way they call escalate_guard_trip()/clear_this_runs_faults(). */
+void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (zone_mask & (1u << zi)) {
+            relay_authority_set_zone_blocked(zi, false);
+        }
+    }
+}
+
 /* Baseline thermocouple snapshot for the ramp-start/warm-start/ambient seeds
  * set further down (under s_exec.lock). Read HERE, before s_exec.lock is
  * ever taken -- CLAUDE.md's "never hold a module lock across a producer
@@ -564,6 +579,24 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.ambient_from_cj = false;
 
     memset(s_exec.zones, 0, sizeof(s_exec.zones)); /* also zeros every zone's fs_* accumulator */
+
+    /* relay_authority's own per-zone latch is a SEPARATE module, not touched
+     * by the memset above -- release it for every zone this run is about to
+     * activate. Without this, a zone whose per-zone guard tripped in a PAST
+     * run that reached DONE/FAULTED and was never explicitly halted/
+     * dismissed stays latched blocked forever: profile_executor_halt() is
+     * the only caller of clear_this_runs_faults(), and that function only
+     * clears zones marked active in the run BEING halted -- it does nothing
+     * for a run that simply finished on its own (the natural-DONE path in
+     * profile_executor.c) or for a later run that never reactivated the
+     * stuck zone. The state guard above only refuses starting over RUNNING/
+     * PAUSED/FAULTED, not DONE, so a fresh run can start directly over an
+     * undismissed DONE run and inherit its stale latch. HP-02 (2026-09-25):
+     * a 3-zone firing where zone 2 alone read ~0C of rise while zones 0/1
+     * rose normally -- duty computed normally, every relay command silently
+     * refused at this chokepoint. See relay_authority.h's corrected comment
+     * on relay_authority_zone_latched_blocked(). */
+    clear_stale_zone_latches_for_new_run(p.zone_mask);
 
     /* PID_EXPANSION_PLAN.md Phase 7a: fresh firing-stats accumulator for
      * this run. fs_target_min_c/max_c start NAN (not 0) so the first

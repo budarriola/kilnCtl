@@ -299,6 +299,11 @@ void profile_executor_get_status(profile_exec_status_t *out)
      * moved past the run that latched it (docs/audits/
      * profile_executor_panic_2026-09-24.md). */
     out->mode_state_violation_count = s_exec.mode_state_violation_count;
+    /* Independent of s_exec.state on purpose -- see the field's own doc
+     * comment (profile_executor_state.h). relay_authority.c has no lock of
+     * its own (a plain static array read), so this needs no ordering
+     * relative to s_exec.lock either way. */
+    out->zone_blocked_mask = relay_authority_latched_blocked_mask();
     if (s_exec.state != PROFILE_EXEC_IDLE) {
         out->profile_id = s_exec.profile_id;
         strncpy(out->profile_name, s_exec.profile.name, sizeof(out->profile_name) - 1);
