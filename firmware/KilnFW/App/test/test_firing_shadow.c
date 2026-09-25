@@ -141,23 +141,32 @@ static void test_wrong_version_and_truncated_blob_rejected(void)
     TEST_CHECK(status.firings_scored == 0, "truncated blob is never trusted");
 }
 
-// Store v1 -> v2 upgrade: a real v1 blob (32 B, version 1, no
-// alloc_failed_count) left by older firmware must be rejected, never read
-// through the v2 layout.
-static void test_v1_blob_rejected_after_upgrade(void)
+// Store v1 -> v2 upgrade (2026-09-24 review advisory): a real v1 blob (32 B,
+// version 1, no alloc_failed_count) left by older firmware must be MIGRATED,
+// carrying firings_scored and every other v1 counter forward -- step 8's "at
+// least 5 firings scored" gate must not silently reset to 0 just because the
+// blob grew a new field. The only genuinely new field, alloc_failed_count,
+// has no v1 history and must come up zeroed, never guessed.
+static void test_v1_blob_migrated_counts_survive(void)
 {
     fs_reset_all();
     hal_kv_init_partition(FIRING_SHADOW_NVS_PARTITION);
 
-    uint8_t v1[32];
-    memset(v1, 0, sizeof(v1));
-    v1[0] = 1;  // version 1
-    v1[4] = 7;  // firings_scored = 7 (little-endian u32 at offset 4)
+    firing_shadow_store_blob_v1_t v1 = {0};
+    v1.version = 1;
+    v1.firings_scored = 7;
+    v1.accept_count = 4;
+    v1.reject_count = 2;
+    v1.insufficient_count = 1;
+    v1.no_matched_pairs_count = 3;
+    v1.last_verdict = (uint8_t)FIRING_COMPARE_ACCEPT;
+    v1.last_composite_normalised = 0.5f;
+
     hal_kv_handle_t h;
     TEST_CHECK(hal_kv_open(&h, FIRING_SHADOW_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
                             FIRING_SHADOW_NVS_PARTITION) == HAL_OK,
                "hal_kv open for v1 fixture");
-    TEST_CHECK(hal_kv_set_blob(&h, FIRING_SHADOW_NVS_KEY, v1, sizeof(v1)) == HAL_OK, "v1 blob written");
+    TEST_CHECK(hal_kv_set_blob(&h, FIRING_SHADOW_NVS_KEY, &v1, sizeof(v1)) == HAL_OK, "v1 blob written");
     hal_kv_commit(&h);
     hal_kv_close(&h);
 
@@ -165,8 +174,43 @@ static void test_v1_blob_rejected_after_upgrade(void)
     firing_shadow_store_start();
     firing_shadow_status_t status;
     TEST_CHECK(firing_shadow_get_status(&status), "get_status tolerates a v1 blob");
-    TEST_CHECK(status.firings_scored == 0 && status.alloc_failed_count == 0,
-               "a 32 B v1 blob is never read through the 36 B v2 layout");
+    TEST_CHECK(status.firings_scored == 7, "firings_scored survives v1 -> v2 migration");
+    TEST_CHECK(status.accept_count == 4 && status.reject_count == 2 && status.insufficient_count == 1
+                   && status.no_matched_pairs_count == 3,
+               "every v1 counter survives the migration, not just firings_scored");
+    TEST_CHECK(status.last_verdict == (uint8_t)FIRING_COMPARE_ACCEPT && status.last_composite_normalised == 0.5f,
+               "last_verdict/last_composite_normalised survive the migration too");
+    TEST_CHECK(status.alloc_failed_count == 0,
+               "alloc_failed_count has no v1 history and starts at 0, not a guess");
+}
+
+// A blob that is v1-SIZED but does not actually claim version 1 (corruption,
+// or some future format that happens to collide on size) must not be
+// migrated -- same fail-closed convention as the wrong-version/truncated
+// tests above.
+static void test_v1_sized_wrong_version_not_migrated(void)
+{
+    fs_reset_all();
+    hal_kv_init_partition(FIRING_SHADOW_NVS_PARTITION);
+
+    firing_shadow_store_blob_v1_t v1 = {0};
+    v1.version = 99;
+    v1.firings_scored = 7;
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, FIRING_SHADOW_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
+                            FIRING_SHADOW_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for v1-sized wrong-version fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, FIRING_SHADOW_NVS_KEY, &v1, sizeof(v1)) == HAL_OK,
+               "v1-sized wrong-version blob written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    firing_shadow_reset_for_test();
+    firing_shadow_store_start();
+    firing_shadow_status_t status;
+    TEST_CHECK(firing_shadow_get_status(&status), "get_status tolerates a v1-sized wrong-version blob");
+    TEST_CHECK(status.firings_scored == 0, "a v1-sized blob NOT claiming version 1 is never trusted");
 }
 
 static void test_invalid_and_out_of_range_ticks_ignored(void)
@@ -247,7 +291,8 @@ void run_test_firing_shadow(void)
     test_second_firing_produces_and_persists_verdict();
     test_never_touches_iter_tune_namespace();
     test_wrong_version_and_truncated_blob_rejected();
-    test_v1_blob_rejected_after_upgrade();
+    test_v1_blob_migrated_counts_survive();
+    test_v1_sized_wrong_version_not_migrated();
     test_invalid_and_out_of_range_ticks_ignored();
     test_abandon_firing_discards_in_progress_state_only();
 }
