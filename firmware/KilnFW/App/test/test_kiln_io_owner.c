@@ -151,19 +151,23 @@ bool relay_authority_manual_blocked_by_owner(uint8_t relay_index) { (void)relay_
 static bool s_stub_crash_unacked = false;
 bool crash_report_has_unacknowledged(void) { return s_stub_crash_unacked; }
 
-// docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): relay_on_blocked()
-// now also calls system_mode_gate_blocks_relay(), which reads these two facts.
-// Hardcoded idle/false is correct for every existing test in this file (none
-// of them exercises the new mode gate) -- no test here drives a firing or
-// autotune run, so this stub never needs to be mutable like the ones above.
-void profile_executor_get_status(profile_exec_status_t *out)
+// docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1):
+// relay_on_blocked() calls system_mode_gate_blocks_relay(), which reads
+// these two facts through relay_authority_heat_run_active() -- a leaf getter
+// (review fix, same day: the original version of this stub was for
+// profile_executor_get_status()/autotune_engine_is_active() directly, which
+// is what kiln_io_owner.c called before the lock-order-cycle fix; see
+// relay_authority.c's doc comment above the real function for why owner_task
+// must not take either module's lock). Mutable, unlike the pre-fix version:
+// test_relay_on_blocked_gates_on_profile_run()/_autotune_run()/
+// _danger_mode_does_not_bypass_mode_gate() below drive both flags.
+static bool s_stub_profile_running = false;
+static bool s_stub_autotune_running = false;
+void relay_authority_heat_run_active(bool *profile, bool *autotune)
 {
-    if (out) {
-        memset(out, 0, sizeof(*out));
-        out->state = PROFILE_EXEC_IDLE;
-    }
+    if (profile) *profile = s_stub_profile_running;
+    if (autotune) *autotune = s_stub_autotune_running;
 }
-bool autotune_engine_is_active(void) { return false; }
 
 // -----------------------------------------------------------------------------
 
@@ -360,6 +364,155 @@ static void test_relay_on_blocked_danger_mode_bypasses_every_gate(void)
     s_stub_crash_unacked = false;
 }
 
+// ---- Review fixes, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md) -------------
+// The four tests below are new: the original slice-3 landing left the mode
+// gate's actual integration with relay_on_blocked() completely untested --
+// s_stub_profile_running/s_stub_autotune_running above were hardcoded false,
+// so no test exercised relay_authority_heat_run_active() driving a real
+// refusal at all.
+
+static void test_relay_on_blocked_gates_on_profile_run(void)
+{
+    TEST_SECTION("relay_on_blocked() -- a running (or paused) profile blocks manual relay-ON via out_mode_blocked");
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+    bool mode_blocked = false;
+
+    s_stub_profile_running = true;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true,
+               "a running profile blocks manual relay-ON");
+    TEST_CHECK(mode_blocked == true, "out_mode_blocked is set so the caller reports ERR_RUNNING");
+    TEST_CHECK(updating == false && crash_unack == false,
+               "the mode gate does not also claim the updating/crash_unack reasons");
+
+    s_stub_profile_running = false;
+    mode_blocked = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == false,
+               "once the profile stops, relay-ON is unblocked again on the very next call");
+
+    s_stub_profile_running = false; // leave stubs in their default state
+}
+
+static void test_relay_on_blocked_gates_on_autotune_run(void)
+{
+    TEST_SECTION("relay_on_blocked() -- a running autotune blocks manual relay-ON via out_mode_blocked");
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+    bool mode_blocked = false;
+
+    s_stub_autotune_running = true;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true,
+               "a running autotune blocks manual relay-ON");
+    TEST_CHECK(mode_blocked == true, "out_mode_blocked is set so the caller reports ERR_RUNNING");
+
+    s_stub_autotune_running = false;
+}
+
+// crash_unack must still be reported ahead of RUNNING when both apply --
+// relay_on_blocked() checks crash_report_has_unacknowledged() before
+// system_mode_gate_blocks_relay() (kiln_io_owner.c's own precedence comment
+// above relay_on_blocked()), unchanged by the review fixes: only WHICH
+// getter feeds the mode gate changed (fix #1), and WHERE the mode check
+// also runs relative to danger_mode_active() (fix #2) -- neither touches
+// this non-danger-mode ordering.
+static void test_relay_on_blocked_crash_unack_precedes_running(void)
+{
+    TEST_SECTION("relay_on_blocked() -- crash_unack is still reported ahead of RUNNING");
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+    bool mode_blocked = false;
+
+    s_stub_crash_unacked = true;
+    s_stub_profile_running = true;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true,
+               "both crash_unack and a running profile -> blocked");
+    TEST_CHECK(crash_unack == true, "crash_unack wins -- it is checked before the mode gate");
+    TEST_CHECK(mode_blocked == false, "out_mode_blocked is never touched once crash_unack already blocked");
+
+    s_stub_crash_unacked = false;
+    s_stub_profile_running = false;
+}
+
+// The one review fix (option a) that actually changes observable behaviour:
+// danger_mode_active()'s early return in relay_on_blocked() must NOT skip
+// the mode gate any more, unlike the other three gates it does skip. This
+// is what makes danger_relay_post_handler() (diagnostics_http.c) reachable
+// again for the RUNNING refusal, closing the autotune+danger-mode bypass
+// the review found.
+static void test_relay_on_blocked_danger_mode_does_not_bypass_mode_gate(void)
+{
+    TEST_SECTION("relay_on_blocked() -- danger mode bypasses safety/updating/crash_unack, but NOT the mode gate");
+
+    s_stub_danger_mode = true;
+    s_stub_safety_blocked = true;
+    s_stub_safety_sources = 0x04u;
+    s_stub_updating = true;
+    s_stub_crash_unacked = true;
+    s_stub_autotune_running = true;
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+    bool mode_blocked = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true,
+               "danger mode + a running autotune -> still blocked (the mode gate, not bypassed)");
+    TEST_CHECK(mode_blocked == true, "out_mode_blocked is set even though danger mode is active");
+    TEST_CHECK(updating == false && crash_unack == false,
+               "danger mode still bypasses the other three gates -- only the mode gate reaches its refusal");
+
+    // Reset every stub to its default for any test after this one.
+    s_stub_danger_mode = false;
+    s_stub_safety_blocked = false;
+    s_stub_safety_sources = 0;
+    s_stub_updating = false;
+    s_stub_crash_unacked = false;
+    s_stub_autotune_running = false;
+}
+
+// Only relay-ON is gated: handle_set_relay()/handle_set_relay_mask() never
+// even call relay_on_blocked() for an OFF write (single relay) or an
+// all-relays-off mask write (kiln_io_owner.c's `if (on)`/`if (any_on)`
+// guards above the call) -- so a running profile/autotune must never refuse
+// either shape. s_io is never initialized in this suite (kiln_io_owner_
+// start() is never called), so a write that DOES reach kiln_io_set_relay()/
+// kiln_io_set_relay_mask() comes back ERR_IO_FAIL (kiln_io.c's own `!io`
+// guard) rather than crashing -- that is exactly the signal used below to
+// prove the mode gate was never consulted (a gate refusal would instead
+// report ERR_RUNNING and never reach the real I/O call at all).
+static void test_relay_off_writes_pass_through_while_running(void)
+{
+    TEST_SECTION("handle_set_relay()/handle_set_relay_mask() -- OFF/all-off writes are not gated by a running run");
+
+    s_stub_profile_running = true;
+
+    owner_cmd_t cmd_off = { .type = CMD_SET_RELAY, .args.set_relay = { .relay = 1, .on = false } };
+    owner_result_t r_off;
+    memset(&r_off, 0, sizeof(r_off));
+    handle_set_relay(&cmd_off, &r_off);
+    TEST_CHECK(r_off.relay_result != KILN_IO_OWNER_RELAY_ERR_RUNNING,
+               "a single relay-OFF write is not refused for a running profile");
+    TEST_CHECK(r_off.relay_result == KILN_IO_OWNER_RELAY_ERR_IO_FAIL,
+               "the OFF write reached the real (uninitialized-in-this-suite) I/O call -- the mode gate never ran");
+
+    owner_cmd_t cmd_mask_off = { .type = CMD_SET_RELAY_MASK, .args.set_relay_mask = { .mask = 0x0Fu, .value = 0x00u } };
+    owner_result_t r_mask_off;
+    memset(&r_mask_off, 0, sizeof(r_mask_off));
+    handle_set_relay_mask(&cmd_mask_off, &r_mask_off);
+    TEST_CHECK(r_mask_off.relay_result != KILN_IO_OWNER_RELAY_ERR_RUNNING,
+               "an all-relays-off mask write is not refused for a running profile");
+    TEST_CHECK(r_mask_off.relay_result == KILN_IO_OWNER_RELAY_ERR_IO_FAIL,
+               "the all-off mask write reached the real I/O call too -- any_on was false, so relay_on_blocked() "
+               "was never called");
+
+    s_stub_profile_running = false;
+}
+
 int main(void)
 {
     TEST_SECTION("kiln_io_owner relay-pin gates");
@@ -372,6 +525,11 @@ int main(void)
     test_relay_on_blocked_gates_on_unacknowledged_crash_report();
     test_relay_on_blocked_precedence_with_multiple_gates_active();
     test_relay_on_blocked_danger_mode_bypasses_every_gate();
+    test_relay_on_blocked_gates_on_profile_run();
+    test_relay_on_blocked_gates_on_autotune_run();
+    test_relay_on_blocked_crash_unack_precedes_running();
+    test_relay_on_blocked_danger_mode_does_not_bypass_mode_gate();
+    test_relay_off_writes_pass_through_while_running();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

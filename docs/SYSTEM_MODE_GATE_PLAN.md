@@ -236,15 +236,23 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    `kiln_io_owner.h`'s new `KILN_IO_OWNER_RELAY_ERR_RUNNING`,
    `dashboard_http.h`'s new `DASHBOARD_RELAY_ERR_RUNNING`, a UART reject
    reason word `"running"`, and an LCD message
-   ("Relay N refused -- firing/autotune active"). **Finding, not a scope
-   change:** HTTP's only surviving manual-relay route
-   (`POST /api/diagnostics/danger/relay`) is gated by `danger_mode_active()`
-   up front, which bypasses `relay_on_blocked()`'s entire chain including
-   this new check — the same way it already bypasses the update-in-progress
-   and unacknowledged-crash checks. The blanket refusal is real and
-   enforced for UART and the LCD; it is not reachable via HTTP today because
-   HTTP's manual-relay path only exists inside an already-explicit
-   accept-the-risk bench mode.
+   ("Relay N refused -- firing/autotune active"). **Correction (review,
+   2026-09-25):** the first landing of this slice believed HTTP's only
+   surviving manual-relay route (`POST /api/diagnostics/danger/relay`) was
+   unreachable, because `danger_mode_active()`'s early return in
+   `relay_on_blocked()` bypasses the entire chain below it, same as the
+   update-in-progress and unacknowledged-crash checks. That was true for
+   those two, but wrong for this one: `danger_mode_request_start()`
+   (`danger_mode.c`) only refuses an *active profile*, never checks
+   autotune, so danger mode + a live autotune run let this HTTP route
+   energize a relay despite the blanket refusal (Q1) — a real gate bypass,
+   not a documentation gap. Fixed by moving the mode-gate check ahead of
+   `danger_mode_active()`'s early return in `relay_on_blocked()` (it is now
+   the one gate danger mode does NOT skip) and mapping
+   `DASHBOARD_RELAY_ERR_RUNNING` to HTTP 409 in
+   `danger_relay_post_handler()` (`diagnostics_http.c`). The blanket refusal
+   is enforced on all three transports, including HTTP, as Q1 always
+   intended.
 4. **Deferred, not landed this pass** — wire `SYS_ACTION_WRITE_ZONES_CONFIG`
    into `zones_http.c` (§2.6, no existing check at all), per owner decision
    Q2 above (refuse all zones/config writes while a firing or autotune run

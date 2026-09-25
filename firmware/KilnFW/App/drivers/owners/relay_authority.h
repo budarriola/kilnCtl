@@ -252,6 +252,16 @@ relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void);
  * never held it. */
 void relay_authority_heat_sweep_claim_end(void);
 
+/* True/false for whether profile_executor / autotune_engine currently hold
+ * the shared heat claim (RUNNING or PAUSED for profile -- claim_end() is
+ * only called from a terminal transition, see profile_executor_status.c's
+ * halt(), never from pause()). A leaf read under s_heat_claim_mux only --
+ * safe to call from any task, including one that must never block on
+ * profile_executor.c's or autotune_engine.c's own locks (kiln_io_owner.c's
+ * owner_task, in particular -- see relay_authority.c's doc comment above
+ * this function). Either out-pointer may be NULL. */
+void relay_authority_heat_run_active(bool *profile, bool *autotune);
+
 #ifdef __cplusplus
 }
 #endif

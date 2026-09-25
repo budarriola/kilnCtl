@@ -7,21 +7,18 @@
 
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "autotune_engine.h" /* autotune_engine_is_active() -- see relay_on_blocked() below */
 #include "crash_report.h" /* crash_report_has_unacknowledged() -- see relay_on_blocked() below */
 #include "danger_mode.h" /* danger_mode_active() -- see relay_on_blocked() below */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- previously transitive via ota_http.h */
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
-#include "profile_executor.h" /* profile_executor_get_status() -- see relay_on_blocked() below */
-#include "relay_authority.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- see system_mode_gate_blocks_relay() below */
 #include "stack_margin.h"
 #include "system_mode_gate.h" /* SYS_ACTION_RAW_RELAY_DEBUG_WRITE -- see relay_on_blocked() below */
 
@@ -209,25 +206,23 @@ static SemaphoreHandle_t s_slot_lock;
  * the same "explicit accept-risk bench test" reason it skips the other two. */
 static bool system_mode_gate_blocks_relay(void)
 {
-    /* Heap, not a stack local -- owner_task's stack is small and
-     * profile_exec_status_t is 1384 bytes; same reasoning ota_http.c uses
-     * for the identical struct. Freed immediately after the one field
-     * needed here is copied out. */
-    profile_exec_status_t *pstat =
-        heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!pstat) {
-        /* Could not read the executor's state -- that is not the same as
-         * "no run is active." Fail closed, same as every other "no data ->
-         * treat as blocked" default in this module. */
-        return true;
-    }
-    profile_executor_get_status(pstat);
-    bool profile_running = (pstat->state == PROFILE_EXEC_RUNNING || pstat->state == PROFILE_EXEC_PAUSED);
-    heap_caps_free(pstat);
+    /* review fix, 2026-09-25: this used to call profile_executor_get_status()/
+     * autotune_engine_is_active() directly, each of which takes that module's
+     * own lock (s_exec.lock / s_at.lock). Those same locks are held by
+     * profile_executor's/autotune_engine's own tick across their call INTO
+     * this file's apply path, which then waits up to KILN_IO_OWNER_WAIT_MS on
+     * owner_task -- a lock-order cycle (owner_task -> s_exec.lock/s_at.lock,
+     * tick -> owner_task). relay_authority_heat_run_active() is a leaf read
+     * under a spinlock with no blocking call inside, so owner_task never
+     * takes either module's lock. See relay_authority.c's doc comment above
+     * that function for the full picture. */
+    bool profile_running = false;
+    bool autotune_running = false;
+    relay_authority_heat_run_active(&profile_running, &autotune_running);
 
     sys_mode_snapshot_t snap = {0};
     snap.profile_running = profile_running;
-    snap.autotune_running = autotune_engine_is_active();
+    snap.autotune_running = autotune_running;
     return system_mode_gate_check(SYS_ACTION_RAW_RELAY_DEBUG_WRITE, &snap, NULL, 0);
 }
 
@@ -241,13 +236,33 @@ static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *ou
      * contactor: that stays entirely outside this ESP's authority (see
      * danger_mode.h's top comment). Checked first, and logged every time it
      * actually changes the outcome, so "why did this relay turn on during a
-     * fault" always has an answer in the log, not just silence. */
+     * fault" always has an answer in the log, not just silence.
+     *
+     * review fix, 2026-09-25: the mode gate (system_mode_gate_blocks_relay(),
+     * below) is DELIBERATELY NOT in the bypass list here, unlike the other
+     * three -- danger_mode_request_start() (danger_mode.c) only refuses an
+     * active PROFILE, never checks autotune, so autotune + danger mode used
+     * to let this HTTP route (the one manual-relay path danger mode's own
+     * "accept risk" checkbox reaches) energize a relay despite a live
+     * autotune run, an owner-decision blanket refusal (Q1) that this danger-
+     * mode carve-out was never meant to override. The mode gate is checked
+     * even when danger mode is active; the other three gates (safety fault,
+     * OTA update in progress, unacknowledged crash) are still bypassed,
+     * unchanged from before. */
     if (danger_mode_active()) {
         char skipped_reason[HEAT_INTERLOCK_REASON_MAX];
         if (relay_authority_on_blocked(s_safety, out_sources) ||
             ota_http_heat_blocked_by_update(skipped_reason, sizeof(skipped_reason)) ||
             crash_report_has_unacknowledged()) {
             ESP_LOGW(TAG, "relay-on: danger mode bypassing a gate that would otherwise have blocked this");
+        }
+        if (system_mode_gate_blocks_relay()) {
+            ESP_LOGW(TAG, "relay-on refused even in danger mode: a firing or autotune run is active -- "
+                          "manual relay control is not available until it ends");
+            if (out_mode_blocked) {
+                *out_mode_blocked = true;
+            }
+            return true;
         }
         return false;
     }

@@ -1296,6 +1296,19 @@ void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t 
             } else if (refused_result == KILN_IO_OWNER_RELAY_ERR_UPDATING) {
                 snprintf(out->reason, sizeof(out->reason),
                          "zone %u energize refused: firmware update in progress", zi);
+            } else if (refused_result == KILN_IO_OWNER_RELAY_ERR_RUNNING) {
+                /* docs/SYSTEM_MODE_GATE_PLAN.md review, 2026-09-25: not
+                 * expected in practice -- relay_authority_heat_sweep_claim_
+                 * begin() already refuses to start a sweep while a profile/
+                 * autotune run holds the shared heat claim (B2's forward
+                 * interlock) -- but this MANUAL energize call reaches the
+                 * same system_mode_gate check every other manual relay-on
+                 * does, so name it directly rather than falling through to
+                 * the bitmask decode below, which would print an empty
+                 * "sources 0x00" for the same reason ERR_UPDATING/
+                 * ERR_CRASH_UNACK do. */
+                snprintf(out->reason, sizeof(out->reason),
+                         "zone %u energize refused: firing or autotune run active", zi);
             } else {
                 char src_words[160];
                 safety_fault_source_words(refused_sources, src_words, sizeof(src_words));

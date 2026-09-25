@@ -111,6 +111,12 @@ class RelayRefusal(enum.Enum):
     SAFETY = "safety"
     UPDATING = "updating"
     DRIVER_ERROR = "driver error"
+    # docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1/Q4):
+    # KILN_IO_OWNER_RELAY_ERR_RUNNING's UART reject word (uart_bridge_io.c).
+    RUNNING = "running"
+    # KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK's UART reject word, added
+    # 2026-09-15 but never mirrored here until this same review pass.
+    CRASH_UNACKED = "crash_unacked"
     OTHER = "other"
 
     @classmethod

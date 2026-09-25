@@ -1211,12 +1211,24 @@ static esp_err_t danger_relay_post_handler(httpd_req_t *req)
 
     uint32_t safety_sources = 0;
     dashboard_relay_result_t rr = dashboard_set_relay((uint8_t)relay, want_on, &safety_sources);
+    if (rr == DASHBOARD_RELAY_ERR_RUNNING) {
+        /* review fix, 2026-09-25: NOT a "should not happen" case any more --
+         * relay_on_blocked() deliberately does NOT let danger mode skip the
+         * system-mode gate (docs/SYSTEM_MODE_GATE_PLAN.md owner decision Q1),
+         * so a firing or autotune run really can reach here now. 409, the
+         * owner's Q4 decision for every new gate refusal. */
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "a firing or autotune run is active -- manual relay control is not "
+                                 "available until it ends");
+        return ESP_OK;
+    }
     if (rr != DASHBOARD_RELAY_OK) {
         /* Should not happen while danger mode is active -- relay_on_blocked()
-         * skips every gate that could produce these -- except ERR_NO_BOARD
-         * (no expander at all, unrelated to any gate) and ERR_RANGE (already
-         * checked above, kept here only as defense in depth). Not extending
-         * the window on a refusal: nothing about this section changed. */
+         * skips every OTHER gate that could produce these -- except
+         * ERR_NO_BOARD (no expander at all, unrelated to any gate) and
+         * ERR_RANGE (already checked above, kept here only as defense in
+         * depth). Not extending the window on a refusal: nothing about this
+         * section changed. */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay write failed");
         return ESP_OK;
     }

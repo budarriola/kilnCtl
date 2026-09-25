@@ -182,6 +182,16 @@ class IoSetRelayRefusalTests(unittest.TestCase):
     def test_updating_distinguishable(self):
         self._assert_relay_refusal(IO_CMD_SET_RELAY, "updating", devices.RelayRefusal.UPDATING)
 
+    def test_running_distinguishable(self):
+        # docs/SYSTEM_MODE_GATE_PLAN.md owner decision 2026-09-25 (Q1):
+        # uart_bridge_io.c's "running" reject word for
+        # KILN_IO_OWNER_RELAY_ERR_RUNNING.
+        self._assert_relay_refusal(IO_CMD_SET_RELAY, "running", devices.RelayRefusal.RUNNING)
+        self._assert_relay_refusal(IO_CMD_SET_RELAY_MASK, "running", devices.RelayRefusal.RUNNING)
+
+    def test_crash_unacked_distinguishable(self):
+        self._assert_relay_refusal(IO_CMD_SET_RELAY, "crash_unacked", devices.RelayRefusal.CRASH_UNACKED)
+
     def test_truncated_distinguishable(self):
         self._assert_relay_refusal(IO_CMD_SET_RELAY, "truncated", devices.RelayRefusal.TRUNCATED)
 
