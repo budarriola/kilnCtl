@@ -32,18 +32,21 @@
 >   blocking call inside) to remove a lock-order cycle between `owner_task`
 >   and `profile_executor`/`autotune_engine`'s own tick locks (each tick holds
 >   its own module lock across a call back into `kiln_io_owner.c`, which used
->   to wait on that same lock from `owner_task`). **Slices 2/4/5 landed same
->   day:** zones/config writes are now refused ALL (not scoped) while a
->   firing or autotune session runs, gated at the caller in
->   `zones_http_post.c`, `uart_bridge_ext_control.c` (`SET_ZONE_PID`/
->   `SET_ZONE_MODEL`), `kiln_cfg_http.c` (apply, at submit time), and
->   `backup_import.c` (via a `"MODE_GATE_REFUSED:"` sentinel prefix through
->   its existing `err_msg` return path, avoiding a signature change across
->   ~60 call sites) — never the `zones_config` accessors themselves, so
+>   to wait on that same lock from `owner_task`). **Slices 4/5 landed same
+>   day (not slice 2 -- see correction below):** zones/config writes are now
+>   refused ALL (not scoped) while a firing or autotune session runs, gated
+>   at the caller in `zones_http_post.c`, `uart_bridge_ext_control.c`
+>   (`SET_ZONE_PID`/`SET_ZONE_MODEL`), `kiln_cfg_http.c` (apply, at submit
+>   time), and `backup_import.c` (at the top of
+>   `backup_import_post_handler()`, ahead of `ota_http_check_interlocks()`
+>   -- the original `"MODE_GATE_REFUSED:"` sentinel-through-`err_msg` design
+>   was replaced during review, 2026-09-25, once the ordering bug below was
+>   found) — never the `zones_config` accessors themselves, so
 >   autotune/adaptive_tune's own direct writes are untouched (host-tested
 >   cross-product in `test_system_mode_gate.c`, plus dedicated regression
 >   tests proving autotune's own writes are NOT gated). Factory reset
->   (`factory_reset.c`, after auth) and cfgfs format
+>   (`factory_reset.c`, after auth, plus the UART-exclusive
+>   `factory_reset_execute()` entry point) and cfgfs format
 >   (`cfg_fs_format_http.c`, first line of the handler) now refuse outright
 >   while running. All four HTTP refusals share one sender,
 >   `system_mode_gate_http_send_refusal()` (slice 4), a 409 distinct from the
@@ -56,25 +59,48 @@
 >   other 409s and from OTA's 428, with dedicated fake-HTTP unit tests. (No
 >   HTTP `factory_reset` MCP tool exists in PcTools today -- only a UART
 >   `system_factory_reset()` -- so that item is N/A here, not overlooked.)
->   **Known gap, still open:** `kiln_cfg_http.c`,
->   `uart_bridge_ext_control.c`, and `cfg_fs_format_http.c` have no
->   host-test harness at all (pre-existing, not introduced by this change),
->   so their gate wiring is verified by code-pattern review and an ESP-IDF
->   target build only, not by a host-test assertion. Evaluated 2026-09-25
->   whether a small harness for `uart_bridge_ext_control.c`'s
->   `SET_ZONE_PID`/`SET_ZONE_MODEL` gate could be added cheaply: no --
->   `control_handle_message()` sits inside a 677-line file sharing static
->   helpers and a large dependency surface (thermocouple channel accessors,
->   `zones_config_*`, `unit_pref_get/set`, `profiles_builtin`,
->   `profile_executor`, `relay_authority`, `run_state`, `kiln_io`) with the
->   PROFILES-task half of the same file, none of it stubbed today -- cheaper
->   to review by hand (confirmed present and correctly wired, see the
->   slice 2/4/5 note above) than to build a fake-dependency harness for one
->   pass. Left open rather than rushed. The recovery-mode
->   HTTP-only-wording slice 2 mentioned in an earlier draft of this note
->   was folded into the same-day zones/config work above rather than done
->   separately. See the plan doc's §5 for the full owner decisions and §3.6
->   for per-slice status.
+>   **Review fix, 2026-09-25 (dead-code ordering):** in `zones_http_post.c`,
+>   `kiln_cfg_http.c`, and `backup_import.c`, the mode gate used to run
+>   AFTER `ota_http_check_interlocks()`, which answers first while a firing
+>   is active and made the mode gate's own 409 unreachable in that state --
+>   fixed by moving the mode-gate check to run first (interlock, then
+>   `http_async_job_busy()`, land after it), with a handler-level test
+>   proving the ordering in `test_zones_http.c`
+>   (`test_zones_post_refused_by_mode_gate_before_interlock`).
+>   **Additional zone writers gated, 2026-09-25 (same review pass):**
+>   `POST /api/zones/pid` (`zones_http_pid.c`) -- revoking its prior
+>   deliberate carve-out that allowed PID-only edits even while a firing was
+>   RUNNING/PAUSED, per owner decision Q2 (refuse ALL zone/relay/guard
+>   config writes, not scoped to which field changed); `iter_tune_http.c`'s
+>   `restore_commissioned`; and `adaptive_tune_http.c`'s `enable`/`revert`
+>   handlers. Autotune/adaptive-tune's own internal accept-path writes
+>   (calling `zones_config_set_*()` directly while a run IS active) stay
+>   ungated by design.
+>   **Known gap, still open:** `kiln_cfg_http.c`, `backup_import.c`,
+>   `uart_bridge_ext_control.c`, `cfg_fs_format_http.c`, the UART
+>   `factory_reset_execute()` path, and `adaptive_tune_http.c`'s
+>   enable/revert handlers have no host-test harness exercising the HTTP/
+>   UART entry point itself (pre-existing gap for the first four, not
+>   introduced by this change); their gate wiring is verified by
+>   code-pattern review and an ESP-IDF target build only, not by a
+>   host-test assertion. `zones_http_pid.c` and `iter_tune_http.c` DO now
+>   have handler-level tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+>   Evaluated 2026-09-25 whether a small harness for
+>   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` gate could
+>   be added cheaply: no -- `control_handle_message()` sits inside a
+>   677-line file sharing static helpers and a large dependency surface
+>   (thermocouple channel accessors, `zones_config_*`, `unit_pref_get/set`,
+>   `profiles_builtin`, `profile_executor`, `relay_authority`, `run_state`,
+>   `kiln_io`) with the PROFILES-task half of the same file, none of it
+>   stubbed today -- cheaper to review by hand (confirmed present and
+>   correctly wired, see the note above) than to build a fake-dependency
+>   harness for one pass. Left open rather than rushed.
+>   **Correction, 2026-09-25 (review):** an earlier draft of this note
+>   claimed the recovery-mode HTTP-only-wording slice 2 was "folded into"
+>   the same-day zones/config work above -- that was false; slice 2 is a
+>   separate, still-open item (recovery-mode command wording, not the
+>   zones/config refusal rule) and has not been done. See the plan doc's §5
+>   for the full owner decisions and §3.6 for per-slice status.
 > - **`safety_get_unset_commissioning_params` MCP tool landed, 2026-09-25**
 >   (`397208ba`, review fixes `2d38f97f`): a READ-ONLY MCP tool re-deriving
 >   `readiness_http.h`'s commissioning-required exclusion rule so the

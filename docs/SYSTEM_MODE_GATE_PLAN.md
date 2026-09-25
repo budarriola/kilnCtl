@@ -253,13 +253,41 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    `danger_relay_post_handler()` (`diagnostics_http.c`). The blanket refusal
    is enforced on all three transports, including HTTP, as Q1 always
    intended.
-4. **Deferred, not landed this pass** — wire `SYS_ACTION_WRITE_ZONES_CONFIG`
-   into `zones_http.c` (§2.6, no existing check at all), per owner decision
+4. **LANDED, 2026-09-25 (review pass)** — wired `SYS_ACTION_WRITE_ZONES_CONFIG`
+   into `zones_http_post.c`, `uart_bridge_ext_control.c` (`SET_ZONE_PID`/
+   `SET_ZONE_MODEL`), `kiln_cfg_http.c` (apply, at submit time),
+   `backup_import.c` (top of `backup_import_post_handler()`),
+   `zones_http_pid.c` (`POST /api/zones/pid`, revoking its prior deliberate
+   carve-out that allowed PID-only edits even while a firing was
+   RUNNING/PAUSED), `iter_tune_http.c`'s `restore_commissioned`, and
+   `adaptive_tune_http.c`'s `enable`/`revert` handlers — per owner decision
    Q2 above (refuse all zones/config writes while a firing or autotune run
-   is active, not scoped to zones the run touches).
-5. **Deferred, not landed this pass** — `SYS_ACTION_FACTORY_RESET`,
-   `SYS_ACTION_CFGFS_FORMAT`, per owner decision Q3 above (refuse outright
-   while running); each is one table row plus wiring at 1-2 call sites.
+   is active, not scoped to zones the run touches). Autotune/adaptive_tune's
+   own internal accept-path writes (calling `zones_config_set_*()` directly
+   while a run IS active) stay ungated by design.
+   **Review fix (dead-code ordering):** `zones_http_post.c`, `kiln_cfg_http.c`
+   and `backup_import.c` originally called the mode gate AFTER
+   `ota_http_check_interlocks()`, which answers first while a firing is
+   active and made the mode gate's own 409 unreachable in that state --
+   fixed by reordering to mode gate first, then the OTA interlock, then
+   `http_async_job_busy()` (landed alongside A1). Handler-level test:
+   `test_zones_http.c`'s
+   `test_zones_post_refused_by_mode_gate_before_interlock`.
+   **Known test gaps (still open):** `kiln_cfg_http.c`, `backup_import.c`,
+   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL`, and
+   `adaptive_tune_http.c`'s `enable`/`revert` handlers have no host-test
+   harness exercising the HTTP/UART entry point itself — their gate wiring
+   is verified by code-pattern review and an ESP-IDF target build only, not
+   a host-test assertion. `zones_http_pid.c` and `iter_tune_http.c` DO have
+   handler-level tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+5. **LANDED, 2026-09-25** — `SYS_ACTION_FACTORY_RESET` wired into
+   `factory_reset.c` (after auth) and the UART-exclusive
+   `factory_reset_execute()` entry point (`uart_bridge_system.c`);
+   `SYS_ACTION_CFGFS_FORMAT` wired into `cfg_fs_format_http.c` (first line
+   of the handler), per owner decision Q3 above (refuse outright while
+   running). **Known test gap (still open):** no host test exists for the
+   UART `factory_reset_execute()` path (no `test_factory_reset.c` file in
+   this codebase).
 6. **Deferred, not landed this pass** — `check_uri_handler_cap.ps1`-style
    mechanical check (or extend an existing one) confirming every route in a
    to-be-decided "gated action" allowlist actually calls
@@ -294,13 +322,13 @@ IMPLEMENTER.md discipline before merge; no slice depends on a later one.
 2. **Zones/config writes during a firing:** **REFUSE ALL** — any zones/
    config write is refused while a firing or autotune session is active,
    not scoped to zones the run actually touches. Same override of this
-   doc's own scoped recommendation as Q1. **Not landed this pass** — see
-   §3.6 slice 4, deferred.
+   doc's own scoped recommendation as Q1. **LANDED, 2026-09-25** — see
+   §3.6 slice 4 for the full call-site list and known test gaps.
 3. **Factory reset / cfgfs format while firing:** refuse outright, as
-   recommended. **Not landed this pass** — see §3.6 slice 5, deferred.
+   recommended. **LANDED, 2026-09-25** — see §3.6 slice 5.
 4. **HTTP status code for a mode refusal:** 409 for all new
    `system_mode_gate` refusals, as recommended; OTA's existing 428
-   interlock is untouched. No new HTTP route was added by slice 3 (it
-   reuses the existing danger-mode relay route), so this has not yet had
-   an HTTP call site to apply to — the first zones/config or factory-reset/
-   cfgfs slice that adds one is where this takes effect.
+   interlock is untouched. **LANDED, 2026-09-25** — every HTTP call site
+   wired in slice 4/5 sends this 409 via the shared
+   `system_mode_gate_http_send_refusal()` sender, distinct from OTA's 428
+   and (where applicable) `http_async_job_busy()`'s own 409.

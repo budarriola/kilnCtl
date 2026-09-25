@@ -32,12 +32,22 @@
 // for HTTP's danger-mode relay route, the UART bridge's SET_RELAY/
 // SET_RELAY_MASK, and the LCD's manual override -- all three transports at
 // once, per the plan's whole point). Slices 2/4/5 (gate-slices-2/4/5 spec,
-// 2026-09-25) then wired SYS_ACTION_WRITE_ZONES_CONFIG (zones_http_post.c,
-// uart_bridge_ext_control.c's SET_ZONE_PID/MODEL, kiln_cfg_http.c's apply
-// submit, backup_import.c's apply) and SYS_ACTION_FACTORY_RESET/
-// SYS_ACTION_CFGFS_FORMAT (factory_reset.c, cfg_fs_format_http.c) the same
-// way. system_mode_gate_check() still returns OK unconditionally for any
-// action nobody has wired a rule for yet (SYS_ACTION_START_PROFILE/
+// 2026-09-25) then wired SYS_ACTION_WRITE_ZONES_CONFIG into every zone/
+// config writer: zones_http_post.c, zones_http_pid.c (POST /api/zones/pid --
+// revoking its prior deliberate carve-out that let PID-only edits through
+// even while a firing was RUNNING/PAUSED), uart_bridge_ext_control.c's
+// SET_ZONE_PID/SET_ZONE_MODEL, kiln_cfg_http.c's apply submit,
+// backup_import.c's apply, iter_tune_http.c's restore_commissioned, and
+// adaptive_tune_http.c's enable/revert handlers -- and SYS_ACTION_FACTORY_
+// RESET/SYS_ACTION_CFGFS_FORMAT (factory_reset.c's reset_post_handler(),
+// the UART-exclusive factory_reset_execute() entry point in
+// uart_bridge_system.c, and cfg_fs_format_http.c) the same way. Refusal
+// order at every HTTP call site: this gate first, then
+// ota_http_check_interlocks(), then http_async_job_busy() where applicable
+// (A1) -- reversing that order made this gate's own 409 unreachable while a
+// firing was active, a dead-code bug found and fixed during review.
+// system_mode_gate_check() still returns OK unconditionally for any action
+// nobody has wired a rule for yet (SYS_ACTION_START_PROFILE/
 // SYS_ACTION_START_AUTOTUNE/SYS_ACTION_OTA_START keep their own existing
 // gates instead -- readiness_gate.h and ota_interlock.c respectively).
 #ifndef SYSTEM_MODE_GATE_H
@@ -59,9 +69,13 @@ extern "C" {
 typedef enum {
     SYS_ACTION_START_PROFILE = 0,
     SYS_ACTION_START_AUTOTUNE,
-    SYS_ACTION_WRITE_ZONES_CONFIG,   // wired -- see callers listed in this file's rollout note
+    SYS_ACTION_WRITE_ZONES_CONFIG,   // wired -- zones_http_post.c, zones_http_pid.c,
+                                      // uart_bridge_ext_control.c, kiln_cfg_http.c,
+                                      // backup_import.c, iter_tune_http.c,
+                                      // adaptive_tune_http.c (see rollout note)
     SYS_ACTION_RAW_RELAY_DEBUG_WRITE, // wired: kiln_io_owner.c's relay_on_blocked()
-    SYS_ACTION_FACTORY_RESET,        // wired: factory_reset.c's reset_post_handler()
+    SYS_ACTION_FACTORY_RESET,        // wired: factory_reset.c's reset_post_handler() and
+                                      // uart_bridge_system.c's factory_reset_execute()
     SYS_ACTION_CFGFS_FORMAT,         // wired: cfg_fs_format_http.c's format_confirm_post_handler()
     SYS_ACTION_OTA_START,            // not gated here -- ota_interlock.c stays the owner (plan section 4)
 } sys_action_t;
