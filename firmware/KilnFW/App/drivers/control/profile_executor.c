@@ -723,11 +723,11 @@ void executor_task_entry(void *arg)
          * s_at.zone_index for other_zone_active_hint: only bother with the
          * SPI/sim read when the peek says RUNNING, since that is the only
          * branch below that consumes it. If the peek disagrees with the
-         * definitive state read right after the lock is taken (a run
-         * starting or stopping in this exact window), the snapshot is
-         * simply stale/unused this one tick -- self-corrects next tick,
-         * same tolerance profile_executor_capture_baseline() already
-         * documents for its own pre-lock read. */
+         * definitive state read right after the lock is taken: a run that
+         * stopped in this window lands in the not-RUNNING branch and the
+         * snapshot is discarded; a run that started (or resumed) in this
+         * window skips its control body for this one tick (see the
+         * !peek_running skip below) -- never runs it on a missing reading. */
         bool peek_running = (s_exec.state == PROFILE_EXEC_RUNNING);
         ThermoChannelSnapshot pre_lock_snap;
         if (peek_running) {
@@ -787,6 +787,24 @@ void executor_task_entry(void *arg)
             continue;
         }
 
+        /* The peek above missed a transition INTO RUNNING (profile_executor_run()
+         * or profile_executor_resume() committed it between the peek and this
+         * lock), so no pre-lock reading exists for this tick. Skip the control
+         * body for this ONE tick rather than running it on an all-invalid
+         * snapshot: an invalid tick would bump every active zone's guard-6
+         * sensor_fault_streak, and guard_sensor_fault_debounce_ticks is
+         * configurable down to 1 (ZONE_GUARD_DEBOUNCE_TICKS_MAX's range), which
+         * would trip SENSOR_INVALID and fault a healthy run on its first tick.
+         * Reading the bus here instead would reintroduce the lock-held producer
+         * call this peek exists to avoid. Relays are already off (every
+         * not-RUNNING tick forced them off), last_tick_tick above still feeds
+         * guard 9, and prev_control_tick is left alone so the next tick's
+         * dt_ms honestly covers both periods. */
+        if (!peek_running) {
+            xSemaphoreGive(s_exec.lock);
+            continue;
+        }
+
         uint32_t dt_ms = ticks_to_ms(now - s_exec.prev_control_tick);
         if (dt_ms == 0) {
             dt_ms = PROFILE_EXECUTOR_TICK_MS;
@@ -815,24 +833,11 @@ void executor_task_entry(void *arg)
          * from "zone zi's one hard-wired channel" to "zone zi's combined
          * reading across every channel its thermo_mask names". Nothing
          * downstream needed to change to pick that up. */
-        /* Consume the pre-lock read taken above. If the peek missed (state
-         * became RUNNING only after the peek), pre_lock_snap was never
-         * filled -- fall back to an all-invalid snapshot rather than reading
-         * the bus here under the lock; this tick's sensor_ok reads false
-         * across the board and the very next tick's peek picks RUNNING up
-         * correctly, same self-correcting tolerance as the peek's own
-         * doc comment above. */
-        ThermoChannelSnapshot zero_snap;
-        if (!peek_running) {
-            memset(&zero_snap, 0, sizeof(zero_snap));
-            for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
-                zero_snap.raw_c[ci] = NAN;
-                zero_snap.cj_c[ci] = NAN;
-            }
-        }
-        const ThermoChannelSnapshot *snap = peek_running ? &pre_lock_snap : &zero_snap;
-        const float *ch_raw_c = snap->raw_c;
-        const bool *ch_sensor_ok = snap->ok;
+        /* Consume the pre-lock read taken above (the !peek_running case
+         * never reaches here -- see the skip right after the not-RUNNING
+         * branch). */
+        const float *ch_raw_c = pre_lock_snap.raw_c;
+        const bool *ch_sensor_ok = pre_lock_snap.ok;
         float raw_c[MAX31856_CHANNEL_COUNT];    /* per ZONE: this zone's combined raw reading */
         bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE_PLAN.md sec 1 --
                                                     * snapshotted once per tick, same "one consistent

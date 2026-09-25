@@ -170,11 +170,10 @@ static void autotune_engine_tick_locked_impl(const ThermoChannelSnapshot *pre_lo
      * hold a module lock across a producer call" -- MAX31856_read_all()/
      * sim_backend_read_all() moved out from under s_at.lock 2026-09-24, same
      * fix and same tolerance as profile_executor.c's identical read).
-     * pre_lock_snap is NULL only when task_entry()'s own peek of
-     * state_is_running() missed a state that became running only after the
-     * peek -- this tick then simply reads as sensor-invalid across the
-     * board, and the very next tick's peek (now correctly seeing RUNNING)
-     * picks the real reading back up. */
+     * Production never passes NULL: task_entry() skips the whole tick when
+     * its peek missed a run that started after the peek (see its own
+     * comment). The NULL branch below is defensive only -- it reads as
+     * sensor-invalid across the board. */
     if (pre_lock_snap != NULL) {
         /* Peer zones (autotune_finalize_fit()'s cross-gain rows): legacy
          * channel-equals-zone mapping, unchanged from before 10.8. */
@@ -800,22 +799,6 @@ static void autotune_engine_tick_locked_impl(const ThermoChannelSnapshot *pre_lo
     }
 }
 
-/* Test-only convenience wrapper preserving the pre-2026-09-24 signature/
- * behavior: reads the bus itself, then runs the real tick. Production code
- * (task_entry(), below) never calls this -- it reads pre-lock and calls
- * autotune_engine_tick_locked_impl() directly, per this file's CLAUDE.md
- * "never hold a module lock across a producer call" fix. Kept so
- * test_autotune_engine_prestart.c's many direct call sites (driving one tick
- * deterministically with s_at.lock not a real FreeRTOS lock in the host
- * build, so no lock-across-producer hazard there) do not all need touching
- * for this fix. */
-static void autotune_engine_tick_locked(void)
-{
-    ThermoChannelSnapshot snap;
-    thermo_channels_read(s_at.thermo_bus, &snap);
-    autotune_engine_tick_locked_impl(&snap);
-}
-
 static void task_entry(void *arg)
 {
     (void)arg;
@@ -850,10 +833,15 @@ static void task_entry(void *arg)
          * s_at.lock is held. Peeks state_is_running(s_at.state) without the
          * lock first, same tolerated-race pattern as other_zone_active_hint
          * just above: only bother with the read when the peek says this run
-         * is active, and if the peek disagrees with the definitive check
-         * right after the lock is taken, the snapshot is simply unused this
-         * tick (autotune_engine_tick_locked() self-corrects next tick, same
-         * as profile_executor.c's identical fix). */
+         * is active. If the peek disagrees with the definitive check right
+         * after the lock is taken: a run that ended in this window is not
+         * ticked and the snapshot is discarded; a run that STARTED in this
+         * window (peek missed it) is not ticked either, for this one tick --
+         * never ticked on a missing reading, which would bump guard 6's
+         * sensor_fault_streak and could trip SENSOR_INVALID outright at a
+         * configured debounce of 1. prev_tick is left alone, so the next
+         * tick's dt_ms covers both periods. Same rule as profile_executor.c's
+         * executor_task_entry(). */
         bool peek_active = state_is_running(s_at.state);
         ThermoChannelSnapshot pre_lock_snap;
         if (peek_active) {
@@ -862,9 +850,9 @@ static void task_entry(void *arg)
 
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
         bool not_running = !state_is_running(s_at.state);
-        if (!not_running) {
+        if (!not_running && peek_active) {
             s_at.other_zone_profile_active_hint = other_zone_active_hint;
-            autotune_engine_tick_locked_impl(peek_active ? &pre_lock_snap : NULL);
+            autotune_engine_tick_locked_impl(&pre_lock_snap);
         }
         xSemaphoreGive(s_at.lock);
 

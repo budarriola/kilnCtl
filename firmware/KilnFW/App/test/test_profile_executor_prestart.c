@@ -10341,20 +10341,38 @@ static char *profile_executor_c_read_source(void)
                                       sizeof(candidates) / sizeof(candidates[0]));
 }
 
-static bool source_scan_call_precedes_pe(const char *text, const char *fn_sig, const char *next_fn_sig,
-                                          const char *first_needle, const char *second_needle,
-                                          const char **out_reason)
+/* Comment-stripped copy of `src` (same approach as test_display_power_wiring.c's
+ * strip_c_comments()), so a source-order scan cannot be satisfied by an
+ * explanatory comment that merely mentions a needle. */
+static char *pe_strip_c_comments(const char *src)
 {
-    const char *fn = strstr(text, fn_sig);
-    if (!fn) { *out_reason = "sanity: function definition not findable"; return false; }
-    const char *next_fn = strstr(fn + 1, next_fn_sig);
-    if (!next_fn) { *out_reason = "sanity: next function boundary not findable"; return false; }
-    const char *first = strstr(fn, first_needle);
-    const char *second = strstr(fn, second_needle);
-    if (!first || first >= next_fn) { *out_reason = "sanity: first call site not findable in function body"; return false; }
-    if (!second || second >= next_fn) { *out_reason = "sanity: second call site not findable in function body"; return false; }
-    *out_reason = NULL;
-    return first < second;
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n;) {
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i = (i + 1 < n) ? i + 2 : n;
+            out[o++] = ' ';
+        } else if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            out[o++] = ' ';
+        } else {
+            out[o++] = src[i++];
+        }
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/* Occurrences of `needle` starting in [begin, end). */
+static int pe_count_in_range(const char *begin, const char *end, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(begin, needle); p && p < end; p = strstr(p + 1, needle)) n++;
+    return n;
 }
 
 static void test_task_entry_reads_before_taking_s_exec_lock(void)
@@ -10370,25 +10388,85 @@ static void test_task_entry_reads_before_taking_s_exec_lock(void)
         TEST_CHECK(false, "could not locate drivers/control/profile_executor.c to source-scan");
         return;
     }
-
-    const char *reason = NULL;
-    bool ok = source_scan_call_precedes_pe(text, "void executor_task_entry(void *arg)",
-                                            "void watchdog_task_entry(void *arg)",
-                                            "thermo_channels_read(", "xSemaphoreTake(s_exec.lock", &reason);
-    if (reason) {
-        TEST_CHECK(false, reason);
-    } else {
-        TEST_CHECK(ok, "MUST GO RED if executor_task_entry() takes s_exec.lock before its "
-                       "thermo_channels_read() pre-lock peek/read -- move the read back before the lock");
+    char *code = pe_strip_c_comments(text);
+    free(text);
+    if (!code) {
+        TEST_CHECK(false, "malloc for the comment-stripped profile_executor.c failed");
+        return;
     }
 
-    free(text);
+    const char *b = strstr(code, "void executor_task_entry(void *arg)");
+    const char *e = b ? strstr(b + 1, "void watchdog_task_entry(void *arg)") : NULL;
+    if (!b || !e) {
+        TEST_CHECK(false, "sanity: executor_task_entry()'s body not findable in profile_executor.c");
+        free(code);
+        return;
+    }
+    TEST_CHECK(pe_count_in_range(b, e, "thermo_channels_read(") == 1,
+               "executor_task_entry() makes exactly ONE thermo_channels_read() call (a second one "
+               "could sit under s_exec.lock without breaking a first-occurrence ordering check)");
+    TEST_CHECK(pe_count_in_range(b, e, "MAX31856_read_all(") == 0 &&
+                   pe_count_in_range(b, e, "sim_backend_read_all(") == 0,
+               "executor_task_entry() never calls a raw bus/sim read directly -- only the pre-lock helper");
+    const char *rd = strstr(b, "thermo_channels_read(");
+    const char *lk = strstr(b, "xSemaphoreTake(s_exec.lock");
+    TEST_CHECK(rd && lk && rd < e && lk < e && rd < lk,
+               "MUST GO RED if executor_task_entry() takes s_exec.lock before its "
+               "thermo_channels_read() pre-lock peek/read -- move the read back before the lock");
+    /* A peek that saw not-RUNNING took no reading; the RUNNING body must be
+     * skipped that tick rather than fed an all-invalid snapshot (which, with
+     * sensor_fault_debounce_ticks configured to 1, trips guard 6 on the first
+     * tick of a run/resume). The skip must come after the lock is taken. */
+    const char *skip = strstr(b, "if (!peek_running)");
+    TEST_CHECK(skip && skip < e && lk && skip > lk,
+               "executor_task_entry() skips the RUNNING tick body when the pre-lock peek missed "
+               "(if (!peek_running) after xSemaphoreTake(s_exec.lock ...))");
+
+    free(code);
+}
+
+/* thermo_channels_read()'s MAX31856 fault filter (0x01 OPEN, 0x02 OVUV,
+ * 0x40 TCRANGE) is what capture_baseline() and live_current_max_zone_c()
+ * newly inherited in this change -- a finite temperature carrying one of
+ * those bits must come back not-ok; any other bit (0x04 here) must not. */
+static void test_thermo_channels_read_fault_filter(void)
+{
+    TEST_SECTION("thermo_channels_read() -- OPEN/OVUV/TCRANGE fault bits mark a finite reading invalid");
+
+    static MAX31856BusClass bus;
+    memset(&bus, 0, sizeof(bus));
+    bus.initialized = true;
+
+    static const uint8_t bits[] = { 0x01u, 0x02u, 0x40u, 0x04u, 0x00u };
+    static const bool expect_ok[] = { false, false, false, true, true };
+    for (size_t k = 0; k < sizeof(bits) / sizeof(bits[0]); k++) {
+        reset_test_thermo_readings();
+        set_test_thermo_reading(0, 123.0f);
+        s_test_thermo_readings[0].fault_status = bits[k];
+        ThermoChannelSnapshot snap;
+        thermo_channels_read(&bus, &snap);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "fault_status 0x%02X on a finite 123 C reading -> ok=%s",
+                 (unsigned)bits[k], expect_ok[k] ? "true" : "false");
+        TEST_CHECK(snap.ok[0] == expect_ok[k], msg);
+        TEST_CHECK(snap.raw_c[0] == 123.0f, "raw_c carries the reported temperature regardless of ok");
+        TEST_CHECK(snap.cj_c[0] == 22.0f, "cj_c carries the cold junction when the SPI read succeeded");
+    }
+
+    reset_test_thermo_readings();
+    set_test_thermo_reading(0, 123.0f);
+    s_test_thermo_readings[0].spi_failed = true;
+    ThermoChannelSnapshot snap;
+    thermo_channels_read(&bus, &snap);
+    TEST_CHECK(!snap.ok[0] && isnan(snap.cj_c[0]), "spi_failed -> ok=false and cj_c NAN");
+    reset_test_thermo_readings();
 }
 
 int main(void)
 {
     run_test_profile_executor_prestart();
     test_task_entry_reads_before_taking_s_exec_lock();
+    test_thermo_channels_read_fault_filter();
     test_fscf_partition_absent_behaves_like_before();
     test_fscf_migrates_then_prefers_file();
     test_fscf_dual_write_stays_in_sync_across_repeated_persists();

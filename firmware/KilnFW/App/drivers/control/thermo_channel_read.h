@@ -28,7 +28,10 @@ extern "C" {
 #endif
 
 typedef struct {
-    float raw_c[MAX31856_CHANNEL_COUNT];  /* NAN where not ok */
+    float raw_c[MAX31856_CHANNEL_COUNT];  /* the channel's reported temperature, or NAN if the
+                                            * bus did not answer for it; NOT cleared when `ok`
+                                            * is false (a faulted channel keeps its finite
+                                            * value) -- always read it together with `ok`. */
     bool  ok[MAX31856_CHANNEL_COUNT];     /* !spi_failed && !isnan && !fault_bits_bad */
     float cj_c[MAX31856_CHANNEL_COUNT];   /* cold-junction reading, NAN where unavailable;
                                             * not gated by `ok` -- callers that use it
@@ -43,8 +46,12 @@ typedef struct {
  * every correct call site already used. Channels at or past
  * MAX31856_CHANNEL_COUNT in a reading are ignored. `out` is fully
  * initialized (NAN/false) even when the bus is not usable, so a caller
- * never needs to zero it first. Never takes a lock and performs no I/O
- * beyond the one bus scan -- safe to call before taking any module lock. */
+ * never needs to zero it first. Takes no module lock (s_exec.lock/s_at.lock)
+ * of its own; the producers it calls take only their own leaf locks
+ * (each MAX31856 channel's own ch->lock, up to MAX31856_LOCK_TIMEOUT_MS
+ * apiece; sim_backend's s_sim.lock), exactly as
+ * before this extraction. Performs no I/O beyond the one bus scan -- must be
+ * called BEFORE taking any module lock, never while holding one. */
 void thermo_channels_read(MAX31856BusClass *bus, ThermoChannelSnapshot *out);
 
 #ifdef __cplusplus

@@ -43,6 +43,19 @@ int g_test_count = 0;
 #include "../drivers/control/autotune_engine_relay.c"
 #include "../drivers/control/autotune_engine_coupling.c"
 
+// Test-only tick driver, defined HERE rather than in autotune_engine.c so the
+// target build never contains it (2026-09-24 review of the pre-lock read fix):
+// it reads the bus the way production's task_entry() does before taking
+// s_at.lock, then runs the real tick body. It keeps the pre-fix
+// autotune_engine_tick_locked() name so this file's many direct call sites
+// stay unchanged.
+static void autotune_engine_tick_locked(void)
+{
+    ThermoChannelSnapshot snap;
+    thermo_channels_read(s_at.thermo_bus, &snap);
+    autotune_engine_tick_locked_impl(&snap);
+}
+
 // ---------------------------------------------------------------------------
 // Stub bodies for every extern symbol autotune_engine.c references that
 // isn't linked in for real (see build_host_tests.ps1 for this executable).
@@ -6816,10 +6829,11 @@ void run_test_autotune_engine_prestart(void)
 // 2026-09-24 "never hold a module lock across a producer call" fix
 // (companion to profile_executor's test_baseline_read_runs_outside_the_lock()
 // in test_profile_executor_prestart.c). autotune_engine_tick_locked() here
-// is the test-only backward-compatible wrapper preserving the pre-fix
-// signature/behavior (reads the bus itself, then calls
-// autotune_engine_tick_locked_impl()) -- production's task_entry() never
-// calls it; it calls _impl() directly with a pre-lock-read snapshot instead.
+// is the test-only wrapper defined at the top of THIS file (reads the bus
+// itself, then calls autotune_engine_tick_locked_impl()); it does not exist in
+// autotune_engine.c at all, so production cannot call it. This test is weak on
+// its own (it exercises the wrapper, not task_entry()); the source scan below
+// is what pins the production ordering.
 // This test still proves the shared thermo_channels_read()/MAX31856_read_all()
 // path itself never observes a nonzero xSemaphoreTake/Give nesting depth,
 // same property test_task_entry_reads_before_taking_s_at_lock() below
@@ -6848,29 +6862,59 @@ static void test_tick_locked_wrapper_reads_outside_any_lock(void)
                "sanity: MAX31856_read_all() must actually have been called this tick, at depth 0");
 }
 
-// Production's task_entry() (unreachable from host tests -- a real
-// `for (;;) { vTaskDelay(...); }` loop with no extraction seam, same
-// unreachability test_baseline_read_runs_outside_the_lock()'s own comment
-// documents for profile_executor.c's executor_task_entry()) cannot be
-// driven directly, so this proves the property by source order instead:
-// thermo_channels_read(...) must appear, textually, before
-// xSemaphoreTake(s_at.lock, portMAX_DELAY) inside task_entry()'s body.
-static bool source_scan_call_precedes(const char *text, const char *fn_sig, const char *next_fn_sig,
-                                       const char *first_needle, const char *second_needle,
-                                       const char **out_reason)
+/* Comment-stripped copy of `src` (same approach as test_display_power_wiring.c's
+ * strip_c_comments()), so a source-order scan cannot be satisfied by an
+ * explanatory comment that merely mentions a needle. */
+static char *ae_strip_c_comments(const char *src)
 {
-    const char *fn = strstr(text, fn_sig);
-    if (!fn) { *out_reason = "sanity: function definition not findable"; return false; }
-    const char *next_fn = strstr(fn + 1, next_fn_sig);
-    if (!next_fn) { *out_reason = "sanity: next function boundary not findable"; return false; }
-    const char *first = strstr(fn, first_needle);
-    const char *second = strstr(fn, second_needle);
-    if (!first || first >= next_fn) { *out_reason = "sanity: first call site not findable in function body"; return false; }
-    if (!second || second >= next_fn) { *out_reason = "sanity: second call site not findable in function body"; return false; }
-    *out_reason = NULL;
-    return first < second;
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n;) {
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i = (i + 1 < n) ? i + 2 : n;
+            out[o++] = ' ';
+        } else if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            out[o++] = ' ';
+        } else {
+            out[o++] = src[i++];
+        }
+    }
+    out[o] = '\0';
+    return out;
 }
 
+/* Occurrences of `needle` starting in [begin, end). */
+static int ae_count_in_range(const char *begin, const char *end, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(begin, needle); p && p < end; p = strstr(p + 1, needle)) n++;
+    return n;
+}
+
+/* Locates [fn_sig, next_fn_sig) in `code`. */
+static bool ae_find_body(const char *code, const char *fn_sig, const char *next_fn_sig,
+                         const char **out_begin, const char **out_end)
+{
+    const char *fn = strstr(code, fn_sig);
+    if (!fn) return false;
+    const char *next_fn = strstr(fn + 1, next_fn_sig);
+    if (!next_fn) return false;
+    *out_begin = fn;
+    *out_end = next_fn;
+    return true;
+}
+
+// Production's task_entry() (unreachable from host tests -- a real
+// `for (;;) { vTaskDelay(...); }` loop with no extraction seam) cannot be
+// driven directly, so this proves the property by comment-stripped source
+// scan: exactly one thermo_channels_read( call, textually before the only
+// xSemaphoreTake(s_at.lock ...), no raw bus/sim read in task_entry() or in
+// the locked tick body, and the test-only wrapper absent from production.
 static void test_task_entry_reads_before_taking_s_at_lock(void)
 {
     TEST_SECTION("autotune_engine -- task_entry() must call thermo_channels_read() BEFORE "
@@ -6883,19 +6927,47 @@ static void test_task_entry_reads_before_taking_s_at_lock(void)
         TEST_CHECK(false, "could not locate drivers/control/autotune_engine.c to source-scan");
         return;
     }
-
-    const char *reason = NULL;
-    bool ok = source_scan_call_precedes(text, "static void task_entry(void *arg)",
-                                         "esp_err_t autotune_engine_start(",
-                                         "thermo_channels_read(", "xSemaphoreTake(s_at.lock", &reason);
-    if (reason) {
-        TEST_CHECK(false, reason);
-    } else {
-        TEST_CHECK(ok, "MUST GO RED if task_entry() takes s_at.lock before its thermo_channels_read() "
-                       "pre-lock peek/read -- move the read back before the lock");
+    char *code = ae_strip_c_comments(text);
+    free(text);
+    if (!code) {
+        TEST_CHECK(false, "malloc for the comment-stripped autotune_engine.c failed");
+        return;
     }
 
-    free(text);
+    const char *b = NULL;
+    const char *e = NULL;
+    if (!ae_find_body(code, "static void task_entry(void *arg)", "esp_err_t autotune_engine_start(", &b, &e)) {
+        TEST_CHECK(false, "sanity: task_entry()'s body not findable in autotune_engine.c");
+    } else {
+        TEST_CHECK(ae_count_in_range(b, e, "thermo_channels_read(") == 1,
+                   "task_entry() makes exactly ONE thermo_channels_read() call (a second one could sit "
+                   "under s_at.lock without breaking a first-occurrence ordering check)");
+        TEST_CHECK(ae_count_in_range(b, e, "xSemaphoreTake(s_at.lock") == 1,
+                   "task_entry() takes s_at.lock exactly once");
+        TEST_CHECK(ae_count_in_range(b, e, "MAX31856_read_all(") == 0 &&
+                       ae_count_in_range(b, e, "sim_backend_read_all(") == 0,
+                   "task_entry() never calls a raw bus/sim read directly -- only the pre-lock helper");
+        const char *rd = strstr(b, "thermo_channels_read(");
+        const char *lk = strstr(b, "xSemaphoreTake(s_at.lock");
+        TEST_CHECK(rd && lk && rd < e && lk < e && rd < lk,
+                   "MUST GO RED if task_entry() takes s_at.lock before its thermo_channels_read() "
+                   "pre-lock peek/read -- move the read back before the lock");
+    }
+
+    if (!ae_find_body(code, "static void autotune_engine_tick_locked_impl(", "static void task_entry(void *arg)", &b, &e)) {
+        TEST_CHECK(false, "sanity: autotune_engine_tick_locked_impl()'s body not findable");
+    } else {
+        TEST_CHECK(ae_count_in_range(b, e, "thermo_channels_read(") == 0 &&
+                       ae_count_in_range(b, e, "MAX31856_read_all(") == 0 &&
+                       ae_count_in_range(b, e, "sim_backend_read_all(") == 0,
+                   "autotune_engine_tick_locked_impl() (runs under s_at.lock) performs no bus/sim read");
+    }
+
+    TEST_CHECK(strstr(code, "autotune_engine_tick_locked(void)") == NULL,
+               "the test-only autotune_engine_tick_locked() wrapper lives in this test file, never in "
+               "autotune_engine.c (it reads the bus itself, so production must not be able to call it)");
+
+    free(code);
 }
 
 int main(void)
