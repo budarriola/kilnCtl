@@ -120,11 +120,177 @@ struct wifi_prov_state s_wifi;
 
 QueueHandle_t s_wifi_cmd_queue;
 
-/* Producer half of the request/response pair -- identical in shape to
- * kiln_io_owner.c's and thermo_owner.c's helper of the same name, including
- * the fail-closed default. Returns false if the owner task isn't up, the post
- * was refused (full queue), or the wait timed out; *result is meaningful only
- * when it returns true. */
+/* ---- Reply slot pool (2026-09-25, W1: docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) ----
+ *
+ * Fixes the write-into-a-dead-stack-frame hazard wifi_cmd_t's doc comment
+ * (wifi_prov_internal.h) describes: a producer used to hand the owner a
+ * pointer straight into its own stack (result) plus a stack-resident
+ * semaphore (done). A timed-out producer returns -- its stack frame is now
+ * free for its caller to reuse -- but the owner had no way to know that and
+ * still wrote *result and gave `done` whenever it eventually got around to
+ * the command.
+ *
+ * Replacement: a small pool of module-owned reply slots (storage that is
+ * never a producer's stack) plus a generation counter per slot. Exactly one
+ * side ever decides a slot's fate at each point in its life, so there is
+ * never a write or a signal aimed at a producer that already gave up:
+ *
+ *   - claim_reply_slot(): producer, before posting. Picks a free slot, marks
+ *     it in_use, captures its current generation into *out_gen, and drains
+ *     any stale "given" signal left on its semaphore (defensive -- see
+ *     owner_reply()'s comment for why this should never actually be needed
+ *     in correct operation, but a drain costs nothing and closes the class
+ *     outright rather than relying on the protocol alone).
+ *   - free_reply_slot(): producer, ONLY on a path where the owner never saw
+ *     (queue-send itself failed) or has already finished with (producer took
+ *     the semaphore successfully and copied the result out) this exact
+ *     generation. Bumps the generation and clears in_use, uncontested.
+ *   - abandon_reply_slot(): producer, on timeout. Does NOT free or touch
+ *     generation -- the owner might still be about to process this exact
+ *     command. Only sets `abandoned`, gated on the generation still
+ *     matching (defensive; it always will, since nothing else bumps it
+ *     until the owner or this same producer does).
+ *   - owner_reply(): owner, once it has computed a reply-bearing command's
+ *     result. Holds the pool lock for its entire decision: if the slot's
+ *     generation no longer matches (should not happen; fail closed and
+ *     never write), or the slot was marked abandoned, the owner recycles the
+ *     slot itself (bump generation, clear in_use/abandoned) and skips both
+ *     the write and the signal -- there is provably nobody left waiting on
+ *     it, and the memory being recycled is the module's own, not a stack
+ *     frame, so there is nothing left to corrupt. Otherwise it writes the
+ *     result into the slot and gives the slot's semaphore; the slot is freed
+ *     later by the producer that is (by construction) still waiting for it.
+ *
+ * Pool size matches the command queue depth: xQueueSend's own 0-tick timeout
+ * already refuses a command outright once WIFI_OWNER_QUEUE_LEN commands are
+ * queued, so at most that many reply-bearing commands can ever be in flight
+ * waiting for a slot at once; running out of slots is treated exactly like a
+ * full queue (refuse the command, never block acquiring one). */
+typedef struct {
+    bool in_use;
+    bool abandoned;
+    uint32_t generation;
+    SemaphoreHandle_t sem;
+    StaticSemaphore_t sem_storage;
+    wifi_result_t result;
+} wifi_reply_slot_t;
+
+#define WIFI_REPLY_SLOT_COUNT WIFI_OWNER_QUEUE_LEN
+
+static wifi_reply_slot_t s_reply_slots[WIFI_REPLY_SLOT_COUNT];
+static StaticSemaphore_t s_reply_pool_mutex_storage;
+static SemaphoreHandle_t s_reply_pool_mutex;
+
+/* Created once, lazily, the first time any producer needs the pool -- mirrors
+ * this module's existing style of deferring one-time setup to first use
+ * rather than adding another wifi_prov_start() step. Every caller of the pool
+ * functions below goes through wifi_prov_post_and_wait(), which always calls
+ * this first. */
+static void ensure_reply_pool_init(void)
+{
+    if (s_reply_pool_mutex) {
+        return;
+    }
+    s_reply_pool_mutex = xSemaphoreCreateMutexStatic(&s_reply_pool_mutex_storage);
+    for (int i = 0; i < WIFI_REPLY_SLOT_COUNT; i++) {
+        s_reply_slots[i].sem = xSemaphoreCreateBinaryStatic(&s_reply_slots[i].sem_storage);
+    }
+}
+
+/* Producer side: claim a free slot before posting. Returns the slot index, or
+ * -1 if every slot is in use (treated the same as a full command queue --
+ * refuse rather than wait). *out_gen is the generation the producer must
+ * carry in its cmd so the owner can tell a stale reuse apart from this exact
+ * claim. */
+static int claim_reply_slot(uint32_t *out_gen)
+{
+    ensure_reply_pool_init();
+    xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
+    int found = -1;
+    for (int i = 0; i < WIFI_REPLY_SLOT_COUNT; i++) {
+        if (!s_reply_slots[i].in_use) {
+            found = i;
+            break;
+        }
+    }
+    if (found >= 0) {
+        s_reply_slots[found].in_use = true;
+        s_reply_slots[found].abandoned = false;
+        *out_gen = s_reply_slots[found].generation;
+        /* Defensive drain -- see this pool's top-of-file comment. Should
+         * never find anything (a slot is never left in_use==false with a
+         * pending give), but a stale signal here would otherwise look like
+         * an instant, wrong answer to whatever the next claimant posts. */
+        xSemaphoreTake(s_reply_slots[found].sem, 0);
+    }
+    xSemaphoreGive(s_reply_pool_mutex);
+    return found;
+}
+
+/* Producer side: free a slot the owner never saw (queue-send failed) or has
+ * already fully handed back (the producer took the semaphore and copied the
+ * result out). Never called by a producer that is declaring a timeout --
+ * that path is abandon_reply_slot() below, precisely because the owner may
+ * still be about to touch this slot. */
+static void free_reply_slot(int slot)
+{
+    xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
+    s_reply_slots[slot].generation++;
+    s_reply_slots[slot].in_use = false;
+    s_reply_slots[slot].abandoned = false;
+    xSemaphoreGive(s_reply_pool_mutex);
+}
+
+/* Producer side: give up waiting. Marks the slot abandoned so that whenever
+ * the owner does get to this command, it recycles the slot instead of
+ * writing into it or signaling a semaphore nobody is waiting on -- see
+ * owner_reply() below. Deliberately does NOT free the slot or touch its
+ * generation: the owner may still be mid-flight toward this exact command,
+ * and freeing here would let a new claimant reuse the slot while the owner
+ * is still about to act on the old generation. */
+static void abandon_reply_slot(int slot, uint32_t gen)
+{
+    xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
+    if (s_reply_slots[slot].generation == gen) {
+        s_reply_slots[slot].abandoned = true;
+    }
+    xSemaphoreGive(s_reply_pool_mutex);
+}
+
+/* Owner side (owner_task() only): called once a reply-bearing command's
+ * result has been computed. The whole decision -- still-live vs.
+ * abandoned/reused -- and, when abandoned/reused, the recycle, happen while
+ * holding the pool lock, so a producer's abandon_reply_slot() call (also
+ * lock-guarded) can never interleave with this in a way that leaves both
+ * sides believing the other will act. */
+static void owner_reply(int slot, uint32_t gen, const wifi_result_t *result)
+{
+    xSemaphoreTake(s_reply_pool_mutex, portMAX_DELAY);
+    if (s_reply_slots[slot].generation != gen) {
+        /* Should not happen given the protocol above -- fail closed: never
+         * write into a slot that isn't provably still this exact call's. */
+        xSemaphoreGive(s_reply_pool_mutex);
+        return;
+    }
+    if (s_reply_slots[slot].abandoned) {
+        /* Producer gave up already. Recycle ourselves -- it never will. */
+        s_reply_slots[slot].generation++;
+        s_reply_slots[slot].in_use = false;
+        s_reply_slots[slot].abandoned = false;
+        xSemaphoreGive(s_reply_pool_mutex);
+        return;
+    }
+    s_reply_slots[slot].result = *result;
+    xSemaphoreGive(s_reply_pool_mutex);
+    /* Given outside the lock -- xSemaphoreGive() must not run inside a
+     * critical section, and by the time we reach here the lock has already
+     * fully decided this producer is still the rightful owner of the slot. */
+    xSemaphoreGive(s_reply_slots[slot].sem);
+}
+
+/* Producer half of the request/response pair. Returns false if the owner task
+ * isn't up, the post was refused (full queue or no free reply slot), or the
+ * wait timed out; *result is meaningful only when it returns true. */
 bool wifi_prov_post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms)
 {
     memset(result, 0, sizeof(*result));
@@ -134,31 +300,33 @@ bool wifi_prov_post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wa
         return false;
     }
 
-    /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
-     * and i2c_owner_transfer() (2026-08-20). Not a hot loop itself, but kept
-     * consistent with every other owner's wifi_prov_post_and_wait() now that the
-     * pattern is known to matter under load. */
-    StaticSemaphore_t done_storage;
-    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
-    if (!done) {
+    uint32_t gen;
+    int slot = claim_reply_slot(&gen);
+    if (slot < 0) {
+        ESP_LOGW(WIFI_PROV_TAG, "reply slot pool exhausted -- refusing command %d", (int)cmd->type);
         return false;
     }
 
-    cmd->result = result;
-    cmd->done = done;
+    cmd->has_reply = true;
+    cmd->slot_idx = slot;
+    cmd->generation = gen;
 
     bool ok = false;
     if (xQueueSend(s_wifi_cmd_queue, cmd, 0) == pdTRUE) {
-        ok = xSemaphoreTake(done, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
-        if (!ok) {
+        ok = xSemaphoreTake(s_reply_slots[slot].sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
+        if (ok) {
+            *result = s_reply_slots[slot].result;
+            free_reply_slot(slot);
+        } else {
             ESP_LOGW(WIFI_PROV_TAG, "owner task did not answer command %d within %ums -- failing closed",
                      (int)cmd->type, (unsigned)wait_ms);
+            abandon_reply_slot(slot, gen);
         }
     } else {
         ESP_LOGW(WIFI_PROV_TAG, "command queue full -- refusing command %d", (int)cmd->type);
+        free_reply_slot(slot); /* owner never saw this generation -- safe to free immediately */
     }
 
-    vSemaphoreDelete(done);
     return ok;
 }
 
@@ -177,7 +345,7 @@ void post_event(wifi_cmd_type_t type)
          * emit. */
         return;
     }
-    wifi_cmd_t cmd = { .type = type, .result = NULL, .done = NULL };
+    wifi_cmd_t cmd = { .type = type, .has_reply = false, .slot_idx = -1, .generation = 0 };
     if (xQueueSend(s_wifi_cmd_queue, &cmd, 0) != pdTRUE) {
         ESP_LOGW(WIFI_PROV_TAG, "command queue full -- dropping Wi-Fi event %d (self-heals: see this file's "
                       "owner-task comment)", (int)type);
@@ -515,13 +683,20 @@ static void owner_task(void *arg)
         }
 
         wifi_result_t local;
-        wifi_result_t *r = cmd.result ? cmd.result : &local;
+        wifi_result_t *r = &local;
         memset(r, 0, sizeof(*r));
         r->err = ESP_FAIL;
 
+        /* W1: set true only by CMD_ADD_NETWORK/CMD_SET_MODE's success paths.
+         * The blocking scan+connect (start_sta_join()) now runs AFTER the
+         * reply below is sent, so it never holds up the caller -- see this
+         * file's reply-slot-pool comment and do_add_network()/do_set_mode()
+         * in wifi_prov_api.c. */
+        bool join_after_reply = false;
+
         switch (cmd.type) {
         case CMD_ADD_NETWORK:
-            r->err = do_add_network(cmd.args.add_network.ssid, cmd.args.add_network.password);
+            r->err = do_add_network(cmd.args.add_network.ssid, cmd.args.add_network.password, &join_after_reply);
             break;
         case CMD_FORGET_NETWORK:
             r->err = do_forget_network(cmd.args.forget_network.ssid);
@@ -530,7 +705,7 @@ static void owner_task(void *arg)
             r->err = do_get_saved_networks(cmd.args.get_saved_networks.max_results, r);
             break;
         case CMD_SET_MODE:
-            r->err = do_set_mode(cmd.args.set_mode.mode);
+            r->err = do_set_mode(cmd.args.set_mode.mode, &join_after_reply);
             break;
         case CMD_SET_AP_SSID:
             r->err = do_set_ap_ssid(cmd.args.set_ap_ssid.ssid);
@@ -556,8 +731,8 @@ static void owner_task(void *arg)
                                       cmd.args.set_static_ip.gateway);
             break;
 
-        /* Fire-and-forget events -- cmd.result/cmd.done are NULL for these,
-         * so the r->err written above goes nowhere, on purpose. */
+        /* Fire-and-forget events -- cmd.has_reply is false for these, so the
+         * r->err written above goes nowhere, on purpose. */
         case CMD_EV_STA_START:
             do_ev_sta_start();
             break;
@@ -578,11 +753,26 @@ static void owner_task(void *arg)
             break;
         }
 
-        if (cmd.done) {
-            /* Given LAST, after the result slot is fully written -- the
-             * producer is blocked on exactly this and reads *result the
-             * instant it is released. */
-            xSemaphoreGive(cmd.done);
+        if (cmd.has_reply) {
+            /* Reply BEFORE the blocking join below -- this is W1's whole
+             * point: httpd_worker and any other caller waiting in
+             * wifi_prov_post_and_wait() gets its answer as soon as the
+             * upsert/NVS write is done, not after up to 15s of scan+connect. */
+            owner_reply(cmd.slot_idx, cmd.generation, r);
+        }
+
+        if (join_after_reply) {
+            /* Runs on owner_task() itself, same as before W1 -- just moved
+             * to after the reply. start_sta_join() never calls back into a
+             * public wifi_prov_*() producer, so there is no deadlock risk
+             * doing this here (see this file's DEADLOCK RULE comment). Any
+             * failure past this point (connect fails, AP fallback fires) is
+             * observable exactly the same way it always has been:
+             * s_wifi.state / wifi_prov_get_state() and the existing
+             * ESP_LOGW/E calls inside start_sta_join()'s callees, since
+             * those never depended on this being called before or after a
+             * reply. */
+            start_sta_join();
         }
     }
 }

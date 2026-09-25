@@ -155,10 +155,27 @@ typedef struct {
     size_t scan_count;
 } wifi_result_t;
 
+/* W1 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md): a command used to carry a
+ * pointer straight into the PRODUCER's own stack frame (result) plus a
+ * stack-resident semaphore handle (done) -- correct only as long as the
+ * producer is still waiting when the owner gets around to answering. A
+ * timed-out producer returns, and its stack frame is free to be reused by
+ * its caller, yet the owner still wrote into *result and gave `done` later:
+ * a write into a dead stack frame. Fixed by replacing both with a slot index
+ * into a small pool of module-owned (never stack-owned) reply slots
+ * (s_reply_slots, wifi_prov.c) plus a generation number captured at claim
+ * time. See wifi_prov.c's "reply slot pool" comment for the full protocol:
+ * in short, a timed-out producer never frees or touches the slot itself --
+ * it only marks it abandoned, and the OWNER is the only side that ever
+ * decides whether to write+signal (generation still matches, not abandoned)
+ * or to just recycle it (mismatch or abandoned), so there is exactly one
+ * writer of "is this slot still alive" at every instant and never a write
+ * or a signal aimed at a producer that already gave up. */
 typedef struct {
     wifi_cmd_type_t type;
-    wifi_result_t *result;
-    SemaphoreHandle_t done;
+    bool has_reply;
+    int slot_idx;
+    uint32_t generation;
     union {
         struct {
             char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
@@ -244,10 +261,10 @@ void start_dns_hijack_task(void);
 
 /* ---- network/mode/AP/IP-mode command bodies + blocking scan
  * (wifi_prov_api.c) --------------------------------------------------------- */
-esp_err_t do_add_network(const char *new_ssid, const char *password);
+esp_err_t do_add_network(const char *new_ssid, const char *password, bool *out_join_after_reply);
 esp_err_t do_forget_network(const char *target);
 esp_err_t do_get_saved_networks(size_t max_results, wifi_result_t *r);
-esp_err_t do_set_mode(wifi_prov_mode_t mode);
+esp_err_t do_set_mode(wifi_prov_mode_t mode, bool *out_join_after_reply);
 esp_err_t do_set_ap_ssid(const char *ssid);
 esp_err_t do_set_ap_password(const char *password);
 esp_err_t do_set_dhcp(void);

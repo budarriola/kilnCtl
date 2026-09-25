@@ -330,6 +330,127 @@ static void test_wifi_prov_start_sets_ram_storage(void)
                "the last esp_wifi_set_storage() call requested WIFI_STORAGE_RAM, not the flash-backed default");
 }
 
+// ---- W1 reply-slot-pool tests (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) ----
+// claim_reply_slot()/free_reply_slot()/abandon_reply_slot()/owner_reply() are
+// static in wifi_prov.c and reached here the same way do_*() is: this file
+// #includes wifi_prov.c directly. These exercise the pure claim/free/abandon/
+// reply protocol against the pool's own data structures -- the freertos/
+// semphr.h stub does not model real per-semaphore give/take state (see its
+// header comment), so a real blocking wait can't be simulated here; what CAN
+// be verified on the host, and is the actual point of this fix, is that the
+// pool never writes a reply into a slot the producer has already abandoned,
+// and never lets a stale generation match after a slot is recycled.
+static void reset_reply_pool(void)
+{
+    // Reset only the protocol state -- NOT the whole struct. A blanket
+    // memset would also zero .sem/.sem_storage, but ensure_reply_pool_init()
+    // only creates the semaphore handles once (it's a no-op once
+    // s_reply_pool_mutex is non-NULL), so a later test would inherit a NULL
+    // .sem and crash the moment claim_reply_slot()'s defensive drain (or
+    // owner_reply()'s xSemaphoreGive()) touched it.
+    for (int i = 0; i < WIFI_REPLY_SLOT_COUNT; i++) {
+        s_reply_slots[i].in_use = false;
+        s_reply_slots[i].abandoned = false;
+        s_reply_slots[i].generation = 0;
+        memset(&s_reply_slots[i].result, 0, sizeof(s_reply_slots[i].result));
+    }
+}
+
+static void test_reply_slot_normal_roundtrip(void)
+{
+    TEST_SECTION("reply slot pool -- normal claim -> owner_reply -> free roundtrip");
+    reset_reply_pool();
+
+    uint32_t gen = 0xFFFFFFFF;
+    int slot = claim_reply_slot(&gen);
+    TEST_CHECK(slot >= 0, "a free pool has a slot to claim");
+    TEST_CHECK(gen == 0, "a never-used slot starts at generation 0");
+    TEST_CHECK(s_reply_slots[slot].in_use, "claimed slot is marked in_use");
+
+    wifi_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.err = ESP_OK;
+    result.scan_count = 7;
+    owner_reply(slot, gen, &result);
+
+    TEST_CHECK(s_reply_slots[slot].in_use, "owner_reply() on a live slot does not free it -- the producer does");
+    TEST_CHECK(!s_reply_slots[slot].abandoned, "owner_reply() on a live slot never marks it abandoned");
+    TEST_CHECK(s_reply_slots[slot].result.err == ESP_OK, "the result was written into the slot");
+    TEST_CHECK(s_reply_slots[slot].result.scan_count == 7, "the full result struct was written, not just err");
+
+    // Producer's side of a successful wait: copy out, then free.
+    free_reply_slot(slot);
+    TEST_CHECK(!s_reply_slots[slot].in_use, "free_reply_slot() releases the slot");
+    TEST_CHECK(s_reply_slots[slot].generation == gen + 1, "freeing bumps the generation");
+}
+
+static void test_reply_slot_abandon_then_owner_recycles(void)
+{
+    TEST_SECTION("reply slot pool -- a timed-out producer's abandon means owner_reply() recycles, never writes");
+    reset_reply_pool();
+
+    uint32_t gen;
+    int slot = claim_reply_slot(&gen);
+    TEST_CHECK(slot >= 0, "slot claimed");
+
+    // Producer gives up (timeout) -- marks abandoned, does NOT free or touch
+    // generation, since the owner may still be about to act on this exact
+    // command.
+    abandon_reply_slot(slot, gen);
+    TEST_CHECK(s_reply_slots[slot].abandoned, "abandon_reply_slot() marks the slot abandoned");
+    TEST_CHECK(s_reply_slots[slot].in_use, "abandon does not free the slot itself -- the owner recycles it");
+    TEST_CHECK(s_reply_slots[slot].generation == gen, "abandon does not bump the generation");
+
+    // Owner finally gets to the command. It must recycle the slot itself and
+    // must NOT write into .result or leave it claimable-but-answered.
+    wifi_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.err = ESP_ERR_TIMEOUT; // a value that must NOT end up in the slot
+    owner_reply(slot, gen, &result);
+
+    TEST_CHECK(!s_reply_slots[slot].in_use, "owner_reply() recycles an abandoned slot instead of answering it");
+    TEST_CHECK(!s_reply_slots[slot].abandoned, "the recycle clears the abandoned flag too");
+    TEST_CHECK(s_reply_slots[slot].generation == gen + 1,
+               "recycling bumps the generation so a future claimant never inherits the abandoned state");
+    TEST_CHECK(s_reply_slots[slot].result.err != ESP_ERR_TIMEOUT,
+               "owner_reply() on an abandoned slot must NOT write the result -- nobody is waiting on it");
+}
+
+static void test_reply_slot_stale_generation_never_matches_after_reuse(void)
+{
+    TEST_SECTION("reply slot pool -- a stale (pre-recycle) generation from owner_reply() is a fail-closed no-op");
+    reset_reply_pool();
+
+    // First claimant abandons; owner recycles it (as in the test above).
+    uint32_t old_gen;
+    int slot = claim_reply_slot(&old_gen);
+    abandon_reply_slot(slot, old_gen);
+    wifi_result_t discard;
+    memset(&discard, 0, sizeof(discard));
+    owner_reply(slot, old_gen, &discard); // recycles
+
+    // A second producer claims the now-free slot -- same index, new generation.
+    uint32_t new_gen;
+    int slot2 = claim_reply_slot(&new_gen);
+    TEST_CHECK(slot2 == slot, "the pool reuses the just-freed slot index");
+    TEST_CHECK(new_gen == old_gen + 1, "the new claim gets the bumped generation, not the stale one");
+
+    // Simulate a delayed/duplicate owner_reply() call still carrying the OLD
+    // generation (should never happen given the protocol, but this is
+    // exactly the fail-closed guard for if it ever did): must not touch the
+    // slot the SECOND producer now owns.
+    wifi_result_t stale_result;
+    memset(&stale_result, 0, sizeof(stale_result));
+    stale_result.err = ESP_ERR_INVALID_ARG; // a value that must NOT land on the new claimant
+    owner_reply(slot, old_gen, &stale_result);
+
+    TEST_CHECK(s_reply_slots[slot].in_use, "the second producer's live claim is untouched by a stale-generation reply");
+    TEST_CHECK(s_reply_slots[slot].generation == new_gen,
+               "generation is unchanged by the stale call -- it never matched");
+    TEST_CHECK(s_reply_slots[slot].result.err != ESP_ERR_INVALID_ARG,
+               "the stale reply's result must never be written into the new claimant's slot");
+}
+
 void run_test_wifi_prov(void)
 {
     test_static_ip_confirmed_false_at_boot();
@@ -342,4 +463,7 @@ void run_test_wifi_prov(void)
     test_static_already_confirmed_got_ip_drops_ap();
     test_set_static_ip_resets_confirmation();
     test_set_dhcp_resets_confirmation();
+    test_reply_slot_normal_roundtrip();
+    test_reply_slot_abandon_then_owner_recycles();
+    test_reply_slot_stale_generation_never_matches_after_reuse();
 }

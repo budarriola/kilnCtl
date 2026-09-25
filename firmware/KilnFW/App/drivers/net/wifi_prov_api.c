@@ -47,8 +47,9 @@ wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
  * length-validated by the producer -- validation stays on the CALLER's side
  * of the queue throughout this file, so a malformed request is refused
  * immediately and never costs a queue slot or a task hop. */
-esp_err_t do_add_network(const char *new_ssid, const char *password)
+esp_err_t do_add_network(const char *new_ssid, const char *password, bool *out_join_after_reply)
 {
+    *out_join_after_reply = false;
     size_t password_len = strlen(password);
 
     /* Upsert by exact SSID match -- update the password in place if this
@@ -99,11 +100,13 @@ esp_err_t do_add_network(const char *new_ssid, const char *password)
         }
     }
 
-    /* start_sta_join() re-runs the scan-based tie-break, so this may join a
-     * different (stronger, already-in-range) saved network than the one just
-     * added -- that's intended, not a bug: adding a network is "make this
-     * available", not "connect to this one specifically". */
-    start_sta_join();
+    /* W1: caller (owner_task()) runs start_sta_join() AFTER replying to the
+     * waiting producer, not here -- see wifi_prov.c's reply-slot-pool
+     * comment. start_sta_join() re-runs the scan-based tie-break, so this may
+     * join a different (stronger, already-in-range) saved network than the
+     * one just added -- that's intended, not a bug: adding a network is
+     * "make this available", not "connect to this one specifically". */
+    *out_join_after_reply = true;
     return ESP_OK;
 }
 
@@ -127,12 +130,15 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
     cmd.args.add_network.password[password_len] = '\0';
 
     wifi_result_t r;
-    /* The generous wait matters most here: do_add_network() calls
-     * start_sta_join(), which re-runs the scan-based tie-break -- a real
-     * blocking scan -- before it returns. This producer's caller is either an
-     * HTTP handler or ui_page_network.c's connect_job_t worker task, both of
-     * which already blocked for exactly this work before Phase 4. */
-    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+    /* W1: the owner now replies right after the upsert+NVS write and runs
+     * start_sta_join() (the real blocking scan) afterward, so this producer
+     * no longer needs to wait out the scan itself -- WIFI_OWNER_WAIT_MS
+     * (ordinary command timeout) replaces WIFI_OWNER_SCAN_WAIT_MS here. Any
+     * join failure past this point is still observable exactly as before:
+     * wifi_prov_get_state() / the existing ESP_LOGW/E calls inside
+     * start_sta_join()'s callees never depended on this call having waited
+     * for them. */
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
@@ -246,8 +252,9 @@ esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t ma
 }
 
 /* Runs on owner_task(). */
-esp_err_t do_set_mode(wifi_prov_mode_t mode)
+esp_err_t do_set_mode(wifi_prov_mode_t mode, bool *out_join_after_reply)
 {
+    *out_join_after_reply = false;
     s_wifi.mode = mode;
     esp_err_t err = nvs_save_mode();
     if (err != ESP_OK) {
@@ -271,7 +278,9 @@ esp_err_t do_set_mode(wifi_prov_mode_t mode)
         ESP_LOGI(WIFI_PROV_TAG, "AP mode enabled: station never attempted");
     } else if (s_wifi.saved_nets.count > 0) {
         ESP_LOGI(WIFI_PROV_TAG, "home mode enabled, resuming join to saved network");
-        start_sta_join();
+        /* W1: caller (owner_task()) runs start_sta_join() AFTER replying --
+         * see wifi_prov.c's reply-slot-pool comment. */
+        *out_join_after_reply = true;
     } else {
         s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
         ESP_LOGI(WIFI_PROV_TAG, "home mode enabled, no saved network to join");
@@ -286,9 +295,9 @@ esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
     }
     wifi_cmd_t cmd = { .type = CMD_SET_MODE, .args.set_mode = { .mode = mode } };
     wifi_result_t r;
-    /* Scan-length wait: the HOME branch of do_set_mode() calls
-     * start_sta_join(), which scans. */
-    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+    /* W1: the HOME branch's start_sta_join() now runs on owner_task() AFTER
+     * the reply, not before it -- ordinary wait applies here too. */
+    if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     return r.err;
