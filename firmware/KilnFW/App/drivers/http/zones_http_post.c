@@ -15,6 +15,7 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
+#include "http_async_job.h" /* http_async_job_busy() -- see the check below */
 #include "ota_http.h" /* ota_http_check_interlocks() -- the shared "not while firing" gate */
 #include "ota_interlock.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
@@ -76,6 +77,21 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by interlock: %s", interlock_reason);
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
+    }
+
+    /* docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 review fix (Opus, 2026-09-25):
+     * this handler raises the Pico ceiling via safety_ceiling_sync_guard_raise()
+     * below (-> pico_ceiling_writer() -> safety_cfg_write_set_and_confirm_f32()),
+     * staging abs_max_temp_c and sending a COMMIT_CONFIG -- exactly the kind of
+     * safety-config write an in-flight http_async_job (bench_preset's 32-param
+     * stage-then-commit, or ct_auto_zero's measurement) must not race, per the
+     * same reasoning as every other safety_cfg_http.c writer's busy check. Ordered
+     * after the mode gate and after ota_http_check_interlocks() per that review:
+     * both of those answer a different question (is a firing/autotune run active,
+     * is heat commanded) and must still run first. */
+    if (http_async_job_busy()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: another commissioning operation is running");
+        return system_mode_gate_http_send_refusal(req, "another commissioning operation is running");
     }
 
     if (req->content_len <= 0 || req->content_len > ZONES_BODY_MAX) {

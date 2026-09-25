@@ -157,6 +157,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
                                             * docs/audits/observability_gaps_closed_2026-09-14.md) */
 #include "../drivers/http/zones_http_get.c"
 #include "../drivers/http/zones_http_post_parse.c"
+#include "../drivers/http/http_async_job.h"
 #include "../drivers/http/zones_http_post.c"
 #include "../drivers/http/zones_http_pid.c"
 #include "../drivers/control/zones_current_sweep_engine.c"
@@ -1348,6 +1349,63 @@ static void test_zones_post_refused_by_mode_gate_before_interlock(void)
     TEST_CHECK(!s_test_ok_called, "must not report success for a gate-refused submit");
     TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
               "refusal body must carry the PcTools discriminator marker");
+}
+
+// Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md
+// A2): the interleaving audit missed that zones_post_handler() raises the
+// Pico ceiling (safety_ceiling_sync_guard_raise() -> s_ceiling_writer, the
+// fake safety_cfg_write_set_and_confirm_f32() above) with no
+// http_async_job_busy() check, so a POST /api/zones could commit a
+// half-staged bench_preset or race ct_auto_zero's measurement. Fixed by a
+// refusal placed after the mode gate and after ota_http_check_interlocks(),
+// matching those handlers' own ordering. Proven here the same way the
+// mode-gate test above proves its own ordering: g_probe_interlock_called
+// stays 0 would be WRONG here on purpose to assert -- the new check runs
+// AFTER the interlock, so the interlock *is* reached; what must never
+// happen is the Pico write (s_ceiling_writer_calls stays 0).
+//
+// MUST RUN LAST IN THIS EXECUTABLE: admits a real http_async_job via
+// http_async_job_try_start(), which the host xTaskCreate() stub never
+// actually runs, so http_async_job_busy() reads true for every test that
+// runs after this one (same convention as
+// test_commissioning_post_refuses_while_async_job_busy() in
+// test_safety_cfg_http.c).
+static void noop_zones_async_job_fn(httpd_req_t *async_req, void *ctx)
+{
+    (void)async_req;
+    (void)ctx;
+}
+
+static void test_zones_post_refused_while_async_job_busy(void)
+{
+    TEST_SECTION("zones_post_handler -- refuses with 409 and never reaches the Pico ceiling write while "
+                 "an http_async_job (bench_preset/ct_auto_zero) is running (review fix, 2026-09-25). "
+                 "MUST RUN LAST: leaves http_async_job_busy() reading true for the rest of this executable.");
+
+    httpd_req_t admit_req;
+    memset(&admit_req, 0, sizeof(admit_req));
+    admit_req.content_len = 0;
+    http_async_job_start_result_t start_result =
+        http_async_job_try_start(&admit_req, "http_async_job", 6144, noop_zones_async_job_fn, NULL);
+    TEST_CHECK(start_result == HTTP_ASYNC_JOB_STARTED, "the admission itself succeeds in this host test");
+    TEST_CHECK(http_async_job_busy(), "the module now reads busy (host stub never runs the job body)");
+
+    g_probe_interlock_called = 0;
+    s_ceiling_writer_calls = 0;
+    s_test_profile_status.state = PROFILE_EXEC_IDLE; // nothing else must be gating this
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+
+    TEST_CHECK(g_probe_interlock_called == 1,
+              "the busy check runs AFTER ota_http_check_interlocks() per the review's explicit ordering, "
+              "so the interlock IS reached");
+    TEST_CHECK(s_ceiling_writer_calls == 0,
+              "the Pico ceiling write (safety_cfg_write_set_and_confirm_f32()) must never be reached "
+              "while another commissioning operation owns http_async_job");
+    TEST_CHECK(!s_test_err_called, "the busy refusal goes through system_mode_gate_http_send_refusal(), not "
+              "httpd_resp_send_err()");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a busy-refused submit");
+    TEST_CHECK(strstr(s_last_resp_body, "another commissioning operation is running") != NULL,
+              "refusal body must carry the busy discriminator marker");
 }
 
 static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(void)
@@ -15094,6 +15152,18 @@ void run_test_zones_http(void)
     test_canonical_negative_MEMCPY_INSTEAD_OF_CANONICAL_breaks_the_round_trip();
     test_canonical_flushes_negative_zero_to_positive_zero();
     test_canonical_max_size_is_a_safe_upper_bound();
+
+    // Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md
+    // A2): zones_post_handler() raises the Pico ceiling via
+    // safety_ceiling_sync_guard_raise() -> s_ceiling_writer (the fake
+    // safety_cfg_write_set_and_confirm_f32() above), so it must refuse while
+    // an http_async_job (bench_preset's stage-then-commit, or ct_auto_zero's
+    // measurement) is running rather than race it. MUST RUN LAST: same
+    // s_busy-is-a-separate-TU reasoning as
+    // test_commissioning_post_refuses_while_async_job_busy() in
+    // test_safety_cfg_http.c -- once admitted here, http_async_job_busy()
+    // reads true for the rest of this executable.
+    test_zones_post_refused_while_async_job_busy();
 }
 
 /* test_zones_config_cfg_fs.c -- separate TU, same executable (see that

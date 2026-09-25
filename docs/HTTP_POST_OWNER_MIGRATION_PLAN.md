@@ -226,28 +226,30 @@ argument to see a call site at all.
   executable; negative-tested (the staging-failure refusal was disabled,
   forced rebuild confirmed `RUN FAILURES (1)`, restored by hand, forced
   rebuild confirmed clean again).
-- **Interleaving audit was wrong and is now corrected:** the original claim
-  that every safety-config writer was covered missed
-  `zones_post_handler` (`zones_http_post.c`), which raises the ceiling via
-  `safety_ceiling_sync_guard_raise` -> `pico_ceiling_writer` ->
+- **Interleaving audit was wrong and is now corrected, and the gap is now
+  closed:** the original claim that every safety-config writer was covered
+  missed `zones_post_handler` (`zones_http_post.c`), which raises the
+  ceiling via `safety_ceiling_sync_guard_raise` -> `pico_ceiling_writer` ->
   `safety_cfg_write_set_and_confirm_f32`, staging `abs_max_temp_c` and
-  sending a COMMIT_CONFIG, with no `http_async_job_busy()` check. **A
-  `POST /api/zones` can commit a half-staged bench preset today** (the same
-  gap already exists for `ct_auto_zero`, so this is not new from A2, but A2
-  is the point this was checked and found). Fix pending -- see below.
+  sending a COMMIT_CONFIG. It now carries its own `http_async_job_busy()`
+  409 refusal (`system_mode_gate_http_send_refusal()`, body "another
+  commissioning operation is running"), ordered after the mode gate and
+  after `ota_http_check_interlocks()` per the review's explicit ordering.
+  The same gap still exists for `ct_auto_zero` (unchanged by this slice).
+  `test_zones_http.c`'s `test_zones_post_refused_while_async_job_busy()`
+  proves the interlock is still reached (`g_probe_interlock_called == 1`)
+  but the Pico write never is (`s_ceiling_writer_calls == 0`); negative-tested
+  (the check was disabled, forced rebuild confirmed `2 FAILURE(S)`, restored
+  by hand, forced rebuild confirmed clean again). Full suite:
+  145/145 checks pass; DRAM unchanged (99672/101000 B); URI count unchanged
+  (no new route).
 - **Other interleaving, checked and found pre-existing, not made worse by
   A2:** no LCD/UART/non-HTTP path calls `SET_PARAM`/`COMMIT_CONFIG`
   directly. Three paths could already interleave with an in-flight
   `http_async_job` before A2 existed and are listed here as a known,
-  pre-existing gap rather than fixed in this slice:
+  pre-existing gap, not fixed in this slice:
   `zones_current_sweep_task.c`, `kiln_cfg_swap.c`'s worker, and the
   `safety_poll` ceiling reconcile.
-- **Pending:** add an `http_async_job_busy()` 409 refusal to
-  `zones_post_handler`, ordered after the mode gate and after
-  `ota_http_check_interlocks()`. Coordinate with the concurrent mode-gate
-  change landing on the same function -- rebase onto it, don't race it. Add
-  a `test_zones_http.c` case: busy refuses 409, never reaches the Pico
-  write. Negative-test it.
 
 ### A3 -- `crash_report/clear` onto A1's helper. CONDITIONAL, measure first
 

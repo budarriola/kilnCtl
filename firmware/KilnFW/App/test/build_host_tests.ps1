@@ -581,7 +581,15 @@ try {
             # no-ESP-IDF-dependency objects in, same convention as exe50's
             # own dedicated executable for the module's unit tests.
             "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
-            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`" " +
+            # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 review fix (Opus,
+            # 2026-09-25): zones_post_handler() (zones_http_post.c, #included
+            # above) now calls http_async_job_busy() -- link the real object
+            # in, same convention as test_safety_cfg_http.c's own link of it.
+            # stack_margin.c is already linked above for zone_sweep's own
+            # registration call, so http_async_job.c's stack_margin_
+            # register() call needs no additional link.
+            "`"$(Join-Path $driversDir 'http/http_async_job.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
