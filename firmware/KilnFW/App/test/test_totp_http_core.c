@@ -20,6 +20,15 @@ static void test_clock_ready(void)
     TEST_CHECK(totp_http_clock_ready(true), "a synced clock is ready");
 }
 
+// --- enrollment requires web auth on (2026-09-25) ---------------------------
+
+static void test_enroll_allowed(void)
+{
+    TEST_SECTION("totp_enroll_allowed -- new enrollment requires web auth on");
+    TEST_CHECK(!totp_enroll_allowed(false), "enrollment is refused while web auth is off");
+    TEST_CHECK(totp_enroll_allowed(true), "enrollment proceeds once web auth is on");
+}
+
 // --- pending-enrollment-secret state machine --------------------------------
 
 static void test_pending_begin_and_valid(void)
@@ -306,6 +315,7 @@ static void test_forgot_board_cap_success_never_resets(void)
 void run_test_totp_http_core(void)
 {
     test_clock_ready();
+    test_enroll_allowed();
     test_pending_begin_and_valid();
     test_pending_expires_and_zeroes();
     test_pending_never_active_is_invalid();

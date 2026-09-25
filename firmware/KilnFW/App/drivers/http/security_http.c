@@ -17,6 +17,7 @@
 #include "hal_sysinfo.h"     // hal_sysinfo_fill_random()
 #include "hal_time.h"        // hal_time_now_ms()
 #include "http_auth_http.h"  // kiln_http_register(), http_auth_caller_is_admin()
+#include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
 #include "http_form.h"
 #include "security_backend.h"
 #include "security_http_core.h"
@@ -123,10 +124,15 @@ static esp_err_t security_config_get_handler(httpd_req_t *req)
 //   cmd=clear_credentials (item 12b -- no other fields)
 //   cmd=totp_enroll_begin (docs/TOTP_PASSWORD_RESET_PLAN.md section 6b) --
 //     returns {"ok":true,"secret_base32","otpauth_uri","board_time_utc",
-//     "sntp_synced"}
-//   cmd=totp_enroll_confirm&code=NNNNNN -- returns {"ok"} only
+//     "sntp_synced"}. 2026-09-25: refused 409
+//     {"ok":false,"web_auth_disabled":true} while web login is off.
+//   cmd=totp_enroll_confirm&code=NNNNNN -- returns {"ok"} only. Same 409
+//     web_auth_disabled refusal as totp_enroll_begin above.
 //   cmd=totp_disable&code=NNNNNN -- requires a currently-valid code, not
-//     merely the ADMIN session already required by this route; {"ok"} only
+//     merely the ADMIN session already required by this route; {"ok"} only.
+//     NOT gated on web auth being on -- must keep working regardless, so an
+//     enrollment left over from before web auth was turned off can still be
+//     removed.
 //
 // The three totp_* commands are handled directly below, before the
 // set_web_password/etc dispatch machinery, and return early -- they do not
@@ -218,6 +224,25 @@ static esp_err_t security_send_totp_refused(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":false}");
+}
+
+// 2026-09-25 owner decision: enrolling a TOTP second factor only makes
+// sense once web login itself is turned on -- an authenticator enrolled
+// while web auth is off would recover a password nobody is being asked for
+// yet, and worse, would silently survive to gate a LATER enable with a
+// factor the operator may not have meant to keep. Refused with a DISTINCT,
+// machine-readable reason (409 + `web_auth_disabled`) rather than the
+// generic `{"ok":false}` every other enrollment refusal uses, so the
+// settings page can show an actionable message instead of a bare failure.
+// Only the two enrollment routes are gated this way -- cmd=totp_disable
+// must keep working regardless of the web-auth toggle, since disabling an
+// existing enrollment (e.g. one left over from before web auth was turned
+// off) is never something this gate should block.
+static esp_err_t security_send_totp_web_auth_off(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"web_auth_disabled\":true}");
 }
 
 static esp_err_t security_totp_enroll_begin(httpd_req_t *req)
@@ -383,6 +408,11 @@ static esp_err_t security_post_handler(httpd_req_t *req)
         // commands bypass that dispatcher's own caller_role check, so make
         // it here explicitly rather than rely on the tier gate alone.
         return security_send_totp_refused(req);
+    }
+    bool totp_enroll_cmd =
+        strcmp(cmd_val, "totp_enroll_begin") == 0 || strcmp(cmd_val, "totp_enroll_confirm") == 0;
+    if (totp_enroll_cmd && !totp_enroll_allowed(http_auth_policy_web_enabled())) {
+        return security_send_totp_web_auth_off(req);
     }
     if (strcmp(cmd_val, "totp_enroll_begin") == 0) {
         return security_totp_enroll_begin(req);

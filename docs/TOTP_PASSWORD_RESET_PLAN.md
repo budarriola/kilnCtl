@@ -445,3 +445,52 @@ negative-test-every-check rule.
 **Dependency summary:** WT-A, WT-B, WT-C (code side) and WT-D are all done
 2026-09-24. WT-C's live-board verification against these routes is the only
 remaining follow-up, not tracked as its own tranche.
+
+## 8. Two 2026-09-25 owner decisions -- DONE, `totp-webauth-off` worktree
+
+**Credential wipe also disenrolls TOTP.** `security_backend_web_auth.c`'s
+`web_auth_backend_clear_all_credentials()` (item 12b's "Clear login
+credentials" ADMIN action) now also calls `totp_config_clear()` and
+`auth_totp_http_clear_reset_tokens()` unconditionally, ANDing their results
+into the reported success -- the same two primitives the LCD four-corner
+gesture's `auth_reset_gesture_clear_all()` already calls, reused directly
+rather than duplicated; the gesture itself is unchanged. **Found while
+implementing:** the gesture's own helper does not clear outstanding
+`/api/auth/forgot` reset tokens (only the secret), so this credential-wipe
+path is now strictly more thorough than the gesture on that one point --
+left as a discrepancy to flag, not fixed here, since the gesture was
+explicitly out of scope.
+
+**Enrollment (not disable) requires web auth on.** `cmd=totp_enroll_begin`/
+`totp_enroll_confirm` now refuse 409 `{"ok":false,"web_auth_disabled":true}`
+while `http_auth_policy_web_enabled()` reads false, gated by a new pure
+predicate `totp_enroll_allowed()` (`totp_http_core.h`, host-tested,
+`test_totp_http_core.c`). `cmd=totp_disable` is deliberately NOT gated.
+`security_page.html`'s enrollment script shows "Turn on web login before
+enrolling an authenticator." on this response
+(`test_totp_enroll_web_auth_off.js`, Node-only, marker-extracts the inline
+TOTP script the same way `test_forgot_password_modal.js` does). **Found
+while implementing:** the existing `beginBtn` fetch handler threw on any
+non-200 response before reading its JSON body, which would have discarded
+this new 409's `web_auth_disabled` field silently -- fixed alongside this
+change to parse JSON unconditionally, matching `confirmBtn`'s existing
+shape.
+
+**Existing enrollment across an auth-off toggle, investigated per owner
+request:** an enrollment made while web auth was on is untouched by
+subsequently toggling web auth off -- `cmd=totp_disable` and the
+`/api/auth/forgot`/`/api/auth/reset` OPEN-tier routes never consult
+`http_auth_policy_web_enabled()`, only the new enrollment gate does. Left
+as-is, matching the owner's "leave as-is unless the plan says otherwise"
+instruction -- nothing above specified different behavior.
+
+Both negative-tested: `totp_enroll_allowed()` inverted and
+`check_00_kilnfw_host_tests.ps1` confirmed to fail, then restored by hand
+and a forced full rebuild confirmed to pass again; the page's
+`web_auth_disabled` check short-circuited to `false` and
+`test_totp_enroll_web_auth_off.js` confirmed to fail the same way, restored
+and re-run clean. `web_auth_backend_clear_all_credentials()` itself has no
+host test (it lives in `security_backend_web_auth.c`, ESP-only per this
+file's own header comment, same as every other real vtable backend in this
+module) -- verified by the KilnFW target build compiling it and by code
+inspection only; live-board verification is a follow-up, not done here.

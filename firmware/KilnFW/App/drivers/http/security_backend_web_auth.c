@@ -28,6 +28,16 @@
 #include "wifi_prov.h"
 #include "wifi_provision_http.h" // wifi_provision_http_get_server()
 
+// 2026-09-25 owner decision: wiping the web credentials from this ADMIN
+// route must also clear any enrolled TOTP second factor and its
+// outstanding reset tokens -- the same two calls the LCD four-corner
+// physical-reset gesture already makes (auth_reset_gesture_wiring.c) and
+// the totp_enroll_confirm/totp_disable handlers already make after a
+// successful change (security_http.c). Reused here rather than
+// reimplemented; see docs/TOTP_PASSWORD_RESET_PLAN.md.
+#include "auth_totp_http.h" // auth_totp_http_clear_reset_tokens()
+#include "totp_config.h"    // totp_config_clear()
+
 // SECURITY_HTTP_USERNAME_MAX (security_http_core.h) and
 // WEB_AUTH_USERNAME_MAX_LEN (web_auth_store.h) are two views of the SAME
 // limit -- the page's request-field size vs. the store's on-disk record
@@ -350,14 +360,33 @@ static security_err_t web_auth_backend_clear_all_credentials(void)
     // "never trust a write's return code alone" lesson use elsewhere in
     // this tree -- a rare, security-relevant event that must be findable
     // afterwards.
-    bool ok = web_auth_store_clear_all_credentials();
+    bool web_ok = web_auth_store_clear_all_credentials();
+
+    // 2026-09-25 owner decision: this action must also disenroll TOTP --
+    // the secret, its replay counter (totp_config_clear() erases both,
+    // read-back verified) and any outstanding /api/auth/forgot reset
+    // tokens (auth_totp_http_clear_reset_tokens()) -- so a wiped
+    // administrator credential does not leave the OLD authenticator
+    // enrollment able to satisfy the OPEN-tier forgot/reset flow for
+    // whatever credential gets set up next. Same two calls the LCD
+    // four-corner gesture and the totp_enroll_confirm/totp_disable
+    // handlers already make; run both unconditionally (best-effort, same
+    // as the gesture's web_ok && totp_ok shape) rather than short-
+    // circuiting on the web clear's result.
+    bool totp_ok = totp_config_clear();
+    auth_totp_http_clear_reset_tokens();
+
+    bool ok = web_ok && totp_ok;
     if (!ok) {
         ESP_LOGE(TAG, "clear_all_credentials() FAILED -- one or more records could not be confirmed cleared "
-                      "by read-back; credentials may be left in a partially-cleared state");
+                      "by read-back (web_ok=%d totp_ok=%d); credentials may be left in a partially-cleared "
+                      "state",
+                 (int)web_ok, (int)totp_ok);
         return SECURITY_ERR_STORAGE;
     }
-    ESP_LOGW(TAG, "clear_all_credentials(): administrator and user web passwords and LCD PINs cleared "
-                  "via the authenticated /settings/security route (WEB_AUTH_PLAN.md item 12b)");
+    ESP_LOGW(TAG, "clear_all_credentials(): administrator and user web passwords, LCD PINs, and any "
+                  "enrolled TOTP factor cleared via the authenticated /settings/security route "
+                  "(WEB_AUTH_PLAN.md item 12b, docs/TOTP_PASSWORD_RESET_PLAN.md)");
     return SECURITY_OK;
 }
 

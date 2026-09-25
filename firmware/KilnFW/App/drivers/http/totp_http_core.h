@@ -35,6 +35,23 @@ static inline bool totp_http_clock_ready(bool sntp_ever_synced)
     return sntp_ever_synced;
 }
 
+// --- Enrollment requires web auth on (2026-09-25 owner decision) -----------
+
+// True iff a NEW TOTP enrollment (cmd=totp_enroll_begin / cmd=
+// totp_enroll_confirm) may proceed. Enrolling a second factor only makes
+// sense once web login itself is turned on -- security_http.c's dispatcher
+// calls this before either handler runs, refusing with a distinct 409 +
+// `web_auth_disabled` reason when it reads false, rather than the generic
+// `{"ok":false}` used for other enrollment refusals. Deliberately NOT
+// consulted by cmd=totp_disable -- disabling an enrollment that predates a
+// web-auth-off toggle must keep working regardless of this gate. Trivial by
+// itself; named and tested so the enrollment-only scope (not just the
+// boolean) is pinned down, same convention as totp_http_clock_ready() above.
+static inline bool totp_enroll_allowed(bool web_auth_enabled)
+{
+    return web_auth_enabled;
+}
+
 // --- RAM-only pending-enrollment-secret state machine -----------------------
 //
 // Enrollment begin() generates a candidate secret and holds it here, in RAM

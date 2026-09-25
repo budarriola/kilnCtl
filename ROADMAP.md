@@ -106,6 +106,14 @@
 >   **WT-B landed** (`62f8bd4e`, gesture follow-up `cafc80f3`): forgot-password
 >   flow in the login modal, settings-page enrollment with a client-side QR,
 >   `test_forgot_password_modal.js` (48) and `test_qrcode_encoder.js` (17).
+>   **Two 2026-09-25 owner decisions landed** (`docs/TOTP_PASSWORD_RESET_PLAN.md`
+>   section 8): the credential-wipe ADMIN action now also disenrolls TOTP
+>   (secret + reset tokens, same primitives the four-corner gesture already
+>   calls, gesture itself unchanged); new TOTP enrollment now refuses 409
+>   while web auth is off (`totp_disable` and the forgot/reset routes are
+>   unaffected, so an existing enrollment survives an auth-off toggle),
+>   settings page shows "Turn on web login before enrolling an
+>   authenticator." Not yet flashed; live-board verification pending.
 > - [ ] **Follow-on, not started:** `docs/TOTP_LOGIN_2FA_PLAN.md` — optional
 >   TOTP as a second factor at ordinary login (reset plan section 5); WT-A has
 >   landed, so this now waits only on the owner's review of that plan.

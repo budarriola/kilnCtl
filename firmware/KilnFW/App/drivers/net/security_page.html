@@ -1129,6 +1129,14 @@ password below for at least the administrator account before turning authenticat
   //   an unsynced board clock is { ok: false, clock_unsynced: true } on any
   //   of the three (plan section 3's specific "board clock not synced"
   //   refusal), shown as its own message rather than "incorrect code".
+  //   2026-09-25 owner decision: cmd=totp_enroll_begin and
+  //   cmd=totp_enroll_confirm are ALSO refused, distinctly, while web login
+  //   is off -- transport status 409, body
+  //   { ok: false, web_auth_disabled: true } -- shown as its own message
+  //   ("Turn on web login before enrolling an authenticator."), never
+  //   folded into the generic "incorrect code" case. cmd=totp_disable is
+  //   NOT gated this way; it must keep working regardless of the web-auth
+  //   toggle.
   // ---------------------------------------------------------------------
   var totpBadge = document.getElementById('kcTotpBadge');
   var clockLine = document.getElementById('kcTotpClockLine');
@@ -1195,6 +1203,7 @@ password below for at least the administrator account before turning authenticat
   }
 
   var CLOCK_UNSYNCED_MSG = 'Board clock is not synced yet -- codes cannot be checked. Try again shortly.';
+  var WEB_AUTH_OFF_MSG = 'Turn on web login before enrolling an authenticator.';
   function isAuthCancelled(err) {
     return !!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err));
   }
@@ -1222,9 +1231,15 @@ password below for at least the administrator account before turning authenticat
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'cmd=totp_enroll_begin'
     }).then(function (resp) {
-      if (!resp.ok) throw new Error('begin failed');
+      // 409 (web_auth_disabled) and the clock_unsynced 200 both carry a
+      // JSON body this handler must inspect -- parse first, and only
+      // treat a non-JSON failure as an error below.
       return resp.json();
     }).then(function (data) {
+      if (data && data.web_auth_disabled) {
+        setStatus(enrollStatus, WEB_AUTH_OFF_MSG, false);
+        return;
+      }
       if (data && data.clock_unsynced) {
         showClockLine(data.board_time_utc, false);
         setStatus(enrollStatus, CLOCK_UNSYNCED_MSG, false);
@@ -1277,6 +1292,8 @@ password below for at least the administrator account before turning authenticat
         clearEnrollmentSecret();
         setStatus(enrollStatus, 'Enrolled.', true);
         loadTotpStatus();
+      } else if (data && data.web_auth_disabled) {
+        setStatus(enrollStatus, WEB_AUTH_OFF_MSG, false);
       } else if (data && data.clock_unsynced) {
         setStatus(enrollStatus, CLOCK_UNSYNCED_MSG, false);
       } else {
