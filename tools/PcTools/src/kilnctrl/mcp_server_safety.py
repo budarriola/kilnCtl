@@ -962,6 +962,53 @@ def safety_get_commissioning(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
+    """READ-ONLY: name the specific safety_cfg_store params that make up
+    readiness's "safety_commissioned" count (GET /api/readiness's "N of M
+    applicable safety parameters still have no value") -- that item counts
+    them but never names them, and no other route or tool lists per-param
+    set/unset flags either.
+
+    Fetches the same GET /api/safety/commissioning safety_get_commissioning()
+    does, then re-derives readiness_http.c's exact applicable/unset split
+    (safety_cfg_http_client.unset_applicable_commissioning_params(): ct_
+    channel_map[0..2] applicable only when ct_installed!=0 and ct_topology is
+    per_zone; i_normal_a[0..2] applicable only when ct_installed!=0; every
+    other param always applicable) -- a pure re-derivation, not a new wire
+    read, so it can never disagree with readiness's own count except by a
+    live change landing between the two calls.
+
+    Pure GET, no side effects -- safe at any time, including mid-firing.
+    Host is auto-resolved the same way safety_get_commissioning() does; pass
+    `host` explicitly for kilnctl.local or a board reachable only from a
+    different network than this link's serial port.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as safety_get_commissioning()
+
+    resolved = _ota_resolve_host(host)
+    try:
+        data = safety_cfg_http_client.get_commissioning(resolved)
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return f"error reading safety commissioning over HTTP (host={resolved}): {exc}"
+
+    if not bool(data.get("unset_reporting_reliable")):
+        unset = safety_cfg_http_client.unset_applicable_commissioning_params(data)
+        names = ", ".join(f"{p.get('name')} (id 0x{p.get('id', 0):04X})" for p in unset)
+        return ("WARNING: unset_reporting_reliable=false -- this peer cannot distinguish "
+                "'never commissioned' from a genuine value, so every applicable param is "
+                f"reported unset: {names}" if names else
+                "WARNING: unset_reporting_reliable=false, and no applicable params exist to report")
+
+    unset = safety_cfg_http_client.unset_applicable_commissioning_params(data)
+    if not unset:
+        return "ok - no applicable safety_cfg_store params are unset"
+    lines = [f"{len(unset)} applicable safety_cfg_store param(s) unset:"]
+    for p in unset:
+        lines.append(f"  id 0x{p.get('id', 0):04X}  {p.get('name')}  type={p.get('type')}")
+    return "\n".join(lines)
+
+
+@_srv._tool()
 def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str] = None) -> str:
     """Commission ARBITRARY named fields on the safety processor's config
     record over GET/POST /api/safety/commissioning -- the MCP-facade

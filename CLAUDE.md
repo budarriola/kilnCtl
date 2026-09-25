@@ -22,8 +22,20 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (190 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-24, when `totp_enroll_status`/
+the rest behind a search facade (191 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-25, when `safety_get_unset_commissioning_params`
+was added -- a READ-ONLY tool naming the specific safety_cfg_store params
+behind `GET /api/readiness`'s "safety_commissioned" count ("N of M applicable
+safety parameters still have no value"), which counts but never names them.
+No route needed changing: `GET /api/safety/commissioning` already reports
+every param's id/name/set, so this tool is a pure re-derivation
+(`safety_cfg_http_client.unset_applicable_commissioning_params()`) of
+`readiness_http.h`'s `readiness_param_required_for_commissioning()` exclusion
+rule (ct_channel_map[0..2] applicable only when ct_installed!=0 and
+ct_topology is per_zone; i_normal_a[0..2] applicable only when
+ct_installed!=0; everything else always applicable), run against the same
+GET response `safety_get_commissioning()` already fetches. The one before it was
+`totp_enroll_status`/
 `totp_reset_password` were added -- `docs/TOTP_PASSWORD_RESET_PLAN.md` WT-C,
 wrapping the OPEN-tier `POST /api/auth/forgot`/`/api/auth/reset` routes and
 the ADMIN-tier `GET /api/auth/totp_status` read (wire contract in that plan's

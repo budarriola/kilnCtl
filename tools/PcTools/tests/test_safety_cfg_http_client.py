@@ -157,6 +157,95 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual(confirmed, [])
         self.assertIn("expected 3", mismatches[0])
 
+
+def _params_response(entries, reliable=True):
+    """A minimal GET /api/safety/commissioning-shaped response carrying only
+    ``params`` + ``unset_reporting_reliable`` -- everything
+    unset_applicable_commissioning_params() reads. ``entries`` is a list of
+    (id, name, set[, value]) tuples."""
+    params = []
+    for entry in entries:
+        pid, name, is_set = entry[0], entry[1], entry[2]
+        p = {"id": pid, "name": name, "type": "u8", "set": is_set}
+        if is_set and len(entry) > 3:
+            p["value"] = entry[3]
+        params.append(p)
+    return {"unset_reporting_reliable": reliable, "params": params}
+
+
+class UnsetApplicableCommissioningParamsTest(unittest.TestCase):
+    """Mirrors readiness_http.c's item 10a ("safety_commissioned") exclusion
+    rule exactly -- see readiness_http.h's
+    readiness_param_required_for_commissioning() -- so a caller can trust
+    this names the same params that item's "N of M unset" count refers to."""
+
+    def test_default_ct_installed_and_topology_keep_ct_channel_map_applicable(self):
+        # ct_installed and ct_topology both unfetched: safe defaults (1,
+        # per_zone) mean ct_channel_map[0] stays applicable and unset.
+        current = _params_response([
+            (0x0106, "ct_channel_map[0]", False),
+            (0x0104, "abs_max_temp_c", True, 900.0),
+        ])
+        out = sc.unset_applicable_commissioning_params(current)
+        self.assertEqual([p["name"] for p in out], ["ct_channel_map[0]"])
+
+    def test_ct_channel_map_excluded_when_ct_installed_explicitly_zero(self):
+        current = _params_response([
+            (0x0109, "ct_installed", True, 0),
+            (0x0106, "ct_channel_map[0]", False),
+            (0x031A, "i_normal_a[0]", False),
+        ])
+        out = sc.unset_applicable_commissioning_params(current)
+        self.assertEqual(out, [])
+
+    def test_ct_channel_map_excluded_when_topology_summed(self):
+        # This is the live bench's actual state (task premise): ct_topology
+        # committed to summed (1) excludes ct_channel_map[0..2] regardless of
+        # ct_installed, matching CT_COMMISSIONING_PLAN.md's summed-topology
+        # carve-out.
+        current = _params_response([
+            (0x0109, "ct_installed", True, 1),
+            (0x031F, "ct_topology", True, 1),
+            (0x0106, "ct_channel_map[0]", False),
+            (0x0107, "ct_channel_map[1]", False),
+            (0x0108, "ct_channel_map[2]", False),
+            (0x031A, "i_normal_a[0]", False),
+        ])
+        out = sc.unset_applicable_commissioning_params(current)
+        self.assertEqual([p["name"] for p in out], ["i_normal_a[0]"])
+
+    def test_i_normal_a_applicable_when_ct_installed_true(self):
+        current = _params_response([
+            (0x0109, "ct_installed", True, 1),
+            (0x031A, "i_normal_a[0]", False),
+            (0x031B, "i_normal_a[1]", False),
+            (0x031C, "i_normal_a[2]", False),
+        ])
+        out = sc.unset_applicable_commissioning_params(current)
+        self.assertEqual(
+            sorted(p["name"] for p in out),
+            ["i_normal_a[0]", "i_normal_a[1]", "i_normal_a[2]"],
+        )
+
+    def test_ordinary_param_always_applicable(self):
+        current = _params_response([(0x0104, "abs_max_temp_c", False)])
+        out = sc.unset_applicable_commissioning_params(current)
+        self.assertEqual([p["name"] for p in out], ["abs_max_temp_c"])
+
+    def test_set_param_never_reported(self):
+        current = _params_response([(0x0104, "abs_max_temp_c", True, 900.0)])
+        self.assertEqual(sc.unset_applicable_commissioning_params(current), [])
+
+    def test_unreliable_reporting_treats_every_applicable_param_as_unset(self):
+        """NEGATIVE-CASE MIRROR of unset_required_fields()'s own
+        reliable-flag handling: a peer that cannot distinguish 'never
+        commissioned' from a genuine value must not be reported as fully
+        commissioned just because its cached `set` bits happen to be True."""
+        current = _params_response(
+            [(0x0104, "abs_max_temp_c", True, 900.0)], reliable=False)
+        out = sc.unset_applicable_commissioning_params(current)
+        self.assertEqual([p["name"] for p in out], ["abs_max_temp_c"])
+
     def test_unreliable_unset_reporting_blocks_confirmation(self):
         """A peer too old (or of unknown version) to set the UNSET bit makes
         every 'set' meaningless -- confirming against it would be confirming

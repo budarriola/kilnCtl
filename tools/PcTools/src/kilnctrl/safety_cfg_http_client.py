@@ -308,6 +308,79 @@ CT_MAP_FIELDS_CONDITIONAL_ON_CT_INSTALLED = (
 )
 
 
+#: Wire ids for the six current-transformer params whose "applicable to
+#: commissioning" status is hardware-conditional -- the SAME ids and the SAME
+#: rule as firmware/KilnFW/App/drivers/http/readiness_http.h's
+#: readiness_param_required_for_commissioning(), duplicated here (not
+#: imported: that header is C, pulled into an ESP-only translation unit) so
+#: unset_applicable_commissioning_params() below can answer the exact same
+#: question the "safety_commissioned" readiness item counts, from a plain GET
+#: response the host can already fetch.
+_CT_CHANNEL_MAP_IDS = (0x0106, 0x0107, 0x0108)
+_I_NORMAL_A_IDS = (0x031A, 0x031B, 0x031C)
+_CT_INSTALLED_ID = 0x0109
+_CT_TOPOLOGY_ID = 0x031F
+
+
+def unset_applicable_commissioning_params(current: dict) -> "list[dict]":
+    """Every safety_cfg_store param this GET /api/safety/commissioning
+    response reports as both APPLICABLE and unset -- i.e. exactly the set
+    readiness_http.c's item 10a ("safety_commissioned", "N of M applicable
+    safety parameters still have no value") counts but never names. There is
+    no route that lists them by id/name today; this is a pure re-derivation
+    from the same ``params`` array safety_get_commissioning() already reads,
+    using the identical exclusion rule readiness_param_required_for_
+    commissioning() applies on the ESP:
+
+      * ct_channel_map[0..2] (0x0106-0x0108) is applicable only when
+        ct_installed is explicitly set-and-nonzero AND ct_topology is
+        explicitly set to per_zone (0). An unset/unfetched ct_installed
+        defaults to 1 (installed) and an unset/unfetched ct_topology
+        defaults to 0 (per_zone) -- the same safe-direction default
+        config_store.c and readiness_http.c both use, so an unanswered
+        question never relaxes the requirement.
+      * i_normal_a[0..2] (0x031A-0x031C) is applicable only when
+        ct_installed is explicitly set-and-nonzero.
+      * every other param defaults to applicable.
+
+    When ``unset_reporting_reliable`` is false, every param's own ``set`` bit
+    is untrustworthy (the peer never sets KILNLINK_CONFIG_PAGE_UNSET_BIT), so
+    every param is reported here too -- same idiom as unset_required_fields()
+    above.
+
+    Returns each unset-and-applicable param's raw dict from the response
+    (``{"id", "name", "type", "set"}``, in store order). Read-only: makes no
+    request and mutates nothing.
+    """
+    params = current.get("params", [])
+    reliable = bool(current.get("unset_reporting_reliable"))
+
+    def value_or_default(param_id: int, default: int) -> int:
+        for p in params:
+            if p.get("id") == param_id and p.get("set") and reliable:
+                return int(p.get("value", default))
+        return default
+
+    ct_installed = value_or_default(_CT_INSTALLED_ID, 1)
+    ct_topology = value_or_default(_CT_TOPOLOGY_ID, 0)
+
+    def applicable(param_id: int) -> bool:
+        if param_id in _CT_CHANNEL_MAP_IDS:
+            return ct_installed != 0 and ct_topology == 0
+        if param_id in _I_NORMAL_A_IDS:
+            return ct_installed != 0
+        return True
+
+    out = []
+    for p in params:
+        pid = p.get("id")
+        if pid is None or not applicable(pid):
+            continue
+        if not (bool(p.get("set")) and reliable):
+            out.append(p)
+    return out
+
+
 def unset_required_fields(current: dict) -> "list[str]":
     """Which REQUIRED_FOR_COMMISSIONING fields the board currently reports as
     unset. Reads ``set``, never the presence of a value -- and when the GET
