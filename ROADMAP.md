@@ -2613,8 +2613,9 @@ soldering session.
 - [x] OpenOCD wrapper covering both chips (program/reset/halt/read/write) —
       2026-08-17, `kilnctrl.debug_probe`
 - [x] Per-processor console capture + interleaved log file
-      (`kilnctrl-console-capture`) — host-verified only; the SAFETY log-relay
-      wire path is still unimplemented in firmware
+      (`kilnctrl-console-capture`) — host-verified only; the SAFETY log-relay wire path has since landed
+      in firmware (`safety_link_service_log_relay()`, `safety_link_poll.c`,
+      2026-09-20 per `tools/PcTools/TODO.md`)
 - [x] **HW change: LCD backlight control — CLOSED 2026-09-04 (`be02d34`).**
       Flying wire (GPIO15 → module pin 8) is fitted, owner-confirmed by
       meter; `KILNCTL_BACKLIGHT_PWM_ENABLE` now defaults on and ON duty
