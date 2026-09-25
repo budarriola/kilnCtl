@@ -53,6 +53,7 @@ void run_test_readiness_safety_context(void);
 void run_test_readiness_estop_verification(void);
 void run_test_kiln_cfg_store(void);
 void run_test_iter_tune_store(void);
+void run_test_firing_shadow(void);
 void run_test_safety_cfg_store(void);
 void run_test_boot_guard(void);
 void run_test_pico_auto_update_decision(void);
@@ -170,6 +171,7 @@ int main(void)
     run_test_readiness_estop_verification();
     run_test_kiln_cfg_store();
     run_test_iter_tune_store();
+    run_test_firing_shadow();
     run_test_safety_cfg_store();
     run_test_boot_guard();
     run_test_pico_auto_update_decision();

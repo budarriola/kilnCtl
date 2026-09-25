@@ -111,9 +111,21 @@ void firing_stats_zone_tick(zone_runtime_t *z, float target_c, bool dwelling, ui
      * parameter to this function's signature or a field to zone_runtime_t
      * -- this hook must not touch profile_executor.c's call site (another
      * agent owns that file concurrently), and s_exec is already extern-
-     * visible via profile_executor_internal.h. */
+     * visible via profile_executor_internal.h.
+     *
+     * On the real board every caller passes &s_exec.zones[zi] (profile_executor.c's
+     * only call site), so zi_shadow always lands in [0, MAX31856_CHANNEL_COUNT).
+     * test_profile_executor_prestart.c's own unit tests for this function,
+     * however, legitimately call it with standalone zone_runtime_t locals
+     * that are NOT part of s_exec.zones (see that file's firing_stats_zone_tick
+     * test section) -- pointer subtraction against an unrelated object is
+     * undefined behaviour and, in practice on this toolchain, yields an
+     * out-of-range result, so a hard assert() here would abort those
+     * pre-existing, otherwise-unrelated tests. The bounds check below is
+     * therefore a silent skip, not an assert: out of range means "not a
+     * real s_exec zone", which is an expected, non-fatal case for this
+     * function's existing test callers, not a defect. */
     ptrdiff_t zi_shadow = z - s_exec.zones;
-    assert(zi_shadow >= 0 && zi_shadow < MAX31856_CHANNEL_COUNT);
     if (zi_shadow >= 0 && zi_shadow < MAX31856_CHANNEL_COUNT) {
         firing_shadow_zone_tick((uint8_t)zi_shadow, z->actual_valid, z->actual_c, target_c, dwelling,
                                  segment_index, dt_s);

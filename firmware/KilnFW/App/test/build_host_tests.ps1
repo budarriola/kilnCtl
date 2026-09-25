@@ -88,6 +88,7 @@ try {
         (Join-Path $testDir "test_readiness_commissioning.c"),
         (Join-Path $testDir "test_kiln_cfg_store.c"),
         (Join-Path $testDir "test_iter_tune_store.c"),
+        (Join-Path $testDir "test_firing_shadow.c"),
         (Join-Path $testDir "test_safety_cfg_store.c"),
         (Join-Path $testDir "test_boot_guard.c"),
         # docs/PICO_AUTO_UPDATE_PLAN.md -- pure decision logic (header-only,
@@ -678,6 +679,14 @@ try {
             # fakes of this same module's surface (live_profile.c itself is
             # tested for real by test_live_profile.c, its own executable).
             "`"$(Join-Path $driversDir 'control/profile_executor_live_pickup.c')`" " +
+            # ITER_TUNE_REDESIGN_PLAN.md step 8: profile_executor_firing_stats.c
+            # (#included above via profile_executor.c's multi-#include block)
+            # now calls firing_shadow_zone_tick()/firing_shadow_finish_firing() --
+            # link the real module (already host-tested by test_firing_shadow.c,
+            # its own executable) in for real, same reasoning as firing_score.c/
+            # firing_compare.c would need if this executable ever called them.
+            "`"$(Join-Path $driversDir 'control/firing_shadow.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`" " +
+            "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     # 2026-09-08: flash_worker_wait.c linked in -- adaptive_tune.c (linked
