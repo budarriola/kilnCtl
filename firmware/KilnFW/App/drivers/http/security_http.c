@@ -41,6 +41,11 @@ static uint32_t security_http_now_ms(void)
     return (uint32_t)hal_time_now_ms();
 }
 
+void security_totp_pending_clear(void)
+{
+    totp_pending_clear(&s_totp_pending);
+}
+
 static const char *TAG = "security_http";
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time -- same

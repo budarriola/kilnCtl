@@ -36,6 +36,7 @@
 // successful change (security_http.c). Reused here rather than
 // reimplemented; see docs/TOTP_PASSWORD_RESET_PLAN.md.
 #include "auth_totp_http.h" // auth_totp_http_clear_reset_tokens()
+#include "security_http.h"  // security_totp_pending_clear()
 #include "totp_config.h"    // totp_config_clear()
 
 // SECURITY_HTTP_USERNAME_MAX (security_http_core.h) and
@@ -375,6 +376,8 @@ static security_err_t web_auth_backend_clear_all_credentials(void)
     // circuiting on the web clear's result.
     bool totp_ok = totp_config_clear();
     auth_totp_http_clear_reset_tokens();
+    security_totp_pending_clear(); // hygiene: never leave a stale pending
+                                    // enrollment secret behind either
 
     bool ok = web_ok && totp_ok;
     if (!ok) {
@@ -382,6 +385,17 @@ static security_err_t web_auth_backend_clear_all_credentials(void)
                       "by read-back (web_ok=%d totp_ok=%d); credentials may be left in a partially-cleared "
                       "state",
                  (int)web_ok, (int)totp_ok);
+        if (web_ok && !totp_ok) {
+            // The web password(s) are already gone at this point, so any
+            // live session authenticated against them is now sitting on a
+            // credential that no longer exists -- a half-wipe must not
+            // leave those sessions usable just because the TOTP half of
+            // the clear failed. Both roles: this action wipes both the
+            // administrator and user web passwords in one call, so there
+            // is no single role to single out.
+            web_auth_backend_invalidate_sessions_for_role(SECURITY_ROLE_ADMIN);
+            web_auth_backend_invalidate_sessions_for_role(SECURITY_ROLE_USER);
+        }
         return SECURITY_ERR_STORAGE;
     }
     ESP_LOGW(TAG, "clear_all_credentials(): administrator and user web passwords, LCD PINs, and any "

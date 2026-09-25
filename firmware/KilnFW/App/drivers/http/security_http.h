@@ -41,6 +41,14 @@ extern "C" {
 // own comment on why that check is unconditional there too).
 esp_err_t security_http_start(void);
 
+// Clears this file's RAM-only pending-enrollment secret (s_totp_pending),
+// same hygiene call security_totp_disable() already makes on itself.
+// Exposed for security_backend_web_auth.c's clear_all_credentials(): a
+// credential wipe must not leave a half-finished enrollment's secret
+// sitting in RAM able to be confirmed against the next administrator's
+// account. A no-op if no enrollment is in progress.
+void security_totp_pending_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

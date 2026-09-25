@@ -18,7 +18,7 @@
  *     response shows the web-auth-off message and never throws (the naive
  *     `if (!resp.ok) throw` shape this fix replaces would have discarded
  *     the JSON body and shown "Could not start enrollment." instead);
- *   - cmd=totp_enroll_confirm: the same 200-with-body web_auth_disabled
+ *   - cmd=totp_enroll_confirm: the same 409 { ok:false, web_auth_disabled:true }
  *     shape shows the same message rather than falling through to
  *     "Incorrect code -- try again.";
  *   - the ordinary success and clock_unsynced paths for both are
@@ -125,8 +125,10 @@ function check(cond, msg) {
   }
 }
 
-function jsonResponse(body) {
-  return Promise.resolve({ ok: true, json: function () { return Promise.resolve(body); } });
+function jsonResponse(body, ok, status) {
+  if (ok === undefined) ok = true;
+  if (status === undefined) status = 200;
+  return Promise.resolve({ ok: ok, status: status, json: function () { return Promise.resolve(body); } });
 }
 
 function flush() {
@@ -138,7 +140,7 @@ function flush() {
 
 function testBeginWebAuthOff() {
   const elements = buildSandbox(function () {
-    return jsonResponse({ ok: false, web_auth_disabled: true });
+    return jsonResponse({ ok: false, web_auth_disabled: true }, false, 409);
   });
   elements.kcTotpBeginBtn._handlers.click();
   return flush().then(function () {
@@ -163,7 +165,7 @@ function testBeginClockUnsyncedStillWorks() {
 
 function testConfirmWebAuthOff() {
   const elements = buildSandbox(function () {
-    return jsonResponse({ ok: false, web_auth_disabled: true });
+    return jsonResponse({ ok: false, web_auth_disabled: true }, false, 409);
   });
   elements.kcTotpConfirmCode.value = '123456';
   elements.kcTotpConfirmBtn._handlers.click();
