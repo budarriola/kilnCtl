@@ -1677,6 +1677,50 @@ static void run_section15_point_on_panel_boundary_matrix(void)
                        "kiln_ui_click_by_name() must reject cy >= disp_h (disp_h itself is one "
                        "past the last row, so this must be >=, not >) -- point_on_panel()'s "
                        "matrix below assumes this exact comparison.");
+
+            // 2026-09-25, coordinator review follow-up: the four checks above
+            // each pin one atom in isolation, so a source edit that kept all
+            // four comparisons but joined them with && instead of ||, or that
+            // moved KILN_UI_CLICK_OFFSCREEN out from behind the bounds check
+            // entirely, would pass every check above while breaking the real
+            // gate. Pin the full joined expression (all three "||" joins,
+            // exact substring, spanning the source's own line break) and that
+            // it -- not some other condition -- is what returns
+            // KILN_UI_CLICK_OFFSCREEN.
+            // Read raw ("rb", test_common.h's test_read_whole_file()) --
+            // this repo's working tree carries CRLF line endings, so the
+            // source's own line break here is "\r\n", not "\n". Accept
+            // either so this pin doesn't depend on which the checkout used.
+            const char *full_cond_crlf =
+                "targets[match].cx < 0 || targets[match].cx >= disp_w ||\r\n"
+                "            targets[match].cy < 0 || targets[match].cy >= disp_h";
+            const char *full_cond_lf =
+                "targets[match].cx < 0 || targets[match].cx >= disp_w ||\n"
+                "            targets[match].cy < 0 || targets[match].cy >= disp_h";
+            const char *cond_pos = strstr(fn, full_cond_crlf);
+            size_t full_cond_len = strlen(full_cond_crlf);
+            if (!cond_pos) {
+                cond_pos = strstr(fn, full_cond_lf);
+                full_cond_len = strlen(full_cond_lf);
+            }
+            TEST_CHECK(cond_pos != NULL,
+                       "the four offscreen comparisons must be joined by || (not && or any "
+                       "other operator) in exactly this order: cx<0, cx>=disp_w, cy<0, "
+                       "cy>=disp_h -- point_on_panel()'s matrix assumes all four are ORed "
+                       "into one bounds check, not evaluated/short-circuited separately.");
+            if (cond_pos) {
+                const char *after_cond = cond_pos + full_cond_len;
+                const char *offscreen_ret = strstr(after_cond, "return KILN_UI_CLICK_OFFSCREEN;");
+                const char *next_if = strstr(after_cond, "if (targets[match].hidden)");
+                TEST_CHECK(offscreen_ret != NULL, "the joined bounds check must be followed by "
+                           "a return KILN_UI_CLICK_OFFSCREEN; -- some other outcome (falling "
+                           "through, a different result code) would mean an offscreen tap is "
+                           "no longer reported as offscreen.");
+                TEST_CHECK(offscreen_ret != NULL && next_if != NULL && offscreen_ret < next_if,
+                           "return KILN_UI_CLICK_OFFSCREEN; must come BEFORE the hidden check "
+                           "(run_section14 pins this ordering too) -- gate the bounds check, "
+                           "don't just place the return text somewhere later in the function.");
+            }
             free(fn);
         }
     }
