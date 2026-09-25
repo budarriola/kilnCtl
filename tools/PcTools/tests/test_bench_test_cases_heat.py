@@ -289,11 +289,13 @@ class CleanupRegressionTest(unittest.TestCase):
 
 
 class _ZoneExecStatusHP:
-    def __init__(self, duty=0.0, relay_commanded_on=False, faulted=False, fault_guard=0):
+    def __init__(self, duty=0.0, relay_commanded_on=False, faulted=False, fault_guard=0, zone=0, actual_c=None):
+        self.zone = zone
         self.duty = duty
         self.relay_commanded_on = relay_commanded_on
         self.faulted = faulted
         self.fault_guard = fault_guard
+        self.actual_c = actual_c
 
 
 class _FakeZonesHttpClient:
@@ -392,9 +394,9 @@ class HP03Test(unittest.TestCase):
 
     def test_passes_on_cycling_within_band(self):
         statuses = [
-            _ExecStatus("running", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
-            _ExecStatus("running", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=False)]),
-            _ExecStatus("done", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=False)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
         ]
         profiles = _FakeProfilesClientHP(exec_statuses=statuses)
         ctx = self._ctx(profiles)
@@ -432,8 +434,8 @@ class HP03Test(unittest.TestCase):
 
     def test_fails_when_relay_never_toggles_and_still_restores(self):
         statuses = [
-            _ExecStatus("running", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
-            _ExecStatus("done", [_ZoneExecStatusHP(), _ZoneExecStatusHP(), _ZoneExecStatusHP(relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
         ]
         profiles = _FakeProfilesClientHP(exec_statuses=statuses)
         ctx = self._ctx(profiles)
@@ -584,6 +586,176 @@ class HP07Test(unittest.TestCase):
         self.assertEqual(n["calls"], 2, "restore POST did not run after the lowering POST raised")
         self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
         self.assertEqual(profiles.started, [])
+
+    def test_multizone_lookup_uses_zone_field_not_position(self):
+        """Regression for the positional-index bug: `ProfileExecStatus.zones`
+        is COMPACTED to only the participating zones, so a run against
+        target_zone=2 (with only zone 2 actually running) must find its
+        status by `.zone == 2`, not by `st.zones[2]` -- the old code would
+        `IndexError`/silently read `None` against a length-1 list here."""
+        ctx_zone = 2
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=ctx_zone)]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(zone=ctx_zone, faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP(zone=ctx_zone)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        ctx["_hp07_zone_index"] = ctx_zone
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_exception_in_run_profile_becomes_fail_and_still_restores(self):
+        """Regression for the 2026-09-24 bug: `_run_hp07_profile` raising
+        (e.g. the board rebooting mid-run) must become a FAIL CaseResult,
+        not propagate past the restore -- and the restore POST must still
+        happen."""
+        class _RaisingProfilesClient(_FakeProfilesClientHP):
+            def get_exec_status(self):
+                raise RuntimeError("board rebooted mid-run")
+
+        profiles = _RaisingProfilesClient(exec_statuses=[_ExecStatus("running", [_ZoneExecStatusHP()])])
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("RuntimeError", result.reason)
+        # the restore POST (empty preset) must still have gone out
+        self.assertTrue(self.fake_zhc.posted_bodies)
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+
+    def test_restore_failure_after_exception_is_surfaced_with_values(self):
+        """A restore failure must never be silently dropped, whether or not
+        the run itself raised -- the FAIL reason must name the zone, the
+        value left behind, and the original value it should have restored."""
+        class _RaisingProfilesClient(_FakeProfilesClientHP):
+            def get_exec_status(self):
+                raise RuntimeError("board rebooted mid-run")
+
+        profiles = _RaisingProfilesClient(exec_statuses=[_ExecStatus("running", [_ZoneExecStatusHP()])])
+        ctx = self._ctx(profiles)
+        import kilnctrl.zones_http_client as real
+        fake_post = self.fake_zhc.post_zones
+        calls = {"n": 0}
+
+        def post(host, body):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return fake_post(host, body)  # the lowering POST succeeds
+            raise OSError("board unreachable")  # every restore attempt fails
+
+        real.post_zones = post
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("zone 0", result.reason)
+        self.assertIn("27.0", result.reason)   # value left behind (ambient 24 + margin 3)
+        self.assertIn("300.0", result.reason)  # original value from the fake snapshot
+
+    def test_restore_retries_after_first_failure(self):
+        """The restore must retry once (after a short delay) before giving
+        up, in case the board rebooted mid-run and just isn't answering yet
+        on the very first POST after the fault."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP()]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        import kilnctrl.zones_http_client as real
+        fake_post = self.fake_zhc.post_zones
+        calls = {"n": 0}
+
+        def post(host, body):
+            calls["n"] += 1
+            # Fail only the FIRST restore attempt (the second post_zones call
+            # overall is the restore, since the first is the lowering POST).
+            if calls["n"] == 2:
+                raise OSError("board unreachable")
+            return fake_post(host, body)
+
+        real.post_zones = post
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(calls["n"], 3, "expected lower + failed-restore + retried-restore")
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+
+    def test_actual_c_samples_captured_in_observed(self):
+        """A future knife-edge failure (never reaching FAULTED) must be
+        diagnosable from `observed` without a live rerun."""
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(actual_c=24.5)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(actual_c=25.8)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIsNotNone(result.observed)
+        # the fake profiles client repeats its last exec_status forever
+        # (never reaches "faulted"), so the poll loop runs until the fake
+        # clock's deadline rather than stopping after 2 -- assert the
+        # observed prefix rather than an exact-length list.
+        samples = result.observed.get("actual_c_samples")
+        self.assertEqual(samples[:2], [24.5, 25.8])
+        self.assertTrue(all(s == 25.8 for s in samples[2:]))
+
+
+class ZoneCeilingPreflightTest(unittest.TestCase):
+    """`_check_zone_ceilings` / its wiring into `_start_bench_profile`:
+    refuses a normal (implicit-target) heat case before ever touching the
+    board if a participating zone's `max_temp_c` is already below the
+    planned target -- e.g. a leftover from an HP-07 restore failure."""
+
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+
+    def test_low_ceiling_refuses_before_touching_the_board(self):
+        self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 30.0  # stuck low
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv, "host": "10.0.0.5"}
+        _always_ok_preflight(ctx)
+        # ambient 20 + default offset 15 = target 35, above the stuck 30C ceiling.
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertFalse(ok)
+        self.assertIn("zone 0", reason)
+        self.assertIn("max_temp_c", reason)
+        self.assertIn("30.0", reason)
+        self.assertIn("35.0", reason)
+        self.assertEqual(srv._profiles.saved, [])
+        self.assertEqual(srv._profiles.started, [])
+
+    def test_healthy_ceiling_allows_start(self):
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv, "host": "10.0.0.5"}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertTrue(ok, reason)
+        self.assertEqual(srv._profiles.started, [C.BENCH_PROFILE_SLOT_ID])
+
+    def test_explicit_target_bypasses_the_ceiling_check(self):
+        """HP-07 pins `target_c` to a limit it just lowered `max_temp_c` to
+        (target == limit exactly) -- this must NOT be flagged, since it is
+        the deliberate edge case this whole harness case exists to exercise."""
+        self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 27.0
+        srv = _FakeSrv(readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)])
+        ctx = {"srv": srv, "host": "10.0.0.5"}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001, target_c=27.0)
+        self.assertTrue(ok, reason)
+
+    def test_missing_host_does_not_block(self):
+        """No host in ctx means the ceiling check can't read the board's
+        zones config -- it must pass through (best-effort) rather than
+        refuse over its own missing capability."""
+        srv = _FakeSrv(readings=[_Reading(0, 20.0), _Reading(1, 20.0), _Reading(2, 20.0)])
+        ctx = {"srv": srv}
+        _always_ok_preflight(ctx)
+        ok, reason, _ambient = C._start_bench_profile(ctx, zone_mask=0b001)
+        self.assertTrue(ok, reason)
 
 
 class HP08Test(unittest.TestCase):
