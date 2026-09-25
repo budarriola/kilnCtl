@@ -527,6 +527,7 @@ $exemptCreatedNames = @{
     "wifi_mode_ui"      = "ui_page_network.c mode_worker_task: one-shot Wi-Fi mode change, self-deletes"
     "wifi_ap_id_ui"     = "ui_page_network.c ap_identity_worker_task: one-shot AP identity fetch, self-deletes"
     "wifi_connect_ui"   = "ui_page_network_manage.c connect_worker_task: one-shot connect attempt, self-deletes"
+    "wifi_forget_ui"    = "ui_page_network_manage.c forget_worker_task: one-shot forget-network call, self-deletes"
     "wifi_scan_ui"      = "ui_page_network_manage.c scan_worker_task: one-shot Wi-Fi scan, self-deletes"
     "ota_confirm"       = "main_network_http.c main_ota_rollback_confirm_task: one-shot OTA confirm timer, self-deletes"
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
