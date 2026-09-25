@@ -8,6 +8,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h" // autotune_engine_reserve_zone_for_external_write()
+#include "firing_shadow.h"   // ITER_TUNE_REDESIGN_PLAN.md step 8 -- read-only status only
 #include "iter_tune.h"
 #include "iter_tune_store.h"
 #include "zones_config_accessors.h" // zones_config_set_pid(), MAX31856_CHANNEL_COUNT
@@ -26,14 +27,38 @@ _Static_assert(MAX31856_CHANNEL_COUNT <= ITER_TUNE_STORE_MAX_ZONES,
 static esp_err_t iter_tune_status_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
+
+    // Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): one whole-firing-set
+    // summary, not per-zone data, so it is its own top-level object rather
+    // than forced into the per-zone loop below. READ-ONLY -- firing_shadow
+    // never writes a gain, this handler never calls anything that would.
+    // Small fixed stack buffer, same "httpd stack blob class" convention as
+    // the rest of this file.
+    {
+        firing_shadow_status_t shadow;
+        char chunk[176];
+        int n;
+        if (firing_shadow_get_status(&shadow)) {
+            n = snprintf(chunk, sizeof(chunk),
+                         "{\"shadow\":{\"firings_scored\":%lu,\"accept_count\":%lu,\"reject_count\":%lu,"
+                         "\"insufficient_count\":%lu,\"no_matched_pairs_count\":%lu},",
+                         (unsigned long)shadow.firings_scored, (unsigned long)shadow.accept_count,
+                         (unsigned long)shadow.reject_count, (unsigned long)shadow.insufficient_count,
+                         (unsigned long)shadow.no_matched_pairs_count);
+        } else {
+            n = snprintf(chunk, sizeof(chunk), "{\"shadow\":null,");
+        }
+        httpd_resp_sendstr_chunk(req, (n > 0 && (size_t)n < sizeof(chunk)) ? chunk : "{\"shadow\":null,");
+    }
+
     uint8_t refused_version = 0;
     if (iter_tune_store_schema_refused(&refused_version)) {
         char preamble[80];
-        int pn = snprintf(preamble, sizeof(preamble), "{\"schema_refused_version\":%u,\"zones\":[",
+        int pn = snprintf(preamble, sizeof(preamble), "\"schema_refused_version\":%u,\"zones\":[",
                            (unsigned)refused_version);
-        httpd_resp_sendstr_chunk(req, (pn > 0 && (size_t)pn < sizeof(preamble)) ? preamble : "{\"zones\":[");
+        httpd_resp_sendstr_chunk(req, (pn > 0 && (size_t)pn < sizeof(preamble)) ? preamble : "\"zones\":[");
     } else {
-        httpd_resp_sendstr_chunk(req, "{\"zones\":[");
+        httpd_resp_sendstr_chunk(req, "\"zones\":[");
     }
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
         iter_tune_store_zone_t st;
