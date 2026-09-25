@@ -149,10 +149,18 @@ def _run_lcd_step(client, action: str, step: dict) -> dict:
             # bench_test/cases_lcd.py's _click_resolving_swallow()) is not a
             # click failure: the press was delivered, just not to the target.
             # Retry a small, bounded number of times before treating it like
-            # any other non-ok result.
+            # any other non-ok result. "verdict_unknown" (the firmware's own
+            # bounded verdict wait timed out -- see ui_test_client.py's
+            # click_by_name() doc comment) gets the same immediate-retry
+            # treatment: it is neither a confirmed pass nor a confirmed
+            # swallow, and re-clicking is the same cheap, bounded way to
+            # resolve it that already works for a confirmed swallow.
             result = client.click_by_name(target)
             retries = 0
-            while result["result"] == "swallowed" and retries < _CLICK_SWALLOW_MAX_RETRIES:
+            while (
+                result["result"] in ("swallowed", "verdict_unknown")
+                and retries < _CLICK_SWALLOW_MAX_RETRIES
+            ):
                 retries += 1
                 result = client.click_by_name(target)
             if result["result"] != "ok":

@@ -147,6 +147,27 @@ class RunUiStepTest(unittest.TestCase):
         self.assertIn("swallowed", result["detail"])
         self.assertEqual(len(client.clicked), 1 + runner._CLICK_SWALLOW_MAX_RETRIES)
 
+    def test_lcd_click_retries_verdict_unknown_then_passes(self):
+        # 2026-09-24 follow-up: "verdict_unknown" (the firmware's own bounded
+        # verdict-wait timed out unresolved) shares the swallow retry path --
+        # neither a confirmed pass nor a confirmed genuine defect.
+        client = _FakeUiTestClient()
+        results = iter([{"result": "verdict_unknown"}, {"result": "ok", "cx": 1, "cy": 2}])
+        client.click_by_name = lambda name: (client.clicked.append(name), next(results))[1]
+        result = runner.run_ui_step("lcd", client, None, {"action": "click", "target": "Start"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.clicked, ["Start", "Start"])
+
+    def test_lcd_click_gives_up_after_verdict_unknown_retry_budget(self):
+        # Negative-test control: a click reading "verdict_unknown" on every
+        # attempt must still fail, not retry forever.
+        client = _FakeUiTestClient()
+        client.click_by_name = lambda name: (client.clicked.append(name), {"result": "verdict_unknown"})[1]
+        result = runner.run_ui_step("lcd", client, None, {"action": "click", "target": "Start"})
+        self.assertFalse(result["ok"])
+        self.assertIn("verdict_unknown", result["detail"])
+        self.assertEqual(len(client.clicked), 1 + runner._CLICK_SWALLOW_MAX_RETRIES)
+
     def test_lcd_wait_for_finds_target_immediately(self):
         client = _FakeUiTestClient()
         result = runner.run_ui_step("lcd", client, None,

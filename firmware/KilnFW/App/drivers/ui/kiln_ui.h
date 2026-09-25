@@ -177,6 +177,20 @@ typedef enum {
      * change", which used to look identical (see the 20260924T233113Z_lcd
      * bench log's unexplained double swallow this was added to diagnose). */
     KILN_UI_CLICK_SWALLOWED,
+    /* 2026-09-24 follow-up: the bounded wait below for lvgl_port_get_
+     * inject_verdict() can itself time out (a slow LVGL flush -- a
+     * full-screen redraw, an SPI stall -- can exceed the wait window even
+     * though the press WAS delivered and will be reflected once the next
+     * poll catches up). Before this result existed, that timeout fell back
+     * to "not swallowed" and kiln_ui_click_by_name() reported plain
+     * KILN_UI_CLICK_OK -- indistinguishable from a press that was
+     * genuinely delivered and confirmed NOT swallowed. KILN_UI_CLICK_
+     * VERDICT_UNKNOWN names that second case explicitly: the target was
+     * found, visible, and a press+release WAS injected, but whether
+     * screen_idle_touch_swallow() swallowed it could not be confirmed
+     * within the wait window. A caller must treat this as neither a pass
+     * nor a genuine defect -- see ui_test_client.py's result-name table. */
+    KILN_UI_CLICK_VERDICT_UNKNOWN,
 } kiln_ui_click_result_t;
 
 /* Finds the tap target whose name exactly matches `name` (kiln_ui_collect_
@@ -198,6 +212,11 @@ typedef enum {
  *                              error-hold dismissal) -- it never reached the
  *                              widget underneath
  *   KILN_UI_CLICK_OK        -- exactly one visible match; press+release sent
+ *   KILN_UI_CLICK_VERDICT_UNKNOWN -- exactly one visible match; press+release
+ *                              sent, but the bounded wait for screen_idle's
+ *                              swallow verdict timed out before it could be
+ *                              read -- neither confirmed delivered-clean nor
+ *                              confirmed swallowed
  * Called directly from the UART bridge task, same as lvgl_port_inject_
  * touch() itself and TOUCH_CMD_INJECT's handler -- see that function's
  * thread-safety note (lvgl_port.h). */

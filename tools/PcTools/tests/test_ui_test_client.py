@@ -22,6 +22,7 @@ from kilnctrl.protocol import (  # noqa: E402
     UI_TEST_CLICK_NOT_FOUND,
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
+    UI_TEST_CLICK_VERDICT_UNKNOWN,
     UI_TEST_CMD_CLICK_BY_NAME,
     UI_TEST_CMD_GET_CURRENT_PAGE,
     UI_TEST_CMD_LIST_TAP_TARGETS,
@@ -165,6 +166,14 @@ class ClickByNameTest(unittest.TestCase):
         # code, which all mean the target itself was not clickable.
         self._reply(UI_TEST_CLICK_SWALLOWED)
         self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "swallowed")
+
+    def test_verdict_unknown_result(self):
+        # 2026-09-24 follow-up: the press was injected (target found,
+        # visible) but kiln_ui_click_by_name()'s own bounded wait for the
+        # swallow verdict timed out before it could be read -- neither a
+        # confirmed "ok" nor a confirmed "swallowed".
+        self._reply(UI_TEST_CLICK_VERDICT_UNKNOWN)
+        self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "verdict_unknown")
 
     def test_request_carries_name(self):
         # uart_task_ids.h's CLICK_BY_NAME request is raw ASCII with NO

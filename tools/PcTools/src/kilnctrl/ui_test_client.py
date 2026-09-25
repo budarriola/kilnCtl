@@ -22,6 +22,7 @@ from .protocol import (
     UI_TEST_CLICK_NOT_FOUND,
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
+    UI_TEST_CLICK_VERDICT_UNKNOWN,
     UI_TEST_CMD_CLICK_BY_NAME,
     UI_TEST_CMD_GET_CURRENT_PAGE,
     UI_TEST_CMD_LIST_TAP_TARGETS,
@@ -42,6 +43,10 @@ _CLICK_RESULT_NAMES = {
     UI_TEST_CLICK_AMBIGUOUS: "ambiguous",
     UI_TEST_CLICK_HIDDEN: "hidden",
     UI_TEST_CLICK_SWALLOWED: "swallowed",
+    #: 2026-09-24 follow-up: the bounded verdict wait in kiln_ui_click_by_name()
+    #: timed out before it could tell whether the press was swallowed. Neither
+    #: a pass nor a genuine_defect -- see click_by_name()'s own doc comment.
+    UI_TEST_CLICK_VERDICT_UNKNOWN: "verdict_unknown",
 }
 
 
@@ -150,7 +155,7 @@ class UiTestClient:
     def click_by_name(self, name: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
         """Inject a tap at the named target's centre.
 
-        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed","cx":int,"cy":int}``
+        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed"|"verdict_unknown","cx":int,"cy":int}``
         -- unlike touch.py's inject()/set_tap_dump(), a firmware-level refusal
         here (target not found, ambiguous, or hidden) is not an
         exceptional/transport failure, so it comes back as a result code
@@ -160,6 +165,15 @@ class UiTestClient:
         screen_idle_touch_swallow() ate it (a wake or ERROR_HOLD dismissal) --
         the target was found and tapped, but nothing under it ran; a caller
         should retry the click rather than treat it as a defect.
+        ``"verdict_unknown"`` (2026-09-24) means the press was injected (the
+        target was found and visible) but kiln_ui_click_by_name()'s own
+        bounded wait for the swallow verdict timed out before it could be
+        read -- a slow LVGL flush can outrun that wait even on a press that
+        landed cleanly. This is neither "ok" nor "swallowed": a caller must
+        not count it as a pass, and must not attribute it as a genuine
+        defect either -- see bench_test/cases_lcd.py's handling for the
+        expected shape (its own distinct attribution, a re-click, never
+        folded into "ok" or "swallowed").
         """
         payload = self._query(UI_TEST_CMD_CLICK_BY_NAME, _pack_click_request(name), timeout)
         if len(payload) < 6:

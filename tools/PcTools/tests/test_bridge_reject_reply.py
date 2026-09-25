@@ -469,11 +469,15 @@ class DisplayTouchDriverErrorTests(unittest.TestCase):
         self.assertEqual(value.swallow_count, 5)
         self.assertEqual(value.last_swallow_reason, 1)  # TOUCH_SWALLOW_REASON_WAKE
 
-    def test_touch_get_state_28_byte_reply_is_refusal_not_truncated_success(self):
+    def test_touch_get_state_15_byte_refusal_is_not_misread_as_truncated_success(self):
         # The regression this guards: a length one byte short of (or past)
         # the new 29-byte real success shape must never be silently misread
         # as a truncated/overlong TouchState -- it must still fall into the
         # refusal decode path, same as before 29 was added to the allowed set.
+        # _reject_frame(TOUCH_CMD_GET_STATE, "driver error") actually builds a
+        # 15-byte refusal ([subcmd, 0, len("driver error")=12] + 12 bytes of
+        # reason text = 15), not a 28-byte one -- the old name here named the
+        # wrong length.
         frame = _reject_frame(TOUCH_CMD_GET_STATE, "driver error")
         self.assertNotIn(len(frame), (6, 23, 29))
         subcmd, value = devices.parse_touch_response(frame)

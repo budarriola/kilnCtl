@@ -462,6 +462,24 @@ uint32_t lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
         return 0;
     }
 
+    /* Concurrent-caller note (2026-09-24 review): this is a single-slot
+     * hand-off, not a queue. TOUCH_CMD_INJECT (uart_bridge.c, task 13) and
+     * kiln_ui_click_by_name() (task 14, UI_TEST) both reach this function
+     * from their own independent UART tasks, so a press from one arriving
+     * between another's still-unconsumed press and touch_read_cb()'s next
+     * poll overwrites its x/y/pressed fields outright -- the earlier press's
+     * coordinates never reach touch_read_cb() at all. This is not a torn
+     * read (the lock keeps `s_inject` internally consistent) and it is not
+     * silently misreported: the overwriting call mints a NEW seq, so the
+     * first call's lvgl_port_get_inject_verdict(press_seq, ...) can never
+     * find a match (seq-match check below) and its caller times out to
+     * KILN_UI_CLICK_VERDICT_UNKNOWN rather than a false verdict. Turning
+     * this into a real per-press queue would need a second FreeRTOS
+     * primitive threaded through touch_read_cb()'s existing lock ordering
+     * for no benefit either caller of this file currently needs (a bench
+     * harness does not run TOUCH_CMD_INJECT and click_by_name() against the
+     * same board at once), so it is left as a documented race rather than
+     * "fixed" here. */
     s_inject.pending = true;
     s_inject.pressed = pressed;
     s_inject.x = (int32_t)x;

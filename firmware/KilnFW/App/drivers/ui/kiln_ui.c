@@ -838,15 +838,27 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
     /* Bounded wait for touch_read_cb() (lvgl_port_task, a different task) to
      * actually deliver this press and record screen_idle's swallow verdict
      * for it -- see lvgl_port_get_inject_verdict()'s doc comment. LVGL polls
-     * roughly every 30ms; 10 attempts at 10ms each (100ms) is comfortably
-     * more than one poll period even under load, while still small next to
-     * the 50ms press-hold below. A miss (timeout) is treated as "not
-     * swallowed" -- the same conservative default screen_idle_touch_swallow()
-     * itself uses on a lock timeout -- rather than blocking this call
-     * indefinitely or failing the whole click. */
+     * roughly every 30ms; 25 attempts at 10ms each (250ms) is several poll
+     * periods even under a slow flush (a full-screen redraw or an SPI
+     * stall can itself run past 100ms on this panel, which is why the
+     * original 100ms bound (10 attempts) sometimes lost the race against
+     * nothing more than LVGL being busy). This wait runs on
+     * ui_test_bridge_task (uart_bridge_ui_test.c), not lvgl_port_task
+     * itself, so stretching it costs only this task's own responsiveness,
+     * never LVGL's.
+     *
+     * A miss (timeout) used to be folded into "not swallowed" and reported
+     * as plain KILN_UI_CLICK_OK -- indistinguishable from a press
+     * confirmed delivered clean. It is now reported as its own result,
+     * KILN_UI_CLICK_VERDICT_UNKNOWN, since a caller cannot tell "reached
+     * the widget" from "reached nobody's ever checked" from an OK alone.
+     * The release below is still sent either way -- an unconfirmed verdict
+     * is a reporting gap, not a reason to leave the press latched. */
     bool swallowed = false;
-    for (int attempt = 0; attempt < 10; attempt++) {
+    bool verdict_known = false;
+    for (int attempt = 0; attempt < 25; attempt++) {
         if (lvgl_port_get_inject_verdict(press_seq, &swallowed)) {
+            verdict_known = true;
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -854,5 +866,8 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
 
     vTaskDelay(pdMS_TO_TICKS(50));
     lvgl_port_inject_touch(cx, cy, false);
+    if (!verdict_known) {
+        return KILN_UI_CLICK_VERDICT_UNKNOWN;
+    }
     return swallowed ? KILN_UI_CLICK_SWALLOWED : KILN_UI_CLICK_OK;
 }

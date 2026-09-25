@@ -21,6 +21,10 @@ from kilnctrl.bench_test import cases_web_rw as CW  # noqa: E402
 from kilnctrl.bench_test import judgments as J  # noqa: E402
 from kilnctrl.bench_test import lcd_sampler  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict  # noqa: E402
+from kilnctrl.devices_touch import (  # noqa: E402
+    TOUCH_POWER_STATE_ERROR_HOLD,
+    TOUCH_POWER_STATE_ON,
+)
 
 
 class FakeUiTest:
@@ -625,13 +629,13 @@ class ClickThenPageTest(unittest.TestCase):
     def test_success_returns_none_fail_and_the_arrived_page(self):
         ui = PageNavUiTest(page="home", page_targets={"home": [], "config": []},
                             nav_map={"settings": "config"})
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config")
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
 
     def test_click_itself_not_found_fails_without_polling(self):
         ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config")
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("not_found", fail.reason)
@@ -643,7 +647,7 @@ class ClickThenPageTest(unittest.TestCase):
         # treated as a successful hop -- and a caller would go on to click
         # a target that cannot exist on the page the board is really on.
         ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})  # "settings" click has no nav_map entry
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("config", fail.reason)
@@ -667,14 +671,14 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _RecoversOnSecondClick(page="home", page_targets={"home": [], "config": []},
                                      nav_map={"settings": "config"})
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 2)
 
     def test_retry_exhausted_fails_naming_the_retry(self):
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={})
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("retried 2 times", fail.reason)
@@ -707,7 +711,7 @@ class ClickThenPageTest(unittest.TestCase):
                 return {"result": "ok", "cx": 0, "cy": 0}  # dead widget: never navigates
 
         ui = _SwallowOnceThenDeadNav(page="home", page_targets={"home": []}, nav_map={})
-        fail, page, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _sr = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
@@ -729,7 +733,7 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _SwallowOnceThenNav(page="home", page_targets={"home": [], "config": []},
                                  nav_map={"settings": "config"})
-        fail, page, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _sr = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 2)
@@ -739,7 +743,7 @@ class ClickThenPageTest(unittest.TestCase):
         # ERROR_HOLD) must FAIL within the swallow budget, never pass.
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
                             click_result="swallowed")
-        fail, page, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _sr = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertEqual(len(ui.clicks), 1 + C._CLICK_THEN_PAGE_SWALLOW_RETRIES)
@@ -762,7 +766,7 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _RecoversOnThirdClick(page="home", page_targets={"home": [], "config": []},
                                     nav_map={"settings": "config"})
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 3)
@@ -772,7 +776,7 @@ class ClickThenPageTest(unittest.TestCase):
         # never-retry behavior, so the retry loop itself (not some other
         # path) is what's responsible for recovering a swallow.
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={})
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=0)
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=0)
         self.assertIsNotNone(fail)
         self.assertIn("not retried", fail.reason)
         self.assertEqual(fail.observed.get("attribution"), "wrong_page")
@@ -780,7 +784,7 @@ class ClickThenPageTest(unittest.TestCase):
 
     def test_not_found_attribution_never_retries(self):
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config")
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.observed.get("attribution"), "not_found")
         self.assertEqual(ui.clicks, ["settings"])
@@ -791,7 +795,7 @@ class ClickThenPageTest(unittest.TestCase):
         # widget, so it must never be sent.
         ui = _CountingNavUi(page="home", page_targets={"home": [], "diagnostics": []},
                             nav_map={"settings": "diagnostics"})
-        fail, page, waited_s = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(ui.clicks, ["settings"])
         self.assertEqual(fail.observed.get("attribution"), "wrong_page")
@@ -2276,6 +2280,96 @@ class WakeAndHomeTest(unittest.TestCase):
             srv_new = FakeSrvWithTouch(ui_new)
             result_new = C._case_lcd08({"srv": srv_new})
         self.assertEqual(result_new.verdict, Verdict.PASS)
+
+
+class FakeTouchErrorHold:
+    """A TouchClient double for _wake_and_home()'s ERROR_HOLD dismissal
+    branch (cases_lcd.py lines ~169-197): get_state() reports power_state
+    (not just screen_on, both read True in ERROR_HOLD per
+    display_power_policy.c's rule 5) so `_power_state_is_on`/
+    `_power_state_is_error_hold` can actually distinguish the two. Each
+    dismiss tap (inject) decrements a counter of remaining ERROR_HOLD
+    reports before the state advances to ON, modeling rule 5 dismissing
+    ERROR_HOLD on its own next touch."""
+
+    def __init__(self, error_hold_reports: int):
+        self.error_hold_reports = error_hold_reports
+        self.injected = []
+
+    def get_state(self):
+        if self.error_hold_reports > 0:
+            return mock.Mock(screen_on=True, idle_ms=0,
+                              power_state=TOUCH_POWER_STATE_ERROR_HOLD)
+        return mock.Mock(screen_on=True, idle_ms=0, power_state=TOUCH_POWER_STATE_ON)
+
+    def inject(self, x, y, pressed):
+        self.injected.append((x, y, pressed))
+        if pressed and self.error_hold_reports > 0:
+            self.error_hold_reports -= 1
+
+
+class WakeAndHomeErrorHoldTest(unittest.TestCase):
+    """Task 4 (2026-09-24 follow-up): _wake_and_home()'s ERROR_HOLD
+    dismissal loop had no direct coverage -- only the plain screen_on/off
+    wake path did. These pin the dismiss-then-proceed behavior and the
+    bound on retries."""
+
+    def test_error_hold_is_dismissed_by_one_extra_tap(self):
+        # error_hold_reports=2: the very first wake tap (sent because the
+        # initial need_wake check itself reads ERROR_HOLD) decrements this
+        # to 1 as a side effect of its own press -- FakeTouchErrorHold.inject()
+        # decrements on every press, including the one that triggered the
+        # wake in the first place. One further dismiss tap inside the wait
+        # loop is needed to actually clear it and observe ON.
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})
+        srv = FakeSrv(ui)
+        srv._touch = FakeTouchErrorHold(error_hold_reports=2)
+        C._wake_and_home({"srv": srv})
+        # Initial wake press+release, plus exactly one dismiss press+release.
+        self.assertEqual(srv._touch.injected, [
+            (5, 5, True), (5, 5, False),
+            (5, 5, True), (5, 5, False),
+        ])
+
+    def test_error_hold_dismissal_is_bounded_and_falls_through(self):
+        # A board stuck in ERROR_HOLD past _ERROR_HOLD_DISMISS_MAX_ATTEMPTS
+        # must not loop forever -- it falls through once the attempt bound
+        # is hit and the wait's own timeout elapses, still on ERROR_HOLD.
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})
+        srv = FakeSrv(ui)
+        srv._touch = FakeTouchErrorHold(error_hold_reports=1_000_000)
+        C._wake_and_home({"srv": srv})
+        dismiss_taps = len(srv._touch.injected) // 2 - 1  # minus the initial wake tap
+        self.assertEqual(dismiss_taps, C._ERROR_HOLD_DISMISS_MAX_ATTEMPTS)
+        # Best-effort: never raises even though the panel is still stuck.
+        self.assertEqual(ui.get_current_page(), "home")
+
+    def test_older_firmware_without_power_state_never_enters_error_hold_branch(self):
+        # A board on firmware predating GET_STATE's power_state field (only
+        # screen_on) must fall back to the plain screen_on check and never
+        # dereference power_state at all -- _power_state_is_on returns None
+        # for that case, and _power_state_is_error_hold reads False.
+        class _NoPowerStateTouch:
+            def __init__(self):
+                self.injected = []
+                self._asleep = True
+
+            def get_state(self):
+                return mock.Mock(spec=["screen_on", "idle_ms"],
+                                  screen_on=not self._asleep, idle_ms=0)
+
+            def inject(self, x, y, pressed):
+                self.injected.append((x, y, pressed))
+                if pressed:
+                    self._asleep = False
+
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})
+        srv = FakeSrv(ui)
+        srv._touch = _NoPowerStateTouch()
+        C._wake_and_home({"srv": srv})
+        # Only the single initial wake press+release; the ERROR_HOLD branch
+        # is never reached because get_state() has no power_state attr.
+        self.assertEqual(srv._touch.injected, [(5, 5, True), (5, 5, False)])
 
 
 class Lcd21Test(unittest.TestCase):

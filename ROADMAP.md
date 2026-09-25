@@ -95,6 +95,25 @@
 >   not yet landed:** stale `FRAME_CORNERS` (camera moved again per this
 >   file's own 2026-09-24 camera-aim note), LCD-16 Prev/Next paging, an
 >   LCD-14 redesign, and cases naming nonexistent widgets.
+> - **Swallowed touch tap made observable, 2026-09-24** (`16ccde78`, review
+>   fix `590f068a`): `kiln_ui_click_by_name()` now reports
+>   `KILN_UI_CLICK_SWALLOWED` directly (GET_STATE also carries power state/
+>   swallow count/reason) instead of the PC side only ever inferring a
+>   swallow from a page that failed to change; `cases_lcd.py` retries a
+>   reported swallow on its own small bounded budget, separate from the
+>   existing page-didn't-change retry. **Landed in source, not yet flashed
+>   to the bench board.** Follow-up (same worktree, `tapverdict`): a distinct
+>   `KILN_UI_CLICK_VERDICT_UNKNOWN` result for the case where
+>   `kiln_ui_click_by_name()`'s own bounded wait for the swallow verdict
+>   times out (a slow LVGL flush can outrun the old 100ms bound even on a
+>   press that landed cleanly) — wait extended to 250ms once confirmed to
+>   run on `ui_test_bridge_task`, not the LVGL task; wire-compatible new
+>   value threaded through `protocol.py`/`ui_test_client.py`/
+>   `ui_test_runner.py`/`cases_lcd.py`, each with its own attribution
+>   (neither a pass nor a genuine defect); `judgments.py`'s
+>   `BLANKED_SCREEN_HINT` reworded to cover both old and new firmware
+>   shapes; a resolved swallow/verdict_unknown retry count is now recorded
+>   in a passing case's `observed` dict instead of discarded.
 > - **Forgot-password design replaced with TOTP, owner change 2026-09-24**
 >   (`84fa2e7b`): `docs/EMAIL_PASSWORD_RESET_PLAN.md` is renamed to
 >   `docs/TOTP_PASSWORD_RESET_PLAN.md` (owner rejected email) — authenticator-app

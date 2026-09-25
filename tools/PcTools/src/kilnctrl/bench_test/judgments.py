@@ -732,16 +732,22 @@ def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResul
 #: swallow is named as a likely cause rather than a reader having to already
 #: know about it: screen_idle.c/lvgl_port.c's touch_swallow path wakes the
 #: panel on a tap but swallows that same tap, so click_by_name() still
-#: replies "ok" while nothing actually navigated. cases_lcd.py's
-#: `_wake_and_home()` runs before each case that clicks a named target, so
-#: this should be rare after that fix, but a case can still race a NEW
-#: idle-blank between two of its own clicks (e.g. LCD-09/14/16's multi-hop
-#: navigation) if one of its steps takes longer than the display timeout.
+#: replies "ok" while nothing actually navigated -- or, on firmware carrying
+#: 16ccde78 (2026-09-24, KILN_UI_CLICK_VERDICT_UNKNOWN), the swallow is its
+#: own reported result ("swallowed"/"verdict_unknown") and this hint instead
+#: covers the case where the verdict-wait itself timed out unresolved.
+#: cases_lcd.py's `_wake_and_home()` runs before each case that clicks a
+#: named target, so this should be rare after that fix, but a case can still
+#: race a NEW idle-blank between two of its own clicks (e.g. LCD-09/14/16's
+#: multi-hop navigation) if one of its steps takes longer than the display
+#: timeout.
 BLANKED_SCREEN_HINT = (
     " (if spurious: the panel may have auto-blanked and swallowed this tap "
     "-- screen_idle.c/lvgl_port.c's touch_swallow path wakes the screen on "
-    "a tap but swallows that same tap, so click_by_name() still replies "
-    "'ok' while nothing actually navigated)"
+    "a tap but swallows that same tap; on older firmware click_by_name() "
+    "still replies 'ok' while nothing actually navigated, and on firmware "
+    "carrying KILN_UI_CLICK_VERDICT_UNKNOWN the swallow can instead surface "
+    "as click_by_name()'s own bounded verdict-wait timing out unresolved)"
 )
 
 

@@ -650,6 +650,14 @@
  * response shape (6 bytes) is unchanged, only this one byte's value range
  * grew. */
 #define UI_TEST_CLICK_SWALLOWED  0x04u
+/* 2026-09-24 follow-up: the press was injected but kiln_ui_click_by_name()'s
+ * bounded wait for screen_idle's swallow verdict timed out before it could
+ * be read -- neither confirmed delivered-clean nor confirmed swallowed. See
+ * KILN_UI_CLICK_VERDICT_UNKNOWN (kiln_ui.h). Same wire-compatibility note as
+ * UI_TEST_CLICK_SWALLOWED above applies: an older PC decoder that has never
+ * seen this value falls into its own default/"unknown result" arm; that
+ * decoder needs updating, this is not a wire break. */
+#define UI_TEST_CLICK_VERDICT_UNKNOWN 0x05u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

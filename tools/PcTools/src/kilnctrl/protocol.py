@@ -213,6 +213,12 @@ UI_TEST_CLICK_HIDDEN = 3
 #: swallowed it (wake or ERROR_HOLD dismissal) -- see kiln_ui.h's
 #: KILN_UI_CLICK_SWALLOWED. Distinct from OK: nothing under the tap target ran.
 UI_TEST_CLICK_SWALLOWED = 4
+#: 2026-09-24 follow-up: the press was injected but kiln_ui_click_by_name()'s
+#: bounded wait for screen_idle's swallow verdict timed out before it could
+#: be read -- neither confirmed delivered-clean nor confirmed swallowed. See
+#: kiln_ui.h's KILN_UI_CLICK_VERDICT_UNKNOWN. A caller must treat this as
+#: neither a pass nor a genuine_defect attribution.
+UI_TEST_CLICK_VERDICT_UNKNOWN = 5
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged
