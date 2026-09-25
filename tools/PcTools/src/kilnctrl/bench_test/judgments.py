@@ -732,10 +732,11 @@ def judge_rate_guard_consistency(safety_side: dict, esp_side: dict) -> CaseResul
 #: swallow is named as a likely cause rather than a reader having to already
 #: know about it: screen_idle.c/lvgl_port.c's touch_swallow path wakes the
 #: panel on a tap but swallows that same tap, so click_by_name() still
-#: replies "ok" while nothing actually navigated -- or, on firmware carrying
-#: 16ccde78 (2026-09-24, KILN_UI_CLICK_VERDICT_UNKNOWN), the swallow is its
-#: own reported result ("swallowed"/"verdict_unknown") and this hint instead
-#: covers the case where the verdict-wait itself timed out unresolved.
+#: replies "ok" while nothing actually navigated -- or, on firmware that
+#: reports a swallow directly (KILN_UI_CLICK_SWALLOWED, and
+#: KILN_UI_CLICK_VERDICT_UNKNOWN when the verdict wait timed out), this hint
+#: instead covers the case where the verdict-wait itself timed out
+#: unresolved.
 #: cases_lcd.py's `_wake_and_home()` runs before each case that clicks a
 #: named target, so this should be rare after that fix, but a case can still
 #: race a NEW idle-blank between two of its own clicks (e.g. LCD-09/14/16's

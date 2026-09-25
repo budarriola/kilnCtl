@@ -285,22 +285,22 @@ _CLICK_THEN_PAGE_SWALLOW_RETRIES = 2
 
 def _click_resolving_swallow(ui, name: str, max_swallow_retries: int = _CLICK_THEN_PAGE_SWALLOW_RETRIES) -> "tuple[dict, int]":
     """click_by_name(), re-clicking immediately while the result reads
-    'swallowed' OR 'verdict_unknown' (bounded by `max_swallow_retries`) -- a
-    swallow is a directly observable, expected race (screen_idle ate the
-    wake/dismiss tap), not the "maybe stuck" ambiguity the caller's own
-    page-poll retry budget exists for, so it must not consume that separate
-    budget. 'verdict_unknown' (2026-09-24: kiln_ui_click_by_name()'s own
-    bounded wait for the swallow verdict timed out -- see
-    ui_test_client.py's click_by_name() doc comment) gets the same
-    immediate-retry treatment: it is neither a confirmed 'ok' nor a
-    confirmed 'swallowed', so re-clicking is the cheapest way to resolve it,
-    same as a confirmed swallow. Returns ``(final_click,
-    swallow_retries_used)`` -- the count covers both reasons; the caller
-    distinguishes which one the FINAL click actually reported via
-    ``final_click["result"]``, not this count alone."""
+    'swallowed' (bounded by `max_swallow_retries`) -- a swallow is a
+    directly observable, expected race (screen_idle ate the wake/dismiss
+    tap), not the "maybe stuck" ambiguity the caller's own page-poll retry
+    budget exists for, so it must not consume that separate budget.
+
+    'verdict_unknown' (kiln_ui_click_by_name()'s own bounded wait for the
+    swallow verdict timed out) is deliberately NOT re-clicked here: unlike a
+    confirmed swallow, the press may well have reached the widget (the usual
+    cause is a slow LVGL flush, which delays the verdict, not the press), so
+    an immediate blind re-click could land on the page that press already
+    opened. It is returned as-is for the caller to resolve against the
+    observable page/target change, whose own retry is guarded by an
+    unchanged page. Returns ``(final_click, swallow_retries_used)``."""
     click = ui.click_by_name(name)
     retries = 0
-    while click.get("result") in ("swallowed", "verdict_unknown") and retries < max_swallow_retries:
+    while click.get("result") == "swallowed" and retries < max_swallow_retries:
         retries += 1
         click = ui.click_by_name(name)
     return click, retries
@@ -326,35 +326,34 @@ def _click_then_page(ui, name: str, expected_page: str,
 
     Returns ``(None, page, waited_s, swallow_retries)`` on success (click
     replied 'ok' AND the page arrived within `timeout_s`) -- `swallow_retries`
-    is the number of 'swallowed'/'verdict_unknown' re-clicks it took to reach
-    that passing 'ok' (0 when the very first click already said 'ok'), so a
-    swallow resolved on the way to a PASS is recorded rather than discarded
-    once the hop succeeds. On any failure, the first element is a
-    ready-to-return FAIL :class:`CaseResult` -- naming the click's own
-    result when the click itself failed, or the page the board is actually
-    on (plus the blanked-screen hint, since a swallowed wake tap reads
-    identically to this) when the click said 'ok' but the page never
+    is the number of 'swallowed' re-clicks it took to reach that passing
+    click (0 when the very first click was not swallowed), so a swallow
+    resolved on the way to a PASS is recorded rather than discarded once the
+    hop succeeds. A 'verdict_unknown' click is never itself a pass: it is
+    judged only by whether the expected page then arrives (the same
+    evidence an 'ok' click is judged by), and is never blind re-clicked
+    unless the page provably stayed where it was. On any failure, the first
+    element is a ready-to-return FAIL :class:`CaseResult` -- naming the
+    click's own result when the click itself failed, or the page the board
+    is actually on (plus the blanked-screen hint, since a swallowed wake tap
+    reads identically to this) when the click said 'ok' but the page never
     changed; `swallow_retries` is 0 in every failure case (the FAIL's own
     ``observed`` dict already carries whatever retry count applies).
 
-    Worst case: ``1 + max_retries`` clicks plus that many full `timeout_s`
-    page waits (~6 s at the 2 s default with the default two retries) when
-    every attempt is swallowed; a not_found click fails immediately with no
-    wait at all."""
+    Worst case: ``(1 + max_retries) * (1 + _CLICK_THEN_PAGE_SWALLOW_RETRIES)``
+    clicks (9 at the defaults, only when every click is 'swallowed') plus
+    ``1 + max_retries`` full `timeout_s` page waits (~6 s at the 2 s
+    default); a not_found click fails immediately with no wait at all."""
     try:
         page_before = ui.get_current_page()
     except Exception:
         page_before = None
     click, swallow_retries = _click_resolving_swallow(ui, name)
-    if click.get("result") != "ok":
-        # 2026-09-24: "verdict_unknown" (still unresolved after
-        # _click_resolving_swallow()'s own retries) gets its own attribution,
-        # distinct from "not_found" -- the target WAS found and a press WAS
-        # injected; only the swallow verdict itself could not be confirmed.
-        # Neither a pass nor proof of a genuine defect, same reasoning as
-        # the page-didn't-move branch below.
+    if click.get("result") not in ("ok", "verdict_unknown"):
+        # A swallow that outlasted _click_resolving_swallow()'s own budget is
+        # attributed as such, never as "not_found" (the target WAS found).
         immediate_attribution = (
-            "verdict_unknown" if click.get("result") == "verdict_unknown" else "not_found"
+            "swallowed" if click.get("result") == "swallowed" else "not_found"
         )
         return (
             CaseResult(
@@ -400,6 +399,10 @@ def _click_then_page(ui, name: str, expected_page: str,
         retries_done = 0
         last_click = click
         total_swallow_retries = swallow_retries
+        # Clicks confirmed delivered un-swallowed ('ok'); a 'verdict_unknown'
+        # click is never counted here, so it can never supply the evidence
+        # "genuine_defect" rests on.
+        confirmed_ok_clicks = 1 if click.get("result") == "ok" else 0
         while (
             retries_done < max_retries
             and page_before is not None
@@ -408,8 +411,10 @@ def _click_then_page(ui, name: str, expected_page: str,
             retries_done += 1
             last_click, retry_swallow_retries = _click_resolving_swallow(ui, name)
             total_swallow_retries += retry_swallow_retries
-            if last_click.get("result") != "ok":
+            if last_click.get("result") not in ("ok", "verdict_unknown"):
                 break
+            if last_click.get("result") == "ok":
+                confirmed_ok_clicks += 1
             retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
             page, waited_s = retry_page, waited_s + retry_waited_s
             if page == expected_page:
@@ -422,9 +427,10 @@ def _click_then_page(ui, name: str, expected_page: str,
         # swallow that an immediate re-click resolved to an un-swallowed "ok"
         # does NOT explain a page that still failed to move after that "ok"
         # -- labelling it a swallow would relabel a real defect as the known
-        # wake/dismiss race. Caveat: firmware reports "ok" (not "swallowed")
-        # when its bounded verdict wait in kiln_ui_click_by_name() times out,
-        # so "genuine_defect" means "no swallow was REPORTED", not a proof.
+        # wake/dismiss race. Caveat: firmware older than
+        # KILN_UI_CLICK_VERDICT_UNKNOWN reports "ok" (not "swallowed") when
+        # its bounded verdict wait times out, so on such firmware
+        # "genuine_defect" means "no swallow was REPORTED", not a proof.
         last_result = last_click.get("result")
         if page_before is None:
             attribution = "page_before_unreadable"
@@ -434,22 +440,17 @@ def _click_then_page(ui, name: str, expected_page: str,
             # A retry's click stayed swallowed through its whole
             # _CLICK_THEN_PAGE_SWALLOW_RETRIES budget.
             attribution = "swallowed"
-        elif last_result == "verdict_unknown":
-            # A retry's click stayed "verdict_unknown" through its whole
-            # _CLICK_THEN_PAGE_SWALLOW_RETRIES budget -- the press was
-            # injected every time, but the firmware's own bounded wait for
-            # the swallow verdict never resolved. Distinct from "swallowed"
-            # (that IS a confirmed verdict) and from "genuine_defect" (there
-            # is no un-swallowed 'ok' click to pin a defect on here) -- this
-            # attribution names "we never found out" honestly rather than
-            # picking one of those two.
-            attribution = "verdict_unknown"
-        elif last_result != "ok":
+        elif last_result not in ("ok", "verdict_unknown"):
             attribution = "retry_click_failed"
-        elif retries_done > 0:
-            # At least two clicks were delivered un-swallowed and the page
-            # never moved.
+        elif confirmed_ok_clicks >= 2:
+            # At least two clicks were confirmed delivered un-swallowed and
+            # the page never moved.
             attribution = "genuine_defect"
+        elif last_result == "verdict_unknown" or click.get("result") == "verdict_unknown":
+            # Fewer than two confirmed-clean clicks and at least one whose
+            # swallow verdict the firmware never resolved -- neither a pass
+            # nor enough evidence for "genuine_defect".
+            attribution = "verdict_unknown"
         else:
             # max_retries=0: one un-swallowed "ok" and no move -- the old
             # single-attempt shape, not enough evidence either way.
@@ -479,9 +480,10 @@ def _click_then_page(ui, name: str, expected_page: str,
             )
         elif attribution == "verdict_unknown":
             reason = (
-                f"click_by_name({name!r}) kept returning 'verdict_unknown' and page stayed "
-                f"{page!r}, expected {expected_page!r} ({retried}); the firmware's own "
-                "swallow-verdict wait never resolved, so this is not a confirmed defect"
+                f"click_by_name({name!r}) returned 'verdict_unknown' (last click: "
+                f"{last_result!r}) and page stayed {page!r}, expected {expected_page!r} "
+                f"({retried}); the firmware's own swallow-verdict wait did not resolve, "
+                "so this is not a confirmed defect"
             )
         else:
             reason = (
@@ -539,7 +541,10 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     targets (or a dead tab bar that answers 'ok' and does nothing), and
     reading per-tab values off it would confirm the wrong tab."""
     click = ui.click_by_name(name)
-    if click.get("result") != "ok":
+    # 'verdict_unknown' (the press was injected; only its swallow verdict
+    # timed out) is judged by the target-set change below exactly like 'ok'
+    # -- never a pass on its own, never a hard not_found FAIL.
+    if click.get("result") not in ("ok", "verdict_unknown"):
         return (
             CaseResult(
                 Verdict.FAIL,
@@ -554,7 +559,7 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     names = {t.get("name") for t in tap.get("targets", [])}
     if names == prev_names:
         retry_click = ui.click_by_name(name)
-        if retry_click.get("result") == "ok":
+        if retry_click.get("result") in ("ok", "verdict_unknown"):
             tap2, waited_s2 = _wait_for_targets_change(ui, prev_names, timeout_s=timeout_s)
             waited_s += waited_s2
             tap = tap2

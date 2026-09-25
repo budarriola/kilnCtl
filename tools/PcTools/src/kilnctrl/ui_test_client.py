@@ -172,8 +172,10 @@ class UiTestClient:
         landed cleanly. This is neither "ok" nor "swallowed": a caller must
         not count it as a pass, and must not attribute it as a genuine
         defect either -- see bench_test/cases_lcd.py's handling for the
-        expected shape (its own distinct attribution, a re-click, never
-        folded into "ok" or "swallowed").
+        expected shape (judged only by the observable page change that
+        follows, never blind re-clicked since the press may have landed,
+        its own distinct attribution, never folded into "ok" or
+        "swallowed").
         """
         payload = self._query(UI_TEST_CMD_CLICK_BY_NAME, _pack_click_request(name), timeout)
         if len(payload) < 6:

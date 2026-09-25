@@ -771,6 +771,57 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 3)
 
+    def test_always_swallowed_first_click_attributed_swallowed(self):
+        # A swallow that outlasts the immediate re-click budget on the FIRST
+        # click is a swallow, not "not_found" -- the target was found.
+        ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
+                            click_result="swallowed")
+        fail, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertEqual(fail.observed.get("attribution"), "swallowed")
+
+    def test_verdict_unknown_press_that_landed_is_not_reclicked(self):
+        # The usual cause of 'verdict_unknown' is a slow flush delaying the
+        # verdict, not the press: the press navigates. It must be judged by
+        # the page arriving and never blind re-clicked on the new page.
+        class _UnknownButNavigates(_CountingNavUi):
+            def click_by_name(self, name):
+                super().click_by_name(name)
+                return {"result": "verdict_unknown", "cx": 0, "cy": 0}
+
+        ui = _UnknownButNavigates(page="home", page_targets={"home": [], "config": []},
+                                  nav_map={"settings": "config"})
+        fail, page, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNone(fail)
+        self.assertEqual(page, "config")
+        self.assertEqual(ui.clicks, ["settings"])
+
+    def test_always_verdict_unknown_unmoved_fails_bounded_never_defect(self):
+        ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
+                            click_result="verdict_unknown")
+        fail, page, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertEqual(fail.observed.get("attribution"), "verdict_unknown")
+        self.assertIn("not a confirmed defect", fail.reason)
+        # No immediate re-click for verdict_unknown: only the page-unchanged
+        # retries, so 1 + max_retries clicks.
+        self.assertEqual(len(ui.clicks), 1 + C._CLICK_THEN_PAGE_MAX_RETRIES)
+
+    def test_verdict_unknown_plus_one_confirmed_ok_is_not_genuine_defect(self):
+        # One confirmed-clean click is not the two genuine_defect rests on.
+        class _UnknownThenDeadOk(_CountingNavUi):
+            def click_by_name(self, name):
+                self.clicks.append(name)
+                r = "verdict_unknown" if len(self.clicks) == 1 else "ok"
+                return {"result": r, "cx": 0, "cy": 0}
+
+        ui = _UnknownThenDeadOk(page="home", page_targets={"home": []}, nav_map={})
+        fail, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=1)
+        self.assertEqual(fail.observed.get("attribution"), "verdict_unknown")
+        ui = _UnknownThenDeadOk(page="home", page_targets={"home": []}, nav_map={})
+        fail, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=2)
+        self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
+
     def test_max_retries_zero_restores_single_attempt_behavior(self):
         # Negative-test knob: max_retries=0 collapses back to the old
         # never-retry behavior, so the retry loop itself (not some other

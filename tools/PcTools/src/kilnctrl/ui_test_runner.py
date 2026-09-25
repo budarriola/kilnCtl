@@ -151,16 +151,16 @@ def _run_lcd_step(client, action: str, step: dict) -> dict:
             # Retry a small, bounded number of times before treating it like
             # any other non-ok result. "verdict_unknown" (the firmware's own
             # bounded verdict wait timed out -- see ui_test_client.py's
-            # click_by_name() doc comment) gets the same immediate-retry
-            # treatment: it is neither a confirmed pass nor a confirmed
-            # swallow, and re-clicking is the same cheap, bounded way to
-            # resolve it that already works for a confirmed swallow.
+            # click_by_name() doc comment) is deliberately NOT re-clicked:
+            # unlike a confirmed swallow, that press may well have reached
+            # the widget (a slow flush delays the verdict, not the press),
+            # and a script step can name any target, including Start/Stop/
+            # Confirm or a PIN digit, where a blind second tap would
+            # double-actuate. It is reported as a failed step instead, never
+            # as a pass.
             result = client.click_by_name(target)
             retries = 0
-            while (
-                result["result"] in ("swallowed", "verdict_unknown")
-                and retries < _CLICK_SWALLOW_MAX_RETRIES
-            ):
+            while result["result"] == "swallowed" and retries < _CLICK_SWALLOW_MAX_RETRIES:
                 retries += 1
                 result = client.click_by_name(target)
             if result["result"] != "ok":
