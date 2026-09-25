@@ -1305,10 +1305,11 @@ check, a mismatch treated as a dead link, the GUI naming both versions and
 which is older (always "update ESP first"), and an explicit `GET_FW_VERSION`
 retried until answered. Full detail: `LINK_PROTOCOL.md` sec 4.
 
-- [ ] **Refuse to push a Pico image this build could not then talk to**
-      (protocol-incompatible). Deferred, out of scope for this OTA pass —
-      see 9.5's matching open item, which is the same gap restated at the
-      transfer layer.
+- [x] **Refuse to push a Pico image this build could not then talk to**
+      (protocol-incompatible). DONE — closed by 9.5's matching item:
+      `ota_pico_do_stage()` (`ota_http_pico.c`) refuses a staged image whose
+      `link_protocol_version` differs with `409 Conflict` unless
+      `X-Ota-Force-Version: 1` is sent.
 
 ### 9.1 Partition table
 
