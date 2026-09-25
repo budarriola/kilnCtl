@@ -640,6 +640,20 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("not_found", fail.reason)
 
+    def test_click_inject_failed_fails_without_polling(self):
+        # 2026-09-24 follow-up: lvgl_port_inject_touch() itself refused (no
+        # press ever sent) -- attributed distinctly from "not_found" and,
+        # like it, never waited on for a page change this click could not
+        # have caused.
+        ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={},
+                            click_result="inject_failed")
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config")
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertIn("inject_failed", fail.reason)
+        self.assertEqual(fail.observed.get("attribution"), "inject_failed")
+        self.assertEqual(waited_s, 0.0)
+
     def test_click_ok_but_page_never_arrives_fails(self):
         # This is the exact regression the 2026-09-24 fix closes: without
         # checking _wait_for_page()'s return value, a click that replies

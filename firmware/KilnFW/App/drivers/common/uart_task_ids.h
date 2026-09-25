@@ -658,6 +658,15 @@
  * seen this value falls into its own default/"unknown result" arm; that
  * decoder needs updating, this is not a wire break. */
 #define UI_TEST_CLICK_VERDICT_UNKNOWN 0x05u
+/* 2026-09-24 follow-up: lvgl_port_inject_touch() itself returned 0 (never
+ * queued -- lvgl_port_start() hasn't run, or the inject lock timed out)
+ * before kiln_ui_click_by_name() ever started its swallow-verdict wait. No
+ * press was ever sent, so this is reported instead of, not in addition to,
+ * a 250ms wait for a verdict that could never arrive. Same wire-compatibility
+ * note as UI_TEST_CLICK_SWALLOWED/VERDICT_UNKNOWN above: an older PC decoder
+ * that has never seen this value falls into its own default/"unknown result"
+ * arm; that decoder needs updating, this is not a wire break. */
+#define UI_TEST_CLICK_INJECT_FAILED 0x06u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

@@ -834,6 +834,19 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
     uint16_t cx = (uint16_t)targets[match].cx;
     uint16_t cy = (uint16_t)targets[match].cy;
     uint32_t press_seq = lvgl_port_inject_touch(cx, cy, true);
+    if (press_seq == 0) {
+        /* lvgl_port_inject_touch()'s own documented "never queued" sentinel
+         * (its declaration comment in lvgl_port.h) -- lvgl_port_start()
+         * hasn't run yet, or touch_inject_lock() timed out. No press was
+         * ever latched into s_inject, so there is nothing for touch_read_cb()
+         * to ever deliver and nothing to wait on: waiting the usual 250ms for
+         * a verdict that can never arrive, then reporting
+         * KILN_UI_CLICK_VERDICT_UNKNOWN, would misrepresent a delivery
+         * failure as an unconfirmed-but-possibly-landed press. Report this
+         * distinctly and skip the wait; there is also no release to send,
+         * since no press was ever recorded to release. */
+        return KILN_UI_CLICK_INJECT_FAILED;
+    }
 
     /* Bounded wait for touch_read_cb() (lvgl_port_task, a different task) to
      * actually deliver this press and record screen_idle's swallow verdict

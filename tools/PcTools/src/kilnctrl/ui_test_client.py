@@ -19,6 +19,7 @@ from .protocol import (
     UART_TASK_ID_UI_TEST,
     UI_TEST_CLICK_AMBIGUOUS,
     UI_TEST_CLICK_HIDDEN,
+    UI_TEST_CLICK_INJECT_FAILED,
     UI_TEST_CLICK_NOT_FOUND,
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
@@ -47,6 +48,11 @@ _CLICK_RESULT_NAMES = {
     #: timed out before it could tell whether the press was swallowed. Neither
     #: a pass nor a genuine_defect -- see click_by_name()'s own doc comment.
     UI_TEST_CLICK_VERDICT_UNKNOWN: "verdict_unknown",
+    #: 2026-09-24 follow-up: no press was ever sent (lvgl_port_inject_touch()
+    #: itself refused) -- distinct from "verdict_unknown", where a press WAS
+    #: sent but its swallow verdict couldn't be confirmed. Never a pass, and
+    #: never grounds to poll for a page change.
+    UI_TEST_CLICK_INJECT_FAILED: "inject_failed",
 }
 
 
@@ -155,7 +161,7 @@ class UiTestClient:
     def click_by_name(self, name: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
         """Inject a tap at the named target's centre.
 
-        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed"|"verdict_unknown","cx":int,"cy":int}``
+        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed"|"verdict_unknown"|"inject_failed","cx":int,"cy":int}``
         -- unlike touch.py's inject()/set_tap_dump(), a firmware-level refusal
         here (target not found, ambiguous, or hidden) is not an
         exceptional/transport failure, so it comes back as a result code
@@ -176,6 +182,13 @@ class UiTestClient:
         follows, never blind re-clicked since the press may have landed,
         its own distinct attribution, never folded into "ok" or
         "swallowed").
+        ``"inject_failed"`` (2026-09-24) means lvgl_port_inject_touch() itself
+        refused the press (returned 0, its documented "never queued"
+        sentinel) -- no press was ever sent, so unlike "verdict_unknown"
+        there is nothing that might have landed. A caller must treat this
+        exactly like "not_found"/"ambiguous"/"hidden": never a pass, and
+        never grounds to poll for a page change this click could not have
+        caused.
         """
         payload = self._query(UI_TEST_CMD_CLICK_BY_NAME, _pack_click_request(name), timeout)
         if len(payload) < 6:

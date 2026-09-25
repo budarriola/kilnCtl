@@ -352,9 +352,17 @@ def _click_then_page(ui, name: str, expected_page: str,
     if click.get("result") not in ("ok", "verdict_unknown"):
         # A swallow that outlasted _click_resolving_swallow()'s own budget is
         # attributed as such, never as "not_found" (the target WAS found).
-        immediate_attribution = (
-            "swallowed" if click.get("result") == "swallowed" else "not_found"
-        )
+        # 'inject_failed' (2026-09-24) is attributed distinctly too: no press
+        # was ever sent (lvgl_port_inject_touch() itself refused), so this is
+        # neither a missing/ambiguous/hidden target nor a swallow -- never a
+        # pass, and never grounds to wait for a page change this click could
+        # not have caused.
+        if click.get("result") == "swallowed":
+            immediate_attribution = "swallowed"
+        elif click.get("result") == "inject_failed":
+            immediate_attribution = "inject_failed"
+        else:
+            immediate_attribution = "not_found"
         return (
             CaseResult(
                 Verdict.FAIL,
@@ -545,11 +553,12 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     # timed out) is judged by the target-set change below exactly like 'ok'
     # -- never a pass on its own, never a hard not_found FAIL.
     if click.get("result") not in ("ok", "verdict_unknown"):
+        attribution = "inject_failed" if click.get("result") == "inject_failed" else "not_found"
         return (
             CaseResult(
                 Verdict.FAIL,
                 reason=f"click_by_name({name!r}) returned {click.get('result')!r}",
-                observed={"click": click, "attribution": "not_found"},
+                observed={"click": click, "attribution": attribution},
             ),
             None,
             0.0,

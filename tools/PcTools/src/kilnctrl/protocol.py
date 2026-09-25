@@ -219,6 +219,13 @@ UI_TEST_CLICK_SWALLOWED = 4
 #: kiln_ui.h's KILN_UI_CLICK_VERDICT_UNKNOWN. A caller must treat this as
 #: neither a pass nor a genuine_defect attribution.
 UI_TEST_CLICK_VERDICT_UNKNOWN = 5
+#: 2026-09-24 follow-up: lvgl_port_inject_touch() itself returned 0 (never
+#: queued) before kiln_ui_click_by_name() started any wait -- no press was
+#: ever sent. Distinct from VERDICT_UNKNOWN (a press WAS sent, only its
+#: verdict is unconfirmed): this means nothing happened at all. See
+#: kiln_ui.h's KILN_UI_CLICK_INJECT_FAILED. Never a pass, and never grounds
+#: to poll for a page change this click could not have caused.
+UI_TEST_CLICK_INJECT_FAILED = 6
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged

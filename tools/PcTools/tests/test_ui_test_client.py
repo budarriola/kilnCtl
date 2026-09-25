@@ -19,6 +19,7 @@ from kilnctrl.protocol import (  # noqa: E402
     UART_TASK_ID_UI_TEST,
     UI_TEST_CLICK_AMBIGUOUS,
     UI_TEST_CLICK_HIDDEN,
+    UI_TEST_CLICK_INJECT_FAILED,
     UI_TEST_CLICK_NOT_FOUND,
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
@@ -174,6 +175,14 @@ class ClickByNameTest(unittest.TestCase):
         # confirmed "ok" nor a confirmed "swallowed".
         self._reply(UI_TEST_CLICK_VERDICT_UNKNOWN)
         self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "verdict_unknown")
+
+    def test_inject_failed_result(self):
+        # 2026-09-24 follow-up: lvgl_port_inject_touch() itself returned 0
+        # (never queued) before kiln_ui_click_by_name() started any wait --
+        # no press was ever sent, distinct from "verdict_unknown" (a press
+        # WAS sent, only its verdict is unconfirmed).
+        self._reply(UI_TEST_CLICK_INJECT_FAILED)
+        self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "inject_failed")
 
     def test_request_carries_name(self):
         # uart_task_ids.h's CLICK_BY_NAME request is raw ASCII with NO

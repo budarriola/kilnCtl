@@ -191,6 +191,17 @@ typedef enum {
      * within the wait window. A caller must treat this as neither a pass
      * nor a genuine defect -- see ui_test_client.py's result-name table. */
     KILN_UI_CLICK_VERDICT_UNKNOWN,
+    /* 2026-09-24 follow-up: lvgl_port_inject_touch() itself returned 0 (its
+     * documented "never queued" sentinel -- either lvgl_port_start() hasn't
+     * run yet, or touch_inject_lock() timed out) for the PRESS half, before
+     * any wait for a swallow verdict began. No press was ever queued, so
+     * there is nothing to wait for and nothing to release -- unlike
+     * KILN_UI_CLICK_VERDICT_UNKNOWN, this is not "a press was sent and we
+     * couldn't confirm it," it is "no press was sent at all." A caller must
+     * treat this the same as NOT_FOUND/AMBIGUOUS/HIDDEN: never a pass, and
+     * never grounds to poll for a page change the same click could not have
+     * caused. */
+    KILN_UI_CLICK_INJECT_FAILED,
 } kiln_ui_click_result_t;
 
 /* Finds the tap target whose name exactly matches `name` (kiln_ui_collect_
@@ -217,6 +228,11 @@ typedef enum {
  *                              swallow verdict timed out before it could be
  *                              read -- neither confirmed delivered-clean nor
  *                              confirmed swallowed
+ *   KILN_UI_CLICK_INJECT_FAILED -- exactly one visible match, but
+ *                              lvgl_port_inject_touch() itself refused the
+ *                              press (returned 0) -- nothing was ever
+ *                              queued, so no wait was attempted and no
+ *                              release was sent
  * Called directly from the UART bridge task, same as lvgl_port_inject_
  * touch() itself and TOUCH_CMD_INJECT's handler -- see that function's
  * thread-safety note (lvgl_port.h). */
