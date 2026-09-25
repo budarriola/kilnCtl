@@ -131,10 +131,11 @@ extern "C" {
  * Idempotent by (name, handle_slot): calling this again with the same name
  * AND the same slot pointer is a no-op that returns true without appending
  * a second row. This matters because not every call site fires once per
- * boot -- the three OTA background-task launchers (ota_rollback_reboot,
- * ota_pico_rollback, recovery_exit) register from inside a short-lived task
- * that a POST handler can (re)start any number of times in one boot, always
- * with the same literal name and the same file-scope TaskHandle_t* slot.
+ * boot -- the four repeat-call launchers (the three OTA background tasks
+ * ota_rollback_reboot, ota_pico_rollback, recovery_exit, plus zone_sweep)
+ * register from inside a short-lived task that a POST handler can (re)start
+ * any number of times in one boot, always with the same literal name and
+ * the same file-scope TaskHandle_t* slot.
  * Without this de-dup every repeat POST would append a fresh row, and since
  * the registry has no removal path, enough repeats silently walk it to
  * STACK_MARGIN_MAX_TASKS, after which every OTHER task's registration
@@ -145,12 +146,14 @@ extern "C" {
  * Not internally locked: every current call site registers from a context
  * that is effectively single-threaded with respect to this registry.
  * Boot-time tasks register once each from app_main()'s own sequential boot
- * sequence. The three repeat-call OTA sites above (ota_http_esp.c,
- * ota_http_pico.c, ota_http_recovery.c) register directly in their POST
- * handler -- not from inside the task body they just created -- and every
- * httpd POST handler runs on the single httpd worker task, so those three
- * call sites are serialized by that worker, not by any per-feature update
- * claim (recovery_exit takes no such claim at all; see its handler). There
+ * sequence. The four repeat-call sites above (ota_http_esp.c,
+ * ota_http_pico.c, ota_http_recovery.c, and zones_current_sweep_task.c's
+ * zone_sweep) register directly in their POST handler -- not from inside
+ * the task body they just created -- and every httpd POST handler runs on
+ * the single httpd worker task, so those four call sites are serialized by
+ * that worker, not by any per-feature update claim (recovery_exit takes no
+ * such claim at all; zone_sweep takes its own, separate heat-sweep claim;
+ * see each handler). There
  * is one pre-existing, accepted narrow window this doesn't cover: httpd
  * starts in main_network_http_bringup(), before main_bridges_bringup()
  * registers its ~10 boot-time tasks (main.c), so an OTA POST arriving in

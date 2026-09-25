@@ -149,6 +149,7 @@ $requiredNames = @(
     "i2c_owner_ns2009",  # liveness: config -- only created if a runtime i2c probe finds an NS2009 (NS2009.c); this bench has an FT6336U instead
     "kiln_io_owner", "lvgl",
     "gpio_probe",  # liveness: config -- only created when CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y (Kconfig)
+    "backlight_pwm",  # liveness: config -- only created when CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE=y (Kconfig, defaults y); found missing from this list by check_stack_task_table_consistency.ps1 (2026-09-24) despite having a real stack_margin_register() call site and a check_all_task_stack_budgets.py TASKS/CEILING_BYTES row all along
     "recovery_exit",  # liveness: on-demand -- transient task an HTTP handler (ota_http_recovery.c) creates per POST /api/ota/esp/recovery_exit call
     "ota_rollback_reboot",  # liveness: on-demand -- transient task ota_http_esp.c's rollback handler creates on demand
     "ota_pico_rollback",  # liveness: on-demand -- transient task ota_http_pico.c's rollback handler creates on demand
