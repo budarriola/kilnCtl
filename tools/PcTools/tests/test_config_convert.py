@@ -948,15 +948,18 @@ def test_convert_document_zones_blob():
 def test_convert_kiln_package_recomputes_hash():
     fields = _make_zones_fields()
     blob = cc.encode_zones_blob(fields)
+    pico = [{"id": 1, "type": 2, "flags": 0, "value_bits": 100}]
     doc = {
         "kind": "kilnctl_kiln_package",
         "pkg_schema": 1,
         "name": "test-package",
         "esp_blob_hex": blob.hex(),
-        "pico": [{"id": 1, "type": 2, "flags": 0, "value_bits": 100}],
+        "esp_blob_len": len(blob),
+        "pico": pico,
+        "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(1, blob, pico):08x}",
     }
     out_doc, report = cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
-    expected_hash = cc._kiln_pkg_compute_hash(1, blob, doc["pico"])
+    expected_hash = cc._kiln_pkg_compute_hash(1, blob, pico)
     assert out_doc["pkg_hash"] == f"0x{expected_hash:08x}"
     assert bytes.fromhex(out_doc["esp_blob_hex"]) == blob
     assert report.store == "kiln_package"
@@ -964,16 +967,95 @@ def test_convert_kiln_package_recomputes_hash():
 
 def test_convert_kiln_package_requires_esp_blob_hex():
     with pytest.raises(cc.ConfigConvertError):
-        cc.convert_kiln_package({"kind": "kilnctl_kiln_package", "pico": []}, cc.ZONES_CFG_VERSION)
+        cc.convert_kiln_package({"kind": "kilnctl_kiln_package", "pkg_schema": 1, "pkg_hash": "0x0", "pico": []},
+                                 cc.ZONES_CFG_VERSION)
 
 
 def test_convert_document_kiln_package():
     fields = _make_zones_fields()
     blob = cc.encode_zones_blob(fields)
-    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": []}
+    doc = {
+        "kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": [],
+        "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(1, blob, []):08x}",
+    }
     out_doc, report = cc.convert_document(doc, cc.ZONES_CFG_VERSION)
     assert out_doc["kind"] == "kilnctl_kiln_package"
     assert "pkg_hash" in out_doc
+
+
+def test_convert_kiln_package_refuses_tampered_hash():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": [],
+           "pkg_hash": "0xdeadbeef"}
+    with pytest.raises(cc.ConfigConvertError, match="pkg_hash"):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_requires_pkg_schema():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_kiln_package", "esp_blob_hex": blob.hex(), "pico": [],
+           "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(1, blob, []):08x}"}
+    with pytest.raises(cc.ConfigConvertError, match="pkg_schema"):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_rejects_pkg_schema_zero():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 0, "esp_blob_hex": blob.hex(), "pico": [],
+           "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(0, blob, []):08x}"}
+    with pytest.raises(cc.ConfigConvertError, match="pkg_schema"):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_rejects_pkg_schema_too_new():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    too_new = cc.KILN_PKG_SCHEMA_VERSION + 1
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": too_new, "esp_blob_hex": blob.hex(), "pico": [],
+           "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(too_new, blob, []):08x}"}
+    with pytest.raises(cc.ConfigConvertError, match="pkg_schema"):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_requires_pkg_hash():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": []}
+    with pytest.raises(cc.ConfigConvertError, match="pkg_hash"):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_rejects_esp_blob_len_mismatch():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(),
+           "esp_blob_len": len(blob) + 1, "pico": [],
+           "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(1, blob, []):08x}"}
+    with pytest.raises(cc.ConfigConvertError, match="esp_blob_len"):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_rejects_pico_entry_missing_field():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    pico = [{"id": 1, "type": 2, "flags": 0}]  # missing value_bits
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": pico,
+           "pkg_hash": "0x00000000"}
+    with pytest.raises(cc.ConfigConvertError):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
+
+
+def test_convert_kiln_package_rejects_pico_entry_out_of_range_field():
+    fields = _make_zones_fields()
+    blob = cc.encode_zones_blob(fields)
+    pico = [{"id": 1, "type": 999, "flags": 0, "value_bits": 100}]  # type must fit uint8
+    doc = {"kind": "kilnctl_kiln_package", "pkg_schema": 1, "esp_blob_hex": blob.hex(), "pico": pico,
+           "pkg_hash": "0x00000000"}
+    with pytest.raises(cc.ConfigConvertError):
+        cc.convert_kiln_package(doc, cc.ZONES_CFG_VERSION)
 
 
 # ---------------------------------------------------------------------------

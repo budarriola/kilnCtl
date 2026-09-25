@@ -14,10 +14,12 @@
 // file never links the real safety_cfg_store.c, so it defines its own
 // fake safety_cfg_param_t rows directly -- no multiple-definition risk with
 // the main executable's real ones.
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int g_test_failures = 0;
 int g_test_count = 0;
@@ -629,6 +631,199 @@ static void test_import_source_board_id_malformed_refuses(void)
     TEST_CHECK(strstr(reason, "source_board_id") != NULL, "refusal reason names the field");
 }
 
+// ---------------------------------------------------------------------------
+// Golden for tools/PcTools/src/kilnctrl/config_convert.py's kiln_package
+// hash/export -- see firmware/KilnFW/App/test/test_zones_blob_golden.c's own
+// header comment for the rationale (pinning a hand-mirrored Python layout
+// against bytes the FIRMWARE actually produced, so a layout drift on either
+// side goes red instead of the two sides silently comparing themselves to
+// themselves).
+//
+// This executable (test_kiln_package.c) does not link zones_config_store.c,
+// so it cannot fill/save its own zones_cfg_t the way test_zones_blob_golden.c
+// does. Instead it reads the ALREADY-COMMITTED zones_cfg_t golden fixture
+// (zones_cfg_golden.txt's own "blob " hex line) to get a real firmware-
+// produced esp_blob, builds a fixed kiln_pkg_safety_t with two sentinel pico
+// entries, and runs the real kiln_package_compute_hash()/
+// kiln_package_export_json() over them -- the same production functions
+// convert_kiln_package's own callers use.
+//
+// tools/PcTools/tests/test_config_convert_kiln_package_golden.py checks
+// config_convert.py's _kiln_pkg_compute_hash()/convert_kiln_package() against
+// this same committed fixture, so this replaces the old hash test that
+// compared the Python function with itself.
+//
+// Regenerate after an intentional kiln_package.c wire-format change by
+// running this executable with KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS=1 set,
+// then update config_convert.py until the pytest passes again.
+#define KPG_GOLDEN_REL "../../../../tools/PcTools/tests/fixtures/config_convert/kiln_package_golden.txt"
+#define KPG_ZONES_GOLDEN_REL "../../../../tools/PcTools/tests/fixtures/config_convert/zones_cfg_golden.txt"
+#define KPG_REGEN_ENV "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS"
+
+static char s_kpg_text[16 * 1024];
+static size_t s_kpg_text_len;
+
+static void kpg_emit(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(s_kpg_text + s_kpg_text_len, sizeof(s_kpg_text) - s_kpg_text_len, fmt, ap);
+    va_end(ap);
+    if (w > 0 && (size_t)w < sizeof(s_kpg_text) - s_kpg_text_len) {
+        s_kpg_text_len += (size_t)w;
+    }
+}
+
+static int kpg_text_equal_ignoring_cr(const char *a, const char *b, int *first_diff_line)
+{
+    int line = 1;
+    while (*a || *b) {
+        if (*a == '\r') { a++; continue; }
+        if (*b == '\r') { b++; continue; }
+        if (*a != *b) { *first_diff_line = line; return 0; }
+        if (*a == '\n') { line++; }
+        a++;
+        b++;
+    }
+    return 1;
+}
+
+// Extracts the hex payload of the committed zones golden's "blob " line
+// without needing any struct/JSON parsing -- this file only needs the raw
+// bytes, not the field-by-field breakdown test_zones_blob_golden.c produces.
+static bool kpg_read_zones_golden_blob(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    char *path = test_resolve_from_here(__FILE__, KPG_ZONES_GOLDEN_REL);
+    if (!path) {
+        return false;
+    }
+    char *text = test_read_whole_file(path);
+    free(path);
+    if (!text) {
+        return false;
+    }
+    bool ok = false;
+    const char *line = text;
+    while (line) {
+        if (strncmp(line, "blob ", 5) == 0) {
+            const char *hex = line + 5;
+            size_t n = 0;
+            while (hex[n] && hex[n] != '\n' && hex[n] != '\r') {
+                n++;
+            }
+            if (n % 2 == 0 && n / 2 <= out_cap) {
+                size_t bytes = n / 2;
+                bool bad = false;
+                for (size_t i = 0; i < bytes; i++) {
+                    unsigned v;
+                    if (sscanf(hex + i * 2, "%2x", &v) != 1) {
+                        bad = true;
+                        break;
+                    }
+                    out[i] = (uint8_t)v;
+                }
+                if (!bad) {
+                    *out_len = bytes;
+                    ok = true;
+                }
+            }
+            break;
+        }
+        const char *next = strchr(line, '\n');
+        line = next ? next + 1 : NULL;
+    }
+    free(text);
+    return ok;
+}
+
+static void test_kiln_package_golden_matches_firmware_layout(void)
+{
+    TEST_SECTION("kiln_package hash/export -- firmware-generated golden");
+
+    static uint8_t esp_blob[4096];
+    size_t esp_blob_len = 0;
+    bool got_blob = kpg_read_zones_golden_blob(esp_blob, sizeof(esp_blob), &esp_blob_len);
+    TEST_CHECK(got_blob, "kiln_package golden: read committed zones_cfg_t golden blob");
+    if (!got_blob) {
+        return;
+    }
+
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = 2;
+    pico.entries[0].param_id = 0x0102;
+    pico.entries[0].type = 3;
+    pico.entries[0].flags = 1;
+    pico.entries[0].value_bits = 0x11223344u;
+    pico.entries[1].param_id = 0x0304;
+    pico.entries[1].type = 7;
+    pico.entries[1].flags = 0;
+    pico.entries[1].value_bits = 0xaabbccddu;
+
+    uint16_t pkg_schema = KILN_PKG_SCHEMA_VERSION;
+    uint32_t hash = 0;
+    bool hashed = kiln_package_compute_hash(pkg_schema, esp_blob, (uint16_t)esp_blob_len, &pico, &hash);
+    TEST_CHECK(hashed, "kiln_package golden: kiln_package_compute_hash succeeds");
+    if (!hashed) {
+        return;
+    }
+
+    static char exported[8192];
+    size_t exported_len = 0;
+    bool exported_ok = kiln_package_export_json("golden-package", pkg_schema, esp_blob, (uint16_t)esp_blob_len,
+                                                &pico, hash, 0x11223344u, exported, sizeof(exported), &exported_len);
+    TEST_CHECK(exported_ok, "kiln_package golden: kiln_package_export_json succeeds");
+    if (!exported_ok) {
+        return;
+    }
+
+    kpg_emit("# kiln_package hash/export golden -- GENERATED by firmware/KilnFW/App/test/test_kiln_package.c.\n");
+    kpg_emit("# Do not edit by hand; regenerate with %s=1 (see that file's header).\n", KPG_REGEN_ENV);
+    kpg_emit("pkg_schema %u\n", (unsigned)pkg_schema);
+    kpg_emit("esp_blob_len %u\n", (unsigned)esp_blob_len);
+    kpg_emit("pico_count %u\n", (unsigned)pico.count);
+    for (uint16_t i = 0; i < pico.count; i++) {
+        kpg_emit("pico[%u] id=%u type=%u flags=%u value_bits=%lu\n", (unsigned)i,
+                 (unsigned)pico.entries[i].param_id, (unsigned)pico.entries[i].type,
+                 (unsigned)pico.entries[i].flags, (unsigned long)pico.entries[i].value_bits);
+    }
+    kpg_emit("hash 0x%08lx\n", (unsigned long)hash);
+    kpg_emit("export_json %s\n", exported);
+
+    char *golden_path = test_resolve_from_here(__FILE__, KPG_GOLDEN_REL);
+    TEST_CHECK(golden_path != NULL, "kiln_package golden: resolve golden path");
+    if (!golden_path) {
+        return;
+    }
+    const char *regen = getenv(KPG_REGEN_ENV);
+    if (regen && regen[0] == '1') {
+        FILE *f = fopen(golden_path, "wb");
+        TEST_CHECK(f != NULL, "kiln_package golden: open golden for regeneration");
+        if (f) {
+            fwrite(s_kpg_text, 1, s_kpg_text_len, f);
+            fclose(f);
+            printf("  regenerated %s\n", golden_path);
+        }
+    }
+    char *committed = test_read_whole_file(golden_path);
+    if (!committed) {
+        printf("  golden not found at %s\n", golden_path);
+        TEST_CHECK(false, "kiln_package golden: committed golden file exists");
+    } else {
+        int diff_line = 0;
+        int same = kpg_text_equal_ignoring_cr(s_kpg_text, committed, &diff_line);
+        if (!same) {
+            printf("  kiln_package golden differs from the committed file at line %d: %s\n"
+                   "  kiln_package's wire format (or this test's fixed inputs) changed. If intentional,\n"
+                   "  regenerate with %s=1 and update tools/PcTools/src/kilnctrl/config_convert.py to match.\n",
+                   diff_line, golden_path, KPG_REGEN_ENV);
+        }
+        TEST_CHECK(same, "kiln_package golden: firmware-generated golden matches the committed file");
+        free(committed);
+    }
+    free(golden_path);
+}
+
 int main(void)
 {
     test_capture_sorts_ascending_by_param_id();
@@ -646,6 +841,7 @@ int main(void)
     test_hash_independent_of_source_board_id();
     test_import_source_board_id_absent();
     test_import_source_board_id_malformed_refuses();
+    test_kiln_package_golden_matches_firmware_layout();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

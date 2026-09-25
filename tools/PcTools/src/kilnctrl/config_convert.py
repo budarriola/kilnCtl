@@ -1208,7 +1208,14 @@ def _zones_crc32(blob_with_real_crc: bytes) -> int:
 def encode_zones_blob(fields: dict) -> bytes:
     """Encode fields (as returned by decode_zones_blob(), version must be
     ZONES_CFG_VERSION) back to raw bytes, recomputing crc32 the same way
-    firmware's nvs_save() does. STAGE 1 ONLY -- see decode_zones_blob()."""
+    firmware's nvs_save() does. STAGE 1 ONLY -- see decode_zones_blob().
+
+    A real board-written blob can carry non-zero struct padding bytes (left
+    over from whatever was on the stack/heap when the firmware struct was
+    filled) that this encoder always writes as zero, so
+    encode_zones_blob(decode_zones_blob(x)) may differ from x byte-for-byte
+    at those padding offsets while still decoding to the same fields and
+    passing the same CRC check -- that is expected, not a round-trip bug."""
     version = fields["version"]
     if version != ZONES_CFG_VERSION:
         raise ConfigConvertError(
@@ -1281,21 +1288,50 @@ def convert_zones_blob(blob: bytes, target_version: int) -> "tuple[bytes, Conver
 # ---------------------------------------------------------------------------
 
 
+KILN_PKG_SCHEMA_VERSION = 1  # kiln_package.h KILN_PKG_SCHEMA_VERSION
+
+
 def _kiln_pkg_compute_hash(pkg_schema: int, esp_blob: bytes, pico_entries: "list[dict]") -> int:
-    buf = bytearray()
-    buf += struct.pack("<HH", pkg_schema, len(esp_blob))
-    buf += esp_blob
-    buf += struct.pack("<H", len(pico_entries))
-    for e in pico_entries:
-        buf += struct.pack("<HBBI", e["id"], e["type"], e["flags"], e["value_bits"])
-    return _crc32(bytes(buf))
+    try:
+        buf = bytearray()
+        buf += struct.pack("<HH", pkg_schema, len(esp_blob))
+        buf += esp_blob
+        buf += struct.pack("<H", len(pico_entries))
+        for e in pico_entries:
+            if not isinstance(e, dict):
+                raise ConfigConvertError("kilnctl_kiln_package document's 'pico' entries must be objects")
+            try:
+                buf += struct.pack("<HBBI", e["id"], e["type"], e["flags"], e["value_bits"])
+            except KeyError as exc:
+                raise ConfigConvertError(
+                    f"kilnctl_kiln_package document's 'pico' entry is missing required field {exc}") from exc
+            except struct.error as exc:
+                raise ConfigConvertError(f"kilnctl_kiln_package document's 'pico' entry has an out-of-range "
+                                          f"or wrongly-typed field: {exc}") from exc
+        return _crc32(bytes(buf))
+    except (struct.error, TypeError) as exc:
+        # Catches a malformed pkg_schema/esp_blob length that struct.pack
+        # itself refuses to encode (e.g. non-int, or > 65535).
+        raise ConfigConvertError(f"kilnctl_kiln_package document has a malformed field: {exc}") from exc
 
 
 def convert_kiln_package(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
     """Convert a kilnctl_kiln_package envelope's esp_blob_hex (a raw
     zones_cfg_t blob) to target_version, re-encoding pkg_hash over the
     result. `pico` and `source_board_id` pass through unchanged -- see this
-    module's kiln_package section comment."""
+    module's kiln_package section comment.
+
+    Mirrors kiln_package_import_json()'s own validation as closely as a
+    file-only tool can: pkg_schema/pkg_hash must both be present (firmware
+    refuses a package missing either), pkg_schema must be in 1..
+    KILN_PKG_SCHEMA_VERSION (0 and "newer than this tool knows" are both
+    refused, never silently accepted), and esp_blob_len (when present) must
+    match the decoded blob length. Unlike firmware's own import path -- which
+    documents that it decodes but does NOT verify pkg_hash, leaving that to
+    its caller -- this function DOES recompute and verify pkg_hash over the
+    INPUT before converting anything, since a converter that re-stamps a
+    tampered or corrupted document as freshly valid is worse than one that
+    refuses it outright."""
     try:
         esp_blob = bytes.fromhex(doc["esp_blob_hex"])
     except (KeyError, ValueError) as exc:
@@ -1303,7 +1339,36 @@ def convert_kiln_package(doc: dict, target_version: int) -> "tuple[dict, Convers
     pico_entries = doc.get("pico", [])
     if not isinstance(pico_entries, list):
         raise ConfigConvertError("kilnctl_kiln_package document's 'pico' field must be a list")
-    pkg_schema = doc.get("pkg_schema", 1)
+
+    if "pkg_schema" not in doc:
+        raise ConfigConvertError("kilnctl_kiln_package document is missing required field 'pkg_schema'")
+    pkg_schema = doc["pkg_schema"]
+    if not isinstance(pkg_schema, int) or isinstance(pkg_schema, bool) or not (1 <= pkg_schema <= KILN_PKG_SCHEMA_VERSION):
+        raise ConfigConvertError(
+            f"kilnctl_kiln_package document's pkg_schema ({pkg_schema!r}) must be an integer in "
+            f"1..{KILN_PKG_SCHEMA_VERSION} -- 0 was never emitted and anything higher is newer than this "
+            "tool knows, same as kiln_package_import_json()'s own refusal")
+
+    if "pkg_hash" not in doc:
+        raise ConfigConvertError("kilnctl_kiln_package document is missing required field 'pkg_hash'")
+    try:
+        declared_hash = int(str(doc["pkg_hash"]), 16)
+    except (TypeError, ValueError) as exc:
+        raise ConfigConvertError(f"kilnctl_kiln_package document's 'pkg_hash' is not a valid hex string: {exc}")
+
+    if "esp_blob_len" in doc:
+        declared_len = doc["esp_blob_len"]
+        if not isinstance(declared_len, int) or isinstance(declared_len, bool) or declared_len != len(esp_blob):
+            raise ConfigConvertError(
+                f"kilnctl_kiln_package document's esp_blob_len ({declared_len!r}) does not match its decoded "
+                f"esp_blob_hex length ({len(esp_blob)}) -- file is truncated or corrupted")
+
+    input_hash = _kiln_pkg_compute_hash(pkg_schema, esp_blob, pico_entries)
+    if input_hash != declared_hash:
+        raise ConfigConvertError(
+            f"kilnctl_kiln_package document's declared pkg_hash (0x{declared_hash:08x}) does not match the "
+            f"hash recomputed over its own esp_blob/pico contents (0x{input_hash:08x}) -- refusing to "
+            "convert a document that already fails its own integrity check rather than re-stamping it valid")
 
     out_blob, zones_report = convert_zones_blob(esp_blob, target_version)
     report = ConversionReport(store="kiln_package", source_version=zones_report.source_version,
@@ -1315,6 +1380,7 @@ def convert_kiln_package(doc: dict, target_version: int) -> "tuple[dict, Convers
     new_hash = _kiln_pkg_compute_hash(pkg_schema, out_blob, pico_entries)
     out_doc = dict(doc)
     out_doc["esp_blob_hex"] = out_blob.hex()
+    out_doc["esp_blob_len"] = len(out_blob)
     out_doc["pkg_hash"] = f"0x{new_hash:08x}"
     return out_doc, report
 
