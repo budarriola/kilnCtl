@@ -4,6 +4,7 @@
 
 #include "firing_shadow.h"
 
+#include <stddef.h> /* offsetof -- v1 blob layout pins below */
 #include <string.h>
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_zone/s_current_set/s_previous_set/s_status below */
@@ -84,6 +85,17 @@ typedef struct {
 
 _Static_assert(sizeof(firing_shadow_store_blob_v1_t) == 32,
                "firing_shadow_store_blob_v1_t size must stay pinned");
+// Pin the v1 field offsets to the layout older firmware actually wrote (c756fffc's
+// original firing_shadow_store_blob_t), independently of this struct: the host
+// test builds its v1 fixture from this same type, so a wrong field order here
+// would otherwise migrate garbage while the test still passed.
+_Static_assert(offsetof(firing_shadow_store_blob_v1_t, version) == 0, "v1 version offset");
+_Static_assert(offsetof(firing_shadow_store_blob_v1_t, firings_scored) == 4, "v1 firings_scored offset");
+_Static_assert(offsetof(firing_shadow_store_blob_v1_t, no_matched_pairs_count) == 20,
+               "v1 no_matched_pairs_count offset");
+_Static_assert(offsetof(firing_shadow_store_blob_v1_t, last_verdict) == 24, "v1 last_verdict offset");
+_Static_assert(offsetof(firing_shadow_store_blob_v1_t, last_composite_normalised) == 28,
+               "v1 last_composite_normalised offset");
 
 // Per-zone in-progress segment tracking. RAM only.
 typedef struct {
