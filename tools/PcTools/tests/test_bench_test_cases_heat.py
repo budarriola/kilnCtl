@@ -600,6 +600,30 @@ class HP03Test(unittest.TestCase):
         self.assertIn("zone 2 zones config restore failed", result.reason)
         self.assertEqual(calls["n"], 3, "expected on/off POST + two restore attempts")
 
+    def test_leftover_low_ceiling_refuses_before_attaching_rule(self):
+        """Opus review: the ceiling preflight must be checked against the
+        rule's own `temp_threshold_c` (34C: ambient 24 + on/off offset 10),
+        not left to `_start_bench_profile`'s internal ambient+offset target
+        alone -- a zone 2 ceiling left at 30C (e.g. a failed HP-07 restore)
+        must refuse before ever POSTing the on/off rule."""
+        self.fake_zhc.snapshot = {
+            "thermo_count": 3, "relay_count": 3,
+            "zones": [
+                {"index": 0, "zone_type": 0, "max_temp_c": 300.0},
+                {"index": 1, "zone_type": 0, "max_temp_c": 300.0},
+                {"index": 2, "zone_type": 0, "max_temp_c": 30.0},
+            ],
+        }
+        profiles = _FakeProfilesClientHP()
+        ctx = self._ctx(profiles)
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("max_temp_c", result.reason)
+        self.assertEqual(len(self.fake_pehc.calls), 0)
+        self.assertEqual(profiles.started, [])
+        # the on/off zone config was still restored
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+
     def test_on_off_rule_attached_with_correct_fields(self):
         """The defect under fix: HP-03 must attach an enabled on/off rule for
         (zone=target_zone, segment 0) to the profile it saves, or the relay
@@ -637,6 +661,24 @@ class HP03Test(unittest.TestCase):
         self.assertEqual(rule.temp_threshold_c, 34.0)
         # the UART SAVE path must not be used when a rule is attached
         self.assertEqual(profiles.saved, [])
+
+    def test_pehc_raising_fails_restores_zones_and_deletes_slot(self):
+        """NEGATIVE (Opus review): post_profile() raising (e.g. a 400 from a
+        bad on/off rule) must FAIL the case, still restore the on/off zone
+        config it already POSTed, and still delete the hidden bench slot --
+        same teardown obligations as every other HP-03 failure path."""
+        self.fake_pehc.raise_exc = RuntimeError("400: bad on/off rule")
+        profiles = _FakeProfilesClientHP()
+        ctx = self._ctx(profiles)
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("bad on/off rule", result.reason)
+        # the on/off zone config POST happened before the profile POST, so a
+        # restore POST must follow it regardless of the profile POST's fate
+        self.assertGreaterEqual(len(self.fake_zhc.posted_bodies), 2)
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
+        self.assertEqual(profiles.started, [])
 
     def test_on_off_post_raising_still_restores(self):
         """A POST that raises may still have been committed by firmware."""

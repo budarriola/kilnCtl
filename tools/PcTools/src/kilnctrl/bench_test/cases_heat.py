@@ -665,6 +665,18 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
         temp_source=_pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE,
         temp_threshold_c=target_c,
     )
+    # `_start_bench_profile` re-reads ambient itself and runs its own ceiling
+    # check against the SEGMENT's target_c -- but `rule.temp_threshold_c` was
+    # computed by the caller from an earlier ambient read and is never passed
+    # through as `target_c` (that would disable the check entirely: an
+    # explicit `target_c` is HP-07's "pinned to an already-checked limit"
+    # signal, not a substitute for one). If ambient drifted between the two
+    # reads the segment's own target could clear the ceiling while the rule's
+    # threshold does not, leaving a relay thermostat armed against a ceiling
+    # nothing has verified it. Check the rule's own threshold explicitly.
+    ceiling_ok, ceiling_reason = _check_zone_ceilings(ctx, 1 << target_zone, rule.temp_threshold_c)
+    if not ceiling_ok:
+        return CaseResult(Verdict.FAIL, reason=ceiling_reason)
     ok, reason, _ambient = _start_bench_profile(
         ctx, zone_mask=1 << target_zone, target_offset_c=10.0,
         on_off_rules=[rule],
