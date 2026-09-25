@@ -3938,8 +3938,9 @@ Owner instruction, 2026-09-21.
   page's own buttons satisfy it before LVGL processes the click (the case ran
   0.92 s against a 2.0 s timeout). Firmware force-lock-on-enable
   (`ui_lcd_lock.c`, `security_backend_web_auth.c`) is correct. Fix (a
-  baseline-then-changed wait) is in flight in the LCD runner round 3 commit —
-  runner fix pending, rerun required once it lands.
+  baseline-then-changed wait) has landed: `_wait_for_overlay_names()` in
+  `cases_lcd.py` takes a `baseline` and waits for the set to change (on main at
+  59c9306a). Only the bench rerun remains.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,
