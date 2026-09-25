@@ -118,6 +118,32 @@ typedef enum {
 totp_reset_token_result_t totp_reset_token_consume(totp_reset_token_table_t *t, const char *token_hex,
                                                     const char *username, uint32_t now_ms);
 
+// --- Board-wide failed-/forgot-attempt cap (plan section 4) -----------------
+//
+// A RAM-only, per-boot count of failed /api/auth/forgot verifications,
+// board-wide (every source address together), additive to the per-IP
+// backoff ladder. Once it reaches TOTP_FORGOT_BOARD_CAP every further
+// /forgot call is refused 429 until the next reboot. A SUCCESSFUL
+// verification deliberately does NOT reset it: plan section 4 says "reset
+// the counter only on reboot", because the cap's job is to bound the TOTAL
+// number of guesses an attacker rotating source addresses gets per uptime.
+// Resetting on success would turn that into a bound on CONSECUTIVE failures
+// only (every legitimate owner reset would hand an attacker a fresh budget),
+// and would never help the owner anyway -- once the cap is reached /forgot
+// refuses before verifying, so no success can happen to reset it.
+#define TOTP_FORGOT_BOARD_CAP 20u
+
+typedef struct {
+    uint32_t failures; // saturates at TOTP_FORGOT_BOARD_CAP
+} totp_forgot_board_cap_t;
+
+// True once TOTP_FORGOT_BOARD_CAP failures have been recorded this boot.
+bool totp_forgot_board_cap_blocked(const totp_forgot_board_cap_t *c);
+
+// Records one /forgot verification outcome. A failure increments the count
+// (saturating); a success leaves it unchanged (see above).
+void totp_forgot_board_cap_record(totp_forgot_board_cap_t *c, bool verified);
+
 #ifdef __cplusplus
 }
 #endif

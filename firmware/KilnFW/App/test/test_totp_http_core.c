@@ -258,6 +258,30 @@ static void test_reset_token_store_reuses_expired_slot(void)
                "the still-live token was NOT evicted -- an expired slot was reused instead");
 }
 
+// --- board-wide failed-/forgot-attempt cap (plan section 4) -----------------
+
+static void test_forgot_board_cap_success_never_resets(void)
+{
+    TEST_SECTION("totp_forgot_board_cap -- cleared only by reboot, never by a success");
+    totp_forgot_board_cap_t c;
+    memset(&c, 0, sizeof(c));
+    TEST_CHECK(!totp_forgot_board_cap_blocked(&c), "a fresh boot is not blocked");
+    for (unsigned i = 0; i + 1u < TOTP_FORGOT_BOARD_CAP; i++) {
+        totp_forgot_board_cap_record(&c, false);
+    }
+    TEST_CHECK(!totp_forgot_board_cap_blocked(&c), "one failure short of the cap is not blocked");
+    totp_forgot_board_cap_record(&c, true);
+    TEST_CHECK(c.failures == TOTP_FORGOT_BOARD_CAP - 1u,
+               "a successful verification leaves the failure count unchanged (no fresh budget)");
+    totp_forgot_board_cap_record(&c, false);
+    TEST_CHECK(totp_forgot_board_cap_blocked(&c),
+               "the cap-th failure blocks, even with a success recorded in between");
+    totp_forgot_board_cap_record(&c, true);
+    TEST_CHECK(totp_forgot_board_cap_blocked(&c), "a success never unblocks a capped board");
+    totp_forgot_board_cap_record(&c, false);
+    TEST_CHECK(c.failures == TOTP_FORGOT_BOARD_CAP, "the count saturates at the cap");
+}
+
 void run_test_totp_http_core(void)
 {
     test_clock_ready();
@@ -272,4 +296,5 @@ void run_test_totp_http_core(void)
     test_reset_token_wrong_length_never_matches();
     test_reset_token_table_capacity_evicts_soonest_expiry();
     test_reset_token_store_reuses_expired_slot();
+    test_forgot_board_cap_success_never_resets();
 }

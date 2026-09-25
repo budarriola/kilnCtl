@@ -45,8 +45,9 @@
 // depth"): a RAM-only, per-boot counter of failed /api/auth/forgot
 // verification attempts (wrong code, wrong username, not enrolled). Once it
 // reaches TOTP_FORGOT_BOARD_CAP, further /api/auth/forgot calls are refused
-// 429 regardless of per-IP state, until the next reboot. This is additive to
-// the per-IP ladder, not a replacement for it.
+// 429 regardless of per-IP state, until the next reboot -- a successful
+// verification does NOT reset it (see totp_http_core.h for why). This is
+// additive to the per-IP ladder, not a replacement for it.
 //
 // STACK: no locals here approach the httpd 8 KB stack blob class this
 // codebase watches for -- every JSON body emitted is a handful of fields
@@ -124,8 +125,9 @@ static totp_reset_token_table_t *reset_tokens(void)
 
 // --- Board-wide failed-forgot-attempt cap (plan section 4) ------------------
 
-#define TOTP_FORGOT_BOARD_CAP 20u
-static uint32_t s_forgot_fail_count;
+// TOTP_FORGOT_BOARD_CAP and the blocked/record logic live in
+// totp_http_core.h (host-tested); cleared only by a reboot.
+static totp_forgot_board_cap_t s_forgot_board_cap;
 
 // --- Shared per-IP backoff ladder for /api/auth/forgot + /api/auth/reset
 // (own instance, same shape as web_auth_login_http.c's -- see this file's
@@ -319,7 +321,7 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (s_forgot_fail_count >= TOTP_FORGOT_BOARD_CAP) {
+    if (totp_forgot_board_cap_blocked(&s_forgot_board_cap)) {
         httpd_resp_set_status(req, "429 Too Many Requests");
         httpd_resp_send(req, "too many failed attempts, try again later", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
@@ -400,13 +402,10 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     ota_http_hex_encode(token_raw, sizeof(token_raw), token_hex);
     totp_secure_zero(token_raw, sizeof(token_raw));
 
+    totp_forgot_board_cap_record(&s_forgot_board_cap, verified);
     if (verified) {
         totp_reset_token_store(reset_tokens(), token_hex, username, now_ms());
-        s_forgot_fail_count = 0;
     } else {
-        if (s_forgot_fail_count < TOTP_FORGOT_BOARD_CAP) {
-            s_forgot_fail_count++;
-        }
         ESP_LOGW(TAG, "forgot: verification failed from %s", ip);
     }
     totp_backoff_record(ip, ip_known, verified);

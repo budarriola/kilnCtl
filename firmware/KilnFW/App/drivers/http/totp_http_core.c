@@ -109,3 +109,18 @@ totp_reset_token_result_t totp_reset_token_consume(totp_reset_token_table_t *t, 
     }
     return TOTP_RESET_TOKEN_NOT_FOUND;
 }
+
+bool totp_forgot_board_cap_blocked(const totp_forgot_board_cap_t *c)
+{
+    return c->failures >= TOTP_FORGOT_BOARD_CAP;
+}
+
+void totp_forgot_board_cap_record(totp_forgot_board_cap_t *c, bool verified)
+{
+    if (verified) {
+        return; // never a reset -- plan section 4: cleared only by a reboot
+    }
+    if (c->failures < TOTP_FORGOT_BOARD_CAP) {
+        c->failures++;
+    }
+}
