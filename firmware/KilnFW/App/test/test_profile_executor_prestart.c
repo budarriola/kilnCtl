@@ -146,9 +146,27 @@ static bool             s_test_thermo_read_ok = false;
 static MAX31856Reading  s_test_thermo_readings[MAX31856_CHANNEL_COUNT];
 static size_t           s_test_thermo_reading_count = 0;
 
+/* CLAUDE.md's "never hold a module lock across a producer call" class:
+ * profile_executor_run() used to do this baseline MAX31856 read while
+ * s_exec.lock was already held (fixed 2026-09-24 -- see
+ * profile_executor_capture_baseline()'s doc comment in
+ * profile_executor_run.c). g_test_stub_lock_depth (stubs/freertos/semphr.h)
+ * is a process-wide xSemaphoreTake/Give nesting counter -- this file's own
+ * tests never take a real lock themselves, so any depth > 0 recorded here
+ * can only be s_exec.lock (or, in principle, s_at.lock, never taken by any
+ * path this executable's tests reach). Recorded on every call, not just the
+ * first, and reset by reset_test_thermo_readings() so each test starts
+ * clean -- see test_baseline_read_runs_outside_the_lock() below. */
+static int s_test_max31856_call_count = 0;
+static int s_test_max31856_max_lock_depth_seen = -1;
+
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
 {
     (void)bus;
+    s_test_max31856_call_count++;
+    if (s_test_max31856_max_lock_depth_seen < g_test_stub_lock_depth) {
+        s_test_max31856_max_lock_depth_seen = g_test_stub_lock_depth;
+    }
     if (!s_test_thermo_read_ok) {
         if (out_count) *out_count = 0;
         return ESP_FAIL;
@@ -185,6 +203,8 @@ static void reset_test_thermo_readings(void)
     s_test_thermo_reading_count = 0;
     memset(s_test_thermo_readings, 0, sizeof(s_test_thermo_readings));
     s_exec.thermo_bus = NULL;
+    s_test_max31856_call_count = 0;
+    s_test_max31856_max_lock_depth_seen = -1;
 }
 
 /* profile_executor_run()'s start-of-run read is gated on
@@ -3030,6 +3050,51 @@ static void test_warm_start_cold_kiln_is_a_regression_noop(void)
               "target_c must seed from the actual reading (50C), exactly the pre-feature baseline_target_c "
               "behavior -- never the segment's own target");
     TEST_CHECK(s_exec.warm_start_replayed_count == 0, "nothing was skipped, so nothing was replayed");
+
+    profile_executor_halt();
+}
+
+// 2026-09-24 regression guard (review advisory): profile_executor_run() used
+// to do its baseline/warm-start/ambient MAX31856 read (profile_executor_
+// capture_baseline() in profile_executor_run.c) AFTER taking s_exec.lock --
+// CLAUDE.md's "never hold a module lock across a producer call" (a real SPI
+// transaction can block on the bus / thermo owner queue for up to ~200 ms).
+// g_test_stub_lock_depth (stubs/freertos/semphr.h) is a process-wide
+// xSemaphoreTake/Give nesting counter; s_test_max31856_max_lock_depth_seen
+// (this file) records the highest depth seen during any MAX31856_read_all()
+// call. This test's own setup never itself takes a lock around
+// profile_executor_run(), so any depth > 0 recorded here can only be
+// s_exec.lock -- proving the fix moved the read outside it, and pinning the
+// behavior against a future regression that puts it back inside. Reuses the
+// exact warm-start setup as test_warm_start_cold_kiln_is_a_regression_noop()
+// so this is additive coverage on an already-exercised path, not a new one.
+static void test_baseline_read_runs_outside_the_lock(void)
+{
+    TEST_SECTION("profile_executor_run() -- the baseline MAX31856 read runs with s_exec.lock NOT held");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    warm_start_test_setup(&p, 50.0f);
+    /* g_test_stub_lock_depth is a single process-wide counter (stubs/freertos/
+     * semphr.h) shared across every test in this executable -- an earlier test
+     * that took and released it in balanced pairs leaves it at 0 already, but
+     * nothing guarantees that, and this test must measure THIS call's nesting,
+     * not carry a stale value forward. Zero it here, immediately before the
+     * call under test. */
+    g_test_stub_lock_depth = 0;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "sanity: the run this depth check rides on must actually succeed");
+    TEST_CHECK(s_test_max31856_call_count >= 1, "sanity: the baseline read must actually have run at all");
+    TEST_CHECK(s_test_max31856_max_lock_depth_seen == 0,
+               "the MAX31856 read must never observe a nonzero xSemaphoreTake/Give nesting depth -- "
+               "s_exec.lock must not be held while it runs");
 
     profile_executor_halt();
 }
@@ -9830,6 +9895,7 @@ void run_test_profile_executor_prestart(void)
     // friends above assume the opposite (fresh process state) and must run
     // first.
     test_warm_start_cold_kiln_is_a_regression_noop();
+    test_baseline_read_runs_outside_the_lock();
     test_configured_progress_band_c_reaches_zone_guard_cfg();
     test_warm_start_mid_ramp_entry_never_below_current();
     test_warm_start_replays_skipped_relay_io_and_registers_it();

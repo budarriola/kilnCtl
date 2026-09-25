@@ -110,6 +110,121 @@ static float live_current_max_zone_c(uint8_t zone_mask)
     return max_c;
 }
 
+/* Baseline thermocouple snapshot for the ramp-start/warm-start/ambient seeds
+ * set further down (under s_exec.lock). Read HERE, before s_exec.lock is
+ * ever taken -- CLAUDE.md's "never hold a module lock across a producer
+ * call": a MAX31856 SPI transaction can block on the bus / thermo owner
+ * queue for up to ~200ms, and profile_executor_run() used to do this exact
+ * read while already holding s_exec.lock, blocking every other s_exec.lock
+ * caller (the dashboard/LCD status readers, profiles_stop(), etc.) for that
+ * whole window. Mirrors live_current_max_zone_c() just above, which already
+ * reads s_exec.thermo_bus/sim_backend_enabled() without the lock for the
+ * same reason.
+ *
+ * first_active (the lowest zone index set in zone_mask) is purely a property
+ * of the profile being started -- it does not depend on any s_exec state
+ * guarded by the lock, so it is safe to compute here, before that state
+ * (s_exec.zones[]) is even touched. zones_config_get_thermo_mask()/
+ * zones_config_apply_cal() are config-store accessors with their own
+ * locking, called elsewhere in this file both under and outside
+ * s_exec.lock already -- s_exec.lock never guards them.
+ *
+ * If s_exec.state changes between this call and the lock being taken (e.g.
+ * another run starts first), the caller's existing state==RUNNING/PAUSED/
+ * FAULTED refusal right after xSemaphoreTake() already rejects this attempt
+ * before any of this snapshot is used -- so no separate re-validation is
+ * needed here; a discarded snapshot on a refused start is harmless. */
+static void profile_executor_capture_baseline(uint8_t zone_mask,
+                                               bool *out_baseline_valid, float *out_baseline_c,
+                                               float *out_warm_start_coolest_c,
+                                               bool *out_ambient_valid, float *out_ambient_c)
+{
+    *out_baseline_valid = false;
+    *out_baseline_c = NAN;
+    *out_warm_start_coolest_c = NAN;
+    *out_ambient_valid = false;
+    *out_ambient_c = 0.0f;
+
+    if (!(sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized))) {
+        return;
+    }
+
+    int8_t first_active = -1;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (zone_mask & (1u << zi)) {
+            first_active = (int8_t)zi;
+            break;
+        }
+    }
+    if (first_active < 0) {
+        return;
+    }
+
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t count = 0;
+    if (sim_backend_enabled()) {
+        sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
+    } else {
+        MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+    }
+
+    float base_ch_c[MAX31856_CHANNEL_COUNT];
+    bool base_ch_ok[MAX31856_CHANNEL_COUNT];
+    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+        base_ch_c[ci] = NAN;
+        base_ch_ok[ci] = false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        uint8_t ci = readings[i].channel;
+        if (ci >= MAX31856_CHANNEL_COUNT) continue;
+        base_ch_c[ci] = readings[i].tc_temperature_c;
+        base_ch_ok[ci] = !readings[i].spi_failed && !isnan(base_ch_c[ci]);
+    }
+
+    uint8_t base_tmask = 0;
+    zones_config_get_thermo_mask((uint8_t)first_active, &base_tmask);
+    bool base_valid = false;
+    float base_combined =
+        thermo_combine(base_ch_c, base_ch_ok, MAX31856_CHANNEL_COUNT, base_tmask, &base_valid);
+    if (base_valid) {
+        *out_baseline_valid = true;
+        *out_baseline_c = zones_config_apply_cal((uint8_t)first_active, base_combined);
+    }
+
+    /* Warm-start's "current temperature" (Q4): the coolest ACTIVE zone's own
+     * combined+calibrated reading, from this same already-fetched `readings`
+     * array -- every active zone gets its own thermo_mask/thermo_combine/
+     * apply_cal treatment here (not just first_active's), because a zone
+     * other than first_active can legitimately be the coolest one. */
+    for (uint8_t wzi = 0; wzi < MAX31856_CHANNEL_COUNT; wzi++) {
+        if (!(zone_mask & (1u << wzi))) continue;
+        uint8_t w_tmask = 0;
+        zones_config_get_thermo_mask(wzi, &w_tmask);
+        bool w_valid = false;
+        float w_combined = thermo_combine(base_ch_c, base_ch_ok, MAX31856_CHANNEL_COUNT, w_tmask, &w_valid);
+        if (!w_valid) continue;
+        float w_c = zones_config_apply_cal(wzi, w_combined);
+        if (isnan(*out_warm_start_coolest_c) || w_c < *out_warm_start_coolest_c) {
+            *out_warm_start_coolest_c = w_c;
+        }
+    }
+
+    /* Feedforward's ambient reference (TODO.md 6A.2), taken from THIS read
+     * rather than a second one: the cold junction is only honest about the
+     * room before the firing has warmed the board, and this is the last
+     * moment that is true. Any channel's CJ will do -- all five sit on the
+     * same board within centimetres of each other, and accepting the first
+     * valid one means a single dead or CJRANGE-flagged channel doesn't cost
+     * the whole run its ambient. */
+    for (size_t i = 0; i < count; i++) {
+        if (!readings[i].spi_failed && !isnan(readings[i].cj_temperature_c)) {
+            *out_ambient_valid = true;
+            *out_ambient_c = readings[i].cj_temperature_c;
+            break;
+        }
+    }
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h
@@ -331,6 +446,17 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             return false;
         }
     }
+
+    /* Baseline/warm-start/ambient SPI read, taken before the lock -- see
+     * profile_executor_capture_baseline()'s own doc comment. */
+    bool baseline_valid = false;
+    float baseline_c = NAN;
+    float warm_start_coolest_captured = NAN;
+    bool ambient_valid = false;
+    float ambient_c_captured = 0.0f;
+    profile_executor_capture_baseline(p.zone_mask, &baseline_valid, &baseline_c,
+                                       &warm_start_coolest_captured,
+                                       &ambient_valid, &ambient_c_captured);
 
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
 
@@ -819,81 +945,27 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         z->on_off_actuated_on = false;
         z->on_off_actuated_held_s = 0.0f;
 
-        /* Ramp baseline: the first active zone's actual (calibrated)
-         * reading if we have one, else the segment's own target (makes
-         * ramp math a no-op rather than ramping from a fabricated zero).
-         * TODO.md 10.8: this must be the same COMBINED reading the very
-         * first control tick will compute for this zone (see the main read
-         * block above), not just its legacy same-index channel -- otherwise
-         * a multi-thermocouple zone would start its ramp math from a
-         * different number than the tick right after it settles on. */
-        if ((int8_t)zi == first_active &&
-            (sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized))) {
-            MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-            size_t count = 0;
-            if (sim_backend_enabled()) {
-                sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
-            } else {
-                MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+        /* Ramp baseline: the first active zone's actual (calibrated) reading
+         * if we have one, else the segment's own target (makes ramp math a
+         * no-op rather than ramping from a fabricated zero). TODO.md 10.8:
+         * this must be the same COMBINED reading the very first control tick
+         * will compute for this zone, not just its legacy same-index channel
+         * -- otherwise a multi-thermocouple zone would start its ramp math
+         * from a different number than the tick right after it settles on.
+         *
+         * The MAX31856 SPI read itself already happened in
+         * profile_executor_capture_baseline(), BEFORE s_exec.lock was taken
+         * (see that function's doc comment) -- this just applies the
+         * snapshot exactly once, at the same zi == first_active gate the
+         * read used to run under. */
+        if ((int8_t)zi == first_active) {
+            if (baseline_valid) {
+                baseline_target_c = baseline_c;
             }
-            float base_ch_c[MAX31856_CHANNEL_COUNT];
-            bool base_ch_ok[MAX31856_CHANNEL_COUNT];
-            for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
-                base_ch_c[ci] = NAN;
-                base_ch_ok[ci] = false;
-            }
-            for (size_t i = 0; i < count; i++) {
-                uint8_t ci = readings[i].channel;
-                if (ci >= MAX31856_CHANNEL_COUNT) continue;
-                base_ch_c[ci] = readings[i].tc_temperature_c;
-                base_ch_ok[ci] = !readings[i].spi_failed && !isnan(base_ch_c[ci]);
-            }
-            uint8_t base_tmask = 0;
-            zones_config_get_thermo_mask(zi, &base_tmask);
-            bool base_valid = false;
-            float base_combined =
-                thermo_combine(base_ch_c, base_ch_ok, MAX31856_CHANNEL_COUNT, base_tmask, &base_valid);
-            if (base_valid) {
-                baseline_target_c = zones_config_apply_cal(zi, base_combined);
-            }
-
-            /* Warm-start's "current temperature" (Q4): the coolest ACTIVE
-             * zone's own combined+calibrated reading, from this same
-             * already-fetched `readings` array -- every active zone gets its
-             * own thermo_mask/thermo_combine/apply_cal treatment here (not
-             * just first_active's), because a zone other than first_active
-             * can legitimately be the coolest one and skipping its
-             * temperature would risk skipping work it still needs. This
-             * block runs exactly once (gated on zi == first_active, same as
-             * the baseline_target_c read above), so it loops over every
-             * active zone itself rather than relying on the outer loop's
-             * per-zi iteration to reach it. */
-            for (uint8_t wzi = 0; wzi < MAX31856_CHANNEL_COUNT; wzi++) {
-                if (!(p.zone_mask & (1u << wzi))) continue;
-                uint8_t w_tmask = 0;
-                zones_config_get_thermo_mask(wzi, &w_tmask);
-                bool w_valid = false;
-                float w_combined = thermo_combine(base_ch_c, base_ch_ok, MAX31856_CHANNEL_COUNT, w_tmask, &w_valid);
-                if (!w_valid) continue;
-                float w_c = zones_config_apply_cal(wzi, w_combined);
-                if (isnan(warm_start_coolest_c) || w_c < warm_start_coolest_c) {
-                    warm_start_coolest_c = w_c;
-                }
-            }
-
-            /* Feedforward's ambient reference (TODO.md 6A.2), taken from THIS
-             * read rather than a second one: the cold junction is only honest
-             * about the room before the firing has warmed the board, and this
-             * is the last moment that is true. Any channel's CJ will do -- all
-             * five sit on the same board within centimetres of each other, and
-             * accepting the first valid one means a single dead or CJRANGE-
-             * flagged channel doesn't cost the whole run its ambient. */
-            for (size_t i = 0; i < count; i++) {
-                if (!readings[i].spi_failed && !isnan(readings[i].cj_temperature_c)) {
-                    s_exec.ambient_c = readings[i].cj_temperature_c;
-                    s_exec.ambient_from_cj = true;
-                    break;
-                }
+            warm_start_coolest_c = warm_start_coolest_captured;
+            if (ambient_valid) {
+                s_exec.ambient_c = ambient_c_captured;
+                s_exec.ambient_from_cj = true;
             }
         }
     }

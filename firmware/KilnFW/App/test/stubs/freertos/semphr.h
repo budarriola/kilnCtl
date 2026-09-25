@@ -85,17 +85,35 @@ static inline SemaphoreHandle_t xSemaphoreCreateMutex(void)
  * which does not exist. */
 __declspec(selectany) BaseType_t g_test_stub_semaphore_take_default = 0; /* pdFALSE */
 
+/* Added 2026-09-24 for CLAUDE.md's "never hold a module lock across a
+ * producer call" class (docs/agent_rules/IMPLEMENTER.md's firmware
+ * invariants say the same): this stub does not otherwise distinguish one
+ * SemaphoreHandle_t's identity from another, so the only cheap way for a
+ * host test to observe "was ANY lock held while this producer call ran" is
+ * a single process-wide nesting depth, incremented/decremented here. It says
+ * nothing about WHICH lock is held -- a test relying on it must arrange for
+ * only the one lock under test to ever be taken around the call it's
+ * checking (see test_profile_executor_prestart.c's baseline-read test).
+ * selectany, same reasoning as g_test_stub_semaphore_take_default just
+ * above: this header is pulled into multiple .c files in the same
+ * executable. */
+__declspec(selectany) int g_test_stub_lock_depth = 0;
+
 #include <assert.h>
 static inline BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks)
 {
     assert(sem != NULL && "xSemaphoreTake on a NULL handle -- would assert/panic on real FreeRTOS");
     (void)ticks;
+    g_test_stub_lock_depth++;
     return g_test_stub_semaphore_take_default;
 }
 
 static inline BaseType_t xSemaphoreGive(SemaphoreHandle_t sem)
 {
     (void)sem;
+    if (g_test_stub_lock_depth > 0) {
+        g_test_stub_lock_depth--;
+    }
     return pdTRUE;
 }
 
