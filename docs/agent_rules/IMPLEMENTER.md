@@ -12,6 +12,11 @@ back to the coordinator. You do not push.
   other sessions and the undo is exactly the destructive command COMMON.md forbids. If you
   ever find you edited outside your worktree, stop and report it rather than reverting it
   yourself. Fresh worktrees need `-AllowFewerChecks` on `run_all_checks.ps1`.
+- Every Read/Edit/Write path must be ABSOLUTE and start with your `C:\wt\<name>\` path.
+  The session's working directory is the shared tree, so a relative path or a path
+  copied from a grep of the shared tree silently edits the wrong copy -- this happened
+  three times on 2026-09-25. Run `git -C <worktree> status --porcelain` after your first
+  edit to confirm it landed in the worktree.
 - `git fetch` first, then commit with `git commit -o <every changed path, explicitly>`.
   Never `git add -A`, never `--amend`, never force-push. Normal-prose message; end it with
   exactly this trailer line:
