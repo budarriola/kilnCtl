@@ -248,6 +248,38 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertEqual(outcome.results["SP-10"].verdict, R.Verdict.NOT_RUN)
         self.assertEqual(outcome.results["SP-10"].reason, "not_implemented")
 
+    def test_full_suite_cases_filter_crosses_suite_boundary_for_a_dependency(self):
+        """LCD-19 (suite `lcd`) `depends_on` WEB-SEC-04 (suite `web`) -- the
+        only catalogue that lists both is `full`. This proves
+        `runner.run(suite="full", cases=["WEB-SEC-04", "LCD-19"])` is
+        already a legal, exact-two-case selection today: `requested` is
+        filtered to precisely those two ids, in dependency order, and never
+        implicitly widens to include any other `full` member (in particular
+        SP-05, the E-stop-verify case, which must never be pulled in by an
+        automated cross-suite selection like this one -- see
+        judge_estop_verify()'s and _case_sp05()'s own docstrings for why
+        it's read-only today, and why running it unattended is still
+        something a caller must ask for by name, not receive as a side
+        effect)."""
+        self.assertEqual(R.get_case("LCD-19").depends_on, "WEB-SEC-04")
+        self.assertNotIn("WEB-SEC-04", R.SUITES["lcd"])
+        self.assertNotIn("LCD-19", R.SUITES["web"])
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        outcome = runner.run(suite="full", cases=["WEB-SEC-04", "LCD-19"], dry_run=True)
+        self.assertEqual(outcome.requested, ["WEB-SEC-04", "LCD-19"])
+        self.assertNotIn("SP-05", outcome.requested)
+        self.assertNotIn("SP-05", outcome.results)
+
+    def test_full_suite_cases_filter_rejects_an_unrequested_id_by_name(self):
+        """Sanity check on the negative side of the same mechanism: naming
+        SP-05 explicitly still selects it (nothing refuses that on its
+        own -- it's a legitimate `full`/`smoke`/`safety` member) but it is
+        never *implicitly* added just because `full` is the suite in play."""
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        outcome = runner.run(suite="full", cases=["WEB-SEC-04", "LCD-19", "SP-05"], dry_run=True)
+        self.assertIn("SP-05", outcome.requested)
+        self.assertEqual(outcome.requested, ["SP-05", "WEB-SEC-04", "LCD-19"])
+
     def test_run_writes_a_summary_json_to_the_logs_root(self):
         self._patch_judge("ST-05", lambda ctx: R.CaseResult(R.Verdict.PASS))
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
