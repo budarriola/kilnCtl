@@ -2001,7 +2001,7 @@ static void bench_preset_job(httpd_req_t *async_req, void *arg)
 static esp_err_t bench_preset_post_handler(httpd_req_t *req)
 {
     // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement, or
-    // this same route's own job) is running: this handler stages ~13 params
+    // this same route's own job) is running: this handler stages 32 params
     // then commits, and a second interleaved SET_PARAM/COMMIT_CONFIG
     // sequence could persist a half-staged preset (2026-09-25 fix-then-push
     // re-review, kept true after A2's own migration onto the same helper --

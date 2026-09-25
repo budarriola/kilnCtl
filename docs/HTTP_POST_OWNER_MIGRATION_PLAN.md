@@ -206,70 +206,48 @@ shared handle slot regardless of which future caller's job is running) and
 `check_stack_margin_registration.ps1`'s static scan requires a literal name
 argument to see a call site at all.
 
-### A2 -- `bench_preset` onto A1's helper. MEDIUM-HIGH value -- LANDED 2026-09-25
+### A2 -- `bench_preset` onto A1's helper. LANDED 2026-09-25, one gap open
 
-- **Handler:** `bench_preset_post_handler()` (`safety_cfg_http.c`). It
-  makes 32 `safety_link_send_set_param()` calls and then one
-  `safety_link_send_commit_config()`. Each call takes
-  `xact_lock` with a 5000 ms timeout (`SAFETY_XACT_LOCK_TIMEOUT_MS`), so
-  the worst case with a slow link is tens of seconds.
-- **Interleaving audit:** satisfied by A1's own fix-then-push commits
-  (`81dc96ec`/`5a196792`), which already added `http_async_job_busy()`
-  guards to `commissioning_post_handler`, `relay_type_post_handler`,
-  `ct_cal_post_handler`, `ct_trim_post_handler`, `rate_guard_auto_post_handler`
-  and `bench_preset_post_handler` itself -- so no other safety-config writer
-  can interleave between the 32 SET_PARAMs and the COMMIT. Confirmed via
-  `git log`/grep before landing this slice; no separate audit commit needed.
-- **Landed as:** `bench_preset_job()`/`bench_preset_post_handler()` follow
-  A1's `ct_auto_zero_job`/`ct_auto_zero_post_handler` pattern exactly:
-  `httpd_req_async_handler_begin/complete`, single-flight busy refusal via
-  `http_async_job_try_start()`/`http_async_job_busy()`, task registered under
-  the fixed literal name `"http_async_job"` (shared with every other caller,
-  same as A1). Every response body/status is byte-for-byte unchanged from the
-  pre-migration handler.
-- **Stack:** unchanged from A1 -- the shared `http_async_job_task` stack is
-  still 6144 B declared, 3312 B measured lower bound (INDETERMINATE per
-  `check_all_task_stack_budgets.py`, an unresolved indirect call in the walk;
-  within budget as far as it can see). `bench_preset_job()`'s own body (32
-  fixed-table SET_PARAMs plus one commit, no heap allocation, no recursion)
-  adds materially less than the ESP_LOG headroom A1's ceiling already
-  budgeted for, so no ceiling change was needed.
-- **`.dram0.bss`:** 99672 B against the 101000 B ceiling (1328 B headroom),
-  unchanged from before this slice -- `bench_preset_post_handler`/`_job` are
-  compiled only under `#if CONFIG_KILNCTL_DEV_TOOLS` (`default n`), which the
-  real bench board's sdkconfig leaves off, so this slice added zero bytes to
-  any real build's image.
-- **Host test coverage (`test_safety_cfg_http.c`):** `safety_cfg_http.c`
-  never itself includes `sdkconfig.h`, so `CONFIG_KILNCTL_DEV_TOOLS` never
-  reached this file's host-compiled translation unit before this slice --
-  the bench_preset code path had **never been compiled or tested** by the
-  host suite. Fixed by (a) forcing
-  `#define CONFIG_KILNCTL_DEV_TOOLS 1` in the shared
-  `App/test/stubs/sdkconfig.h` (same convention as the existing
-  `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` override, host-test-only, not a
-  statement about any real build's Kconfig), and (b) an explicit
-  `#include "sdkconfig.h"` added directly in `test_safety_cfg_http.c` ahead
-  of its `#include "../drivers/http/safety_cfg_http.c"`, since the macro
-  doesn't reach that file transitively otherwise. New tests: job stages
-  every `SAFETY_CFG_BENCH_PRESET` entry and commits once (`ok:true`); a
-  mid-loop SET_PARAM failure stops staging immediately and never commits
-  (500, `s_stub_last_httpd_err`); a commit-call failure (e.g. link timeout)
-  is reported without ever having staged nothing; a REJECTED commit
-  acknowledgement replies with the rejected-commit body, not `ok:true`; the
-  handler refuses synchronously (no `http_async_job` touch at all) with no
-  safety link; and the handler refuses with the same busy body while another
-  `http_async_job` (or a concurrent bench_preset) is running. Result:
-  271/271 checks passed in this executable, 62/62 executables built overall,
-  zero `FAIL` lines. Negative-tested (the staging-failure refusal: disabled
-  with `&& false`, forced full rebuild, confirmed `RUN FAILURES (1)`,
-  restored by hand, forced a second full rebuild, confirmed 271/271 clean
-  again).
-- **Full suite:** `run_all_checks.ps1 -AllowFewerChecks` (non-`-Fast`), 145
-  checks discovered, all passed after fixing an unrelated worktree-local
-  `sdkconfig`/`build/sdkconfig` mismatch left over from earlier verification
-  work in this same worktree (not caused by this slice's code changes).
-- **Risk:** medium, because of the interleaving audit -- resolved, no new
-  audit gap found.
+- **Landed:** `bench_preset_job()`/`bench_preset_post_handler()`
+  (`safety_cfg_http.c`) follow A1's `ct_auto_zero_job`/
+  `ct_auto_zero_post_handler` pattern exactly -- `httpd_req_async_handler_
+  begin/complete`, single-flight busy refusal via `http_async_job_try_
+  start()`/`http_async_job_busy()`, task registered under the fixed literal
+  name `"http_async_job"`. Every response body/status is byte-for-byte
+  unchanged. Stack and `.dram0.bss` unchanged from A1 (6144 B declared /
+  3312 B measured lower-bound stack; 99672/101000 B DRAM, since the feature
+  is `#if CONFIG_KILNCTL_DEV_TOOLS`, off on the real board). Host-tested for
+  the first time -- this code had never been compiled or run by the host
+  suite before, because `safety_cfg_http.c` never itself includes
+  `sdkconfig.h`; reached now via a host-stub-only `CONFIG_KILNCTL_DEV_TOOLS`
+  override (`App/test/stubs/sdkconfig.h`, same convention as the existing
+  `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` one) plus an explicit `#include
+  "sdkconfig.h"` in `test_safety_cfg_http.c`. 271/271 checks pass in that
+  executable; negative-tested (the staging-failure refusal was disabled,
+  forced rebuild confirmed `RUN FAILURES (1)`, restored by hand, forced
+  rebuild confirmed clean again).
+- **Interleaving audit was wrong and is now corrected:** the original claim
+  that every safety-config writer was covered missed
+  `zones_post_handler` (`zones_http_post.c`), which raises the ceiling via
+  `safety_ceiling_sync_guard_raise` -> `pico_ceiling_writer` ->
+  `safety_cfg_write_set_and_confirm_f32`, staging `abs_max_temp_c` and
+  sending a COMMIT_CONFIG, with no `http_async_job_busy()` check. **A
+  `POST /api/zones` can commit a half-staged bench preset today** (the same
+  gap already exists for `ct_auto_zero`, so this is not new from A2, but A2
+  is the point this was checked and found). Fix pending -- see below.
+- **Other interleaving, checked and found pre-existing, not made worse by
+  A2:** no LCD/UART/non-HTTP path calls `SET_PARAM`/`COMMIT_CONFIG`
+  directly. Three paths could already interleave with an in-flight
+  `http_async_job` before A2 existed and are listed here as a known,
+  pre-existing gap rather than fixed in this slice:
+  `zones_current_sweep_task.c`, `kiln_cfg_swap.c`'s worker, and the
+  `safety_poll` ceiling reconcile.
+- **Pending:** add an `http_async_job_busy()` 409 refusal to
+  `zones_post_handler`, ordered after the mode gate and after
+  `ota_http_check_interlocks()`. Coordinate with the concurrent mode-gate
+  change landing on the same function -- rebase onto it, don't race it. Add
+  a `test_zones_http.c` case: busy refuses 409, never reaches the Pico
+  write. Negative-test it.
 
 ### A3 -- `crash_report/clear` onto A1's helper. CONDITIONAL, measure first
 

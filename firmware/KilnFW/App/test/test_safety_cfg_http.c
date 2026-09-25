@@ -2738,7 +2738,7 @@ static void test_ct_auto_zero_job_refuses_stale_ct_cal_without_commit(void)
 static void test_bench_preset_job_stages_all_and_commits(void)
 {
     TEST_SECTION("bench_preset_job -- stages every SAFETY_CFG_BENCH_PRESET entry, commits once, "
-                 "clears rate-guard meta, and replies {\"ok\":true}");
+                 "and replies {\"ok\":true}");
     reset_all();
 
     httpd_req_t async_req = { .content_len = 0 };
@@ -2770,7 +2770,7 @@ static void test_bench_preset_job_reports_staging_failure(void)
 static void test_bench_preset_job_reports_commit_failure(void)
 {
     TEST_SECTION("bench_preset_job -- every field stages fine but the commit call itself fails "
-                 "(e.g. a link timeout) -- replies 500, never clears rate-guard meta's success path");
+                 "(e.g. a link timeout) -- replies 500, never reports success");
     reset_all();
     s_stub_commit_result = ESP_ERR_TIMEOUT;
 
