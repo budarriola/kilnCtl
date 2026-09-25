@@ -46,6 +46,56 @@
       .replace(/'/g, '&#39;');
   };
 
+  // ---- kcModalStack -------------------------------------------------------
+  //
+  // Accessibility follow-up (ROADMAP.md "Owner requests 2026-09-22" item 1):
+  // the confirm/alert modal, the admin-login modal, and the forgot-password
+  // reset modal each register their own `document`-level capture keydown
+  // listener, added/removed independently. Multiple listeners on the same
+  // target/type/capture triple fire in REGISTRATION order, not stacking
+  // (visual) order -- so if a login modal opens on top of an already-open
+  // confirm dialog (confirm's listener registered first), a single Escape
+  // press used to run the confirm dialog's own unconditional
+  // `finish(...)`, closing and cancelling the BOTTOM modal while the login
+  // modal -- the one actually on screen and focused -- stayed open. This
+  // tiny stack is the shared fix: every modal pushes an id when it becomes
+  // visible and pops it when it stops being visible (including the
+  // login-modal "suspended while forgot-password is up" case, which pops on
+  // suspend and pushes again on resume), and each modal's own Escape/Tab
+  // handler bails out immediately unless its id is the current top -- so
+  // only the visually topmost modal ever reacts to a key, regardless of
+  // listener registration order or which pair of modals is stacked.
+  var kcModalStack = [];
+  var kcModalIdSeq = 0;
+  function kcModalPush() {
+    var id = ++kcModalIdSeq;
+    kcModalStack.push(id);
+    return id;
+  }
+  function kcModalPop(id) {
+    var i = kcModalStack.lastIndexOf(id);
+    if (i !== -1) kcModalStack.splice(i, 1);
+  }
+  function kcModalIsTop(id) {
+    return kcModalStack.length > 0 && kcModalStack[kcModalStack.length - 1] === id;
+  }
+
+  // Shared focus-default helper (ROADMAP.md same follow-up item, gap 1):
+  // given a modal's required inputs in tab order, focus the first one that
+  // is still empty (e.g. username, or the TOTP code field on the reset
+  // step), falling back to the last field when every field already has a
+  // value (e.g. a browser autofilled both, or the operator re-opens a
+  // modal after typing into it and cancelling) -- never blindly the first
+  // field regardless of its content.
+  function kcFocusFirstEmpty(fields) {
+    for (var i = 0; i < fields.length; i++) {
+      var el = fields[i];
+      if (el && !el.value) { el.focus(); return; }
+    }
+    var last = fields[fields.length - 1];
+    if (last) last.focus();
+  }
+
   // ---- kcSafetyTcIsSeparate ----------------------------------------------
   //
   // ROADMAP.md "Safety TC display audit, 2026-09-05": the single shared
@@ -164,9 +214,11 @@
     confirmCancelEl.style.display = opts.alertOnly ? 'none' : '';
     var previouslyFocused = document.activeElement;
     confirmModalEl.removeAttribute('hidden');
+    var kcModalId = kcModalPush();
     (opts.alertOnly ? confirmOkEl : confirmCancelEl).focus();
     return new Promise(function (resolve) {
       function finish(ok) {
+        kcModalPop(kcModalId);
         confirmOkEl.removeEventListener('click', onOk);
         confirmCancelEl.removeEventListener('click', onCancel);
         confirmModalEl.removeEventListener('click', onBackdrop);
@@ -179,6 +231,10 @@
       function onCancel(evt) { evt.preventDefault(); finish(false); }
       function onBackdrop(evt) { if (evt.target === confirmModalEl) finish(!!opts.alertOnly); }
       function onKeydown(evt) {
+        // Stacking guard (kcModalStack above): another modal opened on top
+        // of this one (e.g. an admin-login modal escalating out of an
+        // in-flight confirm) owns the keyboard until it closes.
+        if (!kcModalIsTop(kcModalId)) return;
         if (evt.key === 'Escape' || evt.keyCode === 27) {
           evt.preventDefault();
           finish(!!opts.alertOnly);
@@ -367,7 +423,12 @@
     if (!loginModalEl) buildLoginModal();
     loginTitleEl.textContent = titleText;
     loginErrorEl.textContent = '';
-    loginUserEl.value = '';
+    // Password is always cleared -- never leave a typed password sitting in
+    // the DOM across opens. Username is NOT force-cleared: a browser that
+    // autofills the (autocomplete="username") field, or an operator who
+    // typed a username and then cancelled, should not have to retype it,
+    // and the focus-default rule right below only makes sense if the field
+    // can genuinely already be non-empty.
     loginPassEl.value = '';
     // Focus restoration (opus review, 2026-09-21): whatever had focus
     // before this modal opened -- the button/link that triggered the
@@ -375,7 +436,11 @@
     // users land where they were rather than at the top of the page.
     var previouslyFocused = document.activeElement;
     loginModalEl.removeAttribute('hidden');
-    loginUserEl.focus();
+    var kcModalId = kcModalPush();
+    // Focus default (ROADMAP.md modal-accessibility follow-up): username
+    // if it's empty, else password -- never blindly the username field
+    // when it's already filled in.
+    kcFocusFirstEmpty([loginUserEl, loginPassEl]);
 
     return new Promise(function (resolve) {
       var settled = false;
@@ -410,19 +475,25 @@
           if (submitting || settled) return false;
           suspended = true;
           loginModalEl.setAttribute('hidden', '');
+          kcModalPop(kcModalId); // the modal that's about to open owns the stack top now
           return true;
         },
         resume: function (noticeText) {
           if (settled) return;
           suspended = false;
-          loginUserEl.value = '';
           loginPassEl.value = '';
           loginErrorEl.textContent = noticeText || '';
           loginModalEl.removeAttribute('hidden');
-          loginUserEl.focus();
+          kcModalId = kcModalPush();
+          kcFocusFirstEmpty([loginUserEl, loginPassEl]);
         }
       };
       function onKeydown(evt) {
+        // Stacking guard: bail unless this modal is visually on top --
+        // covers both "suspended under forgot-password" (below) and a
+        // login modal that escalated on top of an already-open confirm
+        // dialog, or vice versa.
+        if (!kcModalIsTop(kcModalId)) return;
         if (evt.key === 'Escape' || evt.keyCode === 27) {
           if (submitting) return;
           if (suspended) return; // the reset modal owns Escape right now
@@ -457,6 +528,7 @@
         if (settled) return;
         settled = true;
         suspended = false;
+        kcModalPop(kcModalId);
         loginActiveCtl = null;
         // The modal's DOM is built ONCE (openLoginModal reuses loginModalEl),
         // so the disabled/"Signing in..." state set by setSubmitting(true)
@@ -593,6 +665,10 @@
       forgotSubmit1El = null, forgotSubmit2El = null;
   var forgotResetToken = null;
   var forgotListenersWired = false;
+  // This modal's own kcModalStack id (module-scope, not per-open, since its
+  // listener is wired once and reused -- see forgotListenersWired). Pushed
+  // in openForgotPasswordModal, popped in closeForgotModal.
+  var forgotModalKcId = null;
 
   function buildForgotModal() {
     var overlay = document.createElement('div');
@@ -689,6 +765,7 @@
     if (forgotSubmit2El) forgotSubmit2El.disabled = false;
     forgotStep1El.hidden = false;
     forgotStep2El.hidden = true;
+    if (forgotModalKcId !== null) { kcModalPop(forgotModalKcId); forgotModalKcId = null; }
     if (loginActiveCtl) loginActiveCtl.resume(noticeText);
   }
 
@@ -713,7 +790,12 @@
     forgotStep2El.hidden = true;
     forgotErrorEl.textContent = '';
     forgotErrorEl2.textContent = '';
-    forgotUserEl.value = '';
+    // Carry over whatever username the operator already typed into the
+    // login modal this reset was opened from -- they've already told us
+    // who they are once, and it lets the focus-default rule below send
+    // focus straight to the TOTP code field instead of making them retype
+    // a username they just entered a moment ago.
+    forgotUserEl.value = (typeof loginUserEl !== 'undefined' && loginUserEl && loginUserEl.value) || '';
     forgotCodeEl.value = '';
     forgotNewPassEl.value = '';
     forgotNewPass2El.value = '';
@@ -721,7 +803,10 @@
     forgotSubmit2El.disabled = false;
     forgotResetToken = null;
     forgotModalEl.removeAttribute('hidden');
-    forgotUserEl.focus();
+    forgotModalKcId = kcModalPush();
+    // Focus default (ROADMAP.md modal-accessibility follow-up): username if
+    // empty, else the 6-digit TOTP code field on this reset step.
+    kcFocusFirstEmpty([forgotUserEl, forgotCodeEl]);
     if (forgotListenersWired) return;
     forgotListenersWired = true;
 
@@ -743,6 +828,7 @@
     // would be swallowed (preventDefault) after the first open.
     function onKeydown(evt) {
       if (!forgotModalVisible()) return;
+      if (!kcModalIsTop(forgotModalKcId)) return;
       if (evt.key === 'Escape' || evt.keyCode === 27) {
         evt.preventDefault();
         // This listener is registered once, during the first login modal;

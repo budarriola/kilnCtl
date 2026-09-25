@@ -461,8 +461,13 @@ function extract_js_var_string(src, varName) {
     // (and kcOtaAuthedFetch's own retry, see below) treats as declined.
     // Matched as a `submitting` guard read inside onKeydown/onCancel, not
     // just anywhere in the file (a stray `if (submitting)` in an unrelated
-    // function would pass a bare substring test vacuously).
-    if (!/function onKeydown\(evt\) \{\s*\n\s*if \(evt\.key === 'Escape'[^}]*\{\s*\n\s*if \(submitting\) return;/.test(src)) {
+    // function would pass a bare substring test vacuously). One optional
+    // leading guard line is tolerated between the function open and the
+    // Escape check -- the kcModalStack stacking guard added for the
+    // modal-accessibility follow-up (ROADMAP.md "Owner requests
+    // 2026-09-22" item 1) bails out of onKeydown entirely before the
+    // Escape/submitting checks whenever another modal is stacked on top.
+    if (!/function onKeydown\(evt\) \{\s*\n(\s*\/\/[^\n]*\n)*\s*(if \([^\n]*\) return;\s*\n(\s*\/\/[^\n]*\n)*)?\s*if \(evt\.key === 'Escape'[^}]*\{\s*\n\s*if \(submitting\) return;/.test(src)) {
       bad++;
       console.log(`app.js: the login modal's Escape handler does not check the 'submitting' guard -- ` +
                    `Escape during an in-flight login POST could cancel a login that is about to succeed.`);

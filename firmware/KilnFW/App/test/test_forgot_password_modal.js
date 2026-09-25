@@ -193,6 +193,26 @@ function fakeResp(spec) {
   };
 }
 
+// Stand-ins for the kcModalStack/kcFocusFirstEmpty helpers app.js declares
+// well outside RANGE_D/RANGE_L (near kcEscapeHtml, so every modal subsystem
+// shares one stack) -- a real, working implementation (not a fake), since
+// the point of these tests is to exercise the actual stacking/focus
+// behaviour, just against a fake DOM instead of a browser.
+function makeModalStackStubs() {
+  const stack = [];
+  let seq = 0;
+  return {
+    kcModalPush: function () { const id = ++seq; stack.push(id); return id; },
+    kcModalPop: function (id) { const i = stack.lastIndexOf(id); if (i !== -1) stack.splice(i, 1); },
+    kcModalIsTop: function (id) { return stack.length > 0 && stack[stack.length - 1] === id; },
+    kcFocusFirstEmpty: function (fields) {
+      for (const el of fields) { if (el && !el.value) { el.focus(); return; } }
+      const last = fields[fields.length - 1];
+      if (last) last.focus();
+    },
+  };
+}
+
 function makeContext(opts) {
   opts = opts || {};
   const fetchQueue = (opts.fetchResponses || []).slice();
@@ -233,6 +253,7 @@ function makeContext(opts) {
     // code must never reach for them; if it tried, this would throw
     // ReferenceError, which the tests below treat as a failure.
   };
+  Object.assign(ctx, makeModalStackStubs());
   vm.createContext(ctx);
   if (opts.withLogin) {
     // Real login modal: drop the stubs so RANGE_L's own declarations win.
@@ -523,6 +544,71 @@ function flush() {
     dom.registry['.kc-login-cancel'].dispatch('click', { preventDefault() {}, target: null });
     await p2;
     assert(settled2 === false, 'second login still settles on its own Cancel');
+  }
+
+  // Group 12 (ROADMAP.md modal-accessibility follow-up, gap 1 -- focus
+  // defaults): username gets focus while it's empty; once it already has a
+  // value (a browser autofill, or an operator who typed it and then
+  // cancelled) focus goes to password instead of blindly back to
+  // username. Password itself is still cleared on every open regardless.
+  {
+    const { ctx, dom } = makeContext({ withLogin: true });
+    ctx.openLoginModal('Administrator login required');
+    assert(dom.registry['kc-login-username']._focused === true, 'empty username: initial focus on username');
+    assert(!dom.registry['kc-login-password']._focused, 'empty username: password not focused');
+    dom.registry['.kc-login-cancel'].dispatch('click', { preventDefault() {}, target: null });
+    dom.registry['kc-login-username']._focused = false;
+    dom.registry['kc-login-username'].value = 'bench';
+    ctx.openLoginModal('Administrator login required');
+    assert(dom.registry['kc-login-password']._focused === true, 'pre-filled username: focus jumps to password');
+    assert(!dom.registry['kc-login-username']._focused, 'pre-filled username: username itself not re-focused');
+    assert(dom.registry['kc-login-password'].value === '', 'password is still cleared on every open regardless of focus target');
+  }
+
+  // Group 13 (same follow-up, gap 1 continued): the reset modal's step 1
+  // carries over whatever username the operator already typed into the
+  // login modal, and focus goes straight to the TOTP code field once that
+  // username is known -- never back to a field already filled in.
+  {
+    const { ctx, dom } = makeContext({ withLogin: true });
+    ctx.openLoginModal('Administrator login required');
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    assert(dom.registry['kc-forgot-username'].value === '', 'no login username typed: reset modal opens with username blank');
+    assert(dom.registry['kc-forgot-username']._focused === true, 'no login username typed: focus on username');
+    assert(!dom.registry['kc-forgot-code']._focused, 'no login username typed: code field not focused');
+    dom.registry['kc-forgot-cancel1'].dispatch('click');
+    dom.registry['.kc-login-cancel'].dispatch('click', { preventDefault() {}, target: null });
+
+    ctx.openLoginModal('Administrator login required');
+    dom.registry['kc-login-username'].value = 'bench';
+    dom.registry['kc-forgot-username']._focused = false;
+    dom.registry['.kc-login-forgot-link'].dispatch('click');
+    assert(dom.registry['kc-forgot-username'].value === 'bench', 'login username carried over into the reset modal');
+    assert(dom.registry['kc-forgot-code']._focused === true, 'reset step: focus goes to the TOTP code field once username is known');
+    assert(!dom.registry['kc-forgot-username']._focused, 'reset step: username itself not focused once already filled');
+  }
+
+  // Group 14 (ROADMAP.md modal-accessibility follow-up, gap 2 -- Escape
+  // with stacked modals): the login modal must react to Escape only while
+  // it is the TOPMOST entry on the shared kcModalStack. This simulates
+  // another modal (e.g. a themed confirm dialog, per the "login modal over
+  // a confirm dialog" case named in the follow-up) opening on top of an
+  // already-open login modal by pushing its own id onto the same stack --
+  // exactly what openConfirmModal()/openForgotPasswordModal() do for real.
+  // A single Escape press must never fall through and cancel the login
+  // modal underneath while that other modal is still up.
+  {
+    const { ctx, dom } = makeContext({ withLogin: true });
+    let settled;
+    const p = ctx.openLoginModal('Administrator login required').then((ok) => { settled = ok; });
+    const foreignId = ctx.kcModalPush();
+    dom.document.dispatch('keydown', { key: 'Escape', preventDefault() {} });
+    await flush();
+    assert(settled === undefined, 'Escape does not cancel the login modal while another modal is stacked on top of it');
+    ctx.kcModalPop(foreignId);
+    dom.document.dispatch('keydown', { key: 'Escape', preventDefault() {} });
+    await p;
+    assert(settled === false, 'Escape cancels the login modal once it is topmost again');
   }
 
   // Group 10: no localStorage/sessionStorage reference exists in this code

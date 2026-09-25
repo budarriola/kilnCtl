@@ -3770,9 +3770,19 @@ Owner instruction, 2026-09-21.
   `/login?return=` (open-redirect guard covers backslash); insufficient
   role on a page 302s to `/?admin_required=`, an API call gets 403 with
   `X-Kiln-Auth-Reason: insufficient_role`; `app.js` shows an admin-login
-  modal and retries once on success; a 429 shows `Retry-After`. Follow-up
-  in flight: modal accessibility and retrying through the safety-ack
-  wrapper. (2) Session/LCD timeouts -- already implemented
+  modal and retries once on success; a 429 shows `Retry-After`. Follow-up:
+  modal accessibility -- closed (this session): a shared `kcModalStack`
+  (push/pop/isTop by id) now covers the confirm/alert modal, the login
+  modal, and the forgot-password modal uniformly, so Escape only ever
+  closes/cancels the topmost one regardless of which pair is stacked or
+  which modal's `document` keydown listener registered first (previously
+  only login-over-forgot-password was handled); a shared
+  `kcFocusFirstEmpty` helper focuses the first empty field on open
+  (username else password on login, username else the TOTP code field on
+  the reset step, which now also carries over the login username).
+  Focus trap and focus-restore-on-close were already correct and already
+  covered by tests. Retrying through the safety-ack wrapper is still
+  open. (2) Session/LCD timeouts -- already implemented
   (`web_auth_session.c`, `lcd_auth_state.c`); web timeout verified live
   PASS 2026-09-22, LCD timeout SKIP (no PIN set on bench); see `b3426467`.
   (3) `kiln_configs` apply reported `diverged=true` on a successful
