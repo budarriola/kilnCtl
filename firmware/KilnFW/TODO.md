@@ -1962,6 +1962,9 @@ suspected to be related to this work, was root-caused separately (also in
       (longest/most blocking). OTA's transfer handlers are explicitly
       out-of-scope for migration — they legitimately need to hold a
       streaming HTTP body open across the whole transfer.
+      **Planned 2026-09-25** (owner approved): slices W1/A1-A4 in
+      `docs/HTTP_POST_OWNER_MIGRATION_PLAN.md`; `rules_http.c` no longer
+      exists, and most dashboard/zones/profiles POSTs are short writes, not worth moving.
 - [x] **Debug/PC-link UART side** (explicit user request): closed
       2026-09-24 -- TOUCH and UI_TEST (`LIST_TAP_TARGETS`/`CLICK_BY_NAME`)
       both route their LVGL tree walk through `lvgl_port_collect_tap_targets()`
