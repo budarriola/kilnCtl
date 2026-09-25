@@ -119,6 +119,27 @@ static void test_reset_token_single_use(void)
                "a second consume of the same token reports ALREADY_USED, not OK or NOT_FOUND");
 }
 
+static void test_reset_token_table_init_clears_outstanding_token(void)
+{
+    // Proves the fix for the "stale token survives a re-enrollment" review
+    // finding (docs/TOTP_PASSWORD_RESET_PLAN.md): security_http.c now calls
+    // auth_totp_http_clear_reset_tokens() -- which re-inits this same table
+    // -- after a successful totp_enroll_confirm or totp_disable, so a token
+    // minted before that clear must never validate afterward.
+    TEST_SECTION("totp_reset_token_table_init -- re-init discards a token minted before it");
+    totp_reset_token_table_t t;
+    totp_reset_token_table_init(&t);
+    totp_reset_token_store(&t, "12345678901234567890123456789012", "administrator", 1000u);
+
+    // Simulate the owner disabling/re-enrolling TOTP within the token's TTL:
+    // security_http.c's success path re-inits the whole table.
+    totp_reset_token_table_init(&t);
+
+    TEST_CHECK(totp_reset_token_consume(&t, "12345678901234567890123456789012", "administrator", 1001u) ==
+                   TOTP_RESET_TOKEN_NOT_FOUND,
+               "a token minted before the clear reports NOT_FOUND after it, never OK");
+}
+
 static void test_reset_token_expiry(void)
 {
     TEST_SECTION("totp_reset_token -- expires after TOTP_RESET_TOKEN_TTL_MS");
@@ -291,6 +312,7 @@ void run_test_totp_http_core(void)
     test_pending_begin_overwrites_previous();
     test_pending_clear();
     test_reset_token_single_use();
+    test_reset_token_table_init_clears_outstanding_token();
     test_reset_token_expiry();
     test_reset_token_wrong_token_or_username();
     test_reset_token_wrong_length_never_matches();

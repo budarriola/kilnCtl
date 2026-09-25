@@ -123,6 +123,16 @@ static totp_reset_token_table_t *reset_tokens(void)
     return &s_reset_tokens;
 }
 
+// See auth_totp_http.h: called by security_http.c after a successful
+// totp_enroll_confirm or totp_disable so a reset token minted against a
+// prior enrollment can never survive to be consumed against a new or
+// disabled one (a "same-name, different-enrollment" reset-one-side-of-a-
+// pair gap; CLAUDE.md).
+void auth_totp_http_clear_reset_tokens(void)
+{
+    totp_reset_token_table_init(reset_tokens());
+}
+
 // --- Board-wide failed-forgot-attempt cap (plan section 4) ------------------
 
 // TOTP_FORGOT_BOARD_CAP and the blocked/record logic live in

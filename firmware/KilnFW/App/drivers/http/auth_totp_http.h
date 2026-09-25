@@ -18,6 +18,17 @@ extern "C" {
 // the rest of this component's *_http_start() functions.
 esp_err_t auth_totp_http_start(void);
 
+// Clears every outstanding /api/auth/forgot reset token immediately.
+// Call after a SUCCESSFUL totp_enroll_confirm or totp_disable
+// (security_http.c) so a token minted against the OLD enrollment can never
+// be consumed against a NEW one: an attacker who holds the old factor could
+// mint a token, have the owner disable+re-enroll TOTP within
+// TOTP_RESET_TOKEN_TTL_MS, and still set the admin password with the stale
+// token, since /api/auth/reset's own re-check only asks "is TOTP enrolled",
+// not "is it the SAME enrollment". Safe to call with no server started yet
+// or no tokens outstanding. Runs on the httpd worker; no lock needed.
+void auth_totp_http_clear_reset_tokens(void);
+
 #ifdef __cplusplus
 }
 #endif

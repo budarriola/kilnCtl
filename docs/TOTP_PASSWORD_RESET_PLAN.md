@@ -242,6 +242,19 @@ contract silently. Implementation is additive only: at the point
 NVS clear — no change to `auth_reset_gesture.c`'s state machine, corner
 order, or timing constants.
 
+**Note (second review pass, 2026-09-24): an UNREADABLE stored secret is a
+dead end short of the LCD gesture.** `totp_config_enrolled()`'s tri-state
+(section 2/7, `test_totp_config_persist.c`) treats a corrupt-CRC secret as
+UNREADABLE, distinct from ABSENT — and `totp_enroll_begin`/`totp_enroll_confirm`
+refuse unless the state is exactly ABSENT (6b above), while `totp_disable`
+verifies a *code against the stored secret* before it will clear anything, so
+it cannot clear a secret it cannot read either. Neither route can dig the
+board out of an UNREADABLE state, so the only recovery is the LCD
+four-corner gesture — which, per this section, also wipes the web
+credentials, not just the TOTP secret. This is a known, accepted gap, not a
+firmware defect to fix here: no change to `totp_disable`/`clear_credentials`
+behavior is being made for it.
+
 ## 6a. WT-A/WT-C wire contract (decided by WT-C, 2026-09-24, pending WT-A)
 
 WT-C (`tools/PcTools/src/kilnctrl/totp_http_client.py`) landed before WT-A

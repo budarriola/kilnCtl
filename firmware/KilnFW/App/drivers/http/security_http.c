@@ -13,6 +13,7 @@
 
 #include "esp_log.h"
 
+#include "auth_totp_http.h"  // auth_totp_http_clear_reset_tokens()
 #include "hal_sysinfo.h"     // hal_sysinfo_fill_random()
 #include "hal_time.h"        // hal_time_now_ms()
 #include "http_auth_http.h"  // kiln_http_register(), http_auth_caller_is_admin()
@@ -302,6 +303,12 @@ static esp_err_t security_totp_enroll_confirm(httpd_req_t *req, const char *body
     totp_pending_clear(&s_totp_pending);
     if (!persisted) {
         totp_config_clear();
+    } else {
+        // A reset token minted against a PRIOR enrollment (or before any
+        // enrollment existed, via the anti-oracle path) must not survive to
+        // be consumed against this new one -- /api/auth/reset's own re-check
+        // only asks "is TOTP enrolled", not "is it the SAME enrollment".
+        auth_totp_http_clear_reset_tokens();
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, persisted ? "{\"ok\":true}" : "{\"ok\":false}");
@@ -331,6 +338,13 @@ static esp_err_t security_totp_disable(httpd_req_t *req, const char *body)
     }
     totp_pending_clear(&s_totp_pending); // hygiene: never leave a stale pending secret behind either
     bool cleared = totp_config_clear();
+    if (cleared) {
+        // Same reset-token hazard as security_totp_enroll_confirm() above:
+        // a token minted before this disable must not still set the admin
+        // password afterward -- clear the table so nothing outstanding
+        // survives the enrollment it was minted against.
+        auth_totp_http_clear_reset_tokens();
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, cleared ? "{\"ok\":true}" : "{\"ok\":false}");
 }
