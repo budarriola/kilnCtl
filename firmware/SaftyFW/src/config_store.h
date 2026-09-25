@@ -736,7 +736,14 @@ typedef struct {
                                    // path.
 
     // --- CONFIG_REFERENCE.md section 2: temperature guards ------------------
-    float    firing_margin_c;         // degC, S1
+    float    firing_margin_c;         // degC, S1 -- INERT since the 2026-09-24
+                                       // SET_FIRING_CEILING revert (owner: the
+                                       // Pico must never run tighter than the
+                                       // ESP); S1 is unconditionally
+                                       // abs_max_temp_c. Still commissionable
+                                       // and persisted (no
+                                       // CONFIG_STORE_FORMAT_VERSION bump),
+                                       // just never read by safety_guards.c.
     float    overshoot_margin_c;      // degC, S2
     uint32_t overshoot_time_s;        // s, S2
     float    max_rate_c_per_min;      // degC/min, S8; gated by _SET_MAX_RATE_C_PER_MIN --

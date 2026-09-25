@@ -66,7 +66,10 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
                                            // after 0x0109, deliberately
                                            // adjacent to tc_type (0x0105) in
                                            // this same section-1 group
-    { 0x0201u, KILNLINK_PARAM_TYPE_F32 }, // firing_margin_c
+    { 0x0201u, KILNLINK_PARAM_TYPE_F32 }, // firing_margin_c -- INERT since the
+                                           // 2026-09-24 SET_FIRING_CEILING
+                                           // revert; commissionable/persisted,
+                                           // never read (see config_store.h)
     { 0x0202u, KILNLINK_PARAM_TYPE_F32 }, // overshoot_margin_c
     { 0x0203u, KILNLINK_PARAM_TYPE_U16 }, // overshoot_time_s
     { 0x0204u, KILNLINK_PARAM_TYPE_F32 }, // max_rate_c_per_min

@@ -1061,9 +1061,11 @@ size_t lvgl_port_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool
             /* Accept a completion only if it answers THIS request, and copy
              * out under the data lock so lvgl_port_task cannot start another
              * walk into s_ui_walk_targets mid-copy. lvgl_port_task gives
-             * `done` only after releasing `data`; bounded by what is left of
-             * the window, never by a zero timeout, so a brief hold by the
-             * task cannot turn a served request into a false timeout. */
+             * `done` only after releasing `data`. lvgl_port_task itself takes
+             * `data` with a zero timeout (s_ui_walk.data's doc comment above)
+             * so it never blocks; THIS take, by contrast, is bounded by
+             * whatever is left of the window, so a brief hold by the task
+             * cannot turn a served request into a false timeout. */
             bool mine = false;
             const TickType_t used = xTaskGetTickCount() - start;
             if (xSemaphoreTake(s_ui_walk.data, used < window ? window - used : 0) == pdTRUE) {

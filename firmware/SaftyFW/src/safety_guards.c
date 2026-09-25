@@ -9,7 +9,6 @@
  * ("not configured") -- see safety_guards.h's doc comments. Values are
  * SAFETY_MODEL.md section 4's defaults for S1/S5/S11/S12, carried over
  * verbatim. */
-#define FIRING_MARGIN_C_DEFAULT       100.0f  /* S1 */
 #define BAD_READ_COUNT_DEFAULT        10u     /* S5 */
 #define BAD_READ_TIME_S_DEFAULT       5.0f    /* S5 */
 #define BLIND_GRACE_S_DEFAULT         60.0f   /* S5 */
