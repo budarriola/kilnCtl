@@ -206,24 +206,70 @@ shared handle slot regardless of which future caller's job is running) and
 `check_stack_margin_registration.ps1`'s static scan requires a literal name
 argument to see a call site at all.
 
-### A2 -- `bench_preset` onto A1's helper. MEDIUM-HIGH value
+### A2 -- `bench_preset` onto A1's helper. MEDIUM-HIGH value -- LANDED 2026-09-25
 
-- **Handler:** `bench_preset_post_handler()` (`safety_cfg_http.c:1755`). It
+- **Handler:** `bench_preset_post_handler()` (`safety_cfg_http.c`). It
   makes 32 `safety_link_send_set_param()` calls and then one
-  `safety_link_send_commit_config()` (`:1719-1776`). Each call takes
+  `safety_link_send_commit_config()`. Each call takes
   `xact_lock` with a 5000 ms timeout (`SAFETY_XACT_LOCK_TIMEOUT_MS`), so
   the worst case with a slow link is tens of seconds.
-- **Interleaving audit, required:** today httpd guarantees that no other
-  handler writes safety config between the 32 SET_PARAMs and the COMMIT. The
-  POST handlers for `commissioning`, `relay_type`, `ct_cal`, `ct_trim` and
-  `rate_guard/auto` (same file) must refuse while
-  `http_async_job_busy()` is true, using the same `ok:false` shape. Without
-  that refusal, a mixed parameter set could be committed. The LCD and UART
-  paths already interleave today and are not made worse. Check whether they
-  commit mid-sequence, and record the answer in the commit.
-- Everything else is as in A1. The body is small, and the job's stack needs
-  are similar.
-- **Risk:** medium, because of the interleaving audit.
+- **Interleaving audit:** satisfied by A1's own fix-then-push commits
+  (`81dc96ec`/`5a196792`), which already added `http_async_job_busy()`
+  guards to `commissioning_post_handler`, `relay_type_post_handler`,
+  `ct_cal_post_handler`, `ct_trim_post_handler`, `rate_guard_auto_post_handler`
+  and `bench_preset_post_handler` itself -- so no other safety-config writer
+  can interleave between the 32 SET_PARAMs and the COMMIT. Confirmed via
+  `git log`/grep before landing this slice; no separate audit commit needed.
+- **Landed as:** `bench_preset_job()`/`bench_preset_post_handler()` follow
+  A1's `ct_auto_zero_job`/`ct_auto_zero_post_handler` pattern exactly:
+  `httpd_req_async_handler_begin/complete`, single-flight busy refusal via
+  `http_async_job_try_start()`/`http_async_job_busy()`, task registered under
+  the fixed literal name `"http_async_job"` (shared with every other caller,
+  same as A1). Every response body/status is byte-for-byte unchanged from the
+  pre-migration handler.
+- **Stack:** unchanged from A1 -- the shared `http_async_job_task` stack is
+  still 6144 B declared, 3312 B measured lower bound (INDETERMINATE per
+  `check_all_task_stack_budgets.py`, an unresolved indirect call in the walk;
+  within budget as far as it can see). `bench_preset_job()`'s own body (32
+  fixed-table SET_PARAMs plus one commit, no heap allocation, no recursion)
+  adds materially less than the ESP_LOG headroom A1's ceiling already
+  budgeted for, so no ceiling change was needed.
+- **`.dram0.bss`:** 99672 B against the 101000 B ceiling (1328 B headroom),
+  unchanged from before this slice -- `bench_preset_post_handler`/`_job` are
+  compiled only under `#if CONFIG_KILNCTL_DEV_TOOLS` (`default n`), which the
+  real bench board's sdkconfig leaves off, so this slice added zero bytes to
+  any real build's image.
+- **Host test coverage (`test_safety_cfg_http.c`):** `safety_cfg_http.c`
+  never itself includes `sdkconfig.h`, so `CONFIG_KILNCTL_DEV_TOOLS` never
+  reached this file's host-compiled translation unit before this slice --
+  the bench_preset code path had **never been compiled or tested** by the
+  host suite. Fixed by (a) forcing
+  `#define CONFIG_KILNCTL_DEV_TOOLS 1` in the shared
+  `App/test/stubs/sdkconfig.h` (same convention as the existing
+  `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` override, host-test-only, not a
+  statement about any real build's Kconfig), and (b) an explicit
+  `#include "sdkconfig.h"` added directly in `test_safety_cfg_http.c` ahead
+  of its `#include "../drivers/http/safety_cfg_http.c"`, since the macro
+  doesn't reach that file transitively otherwise. New tests: job stages
+  every `SAFETY_CFG_BENCH_PRESET` entry and commits once (`ok:true`); a
+  mid-loop SET_PARAM failure stops staging immediately and never commits
+  (500, `s_stub_last_httpd_err`); a commit-call failure (e.g. link timeout)
+  is reported without ever having staged nothing; a REJECTED commit
+  acknowledgement replies with the rejected-commit body, not `ok:true`; the
+  handler refuses synchronously (no `http_async_job` touch at all) with no
+  safety link; and the handler refuses with the same busy body while another
+  `http_async_job` (or a concurrent bench_preset) is running. Result:
+  271/271 checks passed in this executable, 62/62 executables built overall,
+  zero `FAIL` lines. Negative-tested (the staging-failure refusal: disabled
+  with `&& false`, forced full rebuild, confirmed `RUN FAILURES (1)`,
+  restored by hand, forced a second full rebuild, confirmed 271/271 clean
+  again).
+- **Full suite:** `run_all_checks.ps1 -AllowFewerChecks` (non-`-Fast`), 145
+  checks discovered, all passed after fixing an unrelated worktree-local
+  `sdkconfig`/`build/sdkconfig` mismatch left over from earlier verification
+  work in this same worktree (not caused by this slice's code changes).
+- **Risk:** medium, because of the interleaving audit -- resolved, no new
+  audit gap found.
 
 ### A3 -- `crash_report/clear` onto A1's helper. CONDITIONAL, measure first
 

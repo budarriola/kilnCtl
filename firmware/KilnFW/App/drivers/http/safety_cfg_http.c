@@ -1934,21 +1934,23 @@ static const struct {
 };
 #define SAFETY_CFG_BENCH_PRESET_COUNT (sizeof(SAFETY_CFG_BENCH_PRESET) / sizeof(SAFETY_CFG_BENCH_PRESET[0]))
 
-static esp_err_t bench_preset_post_handler(httpd_req_t *req)
+/* The slow tail of bench_preset_post_handler() (docs/HTTP_POST_OWNER_
+ * MIGRATION_PLAN.md slice A2) -- runs on its own task via
+ * http_async_job_try_start(), not on httpd_worker: 32 SET_PARAM calls plus
+ * one COMMIT_CONFIG, each SET_PARAM taking xact_lock with a 5000 ms timeout
+ * (SAFETY_XACT_LOCK_TIMEOUT_MS), so a slow link's worst case is tens of
+ * seconds. Every response body/status this function sends is BYTE FOR BYTE
+ * what the pre-A2 inline handler sent from this same point onward -- no
+ * caller (the commissioning page's bench-preset button, PcTools) sees a
+ * difference. arg is unused (this job takes no request-derived input beyond
+ * the fixed SAFETY_CFG_BENCH_PRESET table) -- NULL is passed at the call
+ * site. Must not call http_auth_*, cookie or client-IP functions
+ * (http_async_job.h's doc comment); must not call
+ * httpd_req_async_handler_complete() itself -- http_async_job.c's run_job()
+ * does that once this function returns, on every path. */
+static void bench_preset_job(httpd_req_t *async_req, void *arg)
 {
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: this handler stages ~13 params then commits, and the job's
-    // own COMMIT_CONFIG at the end of its window could persist a half-staged
-    // preset if the two interleave (2026-09-25 fix-then-push re-review).
-    if (http_async_job_busy()) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
-        return ESP_OK;
-    }
-    if (!s_link) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "safety link not available on this board");
-        return ESP_OK;
-    }
+    (void)arg;
     for (size_t i = 0; i < SAFETY_CFG_BENCH_PRESET_COUNT; i++) {
         esp_err_t err = safety_link_send_set_param(s_link, SAFETY_CFG_BENCH_PRESET[i].id,
                                                     SAFETY_CFG_BENCH_PRESET[i].type,
@@ -1956,9 +1958,9 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "bench_preset: staging id 0x%04X failed: %s",
                      (unsigned)SAFETY_CFG_BENCH_PRESET[i].id, esp_err_to_name(err));
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                  "communication with the safety processor failed mid-preset");
-            return ESP_OK;
+            return;
         }
     }
     uint16_t reject_param_id = 0;
@@ -1967,9 +1969,9 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
     esp_err_t commit_err = safety_link_send_commit_config(s_link, &reject_param_id, &reject_reason, &rejected);
     if (commit_err != ESP_OK) {
         ESP_LOGW(TAG, "bench_preset: commit failed: %s", esp_err_to_name(commit_err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+        httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR,
                              "test preset staged but the safety processor did not acknowledge the commit");
-        return ESP_OK;
+        return;
     }
     if (rejected) {
         /* Not expected in practice (the preset's own values are chosen to
@@ -1978,10 +1980,11 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
          * claiming {"ok":true} for a commit the Pico actually refused. */
         ESP_LOGW(TAG, "bench_preset: commit REJECTED (param_id=0x%04X, reason=%u)", (unsigned)reject_param_id,
                  (unsigned)reject_reason);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"test preset staged but the safety "
-                                        "processor rejected the commit\"}");
+        httpd_resp_set_status(async_req, "500 Internal Server Error");
+        httpd_resp_set_type(async_req, "application/json");
+        httpd_resp_sendstr(async_req, "{\"ok\":false,\"error\":\"test preset staged but the safety "
+                                       "processor rejected the commit\"}");
+        return;
     }
     ESP_LOGI(TAG, "bench_preset: applied (%u fields) -- calibration_missing remains set, "
                   "the sec-1 commissioning fields were deliberately not sent",
@@ -1992,7 +1995,57 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
      * and leaving it standing would show a stale "auto-derived"/"hand-
      * entered" label next to a value the preset just replaced. */
     safety_cfg_store_clear_rate_guard_meta();
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    httpd_resp_sendstr(async_req, "{\"ok\":true}");
+}
+
+static esp_err_t bench_preset_post_handler(httpd_req_t *req)
+{
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement, or
+    // this same route's own job) is running: this handler stages ~13 params
+    // then commits, and a second interleaved SET_PARAM/COMMIT_CONFIG
+    // sequence could persist a half-staged preset (2026-09-25 fix-then-push
+    // re-review, kept true after A2's own migration onto the same helper --
+    // http_async_job_try_start() below already refuses a second admission on
+    // its own, but this check keeps the same synchronous, no-allocation
+    // refusal path this route already had rather than depending solely on
+    // the busy branch of the try_start() result below).
+    if (http_async_job_busy()) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+        return ESP_OK;
+    }
+    if (!s_link) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "safety link not available on this board");
+        return ESP_OK;
+    }
+
+    // --- Hand off the 32 SET_PARAM calls + COMMIT_CONFIG to their own task
+    // -- everything above this point is fast (a busy check and a NULL check,
+    // no blocking wait), so it stays on httpd_worker; bench_preset_job()
+    // does the tens-of-seconds-worst-case slow tail this slice moves off it.
+    // See http_async_job.h's doc comment for the handoff contract and
+    // bench_preset_job()'s own comment for why the response bodies/status
+    // codes are unchanged. No request body to carry through (this route
+    // takes no parameters), so ctx is NULL. ---
+    http_async_job_start_result_t start_result =
+        http_async_job_try_start(req, "http_async_job", 6144, bench_preset_job, NULL);
+    if (start_result == HTTP_ASYNC_JOB_STARTED) {
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    if (start_result == HTTP_ASYNC_JOB_BUSY) {
+        // Refused -- another async job (ct_auto_zero, or a concurrent second
+        // POST to this same route) is already running. req is untouched by
+        // http_async_job_try_start() in every refusal case, so responding on
+        // it synchronously here is safe. Same reply text this route already
+        // sent for the pre-try_start() http_async_job_busy() check above, so
+        // a caller sees no difference in which branch produced it.
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+    }
+    // HTTP_ASYNC_JOB_RESOURCE_FAILURE: the async handoff itself failed
+    // (httpd_req_async_handler_begin()) or the job task could not be
+    // created -- an out-of-memory-shaped failure, not contention.
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
 }
 
 #endif /* CONFIG_KILNCTL_DEV_TOOLS */

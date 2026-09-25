@@ -748,7 +748,20 @@ TASKS = [
          # (a 1024 B frame) -> uart_protocol_send_broadcast ->
          # frame_and_send is 3280 B; adding it here makes the checker
          # measure and grade the real number instead of the trampoline's.
-         extra_roots=[("ct_auto_zero_job", "safety_cfg_http.c")]),
+         # bench_preset_job (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A2)
+         # is this helper's second registered fn, added the same way -- only
+         # one job runs at a time, so the loop above takes the DEEPER of the
+         # two rather than summing them (see that loop's own comment). It is
+         # only ever compiled in behind CONFIG_KILNCTL_DEV_TOOLS
+         # (safety_cfg_http.c's #if around bench_preset_job's own
+         # definition, guarding the "Apply test preset" button), so this is a
+         # callable, evaluated lazily once sdkconfig_bool() has a loaded
+         # sdkconfig to read (see the extra_roots-callable comment on the
+         # measurement loop above) rather than a plain list built at import
+         # time, before --elf/--sdkconfig are even parsed.
+         extra_roots=lambda: [("ct_auto_zero_job", "safety_cfg_http.c")] +
+             ([("bench_preset_job", "safety_cfg_http.c")]
+              if sdkconfig_bool("CONFIG_KILNCTL_DEV_TOOLS") else [])),
     dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_exit_reboot_task,\s*"recovery_exit_reboot",\s*(\d+)')),
@@ -1190,7 +1203,10 @@ def main():
     for _t in TASKS:
         if _t.get("root"):
             _tracked_roots.add(_t["root"])
-        for _extra in (_t.get("extra_roots") or ()):
+        _extra_roots_spec = _t.get("extra_roots") or ()
+        if callable(_extra_roots_spec):
+            _extra_roots_spec = _extra_roots_spec()
+        for _extra in _extra_roots_spec:
             _tracked_roots.add(_extra[0] if isinstance(_extra, (tuple, list)) else _extra)
     errors.extend(normalised_gate_violations(_tracked_roots))
     for task in TASKS:
@@ -1291,7 +1307,21 @@ def main():
         extra_total = 0
         extra_label = None
         extra_errors = []
-        for extra_name, extra_path in task.get("extra_roots", []):
+        # extra_roots may be a plain list or a zero-arg callable -- the
+        # callable form (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A2,
+        # http_async_job's own row) lets a row's set of registered fns depend
+        # on the ELF's OWN sdkconfig (bench_preset_job only exists when
+        # CONFIG_KILNCTL_DEV_TOOLS=y, safety_cfg_http.c's #if around its
+        # definition) without needing the stricter present/absent kconfig=
+        # adjudication this file's whole-row KCONFIG-GATED TASKS handling
+        # applies -- http_async_job itself is unconditionally present either
+        # way (ct_auto_zero_job alone still gives it a real callee), so a
+        # dev-tools-off ELF simply omits bench_preset_job from the candidates
+        # measured here rather than failing on its absence.
+        extra_roots_spec = task.get("extra_roots", [])
+        if callable(extra_roots_spec):
+            extra_roots_spec = extra_roots_spec()
+        for extra_name, extra_path in extra_roots_spec:
             try:
                 extra_addr = lib.resolve_root(parsed, extra_name, args.elf, addr2line, extra_path)
             except ValueError as e:

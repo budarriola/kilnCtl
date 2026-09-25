@@ -61,6 +61,12 @@ bool web_client_accepts_gzip(httpd_req_t *req)
     return true;
 }
 
+// safety_cfg_http.c never includes sdkconfig.h itself (its #if CONFIG_KILNCTL_
+// DEV_TOOLS guards default to false, undefined-macro-in-#if, with no compile
+// error either way) -- pulled in explicitly here so stubs/sdkconfig.h's
+// CONFIG_KILNCTL_DEV_TOOLS override (forced on for this file's A2 coverage,
+// see that header's own comment) actually reaches this translation unit.
+#include "sdkconfig.h"
 #include "../drivers/safety/safety_cfg_write.c"
 #include "../drivers/http/safety_cfg_http.c"
 
@@ -2722,6 +2728,126 @@ static void test_ct_auto_zero_job_refuses_stale_ct_cal_without_commit(void)
                "the stale snapshot was never committed to the store");
 }
 
+/* ---- A2: bench_preset_post_handler()/bench_preset_job() (docs/HTTP_POST_
+ * OWNER_MIGRATION_PLAN.md) -- compiled here only because stubs/sdkconfig.h
+ * forces CONFIG_KILNCTL_DEV_TOOLS on for this one host-test executable (see
+ * that file's comment); the real bench board never compiles this code in.
+ * bench_preset_job() takes no request body, so unlike ct_auto_zero_job()
+ * these direct-invocation tests need no ctx allocation. */
+
+static void test_bench_preset_job_stages_all_and_commits(void)
+{
+    TEST_SECTION("bench_preset_job -- stages every SAFETY_CFG_BENCH_PRESET entry, commits once, "
+                 "clears rate-guard meta, and replies {\"ok\":true}");
+    reset_all();
+
+    httpd_req_t async_req = { .content_len = 0 };
+    bench_preset_job(&async_req, NULL);
+
+    TEST_CHECK(s_stub_set_param_calls == (int)SAFETY_CFG_BENCH_PRESET_COUNT,
+               "every table entry was staged");
+    TEST_CHECK(s_stub_commit_calls == 1, "commit was sent exactly once");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"ok\":true") != NULL, "reports success");
+}
+
+static void test_bench_preset_job_reports_staging_failure(void)
+{
+    TEST_SECTION("bench_preset_job -- a SET_PARAM failure partway through stops staging immediately "
+                 "and replies 500, without ever committing");
+    reset_all();
+    s_stub_set_param_result = ESP_FAIL;
+
+    httpd_req_t async_req = { .content_len = 0 };
+    bench_preset_job(&async_req, NULL);
+
+    TEST_CHECK(s_stub_set_param_calls == 1, "stops at the first failed SET_PARAM, does not keep going");
+    TEST_CHECK(s_stub_commit_calls == 0, "never reaches the commit");
+    TEST_CHECK(strstr(s_stub_last_httpd_err, "communication with the safety processor failed mid-preset") !=
+                   NULL,
+               "the staging-failure body was sent");
+}
+
+static void test_bench_preset_job_reports_commit_failure(void)
+{
+    TEST_SECTION("bench_preset_job -- every field stages fine but the commit call itself fails "
+                 "(e.g. a link timeout) -- replies 500, never clears rate-guard meta's success path");
+    reset_all();
+    s_stub_commit_result = ESP_ERR_TIMEOUT;
+
+    httpd_req_t async_req = { .content_len = 0 };
+    bench_preset_job(&async_req, NULL);
+
+    TEST_CHECK(s_stub_set_param_calls == (int)SAFETY_CFG_BENCH_PRESET_COUNT,
+               "every table entry was staged before the commit was attempted");
+    TEST_CHECK(s_stub_commit_calls == 1, "commit was attempted exactly once");
+    TEST_CHECK(strstr(s_stub_last_httpd_err,
+                       "test preset staged but the safety processor did not acknowledge the commit") != NULL,
+               "the commit-failure body was sent");
+}
+
+static void test_bench_preset_job_reports_rejected_commit(void)
+{
+    TEST_SECTION("bench_preset_job -- the Pico's own commit acknowledgement reports REJECTED -- "
+                 "replies 500 with the rejected-commit body rather than claiming ok:true");
+    reset_all();
+    s_stub_commit_rejected = true;
+    s_stub_commit_reject_param_id = 0x0204u; // max_rate_c_per_min, per this table's own comment
+    s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
+
+    httpd_req_t async_req = { .content_len = 0 };
+    bench_preset_job(&async_req, NULL);
+
+    TEST_CHECK(s_stub_set_param_calls == (int)SAFETY_CFG_BENCH_PRESET_COUNT,
+               "every table entry was staged before the commit was attempted");
+    TEST_CHECK(s_stub_commit_calls == 1, "commit was attempted exactly once");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp,
+                       "test preset staged but the safety processor rejected the commit") != NULL,
+               "the rejected-commit body was sent");
+}
+
+static void test_bench_preset_post_handler_refuses_without_link(void)
+{
+    TEST_SECTION("bench_preset_post_handler -- refuses synchronously (400) when there is no safety "
+                 "link, without ever touching http_async_job_try_start()");
+    reset_all();
+    s_link = NULL;
+
+    httpd_req_t req = { .content_len = 0 };
+    esp_err_t err = bench_preset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (the refusal is sent via httpd_resp_send_err)");
+    TEST_CHECK(s_stub_set_param_calls == 0, "nothing was staged");
+    TEST_CHECK(s_stub_commit_calls == 0, "no commit was issued");
+}
+
+static void test_bench_preset_post_handler_refuses_while_async_job_busy(void)
+{
+    TEST_SECTION("bench_preset_post_handler -- refuses with the same busy body while an http_async_job "
+                 "(ct_auto_zero's measurement, or a concurrent bench_preset) is running, staging nothing. "
+                 "MUST RUN LAST, and specifically AFTER the other two MUST-RUN-LAST tests above: this test "
+                 "relies on one of THEM having already admitted a job the host xTaskCreate() stub never "
+                 "actually runs (s_busy is a static in http_async_job.c's own translation unit -- reset_all() "
+                 "in this file cannot touch it), rather than admitting a second one itself.");
+    reset_all();
+
+    TEST_CHECK(http_async_job_busy(), "the module already reads busy, left that way by an earlier "
+                                       "MUST-RUN-LAST test in this same executable");
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    httpd_req_t req = { .content_len = 0 };
+    esp_err_t err = bench_preset_post_handler(&req);
+    s_link = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (the refusal is a 200-shaped JSON body)");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "another commissioning operation is running") != NULL,
+               "the busy refusal body was sent");
+    TEST_CHECK(s_stub_set_param_calls == 0, "nothing was staged to the Pico while busy");
+    TEST_CHECK(s_stub_commit_calls == 0, "no commit was issued while busy");
+}
+
 int main(void)
 {
     test_rate_guard_gather_no_zone_identified_is_no_data();
@@ -2793,11 +2919,22 @@ int main(void)
     test_commissioning_post_gain_out_of_range_is_refused();
     test_commissioning_post_in_range_gain_is_accepted();
 
-    // 2026-09-25 fix-then-push re-review, item 2 -- MUST STAY LAST: both
+    // A2 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) -- bench_preset_job()/
+    // bench_preset_post_handler()'s own non-busy paths. Must run before the
+    // MUST-STAY-LAST busy block below (same s_busy constraint as everything
+    // else in that block).
+    test_bench_preset_job_stages_all_and_commits();
+    test_bench_preset_job_reports_staging_failure();
+    test_bench_preset_job_reports_commit_failure();
+    test_bench_preset_job_reports_rejected_commit();
+    test_bench_preset_post_handler_refuses_without_link();
+
+    // 2026-09-25 fix-then-push re-review, item 2 -- MUST STAY LAST: all
     // leave http_async_job.c's static s_busy permanently true in this host
     // test (see each test's own comment).
     test_commissioning_post_refuses_while_async_job_busy();
     test_ct_auto_zero_job_refuses_stale_ct_cal_without_commit();
+    test_bench_preset_post_handler_refuses_while_async_job_busy();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
