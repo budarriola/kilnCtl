@@ -4,6 +4,23 @@
 > violation no longer reboots the board, board-lock and LCD-bench-runner review
 > fixes landed, and the forgot-password design was replaced with TOTP
 > (thirty-eighth sweep) — open items below.
+> - **System-mode command gate design, 2026-09-25 — DESIGN ONLY, pending owner
+>   review, do not implement yet:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
+>   `firmware/KilnFW/TODO.md` 10.14's Phase 6 (a single owning function/table
+>   deciding whether a *class* of command is allowed given current system mode
+>   — firing/autotune/OTA/recovery/safety-tripped/readiness — composed with,
+>   never replacing, the existing owner locks, the OTA/profile mutual
+>   interlock, and `readiness_gate.h`'s firing checklist, which already
+>   unifies profile/autotune start refusals across HTTP/UART/LCD). Finds the
+>   headline gap: `kiln_io_owner`'s single manual-relay-write choke point
+>   (HTTP `/api/relay`, UART `SET_RELAY`/`SET_RELAY_MASK`, LCD manual
+>   override) checks safety-trip and the OTA interlock but never
+>   `PROFILE_EXEC_RUNNING`/autotune-running — a hand relay flip mid-firing is
+>   ungated today even though starting a *new* profile mid-firing is heavily
+>   gated. Also: zones/config writes and cfgfs format carry no mode check at
+>   all, and recovery-mode's refusal reason is HTTP-only wording (the refusal
+>   itself already fires on every transport). Four open questions for the
+>   owner are in the doc's §5.
 > - **SET_FIRING_CEILING (0x09) reverted, 2026-09-24 owner decision:** "the safety limits should be the same[,] the safty processor is a backup incase the esp fails" -- the level-triggered resend (`6f8ed940`, `34f242c3`) and the Pico-side `min(abs_max_temp_c, firing_max_c + firing_margin_c)` tightening in `safety_guards.c` are removed; S1's ceiling is now unconditionally `abs_max_temp_c`, resolving the "standing tension" this entry used to flag against the "Pico ceiling never tighter than the ESP's abs_max" rule. The cool-down-on-hot-kiln start-time check
 >   (`5840a82c`/`341739ab`) existed only because the Pico tightening could trip a cool-down-only profile started on a hot kiln; with the tightening gone that hazard is gone, so the check was removed in the same revert (`CommonFW/docs/LINK_PROTOCOL.md` §0x09). The generic LCD "Cannot Start" modal it used is pre-existing and stays. `check_firing_ceiling_margin_mirror_drift.ps1` and its Python check (mirrored the now-removed ceiling margin, not the start-time check) were deleted along with the ceiling code.
 > - **`exec_mode_state_check()` violation now latches FAULTED instead of

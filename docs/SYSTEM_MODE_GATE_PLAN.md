@@ -1,0 +1,292 @@
+# System-mode command gate — design (Phase 6)
+
+**Status: DESIGN DOC ONLY, no code. Owner-approved for a design pass,
+2026-09-25.** Source: `firmware/KilnFW/TODO.md` section 10.14, "Phase 6"
+(added mid-Phase-1, user request). Do not implement ahead of an owner
+decision on the open questions below.
+
+## 1. Problem statement
+
+The command-queue work in TODO.md 10.14 (Phases 1/2/4/5) gives each
+state-owning domain (`kiln_io_owner`, `thermo_owner`, `wifi_prov`) a single
+task and a lock that answers "can two writers race on this state." Phase 6
+is a different question: **is this *class* of command allowed at all, given
+what the system is doing right now** — independent of who's asking and
+whether they'd race. Example: while a profile is firing, pause/stop/modify-
+this-run is fine, but starting a *different* profile, starting autotune, or
+a raw GPIO/SX1509 debug write should be refused outright, regardless of
+whether the write itself would have been race-free.
+
+`kiln_io_owner`/`thermo_owner` correctly know nothing about
+`profile_executor`/`autotune_engine` state — that's the ownership boundary
+Phase 1/2 drew on purpose. Mode policy is a layer *above* the owners.
+
+## 2. What already exists (research findings)
+
+### 2.1 System modes/states in the code today
+
+| Mode/state | Where it lives |
+|---|---|
+| Idle vs. firing | `profile_executor` state machine (`profile_executor_state.h`); `profile_executor_get_status()` |
+| Autotune running | `autotune_engine.c`'s `s_at` state, guarded by `s_at.lock` |
+| OTA in progress | `ota_interlock.c`/`.h` — a pure, host-testable predicate already consulted by more than one caller (see 2.3) |
+| Recovery mode | `boot_guard_is_recovery_mode()` (`boot_guard.h`) — fixed for the boot, no HTTP route exposes the raw counter, `GET /api/ota/esp/status`'s `recovery_mode` is the boolean |
+| Safety tripped / ARMED | `safety_link.c` link state, `trip_reason`/`trip_mask`; ARMED is a latch, not a PWM window (project memory) |
+| Commissioning incomplete | `readiness_http.c`'s checklist; `readiness_gate.h`'s `READY_NOT_DONE` biconditional over the *same* predicates (see 2.4) |
+| Web auth on/off | `web_auth_store.c` / `security_backend_web_auth.c` |
+| LCD PIN / session | LCD session timeout (10 min) tracked alongside web (30 min) per `web_auth_store` |
+
+**There is no single "get current mode" function today.** Each caller that
+cares reaches into a different module's state directly, at a call site it
+chooses for itself. Two existing pieces of this codebase already point at
+the shape Phase 6 should generalize — both worth citing because one does it
+right and one doesn't:
+
+### 2.2 Right-shaped precedent: `readiness_gate.h`, and it's already fully unified
+
+`profile_executor_run.c:156-168`'s own doc comment names every start entry
+point explicitly: `POST /api/profile_exec/start` (`dashboard_exec_http.c`),
+both LCD start buttons (`ui_page_home_actions.c`, `ui_page_profile_detail.c`)
+and the benchproto `RUN` command (`uart_bridge_ext_control.c`) all funnel
+through this one function, which checks (in order) `readiness_gate_refuses_
+start()` (`:184`, itself folding in `boot_guard_is_recovery_mode()` per
+`readiness_gate.c:47` and the safety-trip state per `readiness_gate.c:54-58`),
+the `s_exec.lock == NULL`/recovery check (`:194`), profile/zones validity,
+and `ota_http_heat_blocked_by_update()` (`:286`). `autotune_engine.c:962-978`
+documents and implements the identical pattern for autotune's three start
+functions. **This is already the shape Phase 6 should generalize** — one
+owning function, one call site per engine, every transport gets the same
+answer for free. Its header states the design principle in one line worth
+reusing verbatim:
+
+> "the gate blocks item X <=> item X's displayed status is READY_NOT_DONE"
+> — a thin test over the *same* predicates the display already renders,
+> so the gate and the page shown to the operator are physically incapable
+> of disagreeing. `check_readiness_gate_display_agreement.ps1` enforces it.
+
+(`recovery_start_refusal.h`'s two HTTP-only call sites, `dashboard_exec_
+http.c:675` / `dashboard_autotune_http.c:207`, sit *on top of* this already-
+unified gate purely to surface a recovery-specific message before the
+generic one — see 2.4. They are redundant with, not a replacement for, the
+real gate.)
+
+### 2.3 Right-shaped precedent: the OTA/profile mutual interlock
+
+`ota_interlock.c`/`.h` is a pure, ESP-IDF-free predicate consulted from
+both directions: `profile_executor_run.c:278-283` refuses a firing start
+when OTA holds the interlock, and `ota_http_check_interlocks()`/
+`ota_interlock_check()` refuse OTA while a firing/heat cycle holds it. This
+is the "one owning function, called from both sides" shape Phase 6 needs —
+just narrower in scope (one pairwise relationship, not a general table).
+
+### 2.4 Minor drift, same class: recovery mode's message-only inconsistency
+
+`recovery_start_refusal.h`'s `recovery_mode_refuses_start()` is called from
+exactly two places: `dashboard_exec_http.c:675` and
+`dashboard_autotune_http.c:207` — both HTTP, layered on top of the already-
+unified gate in 2.2 purely to substitute a recovery-specific message ahead
+of the generic one. A UART or LCD start request in recovery mode is refused
+today too (same `readiness_gate_refuses_start()` call sees the same
+`recovery_mode` fact) — just with a more generic reason string than HTTP's.
+Not a safety gap, but exactly the kind of one-transport-only wording drift
+Phase 6's shared `reason` string (3.3) should retire this HTTP-only
+special case in favor of, rather than a template for the *headline* gap
+(2.5's manual relay writes).
+
+### 2.5 The real, safety-relevant gap: manual relay writes have no firing-mode check
+
+`owners/kiln_io_owner.c`'s relay-ON choke point (`relay_on_blocked()`
+family, doc block ~`:146-176`) is explicitly "the ONE choke point every
+MANUAL relay-ON command reaches" — `dashboard_http.c`'s `/api/relay`, the
+LCD's manual override (`ui_page_temperature.c`), and `uart_bridge.c`'s
+`SET_RELAY`/`SET_RELAY_MASK` all funnel through it. It checks
+`relay_authority_on_blocked()` (safety-fault state) and
+`ota_http_heat_blocked_by_update()` (OTA interlock) — **but nothing checks
+`PROFILE_EXEC_RUNNING`/autotune-running.** Starting a *new* profile while
+one is already running is heavily gated (2.2); flipping a relay by hand,
+on any of the three transports, while that same profile is mid-firing is
+not gated by mode at all today. This is the concrete instance of the
+problem statement's own example ("a raw GPIO/SX1509 debug write should be
+refused outright" while firing) that is genuinely open today, not merely
+inconsistent in wording.
+
+### 2.6 Inventory table — action × entry point × current check
+
+| Action | HTTP | UART bridge | LCD | Notes |
+|---|---|---|---|---|
+| Start profile | `dashboard_exec_http.c` → `profile_executor_run()`'s single choke point (2.2): `readiness_gate_refuses_start()` + prestart NULL-lock/recovery + OTA interlock, plus an HTTP-only `recovery_mode_refuses_start()` pre-check for a nicer message | same choke point, via `uart_bridge_ext_control.c`'s `RUN` command | same choke point, via `ui_page_home_actions.c`/`ui_page_profile_detail.c` | Fully gated on all three transports; only the recovery-mode *wording* differs (2.4) |
+| Start autotune | `dashboard_autotune_http.c` → same pattern (`autotune_engine.c:962-978`) | same choke point | same choke point | Mirrors profile start |
+| Zones/config write during a firing | `zones_http.c`/`zones_http_post.c` — **no `PROFILE_EXEC_*`/is-running check found**, only a comment noting the handler keeps its own possibly-stale view | not exposed on the UART bridge today | n/a | Value-bound checks (guard-5) exist; a mode check ("a firing is in progress") does not |
+| Manual relay write (HTTP `/api/relay`, UART `SET_RELAY`/`SET_RELAY_MASK`, LCD manual override) | `kiln_io_owner`'s single choke point (`relay_on_blocked()` family) checks safety-fault + OTA interlock | same choke point | same choke point | **Headline gap (2.5): no `PROFILE_EXEC_RUNNING`/autotune-running check anywhere in this already-unified choke point** |
+| Factory reset | `factory_reset.c`: `ota_http_authenticate_request()` (auth) then `ota_http_check_interlocks()` (OTA interlock only) | not exposed | not exposed | No explicit firing/autotune-running check distinct from the OTA interlock |
+| cfgfs format | `cfg_fs_format_http.c` (auth-gated route) + `cfg_fs_format_gate.c` (pure on-disk structural validation, no mode awareness) | referenced in `uart_bridge_ext.c` | not exposed | **No mode check of any kind found** |
+| OTA start/flash | `ota_http_check_interlocks()`/`ota_interlock_check()` — the mutual interlock's other direction, itself informed by profile/autotune heating state (2.3) | same interlock | n/a (LCD does not initiate OTA) | Best-shaped example — symmetric, mutual, kept as-is |
+
+`route_tier_table.h` confirms tiers are **auth only**: `ROUTE_TIER_OPEN`
+(no credential), `ROUTE_TIER_USER`, `ROUTE_TIER_ADMIN`, plus
+`ROUTE_TIER_SAFETY_REDUCE` and `ROUTE_TIER_ADMIN_BOOTSTRAP` for narrow
+documented exceptions. Nothing in that table encodes "and also not during a
+firing" — mode is a wholly separate axis today, checked (if at all) ad hoc
+per handler.
+
+## 3. Proposed gate
+
+### 3.1 One owning function, one table
+
+```c
+// system_mode_gate.h -- pure, host-testable, ESP-IDF-free (same layering
+// discipline as ota_interlock.h/readiness_gate.h).
+
+typedef enum {
+    SYS_ACTION_START_PROFILE,
+    SYS_ACTION_START_AUTOTUNE,
+    SYS_ACTION_WRITE_ZONES_CONFIG,
+    SYS_ACTION_RAW_RELAY_DEBUG_WRITE,
+    SYS_ACTION_FACTORY_RESET,
+    SYS_ACTION_CFGFS_FORMAT,
+    SYS_ACTION_OTA_START,
+    // ... one entry per class of command, not one per route/subcommand
+} sys_action_t;
+
+typedef struct {
+    bool profile_running;
+    bool autotune_running;
+    bool ota_holds_interlock;
+    bool recovery_mode;
+    bool safety_tripped;      // ARMED latch state
+    bool readiness_gate_ready; // same READY_NOT_DONE biconditional readiness_gate.h already computes
+} sys_mode_snapshot_t;
+
+// Pure function: snapshot in, verdict out. No I/O, no locks taken inside it.
+bool system_mode_gate_check(sys_action_t action,
+                             const sys_mode_snapshot_t *snap,
+                             char *reason, size_t reason_cap);
+```
+
+A single table (`action -> which snapshot fields refuse it`) inside the
+`.c` file, reviewed as one unit — the same "one legible record" discipline
+`route_tier_table.h` already uses for auth. Adding a new action or entry
+point means adding one row, not hunting for the right `if` to copy.
+
+### 3.2 Composition with the auth gate
+
+**Auth first, then mode — never the reverse, and mode never weakens auth.**
+An unauthenticated caller gets 401/403 before the mode gate is ever
+consulted; the mode gate only runs for a caller who already cleared
+`route_tier_table.h` (or the UART bridge's own credential check, or the LCD
+PIN). This matches the existing `recovery_mode_refuses_start()` call order
+(auth middleware already ran by the time a `dashboard_*_http.c` handler
+body executes) and keeps the two axes orthogonal: auth answers "who," mode
+answers "what, right now."
+
+### 3.3 Per-entry-point response contract
+
+| Entry point | On refusal |
+|---|---|
+| HTTP | Existing convention: 4xx (409 for a mode conflict, matching the existing OTA-interlock/readiness-gate precedent of using 428/409 for "not now" vs. 403 for "not you") with a JSON body carrying the same `reason` string the pure function produced — no per-handler re-wording |
+| UART bridge | Existing `{subcmd, ok, reason}` reply shape (`bridge_reply_reject()`/`bx_reply_ok_err()`, the convention section 11 of TODO.md already established) — the `reason` field is the *same string* `system_mode_gate_check()` wrote, so a UART caller sees the recovery-mode-specific wording that today only HTTP gets |
+| LCD | The existing generic "Cannot Start" modal (kept per the 2026-09-24 owner decision on the firing-ceiling revert) gains the same `reason` string as its body text instead of a fixed generic message |
+
+One string, three renderings — never three independently-worded refusals
+for the same fact, which is the exact drift `recovery_start_refusal.h`
+introduced for HTTP-only.
+
+### 3.4 Lock/snapshot strategy
+
+**Never hold a module lock across a producer call.** `system_mode_gate_check()`
+takes a plain-old-data snapshot, not locks. The caller (whichever entry
+point invokes it) is responsible for building that snapshot by calling each
+domain's existing cheap read accessor (`profile_executor_get_status()`,
+`autotune_engine_get_status()`, `ota_interlock_check()`,
+`boot_guard_is_recovery_mode()`, the readiness predicates) *before* taking
+any lock of its own, then calls the gate against the resulting struct with
+no locks held. This mirrors the `dashboard_get_status()` fix already in
+this codebase (CLAUDE.md's "cache a snapshot outside the lock" note) and
+keeps `s_exec.lock` → `s_at.lock` as the only lock order anywhere near this
+code — the gate itself never acquires either.
+
+### 3.5 Host-testability
+
+Pure input-struct-in/verdict-out function: trivially host-testable with a
+fake snapshot per row of the action table, no board, no ESP-IDF — same
+shape as `test_readiness_gate.c`'s full-cross-product test and
+`test_recovery_start_refusal.c`. A single test file can assert every
+`(action, snapshot)` combination in the table without touching hardware.
+
+### 3.6 Rollout slices
+
+1. **S** — land `system_mode_gate.h`/`.c` with the table above and its host
+   test, unwired (dead code, callable but not called) — proves the shape
+   compiles and the table is legible before any handler changes.
+2. **S** — call `system_mode_gate_check()` inside `profile_executor_run()`'s
+   and `autotune_engine`'s existing single choke points (2.2) purely to
+   retire `recovery_start_refusal.h`'s two HTTP-only call sites, so the
+   recovery-mode reason string in §2.4 stops being HTTP-only. Negative
+   test: force recovery mode in a host test, confirm the UART/LCD path's
+   *reason string* now matches HTTP's, not just the refusal itself. Lowest
+   risk slice — the underlying refusal already happens everywhere; only
+   the message changes.
+3. **M** — wire `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` into `kiln_io_owner`'s
+   single `relay_on_blocked()` choke point (the headline gap, §2.5) —
+   pending the owner's answer to Q1 below on the actual rule (which relays,
+   which run states). Because it's one already-unified choke point serving
+   all three transports, this slice alone closes the gap everywhere at once.
+4. **M** — wire `SYS_ACTION_WRITE_ZONES_CONFIG` into `zones_http.c` (§2.6,
+   no existing check at all) — pending Q2 below.
+5. **S** each — `SYS_ACTION_FACTORY_RESET`, `SYS_ACTION_CFGFS_FORMAT` once
+   their rules are confirmed (Q3 below); each is one table row plus wiring
+   at 1-2 call sites.
+6. **S** — `check_uri_handler_cap.ps1`-style mechanical check (or extend an
+   existing one) confirming every route in a to-be-decided "gated action"
+   allowlist actually calls `system_mode_gate_check()` before doing its
+   mutation, so this doesn't silently rot the way the recovery banner did
+   before `d89256fe`'s audit caught it.
+
+Each slice lands independently and is negative-tested per COMMON.md/
+IMPLEMENTER.md discipline before merge; no slice depends on a later one.
+
+## 4. Non-goals
+
+- Not a replacement for `kiln_io_owner`/`thermo_owner`'s race-arbitration
+  locks, or for the OTA/profile mutual interlock, or for
+  `readiness_gate.h`'s firing checklist — those stay exactly as they are;
+  the gate composes with them (calls their read accessors into its
+  snapshot) rather than replacing their logic.
+- Not a UART-bridge or LCD architecture change — it reuses each transport's
+  existing reply/error convention, adding a shared reason string, not a new
+  wire format.
+- Not touching `route_tier_table.h` or any auth tier.
+
+## 5. Open questions for the owner
+
+1. **Manual relay writes during a firing (§2.5's headline gap)** — should a
+   manual relay-ON command be refused outright for a relay the running
+   profile/autotune session currently controls, or only refused for relays
+   *not* in use by the run (leaving, e.g., a spare zone free to hand-drive)?
+   **Recommendation:** refuse outright for any relay claimed by the running
+   profile/autotune session (`kiln_io_owner`'s existing per-relay
+   `RELAY_OWNER_*` claim already tells us which those are — reuse that fact
+   rather than re-deriving it), allow a manual write to an unclaimed relay.
+   This mirrors the existing per-relay ownership model rather than
+   introducing a blanket "no manual relay writes while firing anywhere."
+2. **Zones/config writes during a firing** — should *any* zones config
+   write be refused while a profile is running (mode-level refusal), or
+   should this stay purely value-based (today's guard-5 "is this bound
+   safe" check, no mode check at all)? **Recommendation:** mode-refuse
+   writes to zones actively in use by the running profile, allow writes to
+   zones the running profile doesn't touch — mirrors the existing
+   `SET_FIRING_CEILING` precedent of scoping refusals to what's actually
+   in play rather than a blanket "no writes while firing," and the same
+   shape as Q1's recommendation.
+3. **Factory reset / cfgfs format while firing** — refuse outright, or
+   allow (since these operate on persisted config, not live relay state)?
+   **Recommendation:** refuse outright while `profile_running` or
+   `autotune_running` — both are destructive, irreversible operations with
+   no legitimate reason to run mid-firing, and refusing costs nothing
+   (operator stops the firing first).
+4. **HTTP status code for a mode refusal** — reuse 409 (Conflict, matching
+   the live-profile-edit family's window-violation code) uniformly, or
+   keep OTA's existing 428 for its own interlock and use 409 only for new
+   gate wiring? **Recommendation:** 409 for all new `system_mode_gate`
+   refusals; leave OTA's existing 428 alone rather than reshaping an
+   already-shipped, tested contract for consistency's own sake.
