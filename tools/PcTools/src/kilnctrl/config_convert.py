@@ -78,9 +78,11 @@ ZONES_CFG_T / KILN_PACKAGE (landed 2026-09-24, see the "zones_blob store" and
     NVS/blob record (firmware/KilnFW/App/drivers/persist/
     zones_config_json.h, ZONES_CFG_VERSION, currently 26). STAGE 1 ONLY:
     decodes/encodes the CURRENT version byte-exactly (offsets cross-checked
-    against zone_cfg_v25_t's real `_Static_assert`s and against
-    ZONES_CONFIG_BLOB_MAX_SIZE, and pinned going forward by
-    check_zones_blob_mirror.py). STAGE 2 (the other 25 historical shapes,
+    against zone_cfg_v25_t's real `_Static_assert`s, and pinned field by
+    field by a firmware-generated golden: KilnFW's host test
+    test_zones_blob_golden.c writes a sentinel-filled zones_cfg_t through the
+    real nvs_save() into tests/fixtures/config_convert/zones_cfg_golden.txt,
+    and tests/test_config_convert_zones_golden.py decodes it). STAGE 2 (the other 25 historical shapes,
     firmware's `convert_versioned_blob_to_current()`) was assessed and NOT
     attempted this pass -- porting even one branch correctly needs a real
     captured or host-test-emitted blob of that exact version to check
@@ -944,19 +946,22 @@ def convert_safety_config_blob(blob: bytes, target_version: int) -> "tuple[bytes
 # sizeof(zone_cfg_t) == 248. The zones_cfg_t container's own layout
 # (version/thermo_count/.../zones[]/timing_profile_count/timing_profiles[]/
 # pc_link_abort_silence_ms/crc32) was computed the same way, by hand, from
-# natural alignment rules -- and the result, 896 bytes total, matches
-# zones_config_accessors.h's independent ZONES_CONFIG_BLOB_MAX_SIZE #define
-# EXACTLY (that macro is sized to fit sizeof(zones_cfg_t) with headroom
-# reduced to zero on purpose, per that header's own comment; a real firmware
-# compile with a different total would either not compile past that macro's
-# _Static_assert or would fail check_zones_blob_mirror.py below, whichever
-# comes first) -- the strongest cross-check available without a live
-# compiler on this machine. Pinned going forward by
-# check_zones_blob_mirror.py, which re-derives the same struct-tail
-# _Static_assert lines from zones_config_json.h and fails loud if any of
-# them (or ZONES_CFG_VERSION/ZONE_NAME_MAX_LEN/SRC_GROUP_COUNT/
-# THERMO_CHANNEL_COUNT/TIMING_PROFILE_NAME_MAX_LEN/ZONES_CONFIG_BLOB_MAX_SIZE)
-# drift out of step with this module's constants below.
+# natural alignment rules, 896 bytes total. (zones_config_accessors.h's
+# ZONES_CONFIG_BLOB_MAX_SIZE is also 896 today, but firmware only asserts
+# sizeof(zones_cfg_t) <= that macro, so the equality alone proves nothing.)
+#
+# What actually pins this layout is a firmware-generated golden:
+# firmware/KilnFW/App/test/test_zones_blob_golden.c fills a real
+# zones_cfg_t with a distinct sentinel per field, saves it through the real
+# nvs_save() (CRC stamp included), and emits every field's offsetof()/size/
+# value plus the raw blob to
+# tools/PcTools/tests/fixtures/config_convert/zones_cfg_golden.txt; that C
+# test fails when the struct drifts from the committed file.
+# tools/PcTools/tests/test_config_convert_zones_golden.py decodes the blob
+# with this module and checks every field, the field set, and that encode
+# reproduces the firmware bytes exactly. tools/check_config_convert_mirror.py
+# separately pins ZONES_CFG_VERSION/ZONE_NAME_MAX_LEN/SRC_GROUP_COUNT/
+# TIMING_PROFILE_NAME_MAX_LEN/ZONES_CONFIG_BLOB_MAX_SIZE and the total size.
 #
 # STAGE 2 (older versions) was assessed and NOT attempted this pass: firmware
 # converts an arbitrary historical version straight to current in one
@@ -1096,7 +1101,7 @@ def _decode_zone_cfg(raw: bytes) -> dict:
 
 
 def _encode_zone_cfg(z: dict) -> bytes:
-    args = [_encode_name(z["name"])[: _ZONE_NAME_LEN].ljust(_ZONE_NAME_LEN, b"\x00")]
+    args = [z["name"].encode("ascii", errors="replace")[:ZONE_NAME_MAX_LEN].ljust(_ZONE_NAME_LEN, b"\x00")]
     args += [z[f] for f in _ZONE_FLOAT1_FIELDS]
     args += list(z["coupling_coeff"])
     args += list(z["coupling_tau_s"])

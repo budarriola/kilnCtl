@@ -505,6 +505,10 @@ try {
             # link the real registry, same as the other executables below
             # that link stack_margin.c for their own registration calls.
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            # config_convert.py's zones_blob golden (see that file's header):
+            # real nvs_save() bytes of a sentinel-filled zones_cfg_t, compared
+            # against tools/PcTools/tests/fixtures/config_convert/.
+            "`"$(Join-Path $testDir 'test_zones_blob_golden.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
