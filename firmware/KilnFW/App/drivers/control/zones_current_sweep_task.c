@@ -20,6 +20,7 @@
 #include <time.h>
 #include "ct_verify_store.h"
 #include "readiness_http.h" /* readiness_ct_attribution_fact_t -- pure inline header */
+#include "stack_margin.h"
 
 /* opus review finding (LOW): zone_sweep_task_record_ct_channels()'s summed-
  * topology unmeasured path packs zone index zi into a uint8_t bitmask
@@ -2363,6 +2364,17 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     s_sweep.summed_unmeasured_mask = 0;
 
     BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
+    /* Registered unconditionally, success or not, same as recovery_exit/
+     * ota_pico_rollback/ota_rollback_reboot (ota_http_*.c) -- stack_margin_
+     * register() reads *task_handle_slot fresh at report time, so a creation
+     * failure just reads back alive=false. &s_sweep.task is the same
+     * TaskHandle_t slot xTaskCreate() was just given above, and this
+     * function already sets it back to NULL when the task self-deletes
+     * (zone_sweep_task(), near its end), so a finished sweep correctly
+     * reports "not alive" rather than a stale handle -- CLAUDE.md "Register
+     * every new task for stack-margin reporting". Idempotent by (name,
+     * slot): a repeat sweep start re-registers the same pair as a no-op. */
+    stack_margin_register("zone_sweep", &s_sweep.task, 4096);
     if (created != pdPASS) {
         relay_authority_heat_sweep_claim_end(); /* task never started -- give the claim back */
         s_sweep.active = false;

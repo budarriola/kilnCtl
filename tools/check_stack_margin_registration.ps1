@@ -169,6 +169,17 @@ $requiredNames = @(
     # so its live margin has to stay measurable.
     "kiln_cfg_swap",
 
+    # Review finding at 4ddad119 (CLAUDE.md "Register every new task for
+    # stack-margin reporting"): zones_current_sweep_task.c's one-shot,
+    # self-deleting zone_sweep task had a stack_margin_register() call site
+    # added and no ceiling check of its own -- same on-demand shape as
+    # recovery_exit/ota_pico_rollback/ota_rollback_reboot below (a POST
+    # handler, here zones_current_sweep_start(), can (re)start it any number
+    # of times per boot), registered under the same literal name as its own
+    # FreeRTOS task name via &s_sweep.task, the slot it is already created
+    # into and cleared back to NULL from when it self-deletes.
+    "zone_sweep",  # liveness: on-demand -- transient task an HTTP handler (zones_http.c's sweep_start_post_handler()) creates per POST /api/zones/sweep/start call
+
     # docs/PICO_AUTO_UPDATE_PLAN.md G3 -- the one-shot boot-time Pico
     # auto-update evaluator (App/drivers/net/pico_auto_update_boot.c). It
     # self-deletes once it has a verdict, so it is short-lived rather than a
@@ -519,7 +530,6 @@ $exemptCreatedNames = @{
     "ota_confirm"       = "main_network_http.c main_ota_rollback_confirm_task: one-shot OTA confirm timer, self-deletes"
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
     "dns_hijack"        = "wifi_prov_link.c dns_hijack_task: provisioning-only captive-portal DNS, self-deletes"
-    "zone_sweep"        = "zones_current_sweep_task.c zone_sweep_task: one-shot per-zone current sweep, self-deletes"
     "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"

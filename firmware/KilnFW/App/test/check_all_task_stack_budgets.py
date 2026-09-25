@@ -727,6 +727,21 @@ TASKS = [
     dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_exit_reboot_task,\s*"recovery_exit_reboot",\s*(\d+)')),
+    dict(name="zone_sweep", root="zone_sweep_task",
+         # Added 2026-09-24 (review finding at 4ddad119, CLAUDE.md "Register
+         # every new task for stack-margin reporting"): this one-shot,
+         # self-deleting task had a stack_margin_register() call site added
+         # (zones_current_sweep_task.c, registered via &s_sweep.task, same
+         # slot xTaskCreate() writes and the task itself clears to NULL on
+         # exit) but no ceiling row of its own -- same on-demand shape as
+         # recovery_exit/ota_pico_rollback above. zone_sweep_task's own body
+         # calls straight into zone_sweep_run_all_zones() (pure engine,
+         # zones_current_sweep_engine.c) plus the push/plan/confirm helper
+         # functions in this same file -- no function-pointer dispatch on
+         # this task's own reachable graph, so the plain root below reaches
+         # the whole path with no indirect-dispatch gap to model.
+         stack=lambda: extract_int_literal("drivers/control/zones_current_sweep_task.c",
+             r'xTaskCreate\(zone_sweep_task,\s*"zone_sweep",\s*(\d+)')),
     dict(name="backlight_pwm", root="backlight_pwm_task",
          # backlight_pwm.c:57's #if CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE wraps
          # both the task and its xTaskCreate (a no-op stub is compiled in its
@@ -1020,6 +1035,24 @@ CEILING_BYTES = {
     "screen_idle": 3504,
     "uart_owner_evt_task": 176,
     "uart_proto_rx": 3584,
+    # Measured 2026-09-24 against a KilnCtrl.elf freshly built by
+    # check_00_kilnfw_target_build.ps1 (this pass's own build, worktree
+    # C:\wt\sweepstack_dmt6la rebased onto origin/main 4ddad119). Deepest
+    # measured path: zone_sweep_task -> zone_sweep_unstage_k_ct (constprop)
+    # -> zone_sweep_confirm_k_ct_landed (constprop) ->
+    # safety_cfg_store_refetch -> safety_cfg_store_refetch_locked ->
+    # safety_link_get_config_page -> uart_protocol_send_broadcast ->
+    # frame_and_send -> hal_uart_send_blocking -> uart_write_bytes ->
+    # uart_tx_all -> uart_enable_tx_write_fifo = 2896 B, honest free 900 B
+    # (22.0%) of the declared 4096 B, after UNMODELED_OVERHEAD_BYTES. Still
+    # a LOWER BOUND (INDETERMINATE -- an unresolved indirect call in this
+    # graph), same caveat as every other task in this table. 2896 B is well
+    # under the 4096 B declared stack, so this does not meet the "raise the
+    # stack" bar on its own -- but 22.0% honest free for an INDETERMINATE
+    # task that reaches into safety_cfg_store's NVS-backed refetch path is
+    # thin margin, same class flagged (not bumped) for lvgl above; worth a
+    # real hardware high-water-mark measurement before ruling this settled.
+    "zone_sweep": 2896,
 }
 
 
