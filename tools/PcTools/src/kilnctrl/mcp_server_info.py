@@ -907,6 +907,14 @@ def get_readiness(host: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+#: backup_export()'s default output directory, anchored at the repo root
+#: (this file is tools/PcTools/src/kilnctrl/, four levels below it) rather
+#: than the server process's cwd. Gitignored.
+_BACKUP_EXPORT_DEFAULT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))), "logs", "backup_export")
+
+
 @_srv._tool()
 def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) -> str:
     """READ-ONLY: fetch the board's settings/profile backup (GET
@@ -914,8 +922,8 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     ROUTE_TIER_ADMIN) and write the raw JSON to a local file. Pure GET, no
     side effects on the board.
 
-    Default `out_path` is ``logs/backup_export/kilnctl_backup_<UTC
-    timestamp>.json`` (repo-relative; ``logs/backup_export/`` is
+    Default `out_path` is ``<repo root>/logs/backup_export/kilnctl_backup_<UTC
+    timestamp>.json`` (anchored at the repo root, not the server's cwd; ``logs/backup_export/`` is
     gitignored, same convention as ``logs/bench_test/``) -- pass an
     explicit path to save elsewhere.
 
@@ -946,7 +954,7 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
 
     if out_path is None:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        out_path = os.path.join("logs", "backup_export", f"kilnctl_backup_{stamp}.json")
+        out_path = os.path.join(_BACKUP_EXPORT_DEFAULT_DIR, f"kilnctl_backup_{stamp}.json")
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -1001,12 +1009,13 @@ def backup_import(
     exist for this route.
 
     REFUSES UNLESS ``confirm is True`` (exactly `True`) -- without it,
-    nothing is read off disk or sent to the board; the tool reports what it
+    nothing is read off disk and nothing is POSTed; the only board access
+    is the read-only GET /api/readiness below, and the tool reports what it
     WOULD do and stops. This holds even for ``dry_run=True``: the board's
     own dry-run mode computes and returns a plan without writing anything,
-    but this tool still will not talk to the board at all without an
-    explicit confirm, so a caller cannot forget it once and get used to
-    dry-run POSTs going through silently.
+    but this tool still will not POST it without an explicit confirm, so a
+    caller cannot forget it once and get used to dry-run POSTs going
+    through silently.
 
     Always fetches GET /api/readiness FIRST (before touching the file or
     the board) and reports its summary; re-fetches it AFTER the POST and
@@ -1029,7 +1038,9 @@ def backup_import(
         ``ack_no_safety=True`` if that is actually intended.
       * "validation" (400) -- the document was refused before anything was
         written (the board's own error message is included verbatim).
-      * "partial_write" (500) -- FAILS LOUD: a partial write landed
+      * "out_of_memory" (500, body exactly "out of memory") -- a buffer
+        allocation failed before anything was parsed or written.
+      * "partial_write" (any other 500) -- FAILS LOUD: a partial write landed
         (kiln_configs[] committed before profiles/zones failed) -- this is
         reported as a failure, never papered over as a partial success.
 

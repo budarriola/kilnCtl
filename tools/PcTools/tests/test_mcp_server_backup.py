@@ -64,16 +64,18 @@ class BackupExportTest(_Base):
 
     def test_default_out_path_under_logs_backup_export(self):
         raw_text = json.dumps(_GOOD_DOC)
-        cwd = os.getcwd()
-        os.chdir(self._tmpdir)
-        try:
-            with self._resolve_host_patch(), \
-                 unittest.mock.patch.object(backup_export_http_client, "get_export",
-                                             return_value=(raw_text, _GOOD_DOC)):
-                result = msi.backup_export()
-            self.assertTrue(os.path.isdir(os.path.join(self._tmpdir, "logs", "backup_export")))
-        finally:
-            os.chdir(cwd)
+        # The real default is anchored at the repo root, not the cwd.
+        self.assertTrue(msi._BACKUP_EXPORT_DEFAULT_DIR.replace("\\", "/").endswith("/logs/backup_export"))
+        self.assertTrue(os.path.isdir(os.path.join(
+            os.path.dirname(os.path.dirname(msi._BACKUP_EXPORT_DEFAULT_DIR)), "tools", "PcTools")))
+        fake_dir = os.path.join(self._tmpdir, "logs", "backup_export")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(msi, "_BACKUP_EXPORT_DEFAULT_DIR", fake_dir), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                         return_value=(raw_text, _GOOD_DOC)):
+            result = msi.backup_export()
+        self.assertTrue(os.path.isdir(fake_dir))
+        self.assertEqual(len(os.listdir(fake_dir)), 1)
         self.assertIn("logs", result.replace("\\", "/"))
 
     def test_sensitive_field_reported_as_bool_never_value(self):
@@ -219,6 +221,12 @@ class BackupImportRefusalTest(_Base):
         result = self._run(500, "kiln_configs committed, profiles failed")
         self.assertIn("FAILED", result)
         self.assertIn("PARTIAL", result)
+        self.assertNotIn("ok - restored", result)
+
+    def test_500_bare_out_of_memory_is_not_a_partial_write(self):
+        result = self._run(500, "out of memory")
+        self.assertIn("out_of_memory", result)
+        self.assertNotIn("PARTIAL", result)
         self.assertNotIn("ok - restored", result)
 
     def test_transport_failure_reports_error(self):

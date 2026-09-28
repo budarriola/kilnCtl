@@ -15,7 +15,10 @@ whichever of these it gets back:
     JSON -- see ``dry_run`` below).
   * 400 -- validation refused the whole import before writing anything
     (``err_msg``, plain text).
-  * 500 -- a PARTIAL write landed (``kiln_configs[]`` committed before
+  * 500 "out of memory" (that exact body) -- a buffer allocation failed
+    before anything was parsed or written; nothing changed
+    (``REFUSAL_OUT_OF_MEMORY``).
+  * any other 500 -- a PARTIAL write landed (``kiln_configs[]`` committed before
     profiles/zones failed) -- backup_import_post_handler() distinguishes
     this from the all-nothing 400 case explicitly, and so does this client
     (``BackupImportHttpError.partial_write``).
@@ -73,6 +76,12 @@ REFUSAL_INTERLOCK_NEEDS_ACK = "interlock_needs_ack"
 REFUSAL_INTERLOCK = "interlock"
 REFUSAL_VALIDATION = "validation"
 REFUSAL_PARTIAL_WRITE = "partial_write"
+REFUSAL_OUT_OF_MEMORY = "out_of_memory"
+
+#: The exact body of backup_import_post_handler()'s pre-write allocation
+#: failures (httpd_resp_send_err(..., HTTPD_500_INTERNAL_SERVER_ERROR,
+#: "out of memory")) -- a 500 that wrote nothing, unlike every other 500.
+OUT_OF_MEMORY_NOTHING_WRITTEN = "out of memory"
 REFUSAL_OTHER = "other"
 
 
@@ -121,6 +130,16 @@ def classify_refusal(status: Optional[int], detail: str) -> str:
     if status == 400:
         return REFUSAL_VALIDATION
     if status == 500:
+        # backup_import_post_handler() sends a bare "out of memory" 500 via
+        # httpd_resp_send_err() from three allocation checks that all run
+        # BEFORE backup_import_apply() writes anything (body buffer, plan
+        # buffer, dry-run output buffer). Every partial-write 500 instead
+        # carries backup_import_apply()'s own err_msg, whose post-commit
+        # out-of-memory variants all say "... -- kiln configs were already
+        # restored" -- never the bare string. Anything else at 500 stays
+        # partial_write: an unrecognised 500 must fail loud, not quiet.
+        if (detail or "").strip() == OUT_OF_MEMORY_NOTHING_WRITTEN:
+            return REFUSAL_OUT_OF_MEMORY
         return REFUSAL_PARTIAL_WRITE
     return REFUSAL_OTHER
 

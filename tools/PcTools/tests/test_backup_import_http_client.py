@@ -142,6 +142,23 @@ class ClassifyRefusalTest(unittest.TestCase):
     def test_500_is_partial_write(self):
         self.assertEqual(bi.classify_refusal(500, "partial"), bi.REFUSAL_PARTIAL_WRITE)
 
+    def test_500_bare_out_of_memory_wrote_nothing(self):
+        # backup_import_post_handler()'s pre-write httpd_resp_send_err() body.
+        self.assertEqual(bi.classify_refusal(500, "out of memory"), bi.REFUSAL_OUT_OF_MEMORY)
+
+    def test_500_post_commit_out_of_memory_is_still_partial_write(self):
+        # backup_import_apply()'s post-kiln_configs-commit allocation failure.
+        self.assertEqual(
+            bi.classify_refusal(500, "out of memory (profile candidates) -- kiln configs were already restored"),
+            bi.REFUSAL_PARTIAL_WRITE)
+
+    def test_409_real_firmware_mode_gate_string(self):
+        # system_mode_gate.c's SYS_ACTION_WRITE_ZONES_CONFIG reason, verbatim.
+        self.assertEqual(
+            bi.classify_refusal(409, "refused -- a firing or autotune run is active; zone config cannot be "
+                                     "changed until it ends"),
+            bi.REFUSAL_MODE_GATE)
+
     def test_unknown_status_is_other(self):
         self.assertEqual(bi.classify_refusal(503, "?"), bi.REFUSAL_OTHER)
 
