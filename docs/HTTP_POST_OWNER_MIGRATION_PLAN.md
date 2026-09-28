@@ -264,90 +264,36 @@ argument to see a call site at all.
 
 ### A4 -- `backup/import` onto A1's helper. DONE (2026-09-28)
 
-- Measured on the bench (2026-09-28, bench A4 finding): a real restore
-  (10940 B, 1 profile, 3 zones, 1 timing profile, 1 kiln_config) exceeded
-  the PC client's own request timeout on all three attempts and left the
-  board's HTTP stack unresponsive to other requests for several polls after
-  each -- well over the "drop this slice" threshold.
-- `backup_import_post_handler()` (`backup_import.c`) now reads its headers
-  and does its mode-gate/interlock/busy checks on `httpd_worker` exactly as
-  before, then hands the body read plus the two-pass validate-then-commit
-  off to a new `backup_import_job()` running on `http_async_job_try_start()`
-  ("http_async_job", 6144 B, the same task name/size A1/A2 already use).
-  The header-derived values (`mode`, `dry_run`, `ack_delete_count`,
-  `ack_no_safety`, `content_len`) are read on `httpd_worker` before the
-  handoff and carried through a small heap-allocated ctx struct, since
-  `http_auth_*`/header functions are not safe to call again once the async
-  copy is handed to a different task. Every response status/body the job
-  sends is byte-for-byte what the pre-A4 inline handler sent from the same
-  point onward -- `backup_import_http_client.classify_refusal()` needed no
-  changes.
-- This is A1/A2's same-connection-reply shape, not a job-id/poll shape: the
-  wire contract (one POST, one response, no job id, no separate status
-  route) is unchanged, so `check_uri_handler_cap.ps1`'s cap stays unaffected
-  (163/170 routes, unchanged before/after this slice) and no route tier
-  table edit was needed. What moving the work off `httpd_worker` actually
-  fixes is the bench-observed "board HTTP unresponsive for several polls"
-  symptom (other requests no longer wait behind this one on the same shared
-  worker task) -- it does not shorten the restore itself, so
-  `backup_import_http_client.py`'s own client-side timeout was separately
-  raised 30s -> 90s (bench A4 finding: 30s was too short and the client's
-  read timed out while the board was still working -- and had, in fact,
-  already committed on the first of the three bench attempts). Neither the
-  MCP `backup_import()` tool nor its client retries a timed-out import
-  automatically; both now document reading the config back (`get_readiness()`/
-  `control_get_zones()`, or a `dry_run=True` re-call) instead of re-POSTing
-  an import whose outcome is unknown.
-- `.dram0.bss` unchanged (99720 B against the 101000 B ceiling -- no new
-  statics, ctx is heap-allocated). `check_stack_margin_registration.ps1`
-  passes unchanged (`http_async_job` is already registered, shared with
-  A1/A2). No bench check was run for this slice (session constraint: do not
-  touch the bench) -- verified by a full `check_00_kilnfw_target_build.ps1`
-  plus code review of the byte-for-byte response preservation instead;
-  the bench-responsiveness re-check this plan's own "Constraints" section
-  calls for remains open for a future bench session.
-- Review fixes (2026-09-28). First, `backup_import_job()` now re-runs the
-  mode gate and interlock after the body read, just before
-  `backup_import_apply()`. Off `httpd_worker`, an HTTP profile/autotune
-  start is no longer serialized behind this handler. Second,
-  `check_all_task_stack_budgets.py` now measures `backup_import_job` as an
-  `http_async_job` extra root: 3760 B, lower bound, on a 6144 B stack.
-- **Residual TOCTOU -- CLOSED (2026-09-28, A4 review follow-up A):** a start
-  landing *during* the commit pass is now refused. `backup_import.c` owns a
-  lock-free atomic flag (`backup_restore_state.h`'s
-  `backup_import_restore_in_flight()`), set before `backup_import_job`'s
-  commit pass and cleared on every exit path (success, the re-checked mode
-  gate/interlock refusal, and any other early return) via a thin wrapper
-  (`backup_import_job()`) around the renamed original body
-  (`backup_import_job_inner()`) -- the wrapper's `atomic_store` on the way
-  out is what guarantees the clear runs regardless of which path the inner
-  function took. The flag is set BEFORE the job-side TOCTOU re-check reads
-  the heat claim, and each start path re-reads the flag at its commit point,
-  after publishing its heat claim (and undoes the claim if set) -- a
-  store-then-read pair on each side, so a start and a restore can never both
-  proceed. The early gate check alone would have left a window as long as
-  the start's pre-commit validation; the commit-point re-read closes it.
-  `system_mode_gate.c`'s
-  `sys_mode_snapshot_t` gained a `restore_in_flight` field, consulted at the
-  same choke point RECOVERY MODE already gates (`profile_executor_run.c`,
-  `autotune_engine.c`), so all three transports (HTTP, UART, LCD) refuse
-  with the same wording: "a backup restore is in progress; wait for it to
-  finish before starting". Host-tested in `test_backup_import.c` (the flag
-  is already set when the job's re-check reads the heat claim, and reads
-  false before and after the job on both the success and refused-recheck
-  exit paths) and in `test_profile_executor_prestart.c`/
-  `test_autotune_engine_prestart.c` (a fake `backup_import_restore_in_flight()`
-  refuses a start with the gate's exact message, ahead of the generic
-  prestart guard). The commit-point re-read has no host test: those
-  executables never start the executor, so it is covered by review and the
-  target build only. Negative-tested by hand: disabling the gate check in
-  `system_mode_gate.c` reproduces both refusal tests failing; restored, and
-  a forced full rebuild of all 63 host-test executables passes clean.
-  `.dram0.bss` for this follow-up pass (Items A/B/C together, new atomic
-  flag included): **99768 B** against the 101000 B ceiling (up from the
-  99720 B recorded above for the original A4 slice). URI routes unchanged,
-  163/170. `check_stack_margin_registration.ps1` passes, 10 spare task
-  slots, no new task registered by this pass.
+`backup_import_post_handler()` moved its body-read/validate/commit onto a new
+`backup_import_job()` on `http_async_job_try_start()` (same task as A1/A2),
+keeping the header checks on `httpd_worker` and the same one-POST/one-response
+wire contract (no route/URI-cap change, 163/170). Response bytes are
+byte-for-byte unchanged; the client timeout was raised 30s -> 90s. Review
+follow-up closed a residual TOCTOU: a start landing during the commit pass is
+now refused via a `restore_in_flight` atomic flag consulted at the same choke
+point RECOVERY MODE gates, host-tested in `test_backup_import.c` and the
+prestart-guard tests, negative-tested by hand with a forced full rebuild.
+`.dram0.bss` 99768 B / 101000 B ceiling.
+
+**Bench responsiveness check -- DONE (2026-09-28).** ESP flashed at `c021ad96`
+(verified). Two no-op `backup_import` merge round-trips (~61 s each, both
+"ok - restored") ran while an independent poller hit `GET /api/readiness`
+once/s for 90 s: 66/66 OK, max 715.8 ms, avg 359.5 ms. Zones/readiness/crash/
+trip state unchanged before and after. The ~61 s cost is the roughly 48
+per-setter `nvs_save()` calls in the zone/profile commit loops (each flushing
+on its own) plus the Pico round trips (safety ceiling guard,
+`i_normal_a` stage/COMMIT_CONFIG/read-back) -- not a symptom of moving the
+work off `httpd_worker`. `link_reply_us` timeouts (safety link) accumulated
+to 15 during the window with no trip; this is benign, not an open finding --
+that counter counts status-push gaps, not failed replies
+(`docs/audits/safety_link_get_status_timeout_counter_2026-09-10.md`,
+redefined 2026-09-10), and the import's `safety_exchange` calls contend for
+`xact_lock`, so a few gaps are expected under this load. Backlog, not
+urgent: batch the commit loops' `nvs_save()` calls into one flush per zone or
+per import using the existing `_no_save` setter pattern (e.g.
+`zones_config_set_settings_source_unchecked_no_save`,
+`zones_config_accessors.c:818`) to cut the ~61 s further. This closes the "remains open for a future bench session" note
+from the original slice.
 
 ## Not worth doing, with reasons
 
