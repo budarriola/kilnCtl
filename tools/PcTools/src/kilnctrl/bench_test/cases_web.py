@@ -271,12 +271,11 @@ def _case_web_x03(ctx: dict) -> CaseResult:
         if tier in _ALWAYS_OPEN_TIERS:
             # This check's job is confirming the route isn't gated behind
             # auth it shouldn't be (401/403), never that a bare GET with no
-            # query string succeeds -- /api/profile_plan and
-            # /api/firing_history are ROUTE_TIER_OPEN but legitimately
-            # answer 400 for a required id/profile_id query param missing
-            # (dashboard_exec_http.c's profile_plan_get_handler()/
-            # firing_history_get_handler()), which is not an auth-tier
-            # violation. 404 is still a violation here too -- an OPEN route
+            # query string succeeds -- /api/profile_plan is ROUTE_TIER_OPEN
+            # (/api/firing_history is now ADMIN tier, not OPEN) but
+            # legitimately answers 400 for a required id/profile_id query param
+            # missing (dashboard_exec_http.c's profile_plan_get_handler()),
+            # which is not an auth-tier violation. 404 is still a violation here too -- an OPEN route
             # answering "not found" is the URI-handler-cap failure mode (the
             # route silently never got registered, e.g. the 160-slot cap in
             # wifi_provision_http.c being hit), which is exactly the kind of

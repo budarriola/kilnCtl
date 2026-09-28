@@ -139,7 +139,9 @@ needed to load it:
 `GET /`, `/app.js`, `/nav.js`, `/theme.css`, `/commissioning_shared.js`,
 `GET /api/status`, `GET /api/profile_exec`, `GET /api/readiness`,
 `GET /api/ota/esp/status`, `GET /api/history.csv`,
-`GET /api/profile_plan`, `GET /api/board_temps`, `GET /api/firing_history`.
+`GET /api/profile_plan`.
+(`GET /api/board_temps` and `GET /api/firing_history` were originally listed
+here but are now ADMIN tier -- see the ambiguous-routes table below.)
 (An earlier draft also listed `GET /api/unit_pref` here — no such route
 exists. Only `POST /api/unit_pref` is registered, and it belongs in ADMIN
 below; the value the dashboard needs is already in `GET /api/status`'s JSON.)
@@ -256,11 +258,11 @@ OPEN test).
 
 | Route | Why ambiguous | Recommendation |
 |---|---|---|
-| `GET /api/history.csv`, `/api/firing_history` | Full thermal history is more than a glance at the panel | **OPEN.** The owner's requirement is that a run can be monitored; a run's temperature curve is the monitoring. |
+| `GET /api/history.csv`, `/api/firing_history` | Full thermal history is more than a glance at the panel | **ADMIN (current).** This recommendation was OPEN at the time this table was written; the route is now ADMIN tier. |
 | `GET /api/zones` | Read-only, but exposes PID gains and per-zone calibration | **ADMIN.** It is a config dump, not telemetry. Its temperatures are already in `/api/status`. |
 | `GET /api/readiness` | Enumerates every unfinished commissioning step | **OPEN.** The dashboard renders a readiness banner from it, and it reports nothing secret. |
 | `POST /api/unit_pref` | Only a POST route exists (no GET) — the earlier draft's "OPEN for GET" half was fictional | **ADMIN.** The GET variant does not exist; the value the dashboard needs is already in `GET /api/status`'s JSON, which is OPEN. |
-| `GET /api/board_temps` | Telemetry, but board-internal | **OPEN.** Same class as `/api/status`. |
+| `GET /api/board_temps` | Telemetry, but board-internal | **ADMIN (current).** This recommendation was OPEN at the time this table was written; the route is now ADMIN tier. |
 | `GET /api/coredump/*`, `/api/crash_report` | Diagnostics, no write | **ADMIN.** A coredump contains RAM contents, including the session table. |
 | `GET /status` (the Wi-Fi status page) | Publishes the AP password in plain text | **OPEN, unchanged.** It is the board's own AP identity and is already deliberately public. Because it is public, the web credential must not be derived from it — see item 2. |
 | `POST /api/estop/verify` | An operator record, not a live control | **ADMIN.** It records that E-stop wiring was bench-verified; a wrong record weakens a safety argument. |
@@ -993,10 +995,12 @@ reconfirmed GREEN after a forced full rebuild.
 **These paths bypass authentication unconditionally, in every auth state —
 enabled, disabled, locked, or mid-prompt:**
 
-- `POST /api/profile_exec/stop`. Nominally USER, but a stop is never refused
-  for lack of a session. A stop makes the kiln safer; there is no threat model
-  in which blocking it is the safe choice, and `app.js` already calls it from
-  the unauthenticated dashboard.
+- `POST /api/profile_exec/stop` was USER tier with an unconditional bypass at
+  the time this section was originally written; per the 2026-09-28 owner
+  decision quoted below, it is now USER tier and DOES require a session --
+  stopping needs login (the hardware E-stop is the unauthenticated backstop
+  instead). The bypass reasoning here is kept only as historical rationale
+  for that earlier design and no longer describes current behavior.
 - `POST /api/zones/current_sweep/abort`, `POST /api/autotune/abort`, and
   `POST /api/diagnostics/danger/stop`. Nominally ADMIN, but each one aborts an
   operation that is actively driving relays — the current-sweep task, a
