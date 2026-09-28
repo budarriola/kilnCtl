@@ -1292,6 +1292,70 @@ static void test_small_ki_edit_tolerance_is_relative_not_absolute(void)
     }
 }
 
+// Review follow-up to the test above: the %.9g GET-then-repost round trip is
+// exact for EVERY finite float32 (9 significant digits leave a decimal within
+// 5e-9 relative of the float, far inside float32's >= 2.98e-8 relative half-
+// ULP, so even strtof-via-strtod double rounding lands back on the same
+// float). Pin that across the magnitude range the relative tolerance has to
+// handle -- a large Kp, the largest float below ZONE_PID_GAIN_MAX, real bench
+// gains, a subnormal, and zero -- and prove a large-gain edit still
+// invalidates.
+static void test_gain_round_trip_at_9g_never_invalidates_any_magnitude(void)
+{
+    TEST_SECTION("parse_zone_fields -- %.9g gain repost keeps tuning_valid at every magnitude");
+
+    static const float gains[][3] = {
+        {500.0f, 0.3f, 0.05f},
+        {999.999939f, 999.999939f, 999.999939f},
+        {0.0318f, 0.00003f, 1.069f},
+        {0.0631f, 0.000034f, 0.8401f},
+        {1.17549435e-38f, 1.40129846e-45f, 0.0f},
+        {0.0f, 0.0f, 0.0f},
+    };
+    for (size_t g = 0; g < sizeof(gains) / sizeof(gains[0]); g++) {
+        zone_cfg_t current = make_stored_zone();
+        current.pid_kp = gains[g][0];
+        current.pid_ki = gains[g][1];
+        current.pid_kd = gains[g][2];
+        current.tuning_valid = 1;
+        char body[384];
+        snprintf(body, sizeof(body),
+                 "z0_name=Top&z0_tctype=3&z0_relay_mask=2&z0_thermo_mask=1&z0_timingprofile=0&"
+                 "z0_cal=1.5&z0_kp=%.9g&z0_ki=%.9g&z0_kd=%.9g&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                 "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0",
+                 (double)current.pid_kp, (double)current.pid_ki, (double)current.pid_kd);
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "gain set %u: %%.9g repost is accepted", (unsigned)g);
+        TEST_CHECK(ok, msg);
+        snprintf(msg, sizeof(msg), "gain set %u: %%.9g repost reparses bit-exact", (unsigned)g);
+        TEST_CHECK(out.pid_kp == current.pid_kp && out.pid_ki == current.pid_ki && out.pid_kd == current.pid_kd,
+                   msg);
+        snprintf(msg, sizeof(msg), "gain set %u: %%.9g repost leaves tuning_valid standing", (unsigned)g);
+        TEST_CHECK(out.tuning_valid, msg);
+    }
+
+    // A real edit on a large gain (Kp 500 -> 500.01, 2e-5 relative) must
+    // still clear the record: the relative term is 5e-3 there, not 0.01.
+    {
+        zone_cfg_t current = make_stored_zone();
+        current.pid_kp = 500.0f;
+        current.tuning_valid = 1;
+        const char *body = "z0_name=Top&z0_tctype=3&z0_relay_mask=2&z0_thermo_mask=1&z0_timingprofile=0&"
+                           "z0_cal=1.5&z0_kp=500.01&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                           "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a well-formed Kp 500 -> 500.01 edit is accepted");
+        TEST_CHECK(!out.tuning_valid, "a Kp 500 -> 500.01 edit clears tuning_valid");
+    }
+}
+
 // Sibling check: a zone index still IN range (i < thermo_count) that omits
 // its thermo_mask field keeps the documented legacy "zone i reads channel i"
 // fallback -- the fix above must not have disturbed this existing,
@@ -15009,6 +15073,7 @@ void run_test_zones_http(void)
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
     test_small_ki_edit_tolerance_is_relative_not_absolute();
+    test_gain_round_trip_at_9g_never_invalidates_any_magnitude();
     test_in_range_zone_thermo_mask_legacy_fallback_unchanged();
     test_old_behaviour_would_have_zeroed_it();
 

@@ -445,23 +445,32 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * say, 0.00005 is inside 0.0001 and would NOT invalidate the tuning
      * record, silently keeping a stale record for a gain that actually
      * changed by ~50%. 2026-09-28 follow-up: switched to a relative
-     * tolerance, `1e-6f + 1e-5f*fabsf(cur)` -- the `1e-6f` floor still
-     * absorbs float32 round-trip noise (a %.9g repost, or PcTools' own
-     * repr(float) repost, of a near-zero gain) where the relative term alone
-     * would be too tight, and the `1e-5f*fabsf(cur)` term scales with the
-     * gain so a small-Ki edit like the one above is no longer swallowed. An
-     * older client that still round-trips through a %.4f-rendered page
-     * carries up to 5e-5 of rounding noise (half the last decimal place) on
-     * an unedited gain; the relative term alone matches that at cur=5
-     * (1e-5*5 = 5e-5) and clears it with growing margin above that -- so an
-     * identical repost of a LARGE gain (Kp/Ki/Kd of a few units or more,
-     * which is where an ordinary tuned PID loop on this hardware actually
-     * lives) never falsely invalidates. Below cur=5, %.4f rounding noise can
-     * still exceed the relative term and an unedited repost from a %.4f-only
-     * client could rarely trip a false invalidation -- strictly the same
-     * exposure the old 0.0001 absolute tolerance already had below cur=1,
-     * not a regression, and %.9g/repr(float) clients (every current one)
-     * are unaffected since they do not round at all. */
+     * tolerance, `1e-6f + 1e-5f*fabsf(cur)`, and the `1e-5f*fabsf(cur)` term
+     * scales with the gain so a small-Ki edit like the one above is no
+     * longer swallowed. A %.9g repost (the web pages' JS-number repost and
+     * PcTools' repr(float) repost both carry the %.9g digits through
+     * unchanged) reparses BIT-EXACT for every finite float32 -- 9
+     * significant digits put the decimal within 5e-9 relative of the float,
+     * far inside float32's >= 2.98e-8 relative half-ULP, so even a strtof
+     * implemented as strtod-then-cast cannot land on a neighbour -- so the
+     * delta on an unedited gain is exactly 0 and both terms are margin, not
+     * noise absorption (test_gain_round_trip_at_9g_never_invalidates_any_
+     * magnitude). The `1e-6f` floor is defence in depth for a client that
+     * reposts with a few ULP of error; its cost is that an edit smaller
+     * than 1e-6 absolute (a ~3% change on Ki = 3.4e-5) still does not
+     * invalidate.
+     *
+     * Deliberate behavior change for a client that still round-trips gains
+     * through %.4f (none in this tree as of 2026-09-28: zones_page.html,
+     * setup_wizard_page.html, safety_config_page.html and
+     * zones_http_client.py all repost the GET value unrounded): the old
+     * 0.0001 absolute tolerance always exceeded %.4f's 5e-5 rounding, so
+     * such a repost never cleared tuning_valid. It now can for any gain
+     * below ~5, which covers every real bench gain (presets carry Kp
+     * ~0.03-0.06, Ki ~1e-4, Kd ~1). That is the honest outcome, not
+     * collateral damage: such a client really does change the stored gain
+     * (a Ki of 3.4e-5 reposted as 0.0000 is zeroed), and a tuning-quality
+     * record describing gains that are no longer stored should not stand. */
     z->tuning_valid = current_z->tuning_valid;
     z->tuning_method = current_z->tuning_method;
     z->tuning_rule = current_z->tuning_rule;
