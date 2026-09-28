@@ -3,30 +3,14 @@
  * even though there is nothing running. i would like to see the last
  * profile there untill i start or select another."
  *
- * Root cause (see the long comment above pollExec() in main_page.html,
- * marked "Owner report, 2026-09-27"): poll()/pollExec() used to react to a
- * run ending by calling `setActivePlanFor(sel.value)` -- sel.value being
- * whatever the <select> incidentally showed, not the profile that had just
- * run. This test extracts getPersistedLastProfileId/setPersistedLastProfileId/
- * pickInitialProfileId VERBATIM from the page and checks:
- *
- *   1. With nothing persisted and no last_run, pickInitialProfileId() falls
- *      back to the select's own current value (old behavior, unchanged as
- *      a last resort).
- *   2. With nothing persisted but the board reporting a present last_run,
- *      pickInitialProfileId() prefers that firmware-exposed id over the
- *      select's incidental value -- the preferred, no-new-route path
- *      (CLAUDE.md: URI handler headroom is tight).
- *   3. A persisted (localStorage) id outranks both -- it represents
- *      whichever of "last run" or "last explicitly selected" happened
- *      later, since both paths write through setPersistedLastProfileId().
- *   4. setPersistedLastProfileId(undefined) clears the persisted value
- *      (so an id of `undefined` doesn't get coerced into the string
- *      "undefined").
- *   5. Negative-test control: a build of pickInitialProfileId() with the
- *      persisted-id check removed (always reads last_run first) fails
- *      assertion 3 -- proving that assertion actually exercises the
- *      priority order rather than passing regardless.
+ * Extracts getPersistedLastProfile/setPersistedLastProfileId/
+ * newestFiredProfile/pickInitialProfileId VERBATIM from the page and checks
+ * the "last run or last explicit selection, whichever is later" ordering,
+ * including across a reload where a run was started from the LCD/UART while
+ * the page was closed (ordered by GET /api/profiles' per-profile
+ * last_run_started_unix_s against the selection's stored wall-clock time),
+ * the legacy bare-id storage format, a deleted persisted id, and a negative
+ * control that removes the timestamp comparison.
  *
  * Run: node firmware/KilnFW/App/test/test_last_relevant_profile.js
  * Exit code 0 on all-pass, 1 otherwise.
@@ -53,7 +37,7 @@ function extractThrough(startMarker, mustContain, stopMarker) {
 
 const CODE = extractThrough(
   "var LAST_PROFILE_STORAGE_KEY = 'kcLastPreviewedProfileId';",
-  'function pickInitialProfileId(sel)',
+  'function pickInitialProfileId(sel, execSt, profiles)',
   '// Tracks the profile id the running/paused/etc. plan curve was last fetched'
 );
 if (CODE.indexOf('function pickInitialProfileId') === -1) {
@@ -77,67 +61,91 @@ function makeFakeLocalStorage() {
   };
 }
 
-function makeContext(code, lastExecStatus) {
-  const ctx = {
-    window: { localStorage: makeFakeLocalStorage() },
-    lastExecStatus: lastExecStatus,
-    console,
-  };
+
+function makeCtx(code) {
+  const ctx = { window: { localStorage: makeFakeLocalStorage() }, console, Date };
   vm.createContext(ctx);
   vm.runInContext(code, ctx);
   return ctx;
 }
+const SEL = { value: '7' };
+const LIST = [
+  { id: 1, last_run_started_unix_s: 1000 },       // started at t = 1 000 000 ms
+  { id: 3, last_run_started_unix_s: 5000 },       // started at t = 5 000 000 ms (newest)
+  { id: 7, last_run_started_unix_s: 0 },          // never fired / no SNTP time
+  { id: 9, last_run_started_unix_s: 0 },
+];
 
-// Group 1: nothing persisted, no last_run -- falls back to sel.value.
+// Group 1: nothing persisted, no list, no last_run -- falls back to sel.value.
 {
-  const ctx = makeContext(CODE, null);
-  const sel = { value: '7' };
-  assert(ctx.pickInitialProfileId(sel) === '7',
-    'no persisted id and no last_run: falls back to the select\'s current value');
+  const ctx = makeCtx(CODE);
+  assert(ctx.pickInitialProfileId(SEL, null, []) === '7',
+    'nothing known: falls back to the select\'s current value');
 }
 
-// Group 2: nothing persisted, last_run present -- prefers firmware data.
+// Group 2: nothing persisted, no list (no session), boot-record last_run present.
 {
-  const ctx = makeContext(CODE, { last_run: { present: true, profile_id: 3 } });
-  const sel = { value: '7' };
-  assert(ctx.pickInitialProfileId(sel) === 3,
-    'no persisted id, last_run present: prefers the firmware-exposed last_run.profile_id');
+  const ctx = makeCtx(CODE);
+  assert(ctx.pickInitialProfileId(SEL, { last_run: { present: true, profile_id: 3 } }, []) === '3',
+    'no persisted id and no list: the boot-record last_run is the fallback');
 }
 
-// Group 3: a persisted id outranks both last_run and the select's value.
+// Group 3: an explicit selection made AFTER the newest recorded run wins.
 {
-  const ctx = makeContext(CODE, { last_run: { present: true, profile_id: 3 } });
+  const ctx = makeCtx(CODE);
+  ctx.setPersistedLastProfileId('9', 6000 * 1000);
+  assert(ctx.pickInitialProfileId(SEL, null, LIST) === '9',
+    'a selection newer than every recorded run start wins');
+}
+
+// Group 4: the reload case -- a run started (LCD/UART) AFTER the persisted
+// selection, while the page was closed, must win over that selection.
+{
+  const ctx = makeCtx(CODE);
+  ctx.setPersistedLastProfileId('9', 2000 * 1000);
+  assert(ctx.pickInitialProfileId(SEL, null, LIST) === '3',
+    'a run started after the persisted selection (page closed) wins over it');
+}
+
+// Group 5: a legacy bare-string value reads as "some time ago" -- any
+// recorded run beats it, and with no list it is still used.
+{
+  const ctx = makeCtx(CODE);
   ctx.window.localStorage.setItem('kcLastPreviewedProfileId', '9');
-  const sel = { value: '7' };
-  assert(ctx.pickInitialProfileId(sel) === '9',
-    'a persisted id (a later explicit selection or run) outranks last_run and the select value');
+  const got = ctx.getPersistedLastProfile();
+  assert(got.id === '9' && got.t === 0, 'legacy bare id parses as {id, t: 0}');
+  assert(ctx.pickInitialProfileId(SEL, null, LIST) === '3', 'legacy bare id loses to a recorded run');
+  assert(ctx.pickInitialProfileId(SEL, null, []) === '9', 'legacy bare id is used when there is no list');
 }
 
-// Group 4: setPersistedLastProfileId(undefined) clears rather than storing "undefined".
+// Group 6: a persisted id that is no longer in the list (deleted) is ignored.
 {
-  const ctx = makeContext(CODE, null);
-  ctx.setPersistedLastProfileId('4');
-  assert(ctx.getPersistedLastProfileId() === '4', 'sanity: persisted id round-trips');
+  const ctx = makeCtx(CODE);
+  ctx.setPersistedLastProfileId('42', 9999 * 1000);
+  assert(ctx.pickInitialProfileId(SEL, null, LIST) === '3',
+    'a persisted id missing from the loaded list is ignored');
+}
+
+// Group 7: clearing stores nothing, not the string "undefined".
+{
+  const ctx = makeCtx(CODE);
+  ctx.setPersistedLastProfileId('4', 1);
+  assert(ctx.getPersistedLastProfile().id === '4', 'sanity: persisted id round-trips');
   ctx.setPersistedLastProfileId(undefined);
-  assert(ctx.getPersistedLastProfileId() === undefined,
-    'setPersistedLastProfileId(undefined) clears the stored value instead of storing "undefined"');
+  assert(ctx.getPersistedLastProfile() === undefined,
+    'setPersistedLastProfileId(undefined) clears the stored value');
 }
 
-// Group 5: negative-test control -- with the persisted-id check removed,
-// group 3's distinguishing assertion must fail.
+// Group 8: negative control -- with the timestamp comparison removed (the
+// persisted selection always wins, as in this change's first cut), group
+// 4's scenario picks the stale selection.
 {
-  const patchRe = /function pickInitialProfileId\(sel\) \{\r?\n  var id = getPersistedLastProfileId\(\);\r?\n/;
-  if (!patchRe.test(CODE)) throw new Error('sanity: negative-test patch did not match pickInitialProfileId source');
-  const BROKEN_CODE = CODE.replace(
-    patchRe,
-    'function pickInitialProfileId(sel) {\n  var id = undefined; // negative-test: persisted id never consulted\n'
-  );
-  const ctx = makeContext(BROKEN_CODE, { last_run: { present: true, profile_id: 3 } });
-  ctx.window.localStorage.setItem('kcLastPreviewedProfileId', '9');
-  const sel = { value: '7' };
-  const wouldHavePassed = ctx.pickInitialProfileId(sel) === '9';
-  assert(!wouldHavePassed,
-    'negative control: with the persisted-id check removed, last_run wins instead -- proving group 3 exercises real priority logic');
+  const needle = 'return (fired.t > persisted.t) ? fired.id : persisted.id;';
+  if (CODE.indexOf(needle) === -1) throw new Error('sanity: negative-test needle not found');
+  const ctx = makeCtx(CODE.replace(needle, 'return persisted.id;'));
+  ctx.setPersistedLastProfileId('9', 2000 * 1000);
+  assert(ctx.pickInitialProfileId(SEL, null, LIST) !== '3',
+    'negative control: without the timestamp comparison the stale selection wins -- group 4 is real');
 }
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

@@ -18,6 +18,9 @@
  *      catch's kcIsAuthCancelled() branch removed (both cases fall through
  *      to showProfilePickerError()) fails assertion 2 -- proving the assertion
  *      actually exercises the distinction rather than passing regardless.
+ *      The mutation is applied to the extracted page source itself.
+ *   5. A reload of the list keeps the operator's current pick (the select
+ *      is rebuilt from scratch), with its own source-mutation negative control.
  *
  * Run: node firmware/KilnFW/App/test/test_profile_picker_auth_status.js
  * Exit code 0 on all-pass, 1 otherwise.
@@ -103,7 +106,7 @@ function makeFakeDom() {
   return { registry, document: doc };
 }
 
-function makeContext(kcIsAuthCancelledImpl) {
+function makeContext(kcIsAuthCancelledImpl, code) {
   const dom = makeFakeDom();
   // Pre-seed the two elements loadProfileList()/its helpers touch by id.
   dom.registry['profileSelect'] = dom.document.createElement('select');
@@ -117,7 +120,7 @@ function makeContext(kcIsAuthCancelledImpl) {
     console,
   };
   vm.createContext(ctx);
-  vm.runInContext(FULL_RANGE, ctx);
+  vm.runInContext(code || FULL_RANGE, ctx);
   return { ctx, dom };
 }
 
@@ -176,12 +179,16 @@ function makeContext(kcIsAuthCancelledImpl) {
     assert(status.textContent === 'Could not load profiles.', 'a real failure names itself plainly');
   }
 
-  // Group 4: negative-test control -- with the AuthCancelled branch
-  // short-circuited to always fall through to showProfilePickerError(),
-  // group 2's distinguishing assertions must fail. This proves group 2
-  // actually exercises the branch rather than passing regardless of it.
+  // Group 4: negative-test control -- mutate the SHIPPED source so the
+  // catch's AuthCancelled branch is dead (if (false)), keeping the same
+  // recognizing kcIsAuthCancelled stub group 2 uses. Group 2's
+  // distinguishing assertion must then fail, proving group 2 exercises that
+  // branch in the page source rather than passing regardless of it.
   {
-    const { ctx, dom } = makeContext(() => false); // never recognizes AuthCancelled
+    const needle = 'if (window.kcIsAuthCancelled(err)) {';
+    if (FULL_RANGE.indexOf(needle) === -1) throw new Error('sanity: negative-test needle not found');
+    const mutated = FULL_RANGE.replace(needle, 'if (false) {');
+    const { ctx, dom } = makeContext((err) => !!(err && err.name === 'AuthCancelled'), mutated);
     ctx.fetch = function () {
       const e = new Error('sign-in cancelled');
       e.name = 'AuthCancelled';
@@ -189,8 +196,43 @@ function makeContext(kcIsAuthCancelledImpl) {
     };
     await ctx.loadProfileList();
     const status = dom.registry['profilePickerStatus'];
-    const wouldHavePassed = status.className !== 'status-fault';
-    assert(!wouldHavePassed, 'negative control: with kcIsAuthCancelled stubbed false, the fault path runs instead');
+    assert(status.className === 'status-fault',
+      'negative control: with the AuthCancelled branch removed from the source, the fault path runs -- group 2 is real');
+  }
+
+  // Group 5: a reload (e.g. the kc-login-driven one) keeps the operator's
+  // current pick. The fake select models a real <select>: clearing
+  // innerHTML resets value, and the first appended option becomes selected.
+  {
+    const run = async (code) => {
+      const { ctx, dom } = makeContext(() => false, code);
+      const sel = dom.registry['profileSelect'];
+      Object.defineProperty(sel, 'innerHTML', {
+        set(v) { this._innerHTML = v; this.children = []; this.value = ''; },
+        get() { return this._innerHTML; },
+      });
+      sel.appendChild = function (child) {
+        this.children.push(child);
+        if (this.value === '') {
+          const first = child.tagName === 'optgroup' ? child.children[0] : child;
+          if (first && first.value !== undefined) this.value = String(first.value);
+        }
+      };
+      sel.value = '2';
+      ctx.fetch = function (url) {
+        if (url === '/api/profiles') return Promise.resolve({ json: () => Promise.resolve([
+          { id: 1, name: 'A', zone_mask: 0 }, { id: 2, name: 'B', zone_mask: 0 }]) });
+        if (url === '/api/profiles/favorites') return Promise.resolve({ ok: true, json: () => Promise.resolve({ ids: [] }) });
+        return Promise.reject(new Error('unexpected url ' + url));
+      };
+      await ctx.loadProfileList();
+      return sel.value;
+    };
+    assert(await run() === '2', 'reloading the list keeps the operator\'s current pick');
+    const needle = 'sel.value = prevValue;';
+    if (FULL_RANGE.indexOf(needle) === -1) throw new Error('sanity: restore needle not found');
+    assert(await run(FULL_RANGE.replace(needle, '')) !== '2',
+      'negative control: without the restore the pick resets -- the positive case is real');
   }
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');

@@ -1255,6 +1255,10 @@ function loadZones() {
 // profile is later named by id only (running-exec card, previous-run
 // banner) so builtins show their full title there too, not just their code.
 var profileTitleById = {};
+// The last successfully loaded GET /api/profiles list, kept for
+// pickInitialProfileId(): each entry's last_run_started_unix_s is the only
+// wall-clock "when did this profile last run" the board exposes.
+var loadedProfileList = [];
 
 // A builtin carries both a short `code` (what fits profile_t's 15-char name
 // field, e.g. "BQ1000") and the full human `title` ("Plainsman Electric
@@ -1399,7 +1403,12 @@ function loadProfileList() {
     hideProfilePickerStatus();
     const list = both[0], favIds = both[1];
     const sel = document.getElementById('profileSelect');
+    // A reload (e.g. after a login elsewhere on the page) must not silently
+    // move the operator's current pick back to the first option -- restored
+    // below if it still exists in the new list.
+    const prevValue = sel.value;
     sel.innerHTML = '';
+    loadedProfileList = Array.isArray(list) ? list : [];
     profileTitleById = {};
     list.forEach(function (p) { profileTitleById[p.id] = profileDisplayName(p); });
     // "no profiles" and "recovery mode" (app.js's setRecoveryBanner()) are
@@ -1434,6 +1443,9 @@ function loadProfileList() {
     appendGroup('Favorites', groups.favorites, true);
     appendGroup('Recently fired', groups.recent, false);
     appendGroup('All', groups.all, false);
+    if (prevValue && list.some(function (p) { return String(p.id) === prevValue; })) {
+      sel.value = prevValue;
+    }
   }).catch(function (err) {
     if (window.kcIsAuthCancelled(err)) {
       showProfilePickerLoginPrompt();
@@ -1750,9 +1762,15 @@ function fetchPlan(id) {
 // null means "nothing to draw", either because no id is selected/running or
 // because the plan fetch failed/404'd (old firmware, or id not found).
 var activePlan = null;
+// Latest id asked for: two overlapping requests (e.g. the page-load preview
+// and poll()'s first "a run is live" tick) must not let the SLOWER plan
+// fetch win -- only the most recent request may set activePlan.
+var activePlanRequestSeq = 0;
 function setActivePlanFor(id) {
+  var seq = ++activePlanRequestSeq;
   if (id === undefined || id === null || id === '') { activePlan = null; return; }
   fetchPlan(id).then(function (data) {
+    if (seq !== activePlanRequestSeq) return;
     activePlan = data;
     // Redraw whichever chart mode is current so a plan that arrives after
     // the frame was already drawn (fetch is async) doesn't sit un-rendered
@@ -3444,8 +3462,21 @@ function drawHistoryChart(rows) {
   });
 }
 
+// Draws the run-trend view -- but only while that IS the current view.
+// Owner report, 2026-09-27 ("i perodicly see a profile flash on the graph
+// even though there is nothing running"): this used to draw
+// unconditionally, and it runs on a bare setInterval(pollHistory, 15000)
+// below, plus the kcunitchange/resize/setActivePlanFor paths. The history
+// ring (profile_executor's s_exec.history) is cleared only when a NEW run
+// starts, so after an operator Stop (state back to 'idle') every 15 s tick
+// repainted the whole finished run plus its plan curve over the idle dots
+// until poll()'s next 2 s tick put the dots back -- the periodic flash.
+// Checked both before the fetch (no pointless request) and again when it
+// lands (the state may have changed while it was in flight).
 function pollHistory() {
+  if (currentChartView(lastExecStatus, lastAutotuneStatus) !== 'history') return;
   fetch('/api/history.csv').then(function (r) { return r.text(); }).then(function (text) {
+    if (currentChartView(lastExecStatus, lastAutotuneStatus) !== 'history') return;
     drawHistoryChart(parseHistoryCsv(text));
   }).catch(function () {});
 }
@@ -3888,16 +3919,27 @@ function drawAutotuneChart(st, trace) {
 // same function instead of drawing anything themselves.
 var wasIdle = true;
 var lastExecStatus = null;
+// Which of the three chart views the cached exec/autotune state calls for:
+// 'autotune', 'idle' (live dots + plan preview) or 'history' (the run
+// trend). Shared by updateChartMode() and pollHistory() so the 15 s
+// history refresh can never paint the trend view over the idle dots or
+// the autotune trace (see pollHistory()'s own comment).
+function currentChartView(execSt, atSt) {
+  var idleNow = !execSt || execSt.state === 'idle';
+  var atState = atSt && atSt.state;
+  if (isAutotuneActive(atState) || ((atState === 'done' || atState === 'aborted') && idleNow)) {
+    return 'autotune';
+  }
+  return idleNow ? 'idle' : 'history';
+}
 function updateChartMode(st) {
   if (st) { lastExecStatus = st; }
   st = lastExecStatus;
   var idleNow = !st || st.state === 'idle';
-  var atState = lastAutotuneStatus && lastAutotuneStatus.state;
-  var atActive = isAutotuneActive(atState);
-  var atFinished = atState === 'done' || atState === 'aborted';
-  if (atActive || (atFinished && idleNow)) {
+  var view = currentChartView(st, lastAutotuneStatus);
+  if (view === 'autotune') {
     drawAutotuneChart(lastAutotuneStatus, autotuneTrace);
-  } else if (idleNow) {
+  } else if (view === 'idle') {
     drawIdleDots(lastChannelsData);
   } else if (wasIdle) {
     pollHistory();
@@ -3907,60 +3949,117 @@ function updateChartMode(st) {
 
 // Owner report, 2026-09-27: "i perodicly see a profile flash on the graph
 // even though there is nothing running. i would like to see the last
-// profile there untill i start or select another." Root cause: the idle
-// branch below used to unconditionally call
-// `setActivePlanFor(sel ? sel.value : undefined)` the instant a run (or
-// even just the exec-state bookkeeping) transitioned to idle -- but
-// `sel.value` is just whatever the browser currently has the rebuilt
-// <select> sitting on (its first/default option after loadProfileList()
-// last repopulated it), almost never the profile that was actually running
-// a moment ago. That swapped the just-finished run's curve for an
-// unrelated, arbitrary profile's curve the instant it ended -- the
-// "flash". The same wrong default (`setActivePlanFor(sel.value)`) was also
-// used to choose the very first thing shown on page load, before the
-// operator had ever touched the picker.
-//
-// Fix: track the "last relevant profile" (last one that actually ran, or
-// last one the operator explicitly picked, whichever happened later)
-// instead of ever falling back to the picker's incidental current value.
-// A run ending no longer touches activePlan at all -- it just persists the
-// plan that WAS running so a later page load can restore it. Persisted in
-// localStorage (wrapped try/catch, degrades to "nothing remembered" in
-// private browsing / storage-disabled) since there is no spare URI-handler
-// headroom for a new route (CLAUDE.md) and firmware's own
-// GET /api/status `last_run` block is preferred first where it applies
-// (survives a reload with no client-side storage at all, and always wins
-// a tie against a stale persisted selection because the run-end path
-// below re-persists over any older selection every time a run finishes).
+// profile there untill i start or select another." Two separate causes:
+//   1. The PERIODIC flash: pollHistory() repainting the finished run's
+//      trend over the idle dots every 15 s -- fixed there (see its own
+//      comment).
+//   2. On an idle transition poll()/pollExec() used to call
+//      `setActivePlanFor(sel.value)` -- whatever the <select> happened to
+//      sit on, not the profile that had just run -- and page load did the
+//      same, so the preview showed an arbitrary profile.
+// For (2): a run ending no longer touches activePlan (the finished run's
+// curve stays) and the picker is moved onto that profile so graph, picker
+// and Run button agree. The "last relevant profile" (last one that ran or
+// was explicitly picked, whichever is LATER) is persisted in localStorage
+// with a wall-clock time (try/catch; degrades to nothing remembered) and
+// on load is ordered against the board's own per-profile
+// last_run_started_unix_s from GET /api/profiles -- so a run started from
+// the LCD or UART while this page was closed beats an older selection.
+// GET /api/profile_exec's `last_run` is only a last-resort fallback: it is
+// run_state's BOOT record (the run in progress before the last reboot, or
+// absent once acknowledged), not this boot's latest run, and carries no
+// wall-clock time to order it by.
 var LAST_PROFILE_STORAGE_KEY = 'kcLastPreviewedProfileId';
-function getPersistedLastProfileId() {
+// Returns {id: string, t: ms since epoch} or undefined. A bare id string
+// (this change's first cut stored one) reads as t = 0: "some time ago".
+function getPersistedLastProfile() {
   try {
     var v = window.localStorage.getItem(LAST_PROFILE_STORAGE_KEY);
-    return (v === null) ? undefined : v;
+    if (v === null || v === '') return undefined;
+    var o = null;
+    try { o = JSON.parse(v); } catch (e) { o = null; }
+    if (o && typeof o === 'object') {
+      if (o.id === undefined || o.id === null || o.id === '') return undefined;
+      return { id: String(o.id), t: Number(o.t) || 0 };
+    }
+    return { id: String(v), t: 0 };
   } catch (e) { return undefined; }
 }
-function setPersistedLastProfileId(id) {
+function setPersistedLastProfileId(id, nowMs) {
   try {
     if (id === undefined || id === null || id === '') {
       window.localStorage.removeItem(LAST_PROFILE_STORAGE_KEY);
     } else {
-      window.localStorage.setItem(LAST_PROFILE_STORAGE_KEY, String(id));
+      window.localStorage.setItem(LAST_PROFILE_STORAGE_KEY, JSON.stringify({
+        id: String(id), t: (typeof nowMs === 'number') ? nowMs : Date.now() }));
     }
   } catch (e) { /* private browsing / storage disabled -- fine to lose this */ }
 }
-// Picks what the idle preview should show when nothing else has set it yet
-// (page load, or the picker went from empty to populated after a login):
-// an explicit earlier selection (localStorage) first, else the board's own
-// last-run record (`GET /api/status`'s OPEN-tier `last_run`, already
-// fetched by poll() -- never gated behind a login), else whatever the
-// picker itself currently shows as a last resort.
-function pickInitialProfileId(sel) {
-  var id = getPersistedLastProfileId();
-  if (!id && lastExecStatus && lastExecStatus.last_run && lastExecStatus.last_run.present) {
-    id = lastExecStatus.last_run.profile_id;
+// The most recently STARTED profile per the board's own records, as
+// {id, t: ms}, or undefined (no list, or no SNTP time recorded yet: the
+// firmware reports 0 rather than a fabricated time).
+function newestFiredProfile(profiles) {
+  var best;
+  (profiles || []).forEach(function (p) {
+    var s = Number(p && p.last_run_started_unix_s) || 0;
+    if (s > 0 && (!best || s * 1000 > best.t)) best = { id: String(p.id), t: s * 1000 };
+  });
+  return best;
+}
+// Picks what the idle preview (and the picker) should show when nothing
+// else has set it yet: page load, or the picker going from empty to
+// populated after a login. `profiles` is the loaded GET /api/profiles list
+// (empty/absent without a session); `execSt` the last /api/profile_exec.
+function pickInitialProfileId(sel, execSt, profiles) {
+  var haveList = Array.isArray(profiles) && profiles.length > 0;
+  function known(id) {
+    return !haveList || profiles.some(function (p) { return String(p.id) === id; });
   }
-  if (!id && sel) { id = sel.value; }
-  return id;
+  var persisted = getPersistedLastProfile();
+  if (persisted && !known(persisted.id)) persisted = undefined; // deleted since
+  var fired = newestFiredProfile(profiles);
+  if (persisted && fired) return (fired.t > persisted.t) ? fired.id : persisted.id;
+  if (persisted) return persisted.id;
+  if (fired) return fired.id;
+  if (execSt && execSt.last_run && execSt.last_run.present &&
+      known(String(execSt.last_run.profile_id))) {
+    return String(execSt.last_run.profile_id);
+  }
+  return sel ? sel.value : undefined;
+}
+// Moves the (idle) picker onto `id` if it lists it, so the preview curve,
+// the picker's label, the feasibility icons and the Run button all name the
+// same profile. Returns whether it did.
+function selectProfileInPicker(id) {
+  var sel = document.getElementById('profileSelect');
+  if (!sel || id === undefined || id === null || id === '') return false;
+  var want = String(id);
+  for (var i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].value === want) {
+      if (sel.value !== want) {
+        sel.value = want;
+        updateProfileFeasIcon();
+        updateProfileLimitIcon();
+      }
+      return true;
+    }
+  }
+  return false;
+}
+// Shared by poll() and pollExec(): exec state moved to/from idle. A run
+// that ended leaves its curve on screen (activePlan already holds it).
+function noteExecPlanChange(planId, idleNow) {
+  if (idleNow) {
+    if (lastExecPlanId !== undefined) {
+      setPersistedLastProfileId(lastExecPlanId);
+      selectProfileInPicker(lastExecPlanId);
+    }
+    lastExecPlanId = planId;
+  } else {
+    lastExecPlanId = planId;
+    setActivePlanFor(planId);
+    setPersistedLastProfileId(planId);
+  }
 }
 
 // Tracks the profile id the running/paused/etc. plan curve was last fetched
@@ -3976,19 +4075,7 @@ function pollExec() {
     renderLagBanner(st);
     var idleNow = !st || st.state === 'idle';
     var planId = idleNow ? undefined : st.profile_id;
-    if (planId !== lastExecPlanId) {
-      if (idleNow) {
-        // A run just ended -- leave its curve on screen (activePlan already
-        // holds it) instead of switching to an arbitrary default. Persist it
-        // as the "last relevant profile", superseding any older selection.
-        if (lastExecPlanId !== undefined) { setPersistedLastProfileId(lastExecPlanId); }
-        lastExecPlanId = planId;
-      } else {
-        lastExecPlanId = planId;
-        setActivePlanFor(planId);
-        setPersistedLastProfileId(planId);
-      }
-    }
+    if (planId !== lastExecPlanId) noteExecPlanChange(planId, idleNow);
     updateChartMode(st);
   }).catch(function () {});
 }
@@ -4163,19 +4250,8 @@ function poll() {
       }
       wasFiringActive = firingNowActive;
       var planId = idleNow ? undefined : st.profile_id;
-      if (planId !== lastExecPlanId) {
-        if (idleNow) {
-          // A run just ended -- see the "Owner report, 2026-09-27" comment
-          // above pollExec(): leave its curve on screen (activePlan already
-          // holds it), just persist it as the last relevant profile.
-          if (lastExecPlanId !== undefined) { setPersistedLastProfileId(lastExecPlanId); }
-          lastExecPlanId = planId;
-        } else {
-          lastExecPlanId = planId;
-          setActivePlanFor(planId);
-          setPersistedLastProfileId(planId);
-        }
-      }
+      // Same transition handling as pollExec() -- see noteExecPlanChange().
+      if (planId !== lastExecPlanId) noteExecPlanChange(planId, idleNow);
     }
     // Idle dots are a LIVE temperature display (same data as the channel
     // cards above), so they need to refresh on this 2s status poll, not
@@ -4220,7 +4296,11 @@ function reloadAfterLoginPickers() {
     // already picked a profile and logged in for an unrelated reason (e.g.
     // the Run button's own 401) must not have that selection reset under
     // them.
-    if (hadNoProfiles && wasIdle) setActivePlanFor(pickInitialProfileId(sel));
+    if (hadNoProfiles && wasIdle) {
+      var id = pickInitialProfileId(sel, lastExecStatus, loadedProfileList);
+      setActivePlanFor(id);
+      selectProfileInPicker(id);
+    }
     updateProfileFeasIcon();
     updateProfileLimitIcon();
   });
@@ -4236,7 +4316,11 @@ window.addEventListener('kc-login', reloadAfterLoginPickers);
 loadZones().then(function () {
   loadProfileList().then(function () {
     var sel = document.getElementById('profileSelect');
-    if (wasIdle && sel) setActivePlanFor(pickInitialProfileId(sel));
+    if (wasIdle && sel) {
+      var id = pickInitialProfileId(sel, lastExecStatus, loadedProfileList);
+      setActivePlanFor(id);
+      selectProfileInPicker(id);
+    }
     updateProfileFeasIcon();
     updateProfileLimitIcon();
   });
