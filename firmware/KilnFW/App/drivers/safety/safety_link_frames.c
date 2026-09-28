@@ -890,15 +890,52 @@ bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
  *    doc comment) burned the one-shot with nothing actually sent on the
  *    wire, leaving a real stale S6a latched for the rest of the boot. Fixed
  *    by only latching s_boot_clear_attempted on ESP_OK; a refused attempt
- *    can retry on the next DIAG frame, still bounded by the deadline above. */
+ *    can retry on the next DIAG frame, still bounded by the deadline above.
+ *
+ * 3. (2026-09-28 review) s_boot_clear_attempted latched permanently as soon
+ *    as safety_link_send_clear_trip() returned ESP_OK -- ESP_OK only proves
+ *    the CLEAR_TRIP broadcast was handed to the UART, not that the Pico
+ *    accepted it (see that function's doc comment in safety_link.h:
+ *    "not proof of Pico acceptance"). CLEAR_TRIP has no on-wire ACK/NACK;
+ *    the Pico's safety_guards_try_clear() refuses it while S6a's own 200 ms
+ *    release debounce hasn't yet cleared, and origin/main 9056bc09's
+ *    SAFETY_FAULT_MIN_HOLD_MS (>=300 ms fault-line hold) makes hitting that
+ *    window on the very first DIAG after boot more likely, not less. A
+ *    refusal in that window used to burn the one-shot with the trip still
+ *    latched. Fixed by replacing the one-shot with a small bounded, spaced
+ *    retry budget (s_boot_clear_attempts/s_boot_clear_last_attempt_tick_ms):
+ *    an attempt is only counted on ESP_OK (a locally-refused send, e.g.
+ *    stale diag age, still doesn't burn a slot -- same rule as defect 2),
+ *    "confirmed acceptance" is never a separate signal -- it IS the next
+ *    DIAG frame's diag_state/diag_trip_reason falling out of TRIPPED/
+ *    MAIN_FAULT, which is the gate's own pre-existing condition, so success
+ *    naturally stops retries with no new state needed. The retry budget is
+ *    anchored to s_boot_clean_deadline_ms (the ESP's own boot/mark_boot_
+ *    clean() event), not to the Pico's boot_id or to link-up: a Pico reboot
+ *    mid-window (boot_id change) or a link flap must NOT hand this a fresh
+ *    budget ("reset one side of a pair", CLAUDE.md) -- that would let a
+ *    Pico stuck rebooting into the debounce window grant itself unbounded
+ *    retries by resetting the other side's counter every time. A link-down
+ *    stretch needs no separate handling either: safety_apply_diag() only
+ *    runs when a DIAG frame actually arrives, so no frames means no
+ *    attempts, and the deadline still expires on ESP wall-clock time
+ *    regardless. */
 #define SAFETY_LINK_BOOT_CLEAN_WINDOW_MS (30u * 1000u)
+/* Small and spaced out: a stale S6a should clear within a couple of the
+ * Pico's 200 ms release debounces, and this must never look like link
+ * flooding. Bounded independently of (and inside) the 30 s window above. */
+#define SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS 3u
+#define SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS (2u * 1000u)
 static bool s_boot_clean = false;
-static bool s_boot_clear_attempted = false;
+static uint8_t s_boot_clear_attempts = 0;
+static uint32_t s_boot_clear_last_attempt_tick_ms = 0;
 static uint32_t s_boot_clean_deadline_ms = 0;
 
 void safety_link_mark_boot_clean(void)
 {
     s_boot_clean = true;
+    s_boot_clear_attempts = 0;
+    s_boot_clear_last_attempt_tick_ms = 0;
     s_boot_clean_deadline_ms =
         (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS) + SAFETY_LINK_BOOT_CLEAN_WINDOW_MS;
 }
@@ -942,15 +979,24 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
              * comment above for the "hours later" real-trip scenario this
              * closes. */
             s_boot_clean = false;
-        } else if (!s_boot_clear_attempted && link->fault_sources == 0u &&
+        } else if (s_boot_clear_attempts < SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS &&
+                   (s_boot_clear_attempts == 0u ||
+                    (now - s_boot_clear_last_attempt_tick_ms) >= SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS) &&
+                   link->fault_sources == 0u &&
                    link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
                    link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
             want_boot_clear = true;
-            /* s_boot_clear_attempted is NOT latched here -- only on ESP_OK
-             * from the actual send, in safety_link_service_boot_clear_if_
-             * pending() below. A locally refused send (stale diag age, etc.)
-             * must be retryable on the next DIAG frame, still bounded by the
-             * deadline above. */
+            /* s_boot_clear_attempts is NOT incremented here -- only on
+             * ESP_OK from the actual send, in safety_link_service_boot_
+             * clear_if_pending() below. A locally refused send (stale diag
+             * age, etc.) must be retryable on the next DIAG frame without
+             * burning a slot, still bounded by the deadline above. Whether
+             * the PICO accepted a prior attempt is never checked directly
+             * (CLEAR_TRIP has no ACK) -- this same diag_state/diag_trip_
+             * reason condition is the confirmation: a prior accepted clear
+             * would already have flipped diag_state away from TRIPPED by
+             * the time a later DIAG frame gets here, so this branch simply
+             * would not re-fire. */
         }
     }
     if (want_boot_clear) {
@@ -969,11 +1015,11 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
 }
 
 /* Performs the deferred boot_clear_pending send (see its doc comment,
- * safety_link.h) and latches s_boot_clear_attempted on success -- the exact
- * logic safety_apply_diag() used to run inline. Called only from
- * safety_poll_task (safety_link_poll.c), which has the stack headroom this
- * chain needs; safe to call unconditionally each iteration since it is a
- * no-op whenever nothing is pending. */
+ * safety_link.h) and counts the attempt on success -- the exact logic
+ * safety_apply_diag() used to run inline. Called only from safety_poll_task
+ * (safety_link_poll.c), which has the stack headroom this chain needs; safe
+ * to call unconditionally each iteration since it is a no-op whenever
+ * nothing is pending. */
 void safety_link_service_boot_clear_if_pending(SafetyLinkClass *link)
 {
     bool owed = false;
@@ -988,7 +1034,8 @@ void safety_link_service_boot_clear_if_pending(SafetyLinkClass *link)
     ESP_LOGW(TAG, "boot was clean but a stale S6a (main-controller-fault) trip is still "
                   "latched from before this boot -- sending clear_trip to release it");
     if (safety_link_send_clear_trip(link) == ESP_OK && safety_lock(link)) {
-        s_boot_clear_attempted = true;
+        s_boot_clear_attempts++;
+        s_boot_clear_last_attempt_tick_ms = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
         safety_unlock(link);
     }
 }

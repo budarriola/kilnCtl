@@ -455,6 +455,18 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 }
 #define xSemaphoreTake safety_link_test_xSemaphoreTake
 
+// stubs/freertos/task.h's xTaskGetTickCount() is hardcoded to always return 0
+// (added purely so profile_executor.c/autotune_engine.c's host tests link --
+// see that stub's own header comment). safety_link_frames.c's boot-clear
+// retry logic (2026-09-28 fix) needs to observe elapsed time -- the 30 s
+// boot-clean window and the inter-attempt retry gap -- so this file needs a
+// controllable fake tick count, same "local macro shadow, #undef after this
+// #include block" precedent as xSemaphoreTake above. portTICK_PERIOD_MS is
+// 1u in the stub (freertos/FreeRTOS.h), so a tick IS a millisecond here.
+static TickType_t s_fake_tick_count = 0;
+static inline TickType_t safety_link_test_xTaskGetTickCount(void) { return s_fake_tick_count; }
+#define xTaskGetTickCount safety_link_test_xTaskGetTickCount
+
 #include "../drivers/safety/safety_link.c"
 
 // Each of the five files below is its own translation unit in the real
@@ -486,6 +498,7 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 #include "../drivers/safety/safety_link_payload.c" // no TAG of its own -- see that file's header comment
 
 #undef xSemaphoreTake
+#undef xTaskGetTickCount
 
 // relay_authority.c -- the REAL, compiled chokepoint (not a stub -- no other
 // host test in this suite links the real relay_authority_on_blocked(),
@@ -517,6 +530,18 @@ static void set_status_frame(uint8_t *p, uint8_t flags, float tc_c, float cj_c,
     memcpy(&p[11], &ia, sizeof(float));
     memcpy(&p[15], &ib, sizeof(float));
     memcpy(&p[19], &ic, sizeof(float));
+}
+
+// Builds a SAFETY_CMD_DIAG (Frame B) payload -- byte layout per
+// safety_link_frames.c's safety_apply_diag() header comment. Only the fields
+// the boot-clear retry tests care about are parameterized; the rest are
+// zeroed (harmless -- safety_apply_diag() doesn't gate on them).
+static void set_diag_frame(uint8_t *p, uint8_t trip_reason, uint8_t state)
+{
+    memset(p, 0, SAFETY_LINK_DIAG_FRAME_LEN);
+    p[0] = SAFETY_CMD_DIAG;
+    p[1] = trip_reason;
+    p[24] = state;
 }
 
 static SafetyLinkClass make_link(void)
@@ -2611,6 +2636,156 @@ static void test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order(void)
                "along with the ring");
 }
 
+// ---------------------------------------------------------------------
+// 2026-09-28 review: boot-clear bounded-retry tests. The old s_boot_clear_
+// attempted one-shot latched permanently on the first ESP_OK send, so a
+// Pico refusal (its own S6a release debounce not yet elapsed) burned the
+// only attempt and left a genuinely-releasable stale S6a latched for the
+// rest of the boot. These drive safety_apply_diag()/safety_link_service_
+// boot_clear_if_pending() directly, with s_fake_tick_count standing in for
+// xTaskGetTickCount() (see this file's own macro-shadow comment above the
+// #include block).
+
+// Common setup: a fresh link with a cached STATUS frame (so safety_link_
+// send_clear_trip()'s diag-age staleness check, measured off cached_tick,
+// never refuses locally) and boot-clean armed. Resets every one-shot/retry
+// static this feature owns so tests don't see a previous test's state --
+// same "explicit per-test reset" convention as s_stub_broadcast_* above.
+static SafetyLinkClass boot_clear_test_setup(void)
+{
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    s_fake_tick_count = 0;
+    s_stub_broadcast_send_succeeds = true;
+    s_stub_broadcast_reply_push = false;
+    s_stub_broadcast_leading_push = false;
+
+    uart_proto_message_t status;
+    memset(&status, 0, sizeof(status));
+    set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
+    status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &status) == true, "status frame primes cached_tick");
+
+    safety_link_mark_boot_clean(); // resets s_boot_clear_attempts/last_attempt_tick too
+    return link;
+}
+
+// Applies one TRIPPED/trip_reason DIAG frame and services whatever it
+// queued. Returns the stub broadcast count immediately after. Refreshes the
+// cached STATUS frame first (real STATUS traffic keeps arriving alongside
+// DIAG on the real link) so safety_link_send_clear_trip()'s own diag-age
+// staleness check (SAFETY_LINK_STALE_MS, 1500 ms) never refuses locally just
+// because a test advanced s_fake_tick_count past it between attempts.
+static unsigned drive_one_diag_and_service(SafetyLinkClass *link, uint8_t trip_reason)
+{
+    uart_proto_message_t status;
+    memset(&status, 0, sizeof(status));
+    set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
+    status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    safety_apply_status(link, &status);
+
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    set_diag_frame(diag.payload, trip_reason, SAFETY_LINK_DIAG_STATE_TRIPPED);
+    diag.length = SAFETY_LINK_DIAG_FRAME_LEN;
+    TEST_CHECK(safety_apply_diag(link, &diag) == true, "DIAG frame decodes");
+    safety_link_service_boot_clear_if_pending(link);
+    return s_stub_broadcast_count;
+}
+
+static void test_boot_clear_refused_then_retried_succeeds(void)
+{
+    TEST_SECTION("safety_link_service_boot_clear_if_pending -- a Pico-refused clear "
+                 "(DIAG still TRIPPED/MAIN_FAULT afterward) is retried after the spacing "
+                 "gap rather than burned as a one-shot, and a later DIAG showing the trip "
+                 "gone (Pico accepted it) needs no further send");
+
+    SafetyLinkClass link = boot_clear_test_setup();
+    unsigned base = s_stub_broadcast_count;
+
+    // First DIAG: still tripped -- this is the boot-clear's very first
+    // attempt, so it always sends regardless of spacing.
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 1,
+               "first attempt sends CLEAR_TRIP");
+    TEST_CHECK(s_boot_clear_attempts == 1, "one attempt is now counted");
+
+    // "Refused": the Pico's DIAG still reports TRIPPED/MAIN_FAULT right
+    // away, before the retry-spacing gap has elapsed. Must NOT resend.
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 1,
+               "an immediate re-refusal within the spacing gap is not retried yet");
+    TEST_CHECK(s_boot_clear_attempts == 1, "attempt count unchanged while inside the gap");
+
+    // Advance past the spacing gap; still tripped -- now eligible to retry.
+    s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 2,
+               "once the spacing gap has elapsed, a still-refused clear is retried");
+    TEST_CHECK(s_boot_clear_attempts == 2, "second attempt now counted");
+
+    // The Pico accepted this retry: the next DIAG no longer shows TRIPPED.
+    // No further send should happen -- "confirmed acceptance" is exactly
+    // this condition, not a separate flag.
+    s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+    uart_proto_message_t cleared;
+    memset(&cleared, 0, sizeof(cleared));
+    set_diag_frame(cleared.payload, 0, SAFETY_LINK_DIAG_STATE_ARMED);
+    cleared.length = SAFETY_LINK_DIAG_FRAME_LEN;
+    TEST_CHECK(safety_apply_diag(&link, &cleared) == true, "cleared DIAG frame decodes");
+    safety_link_service_boot_clear_if_pending(&link);
+    TEST_CHECK(s_stub_broadcast_count == base + 2, "no further send once the Pico's own DIAG shows "
+                                                     "the trip is gone");
+    TEST_CHECK(s_boot_clear_attempts == 2, "attempt count stays at 2 -- success needed no 3rd attempt");
+}
+
+static void test_boot_clear_persistent_refusal_gives_up_after_bound(void)
+{
+    TEST_SECTION("safety_link_service_boot_clear_if_pending -- a persistently refused clear "
+                 "(DIAG never stops showing TRIPPED/MAIN_FAULT) gives up after "
+                 "SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS attempts and never floods the link");
+
+    SafetyLinkClass link = boot_clear_test_setup();
+    unsigned base = s_stub_broadcast_count;
+
+    for (unsigned i = 0; i < SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS; i++) {
+        unsigned expect = base + i + 1;
+        TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == expect,
+                   "attempt N sends while under the bound");
+        s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+    }
+    TEST_CHECK(s_boot_clear_attempts == SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS,
+               "attempt count reaches exactly the bound");
+
+    unsigned after_bound = s_stub_broadcast_count;
+    // Keep offering a still-tripped DIAG, well past the spacing gap each
+    // time -- a genuinely persistent trip must not be retried forever.
+    for (unsigned i = 0; i < 5; i++) {
+        s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+        drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT);
+    }
+    TEST_CHECK(s_stub_broadcast_count == after_bound,
+               "no further sends past the bound, no matter how long the trip persists");
+    TEST_CHECK(s_boot_clear_attempts == SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS,
+               "attempt count never exceeds the bound");
+}
+
+static void test_boot_clear_never_fires_for_a_non_s6a_trip(void)
+{
+    TEST_SECTION("safety_link_service_boot_clear_if_pending -- a trip reason other than "
+                 "SAFETY_LINK_TRIP_REASON_MAIN_FAULT (S6a) is never cleared by the boot-clean "
+                 "one-shot/retry mechanism, no matter how the DIAG otherwise looks");
+
+    SafetyLinkClass link = boot_clear_test_setup();
+    unsigned base = s_stub_broadcast_count;
+
+    uint8_t non_s6a_reason = SAFETY_LINK_TRIP_REASON_MAIN_FAULT + 1u; // any other reason code
+    for (unsigned i = 0; i < 3; i++) {
+        drive_one_diag_and_service(&link, non_s6a_reason);
+        s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+    }
+    TEST_CHECK(s_stub_broadcast_count == base, "no CLEAR_TRIP is ever sent for a non-S6a trip reason");
+    TEST_CHECK(s_boot_clear_attempts == 0, "attempt count stays at 0 -- this trip is simply not "
+                                            "this mechanism's to clear");
+}
+
 static void test_fault_edge_uninitialized_link_refuses(void)
 {
     TEST_SECTION("safety_link_get_fault_edges -- an uninitialized link refuses rather than "
@@ -2682,6 +2857,10 @@ int main(void)
     test_fault_edge_multi_bit_assert_reports_lowest_first_set_bit();
     test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order();
     test_fault_edge_uninitialized_link_refuses();
+
+    test_boot_clear_refused_then_retried_succeeds();
+    test_boot_clear_persistent_refusal_gives_up_after_bound();
+    test_boot_clear_never_fires_for_a_non_s6a_trip();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

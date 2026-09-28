@@ -4141,6 +4141,21 @@ Owner instruction, 2026-09-21.
   `f5f06dee`..`9708015f`. See the top-of-file entry above.
 - [x] `check_flash_worker_lint.ps1` red over `totp_config.c` -- green on main
   at `9708015f` (re-run 2026-09-24).
+- [x] **S6a boot-clear one-shot fixed, 2026-09-28 (review find):**
+  `safety_link_frames.c`'s stale-S6a boot-clear latched permanently on the
+  first successful CLEAR_TRIP *send*, not on Pico *acceptance* -- CLEAR_TRIP
+  has no on-wire ACK, and the Pico's `safety_guards_try_clear()` refuses
+  while its own S6a release debounce (200 ms) hasn't yet elapsed, made more
+  likely by `SAFETY_FAULT_MIN_HOLD_MS`'s >=300 ms fault-line hold. A refusal
+  inside that window used to burn the one-shot with a releasable trip still
+  latched. Replaced with a small bounded, spaced retry (3 attempts, 2 s
+  apart, still inside the existing 30 s boot window, anchored to the ESP's
+  own boot rather than the Pico's boot_id/link-up); "confirmed acceptance"
+  is the next DIAG frame simply no longer reading TRIPPED/MAIN_FAULT --
+  the existing gate condition, no new signal needed. All prior guards
+  (S6a-only, `fault_sources==0`, the 30 s window) unchanged. Host-tested
+  (refused-then-retried-succeeds, persistent-refusal-gives-up-after-bound,
+  non-S6a-never-cleared) and negative-tested.
 
 ---
 

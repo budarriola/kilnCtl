@@ -1632,10 +1632,12 @@ typedef struct {
      * uart_protocol_send_broadcast()-reaching call previously made straight
      * from inside safety_drain_inbox_ex()'s dispatch, on whatever task was
      * draining. Set under state_lock by safety_apply_diag() once its
-     * one-shot eligibility check passes; consumed by safety_link_service_
+     * bounded-retry eligibility check passes; consumed by safety_link_service_
      * boot_clear_if_pending() (called from safety_poll_task) which performs
-     * the actual send and latches s_boot_clear_attempted only on success,
-     * preserving the original retry-on-refusal contract. */
+     * the actual send and counts the attempt only on success, bounded and
+     * spaced out (s_boot_clear_attempts/s_boot_clear_last_attempt_tick_ms,
+     * safety_link_frames.c) -- a Pico refusal (its own S6a release debounce
+     * not yet elapsed) is retried rather than burning a one-shot. */
     bool    boot_clear_pending;
     bool    peer_version_known;
     bool    peer_version_compatible;
