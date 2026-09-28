@@ -1017,7 +1017,9 @@ static void test_begin_run_refused_by_readiness_recovery_mode(void)
     TEST_SECTION("autotune_begin_run_locked() is refused by the readiness interlock -- recovery mode");
     reset_readiness_facts_to_ready();
     s_test_readiness_facts.recovery_mode = true;
-    begin_run_and_expect_gate_refusal("a recovery-mode boot refuses an autotune start", "RECOVERY MODE");
+    /* system_mode_gate.c's wording, not readiness_gate.h's -- proves slice
+     * 2's mode-gate call fires first (see test_profile_executor_prestart.c). */
+    begin_run_and_expect_gate_refusal("a recovery-mode boot refuses an autotune start", "no firing or autotune");
 }
 
 static void test_begin_run_refused_by_readiness_safety_trip(void)

@@ -185,7 +185,7 @@ void readiness_gate_collect(readiness_gate_facts_t *out);
  * FRONT-LOADED: the item's name comes first, the remedy second, so a
  * truncated message still tells the operator which item refused. Leaves msg
  * untouched when nothing blocks (same convention as
- * recovery_mode_refuses_start()). */
+ * system_mode_gate_check()). */
 static inline readiness_gate_block_t readiness_gate_evaluate(const readiness_gate_facts_t *f, char *msg,
                                                              size_t cap)
 {

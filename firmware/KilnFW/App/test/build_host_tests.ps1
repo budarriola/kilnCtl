@@ -1810,9 +1810,9 @@ try {
     # call sites now go through system_mode_gate_check() instead
     # (dashboard_exec_http.c, dashboard_autotune_http.c), which shares its
     # wording across HTTP/UART/LCD. Coverage for the recovery-mode rule moved
-    # into test_system_mode_gate.c below. The exe33 slot that used to build
-    # this file is intentionally left unrenumbered -- see this script's own
-    # header note that exe numbers are narrative, not an enforced count.
+    # into test_system_mode_gate.c below. The exe33 variable name is left
+    # unused rather than renumbering every later $exeNN; only $totalExpected
+    # (near the end of this script) is an enforced count.
 
     # ---- test_readiness_gate.c: its own THIRTY-FOURTH, separate
     # executable ----------------------------------------------------------
@@ -1822,7 +1822,7 @@ try {
     # decision (static inline over readiness_http.h's shared predicates), so
     # this needs no sibling .c files -- just a fake body for the one declared
     # symbol, readiness_gate_collect(), same convention
-    # test_recovery_start_refusal.c uses for boot_guard_is_recovery_mode().
+    # test_ota_http.c uses for boot_guard_is_recovery_mode().
     # Own executable because that fake would collide at link time with
     # readiness_gate.c's real body wherever that gets linked.
     $exe34 = Join-Path $outDir "kilnctl_host_tests_readiness_gate.exe"

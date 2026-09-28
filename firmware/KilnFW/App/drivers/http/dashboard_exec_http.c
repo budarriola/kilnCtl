@@ -724,7 +724,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
         const char *item_key = readiness_gate_item_key(gate_which);
         ESP_LOGW(DASH_TAG, "profile_exec/start refused by the readiness interlock (item %s)",
                  item_key ? item_key : "?");
-        /* JSON, not the plain string the recovery refusal above sends: this
+        /* JSON, same envelope as the recovery refusal above: this
          * page's start handler (main_page.html's proceedToStart()) parses the
          * response with r.json() and shows result.error, so a plain-text body
          * would throw in the parse and land in its .catch() -- an operator

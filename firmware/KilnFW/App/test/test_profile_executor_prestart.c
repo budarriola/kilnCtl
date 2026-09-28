@@ -1417,7 +1417,11 @@ static void test_run_refused_by_readiness_recovery_mode(void)
     TEST_SECTION("profile_executor_run() is refused by the readiness interlock -- recovery mode");
     reset_readiness_facts_to_ready();
     s_test_readiness_facts.recovery_mode = true;
-    run_and_expect_gate_refusal("a recovery-mode boot refuses a firing at run()", "RECOVERY MODE");
+    /* "no firing or autotune" is system_mode_gate.c's wording, not
+     * readiness_gate.h's -- so this proves slice 2's mode-gate call in run()
+     * fires first, rather than readiness_gate_evaluate()'s own recovery item
+     * (whose message also contains "RECOVERY MODE") catching it instead. */
+    run_and_expect_gate_refusal("a recovery-mode boot refuses a firing at run()", "no firing or autotune");
 }
 
 static void test_run_refused_by_readiness_safety_trip(void)

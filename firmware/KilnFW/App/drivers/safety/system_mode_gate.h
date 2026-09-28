@@ -19,7 +19,7 @@
 // kiln_io_owner's ownership/safety-fault checks, readiness_gate.h's firing
 // checklist, or the OTA/profile mutual interlock -- it is one more row a
 // caller consults alongside those, checked ahead of
-// readiness_gate_refuses_start() rather than instead of it (same position
+// readiness_gate_evaluate() rather than instead of it (same position
 // App/drivers/http/recovery_start_refusal.h used to occupy, before slice 2
 // retired that header in favor of this gate).
 //
@@ -60,14 +60,17 @@
 // SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE's recovery-mode rule and
 // called system_mode_gate_check() for it from profile_executor_run()'s and
 // autotune_begin_run_locked()'s existing single choke points, ahead of their
-// readiness_gate_refuses_start() call -- purely to retire
+// readiness_gate_evaluate() call -- purely to retire
 // App/drivers/http/recovery_start_refusal.h's two HTTP-only call sites
 // (dashboard_exec_http.c, dashboard_autotune_http.c), which produced a
 // recovery-mode reason string ONLY on HTTP while UART/LCD saw
 // readiness_gate.h's own, differently-worded recovery message (plan section
 // 2.4's wording drift). Both HTTP call sites now build a snapshot and call
-// system_mode_gate_check()/system_mode_gate_http_send_refusal() instead, so
-// all three transports produce the exact same string. recovery_start_
+// system_mode_gate_check() instead, so all three transports produce the
+// exact same string. They send it in their own JSON 409 envelope
+// ({"ok":false,"readiness_item":"recovery_mode","error":...}), NOT via
+// system_mode_gate_http_send_refusal()'s plain text -- their frontend
+// callers parse the response with r.json(). recovery_start_
 // refusal.h and its host test are retired (deleted) as a result -- this was
 // their only caller. SYS_ACTION_START_PROFILE/START_AUTOTUNE otherwise still
 // return OK unconditionally: every non-recovery start refusal stays owned by

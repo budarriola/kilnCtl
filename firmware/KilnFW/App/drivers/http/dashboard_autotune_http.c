@@ -202,7 +202,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     /* system_mode_gate (slice 2): same explicit recovery-mode enforcement as
      * profile_exec_start_post_handler() (dashboard_exec_http.c) -- see that
      * handler's comment for the full rationale, including why this must stay
-     * JSON, not plain text (main_page.html's autotune start path also calls
+     * JSON, not plain text (zones_page.html's autotune start path also calls
      * r.json() on the response). Checked first, before the body is even
      * read; shares the facts collected below with the readiness call rather
      * than collecting them twice. */
@@ -256,7 +256,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
         const char *item_key = readiness_gate_item_key(gate_which);
         ESP_LOGW(DASH_TAG, "autotune/start refused by the readiness interlock (item %s)",
                  item_key ? item_key : "?");
-        /* JSON, not the plain string the recovery refusal above sends -- same
+        /* JSON, same envelope as the recovery refusal above -- same
          * reasoning as profile_exec_start_post_handler()'s identical block:
          * the page parses this response as JSON. No json_escape() needed for
          * the same reason as there: readiness_gate_evaluate()'s messages are

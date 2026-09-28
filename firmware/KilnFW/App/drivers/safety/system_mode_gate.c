@@ -31,7 +31,7 @@
 // Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6), 2026-09-27:
 // SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE's recovery-mode rule,
 // wired into profile_executor_run()'s and autotune_begin_run_locked()'s
-// choke points ahead of their readiness_gate_refuses_start() call, and into
+// choke points ahead of their readiness_gate_evaluate() call, and into
 // dashboard_exec_http.c/dashboard_autotune_http.c in place of the retired
 // App/drivers/http/recovery_start_refusal.h -- so all three transports
 // (HTTP, UART, LCD) produce this exact string for a start request in
@@ -106,12 +106,17 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
         // trip, unacknowledged crash, E-stop unverified, ...) stays owned by
         // readiness_gate.h, unchanged. Checked here so the wording is shared
         // across HTTP/UART/LCD instead of living only in recovery_start_
-        // refusal.h's HTTP-only pre-check (now retired).
+        // refusal.h's HTTP-only pre-check (now retired). Keeps the remedy
+        // readiness_gate.h's own recovery message (and the retired header's)
+        // carried -- where to exit recovery -- inside the 96-byte
+        // SYSTEM_MODE_GATE_REASON_MAX / UART err_msg[96] budget, front-loaded
+        // so a truncation still names the item. JSON-safe: no double quote or backslash
+        // (both HTTP call sites embed it verbatim).
         if (snap->recovery_mode) {
             if (reason != NULL && reason_cap > 0) {
                 snprintf(reason, reason_cap,
-                         "refused -- RECOVERY MODE this boot: firing and autotune are unavailable "
-                         "until it exits");
+                         "refused -- RECOVERY MODE boot: no firing or autotune. Exit it on the "
+                         "Firmware update page.");
             }
             return true;
         }
