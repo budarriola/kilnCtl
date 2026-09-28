@@ -206,12 +206,22 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     )
     if not send_result.ok:
         return f"error: factory reset request was not ACKed ({send_result})"
-    try:
-        _srv._info.get_fw_version(timeout=FACTORY_RESET_REBOOT_TIMEOUT_S)
-    except InfoQueryError as exc:
+    # Wait for the device's own UNSOLICITED boot-time FW-version push, not a
+    # polled get_fw_version() query -- a query is answered by the always-alive
+    # INFO task whether or not a reboot ever happened, so it cannot tell a
+    # real reboot apart from a factory reset the board's system mode gate
+    # silently refused (execute_scope() is never reached, so no reboot
+    # follows; see firmware/KilnFW/App/drivers/http/factory_reset.c's
+    # FACTORY_RESET_ERR_MODE_GATE_REFUSED path and its UART counterpart in
+    # uart_bridge_system.c). A refused reset still ACKs the request above
+    # (the ACK only confirms delivery of the command, not that it will be
+    # honored), so send_result.ok alone is not proof either.
+    if _srv._info.wait_for_boot_push(timeout=FACTORY_RESET_REBOOT_TIMEOUT_S) is None:
         return (
-            f"error: factory reset sent, but the board did not come back up "
-            f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s ({exc}) -- preset NOT applied"
+            f"refused: factory reset request was ACKed, but no reboot was observed "
+            f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s (no unsolicited FW-version "
+            f"boot push) -- most likely refused by the board's system mode gate "
+            f"(e.g. a firing or autotune run in progress); preset NOT applied"
         )
     resolved = _ota_resolve_host(host) if host else None
     resolved_safety = _ota_resolve_host(safety_host) if safety_host else None

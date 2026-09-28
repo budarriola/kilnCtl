@@ -106,6 +106,10 @@ class InfoClient:
         #: .compatible before sending anything besides INFO queries
         #: themselves -- see UART_PROTOCOL_VERSION in protocol.py.
         self.last_fw_version: Optional[FirmwareVersion] = None
+        #: Set only by the UNSOLICITED boot-push branch of _consume_loop
+        #: below, never by an ordinary query reply -- see wait_for_boot_push().
+        self._boot_push_event = threading.Event()
+        self._last_boot_push: Optional[FirmwareVersion] = None
         self._pending: Optional[_Pending] = None
         self._pending_lock = threading.Lock()
         #: Serializes queries so at most one reply is ever outstanding, which
@@ -151,9 +155,39 @@ class InfoClient:
         return value  # type: ignore[return-value]
 
     def get_fw_version(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> FirmwareVersion:
-        """Ask the device for its git commit / build timestamp / dirty flag."""
+        """Ask the device for its git commit / build timestamp / dirty flag.
+
+        This is a QUERY: the device answers it whether or not it has ever
+        rebooted, since the always-alive INFO task replies to it the same
+        way regardless. It is NOT proof of a reboot -- do not use it to
+        confirm a reset/reboot actually happened (a board that silently
+        refused a reset, e.g. the system mode gate refusing FACTORY_RESET
+        mid-firing, answers this query just as promptly as one that really
+        rebooted). Use :meth:`wait_for_boot_push` for that instead.
+        """
         value = self._query(INFO_CMD_GET_FW_VERSION, devices.info_get_fw_version(), timeout)
         return value  # type: ignore[return-value]
+
+    def wait_for_boot_push(self, timeout: float) -> Optional[FirmwareVersion]:
+        """Block until the device's own once-per-boot, UNSOLICITED FW-version
+        push (info_boot_push_task) arrives, or ``timeout`` elapses.
+
+        Unlike :meth:`get_fw_version`, this can only return non-None as a
+        result of _consume_loop's unsolicited-response branch below -- i.e.
+        an actual reboot, not merely a link that is still up and answering
+        queries. Returns ``None`` on timeout, which callers must treat as
+        "reboot not confirmed" (e.g. a factory reset refused by the mode
+        gate, which acks the request but never reboots), never as success.
+
+        Clears any push already observed before waiting, so only a push that
+        arrives strictly after this call counts -- callers should call this
+        right after sending the reset/reboot-triggering command.
+        """
+        self._boot_push_event.clear()
+        self._last_boot_push = None
+        if self._boot_push_event.wait(timeout):
+            return self._last_boot_push
+        return None
 
     def get_wifi_status(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> WifiStatus:
         """Ask the device whether it's joined a network and, if so, its IP."""
@@ -293,6 +327,8 @@ class InfoClient:
         # on; drop it.
         if subcommand == INFO_CMD_GET_FW_VERSION and isinstance(value, FirmwareVersion):
             log.info("unsolicited FW version push (device booted): %s", value.describe())
+            self._last_boot_push = value
+            self._boot_push_event.set()
             if self.on_boot_push is not None:
                 self.on_boot_push(value)
         else:
