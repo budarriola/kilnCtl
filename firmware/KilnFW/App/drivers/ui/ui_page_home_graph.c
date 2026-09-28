@@ -76,6 +76,17 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
 
 void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *out_axis_lo, int32_t *out_axis_hi)
 {
+    /* 2026-09-28 owner request: never show less than
+     * UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP degrees of vertical span. Widen the
+     * raw data range symmetrically around its own midpoint FIRST, before the
+     * usual 10% pad/degenerate-guard/freezing-floor logic below runs on top
+     * of it -- see header comment. */
+    if (hi - lo < UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP) {
+        float mid = (lo + hi) * 0.5f;
+        lo = mid - UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP * 0.5f;
+        hi = mid + UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP * 0.5f;
+    }
+
     float range = hi - lo;
     if (range < 1.0f) {
         range = 1.0f; /* degenerate/all-same-value guard -- see header comment */
@@ -100,6 +111,17 @@ void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *ou
      * branch). */
     if (axis_hi <= axis_lo) {
         axis_hi = axis_lo + 1;
+    }
+    /* Final integer-level floor: the freezing-floor clamp just above only
+     * ever RAISES axis_lo, which can narrow the span back under
+     * UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP even though the pre-clamp float math
+     * already widened it to that span (e.g. a near-freezing flat reading
+     * whose widened low edge dips just below the floor and gets clamped back
+     * up). Re-widen upward -- never re-lower axis_lo, which would undo the
+     * floor clamp this guard runs after -- so the 5-degree minimum holds on
+     * the actual returned integers in every case, not just the common one. */
+    if (axis_hi - axis_lo < (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP) {
+        axis_hi = axis_lo + (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP;
     }
     *out_axis_lo = axis_lo;
     *out_axis_hi = axis_hi;

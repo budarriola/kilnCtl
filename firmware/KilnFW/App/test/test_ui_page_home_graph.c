@@ -192,6 +192,60 @@ void run_test_ui_page_home_graph(void)
         TEST_CHECK(lo >= 0, "above-freezing data whose padding alone dips below 0: axis_lo floored at freezing");
     }
 
+    TEST_SECTION("ui_page_home_graph: y_axis_range minimum 5-degree span (owner request 2026-09-28)");
+    {
+        int32_t lo, hi;
+
+        // Flat data (lo == hi): the degenerate guard already keeps hi > lo,
+        // but the owner's new rule is stronger -- the returned span must be
+        // at least UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP (5), not just "more than
+        // zero". 20C flat reading, well clear of the freezing floor.
+        ui_page_home_y_axis_range(20.0f, 20.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP,
+                   "flat data (20==20): span >= 5");
+        TEST_CHECK(lo <= 20 && hi >= 20, "flat data (20==20): still covers the real reading");
+
+        // A 1C range (e.g. 30-31C) -- under the 5-degree minimum, must be
+        // widened, symmetrically, around the data's own midpoint (30.5).
+        ui_page_home_y_axis_range(30.0f, 31.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP, "1C range (30-31): span >= 5");
+        TEST_CHECK(lo <= 30 && hi >= 31, "1C range (30-31): still covers the real data");
+        // Roughly symmetric around the 30.5 midpoint: the extra width added
+        // below 30 and above 31 should be nearly equal (within the 10% pad's
+        // own asymmetry budget), not all piled onto one side.
+        float below = 30.0f - (float)lo, above = (float)hi - 31.0f;
+        TEST_CHECK(fabsf(below - above) <= 1.0f, "1C range (30-31): widened roughly symmetrically");
+
+        // A range already >= 5C must be left alone by this rule (still gets
+        // the ordinary 10% pad, same as the pre-existing "36-63C" case
+        // above) -- no extra widening beyond what padding already does.
+        ui_page_home_y_axis_range(40.0f, 46.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP, "6C range (40-46): span >= 5 (unsurprising)");
+        TEST_CHECK_NEAR((float)lo, 40.0f - (46.0f - 40.0f) * 0.1f, 1.0f,
+                         "6C range (40-46, already >= 5): ordinary 10% pad only, not further widened");
+        TEST_CHECK_NEAR((float)hi, 46.0f + (46.0f - 40.0f) * 0.1f, 1.0f,
+                         "6C range (40-46, already >= 5): ordinary 10% pad only, not further widened");
+
+        // Negative temperatures, flat: the freezing-floor clamp must not be
+        // allowed to quietly claw the span back under 5 once the low side
+        // gets special-cased. A genuine sub-zero flat reading (-10C) is
+        // itself below the floor, so the floor clamp does not fire at all
+        // (lo < floor_i), and the widened span must still hold.
+        ui_page_home_y_axis_range(-10.0f, -10.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP, "flat sub-zero data (-10C): span >= 5");
+        TEST_CHECK(lo <= -10 && hi >= -10, "flat sub-zero data (-10C): still covers the real reading");
+
+        // Near-zero flat data (e.g. a bench sitting at exactly the freezing
+        // floor, 0C): widening pushes the low edge below the floor even
+        // though the real reading is AT the floor -- this is the case the
+        // final integer-level re-widen guard exists for (the floor clamp
+        // would otherwise claw the span back under 5).
+        ui_page_home_y_axis_range(0.0f, 0.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP,
+                   "flat at-freezing data (0C): span >= 5 even after the floor clamp");
+        TEST_CHECK(lo <= 0 && hi >= 0, "flat at-freezing data (0C): still covers the real reading");
+    }
+
     TEST_SECTION("ui_page_home_graph: legend_visibility");
     {
         bool show_actual, show_plan;

@@ -1510,6 +1510,41 @@ function fmtTick(s) {
 // through kcUnit.toDisplay()/label().
 var CHART_FREEZING_C = 0;
 
+// 2026-09-28 owner request: "the graph on the lcd and web should never
+// vertically span less than 5 degrees." Like CHART_FREEZING_C just above,
+// this chart computes its whole [minV, maxV] range in the raw Celsius the
+// firmware stores and only converts to the display unit at label-draw time
+// (kcUnit.toDisplay()), so this constant is 5 Celsius, not 5-in-whatever-
+// unit-is-currently-displayed -- the LCD side (ui_page_home_graph.h's
+// UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP) makes the opposite, equally consistent
+// choice, because ITS range is already computed in display units by the time
+// that function sees it. Applied by widenRangeToMinSpan() below, on the raw
+// data range, BEFORE each chart's own existing padding/rounding/freezing-
+// floor rules run on top of it.
+var GRAPH_MIN_SPAN_C = 5;
+
+// Shared minimum-span enforcement for every temperature-axis [minV, maxV]
+// range on this page (drawIdleDots, drawHistoryChart, drawAutotuneChart) --
+// one place so a future change to the 5-degree rule only has to happen once.
+// Widens symmetrically around the data's own midpoint so a flat or near-flat
+// trace is centred in its padded view rather than shifted to one side.
+// Never NARROWS a range that already meets the minimum -- this is purely a
+// floor, applied to the RAW data range before each caller's own 10%/1%
+// padding, so the existing padding/rounding/freezing-floor rules still run
+// on top of a real (never below GRAPH_MIN_SPAN_C) span, same as the LCD
+// side's ui_page_home_y_axis_range(). Deliberately NOT applied to the duty-
+// cycle (right-hand) axis anywhere on this page -- that axis is always a
+// fixed 0..1 (0-100%) range, never data-driven, so this rule (a temperature-
+// axis rule per the owner's own wording) has nothing to widen there.
+function widenRangeToMinSpan(minV, maxV) {
+  if (maxV - minV < GRAPH_MIN_SPAN_C) {
+    var mid = (minV + maxV) / 2;
+    minV = mid - GRAPH_MIN_SPAN_C / 2;
+    maxV = mid + GRAPH_MIN_SPAN_C / 2;
+  }
+  return [minV, maxV];
+}
+
 // One legend row's markup: a short coloured line sample (dashed for the
 // planned-curve series, solid otherwise) plus its label. Labels here are
 // always this script's own literal strings, never server-supplied, so
@@ -3123,7 +3158,10 @@ function drawIdleDots(data) {
   // divide-by-zero 0..1 span, and matches the kiln's low end.
   var minV = vals.length ? Math.min.apply(null, vals) : 0;
   var maxV = vals.length ? Math.max.apply(null, vals) : 100;
-  if (maxV === minV) { minV -= 5; maxV += 5; }
+  // GRAPH_MIN_SPAN_C floor (owner request 2026-09-28) subsumes the old
+  // "if flat, widen +/-5" special case -- widenRangeToMinSpan() covers both
+  // the exactly-flat case and any other sub-5-degree span the same way.
+  var widened = widenRangeToMinSpan(minV, maxV); minV = widened[0]; maxV = widened[1];
   var padV = (maxV - minV) * 0.1;
   minV -= padV; maxV += padV;
 
@@ -3140,6 +3178,12 @@ function drawIdleDots(data) {
   // reference line mark 0degC as the abnormal boundary.
   var belowFreezing = sensorVals.length > 0 && Math.min.apply(null, sensorVals) < CHART_FREEZING_C;
   if (!belowFreezing) { minV = Math.max(minV, CHART_FREEZING_C); if (maxV <= minV) maxV = minV + 10; }
+  // The freezing clamp just above only ever RAISES minV, which can claw the
+  // span back under GRAPH_MIN_SPAN_C even though the pre-clamp widen/pad
+  // math already met it -- widen maxV (never re-lower minV, which would
+  // undo the clamp) so the floor holds unconditionally. Same guard as the
+  // LCD side's ui_page_home_y_axis_range() final check.
+  if (maxV - minV < GRAPH_MIN_SPAN_C) maxV = minV + GRAPH_MIN_SPAN_C;
 
   function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }
   var dotX = g.padL + 10; // pinned to the left edge, never marches across the plot
@@ -3289,7 +3333,9 @@ function drawHistoryChart(rows) {
   });
   var tMinV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var tMaxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
-  if (tMaxV === tMinV) tMaxV = tMinV + 1;
+  // GRAPH_MIN_SPAN_C floor (owner request 2026-09-28) subsumes the old
+  // "if flat, +1" special case.
+  var widenedT = widenRangeToMinSpan(tMinV, tMaxV); tMinV = widenedT[0]; tMaxV = widenedT[1];
   tMinV -= (tMaxV - tMinV) * 0.05; tMaxV += (tMaxV - tMinV) * 0.05;
 
   // Same freezing-axis-floor clamp as drawIdleDots (see that function's
@@ -3300,6 +3346,9 @@ function drawHistoryChart(rows) {
   // below-freezing axis.
   var belowFreezing = actualVals.length > 0 && Math.min.apply(null, actualVals) < CHART_FREEZING_C;
   if (!belowFreezing) { tMinV = Math.max(tMinV, CHART_FREEZING_C); if (tMaxV <= tMinV) tMaxV = tMinV + 1; }
+  // See drawIdleDots's matching comment: the freezing clamp above only ever
+  // raises tMinV, which can claw the span back under GRAPH_MIN_SPAN_C.
+  if (tMaxV - tMinV < GRAPH_MIN_SPAN_C) tMaxV = tMinV + GRAPH_MIN_SPAN_C;
 
   function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
   function yTemp(v) { return padT + plotH - (v - tMinV) / (tMaxV - tMinV) * plotH; }
@@ -3801,10 +3850,15 @@ function drawAutotuneChart(st, trace) {
   });
   var minV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var maxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
-  if (maxV === minV) maxV = minV + 1;
+  // GRAPH_MIN_SPAN_C floor (owner request 2026-09-28) subsumes the old
+  // "if flat, +1" special case.
+  var widenedA = widenRangeToMinSpan(minV, maxV); minV = widenedA[0]; maxV = widenedA[1];
   minV -= (maxV - minV) * 0.05; maxV += (maxV - minV) * 0.05;
   var belowFreezing = trace.some(function (p) { return p.c < CHART_FREEZING_C; });
   if (!belowFreezing) { minV = Math.max(minV, CHART_FREEZING_C); if (maxV <= minV) maxV = minV + 1; }
+  // See drawIdleDots's matching comment: the freezing clamp above only ever
+  // raises minV, which can claw the span back under GRAPH_MIN_SPAN_C.
+  if (maxV - minV < GRAPH_MIN_SPAN_C) maxV = minV + GRAPH_MIN_SPAN_C;
 
   function x(t) { return g.padL + (t - tMin) / (tMax - tMin) * g.plotW; }
   function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }

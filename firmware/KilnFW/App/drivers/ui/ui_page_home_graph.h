@@ -107,6 +107,21 @@ size_t ui_page_home_now_bucket_index(float horizon_s, float elapsed_s, size_t po
  * file's other snprintf-into-fixed-buffer callers. */
 bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_t out_cap);
 
+/* 2026-09-28 owner request: "the graph on the lcd and web should never
+ * vertically span less than 5 degrees." Applied here in DISPLAY degrees --
+ * lo/hi/floor_disp are already display-unit values by the time they reach
+ * this function (see ui_page_home_refresh.c's call sites, which convert
+ * through ui_home_freezing_point_disp()/the board's unit_pref_t before
+ * calling in), so a caller displaying Fahrenheit gets a 5 F floor, not a
+ * 5 C-converted-to-F one -- consistent with every other constant already
+ * flowing through this same seam (UI_PAGE_HOME_AXIS_QUANT_STEP_DISP below is
+ * the same convention: a "5" that means 5 of whatever unit is on screen).
+ * The web side (main_page.html) makes the opposite, still-consistent-with-
+ * itself choice: its own GRAPH_MIN_SPAN_C is applied in Celsius, since that
+ * chart computes its whole range in Celsius internally and converts only at
+ * label-draw time (kcUnit.toDisplay()) -- see that constant's own comment. */
+#define UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP 5.0f
+
 /* Padded Y-axis range from a real plotted data min/max (lo, hi) -- factored
  * out of refresh_cb()'s data-driven axis branch (the "have_range" case,
  * distinct from the idle single-dot branch's own fixed +/-10 padding, which
@@ -124,6 +139,18 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
  * away from this function, not inside it. The floor is what keeps that call
  * safe; see test_ui_page_home_graph.c's "degenerate span" case, which is run
  * both with and without this guard to prove it is load-bearing.
+ *
+ * Before any of that: if the real data span (hi - lo) is under
+ * UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP, lo/hi are widened symmetrically around
+ * their own midpoint to exactly that span BEFORE the 10% pad and freezing
+ * floor are applied -- so a flat or near-flat trace still gets the usual
+ * padding/rounding on top of a real 5-degree floor, not instead of it. A
+ * final integer-level check after the freezing-floor clamp (which can only
+ * ever narrow axis_lo upward, never widen it) re-widens axis_hi if that
+ * clamp alone pushed the final integer span back under
+ * UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP, so the 5-degree floor holds
+ * unconditionally on the returned integers, not just on the pre-clamp float
+ * math.
  *
  * floor_disp is freezing_point_disp()'s return value (0 C or 32 F, ALREADY
  * converted to the caller's display unit) -- axis_lo is raised to it only

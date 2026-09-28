@@ -354,6 +354,70 @@ function loadMaskFns() {
 })();
 
 // ---------------------------------------------------------------------------
+// GRAPH_MIN_SPAN_C / widenRangeToMinSpan -- owner request 2026-09-28: "the
+// graph on the lcd and web should never vertically span less than 5
+// degrees." See widenRangeToMinSpan()'s own doc comment in main_page.html.
+const MIN_SPAN_SRC = extractRange(
+  'var GRAPH_MIN_SPAN_C = 5;',
+  '}',
+);
+
+assert(MIN_SPAN_SRC.indexOf('function widenRangeToMinSpan') !== -1,
+  'extracted range still contains widenRangeToMinSpan (marker drift guard)');
+
+function loadMinSpanFns() {
+  const ctx = vm.createContext({ console });
+  vm.runInContext(MIN_SPAN_SRC, ctx);
+  return ctx;
+}
+
+(function testFlatDataWidensToExactlyMinSpan() {
+  const ctx = loadMinSpanFns();
+  const r = ctx.widenRangeToMinSpan(20, 20);
+  assert(r[1] - r[0] === 5, 'flat data (20==20): widened to exactly GRAPH_MIN_SPAN_C (5), got span ' + (r[1] - r[0]));
+  assert(r[0] === 17.5 && r[1] === 22.5, 'flat data (20==20): widened symmetrically around midpoint 20');
+})();
+
+(function testOneDegreeRangeWidensToMinSpan() {
+  const ctx = loadMinSpanFns();
+  const r = ctx.widenRangeToMinSpan(30, 31);
+  assert(r[1] - r[0] === 5, '1-degree range (30-31): widened to exactly 5, got ' + (r[1] - r[0]));
+  assert(r[0] <= 30 && r[1] >= 31, '1-degree range (30-31): widened range still covers the real data');
+  // Symmetric around the data's own midpoint (30.5), not shifted to one side.
+  assert(Math.abs((30 - r[0]) - (r[1] - 31)) < 1e-9,
+    '1-degree range (30-31): widened symmetrically around the 30.5 midpoint');
+})();
+
+(function testRangeAtOrAboveMinSpanLeftUnchanged() {
+  const ctx = loadMinSpanFns();
+  const r5 = ctx.widenRangeToMinSpan(10, 15); // exactly 5 -- the boundary itself
+  assert(r5[0] === 10 && r5[1] === 15, 'range exactly at the 5-degree minimum (10-15): left unchanged');
+  const r10 = ctx.widenRangeToMinSpan(40, 50); // well above 5
+  assert(r10[0] === 40 && r10[1] === 50, 'range well above the minimum (40-50): left unchanged, no extra widening');
+})();
+
+(function testNegativeAndNearZeroTemperatures() {
+  const ctx = loadMinSpanFns();
+  // Flat sub-zero data: still widens to exactly 5, symmetric around -10.
+  const rNeg = ctx.widenRangeToMinSpan(-10, -10);
+  assert(rNeg[1] - rNeg[0] === 5, 'flat sub-zero data (-10): widened to exactly 5, got ' + (rNeg[1] - rNeg[0]));
+  assert(rNeg[0] === -12.5 && rNeg[1] === -7.5, 'flat sub-zero data (-10): widened symmetrically around -10');
+  // Flat at exactly zero (freezing point) -- widening pushes the low edge
+  // below zero; this function itself has no freezing-floor opinion (that
+  // clamp is a separate, later step in each caller), so it must widen
+  // exactly the same way as any other flat value.
+  const rZero = ctx.widenRangeToMinSpan(0, 0);
+  assert(rZero[1] - rZero[0] === 5, 'flat at-freezing data (0): widened to exactly 5, got ' + (rZero[1] - rZero[0]));
+  assert(rZero[0] === -2.5 && rZero[1] === 2.5, 'flat at-freezing data (0): widened symmetrically around 0');
+  // A small range straddling zero (-1 to 1.5, span 2.5) -- under 5, must widen.
+  const rStraddle = ctx.widenRangeToMinSpan(-1, 1.5);
+  assert(rStraddle[1] - rStraddle[0] === 5,
+    'small range straddling zero (-1 to 1.5): widened to exactly 5, got ' + (rStraddle[1] - rStraddle[0]));
+  assert(rStraddle[0] <= -1 && rStraddle[1] >= 1.5,
+    'small range straddling zero (-1 to 1.5): widened range still covers the real data');
+})();
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');
 if (failed) {
