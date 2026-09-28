@@ -1583,6 +1583,28 @@ try {
 
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
 
+    # ---- test_adaptive_tune_http_gate.c: its own separate executable ----------
+    # Task 1a (docs/SYSTEM_MODE_GATE_PLAN.md known gap): adaptive_tune_http.c's
+    # enable_post_handler()/revert_post_handler() system_mode_gate wiring
+    # (owner decision 2026-09-25, narrowed same day: enable only gates
+    # enabled=true, never enabled=false; revert has no such carve-out) was
+    # verified only by code-pattern review and an ESP-IDF target build.
+    # test_adaptive_tune_http.c already exists and deliberately never links
+    # the rest of the translation unit (see its own header comment), so this
+    # is a separate file/executable, same "own stub surface, own executable"
+    # convention as test_kiln_cfg_http.c above. #includes adaptive_tune_http.c
+    # directly (static handlers, no other seam); system_mode_gate.c/
+    # system_mode_gate_http.c are linked in for real.
+    $exeAtGate = Join-Path $outDir "kilnctl_host_tests_adaptive_tune_http_gate.exe"
+    $atGateObjDir = Join-Path $outDir "atgate"
+    New-Item -ItemType Directory -Force -Path $atGateObjDir | Out-Null
+    $cmdAtGate = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$atGateObjDir\\`" /Fe:`"$exeAtGate`" `"$(Join-Path $testDir 'test_adaptive_tune_http_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+
+    Invoke-HostTestExe -Name "adaptive_tune_http_gate" -ExePath $exeAtGate -BuildCmd $cmdAtGate
+
     # ---- test_ft6336u.c: its own 24th, separate executable --------------------
     # HAL Phase 1b (docs/HW_ABSTRACTION.md): FT6336U.c was rewritten to go
     # through interface/hal_i2c.h instead of driver/i2c_master.h + i2c_owner.c
@@ -2733,7 +2755,11 @@ try {
     # system mode gate, then the OTA interlock, then http_async_job_busy()),
     # a known test gap named in docs/SYSTEM_MODE_GATE_PLAN.md section 3.6
     # slice 4, previously untested at the handler level.
-    $totalExpected = 62
+    # 62 -> 63: added test_adaptive_tune_http_gate.c's own Invoke-HostTestExe
+    # call -- adaptive_tune_http.c's enable_post_handler()/revert_post_handler()
+    # system_mode_gate wiring (Task 1a, docs/SYSTEM_MODE_GATE_PLAN.md known
+    # gap), previously untested at the handler level.
+    $totalExpected = 63
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
