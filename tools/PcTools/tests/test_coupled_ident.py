@@ -694,6 +694,27 @@ CPL_Z0_MCP = os.path.join(PAIR_FIXTURES, "cpl_z0_mcp.jsonl")
 CPL_Z0_THERMO = os.path.join(PAIR_FIXTURES, "cpl_z0_thermo.jsonl")
 
 
+def _require_default_coupling_captures():
+    """build_coupling_report()/score_matrix_transient_from_http_paths()'s
+    module-level defaults (ci.DEFAULT_SINGLE_ZONE_PAIRS, ci.DEFAULT_COOLDOWN_PATHS,
+    ci.DEFAULT_TRANSIENT_AB_PATH_RUNS) all point at logs/coupling/*.jsonl real
+    bench captures, which are deliberately gitignored (85MB+, not tracked) and
+    absent in a fresh clone/worktree. Skip rather than fail so a from-scratch
+    checkout doesn't read as regressed."""
+    paths = []
+    for mcp_path, thermo_path in ci.DEFAULT_SINGLE_ZONE_PAIRS.values():
+        paths.append(mcp_path)
+        paths.append(thermo_path)
+    paths.extend(ci.DEFAULT_COOLDOWN_PATHS)
+    paths.extend(p for p, _idx in ci.DEFAULT_TRANSIENT_AB_PATH_RUNS)
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        pytest.skip(
+            "real-capture fixture(s) not present (gitignored, main-tree-only): "
+            + ", ".join(missing)
+        )
+
+
 def test_single_zone_column_observations_from_pair_reads_real_capture():
     """The real cpl_z0 capture (zone 0 driven, 55 C dwell, in progress) must
     yield at least zone 0's own diagonal observation via the pair-log path
@@ -1097,6 +1118,7 @@ def test_coupling_report_reproduces_checked_in_captures():
     reports, now reproducible by re-running this function/CLI instead of
     living only in a prose report.
     """
+    _require_default_coupling_captures()
     report = ci.build_coupling_report()
     assert report["matrix_incomplete"] is False
     assert report["coverage_note"].startswith("every one of the 9 cells has coverage=1")
@@ -1122,6 +1144,7 @@ def test_coupling_report_reproduces_checked_in_captures():
 
 
 def test_coupling_report_cli_text_smoke(capsys):
+    _require_default_coupling_captures()
     rc = ci.main(["coupling-report"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -1130,6 +1153,7 @@ def test_coupling_report_cli_text_smoke(capsys):
 
 
 def test_coupling_report_cli_json_smoke(capsys):
+    _require_default_coupling_captures()
     import json as json_mod
     rc = ci.main(["coupling-report", "--json"])
     assert rc == 0
@@ -1302,6 +1326,7 @@ def test_score_matrix_transient_from_http_paths_smoke_on_real_captures():
       ``log_analysis.select_run`` refusal machinery, not a silent
       most-recent-run fallback.
     """
+    _require_default_coupling_captures()
     for matrix in (ci.PRE_ADOPTION_HYBRID_MATRIX, ci.ADOPTED_OWN_DIAGONAL_MATRIX, ci.ADOPTED_HYBRID_MATRIX):
         scores = ci.score_matrix_transient_from_http_paths(matrix, ci.DEFAULT_TRANSIENT_AB_PATH_RUNS)
         assert len(scores) == 3
@@ -1324,6 +1349,7 @@ def test_coupling_report_includes_transient_section():
       -- format_coupling_report_text's ``.items()`` call blew up because
       the report no longer carried the key it expects.
     """
+    _require_default_coupling_captures()
     report = ci.build_coupling_report()
     assert set(report["transient_scores"].keys()) == {
         "pre_adoption_hybrid", "adopted_own_diagonal", "adopted_hybrid"

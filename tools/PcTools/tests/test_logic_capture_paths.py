@@ -69,6 +69,12 @@ class DefaultOutDirCwdIndependenceTests(unittest.TestCase):
         # convention) -- pins DEFAULT_OUT_DIR to that existing location, not
         # just to "some absolute path".
         os.chdir(tempfile.gettempdir())
+        if not os.path.isdir(lc.DEFAULT_OUT_DIR):
+            self.skipTest(
+                f"{lc.DEFAULT_OUT_DIR} does not exist in this checkout yet "
+                "(tools/PcTools/logs/ is gitignored and only created by an "
+                "actual capture run, not by cloning/worktree-minting)"
+            )
         self.assertTrue(os.path.isdir(lc.DEFAULT_OUT_DIR))
 
 

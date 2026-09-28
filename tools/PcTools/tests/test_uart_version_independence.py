@@ -114,15 +114,15 @@ def test_pc_tools_uart_protocol_version_is_a_plain_literal():
 def test_wire_version_matches_on_both_sides():
     """The firmware's C-side constant and pc_tools' Python-side constant must
     stay the same number, even though they are no longer textually related --
-    a real wire change (like the UART_TASK_ID_UI_TEST addition that bumped
-    this to 8) must be applied to both sides by hand, and this test is what
-    catches a one-sided miss."""
+    a real wire change (like the GET_DIAG payload growing to 31 bytes, which
+    bumped this to 13) must be applied to both sides by hand, and this test
+    is what catches a one-sided miss."""
     code = _strip_comments(_UART_TASK_IDS_H.read_text(encoding="utf-8"))
     value_side = _find_define_value(code, "UART_PROTOCOL_VERSION")
-    # The value is `((uint16_t)8)` -- pull the literal that follows the cast,
+    # The value is `((uint16_t)13)` -- pull the literal that follows the cast,
     # not the "16" inside "uint16_t" itself (a bare r"\d+" search would find
     # that first and silently check the wrong number).
     firmware_literal = re.search(r"\(uint16_t\)\s*(\d+)", value_side)
     assert firmware_literal is not None, value_side
-    assert int(firmware_literal.group(1)) == 12
-    assert protocol.UART_PROTOCOL_VERSION == 12
+    assert int(firmware_literal.group(1)) == 13
+    assert protocol.UART_PROTOCOL_VERSION == 13

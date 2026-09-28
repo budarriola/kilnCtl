@@ -14,7 +14,7 @@ from mcpkit import workbench
 def test_saftyfw_runs_before_kilnfw_and_both_reported(monkeypatch, tmp_path):
     calls = []
 
-    def fake_build_saftyfw(jobs=0):
+    def fake_build_saftyfw(jobs=0, saftyfw_root=None):
         calls.append("saftyfw")
         return "saftyfw: OK in 1.0s (3 log lines)\nfull log: x\n--\nall good"
 
@@ -36,7 +36,7 @@ def test_saftyfw_runs_before_kilnfw_and_both_reported(monkeypatch, tmp_path):
 def test_saftyfw_failure_aborts_before_kilnfw_starts(monkeypatch):
     calls = []
 
-    def fake_build_saftyfw(jobs=0):
+    def fake_build_saftyfw(jobs=0, saftyfw_root=None):
         calls.append("saftyfw")
         return "saftyfw: FAILED (exit 1) in 1.0s (3 log lines)\nfull log: x\n--\nerror: bad"
 
@@ -57,7 +57,7 @@ def test_saftyfw_failure_aborts_before_kilnfw_starts(monkeypatch):
 def test_skip_saftyfw_opts_out(monkeypatch):
     calls = []
 
-    def fake_build_saftyfw(jobs=0):
+    def fake_build_saftyfw(jobs=0, saftyfw_root=None):
         calls.append("saftyfw")
         return "saftyfw: OK"
 
@@ -78,7 +78,7 @@ def test_skip_saftyfw_opts_out(monkeypatch):
 def test_fullclean_target_does_not_build_saftyfw(monkeypatch):
     calls = []
 
-    def fake_build_saftyfw(jobs=0):
+    def fake_build_saftyfw(jobs=0, saftyfw_root=None):
         calls.append("saftyfw")
         return "saftyfw: OK"
 

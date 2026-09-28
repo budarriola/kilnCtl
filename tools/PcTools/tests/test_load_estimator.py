@@ -94,6 +94,10 @@ def test_real_capture_loader_handles_both_envelopes():
     form. load_capture_rows must auto-detect either."""
     wrapped = os.path.join(REPO_ROOT, "logs", "coupling", "p7_fuzzy0_http.jsonl")
     bare = os.path.join(FIXTURES, "final.jsonl")
+    if not os.path.exists(wrapped):
+        pytest.skip(
+            f"real-capture fixture not present (gitignored, main-tree-only): {wrapped}"
+        )
     assert os.path.exists(wrapped) and os.path.exists(bare)
     rows_wrapped = le.load_capture_rows(wrapped)
     rows_bare = le.load_capture_rows(bare)
@@ -169,7 +173,11 @@ def test_real_captures_produce_finite_estimates_no_crash():
     estimator crashing/returning nonsense on real data, not against that
     (already-documented) inconsistency regressing further."""
     paths = sorted(glob.glob(os.path.join(REPO_ROOT, "logs", "coupling", "p7_*_http.jsonl")))
-    assert paths, "expected at least one real profile-7 capture"
+    if not paths:
+        pytest.skip(
+            "no logs/coupling/p7_*_http.jsonl real captures present "
+            "(gitignored, main-tree-only)"
+        )
     seen_any = False
     for p in paths:
         rows_all = le.load_capture_rows(p)
