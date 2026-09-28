@@ -443,81 +443,80 @@ function loadMinSpanFns(unit) {
 })();
 
 // ---------------------------------------------------------------------------
-// niceAxisTickStep / drawYAxis label uniqueness -- owner fix 2026-09-28:
+// drawYAxis label uniqueness and placement -- owner fix 2026-09-28:
 // GRAPH_MIN_SPAN_DISP can leave a 5-6 displayed-degree span, which the old
 // fixed 11-label/.toFixed(0) axis repeated (e.g. 20, 21, 21, 22). Extracts
-// niceAxisTickStep() itself (pure, no canvas) and reproduces drawYAxis()'s
-// label-generation loop against it, so this is checking the exact function
-// production code calls, not a reimplementation of the fix.
+// niceAxisTickStep() AND drawYAxis() and runs the real drawYAxis() against a
+// recording canvas stub and a kcUnit stub, so the tick loop itself (first
+// tick, count, F->C mapping, label text) is under test, not a mirror of it.
 const NICE_TICK_SRC = extractRange(
   'function niceAxisTickStep(range, targetCount) {',
   '}'
 );
 assert(NICE_TICK_SRC.indexOf('niceNorm') !== -1,
   'sanity: extracted range is niceAxisTickStep');
+const DRAW_Y_AXIS_SRC = extractRange(
+  'function drawYAxis(g, yTemp, minV, maxV) {',
+  '}'
+);
+assert(DRAW_Y_AXIS_SRC.indexOf('fillText') !== -1,
+  'sanity: extracted range is drawYAxis');
 
-function loadNiceTickFn() {
-  const ctx = vm.createContext({ console });
-  new vm.Script(NICE_TICK_SRC, { filename: 'main_page.html (nice-tick slice)' }).runInContext(ctx);
-  return ctx;
+// Returns [{text, y, value}] for every label drawYAxis() draws on a chart
+// laid out like makeChartCanvas() (padT 10, plotH 190) over [minC, maxC] C.
+function drawYAxisLabels(unit, minC, maxC) {
+  const texts = [];
+  const g = {
+    padL: 42, padT: 10, plotH: 190, border: '#000', muted: '#666',
+    ctx: {
+      beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
+      fillText(t, x, y) { texts.push({ text: t, y: y - 3 }); },
+    },
+  };
+  const kcUnit = {
+    get: () => unit,
+    toDisplay: (c) => (unit === 'f' ? c * 9 / 5 + 32 : c),
+    label: () => (unit === 'f' ? '\u00b0F' : '\u00b0C'),
+  };
+  const ctx = vm.createContext({ console, window: { kcUnit } });
+  vm.runInContext(NICE_TICK_SRC + '\n' + DRAW_Y_AXIS_SRC, ctx);
+  function yTemp(v) { return g.padT + g.plotH - (v - minC) / (maxC - minC) * g.plotH; }
+  ctx.drawYAxis(g, yTemp, minC, maxC);
+  return texts.map((l) => ({ text: l.text, y: l.y, value: parseFloat(l.text) }));
 }
 
-// Mirrors drawYAxis()'s own loop (first = ceil(lo/step)*step, count =
-// round((hi-first)/step)) exactly, converting each tick to the same
-// .toFixed(decimals) string drawYAxis() draws.
-function labelsForDisplayedSpan(ctx, lo, hi) {
-  const t = ctx.niceAxisTickStep(hi - lo, 8);
-  const first = Math.ceil(lo / t.step) * t.step;
-  const count = Math.max(0, Math.round((hi - first) / t.step));
-  const labels = [];
-  for (let i = 0; i <= count; i++) {
-    labels.push((first + i * t.step).toFixed(t.decimals));
-  }
-  return labels;
-}
-
-function hasNoDuplicates(labels) {
-  return new Set(labels).size === labels.length;
-}
-
-// Displayed-degree spans to check, both in °C (span applied directly) and in
-// °F (the same widenRangeToMinSpan()-produced Celsius span, scaled by 9/5 the
-// way toDisplay() does) -- 5 and 6 are the exact boundary the owner report
-// named, 5.5 the fractional case in between, 50 and 1000 much wider ranges
-// that must still land a reasonable tick count.
-[5, 5.5, 6, 50, 1000].forEach(function (spanC) {
-  (function () {
-    const ctx = loadNiceTickFn();
-    const labelsC = labelsForDisplayedSpan(ctx, 20, 20 + spanC);
-    assert(hasNoDuplicates(labelsC),
-      spanC + ' C span: no duplicate Y-axis labels in C, got [' + labelsC.join(', ') + ']');
-    assert(labelsC.length >= 4 && labelsC.length <= 12,
-      spanC + ' C span: label count in the 5-11ish range (got ' + labelsC.length + ')');
-
-    const spanF = spanC * 9 / 5;
-    const labelsF = labelsForDisplayedSpan(ctx, 68, 68 + spanF);
-    assert(hasNoDuplicates(labelsF),
-      spanC + ' C (' + spanF.toFixed(1) + ' F) span: no duplicate Y-axis labels in F, got [' +
-      labelsF.join(', ') + ']');
-  })();
+// Spans in displayed degrees (5/5.5/6: the min-span boundary; 50, and the
+// full 20-1300 C firing range) in both units. For F the Celsius span is
+// chosen so the DISPLAYED span is the listed value.
+[
+  [20, 25], [20, 25.5], [20, 26], [21.3, 26.3], [-2.2, 2.8], [20, 70], [20, 1300],
+].forEach(function (r) {
+  ['c', 'f'].forEach(function (unit) {
+    const minC = r[0], maxC = unit === 'f' && r[1] - r[0] < 10 ? r[0] + (r[1] - r[0]) * 5 / 9 : r[1];
+    const tag = unit.toUpperCase() + ' ' + minC.toFixed(2) + '..' + maxC.toFixed(2) + ' C';
+    const labels = drawYAxisLabels(unit, minC, maxC);
+    const texts = labels.map((l) => l.text);
+    assert(new Set(texts).size === texts.length,
+      tag + ': no duplicate Y-axis labels, got [' + texts.join(', ') + ']');
+    assert(labels.length >= 4 && labels.length <= 13,
+      tag + ': label count 4..13 (got ' + labels.length + ': ' + texts.join(', ') + ')');
+    assert(labels.every((l) => l.y >= 10 - 1e-6 && l.y <= 200 + 1e-6),
+      tag + ': every tick inside the plot [padT, padT+plotH], got y=[' +
+      labels.map((l) => l.y.toFixed(1)).join(', ') + ']');
+    // The label text must name the temperature its tick is drawn at.
+    const lo = unit === 'f' ? minC * 9 / 5 + 32 : minC, hi = unit === 'f' ? maxC * 9 / 5 + 32 : maxC;
+    assert(labels.every((l) => Math.abs((10 + 190 - (l.value - lo) / (hi - lo) * 190) - l.y) < 1e-6),
+      tag + ': each label value maps to its own tick y');
+    assert(texts.every((t) => t.endsWith(unit === 'f' ? '\u00b0F' : '\u00b0C')),
+      tag + ': labels carry the displayed unit');
+  });
 });
 
-// Negative-test evidence (restored by hand immediately below, then a forced
-// full rebuild before declaring the tree clean -- see IMPLEMENTER.md): with
-// the OLD fixed tickCount=10/.toFixed(0) behaviour, a 5-degree span at a
-// non-round base value DOES repeat a label. Reproduced here directly (not by
-// editing the source file) so this assertion documents the exact bug this
-// change fixes and stays in the suite as a regression guard.
-(function testOldFixedElevenLabelBehaviourDidRepeat() {
-  const minV = 20, maxV = 25; // 5 C span, the exact boundary case
-  const oldLabels = [];
-  for (let vi = 0; vi <= 10; vi++) {
-    const vv = minV + (maxV - minV) * vi / 10;
-    oldLabels.push(vv.toFixed(0));
-  }
-  assert(!hasNoDuplicates(oldLabels),
-    'sanity: the OLD tickCount=10/.toFixed(0) scheme really did repeat labels over a 5 C span (' +
-    oldLabels.join(', ') + ') -- proves this test would have caught the pre-fix bug');
+(function testFullFiringRangeDoesNotOvershootTop() {
+  // Regression: a Math.round tick count drew 1400 C above a 20..1300 C plot.
+  const texts = drawYAxisLabels('c', 20, 1300).map((l) => l.text);
+  assert(texts[texts.length - 1] === '1200\u00b0C',
+    '20..1300 C: top label is 1200, not past hi, got [' + texts.join(', ') + ']');
 })();
 
 // ---------------------------------------------------------------------------

@@ -1715,8 +1715,11 @@ function drawYAxis(g, yTemp, minV, maxV) {
   var lo = Math.min(dispA, dispB), hi = Math.max(dispA, dispB);
   var t = niceAxisTickStep(hi - lo, 8);
   var step = t.step, decimals = t.decimals;
-  var first = Math.ceil(lo / step) * step;
-  var count = Math.max(0, Math.round((hi - first) / step));
+  var first = Math.ceil(lo / step - 1e-9) * step;
+  // floor, not round: a rounded count added one tick past hi (20..1300 C,
+  // step 200, drew a 1400 tick above the plot). The epsilons keep a tick
+  // sitting exactly on lo/hi despite float error.
+  var count = Math.max(0, Math.floor((hi - first) / step + 1e-9));
   ctx.font = '10px sans-serif';
   for (var vi = 0; vi <= count; vi++) {
     var dv = first + vi * step;
