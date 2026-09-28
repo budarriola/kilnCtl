@@ -284,6 +284,8 @@ KEYWORDS = {
     "control_set_zone_pid": ("kp", "ki", "kd", "gains", "loop"),
     "control_set_zone_limits": ("zone limit", "max temp", "min temp", "ceiling", "floor",
                                 "restore", "max_temp_c", "min_temp_c", "abs_max"),
+    "control_set_zone_type": ("zone type", "on/off", "on-off", "heater", "PID", "hysteresis",
+                              "zone_type", "control strategy"),
     "wifi_add_network": ("provision", "credentials", "ssid", "join"),
     "ota_update_esp": ("over", "air", "upload", "firmware", "http"),
     "codec_decode_frame": ("wire", "bytes", "protocol", "parse", "hex"),

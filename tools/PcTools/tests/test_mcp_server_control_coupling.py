@@ -63,9 +63,11 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
         tool just fetched that response and dropped everything but the
         coupling matrix. Prove all three now appear per zone."""
         zones_json = _zones_json()
+        zones_json["zones"][0]["zone_type"] = 0
         zones_json["zones"][0]["fuzzy_strength_pct"] = 50.0
         zones_json["zones"][0]["ease_off_window_mult"] = 2.0
         zones_json["zones"][0]["approach_rate_cap_c_per_hr"] = 0.0
+        zones_json["zones"][1]["zone_type"] = 1
         zones_json["zones"][1]["fuzzy_strength_pct"] = 0.0
         zones_json["zones"][1]["ease_off_window_mult"] = 2.0
         zones_json["zones"][1]["approach_rate_cap_c_per_hr"] = 0.0
@@ -74,12 +76,12 @@ class ControlGetZonesCouplingTest(unittest.TestCase):
             result = mc.control_get_zones()
         self.assertIn("http-only fields", result)
         self.assertIn(
-            "z0: fuzzy_strength_pct=50.0, ease_off_window_mult=2.0, "
+            "z0: zone_type=0, fuzzy_strength_pct=50.0, ease_off_window_mult=2.0, "
             "approach_rate_cap_c_per_hr=0.0",
             result,
         )
         self.assertIn(
-            "z1: fuzzy_strength_pct=0.0, ease_off_window_mult=2.0, "
+            "z1: zone_type=1, fuzzy_strength_pct=0.0, ease_off_window_mult=2.0, "
             "approach_rate_cap_c_per_hr=0.0",
             result,
         )

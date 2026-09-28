@@ -22,9 +22,18 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (194 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-27, when `backup_export`/
-`backup_import` were added -- wrapping `GET /api/backup/export` (READ-ONLY;
+the rest behind a search facade (195 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-28, when `control_set_zone_type`
+was added -- a narrow writer for one zone's `zone_type` field only
+(GET-merge-POST `/api/zones`, no PID/control_mode/limits collateral, modeled
+directly on `control_set_zone_limits`), fixing the gap where the only
+existing `zone_type` writer, `load_config_preset()`, is a whole-page write
+forbidden for a single-field fix -- an unverified preset restore once left
+bench zone 2 at `zone_type=1` (on/off) this way, which silently made a
+3-zone firing never close that zone's relay (HP-02). `control_get_zones` now
+also surfaces `zone_type` per zone (it previously showed only `mode`, i.e.
+`control_mode`). The one before it was `backup_export`/
+`backup_import`, 2026-09-27 -- wrapping `GET /api/backup/export` (READ-ONLY;
 saves the JSON under gitignored `logs/backup_export/`) and the synchronous
 `POST /api/backup/import` (`confirm=True` exactly, readiness read before and
 after, a 500 partial write reported as a failure). The one before it was

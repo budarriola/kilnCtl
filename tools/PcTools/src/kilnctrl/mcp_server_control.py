@@ -198,6 +198,7 @@ def _describe_coupling_matrix(zones_json: dict) -> str:
 #: incidents): a tool that omits fields makes a campaign look verified when
 #: it wasn't actually checked.
 HTTP_ONLY_ZONE_FIELDS = (
+    "zone_type",
     "fuzzy_strength_pct",
     "ease_off_window_mult",
     "approach_rate_cap_c_per_hr",
@@ -794,3 +795,164 @@ def control_set_zone_limits(
     if ceiling_warning:
         result += f"\nWARNING: {ceiling_warning}"
     return result
+
+
+# ---------------------------------------------------------------------------
+# control_set_zone_type -- narrow writer for one zone's zone_type field only,
+# modeled directly on control_set_zone_limits() above (same GET-merge-POST
+# /api/zones path, zones_http_client.build_post_body(), same confirm gate,
+# same mode-gate/collateral read-back discipline). The only pre-existing
+# zone_type writer is config_presets.load_config_preset(), which is a whole
+# bench_fixture.json-shaped preset POST that also overwrites PID gains and
+# control_mode for every zone -- forbidden for a single-field fix.
+#
+# Why this exists: bench zone 2 was left zone_type=ZONE_TYPE_ON_OFF (1) by an
+# unverified preset restore, which silently made a 3-zone firing never close
+# zone 2's relay (HP-02) -- ZONE_TYPE_ON_OFF zones are driven by hysteresis/
+# on-off rules, not the PID loop a firing profile assumes. zone_type is a
+# uint8_t enum (zones_config_accessors.h's zone_type_t): ZONE_TYPE_HEATER = 0
+# (PID-controlled), ZONE_TYPE_ON_OFF = 1 (hysteresis-controlled). Validated
+# range-checked firmware-side too (zones_config_json.c: "zone zone_type out
+# of range" if > ZONE_TYPE_ON_OFF).
+# ---------------------------------------------------------------------------
+ZONE_TYPE_HEATER = 0
+ZONE_TYPE_ON_OFF = 1
+_ZONE_TYPE_NAMES = {ZONE_TYPE_HEATER: "heater/PID", ZONE_TYPE_ON_OFF: "on/off"}
+# What else the firmware does differently once a zone has this type -- none
+# of it is a live relay/integral side effect (the write is refused mid-run),
+# but each changes what the NEXT firing or profile save does with the zone.
+_ZONE_TYPE_CONSEQUENCE = {
+    ZONE_TYPE_HEATER: (
+        "note: a heater zone is PID-driven, needs a max_temp_c ceiling (zone_needs_ceiling()), "
+        "and profile on/off rules aimed at it are refused on profile save (profiles_http.c)"),
+    ZONE_TYPE_ON_OFF: (
+        "note: an on/off zone is never PID-driven; its coupling row/column read as 0 at use "
+        "(zones_config_get_coupling(), stored cells kept), and a custom profile including it "
+        "with no on/off rule is refused at start (HP-02, profile_executor_run.c)"),
+}
+
+
+@_srv._tool()
+def control_set_zone_type(
+    zone: int,
+    zone_type: int,
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Set a zone's persistent zone_type (0 = ZONE_TYPE_HEATER/PID-controlled,
+    1 = ZONE_TYPE_ON_OFF/hysteresis-controlled), touching ONLY that one field
+    over the GET-merge-POST /api/zones path (zones_http_client.
+    build_post_body()) -- every other field the board reports (PID gains,
+    control_mode, relay_mask, limits, ramp rate, coupling matrix, timing
+    profiles, ...) is echoed back exactly as read, never overwritten. Modeled
+    directly on control_set_zone_limits(); see that tool's docstring for the
+    shared GET-merge-POST/collateral-diff discipline.
+
+    The only pre-existing zone_type writer is load_config_preset()
+    (config_presets.py), which overwrites PID gains and control_mode for
+    every zone along with whatever zone_type a preset also carries -- forbidden
+    for a single-field fix. This tool exists because an unverified preset
+    restore once left a bench zone at zone_type=1 (on/off), which silently
+    made a 3-zone firing never close that zone's relay (a hysteresis-
+    controlled zone is not driven by the PID loop a firing profile assumes).
+
+    Refused:
+      - if `zone_type` is not 0 or 1 (the firmware's own valid range --
+        zones_config_json.c refuses anything > ZONE_TYPE_ON_OFF);
+      - unless `confirm is True` exactly (a dry run otherwise -- no POST);
+      - unless the profile executor reads idle/done/faulted and autotune
+        reads idle/done/aborted (anything else, including an unreadable
+        state, refuses) -- the same system_mode_gate window
+        control_set_zone_limits() respects, since changing a zone's control
+        strategy mid-run is exactly as unsafe as changing its limits;
+      - if `zone` is not one of the indices GET /api/zones reports.
+
+    After a confirmed write, re-fetches GET /api/zones and FAILS LOUD if
+    zone_type doesn't read back exactly as posted, or if ANY other config
+    field (any zone, or top-level) differs between the before and after
+    snapshots -- reusing control_set_zone_limits()'s _zone_collateral_diff()
+    so the same firmware-derived-telemetry exclusions (generation,
+    safety_ceiling, measured currents) apply and nothing else is silently
+    permitted to drift.
+
+    Uses the http_auth ADMIN-session seam via zones_http_client -- never
+    prints, logs, or echoes a credential.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as control_set_zone_limits()
+
+    if isinstance(zone_type, bool) or not isinstance(zone_type, int) or zone_type not in (ZONE_TYPE_HEATER, ZONE_TYPE_ON_OFF):
+        return (f"refused: zone_type={zone_type!r} is not a valid zone_type -- must be "
+                f"{ZONE_TYPE_HEATER} (heater/PID) or {ZONE_TYPE_ON_OFF} (on/off)")
+
+    resolved = _ota_resolve_host(host)
+
+    running_reason = _profile_or_autotune_running_reason()
+    if running_reason is not None:
+        return f"refused: {running_reason} -- zone_type is not changed mid-run (host={resolved})"
+
+    try:
+        before = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: GET /api/zones failed (host={resolved}): {exc}"
+
+    zones = before.get("zones") or []
+    valid_indices = sorted(z.get("index") for z in zones if "index" in z)
+    if zone not in valid_indices:
+        return f"refused: zone {zone} is out of range -- board reports zones {valid_indices} (host={resolved})"
+
+    current = _zone_by_index(zones, zone) or {}
+    current_type = current.get("zone_type")
+
+    changed_fields = {"zone_type"}
+    zone_override: "dict[str, Any]" = {"index": zone, "zone_type": zone_type}
+
+    if confirm is not True:
+        return (
+            f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set zone {zone}: "
+            f"zone_type={zone_type} ({_ZONE_TYPE_NAMES.get(zone_type, '?')}) "
+            f"(current: zone_type={current_type!r} ({_ZONE_TYPE_NAMES.get(current_type, '?')}); "
+            f"host={resolved})\n{_ZONE_TYPE_CONSEQUENCE[zone_type]}"
+        )
+
+    try:
+        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: could not build POST body from the GET snapshot: {exc}"
+
+    try:
+        post_result = zones_http_client.post_zones(resolved, body)
+    except zones_http_client.ZonesHttpError as exc:
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run started after this tool's own precheck "
+                    f"(host={resolved})")
+        return f"error: POST /api/zones failed (host={resolved}): {exc}"
+    if post_result != "ok":
+        return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
+
+    try:
+        after = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: POST /api/zones returned ok, but the confirming re-fetch of GET "
+                f"/api/zones failed (host={resolved}): {exc} -- state UNKNOWN, re-check before "
+                f"trusting this")
+
+    after_zones = after.get("zones") or []
+    after_zone = _zone_by_index(after_zones, zone)
+    if after_zone is None:
+        return f"FAILED: zone {zone} missing from the re-fetched GET /api/zones response (host={resolved})"
+
+    got = after_zone.get("zone_type")
+    if got != zone_type:
+        return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
+                f"landed -- zone_type: wanted {zone_type}, board now reports {got!r} "
+                f"(host={resolved}). Do not trust this as applied.")
+
+    collateral = _zone_collateral_diff(before, after, zone, changed_fields)
+    if collateral:
+        return (f"FAILED: zone {zone}'s zone_type landed correctly, but other field(s) changed "
+                f"unexpectedly -- {'; '.join(collateral)} (host={resolved}). This tool must touch "
+                f"only zone_type; investigate before trusting this board's config.")
+
+    return (f"ok - zone {zone}: zone_type={got} ({_ZONE_TYPE_NAMES.get(got, '?')}) "
+            f"(confirmed by read-back; host={resolved})\n{_ZONE_TYPE_CONSEQUENCE[zone_type]}")
