@@ -354,22 +354,47 @@ function loadMaskFns() {
 })();
 
 // ---------------------------------------------------------------------------
-// GRAPH_MIN_SPAN_C / widenRangeToMinSpan -- owner request 2026-09-28: "the
+// GRAPH_MIN_SPAN_DISP / widenRangeToMinSpan -- owner request 2026-09-28: "the
 // graph on the lcd and web should never vertically span less than 5
 // degrees." See widenRangeToMinSpan()'s own doc comment in main_page.html.
 const MIN_SPAN_SRC = extractRange(
-  'var GRAPH_MIN_SPAN_C = 5;',
+  'var GRAPH_MIN_SPAN_DISP = 5;',
+  '}',
+) + '\n' + extractRange(
+  'function widenRangeToMinSpan(minV, maxV) {',
   '}',
 );
 
-assert(MIN_SPAN_SRC.indexOf('function widenRangeToMinSpan') !== -1,
-  'extracted range still contains widenRangeToMinSpan (marker drift guard)');
+assert(MIN_SPAN_SRC.indexOf('function graphMinSpanC') !== -1 &&
+  MIN_SPAN_SRC.indexOf('function widenRangeToMinSpan') !== -1,
+  'extracted range contains graphMinSpanC and widenRangeToMinSpan (marker drift guard)');
 
-function loadMinSpanFns() {
-  const ctx = vm.createContext({ console });
+// unit: undefined -> no window at all (Celsius default); 'c'/'f' -> a
+// window.kcUnit stub reporting that display unit.
+function loadMinSpanFns(unit) {
+  const sandbox = { console };
+  if (unit) sandbox.window = { kcUnit: { get: () => unit } };
+  const ctx = vm.createContext(sandbox);
   vm.runInContext(MIN_SPAN_SRC, ctx);
   return ctx;
 }
+
+(function testFahrenheitMinSpanIsFiveDisplayedDegrees() {
+  // 5 degrees of the DISPLAYED unit, same as the LCD: in F the Celsius span
+  // enforced is 25/9, which is exactly 5 F once toDisplay() scales by 9/5.
+  const f = loadMinSpanFns('f');
+  const rf = f.widenRangeToMinSpan(20, 20);
+  assert(Math.abs((rf[1] - rf[0]) * 9 / 5 - 5) < 1e-9,
+    'F display: flat data widens to exactly 5 displayed degrees, got ' + ((rf[1] - rf[0]) * 9 / 5) + ' F');
+  const c = loadMinSpanFns('c');
+  const rc = c.widenRangeToMinSpan(20, 20);
+  assert(rc[1] - rc[0] === 5, 'C display: flat data widens to exactly 5 C, got ' + (rc[1] - rc[0]));
+  // 3 C (5.4 F) already meets 5 displayed degrees in F, but not in C.
+  const r3f = f.widenRangeToMinSpan(20, 23);
+  assert(r3f[0] === 20 && r3f[1] === 23, 'F display: 3 C (5.4 F) range left unchanged');
+  const r3c = c.widenRangeToMinSpan(20, 23);
+  assert(r3c[1] - r3c[0] === 5, 'C display: 3 C range widened to 5 C');
+})();
 
 (function testFlatDataWidensToExactlyMinSpan() {
   const ctx = loadMinSpanFns();

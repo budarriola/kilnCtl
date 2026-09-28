@@ -244,6 +244,32 @@ void run_test_ui_page_home_graph(void)
         TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP,
                    "flat at-freezing data (0C): span >= 5 even after the floor clamp");
         TEST_CHECK(lo <= 0 && hi >= 0, "flat at-freezing data (0C): still covers the real reading");
+        // The floor decision uses the REAL data minimum (0, at the floor),
+        // not the widened -2.5: the axis is floored at 0, and the final
+        // integer re-widen is what restores the 5-degree span (0..3 -> 0..5).
+        TEST_CHECK(lo == 0, "flat at-freezing data (0C): axis_lo floored at freezing, not widened below it");
+
+        // Flat 1C: widened to -1.5..3.5, padded to -2..4; the real minimum
+        // (1C) is above freezing so the floor applies (0..4), and the final
+        // guard re-widens to 0..5.
+        ui_page_home_y_axis_range(1.0f, 1.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(lo == 0, "flat 1C data: axis_lo floored at freezing despite the widened low edge dipping below it");
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP, "flat 1C data: span >= 5 after the floor clamp");
+
+        // Same in Fahrenheit (floor 32F): 5 displayed degrees, not 9.
+        ui_page_home_y_axis_range(33.0f, 33.0f, 32.0f, &lo, &hi);
+        TEST_CHECK(lo == 32 && hi == 37, "flat 33F data: floored at 32F, span exactly 5F (32..37)");
+
+        // Active-firing path: quantize + only-widen ratchet. Even a held
+        // range narrower than 5 (e.g. carried from before this rule) cannot
+        // shrink the result, since the ratchet only ever widens the fresh
+        // (already >= 5) range.
+        ui_page_home_active_y_axis_range(20.0f, 20.0f, 0.0f, true, 20, 21, &lo, &hi);
+        TEST_CHECK(hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP,
+                   "active range, flat data with a narrow held range (20..21): span >= 5");
+        ui_page_home_active_y_axis_range(1.0f, 1.0f, 0.0f, false, 0, 0, &lo, &hi);
+        TEST_CHECK(lo == 0 && hi - lo >= (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP,
+                   "active range, flat 1C first tick: floored at 0 and span >= 5");
     }
 
     TEST_SECTION("ui_page_home_graph: legend_visibility");

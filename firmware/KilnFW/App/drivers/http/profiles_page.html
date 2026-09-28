@@ -833,7 +833,10 @@ function drawSegPreview(points) {
     if (p.temp < vMin) vMin = p.temp;
   });
   if (tMax <= tMin) tMax = tMin + 1; // degenerate (all-flat/zero-duration) -- keep the axes finite
-  if (vMax <= vMin) vMax = vMin + 1;
+  // Owner request 2026-09-28: never span less than 5 degrees vertically
+  // (this sketch labels in C, so 5 C) -- same rule as main_page.html's
+  // widenRangeToMinSpan(); also covers the old flat-data case.
+  if (vMax - vMin < 5) { var vMid = (vMax + vMin) / 2; vMin = vMid - 2.5; vMax = vMid + 2.5; }
 
   function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
   function y(v) { return padT + plotH - (v - vMin) / (vMax - vMin) * plotH; }

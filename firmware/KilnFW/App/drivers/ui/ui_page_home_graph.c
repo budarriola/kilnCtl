@@ -80,7 +80,11 @@ void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *ou
      * UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP degrees of vertical span. Widen the
      * raw data range symmetrically around its own midpoint FIRST, before the
      * usual 10% pad/degenerate-guard/freezing-floor logic below runs on top
-     * of it -- see header comment. */
+     * of it -- see header comment. data_lo keeps the REAL data minimum for
+     * the freezing-floor decision below: testing the widened lo instead
+     * would stop flooring any above-freezing trace within 2.5 degrees of
+     * the floor (e.g. flat 1 C data widened to -1.5..3.5). */
+    const float data_lo = lo;
     if (hi - lo < UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP) {
         float mid = (lo + hi) * 0.5f;
         lo = mid - UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP * 0.5f;
@@ -96,7 +100,7 @@ void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *ou
     int32_t axis_hi = (int32_t)lroundf(hi + pad_c);
 
     int32_t floor_i = (int32_t)lroundf(floor_disp);
-    if (axis_lo < floor_i && lo >= floor_i) {
+    if (axis_lo < floor_i && data_lo >= floor_i) {
         axis_lo = floor_i;
     }
     /* Second-stage guard: the float-side `range < 1.0f` floor above keeps

@@ -339,6 +339,13 @@ static void refresh_plan_chart(const profile_t *prof)
     float zero_disp = unit_pref_convert(0.0f, unit, UNIT_PREF_KIND_ABSOLUTE);
     int32_t axis_lo = (int32_t)lroundf(zero_disp < peak_disp ? zero_disp : peak_disp - 1.0f);
     int32_t axis_hi = (int32_t)lroundf(peak_disp > zero_disp ? peak_disp : zero_disp + 1.0f);
+    /* Owner request 2026-09-28: never span less than 5 displayed degrees
+     * (reachable only for a plan whose start and every target sit within
+     * 5 degrees of freezing -- PROFILE_TARGET_C_MIN is 0 C). Same constant
+     * as the home chart's ui_page_home_y_axis_range(). */
+    if (axis_hi - axis_lo < (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP) {
+        axis_hi = axis_lo + (int32_t)UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP;
+    }
     lv_chart_set_axis_range(s_plan_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
 
     for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {

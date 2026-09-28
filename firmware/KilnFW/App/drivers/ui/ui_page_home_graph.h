@@ -116,10 +116,9 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
  * 5 C-converted-to-F one -- consistent with every other constant already
  * flowing through this same seam (UI_PAGE_HOME_AXIS_QUANT_STEP_DISP below is
  * the same convention: a "5" that means 5 of whatever unit is on screen).
- * The web side (main_page.html) makes the opposite, still-consistent-with-
- * itself choice: its own GRAPH_MIN_SPAN_C is applied in Celsius, since that
- * chart computes its whole range in Celsius internally and converts only at
- * label-draw time (kcUnit.toDisplay()) -- see that constant's own comment. */
+ * The web side (main_page.html's GRAPH_MIN_SPAN_DISP/graphMinSpanC()) uses
+ * the same 5-displayed-degrees rule, converted to a Celsius span because
+ * that chart ranges in Celsius and converts only at label-draw time. */
 #define UI_PAGE_HOME_GRAPH_MIN_SPAN_DISP 5.0f
 
 /* Padded Y-axis range from a real plotted data min/max (lo, hi) -- factored
@@ -154,7 +153,8 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
  *
  * floor_disp is freezing_point_disp()'s return value (0 C or 32 F, ALREADY
  * converted to the caller's display unit) -- axis_lo is raised to it only
- * when the real data minimum (lo, pre-padding) is itself at or above the
+ * when the real data minimum (lo as passed in, before the min-span widening
+ * and padding) is itself at or above the
  * floor, so a genuine sub-freezing reading still plots visibly instead of
  * being clipped off the bottom (same rule freezing_point_disp()'s own
  * comment in ui_page_home.c documents; this function just applies it). */
