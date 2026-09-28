@@ -262,16 +262,50 @@ argument to see a call site at all.
   `crash_report_clear_http_client.py` reads the state back afterwards and
   does not change.
 
-### A4 -- `backup/import` onto A1's helper. CONDITIONAL, measure first
+### A4 -- `backup/import` onto A1's helper. DONE (2026-09-28)
 
-- `backup_import_post_handler()` receives the body and then applies up to
-  100 profile slots, zones and kiln_configs through the stores' public save
-  functions (`backup_import.c`). This could plausibly take several seconds.
-  The job task would also receive the body (`httpd_req_recv` on the async
-  copy is supported). The body buffer is already on the heap
-  (`backup_import.c:77`). Time a full 100-slot import on the bench first. If
-  it takes under about 2 s, **drop this slice**. This is the largest
-  handler and the riskiest to move, so do it last.
+- Measured on the bench (2026-09-28, bench A4 finding): a real restore
+  (10940 B, 1 profile, 3 zones, 1 timing profile, 1 kiln_config) exceeded
+  the PC client's own request timeout on all three attempts and left the
+  board's HTTP stack unresponsive to other requests for several polls after
+  each -- well over the "drop this slice" threshold.
+- `backup_import_post_handler()` (`backup_import.c`) now reads its headers
+  and does its mode-gate/interlock/busy checks on `httpd_worker` exactly as
+  before, then hands the body read plus the two-pass validate-then-commit
+  off to a new `backup_import_job()` running on `http_async_job_try_start()`
+  ("http_async_job", 6144 B, the same task name/size A1/A2 already use).
+  The header-derived values (`mode`, `dry_run`, `ack_delete_count`,
+  `ack_no_safety`, `content_len`) are read on `httpd_worker` before the
+  handoff and carried through a small heap-allocated ctx struct, since
+  `http_auth_*`/header functions are not safe to call again once the async
+  copy is handed to a different task. Every response status/body the job
+  sends is byte-for-byte what the pre-A4 inline handler sent from the same
+  point onward -- `backup_import_http_client.classify_refusal()` needed no
+  changes.
+- This is A1/A2's same-connection-reply shape, not a job-id/poll shape: the
+  wire contract (one POST, one response, no job id, no separate status
+  route) is unchanged, so `check_uri_handler_cap.ps1`'s cap stays unaffected
+  (163/170 routes, unchanged before/after this slice) and no route tier
+  table edit was needed. What moving the work off `httpd_worker` actually
+  fixes is the bench-observed "board HTTP unresponsive for several polls"
+  symptom (other requests no longer wait behind this one on the same shared
+  worker task) -- it does not shorten the restore itself, so
+  `backup_import_http_client.py`'s own client-side timeout was separately
+  raised 30s -> 90s (bench A4 finding: 30s was too short and the client's
+  read timed out while the board was still working -- and had, in fact,
+  already committed on the first of the three bench attempts). Neither the
+  MCP `backup_import()` tool nor its client retries a timed-out import
+  automatically; both now document reading the config back (`get_readiness()`/
+  `control_get_zones()`, or a `dry_run=True` re-call) instead of re-POSTing
+  an import whose outcome is unknown.
+- `.dram0.bss` unchanged (99720 B against the 101000 B ceiling -- no new
+  statics, ctx is heap-allocated). `check_stack_margin_registration.ps1`
+  passes unchanged (`http_async_job` is already registered, shared with
+  A1/A2). No bench check was run for this slice (session constraint: do not
+  touch the bench) -- verified by a full `check_00_kilnfw_target_build.ps1`
+  plus code review of the byte-for-byte response preservation instead;
+  the bench-responsiveness re-check this plan's own "Constraints" section
+  calls for remains open for a future bench session.
 
 ## Not worth doing, with reasons
 
@@ -318,7 +352,8 @@ later.
 
 ## When this is done
 
-W1 and A1 close the TODO item. A2 is strongly recommended. A3 and A4 depend
-on their bench measurements. When the chosen slices land, tick the TODO.md
-10.14 "Web side" box, citing this plan, and rename this file without the
-`_PLAN` suffix.
+W1, A1, A2 and A4 are landed (A4 2026-09-28, driven by a live bench
+measurement rather than a speculative one -- see A4's own section above).
+A3 is still conditional and unaddressed. Once A3 is resolved one way or the
+other, tick the TODO.md 10.14 "Web side" box, citing this plan, and rename
+this file without the `_PLAN` suffix.

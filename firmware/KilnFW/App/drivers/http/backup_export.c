@@ -327,9 +327,19 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * have_model/have_tc. */
             float fuzzy_strength_pct = 0.0f;
             zones_config_get_fuzzy_strength_pct(zi, &fuzzy_strength_pct);
+            /* zones_config_get_coupling_raw(), not zones_config_get_coupling():
+             * the latter zeroes any row/column touching an on/off zone
+             * (docs/ON_OFF_ZONE_PLAN.md sec 1's belt-and-braces control-loop
+             * guard) -- reading through it here exported 0.0 for a
+             * currently on/off zone's real, previously-measured coupling
+             * cells, and a later import then committed that 0.0 as the new
+             * stored value via zones_config_set_coupling_cell() (which has
+             * no on/off awareness), permanently losing the real number.
+             * Found via bench A4 (2026-09-28). The raw accessor round-trips
+             * the true stored value regardless of the zone's current type. */
             float *coupling_row = zs->coupling_row;
             memset(coupling_row, 0, sizeof(zs->coupling_row));
-            zones_config_get_coupling(zi, coupling_row);
+            zones_config_get_coupling_raw(zi, coupling_row);
             /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the tau/L
              * siblings of coupling_row above -- same "always answerable"
              * reasoning, same getters' own zeroed-array contract on a zone

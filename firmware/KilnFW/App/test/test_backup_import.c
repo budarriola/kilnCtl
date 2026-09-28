@@ -961,6 +961,34 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
         return false;
     }
     memcpy(out_row, s_writes[zone_index].coupling_coeff, sizeof(s_writes[zone_index].coupling_coeff));
+    /* Mirror zones_config_accessors.c's own on/off belt-and-braces mask
+     * (docs/ON_OFF_ZONE_PLAN.md sec 1) so this stub's behavior matches
+     * production closely enough to reproduce the bench A4 (2026-09-28)
+     * backup-export bug: a currently on/off zone reads its whole row as
+     * zero, and any OTHER zone reads a zero in the column of an on/off
+     * neighbor. zones_config_get_coupling_raw() below is the unmasked
+     * sibling backup_export.c now uses instead. */
+    if (zone_index < STUB_ZONE_COUNT && s_writes[zone_index].zone_type == (uint8_t)ZONE_TYPE_ON_OFF) {
+        memset(out_row, 0, MAX31856_CHANNEL_COUNT * sizeof(out_row[0]));
+        return true;
+    }
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (j < STUB_ZONE_COUNT && s_writes[j].zone_type == (uint8_t)ZONE_TYPE_ON_OFF) {
+            out_row[j] = 0.0f;
+        }
+    }
+    return true;
+}
+
+/* RAW sibling of the stub above -- see zones_config_accessors.c's real
+ * zones_config_get_coupling_raw() for why backup_export.c must use this one
+ * instead of the masking getter. */
+bool zones_config_get_coupling_raw(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= STUB_ZONE_COUNT || !s_coupling_getter_answers[zone_index]) {
+        return false;
+    }
+    memcpy(out_row, s_writes[zone_index].coupling_coeff, sizeof(s_writes[zone_index].coupling_coeff));
     return true;
 }
 
@@ -3386,6 +3414,77 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK(g_last_saved_profile.segments[0].dwell_min == 10, "profile segment dwell_min round-trips");
 }
 
+// Bench A4 (2026-09-28): an export/import round trip of a live 3-zone
+// matrix with zone 2 typed ZONE_TYPE_ON_OFF zeroed every coupling cell
+// touching zone 2 -- as either row (z2[0], z2[1]) or column (z0[2], z1[2])
+// -- while cells that never touch zone 2 (z0[1], z1[0]) survived untouched.
+// Root cause: backup_export.c read the matrix through
+// zones_config_get_coupling(), which deliberately zeroes any row/column
+// touching an on/off zone as a live-control-loop guard (docs/
+// ON_OFF_ZONE_PLAN.md sec 1) -- exporting through that masking getter
+// permanently lost the real stored value the moment it was written back by
+// import via zones_config_set_coupling_cell() (which has no on/off
+// awareness at all). Fix: export now reads zones_config_get_coupling_raw(),
+// the unmasked sibling, so the true stored matrix round-trips regardless of
+// the zone's current type. This test sets up exactly the bench matrix,
+// exports with zone 2 on/off, and proves every cell -- including the ones
+// touching zone 2 -- comes back unchanged.
+static void test_export_preserves_coupling_matrix_when_a_zone_is_on_off(void)
+{
+    TEST_SECTION("backup_export_get_handler -> backup_import_apply -- coupling matrix round-trips "
+                 "unchanged even when one zone is ZONE_TYPE_ON_OFF (bench A4, 2026-09-28)");
+    reset_stub_state();
+
+    /* Seed all three zones' PID so export sees them as configured, then the
+     * exact bench matrix: z0=[0,25.42,24.52] z1=[12.44,0,28.69] z2=[8.08,10.81,0]. */
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        TEST_CHECK(zones_config_set_pid(zi, 1.0f, 0.1f, 0.0f), "seed zone pid so export answers");
+    }
+    TEST_CHECK(zones_config_set_coupling_cell(0, 1, 25.42f, 0.0f, 0.0f), "seed z0[1]");
+    TEST_CHECK(zones_config_set_coupling_cell(0, 2, 24.52f, 0.0f, 0.0f), "seed z0[2]");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 0, 12.44f, 0.0f, 0.0f), "seed z1[0]");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 2, 28.69f, 0.0f, 0.0f), "seed z1[2]");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 0, 8.08f, 0.0f, 0.0f), "seed z2[0]");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 1, 10.81f, 0.0f, 0.0f), "seed z2[1]");
+
+    /* Zone 2 is currently ZONE_TYPE_ON_OFF on the bench -- set directly on
+     * the stub state (not through zones_config_set_zone_type(), which this
+     * file's own stub also just writes into s_writes -- either is
+     * equivalent here). */
+    s_writes[2].zone_type = (uint8_t)ZONE_TYPE_ON_OFF;
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "export must succeed with an on/off zone present");
+    TEST_CHECK(s_export_body != NULL && s_export_len > 0, "export must have produced a body");
+
+    /* Poison every cell to a value distinct from both the real matrix and
+     * zero, so a re-import that silently no-ops or that lands a real zero
+     * is equally detectable. */
+    for (uint8_t a = 0; a < 3; a++) {
+        for (uint8_t b = 0; b < 3; b++) {
+            if (a != b) {
+                s_writes[a].coupling_coeff[b] = 99.0f;
+            }
+        }
+    }
+    g_total_write_calls = 0;
+
+    char import_err[256];
+    bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    TEST_CHECK(ok, "re-importing the exported on/off-zone matrix must succeed");
+
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[1], 25.42, 1e-3, "z0[1] round-trips (touches no on/off zone)");
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[2], 24.52, 1e-3,
+                    "z0[2] round-trips -- NOT zeroed by exporting through the on/off column mask");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[0], 12.44, 1e-3, "z1[0] round-trips (touches no on/off zone)");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[2], 28.69, 1e-3,
+                    "z1[2] round-trips -- NOT zeroed by exporting through the on/off column mask");
+    TEST_CHECK_NEAR(s_writes[2].coupling_coeff[0], 8.08, 1e-3,
+                    "z2[0] round-trips -- NOT zeroed by exporting through the on/off row mask");
+    TEST_CHECK_NEAR(s_writes[2].coupling_coeff[1], 10.81, 1e-3,
+                    "z2[1] round-trips -- NOT zeroed by exporting through the on/off row mask");
+}
+
 // A NON-empty timing_profiles[] bundle: this is the case the empty-bundle
 // fix above deliberately does NOT exercise, so it needs its own test proving
 // the bundle itself round-trips and a zone's timing_profile index that
@@ -4224,6 +4323,7 @@ void run_test_backup_import(void)
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
     test_timing_profiles_bundle_round_trips_nonempty();
+    test_export_preserves_coupling_matrix_when_a_zone_is_on_off();
 
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
     test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();

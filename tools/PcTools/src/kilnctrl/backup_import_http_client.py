@@ -10,6 +10,32 @@ response round trip (backup_import_apply(), a two-pass validate-then-commit
 parser); the response IS the outcome. ``post_import()`` below reports
 whichever of these it gets back:
 
+2026-09-28 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A4): the slow tail
+(reading the body and running backup_import_apply()) now runs on its own
+task via http_async_job.c, off esp_http_server's single shared httpd_worker
+-- so a long import no longer starves every OTHER request (dashboard polls,
+the Stop button) for its duration, which is what a bench A4 run
+(2026-09-28) actually observed ("board HTTP unresponsive for several polls
+after each" import). The wire contract this client speaks did NOT change:
+still one POST, still one response, on the SAME connection, no job id, no
+poll -- A4 reuses A1's helper shape (same status/body the handler already
+sent), not the kiln_configs/apply 202-and-poll shape. What DID change is
+how long a caller must be willing to wait for that one response:
+BACKUP_IMPORT_HTTP_TIMEOUT_S below was raised from 30s after that same bench
+run's POST timed out client-side on a live, uncommitted-looking import that
+the board had, in fact, already committed (confirmed by a follow-up
+GET /api/zones read showing the new config in place) -- a client-side
+timeout on this route answers only "did the response arrive within this
+many seconds", never "did the board apply the change". A caller whose POST
+times out here MUST NOT retry blindly: retrying an import whose first
+attempt actually committed re-applies it a second time (harmless for an
+idempotent merge/mirror of the same body, but never assume that without
+checking) instead of confirming the real outcome. Read back the config
+(``GET /api/zones``, ``GET /api/profiles``, ``GET /api/kiln_configs`` as
+appropriate) after a timeout, the same way the firmware gotchas section on
+``ota_rollback_esp()`` already tells a caller to do after a rollback,
+rather than re-POSTing.
+
   * 200, ``{"ok":true}`` -- committed (or, if the request set
     ``X-Kiln-Config-Dry-Run: 1``, the plan text was returned instead of
     JSON -- see ``dry_run`` below).
@@ -55,7 +81,16 @@ from typing import Optional
 from . import http_auth
 from . import zones_http_client
 
-BACKUP_IMPORT_HTTP_TIMEOUT_S = 30.0
+#: Raised from 30.0 (2026-09-28, bench A4 finding): a live board with 100
+#: profile/zone/kiln_config slots plus a coupling matrix restore can push
+#: safety_cfg_write_apply_pairs()'s own stage/COMMIT_CONFIG/read-back-confirm
+#: round trip through the Pico link, the same worst-case-tens-of-seconds
+#: shape bench_preset_job() already documents for 32 SET_PARAM calls plus one
+#: commit -- 30s was measured too short on the bench and the client's own
+#: read timed out while the board was still working (and, per the module
+#: docstring above, had in fact already committed). This is a read timeout
+#: on one still-synchronous POST/response round trip, not a poll interval.
+BACKUP_IMPORT_HTTP_TIMEOUT_S = 90.0
 
 _API_PATH = "/api/backup/import"
 

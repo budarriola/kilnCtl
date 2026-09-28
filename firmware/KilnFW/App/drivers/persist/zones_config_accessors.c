@@ -563,6 +563,33 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+/* RAW sibling of the getter above -- same bounds check, same memcpy, but
+ * deliberately skips the on/off row/column zeroing. backup_export.c needs
+ * this: a zone that is CURRENTLY on/off still has real, previously-measured
+ * coupling cells sitting in flash (from before it was retyped, or measured
+ * while it was still a heater), and zones_config_get_coupling()'s
+ * belt-and-braces mask (docs/ON_OFF_ZONE_PLAN.md sec 1) is a live-control-
+ * loop guard, not a storage truncation -- reading through it for a backup
+ * silently exported 0.0 for every cell touching an on/off zone (as either
+ * row or column), and a subsequent import then committed that 0.0 via
+ * zones_config_set_coupling_cell() (which has no on/off awareness at all,
+ * by design -- see that function's own header comment), permanently
+ * overwriting the real stored value with zero. Found via bench A4
+ * (2026-09-28): zone 2 on/off, coupling cells z0[2]/z1[2]/z2[0]/z2[1] all
+ * went to 0 after a plain export/import round trip. Same "raw accessor for
+ * backup round-trip" pattern as zones_config_get_coil_power_w()/
+ * zones_config_get_cal_offset() above -- never call this from any live
+ * control-loop path; those must keep going through the masking getter. */
+bool zones_config_get_coupling_raw(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    memcpy(out_row, z->coupling_coeff, sizeof(z->coupling_coeff));
+    return true;
+}
+
 /* ZONES_CFG_VERSION 11->12 siblings of the getter above -- identical shape
  * and orientation, for coupling_tau_s[]/coupling_dead_time_s[]. */
 bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])

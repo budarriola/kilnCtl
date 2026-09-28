@@ -948,6 +948,16 @@ bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc);
  * floats; out_row[zone_index] (the diagonal) is always 0. */
 bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT]);
 
+/* RAW sibling of the getter above: same bounds and shape, but skips the
+ * on/off row/column zeroing zones_config_get_coupling() applies (docs/
+ * ON_OFF_ZONE_PLAN.md sec 1). backup_export.c uses this one so a currently
+ * on/off zone's previously-measured coupling cells round-trip through a
+ * backup instead of being read back as 0.0 and re-committed as a real,
+ * permanent zero on import -- see the .c file's own comment (bench A4,
+ * 2026-09-28) for the failure this closes. Never use this from a live
+ * control-loop path; those must keep going through the masking getter. */
+bool zones_config_get_coupling_raw(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT]);
+
 /* ZONES_CFG_VERSION 11->12 siblings of the getter above -- same row shape,
  * same orientation, same diagonal-always-0 rule, for zone_cfg_t::
  * coupling_tau_s[]/coupling_dead_time_s[] (see that field's own doc comment).

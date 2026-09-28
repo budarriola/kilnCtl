@@ -2682,6 +2682,124 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     return true;
 }
 
+/* Context for backup_import_job() below, heap-allocated (plain malloc --
+ * tiny, no reason to burn PSRAM bookkeeping on it) by
+ * backup_import_post_handler() and freed by the job on every exit path.
+ * Everything in it came from req's headers/content_len, read on httpd_worker
+ * BEFORE the handoff -- httpd_req_get_hdr_value_str()/content_len are not
+ * safe to call again on the async copy for state httpd_worker already has,
+ * and doing so would just be re-deriving values already in hand. */
+typedef struct {
+    kiln_cfg_restore_mode_t mode;
+    bool dry_run;
+    int32_t ack_delete_count;
+    bool ack_no_safety;
+    size_t content_len;
+} backup_import_job_ctx_t;
+
+/* The slow tail of backup_import_post_handler() (docs/HTTP_POST_OWNER_
+ * MIGRATION_PLAN.md slice A4) -- runs on its own task via
+ * http_async_job_try_start(), not on httpd_worker: reads the (possibly up to
+ * BACKUP_BODY_MAX) body off the async copy of the connection (httpd_req_recv()
+ * is supported on it, same as on the original req -- http_async_job.h's own
+ * doc comment), then runs the same two-pass validate-then-commit
+ * backup_import_apply() the pre-A4 inline handler called from this same
+ * point onward. Every response body/status this function sends is BYTE FOR
+ * BYTE what the pre-A4 inline handler sent -- backup_import_http_client.py's
+ * classify_refusal() depends on these exact strings/codes, so none of them
+ * moved. Must not call http_auth_*, cookie or client-IP functions
+ * (http_async_job.h's doc comment); must not call
+ * httpd_req_async_handler_complete() itself -- http_async_job.c's run_job()
+ * does that once this function returns, on every path. ctx is freed here,
+ * on every path, since backup_import_post_handler() no longer owns it once
+ * http_async_job_try_start() returns HTTP_ASYNC_JOB_STARTED. */
+static void backup_import_job(httpd_req_t *async_req, void *arg)
+{
+    backup_import_job_ctx_t *ctx = (backup_import_job_ctx_t *)arg;
+    kiln_cfg_restore_mode_t mode = ctx->mode;
+    bool dry_run = ctx->dry_run;
+    int32_t ack_delete_count = ctx->ack_delete_count;
+    bool ack_no_safety = ctx->ack_no_safety;
+    size_t content_len = ctx->content_len;
+    free(ctx);
+
+    /* HEAP in PSRAM, not internal DRAM -- same reasoning as the pre-A4
+     * inline handler used at this same point: up to BACKUP_BODY_MAX (16384)
+     * bytes, far too large for even this job task's own internal-RAM stack.
+     * Freed on every return path below. */
+    char *body = heap_caps_malloc(content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!body) {
+        httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return;
+    }
+    size_t received = 0;
+    while (received < content_len) {
+        int ret = httpd_req_recv(async_req, body + received, content_len - received);
+        if (ret <= 0) {
+            /* Same reasoning as the pre-A4 inline handler: nothing has been
+             * parsed or applied yet, so a truncated upload is refused with
+             * nothing changed. */
+            free(body);
+            ESP_LOGW(BACKUP_TAG, "backup import body read failed/short: %d", ret);
+            httpd_resp_send_err(async_req, HTTPD_400_BAD_REQUEST, "upload incomplete or connection dropped");
+            return;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char err_msg[160];
+    /* Task 5: kiln_cfg_plan_t heap-allocated -- same reasoning as the pre-A4
+     * inline handler used at this same point. Freed on every exit path
+     * below. */
+    kiln_cfg_plan_t *plan = heap_caps_malloc(sizeof(kiln_cfg_plan_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!plan) {
+        free(body);
+        httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return;
+    }
+    bool partial_write = false;
+    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, ack_no_safety, plan, &partial_write, err_msg,
+                                  sizeof(err_msg));
+    free(body);
+
+    if (!ok) {
+        httpd_resp_set_status(async_req, partial_write ? "500 Internal Server Error" : "400 Bad Request");
+        httpd_resp_set_type(async_req, "text/plain");
+        httpd_resp_send(async_req, err_msg, strlen(err_msg));
+        free(plan);
+        return;
+    }
+
+    if (dry_run) {
+        httpd_resp_set_type(async_req, "text/plain");
+        char *out = heap_caps_malloc(KILN_CFG_PLAN_MAX_LINES * (KILN_CFG_PLAN_LINE_MAX + 1) + 1,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!out) {
+            free(plan);
+            httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+            return;
+        }
+        size_t off = 0;
+        out[0] = '\0';
+        for (size_t i = 0; i < plan->count; i++) {
+            int n = snprintf(out + off, KILN_CFG_PLAN_LINE_MAX + 2, "%s\n", plan->lines[i]);
+            if (n > 0) {
+                off += (size_t)n;
+            }
+        }
+        httpd_resp_send(async_req, out, off);
+        free(out);
+        free(plan);
+        return;
+    }
+
+    free(plan);
+    httpd_resp_set_type(async_req, "application/json");
+    const char *ok_json = "{\"ok\":true}";
+    httpd_resp_send(async_req, ok_json, strlen(ok_json));
+}
+
 esp_err_t backup_import_post_handler(httpd_req_t *req)
 {
     /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
@@ -2744,12 +2862,15 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: a restore can write the same safety_cfg_store/zones_config
-    // state that job commits at the end of its window, and letting both
-    // proceed concurrently risks one clobbering the other's write
-    // (2026-09-25 fix-then-push review, A2 pulled forward). Set explicitly
-    // rather than via httpd_resp_send_err(): esp_http_server has no
+    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement, or
+    // this same route's own job -- see below) is running: a restore can
+    // write the same safety_cfg_store/zones_config state that job commits at
+    // the end of its window, and letting both proceed concurrently risks one
+    // clobbering the other's write (2026-09-25 fix-then-push review, A2
+    // pulled forward; kept as its own synchronous, no-allocation refusal
+    // path after A4's migration onto the same helper below, same reasoning
+    // as bench_preset_post_handler's own pre-check). Set explicitly rather
+    // than via httpd_resp_send_err(): esp_http_server has no
     // HTTPD_409_CONFLICT enumerator (same workaround as kiln_cfg_http.c's
     // apply-in-flight refusal) -- 409 is the right code, a refusal the
     // operator cannot argue with.
@@ -2763,36 +2884,6 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
-
-    /* HEAP in PSRAM, not internal DRAM: same fix, same reasoning as this
-     * file's export-side buffer above -- up to BACKUP_BODY_MAX (16384) bytes,
-     * far too large to belong in internal DRAM alongside every other
-     * handler's own locals on the shared httpd_worker stack/heap. Freed on
-     * every return path below. */
-    char *body = heap_caps_malloc((size_t)req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!body) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-        return ESP_OK;
-    }
-    size_t received = 0;
-    while (received < (size_t)req->content_len) {
-        int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
-        if (ret <= 0) {
-            /* A short/failed read means the body this handler has is
-             * incomplete -- e.g. the connection dropped mid-upload. Nothing
-             * has been parsed or applied yet at this point (the read loop
-             * runs entirely before backup_import_apply() is ever called), so
-             * a truncated upload simply gets refused with nothing changed --
-             * exactly the "must not leave configuration half-applied" case,
-             * satisfied here by construction rather than by a rollback. */
-            free(body);
-            ESP_LOGW(BACKUP_TAG, "backup import body read failed/short: %d", ret);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "upload incomplete or connection dropped");
-            return ESP_OK;
-        }
-        received += (size_t)ret;
-    }
-    body[received] = '\0';
 
     /* X-Kiln-Config-Mode: merge|mirror (default merge -- the safer choice,
      * per the owner decision), X-Kiln-Config-Dry-Run: 1 -- same header-ack
@@ -2835,71 +2926,52 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         }
     }
 
-    char err_msg[160];
-    /* Task 5: kiln_cfg_plan_t (32 * 128 = 4096 bytes, KILN_CFG_PLAN_MAX_LINES *
-     * KILN_CFG_PLAN_LINE_MAX) is heap-allocated rather than a local of this
-     * httpd handler -- the same reasoning as the profiles/zones candidate
-     * arrays in backup_import_apply_locked() above (check_httpd_task_stack_budget.py
-     * / check_all_task_stack_budgets.py grade the httpd task's 8 KB stack
-     * against every handler's own locals, and this struct alone was a
-     * sizable chunk of it). Freed on every exit path below. */
-    kiln_cfg_plan_t *plan = heap_caps_malloc(sizeof(kiln_cfg_plan_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!plan) {
-        free(body);
+    /* Task 4 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A4): hand the body
+     * read plus the two-pass validate-then-commit off to backup_import_job()
+     * on its own task -- up to 100 profile/zone/kiln_config slots through
+     * the stores' public save functions, measured on the bench (2026-09-28,
+     * A4 finding) to exceed the PC client's own request timeout and leave
+     * the board's HTTP stack answering no other request (including
+     * GET /api/status polls) for the duration. Everything above this point
+     * (mode gate, interlock, busy check, content-length bound, header reads)
+     * is fast and stays on httpd_worker; ctx carries the header-derived
+     * values through since http_async_job_try_start() may hand req off to a
+     * different task before this function returns, and http_auth_ / header
+     * functions are not safe to call again on that task (http_async_job.h's
+     * own doc comment). */
+    backup_import_job_ctx_t *ctx = malloc(sizeof(backup_import_job_ctx_t));
+    if (!ctx) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
     }
-    bool partial_write = false;
-    bool ok = backup_import_apply(body, mode, dry_run, ack_delete_count, ota_http_req_ack_no_safety(req), plan,
-                                  &partial_write, err_msg, sizeof(err_msg));
-    free(body);
+    ctx->mode = mode;
+    ctx->dry_run = dry_run;
+    ctx->ack_delete_count = ack_delete_count;
+    ctx->ack_no_safety = ota_http_req_ack_no_safety(req);
+    ctx->content_len = (size_t)req->content_len;
 
-    if (!ok) {
-        /* task 6: a partial write (kiln_configs[] already committed before
-         * profiles/zones failed) is a distinct 500 naming what already
-         * landed -- a 400 promises nothing changed, and that would be a lie
-         * here. */
-        httpd_resp_set_status(req, partial_write ? "500 Internal Server Error" : "400 Bad Request");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, err_msg, strlen(err_msg));
-        free(plan);
+    http_async_job_start_result_t start_result =
+        http_async_job_try_start(req, "http_async_job", 6144, backup_import_job, ctx);
+    if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }
-
-    if (dry_run) {
-        /* Plain text, one plan line per line -- deliberately not JSON: plan
-         * lines are built from operator-chosen kiln config names, which
-         * name_charset_and_utf8_valid() does not forbid quote/backslash
-         * characters from (kiln_cfg_store.c), so treating them as JSON
-         * string content would need escaping this endpoint has no other
-         * reason to carry. The client already reads this as plain text (see
-         * backup_page.html's dry-run fetch) and joins it into the confirm
-         * dialog verbatim. An empty plan (no lines) means this restore
-         * changes no kiln config slots at all. */
+    free(ctx);
+    if (start_result == HTTP_ASYNC_JOB_BUSY) {
+        /* Refused -- another async job (ct_auto_zero, bench_preset, or a
+         * concurrent second POST to this same route) is already running.
+         * req is untouched by http_async_job_try_start() in every refusal
+         * case, so responding on it synchronously here is safe. Same reply
+         * text the pre-check above already sends, so a caller sees no
+         * difference in which branch produced it. */
+        httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
-        char *out = heap_caps_malloc(KILN_CFG_PLAN_MAX_LINES * (KILN_CFG_PLAN_LINE_MAX + 1) + 1,
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!out) {
-            free(plan);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-            return ESP_OK;
-        }
-        size_t off = 0;
-        out[0] = '\0';
-        for (size_t i = 0; i < plan->count; i++) {
-            int n = snprintf(out + off, KILN_CFG_PLAN_LINE_MAX + 2, "%s\n", plan->lines[i]);
-            if (n > 0) {
-                off += (size_t)n;
-            }
-        }
-        esp_err_t send_err = httpd_resp_send(req, out, off);
-        free(out);
-        free(plan);
-        return send_err;
+        return httpd_resp_sendstr(req, "another commissioning operation is running");
     }
-
-    free(plan);
-    httpd_resp_set_type(req, "application/json");
-    const char *ok_json = "{\"ok\":true}";
-    return httpd_resp_send(req, ok_json, strlen(ok_json));
+    /* HTTP_ASYNC_JOB_RESOURCE_FAILURE: the async handoff itself failed
+     * (httpd_req_async_handler_begin()) or the job task could not be
+     * created -- an out-of-memory-shaped failure, not contention. Same
+     * "out of memory" 500 the pre-A4 handler already sent for its own
+     * allocation failures at this point. */
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+    return ESP_OK;
 }
