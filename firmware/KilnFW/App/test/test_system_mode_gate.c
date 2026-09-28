@@ -124,13 +124,15 @@ static void test_relay_write_ignores_reserved_fields(void)
 
 static void test_unwired_actions_are_ok_for_now(void)
 {
-    TEST_SECTION("Unwired actions -- OK unconditionally, correct today per this file's top comment");
+    TEST_SECTION("SYS_ACTION_OTA_START -- OK unconditionally, correct today per this file's top comment");
 
-    // SYS_ACTION_START_PROFILE/START_AUTOTUNE/OTA_START are NOT wired into
-    // this gate table at all -- readiness_gate.h and ota_interlock.c own
-    // those respectively. A worst-case snapshot (everything running/tripped)
-    // must still return "not refused" for these, since returning true here
-    // would be reporting a rule that does not exist.
+    // SYS_ACTION_OTA_START is NOT wired into this gate table at all --
+    // ota_interlock.c owns it. A worst-case snapshot (everything
+    // running/tripped, including recovery_mode) must still return
+    // "not refused" for it, since returning true here would be reporting a
+    // rule that does not exist. (SYS_ACTION_START_PROFILE/START_AUTOTUNE used
+    // to be unwired too -- see test_start_actions_refuse_only_on_recovery_mode()
+    // below for their slice-2 recovery-mode rule.)
     sys_mode_snapshot_t snap = good_snapshot();
     snap.profile_running = true;
     snap.autotune_running = true;
@@ -139,12 +141,69 @@ static void test_unwired_actions_are_ok_for_now(void)
     snap.safety_tripped = true;
     snap.readiness_gate_ready = false;
 
-    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, NULL, 0) == false,
-               "SYS_ACTION_START_PROFILE not wired -- always OK from this gate (readiness_gate.h owns it)");
-    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &snap, NULL, 0) == false,
-               "SYS_ACTION_START_AUTOTUNE not wired -- always OK from this gate");
     TEST_CHECK(system_mode_gate_check(SYS_ACTION_OTA_START, &snap, NULL, 0) == false,
                "SYS_ACTION_OTA_START not gated here at all -- ota_interlock.c stays the owner");
+}
+
+static void test_start_actions_refuse_only_on_recovery_mode(void)
+{
+    TEST_SECTION("SYS_ACTION_START_PROFILE / SYS_ACTION_START_AUTOTUNE -- recovery-mode rule (slice 2, 2026-09-27)");
+
+    // docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 2: these two actions
+    // are wired for recovery_mode ONLY -- every other start-refusal reason
+    // (safety trip, unacknowledged crash, E-stop unverified, ...) stays owned
+    // by readiness_gate.h, unchanged. A worst-case snapshot that ALSO sets
+    // profile_running/autotune_running/safety_tripped/etc but leaves
+    // recovery_mode false must still be allowed from THIS gate -- those other
+    // facts are not this rule's concern and must not leak into it.
+    sys_mode_snapshot_t snap = good_snapshot();
+    snap.profile_running = true;
+    snap.autotune_running = true;
+    snap.ota_holds_interlock = true;
+    snap.safety_tripped = true;
+    snap.readiness_gate_ready = false;
+    snap.recovery_mode = false;
+
+    char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, reason, sizeof(reason)) == false,
+               "recovery_mode=false: SYS_ACTION_START_PROFILE allowed regardless of other facts");
+    TEST_CHECK(reason[0] == '\0', "an allowed case leaves reason untouched");
+
+    memset(reason, 0, sizeof(reason));
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &snap, reason, sizeof(reason)) == false,
+               "recovery_mode=false: SYS_ACTION_START_AUTOTUNE allowed regardless of other facts");
+    TEST_CHECK(reason[0] == '\0', "an allowed case leaves reason untouched");
+
+    // Now flip only recovery_mode -- everything else stays at the
+    // worst-case values above, proving the rule reacts to recovery_mode
+    // alone, not to the other flags it shares a struct with.
+    snap.recovery_mode = true;
+
+    memset(reason, 0, sizeof(reason));
+    bool refused_profile = system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, reason, sizeof(reason));
+    TEST_CHECK(refused_profile == true, "recovery_mode=true: SYS_ACTION_START_PROFILE refused");
+    TEST_CHECK(reason[0] != '\0', "a refusal always writes a reason");
+    TEST_CHECK(strstr(reason, "RECOVERY MODE") != NULL, "the reason names recovery mode");
+    TEST_CHECK(strlen(reason) < SYSTEM_MODE_GATE_REASON_MAX, "reason fits within the documented cap");
+    TEST_CHECK(strchr(reason, '"') == NULL && strchr(reason, '\\') == NULL,
+               "reason is JSON-safe (no quote or backslash) -- callers embed it directly into a JSON body");
+
+    memset(reason, 0, sizeof(reason));
+    bool refused_autotune = system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &snap, reason, sizeof(reason));
+    TEST_CHECK(refused_autotune == true, "recovery_mode=true: SYS_ACTION_START_AUTOTUNE refused");
+    TEST_CHECK(reason[0] != '\0', "a refusal always writes a reason");
+    TEST_CHECK(strstr(reason, "RECOVERY MODE") != NULL, "the reason names recovery mode");
+    TEST_CHECK(strchr(reason, '"') == NULL && strchr(reason, '\\') == NULL,
+               "reason is JSON-safe (no quote or backslash)");
+
+    // A clean, all-false snapshot except recovery_mode: proves the rule does
+    // not accidentally depend on any of the other worst-case flags above.
+    sys_mode_snapshot_t clean = good_snapshot();
+    clean.recovery_mode = true;
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &clean, NULL, 0) == true,
+               "recovery_mode=true alone (nothing else set) still refuses START_PROFILE");
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &clean, NULL, 0) == true,
+               "recovery_mode=true alone (nothing else set) still refuses START_AUTOTUNE");
 }
 
 static void test_zones_config_write_refused_cross_product(void)
@@ -243,6 +302,7 @@ int main(void)
     test_relay_write_refused_cross_product();
     test_relay_write_ignores_reserved_fields();
     test_unwired_actions_are_ok_for_now();
+    test_start_actions_refuse_only_on_recovery_mode();
     test_zones_config_write_refused_cross_product();
     test_factory_reset_and_cfgfs_format_refused_cross_product();
     test_reason_truncation_is_safe();

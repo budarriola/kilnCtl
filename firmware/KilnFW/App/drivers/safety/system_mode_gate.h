@@ -18,8 +18,10 @@
 // Composition, not replacement (plan section 4): this never replaces
 // kiln_io_owner's ownership/safety-fault checks, readiness_gate.h's firing
 // checklist, or the OTA/profile mutual interlock -- it is one more row a
-// caller consults alongside those, same as recovery_start_refusal.h sits
-// alongside readiness_gate_refuses_start() rather than instead of it.
+// caller consults alongside those, checked ahead of
+// readiness_gate_refuses_start() rather than instead of it (same position
+// App/drivers/http/recovery_start_refusal.h used to occupy, before slice 2
+// retired that header in favor of this gate).
 //
 // Auth vs mode (plan section 3.2): AUTH FIRST, ALWAYS. This gate only ever
 // runs for a caller that already cleared route_tier_table.h (or the UART
@@ -53,10 +55,26 @@
 // a future change, never apply one, the same shape as pausing a firing rather
 // than a config write. revert_post_handler() is unaffected and still refuses
 // unconditionally while a run is active, same as every other wired writer.
+//
+// Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6), 2026-09-27: wired
+// SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE's recovery-mode rule and
+// called system_mode_gate_check() for it from profile_executor_run()'s and
+// autotune_begin_run_locked()'s existing single choke points, ahead of their
+// readiness_gate_refuses_start() call -- purely to retire
+// App/drivers/http/recovery_start_refusal.h's two HTTP-only call sites
+// (dashboard_exec_http.c, dashboard_autotune_http.c), which produced a
+// recovery-mode reason string ONLY on HTTP while UART/LCD saw
+// readiness_gate.h's own, differently-worded recovery message (plan section
+// 2.4's wording drift). Both HTTP call sites now build a snapshot and call
+// system_mode_gate_check()/system_mode_gate_http_send_refusal() instead, so
+// all three transports produce the exact same string. recovery_start_
+// refusal.h and its host test are retired (deleted) as a result -- this was
+// their only caller. SYS_ACTION_START_PROFILE/START_AUTOTUNE otherwise still
+// return OK unconditionally: every non-recovery start refusal stays owned by
+// readiness_gate.h, unchanged by this slice.
 // system_mode_gate_check() still returns OK unconditionally for any action
-// nobody has wired a rule for yet (SYS_ACTION_START_PROFILE/
-// SYS_ACTION_START_AUTOTUNE/SYS_ACTION_OTA_START keep their own existing
-// gates instead -- readiness_gate.h and ota_interlock.c respectively).
+// nobody has wired a rule for yet (SYS_ACTION_OTA_START keeps its own
+// existing gate instead -- ota_interlock.c).
 #ifndef SYSTEM_MODE_GATE_H
 #define SYSTEM_MODE_GATE_H
 
@@ -74,8 +92,8 @@ extern "C" {
 // relay_on_blocked() is the one choke point all three already funnel
 // through (docs/SYSTEM_MODE_GATE_PLAN.md section 2.5).
 typedef enum {
-    SYS_ACTION_START_PROFILE = 0,
-    SYS_ACTION_START_AUTOTUNE,
+    SYS_ACTION_START_PROFILE = 0,   // wired -- recovery_mode only (slice 2); see rollout note
+    SYS_ACTION_START_AUTOTUNE,      // wired -- recovery_mode only (slice 2); see rollout note
     SYS_ACTION_WRITE_ZONES_CONFIG,   // wired -- zones_http_post.c, zones_http_pid.c,
                                       // uart_bridge_ext_control.c, kiln_cfg_http.c,
                                       // backup_import.c, iter_tune_http.c,
@@ -100,7 +118,8 @@ typedef struct {
     bool ota_holds_interlock;  // ota_interlock_check()/ota_http_heat_blocked_by_update() -- reserved,
                                 // not consulted by any rule wired in this pass (kiln_io_owner.c
                                 // already checks its own OTA interlock separately and first)
-    bool recovery_mode;        // boot_guard_is_recovery_mode() -- reserved, unused by this pass's rules
+    bool recovery_mode;        // boot_guard_is_recovery_mode() -- consulted by SYS_ACTION_START_PROFILE/
+                                // SYS_ACTION_START_AUTOTUNE's rule (slice 2); unused by every other rule
     bool safety_tripped;       // ARMED-latch trip state -- reserved, unused by this pass's rules
     bool readiness_gate_ready; // !readiness_gate_refuses_start() -- reserved, unused by this pass's rules
 } sys_mode_snapshot_t;

@@ -218,14 +218,21 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
 1. **LANDED** — `system_mode_gate.h`/`.c` with the table above and a host
    test (`test_system_mode_gate.c`, 27 checks, negative-tested), unwired
    beyond slice 3 below.
-2. **Deferred, not landed this pass** — call `system_mode_gate_check()`
-   inside `profile_executor_run()`'s and `autotune_engine`'s existing
-   single choke points (2.2) purely to retire `recovery_start_refusal.h`'s
-   two HTTP-only call sites, so the recovery-mode reason string in §2.4
-   stops being HTTP-only. Out of scope for this pass (only slice 3 was
-   requested); the underlying refusal already happens everywhere today, so
-   nothing regresses by deferring this — only the message stays HTTP-only
-   a while longer.
+2. **LANDED, 2026-09-27** — wired `SYS_ACTION_START_PROFILE`/
+   `SYS_ACTION_START_AUTOTUNE`'s recovery-mode rule into
+   `profile_executor_run()`'s and `autotune_begin_run_locked()`'s existing
+   single choke points, ahead of their `readiness_gate_evaluate()` call
+   (both now collect `readiness_gate_facts_t` once and share it between the
+   two calls). `dashboard_exec_http.c`/`dashboard_autotune_http.c`'s two
+   HTTP-only call sites were rewired onto the same `system_mode_gate_check()`
+   call, each still answering with the JSON envelope its frontend parse
+   expects. `App/drivers/http/recovery_start_refusal.h` and
+   `test_recovery_start_refusal.c` are deleted — this was their only
+   caller. All three transports (HTTP, UART, LCD) now produce the exact
+   string `system_mode_gate.c` writes for a start request in recovery mode.
+   No owner decision needed — this action encodes only recovery_mode, no new
+   rule; every other start refusal stays owned by `readiness_gate.h`,
+   unchanged.
 3. **LANDED** — wired `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` into
    `kiln_io_owner.c`'s single `relay_on_blocked()` choke point (the
    headline gap, §2.5), encoding owner decision Q1 above (blanket refusal,

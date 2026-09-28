@@ -747,7 +747,13 @@ try {
             "`"$(Join-Path $driversDir 'control/firing_shadow.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`" " +
             "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6, 2026-09-27):
+            # profile_executor_run.c now calls system_mode_gate_check() ahead
+            # of readiness_gate_evaluate() -- link the real, pure module in
+            # (already host-tested for real by test_system_mode_gate.c, its
+            # own executable) rather than faking it.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
     # 2026-09-08: flash_worker_wait.c linked in -- adaptive_tune.c (linked
     # for real here too) now calls flash_worker_wait_default() before its
     # kibase migrate-on-load write; same fix as exe17/exe19 above.
@@ -782,7 +788,12 @@ try {
             "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
-            "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+            "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            # Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6, 2026-09-27):
+            # autotune_engine.c now calls system_mode_gate_check() ahead of
+            # readiness_gate_evaluate() -- link the real, pure module in, same
+            # reasoning as test_profile_executor_prestart.c's cmd4 above.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
     # stack_margin.c added DRAM_PSRAM_STATUS.md Phase 0 (4.2): autotune_engine.c's
     # autotune_engine_start() now calls stack_margin_register() (registration
     # only, no size change), and this executable #includes autotune_engine.c
@@ -1793,23 +1804,15 @@ try {
 
     Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
 
-    # ---- test_recovery_start_refusal.c: its own THIRTY-THIRD, separate
-    # executable ----------------------------------------------------------
-    # ui_aggregate_review_2026-09-08.md (d89256fe): tests
-    # App/drivers/http/recovery_start_refusal.h's explicit, named
-    # recovery-mode refusal -- the enforcement the review found missing
-    # (the banner claimed "Firing is NOT available" but no HTTP route
-    # checked boot_guard_is_recovery_mode()). Header-only (static inline),
-    # so this needs no sibling .c files -- just a fake body for
-    # boot_guard_is_recovery_mode() (same convention test_ota_http.c already
-    # uses for that exact symbol). Own executable because that fake would
-    # collide at link time with test_boot_guard.c's real one (test_main.c's
-    # combined binary #includes boot_guard.c directly).
-    $exe33 = Join-Path $outDir "kilnctl_host_tests_recovery_start_refusal.exe"
-    $cmd33 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$outDir\\`" /Fe:`"$exe33`" `"$(Join-Path $testDir 'test_recovery_start_refusal.c')`""
-
-    Invoke-HostTestExe -Name "recovery_start_refusal" -ExePath $exe33 -BuildCmd $cmd33
+    # ---- test_recovery_start_refusal.c retired 2026-09-27 (mode-gate slice
+    # 2, docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): its subject,
+    # App/drivers/http/recovery_start_refusal.h, was deleted -- its two HTTP
+    # call sites now go through system_mode_gate_check() instead
+    # (dashboard_exec_http.c, dashboard_autotune_http.c), which shares its
+    # wording across HTTP/UART/LCD. Coverage for the recovery-mode rule moved
+    # into test_system_mode_gate.c below. The exe33 slot that used to build
+    # this file is intentionally left unrenumbered -- see this script's own
+    # header note that exe numbers are narrative, not an enforced count.
 
     # ---- test_readiness_gate.c: its own THIRTY-FOURTH, separate
     # executable ----------------------------------------------------------
@@ -2698,7 +2701,12 @@ try {
     # 61 -> 62: added test_system_mode_gate.c's own Invoke-HostTestExe call --
     # docs/SYSTEM_MODE_GATE_PLAN.md Phase 6's pure gate module (owner decisions
     # 2026-09-25).
-    $totalExpected = 62
+    # 62 -> 61 (2026-09-27, mode-gate slice 2): retired test_recovery_start_
+    # refusal.c's Invoke-HostTestExe call along with its subject header,
+    # App/drivers/http/recovery_start_refusal.h -- both HTTP call sites now go
+    # through system_mode_gate_check() instead, covered by test_system_mode_
+    # gate.c's own (expanded) cases rather than a separate executable.
+    $totalExpected = 61
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

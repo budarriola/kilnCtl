@@ -1787,7 +1787,9 @@
     // stayed clickable -- a banner asserting a property the page does not
     // enforce is worse than no banner. Disable the control here, in
     // lockstep with the banner, rather than only warning about it; the
-    // server-side enforcement is recovery_start_refusal.h. Tracked via a
+    // server-side enforcement is system_mode_gate.c's recovery-mode rule
+    // (docs/SYSTEM_MODE_GATE_PLAN.md slice 2, formerly recovery_start_
+    // refusal.h). Tracked via a
     // dataset flag rather than driving runBtn.disabled directly so this
     // never fights with loadProfileList()'s own "no saved profiles" disable
     // reason (main_page.html) -- either reason alone must keep it disabled,

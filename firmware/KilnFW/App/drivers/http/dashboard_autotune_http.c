@@ -18,7 +18,7 @@
 #include "http_form.h"
 #include "profile_executor.h"
 #include "readiness_gate.h"
-#include "recovery_start_refusal.h"
+#include "system_mode_gate.h"
 #include "zones_config_accessors.h"
 
 /* autotune_state_name()/autotune_rule_name()/autotune_refusal_name() and the
@@ -199,15 +199,29 @@ esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
 
 esp_err_t autotune_start_post_handler(httpd_req_t *req)
 {
-    /* recovery_start_refusal.h: same explicit, named recovery-mode
-     * enforcement as profile_exec_start_post_handler() (dashboard_exec_http.c)
-     * -- see that header's doc comment. Checked first, before the body is
-     * even read. */
+    /* system_mode_gate (slice 2): same explicit recovery-mode enforcement as
+     * profile_exec_start_post_handler() (dashboard_exec_http.c) -- see that
+     * handler's comment for the full rationale, including why this must stay
+     * JSON, not plain text (main_page.html's autotune start path also calls
+     * r.json() on the response). Checked first, before the body is even
+     * read; shares the facts collected below with the readiness call rather
+     * than collecting them twice. */
     char recovery_err[192];
-    if (recovery_mode_refuses_start(recovery_err, sizeof(recovery_err))) {
+    readiness_gate_facts_t facts;
+    readiness_gate_collect(&facts);
+
+    sys_mode_snapshot_t mode_snap;
+    memset(&mode_snap, 0, sizeof(mode_snap));
+    mode_snap.recovery_mode = facts.recovery_mode;
+    if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, recovery_err, sizeof(recovery_err))) {
+        ESP_LOGW(DASH_TAG, "autotune/start refused by the system mode gate (recovery mode)");
+        char json[sizeof(recovery_err) + 96];
+        int n = snprintf(json, sizeof(json),
+                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                         READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
         httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_sendstr(req, recovery_err);
-        return ESP_OK;
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
     /* THE READINESS INTERLOCK (readiness_gate.h), extended to autotune the
@@ -219,26 +233,26 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
      * named in full, before the body is even read, instead of the generic 400
      * autotune_begin_run_locked()'s own refusal produces further down.
      * Deliberately reuses recovery_err[] as the OUTPUT buffer for
-     * readiness_gate_refuses_start()'s message, rather than adding a second
+     * readiness_gate_evaluate()'s message, rather than adding a second
      * ~200-byte local for that purpose, on the shared 8 KB httpd task stack
-     * (check_httpd_task_stack_budget; CLAUDE.md's httpd-stack-blob note).
-     * This does NOT mean no further local is added: the json[] buffer a few
-     * lines below (sizeof(recovery_err) + 96 = 288 B) IS a genuine second
-     * stack local, needed to wrap recovery_err's text in the JSON envelope
-     * this endpoint's caller expects -- check_httpd_task_stack_budget.py
-     * measures autotune_start_post_handler's reachable depth well under this
-     * file's worst path (4304 B of the 4832 B ceiling, cfgfs_status_get_
-     * handler) with this buffer included, so it is not the blob this repo's
-     * class of bug looks for; it just is not what the sentence above is
-     * about.
+     * (check_httpd_task_stack_budget; CLAUDE.md's httpd-stack-blob note), and
+     * reuses the facts collected above rather than re-collecting them. This
+     * does NOT mean no further local is added: the json[] buffer a few lines
+     * below (sizeof(recovery_err) + 96 = 288 B) IS a genuine second stack
+     * local, needed to wrap recovery_err's text in the JSON envelope this
+     * endpoint's caller expects -- check_httpd_task_stack_budget.py measures
+     * autotune_start_post_handler's reachable depth well under this file's
+     * worst path (4304 B of the 4832 B ceiling, cfgfs_status_get_handler)
+     * with this buffer included, so it is not the blob this repo's class of
+     * bug looks for; it just is not what the sentence above is about.
      *
      * If this call were ever deleted, the autotune start would still be
      * refused -- just with a less specific status/message. If autotune_begin_
      * run_locked()'s check were deleted, this one would NOT cover the
      * benchproto start path. Do not "de-duplicate" by removing the one in
      * autotune_begin_run_locked(). */
-    readiness_gate_block_t gate_which = READINESS_GATE_OK;
-    if (readiness_gate_refuses_start(recovery_err, sizeof(recovery_err), &gate_which)) {
+    readiness_gate_block_t gate_which = readiness_gate_evaluate(&facts, recovery_err, sizeof(recovery_err));
+    if (gate_which != READINESS_GATE_OK) {
         const char *item_key = readiness_gate_item_key(gate_which);
         ESP_LOGW(DASH_TAG, "autotune/start refused by the readiness interlock (item %s)",
                  item_key ? item_key : "?");

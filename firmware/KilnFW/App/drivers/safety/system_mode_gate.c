@@ -27,6 +27,15 @@
 //   Q4 -- HTTP status for a new refusal: 409, decided at each HTTP call site
 //        (this module has no notion of HTTP), leaving OTA's existing 428
 //        untouched.
+//
+// Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6), 2026-09-27:
+// SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE's recovery-mode rule,
+// wired into profile_executor_run()'s and autotune_begin_run_locked()'s
+// choke points ahead of their readiness_gate_refuses_start() call, and into
+// dashboard_exec_http.c/dashboard_autotune_http.c in place of the retired
+// App/drivers/http/recovery_start_refusal.h -- so all three transports
+// (HTTP, UART, LCD) produce this exact string for a start request in
+// recovery mode, not just HTTP's former, differently-worded one.
 bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap, char *reason,
                              size_t reason_cap)
 {
@@ -93,12 +102,26 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
 
     case SYS_ACTION_START_PROFILE:
     case SYS_ACTION_START_AUTOTUNE:
+        // Slice 2: recovery mode only -- every other start refusal (safety
+        // trip, unacknowledged crash, E-stop unverified, ...) stays owned by
+        // readiness_gate.h, unchanged. Checked here so the wording is shared
+        // across HTTP/UART/LCD instead of living only in recovery_start_
+        // refusal.h's HTTP-only pre-check (now retired).
+        if (snap->recovery_mode) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- RECOVERY MODE this boot: firing and autotune are unavailable "
+                         "until it exits");
+            }
+            return true;
+        }
+        return false;
+
     case SYS_ACTION_OTA_START:
     default:
         // Not wired in this pass -- see this file's top comment. Correct
-        // today because no caller invokes this gate for these actions;
-        // profile/autotune start keep readiness_gate.h's own gate, and OTA
-        // keeps ota_interlock.c's.
+        // today because no caller invokes this gate for this action; OTA
+        // keeps ota_interlock.c's own gate.
         return false;
     }
 }

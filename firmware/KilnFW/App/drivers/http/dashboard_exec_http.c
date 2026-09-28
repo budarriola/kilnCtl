@@ -25,11 +25,11 @@
 #include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "readiness_gate.h"
-#include "recovery_start_refusal.h"
 #include "relay_authority.h"
 #include "run_state.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
+#include "system_mode_gate.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
 
@@ -676,18 +676,32 @@ esp_err_t history_csv_get_handler(httpd_req_t *req)
 
 esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 {
-    /* recovery_start_refusal.h: checked first, before even reading the
-     * body -- ui_aggregate_review_2026-09-08's finding that the recovery
-     * banner's "Firing is NOT available" claim was never enforced by any
-     * route. See that header's doc comment for what happens without this
-     * check (a clean but generic "profile executor not started" refusal
-     * from profile_executor_run() itself, not a hang) and why this is named
-     * explicitly instead. */
+    /* system_mode_gate (slice 2): checked first, before even reading the
+     * body -- retires recovery_start_refusal.h's separate, HTTP-only wording
+     * (ui_aggregate_review_2026-09-08's finding that the recovery banner's
+     * "Firing is NOT available" claim was never enforced by any route). Uses
+     * the same recovery_mode fact readiness_gate_facts_t carries, collected
+     * once and shared with the readiness call below. JSON, not plain text --
+     * main_page.html's proceedToStart() calls r.json() on every response, so
+     * a plain-text body throws in the parse and lands in .catch(), leaving an
+     * operator who pressed Start in recovery mode looking at nothing (the bug
+     * recovery_start_refusal.h's plain httpd_resp_sendstr() had). */
     char recovery_err[192];
-    if (recovery_mode_refuses_start(recovery_err, sizeof(recovery_err))) {
+    readiness_gate_facts_t facts;
+    readiness_gate_collect(&facts);
+
+    sys_mode_snapshot_t mode_snap;
+    memset(&mode_snap, 0, sizeof(mode_snap));
+    mode_snap.recovery_mode = facts.recovery_mode;
+    if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, recovery_err, sizeof(recovery_err))) {
+        ESP_LOGW(DASH_TAG, "profile_exec/start refused by the system mode gate (recovery mode)");
+        char json[sizeof(recovery_err) + 96];
+        int n = snprintf(json, sizeof(json),
+                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                         READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
         httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_sendstr(req, recovery_err);
-        return ESP_OK;
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
     /* THE READINESS INTERLOCK (readiness_gate.h). profile_executor_run()
@@ -697,15 +711,16 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
      * the generic 400 the run() refusal path below produces. Deliberately
      * reuses recovery_err[] rather than adding a second ~200-byte local to a
      * frame that runs on the shared 8 KB httpd task stack
-     * (check_httpd_task_stack_budget; see CLAUDE.md's httpd-stack-blob note):
-     * the recovery check above has already returned by the time this writes.
+     * (check_httpd_task_stack_budget; see CLAUDE.md's httpd-stack-blob note),
+     * and reuses the facts collected above rather than re-collecting them --
+     * the recovery check has already returned by the time this writes.
      *
      * If this call were ever deleted, the firing would still be refused --
      * just with a less specific status and message. If profile_executor_run()'s
      * check were deleted, this one would NOT cover the LCD or benchproto start
      * paths. Do not "de-duplicate" by removing the one in run(). */
-    readiness_gate_block_t gate_which = READINESS_GATE_OK;
-    if (readiness_gate_refuses_start(recovery_err, sizeof(recovery_err), &gate_which)) {
+    readiness_gate_block_t gate_which = readiness_gate_evaluate(&facts, recovery_err, sizeof(recovery_err));
+    if (gate_which != READINESS_GATE_OK) {
         const char *item_key = readiness_gate_item_key(gate_which);
         ESP_LOGW(DASH_TAG, "profile_exec/start refused by the readiness interlock (item %s)",
                  item_key ? item_key : "?");

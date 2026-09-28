@@ -976,10 +976,30 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * must not depend on which zone or method was asked for, and in recovery
      * mode s_at.lock IS NULL, so reaching the gate first means a recovery-mode
      * refusal names recovery mode instead of "autotune engine not started".
-     * Nothing here touches s_at, so running before that guard is safe. */
+     * Nothing here touches s_at, so running before that guard is safe.
+     *
+     * Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): same
+     * collect-once-then-check pattern as profile_executor_run() -- runs
+     * system_mode_gate_check()'s recovery-mode rule against the same facts
+     * before readiness_gate_evaluate(), so the recovery-mode wording matches
+     * dashboard_autotune_http.c's HTTP response exactly (retiring
+     * App/drivers/http/recovery_start_refusal.h's separate wording) and the
+     * benchproto AUTOTUNE path gets it too. */
     {
-        readiness_gate_block_t which = READINESS_GATE_OK;
-        if (readiness_gate_refuses_start(err_msg, err_cap, &which)) {
+        readiness_gate_facts_t facts;
+        readiness_gate_collect(&facts);
+
+        sys_mode_snapshot_t mode_snap;
+        memset(&mode_snap, 0, sizeof(mode_snap));
+        mode_snap.recovery_mode = facts.recovery_mode;
+        if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, err_msg, err_cap)) {
+            ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the system mode gate (recovery mode)",
+                     (unsigned)zone_index);
+            return false;
+        }
+
+        readiness_gate_block_t which = readiness_gate_evaluate(&facts, err_msg, err_cap);
+        if (which != READINESS_GATE_OK) {
             ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the readiness interlock (item %d): %s",
                      (unsigned)zone_index, (int)which, err_msg ? err_msg : "(no message)");
             return false;

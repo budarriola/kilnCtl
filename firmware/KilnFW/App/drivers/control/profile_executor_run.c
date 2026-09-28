@@ -25,6 +25,7 @@
 #include "relay_authority.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
+#include "system_mode_gate.h"
 #include "thermo_channel_read.h"
 #include "thermo_combine.h"
 #include "zones_config_accessors.h"
@@ -190,14 +191,34 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * about the BOARD, and "which item is red" must read the same whatever is
      * being started. (b) In recovery mode the lock IS NULL, and the generic
      * "profile executor not started" refusal below tells an operator nothing
-     * about why -- the exact complaint recovery_start_refusal.h was written
-     * to fix. Reaching the gate first means the recovery-mode refusal names
-     * recovery mode. Nothing here touches s_exec, so running before that
-     * guard is safe; readiness_gate.c documents the fail-safe direction of
-     * every fact it reads on a board that has not finished starting. */
+     * about why. Reaching the gate first means the recovery-mode refusal
+     * names recovery mode. Nothing here touches s_exec, so running before
+     * that guard is safe; readiness_gate.c documents the fail-safe direction
+     * of every fact it reads on a board that has not finished starting.
+     *
+     * Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): collects the
+     * readiness facts once and runs system_mode_gate_check()'s recovery-mode
+     * rule against them BEFORE readiness_gate_evaluate() -- the same facts,
+     * no second collect -- so the recovery-mode wording an operator sees here
+     * is the SAME string dashboard_exec_http.c now sends over HTTP (retiring
+     * App/drivers/http/recovery_start_refusal.h's separate, HTTP-only
+     * wording), and the UART/LCD start paths get it too since they funnel
+     * through this same function. */
     {
-        readiness_gate_block_t which = READINESS_GATE_OK;
-        if (readiness_gate_refuses_start(err_msg, err_cap, &which)) {
+        readiness_gate_facts_t facts;
+        readiness_gate_collect(&facts);
+
+        sys_mode_snapshot_t mode_snap;
+        memset(&mode_snap, 0, sizeof(mode_snap));
+        mode_snap.recovery_mode = facts.recovery_mode;
+        if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, err_msg, err_cap)) {
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode)",
+                     (unsigned)profile_id);
+            return false;
+        }
+
+        readiness_gate_block_t which = readiness_gate_evaluate(&facts, err_msg, err_cap);
+        if (which != READINESS_GATE_OK) {
             ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the readiness interlock (item %d): %s",
                      (unsigned)profile_id, (int)which, err_msg ? err_msg : "(no message)");
             return false;

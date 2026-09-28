@@ -29,8 +29,7 @@
 //
 // FAKES: readiness_gate.h declares readiness_gate_collect() and defines
 // everything else as static inline, exactly so this file can supply that one
-// body and reach the real decision. Same convention
-// test_recovery_start_refusal.c uses for boot_guard_is_recovery_mode().
+// body and reach the real decision.
 //
 // Own, separate executable (own main()): this file defines a body for
 // readiness_gate_collect(), which readiness_gate.c also defines -- linking

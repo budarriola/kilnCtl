@@ -51,9 +51,9 @@
 // host-tested and so profile_executor_run.c can call it without dragging in
 // esp_http_server. readiness_gate_collect() -- the one thing that actually
 // touches the board -- is declared here and defined in readiness_gate.c,
-// which is target-only. Host tests supply their own body for it, the same
-// convention test_recovery_start_refusal.c uses for
-// boot_guard_is_recovery_mode().
+// which is target-only. Host tests supply their own body for it -- the same
+// fake-the-one-impure-accessor convention test_boot_guard.c's neighbors use
+// for boot_guard_is_recovery_mode().
 #ifndef READINESS_GATE_H
 #define READINESS_GATE_H
 

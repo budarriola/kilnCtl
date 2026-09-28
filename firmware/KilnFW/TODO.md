@@ -1992,20 +1992,21 @@ suspected to be related to this work, was root-caused separately (also in
       mechanically (zero-entry allowlist for MAX31856/kiln_io, one narrow
       documented exception for `factory_reset.c`'s driver-storage-reset
       `esp_wifi_restore()`/`esp_wifi_set_storage()` calls).
-- [ ] **Phase 6** (added mid-Phase-1, user request): a **system-mode command
+- [x] **Phase 6** (added mid-Phase-1, user request): a **system-mode command
       gate**, distinct from the owner-task pattern above. The owners answer
       "can two writers race on this state"; this answers "is this *class* of
       command allowed at all given what the system is doing right now" —
       e.g. while a profile is firing, stop/pause/modify-this-run is fine, but
       starting a *different* profile, running autotune, or a raw GPIO/SX1509
-      debug write should be refused outright. Needs to see
-      `profile_executor`'s and `autotune_engine`'s state, which
-      `kiln_io_owner`/`thermo_owner` have no business knowing about — a
-      policy layer above the owners, consulted by every producer-facing entry
-      point before a command is even built. **Design pass landed 2026-09-25**
-      (`docs/SYSTEM_MODE_GATE_PLAN.md`, `155bffd5`) -- design only, pending
-      owner review of its four open questions; do not implement ahead of
-      that review.
+      debug write should be refused outright. **All five rollout slices
+      LANDED** (`docs/SYSTEM_MODE_GATE_PLAN.md` section 3.6, owner decisions
+      2026-09-25): `system_mode_gate.h`/`.c` (slice 1); manual relay writes
+      via `kiln_io_owner.c`'s `relay_on_blocked()` (slice 3); recovery-mode
+      start refusals shared across HTTP/UART/LCD, retiring the HTTP-only
+      `recovery_start_refusal.h` (slice 2, 2026-09-27); zones/config writes
+      (slice 4); and factory reset/cfgfs format (slice 5) — each wired into
+      the callers' existing single choke points ahead of
+      `readiness_gate.h`/the owner locks, never replacing them.
 - [ ] `profile_executor.c`/`relay_authority.c` gaining the same
       `relay_owner.c`-style queue is a candidate once the web/LCD callers
       that drive them are migrated — not urgent (current call pattern

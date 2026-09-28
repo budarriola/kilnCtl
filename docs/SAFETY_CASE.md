@@ -422,8 +422,9 @@ here; none is copied from an unverified summary.
       Per item, as verified 2026-09-09:
       - `recovery_mode` — already enforced: `main_control_bringup.c` never
         calls `profile_executor_start()` in recovery mode, so `s_exec.lock` is
-        NULL and every entry point refuses; plus the explicit API-layer
-        refusal in `recovery_start_refusal.h`.
+        NULL and every entry point refuses; plus the explicit, shared-wording
+        refusal in `system_mode_gate.c` (docs/SYSTEM_MODE_GATE_PLAN.md slice 2,
+        2026-09-27 -- formerly a separate, HTTP-only `recovery_start_refusal.h`).
       - `safety_trip` — already enforced: `profile_executor_run()`'s
         `relay_authority_on_blocked()` check refuses a start while heat
         authority is blocked, which a latched trip does; and the Pico refuses

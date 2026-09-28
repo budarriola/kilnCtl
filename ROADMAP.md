@@ -1,11 +1,18 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-25, the system-mode gate
-> landed for zone-config writes, factory reset, and cfgfs format (slices
-> 2/4/5, on top of slice 3's manual relay writes), two new bench MCP tools (`control_set_zone_limits`,
-> `safety_get_unset_commissioning_params`) landed, and a further LCD-01/
-> LCD-19 harness/firmware review-fix chain landed (thirty-ninth sweep) —
-> open items below.
+> **Status:** planning · **Last reviewed:** 2026-09-27, the system-mode
+> gate's last deferred slice (2, "recovery wording") landed: `system_mode_
+> gate_check()` now runs inside `profile_executor_run()`'s and
+> `autotune_begin_run_locked()`'s choke points and inside their two HTTP
+> call sites, so a start refused for recovery mode reads the same string on
+> HTTP/UART/LCD alike; `App/drivers/http/recovery_start_refusal.h` (the
+> HTTP-only wording it retired) is deleted. All five `docs/
+> SYSTEM_MODE_GATE_PLAN.md` slices are now LANDED — 2026-09-25 landed
+> zone-config writes, factory reset, and cfgfs format (plan slices 4/5, on
+> top of plan slice 3's manual relay writes), two new bench MCP tools
+> (`control_set_zone_limits`, `safety_get_unset_commissioning_params`)
+> landed, and a further LCD-01/LCD-19 harness/firmware review-fix chain
+> landed (thirty-ninth sweep) — open items below.
 > - **System-mode command gate, 2026-09-25 — owner decisions recorded, slices
 >   2/3/4/5 LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
 >   `firmware/KilnFW/TODO.md` 10.14's Phase 6 (a single owning function/table
