@@ -44,8 +44,15 @@ typedef enum {
     HTTPD_400_BAD_REQUEST = 400,
     HTTPD_401_UNAUTHORIZED = 401, /* added for web_auth_login_http.c's host tests (Findings 4/5) */
     HTTPD_403_FORBIDDEN = 403, /* added 2026-08-27 for ota_http.c's host tests */
+    HTTPD_404_NOT_FOUND = 404, /* added 2026-09-27 for kiln_cfg_http.c's host tests (test_kiln_cfg_http.c) */
     HTTPD_500_INTERNAL_SERVER_ERROR = 500,
 } httpd_err_code_t;
+
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
 
 /* Real esp_http_server.h's sentinel meaning "buf is a NUL-terminated C
  * string, compute its length with strlen()" -- added 2026-08-27 for
@@ -88,6 +95,12 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s);
 size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field);
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size);
 int httpd_req_to_sockfd(httpd_req_t *r);
+
+/* Added 2026-09-27 for kiln_cfg_http.c's host tests (test_kiln_cfg_http.c) --
+ * list_get_handler()'s ?id= query-string parsing. Declared once here,
+ * defined per test file, same split as the group above. */
+esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len);
+esp_err_t httpd_query_key_value(const char *qry, const char *key, char *val, size_t val_size);
 
 /* Added 2026-09-25 for http_async_job.c's host tests
  * (test_http_async_job.c) -- the first driver code to call the real

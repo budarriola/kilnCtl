@@ -1561,6 +1561,28 @@ try {
 
     Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
 
+    # ---- test_kiln_cfg_http.c: its own 24th, separate executable --------------
+    # Closes a docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice-4 known test gap:
+    # kiln_cfg_http.c's apply_post_handler() (POST /api/kiln_configs/apply) had
+    # NO host-test coverage of any kind before this -- its refusal order (404
+    # nonexistent id, then the system_mode_gate, then the OTA interlock, then
+    # http_async_job_busy()) was verified only by code-pattern review and an
+    # ESP-IDF target build. #includes kiln_cfg_http.c directly (same "static
+    # handler, no other seam" convention as test_zones_http.c/
+    # test_backup_import.c) and stubs its whole store/swap-worker/interlock/
+    # async-job dependency surface; system_mode_gate.c/system_mode_gate_http.c
+    # are linked in for real, same convention as exe2/test_backup_import.c's
+    # own executables, since apply_post_handler() calls those two directly.
+    $exe24kcfg = Join-Path $outDir "kilnctl_host_tests_kiln_cfg_http.exe"
+    $kcfgObjDir = Join-Path $outDir "kcfg"
+    New-Item -ItemType Directory -Force -Path $kcfgObjDir | Out-Null
+    $cmd24kcfg = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$kcfgObjDir\\`" /Fe:`"$exe24kcfg`" `"$(Join-Path $testDir 'test_kiln_cfg_http.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+
+    Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
+
     # ---- test_ft6336u.c: its own 24th, separate executable --------------------
     # HAL Phase 1b (docs/HW_ABSTRACTION.md): FT6336U.c was rewritten to go
     # through interface/hal_i2c.h instead of driver/i2c_master.h + i2c_owner.c
@@ -2706,7 +2728,12 @@ try {
     # App/drivers/http/recovery_start_refusal.h -- both HTTP call sites now go
     # through system_mode_gate_check() instead, covered by test_system_mode_
     # gate.c's own (expanded) cases rather than a separate executable.
-    $totalExpected = 61
+    # 61 -> 62: added test_kiln_cfg_http.c's own Invoke-HostTestExe call --
+    # kiln_cfg_http.c's apply_post_handler() refusal order (404, then the
+    # system mode gate, then the OTA interlock, then http_async_job_busy()),
+    # a known test gap named in docs/SYSTEM_MODE_GATE_PLAN.md section 3.6
+    # slice 4, previously untested at the handler level.
+    $totalExpected = 62
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
