@@ -1682,21 +1682,50 @@ function drawChartAxis(g, x, yTemp, tMin, tMax) {
   }
 }
 
-// Owner request: the y-axis (temp) should always carry 10 markings, not
-// just a top/bottom label. Evenly spaced across [minV, maxV] regardless of
-// how that range was derived (live-reading pad, history pad, or the
-// freezing-floor clamp) -- shared by drawIdleDots and drawHistoryChart so
-// both charts read the same way.
+// Owner fix 2026-09-28: GRAPH_MIN_SPAN_DISP (widenRangeToMinSpan()) can leave
+// as little as a 5-6 displayed-degree span. The old fixed tickCount=10 (11
+// labels) evenly divided that span and rounded each to a whole degree with
+// .toFixed(0) -- a 5-6 degree span then repeats a label (e.g. 20, 21, 21,
+// 22). Pick a "nice" step (1/2/5/10/20/50/... in the DISPLAYED unit, the
+// classic base-1/2/5 ladder) sized to land roughly 5-11 labels across the
+// range instead, and fall back to one decimal place only when that step is
+// itself under 1 displayed degree -- every label is then unique BY
+// CONSTRUCTION (each step is >= the rounding granularity), not by luck of
+// how wide the range happens to be. Pure function of the range so
+// test_firing_chart.js can exercise it without a canvas.
+function niceAxisTickStep(range, targetCount) {
+  if (!(range > 0)) return { step: 1, decimals: 0 };
+  var rawStep = range / targetCount;
+  var mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  var norm = rawStep / mag;
+  var niceNorm = norm < 1.5 ? 1 : (norm < 3 ? 2 : (norm < 7 ? 5 : 10));
+  var step = niceNorm * mag;
+  return { step: step, decimals: step < 1 ? 1 : 0 };
+}
+
+// Evenly spaced across [minV, maxV] regardless of how that range was derived
+// (live-reading pad, history pad, or the freezing-floor clamp) -- shared by
+// drawIdleDots and drawHistoryChart so both charts read the same way. Ticks
+// are chosen in the DISPLAYED unit (niceAxisTickStep above) so a °F toggle
+// gets its own nice ladder rather than inheriting °C's.
 function drawYAxis(g, yTemp, minV, maxV) {
-  var ctx = g.ctx, tickCount = 10;
+  var ctx = g.ctx;
+  var isF = window.kcUnit.get() === 'f';
+  var dispA = window.kcUnit.toDisplay(minV), dispB = window.kcUnit.toDisplay(maxV);
+  var lo = Math.min(dispA, dispB), hi = Math.max(dispA, dispB);
+  var t = niceAxisTickStep(hi - lo, 8);
+  var step = t.step, decimals = t.decimals;
+  var first = Math.ceil(lo / step) * step;
+  var count = Math.max(0, Math.round((hi - first) / step));
   ctx.font = '10px sans-serif';
-  for (var vi = 0; vi <= tickCount; vi++) {
-    var vv = minV + (maxV - minV) * vi / tickCount;
+  for (var vi = 0; vi <= count; vi++) {
+    var dv = first + vi * step;
+    var vv = isF ? (dv - 32) * 5 / 9 : dv;
     var vy = yTemp(vv);
     ctx.strokeStyle = g.border;
     ctx.beginPath(); ctx.moveTo(g.padL - 3, vy); ctx.lineTo(g.padL, vy); ctx.stroke();
     ctx.fillStyle = g.muted;
-    ctx.fillText(window.kcUnit.toDisplay(vv).toFixed(0) + window.kcUnit.label(), 2, vy + 3);
+    ctx.fillText(dv.toFixed(decimals) + window.kcUnit.label(), 2, vy + 3);
   }
 }
 

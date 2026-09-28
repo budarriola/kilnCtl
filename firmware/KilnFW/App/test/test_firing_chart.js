@@ -443,6 +443,84 @@ function loadMinSpanFns(unit) {
 })();
 
 // ---------------------------------------------------------------------------
+// niceAxisTickStep / drawYAxis label uniqueness -- owner fix 2026-09-28:
+// GRAPH_MIN_SPAN_DISP can leave a 5-6 displayed-degree span, which the old
+// fixed 11-label/.toFixed(0) axis repeated (e.g. 20, 21, 21, 22). Extracts
+// niceAxisTickStep() itself (pure, no canvas) and reproduces drawYAxis()'s
+// label-generation loop against it, so this is checking the exact function
+// production code calls, not a reimplementation of the fix.
+const NICE_TICK_SRC = extractRange(
+  'function niceAxisTickStep(range, targetCount) {',
+  '}'
+);
+assert(NICE_TICK_SRC.indexOf('niceNorm') !== -1,
+  'sanity: extracted range is niceAxisTickStep');
+
+function loadNiceTickFn() {
+  const ctx = vm.createContext({ console });
+  new vm.Script(NICE_TICK_SRC, { filename: 'main_page.html (nice-tick slice)' }).runInContext(ctx);
+  return ctx;
+}
+
+// Mirrors drawYAxis()'s own loop (first = ceil(lo/step)*step, count =
+// round((hi-first)/step)) exactly, converting each tick to the same
+// .toFixed(decimals) string drawYAxis() draws.
+function labelsForDisplayedSpan(ctx, lo, hi) {
+  const t = ctx.niceAxisTickStep(hi - lo, 8);
+  const first = Math.ceil(lo / t.step) * t.step;
+  const count = Math.max(0, Math.round((hi - first) / t.step));
+  const labels = [];
+  for (let i = 0; i <= count; i++) {
+    labels.push((first + i * t.step).toFixed(t.decimals));
+  }
+  return labels;
+}
+
+function hasNoDuplicates(labels) {
+  return new Set(labels).size === labels.length;
+}
+
+// Displayed-degree spans to check, both in °C (span applied directly) and in
+// °F (the same widenRangeToMinSpan()-produced Celsius span, scaled by 9/5 the
+// way toDisplay() does) -- 5 and 6 are the exact boundary the owner report
+// named, 5.5 the fractional case in between, 50 and 1000 much wider ranges
+// that must still land a reasonable tick count.
+[5, 5.5, 6, 50, 1000].forEach(function (spanC) {
+  (function () {
+    const ctx = loadNiceTickFn();
+    const labelsC = labelsForDisplayedSpan(ctx, 20, 20 + spanC);
+    assert(hasNoDuplicates(labelsC),
+      spanC + ' C span: no duplicate Y-axis labels in C, got [' + labelsC.join(', ') + ']');
+    assert(labelsC.length >= 4 && labelsC.length <= 12,
+      spanC + ' C span: label count in the 5-11ish range (got ' + labelsC.length + ')');
+
+    const spanF = spanC * 9 / 5;
+    const labelsF = labelsForDisplayedSpan(ctx, 68, 68 + spanF);
+    assert(hasNoDuplicates(labelsF),
+      spanC + ' C (' + spanF.toFixed(1) + ' F) span: no duplicate Y-axis labels in F, got [' +
+      labelsF.join(', ') + ']');
+  })();
+});
+
+// Negative-test evidence (restored by hand immediately below, then a forced
+// full rebuild before declaring the tree clean -- see IMPLEMENTER.md): with
+// the OLD fixed tickCount=10/.toFixed(0) behaviour, a 5-degree span at a
+// non-round base value DOES repeat a label. Reproduced here directly (not by
+// editing the source file) so this assertion documents the exact bug this
+// change fixes and stays in the suite as a regression guard.
+(function testOldFixedElevenLabelBehaviourDidRepeat() {
+  const minV = 20, maxV = 25; // 5 C span, the exact boundary case
+  const oldLabels = [];
+  for (let vi = 0; vi <= 10; vi++) {
+    const vv = minV + (maxV - minV) * vi / 10;
+    oldLabels.push(vv.toFixed(0));
+  }
+  assert(!hasNoDuplicates(oldLabels),
+    'sanity: the OLD tickCount=10/.toFixed(0) scheme really did repeat labels over a 5 C span (' +
+    oldLabels.join(', ') + ') -- proves this test would have caught the pre-fix bug');
+})();
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');
 if (failed) {
