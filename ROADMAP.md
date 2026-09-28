@@ -6,11 +6,21 @@
 > OTA-bench PID comparisons are tolerance-based. `cc71612d` closed the
 > guard-disable-ack-gate item by owner decision (thermal protection gets no
 > disable switch, ever) and recorded HP-07's 2026-09-28 bench rerun as a
-> PASS. Open: the `tuning_valid` tolerance gap the precision fix exposed,
-> `backup_import`'s NVS-save batching, dropping the dashboard's "Previous
-> firing ended" card on a normal/deliberate stop, and three new owner
-> requests (live-edit button for a running profile, a stop confirm dialog,
-> and login required for everything but the dashboards) — see M18 below.
+> PASS. `49b32a24` fixed the `tuning_valid` relative-tolerance gap. `d484e51a`/
+> `f017b285` landed the "Edit firing" button next to Start/Stop on the web
+> (opens `/live_profile`, login modal first). `fd792793` landed hiding the
+> web dashboard's "previous firing ended" card except for an interrupted or
+> faulted run. `c2240cb1`/`389275a5` landed a 5-degree minimum vertical span
+> on every LCD and web temperature graph; `e6d7db5f`/`3d90c8eb` landed
+> non-repeating web y-axis tick labels. Open: `backup_import`'s NVS-save
+> batching, and three 2026-09-28 owner requests — a stop confirm dialog
+> (already existed on both UIs before this round; the login-required work
+> below covers what's actually new), login required for Stop and everything
+> but the dashboards on both web and LCD (in review, not yet landed), and
+> an LCD PIN that follows the web password's lockout/backoff and idle-
+> timeout rules (in review) — see M18 below. In review, not yet landed: a
+> divergence-triggered stop now records FAULTED with a reason (was HALTED
+> with an empty reason), and `backup_import` batches its NVS saves.
 > **2026-09-27:** the system-mode gate's last deferred slice (2, "recovery
 > wording") landed: `system_mode_
 > gate_check()` now runs inside `profile_executor_run()`'s and
@@ -4174,40 +4184,54 @@ Owner instruction, 2026-09-21.
   small `Ki` on their GET-merge-POST round trip, and OTA-bench PID
   comparisons are now tolerance-based (`judgments.pid_gains_match`) instead
   of exact-string.
-- [ ] **`tuning_valid` invalidation tolerance (open, predates `04fb2afe`):**
-  the compare in `zones_http_post_parse.c` that decides whether a re-posted
-  value counts as "changed enough to invalidate `tuning_valid`" still uses
-  an absolute `0.0001` tolerance. A small-`Ki` edit (now printed and
-  re-posted at full `%.9g` precision rather than being rounded to zero) can
-  still fail to clear `tuning_valid` because the absolute delta is below
-  0.0001 even though the value genuinely changed. Needs a relative
-  tolerance. Found as a byproduct of the `04fb2afe` precision fix.
-- [ ] **`backup_import` batched NVS save (in progress):** the ~61 s import
-  currently issues one NVS save per field as it restores each store.
-  Planned: `_no_save` setter variants for the hot paths, one trailing save
-  per store, a RAM rollback if a mid-batch setter fails partway through, and
-  timing instrumentation to confirm the win. Not started.
-- [ ] **Web dashboard: drop the "Previous firing ended" card after a normal
-  or deliberate stop (owner request, 2026-09-28).** Keep it only for an
+- [x] **`tuning_valid` invalidation tolerance, landed (`49b32a24`):** the
+  compare in `zones_http_post_parse.c` that decides whether a re-posted
+  value counts as "changed enough to invalidate `tuning_valid`" used an
+  absolute `0.0001` tolerance, so a small-`Ki` edit (now printed and
+  re-posted at full `%.9g` precision rather than being rounded to zero)
+  could fail to clear `tuning_valid` even though the value genuinely
+  changed. Now a relative tolerance; also carries a magnitude-sweep test and
+  a comment fix from review.
+- [ ] **`backup_import` batched NVS save (in review, not yet landed):** the
+  ~61 s import currently issues one NVS save per field as it restores each
+  store. Planned: `_no_save` setter variants for the hot paths, one trailing
+  save per store, a RAM rollback if a mid-batch setter fails partway
+  through, and timing instrumentation to confirm the win.
+- [x] **Web dashboard: drop the "Previous firing ended" card after a normal
+  or deliberate stop, landed (`fd792793`).** The card now shows only for an
   *unexpected* end (fault/trip/crash) — a normal Stop or a profile reaching
-  its own end should clear the card rather than leave it displayed.
-- [ ] **Owner requests, 2026-09-28 (new, pending):**
-  - (a) A web GUI button next to Start/Stop to live-edit the running
-    profile's dwell times, target temps and ramp rates. The backend already
-    exists (`firmware/KilnFW/App/drivers/http/profiles_live_http.c`,
-    `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, exposed to PcTools as
-    the `profile_live_*` MCP quartet); web UI coverage for it is still
-    being researched, not yet built.
+  its own end clears it instead of leaving it displayed.
+- [ ] **Divergence-triggered stop recorded as FAULTED (in review, not yet
+  landed):** was recorded as HALTED with an empty reason; now records
+  FAULTED with a reason.
+- [x] **Owner requests, 2026-09-28:**
+  - (a) **Landed (`d484e51a`, `f017b285`):** an "Edit firing" button next to
+    Start/Stop on the web UI opens `/live_profile`, prompting for login
+    first if not already signed in (backend: `profiles_live_http.c`,
+    `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, the `profile_live_*` MCP
+    quartet).
   - (b) A confirm dialog before stopping a running profile, on both the web
-    UI and the LCD. The physical E-stop must stay immediate and bypass this
-    dialog entirely.
+    UI and the LCD — this already existed on both UIs before this round of
+    requests (a prior status line here mistakenly listed it as still
+    pending in `1037c4ff`; corrected). What's new and **in review, not yet
+    landed**: Stop itself now requires login on both UIs, per (c) below. The
+    physical E-stop stays immediate, always available without login, and
+    bypasses both the confirm dialog and the login requirement entirely.
   - (c) **Owner decision, supersedes the earlier "show login only when an
-    action needs it" request:** without login, the web and LCD show only
-    the dashboards. Every other page and action — including Stop — now
-    requires login. Session timeouts are unchanged. Setup/AP provisioning,
-    the bootstrap-password flow, TOTP reset, and the LCD reset touch
-    sequence stay reachable without login, since they exist to recover
-    access in the first place.
+    action needs it" request. In review, not yet landed on either UI:**
+    without login, the web and LCD show only the dashboards. Every other
+    page and action — including Stop — requires login. The LCD's PIN gate
+    follows the same rules as the web password: the shared
+    `login_backoff` module's lockout/backoff ladder (5/10/30/60/300 s) and
+    the same idle-timeout semantics. Setup/AP provisioning, the
+    bootstrap-password flow, TOTP reset, and the LCD reset touch sequence
+    stay reachable without login, since they exist to recover access in the
+    first place.
+  - **Pending bench work (not yet done):** flash the landed firmware above
+    to the bench board; verify LCD-19 and the login gate on hardware once
+    the login-required work lands; bench-verify the live-edit feature end
+    to end; measure `backup_import` timing after the NVS-save batching
+    lands; measure `crash_report/clear` latency.
 
 ---
 
