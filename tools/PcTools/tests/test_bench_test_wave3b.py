@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl.bench_test import cases_fl as CFL  # noqa: E402
 from kilnctrl.bench_test import cases_safety as CS  # noqa: E402
+from kilnctrl.bench_test import cases_smoke as CSM  # noqa: E402
 from kilnctrl.bench_test import cases_web as CW  # noqa: E402
 from kilnctrl.bench_test import judgments as J  # noqa: E402
 from kilnctrl.bench_test import operator as OP  # noqa: E402
@@ -253,6 +254,34 @@ class _FakeSafetySrv:
         self.clear_called += 1
 
 
+class _FakeFlashAndSafetySrv:
+    """FL-11's shape: `debug_program(peer="pico")` plus a diag cache that
+    can stay stale for a few reads after `safety_clear_trip()` (models
+    LINK_DIAG_TX_PERIOD_MS, see cases_smoke.wait_for_trip_clear)."""
+
+    def __init__(self, flash_text, diag_before_clear, post_clear_delay_polls=0):
+        self._flash_text = flash_text
+        self._diag_before_clear = diag_before_clear
+        self._post_clear_delay_polls = post_clear_delay_polls
+        self._polls_since_clear = None
+        self.clear_called = 0
+
+    def debug_program(self, peer=None):
+        return self._flash_text
+
+    def safety_get_diag(self):
+        if self._polls_since_clear is not None:
+            if self._polls_since_clear < self._post_clear_delay_polls:
+                self._polls_since_clear += 1
+                return self._diag_before_clear
+            return _diag_text(0)
+        return self._diag_before_clear
+
+    def safety_clear_trip(self):
+        self.clear_called += 1
+        self._polls_since_clear = 0
+
+
 class Sp08AttendedFlowTest(unittest.TestCase):
     def test_operator_says_no_fails(self):
         ctx = {"attended": True, "operator_prompt_fn": lambda q, t: False}
@@ -421,6 +450,45 @@ class TripMaskRuleFiveTest(unittest.TestCase):
 
     def test_fl11_expects_s6a_mask_0x0020(self):
         self.assertEqual(J.safety_trip_mask_for_reason(CFL._FL11_EXPECTED_TRIP_REASON), 0x0020)
+
+
+class Fl11TripClearPollTest(unittest.TestCase):
+    """FL-11's clear-then-read-back must poll rather than trust a single
+    immediate read, same reasoning as HP-07 (cases_heat.py) --
+    cases_smoke.wait_for_trip_clear is the shared helper both use."""
+
+    def _ctx(self, srv):
+        clock = {"t": 0.0}
+        return {
+            "allow_flash": True, "srv": srv,
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+        }
+
+    def test_clear_landing_on_second_poll_still_passes(self):
+        srv = _FakeFlashAndSafetySrv(
+            flash_text="flashed OK", diag_before_clear=_diag_text(6), post_clear_delay_polls=1,
+        )
+        result = CFL._case_fl11(self._ctx(srv))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(srv.clear_called, 1)
+        self.assertGreater(result.observed.get("trip_clear_elapsed_s"), 0.0)
+
+    def test_clear_landing_on_third_poll_still_passes(self):
+        srv = _FakeFlashAndSafetySrv(
+            flash_text="flashed OK", diag_before_clear=_diag_text(6), post_clear_delay_polls=2,
+        )
+        result = CFL._case_fl11(self._ctx(srv))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_never_clears_fails_with_last_reason_and_elapsed(self):
+        srv = _FakeFlashAndSafetySrv(
+            flash_text="flashed OK", diag_before_clear=_diag_text(6), post_clear_delay_polls=1000,
+        )
+        result = CFL._case_fl11(self._ctx(srv))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(result.observed.get("trip_reason"), 6)
+        self.assertGreaterEqual(result.observed.get("trip_clear_elapsed_s"), CSM._TRIP_CLEAR_POLL_TIMEOUT_S)
 
 
 class AlwaysLastAcrossEverySuiteTest(unittest.TestCase):

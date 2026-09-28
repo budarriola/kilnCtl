@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import judgments as J
-from .cases_smoke import _http_get_json, _repo_root, _srv
+from .cases_smoke import _http_get_json, _repo_root, _srv, wait_for_trip_clear as _wait_for_trip_clear
 from .registry import CaseResult, Verdict, get_case
 
 #: Baseline records for the ESP side are committed here -- a sibling of the
@@ -333,16 +333,25 @@ def _case_fl11(ctx: dict) -> CaseResult:
     expected_mask = J.safety_trip_mask_for_reason(_FL11_EXPECTED_TRIP_REASON)
 
     cleared_after: "bool | None" = None
+    clear_elapsed_s: "float | None" = None
     # Plan section 6 rule 5: exactly-matched reason AND mask before any
     # safety_clear_trip(). S6a is reason 6, so the mask must be 0x0020 and
     # nothing else -- a mask the report omits is not a match.
     if trip_reason == _FL11_EXPECTED_TRIP_REASON and trip_mask == expected_mask:
-        srv.safety_clear_trip()
-        after_reason = J.parse_trip_reason(srv.safety_get_diag())
+        # safety_clear_trip() is fire-and-forget and safety_get_diag() only
+        # reflects the Pico's last DIAG push (LINK_DIAG_TX_PERIOD_MS,
+        # firmware/SaftyFW/src/tasks/link_task.c:209) -- poll rather than
+        # reading back once immediately (see wait_for_trip_clear's docstring).
+        after_reason, clear_elapsed_s = _wait_for_trip_clear(ctx, srv)
         if after_reason is not None:
             cleared_after = after_reason == 0
 
-    return J.judge_operator_trip(trip_reason, _FL11_EXPECTED_TRIP_REASON, cleared_after, trip_mask=trip_mask)
+    result = J.judge_operator_trip(trip_reason, _FL11_EXPECTED_TRIP_REASON, cleared_after, trip_mask=trip_mask)
+    if clear_elapsed_s is not None:
+        observed = dict(result.observed or {})
+        observed["trip_clear_elapsed_s"] = clear_elapsed_s
+        return CaseResult(result.verdict, reason=result.reason, observed=observed)
+    return result
 
 
 #: Wire this wave's judge functions into the shared REGISTRY. Imported by

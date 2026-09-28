@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl.bench_test import cases_heat as C  # noqa: E402
+from kilnctrl.bench_test import cases_smoke as CS  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict  # noqa: E402
 
 
@@ -103,7 +104,7 @@ def _diag_text(trip_reason=0, trip_mask=None, current_fault_sources=0):
 
 
 class _FakeSrv:
-    def __init__(self, readings=None, profiles=None, diag_sequence=None):
+    def __init__(self, readings=None, profiles=None, diag_sequence=None, post_clear_delay_polls=0):
         self._thermo = _FakeThermoClient(readings if readings is not None else [
             _Reading(0, 24.0), _Reading(1, 24.2), _Reading(2, 23.9),
         ])
@@ -116,14 +117,29 @@ class _FakeSrv:
         #: this stay PASS-as-before.
         self._diag_sequence = list(diag_sequence) if diag_sequence is not None else [_diag_text()]
         self.safety_clear_trip_called = 0
+        #: Models `wait_for_trip_clear`'s stale-cache scenario
+        #: (LINK_DIAG_TX_PERIOD_MS): the number of `safety_get_diag()` reads
+        #: AFTER `safety_clear_trip()` that must still report the pre-clear
+        #: (stale) text before the cache is modelled as having caught up.
+        #: 0 (default) preserves the old immediate-clear fake behaviour.
+        self._post_clear_delay_polls = post_clear_delay_polls
+        self._polls_since_clear = None  # None until safety_clear_trip() is called
 
     def safety_get_diag(self):
+        if self._polls_since_clear is not None:
+            if self._polls_since_clear < self._post_clear_delay_polls:
+                self._polls_since_clear += 1
+                return self._diag_sequence[0]
+            return _diag_text()
         if len(self._diag_sequence) > 1:
             return self._diag_sequence.pop(0)
         return self._diag_sequence[0]
 
     def safety_clear_trip(self):
         self.safety_clear_trip_called += 1
+        if self._post_clear_delay_polls > 0:
+            self._polls_since_clear = 0
+            return
         # A real clear makes the next diag read report reason 0, unless the
         # test queued its own explicit post-clear text.
         if len(self._diag_sequence) <= 1:
@@ -745,7 +761,7 @@ class HP07Test(unittest.TestCase):
         _restore_zones_http_client(self._saved)
         _restore_profile_edit_http_client(self._saved_pehc)
 
-    def _ctx(self, profiles, diag_sequence=None):
+    def _ctx(self, profiles, diag_sequence=None, post_clear_delay_polls=0):
         # Default: the expected shape once FAULTED is acked -- the ESP
         # released its fault source and the Pico shows exactly S6a
         # (trip_reason 6, mask 0x0020), which `_case_hp07` clears.
@@ -753,6 +769,7 @@ class HP07Test(unittest.TestCase):
             readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
             profiles=profiles,
             diag_sequence=diag_sequence if diag_sequence is not None else [_diag_text(trip_reason=6)],
+            post_clear_delay_polls=post_clear_delay_polls,
         )
         clock = {"t": 0.0}
         ctx = {
@@ -1098,6 +1115,43 @@ class HP07Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertEqual(ctx["srv"].safety_clear_trip_called, 1)
         self.assertEqual(result.observed.get("trip_reason_after_clear"), 0)
+
+    def test_s6a_clear_landing_on_second_poll_still_passes(self):
+        """The ESP's DIAG cache (LINK_DIAG_TX_PERIOD_MS) can still read the
+        stale trip_reason for one poll after safety_clear_trip() -- must be
+        retried, not read once and believed."""
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(
+            profiles, diag_sequence=[_diag_text(trip_reason=6)], post_clear_delay_polls=1,
+        )
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ctx["srv"].safety_clear_trip_called, 1)
+        self.assertEqual(result.observed.get("trip_reason_after_clear"), 0)
+        self.assertGreater(result.observed.get("trip_clear_elapsed_s"), 0.0)
+
+    def test_s6a_clear_landing_on_third_poll_still_passes(self):
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(
+            profiles, diag_sequence=[_diag_text(trip_reason=6)], post_clear_delay_polls=2,
+        )
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed.get("trip_reason_after_clear"), 0)
+
+    def test_s6a_never_clears_fails_with_last_reason_and_elapsed(self):
+        """A clear that never actually lands (stuck stale forever) must FAIL
+        loud after the timeout rather than hang or silently PASS, and must
+        report the last trip_reason it actually saw plus how long it
+        waited."""
+        profiles = _FakeProfilesClientHP(exec_statuses=self._faulted_statuses())
+        ctx = self._ctx(
+            profiles, diag_sequence=[_diag_text(trip_reason=6)], post_clear_delay_polls=1000,
+        )
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(result.observed.get("trip_reason_after_clear"), 6)
+        self.assertGreaterEqual(result.observed.get("trip_clear_elapsed_s"), CS._TRIP_CLEAR_POLL_TIMEOUT_S)
 
     def test_s6a_wrong_reason_does_not_clear_and_fails(self):
         """A different guard latched (e.g. S6b, LINK_DEAD=7) must surface as

@@ -26,7 +26,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import judgments as J
-from .cases_smoke import _http_get_json, _srv
+from .cases_smoke import _http_get_json, _srv, wait_for_trip_clear as _wait_for_trip_clear
 from .registry import CaseResult, Verdict, get_case
 
 #: The hidden bench-profile slot (plan doc section 7, owner decision 3: "i
@@ -1267,9 +1267,13 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
 
     cleared_after: Optional[bool] = None
     if trip_reason == expected_reason and trip_mask == expected_mask:
-        srv.safety_clear_trip()
-        after_reason = J.parse_trip_reason(srv.safety_get_diag())
+        # safety_clear_trip() is fire-and-forget and safety_get_diag() only
+        # reflects the Pico's last DIAG push (LINK_DIAG_TX_PERIOD_MS,
+        # firmware/SaftyFW/src/tasks/link_task.c:209) -- poll rather than
+        # reading back once immediately (see wait_for_trip_clear's docstring).
+        after_reason, clear_elapsed_s = _wait_for_trip_clear(ctx, srv)
         merged_observed["trip_reason_after_clear"] = after_reason
+        merged_observed["trip_clear_elapsed_s"] = clear_elapsed_s
         if after_reason is not None:
             cleared_after = after_reason == 0
 
