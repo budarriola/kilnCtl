@@ -124,6 +124,24 @@ static kiln_ui_page_t *find_page(const char *name)
     return NULL;
 }
 
+/* ui_lcd_lock.h's ui_lcd_lock_set_relock_cb() seam -- called on an
+ * inactivity-timeout re-lock (never on a policy-transition force-lock) so a
+ * session that expires several pages deep does not leave that page's buttons
+ * usable until the operator navigates back out and in again. See that
+ * header's doc comment for the full 2026-09-28 owner-decision rationale.
+ * Guard against navigating "home" -> "home": kiln_ui_show() logs every call
+ * at INFO and this timer fires every second, so an operator already sitting
+ * on the dashboard when the timeout expires would otherwise get a redundant
+ * re-show and log line once a minute purely from staying put. */
+static void handle_lcd_relock_to_home(void)
+{
+    const char *current = kiln_ui_current_page();
+    if (current && strcmp(current, "home") == 0) {
+        return;
+    }
+    kiln_ui_show("home");
+}
+
 esp_err_t kiln_ui_init(void)
 {
     memset(s_pages, 0, sizeof(s_pages));
@@ -320,6 +338,7 @@ esp_err_t kiln_ui_init(void)
      * ui_lcd_lock_init()) and before any page can be shown, so a gated
      * Start button never fires before the lock exists. */
     ui_lcd_lock_init();
+    ui_lcd_lock_set_relock_cb(handle_lcd_relock_to_home);
     lcd_credential_bridge_init();
 
     return kiln_ui_show("home");

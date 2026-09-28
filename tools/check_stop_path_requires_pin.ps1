@@ -1,37 +1,33 @@
-# check_stop_path_never_gated.ps1 -- mechanically enforces the LCD half of
-# docs/WEB_AUTH_PLAN.md section 9: "the LCD Stop control ... must never
-# route through the keypad. On the LCD the Start/Stop control is one merged
-# widget that reads 'Stop' only while RUNNING or PAUSED -- so the gate is:
-# that widget demands a PIN when it would Start, and never when it would
-# Stop."
+# check_stop_path_requires_pin.ps1 -- mechanically enforces the LCD half of
+# the 2026-09-28 owner decision reversing docs/WEB_AUTH_PLAN.md section 9's
+# old "Stop is never gated" rule: the owner's own words were "stop needs
+# login. there is an estop button" -- the hardware E-stop
+# (docs/SAFETY_CASE.md H7, firmware-mediated on this bench) is the
+# independent safety backstop, not this keypad, so the LCD Stop control may
+# now require the same PIN as Start.
 #
-# Scope note: this check covers only the LCD side of section 9
-# (ui_home_fire_btn_cb() in ui_page_home_actions.c), which is fully
-# implemented and dependency-free. The HTTP side of the same section --
-# `POST /api/profile_exec/stop` bypassing authentication unconditionally at
-# the enforcement point -- is NOT covered here: as of this writing
-# http_auth_check() (App/drivers/http/http_auth_enforce.c) takes no uri at
-# all, only a route_tier_t, and neither it nor http_auth_http.c's
-# kiln_http_prehandler() special-cases /api/profile_exec/stop anywhere.
-# That means a session-less client currently gets DENY_NO_SESSION calling
-# stop while web auth is on -- section 9's own acceptance criterion ("a host
-# test drives the enforcement function with every combination ... against
-# /api/profile_exec/stop and asserts ALLOW in all five") does not hold on
-# this tree today. That gap lives in the enforcement point (plan item 5),
-# which is owned by another in-flight change, not by this check -- see
-# docs/WEB_AUTH_PLAN.md section 9's own note above this script's reference,
-# and report it rather than adding a check here that is red by construction
-# until that lands.
+# This check used to be check_stop_path_never_gated.ps1 and asserted the
+# OPPOSITE rule (Stop branch must NOT reference a PIN gate). It has been
+# renamed and inverted to match the reversal, not just edited in place, so a
+# stale reference to the old filename or the old rule text is easy to spot
+# by name alone.
 #
-# WHAT THIS CHECKS: inside ui_home_fire_btn_cb(), the branch taken when the
-# firing is RUNNING or PAUSED (i.e. the button reads "Stop") must call
-# ui_home_show_stop_confirm() directly, with no PIN-gating call
-# (ui_lcd_lock_run_gated(), or any LCD_PIN_ROLE_* reference) anywhere in that
-# branch. The opposite branch (Idle/Done/Faulted, i.e. "Start") is asserted
-# to still be gated -- proving this check can tell the two branches apart
-# rather than passing on a file with no gating anywhere.
+# Scope note: this check covers only the LCD side (ui_home_fire_btn_cb() in
+# ui_page_home_actions.c). The HTTP side (`POST /api/profile_exec/stop`
+# bypassing authentication unconditionally) is a SEPARATE, unchanged
+# concern -- this 2026-09-28 owner decision is explicitly scoped to the LCD
+# only, so the HTTP-side bypass at the enforcement point is left exactly as
+# it was and is not asserted on here.
 #
-# Usage: powershell -ExecutionPolicy Bypass -File tools\check_stop_path_never_gated.ps1 [-SourceFile <path>]
+# WHAT THIS CHECKS: inside ui_home_fire_btn_cb(), BOTH branches must
+# reference a PIN gate (ui_lcd_lock_run_gated() / LCD_PIN_ROLE_*) --
+# the RUNNING/PAUSED branch (the button reads "Stop") equally with the
+# Idle/Done/Faulted branch (the button reads "Start"). The Stop branch must
+# still ultimately reach ui_home_show_stop_confirm() (directly, or via a
+# gated callback wrapper such as ui_home_show_stop_confirm_gated_cb) so the
+# existing confirm dialog is never bypassed.
+#
+# Usage: powershell -ExecutionPolicy Bypass -File tools\check_stop_path_requires_pin.ps1 [-SourceFile <path>]
 param(
     [string]$SourceFile
 )
@@ -94,7 +90,7 @@ function Invoke-StopPathGateScan {
         [string]$FunctionName = "ui_home_fire_btn_cb"
     )
     if (-not (Test-Path $SourceFile)) {
-        throw "check_stop_path_never_gated.ps1: $SourceFile does not exist."
+        throw "check_stop_path_requires_pin.ps1: $SourceFile does not exist."
     }
     $codeLines = Get-CodeOnlyLines -Path $SourceFile
     $text = [string]::Join("`n", $codeLines)
@@ -106,7 +102,7 @@ function Invoke-StopPathGateScan {
     $sigPattern = [regex]::Escape($FunctionName) + '\s*\([^)]*\)\s*\{'
     $sigMatch = [regex]::Match($text, $sigPattern)
     if (-not $sigMatch.Success) {
-        throw "check_stop_path_never_gated.ps1: could not find function '$FunctionName' in $SourceFile -- has it been renamed or moved? Update this script."
+        throw "check_stop_path_requires_pin.ps1: could not find function '$FunctionName' in $SourceFile -- has it been renamed or moved? Update this script."
     }
     $bodyStart = $sigMatch.Index + $sigMatch.Length
     $depth = 1
@@ -118,22 +114,25 @@ function Invoke-StopPathGateScan {
         $i++
     }
     if ($depth -ne 0) {
-        throw "check_stop_path_never_gated.ps1: unbalanced braces scanning '$FunctionName' in $SourceFile -- cannot trust the parse."
+        throw "check_stop_path_requires_pin.ps1: unbalanced braces scanning '$FunctionName' in $SourceFile -- cannot trust the parse."
     }
     $body = $text.Substring($bodyStart, $i - $bodyStart - 1)
 
     # Split into the two top-level branches on the first top-level "} else {"
-    # inside this body. Section 9's shape is a single if/else: the "if"
+    # inside this body. The shape is a single if/else: the "if"
     # (RUNNING/PAUSED -> Stop) and the "else" (everything else -> Start).
     $elseMatch = [regex]::Match($body, '\}\s*else\s*\{')
     if (-not $elseMatch.Success) {
-        throw "check_stop_path_never_gated.ps1: '$FunctionName' in $SourceFile has no if/else split -- has its shape changed from the merged Start/Stop button section 9 describes? Update this script."
+        throw "check_stop_path_requires_pin.ps1: '$FunctionName' in $SourceFile has no if/else split -- has its shape changed from the merged Start/Stop button design? Update this script."
     }
     $stopBranch = $body.Substring(0, $elseMatch.Index)
     $startBranch = $body.Substring($elseMatch.Index + $elseMatch.Length)
 
     $gatePattern = 'ui_lcd_lock_run_gated|LCD_PIN_ROLE_[A-Za-z0-9_]+'
-    $stopCallPattern = 'ui_home_show_stop_confirm\s*\('
+    # Accepts either a direct call, ui_home_show_stop_confirm(...), or a
+    # reference to a gated-callback wrapper passed by name with no
+    # trailing parens, e.g. ui_home_show_stop_confirm_gated_cb.
+    $stopCallPattern = 'ui_home_show_stop_confirm(_gated_cb)?\b'
 
     $stopBranchGated = [regex]::IsMatch($stopBranch, $gatePattern)
     $stopBranchCallsStop = [regex]::IsMatch($stopBranch, $stopCallPattern)
@@ -152,27 +151,27 @@ function Invoke-StopPathGateScan {
 if ($MyInvocation.InvocationName -ne '.') {
     $result = Invoke-StopPathGateScan -SourceFile $sourceFile
 
-    Write-Host "Stop-path-never-gated check: scanned ui_home_fire_btn_cb() in $sourceFile."
+    Write-Host "Stop-path-requires-pin check: scanned ui_home_fire_btn_cb() in $sourceFile."
 
     $failures = @()
     if (-not $result.StopBranchCallsStop) {
-        $failures += "the RUNNING/PAUSED branch (Stop) does not call ui_home_show_stop_confirm() at all -- has the widget's shape changed?"
+        $failures += "the RUNNING/PAUSED branch (Stop) does not reach ui_home_show_stop_confirm() (directly or via a gated callback) -- has the widget's shape changed?"
     }
-    if ($result.StopBranchGated) {
-        $failures += "the RUNNING/PAUSED branch (Stop) references a PIN gate (ui_lcd_lock_run_gated / LCD_PIN_ROLE_*) -- docs/WEB_AUTH_PLAN.md section 9 requires Stop to NEVER be gated."
+    if (-not $result.StopBranchGated) {
+        $failures += "the RUNNING/PAUSED branch (Stop) does not reference a PIN gate (ui_lcd_lock_run_gated / LCD_PIN_ROLE_*) -- owner decision 2026-09-28 requires Stop to be gated the same as Start ('stop needs login. there is an estop button')."
     }
     if (-not $result.StartBranchGated) {
-        $failures += "the else branch (Start) does not reference a PIN gate at all -- this check cannot distinguish a correctly-ungated Stop from a file where gating was removed everywhere, so this counts as a failure to keep the check honest."
+        $failures += "the else branch (Start) does not reference a PIN gate at all -- this check cannot distinguish a correctly-gated Stop from a file where gating was removed everywhere, so this counts as a failure to keep the check honest."
     }
 
     if ($failures.Count -gt 0) {
-        Write-Host "STOP PATH NEVER GATED CHECK FAILED:" -ForegroundColor Red
+        Write-Host "STOP PATH REQUIRES PIN CHECK FAILED:" -ForegroundColor Red
         foreach ($f in $failures) {
             Write-Host "  - $f" -ForegroundColor Red
         }
-        throw "$($failures.Count) failure(s) above. A PIN surface must never be able to prevent a running firing from being stopped (docs/WEB_AUTH_PLAN.md section 9)."
+        throw "$($failures.Count) failure(s) above. Owner decision 2026-09-28: LCD Stop must require the PIN, the same as Start."
     }
 
-    Write-Host "Stop path never gated check passed: Stop branch is ungated and calls ui_home_show_stop_confirm(); Start branch is still gated."
+    Write-Host "Stop path requires PIN check passed: Stop branch is gated and still reaches ui_home_show_stop_confirm(); Start branch is still gated."
     exit 0
 }

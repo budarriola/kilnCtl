@@ -62,16 +62,66 @@ void ui_lcd_lock_force_lock(void);
 void ui_lcd_lock_note_activity(void);
 
 // The gate itself. If the policy is disabled, or a session already covers
-// `min_role`, calls `action(user_data)` immediately -- no keypad, no delay,
-// so this can never be the thing that stands between an operator and a
-// Stop (item 9: only ever wired to the Start half of the merged Start/Stop
-// button, never to Stop). Otherwise shows the keypad overlay with `prompt`
-// and calls `action(user_data)` only after a PIN is entered whose role meets
-// or exceeds `min_role`; a wrong or insufficient PIN, lockout, or Cancel
-// simply leaves the caller's action unexecuted.
+// `min_role`, calls `action(user_data)` immediately -- no keypad, no delay.
+// Otherwise shows the keypad overlay with `prompt` and calls
+// `action(user_data)` only after a PIN is entered whose role meets or
+// exceeds `min_role`; a wrong or insufficient PIN, lockout, or Cancel simply
+// leaves the caller's action unexecuted.
+//
+// **Owner decision, 2026-09-28: this IS now wired to the Stop half of the
+// merged Start/Stop button, reversing the rule this comment used to state
+// here** ("only ever wired to the Start half ... never to Stop", item 9).
+// The owner's own words: "stop needs login. there is an estop button" -- the
+// LCD PIN surface is no longer treated as the thing standing between an
+// operator and stopping a firing, because a hardware E-stop
+// (docs/SAFETY_CASE.md H7, firmware-mediated on this bench per that doc) is
+// the actual safety backstop, independent of this keypad and of LCD auth
+// state entirely. Only a logged-in operator (or a board with LCD auth
+// disabled -- see ui_lcd_lock_has_role()'s item-11 collapse) may now press
+// Stop from the LCD; ui_home_fire_btn_cb() (ui_page_home_actions.c) gates
+// both halves of the merged button, and
+// tools/check_stop_path_requires_pin.ps1 enforces this mechanically (the
+// check this comment used to name, tools/check_stop_path_never_gated.ps1,
+// asserted the opposite rule and has been renamed/inverted to match). Every
+// OTHER LCD page and action -- not only Start/Stop -- is also gated per that
+// same 2026-09-28 decision when navigated to from the home/dashboard page:
+// see ui_page_home_actions.c's ui_home_menu_nav_cb()/ui_home_profile_btn_cb()
+// for the two gated exits off "home", and kiln_ui.c's page-registry comment
+// for the short list of what deliberately stays reachable without a PIN
+// (the physical credential-reset gesture on the home page's corner taps,
+// which never navigates through this gate at all; and whatever a board
+// needs before any PIN has ever been set, which the item-11 collapse above
+// already covers automatically, since `enabled` only ever becomes true once
+// a PIN is configured). The existing confirm dialog (ui_confirm.h's
+// "Confirm Stop") is unchanged -- it still runs AFTER the PIN, exactly as it
+// already did for Start.
 typedef void (*ui_lcd_lock_gated_cb_t)(void *user_data);
 void ui_lcd_lock_run_gated(const char *prompt, lcd_pin_role_t min_role, ui_lcd_lock_gated_cb_t action,
                             void *user_data);
+
+// Installs a callback the lock calls right after the inactivity timeout
+// re-locks the session (LCD_LOCK_TICK_EXPIRED, ui_lcd_lock.c's
+// tick_timer_cb()) -- never on a policy-transition force-lock, which already
+// happens on whatever page the operator is looking at and does not need a
+// forced navigation. docs/WEB_AUTH_PLAN.md section 8 says locking "returns
+// the interface to the Dashboard"; before page-level gating (2026-09-28
+// owner decision, see ui_lcd_lock_run_gated()'s comment above) that was true
+// for the web GUI but not enforced on the LCD, since only the Start button
+// itself was ever gated and an expired session simply meant the NEXT tap on
+// Start would re-prompt from wherever the operator already was. Now that
+// entire pages are gated at the two exits off "home"
+// (ui_page_home_actions.c's ui_home_menu_nav_cb()/ui_home_profile_btn_cb()),
+// a session that expires while the operator is several pages deep in the
+// Config hub would otherwise leave every button on THAT page usable with no
+// fresh PIN demanded until they navigated back out and back in -- so this
+// seam forces a return to "home" on expiry instead, making the single
+// dashboard-exit gate sufficient rather than requiring a gate on every
+// individual page transition. Passing NULL (the default) restores today's
+// current-page-only behaviour, which is what every host test and the
+// LVGL-free build gets since kiln_ui.c (the only real caller) is not linked
+// there.
+typedef void (*ui_lcd_lock_relock_cb_t)(void);
+void ui_lcd_lock_set_relock_cb(ui_lcd_lock_relock_cb_t fn);
 
 #ifdef __cplusplus
 }

@@ -35,7 +35,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../net/ota_auth.h"
+#include "../net/login_backoff.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,14 +93,27 @@ lcd_pin_role_t lcd_auth_default_verify(const char *digits, uint8_t len);
 void lcd_auth_state_set_verify_fn(lcd_pin_verify_fn_t fn);
 
 // --- Submit + lockout (section 7: "every wrong PIN feeds the existing
-// ota_auth lockout under its own new context ... keyed to the panel as a
-// whole, not per PIN") ----------------------------------------------------
-
+// lockout under its own new context ... keyed to the panel as a whole, not
+// per PIN") -----------------------------------------------------------------
+//
+// Owner decision, 2026-09-28 ("apply the web password policies to the LCD
+// PIN too"): this used to be ota_auth_lockout_state_t (the OTA surface's
+// 3-failures/60s-doubling-to-900s scheme). That was itself a drift bug by
+// then -- the web login moved OFF that same shared scheme on 2026-09-21 onto
+// its own 5s/10s/30s/60s/300s ladder (login_backoff_state_t,
+// ../net/login_backoff.h) and the LCD was never updated to follow. Switched
+// here to login_backoff_state_t so the LCD PIN now mirrors the web login's
+// ACTUAL CURRENT lockout thresholds and backoff shape by calling the exact
+// same pure functions, not a second copy of the numbers. Still one instance
+// = one new, LCD-only STATE (WEB_AUTH_PLAN.md section 7) -- never shared
+// with, compared to, or merged with the web login's own per-IP table
+// entries or an OTA context's instance; only the ladder/functions are
+// shared, never the counters.
 typedef struct {
     lcd_pin_entry_t           entry;
-    ota_auth_lockout_state_t  lockout; // one instance = one new, LCD-only context;
-                                        // never shared with a web login's or an
-                                        // OTA context's own instance
+    login_backoff_state_t     lockout; // one instance = one new, LCD-only context;
+                                        // shares login_backoff.h's policy with the web
+                                        // login, never its state
 } lcd_keypad_state_t;
 
 void lcd_keypad_state_init(lcd_keypad_state_t *ks);

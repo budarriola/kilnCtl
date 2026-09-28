@@ -329,6 +329,10 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # 1500-line item) -- see backup_http_internal.h's own
                        # doc comment for the file map.
                        "net/ota_auth.c"
+                       # 2026-09-28: shared login-lockout ladder, used by both
+                       # web_auth_login_http.c and lcd_auth_state.c -- see
+                       # login_backoff.h's doc comment.
+                       "net/login_backoff.c"
                        "net/auth_reset_gesture.c"
                        # docs/WEB_AUTH_PLAN.md section 4/8 -- the pure session-table/
                        # timeout module, host-tested alongside ota_auth.c (same

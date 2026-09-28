@@ -80,9 +80,15 @@ lcd_keypad_submit_result_t lcd_keypad_state_submit(lcd_keypad_state_t *ks, uint3
         return LCD_KEYPAD_SUBMIT_TOO_SHORT;
     }
 
+    // "The cycle resets" (login_backoff.h) once the ladder's last step has
+    // both been reached and its lock has expired -- must run before the
+    // is_locked() check below on every attempt, same as the web login's own
+    // login_lockout_slot_for() does on every lookup.
+    login_backoff_cycle_reset_if_due(&ks->lockout, now_ms);
+
     // A locked-out panel never even reaches the verify seam -- the PIN is
     // not checked, so no information about it leaks through timing either.
-    if (ota_auth_lockout_is_locked(&ks->lockout, now_ms)) {
+    if (login_backoff_is_locked(&ks->lockout, now_ms)) {
         return LCD_KEYPAD_SUBMIT_LOCKED_OUT;
     }
 
@@ -95,11 +101,11 @@ lcd_keypad_submit_result_t lcd_keypad_state_submit(lcd_keypad_state_t *ks, uint3
 
     lcd_pin_role_t role = s_verify_fn(ks->entry.digits, ks->entry.len);
     if (role == LCD_PIN_ROLE_NONE) {
-        ota_auth_lockout_record_failure(&ks->lockout, now_ms);
+        login_backoff_record_failure(&ks->lockout, now_ms);
         return LCD_KEYPAD_SUBMIT_DENIED;
     }
 
-    ota_auth_lockout_record_success(&ks->lockout);
+    login_backoff_record_success(&ks->lockout);
     if (out_role) {
         *out_role = role;
     }

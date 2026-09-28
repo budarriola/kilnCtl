@@ -101,32 +101,41 @@ static void test_keypad_submit_outcomes(void)
         TEST_CHECK(role == LCD_PIN_ROLE_NONE, "out_role reset to NONE on a non-granted result");
     }
 
-    // DENIED, then lockout escalation via the reused ota_auth primitive
+    // DENIED, then lockout escalation via the shared login_backoff primitive.
+    // login_backoff_record_failure() locks immediately on the FIRST failure
+    // (unlike the old ota_auth threshold scheme) -- each subsequent attempt
+    // here is timestamped past the PRIOR step's lock duration so it actually
+    // reaches the verify seam and gets a fresh DENIED, mirroring
+    // test_login_backoff.c's test_ladder_escalation().
     {
         lcd_keypad_state_t ks;
         lcd_keypad_state_init(&ks);
         s_fake_verify_result = LCD_PIN_ROLE_NONE;
 
-        for (uint32_t attempt = 0; attempt < OTA_AUTH_LOCKOUT_THRESHOLD; attempt++) {
+        uint32_t now = 0;
+        for (uint32_t step = 0; step < LOGIN_BACKOFF_LADDER_LEN; step++) {
             lcd_pin_entry_reset(&ks.entry);
             lcd_pin_entry_push_digit(&ks.entry, '0');
             lcd_pin_entry_push_digit(&ks.entry, '0');
             lcd_pin_entry_push_digit(&ks.entry, '0');
             lcd_pin_entry_push_digit(&ks.entry, '0');
             lcd_pin_role_t role;
-            lcd_keypad_submit_result_t r = lcd_keypad_state_submit(&ks, attempt, &role);
-            TEST_CHECK(r == LCD_KEYPAD_SUBMIT_DENIED, "wrong PIN before threshold -- DENIED");
+            lcd_keypad_submit_result_t r = lcd_keypad_state_submit(&ks, now, &role);
+            TEST_CHECK(r == LCD_KEYPAD_SUBMIT_DENIED, "wrong PIN, past the prior lock window -- DENIED");
+            now += LOGIN_BACKOFF_LADDER_MS[step]; // advance past this failure's own lock
         }
 
+        // Still within the lock window opened by the 5th (last-step) failure --
+        // even a correct PIN must be refused.
         lcd_pin_entry_reset(&ks.entry);
         lcd_pin_entry_push_digit(&ks.entry, '0');
         lcd_pin_entry_push_digit(&ks.entry, '0');
         lcd_pin_entry_push_digit(&ks.entry, '0');
         lcd_pin_entry_push_digit(&ks.entry, '0');
         lcd_pin_role_t role;
-        lcd_keypad_submit_result_t r = lcd_keypad_state_submit(&ks, OTA_AUTH_LOCKOUT_THRESHOLD, &role);
+        lcd_keypad_submit_result_t r = lcd_keypad_state_submit(&ks, now - 1, &role);
         TEST_CHECK(r == LCD_KEYPAD_SUBMIT_LOCKED_OUT,
-                   "reaching OTA_AUTH_LOCKOUT_THRESHOLD wrong PINs locks out via the shared ota_auth primitive");
+                   "still inside the active lock window -- LOCKED_OUT via the shared login_backoff primitive");
     }
 
     // GRANTED
@@ -154,28 +163,27 @@ static void test_keypad_submit_outcomes(void)
         TEST_CHECK(r == LCD_KEYPAD_SUBMIT_GRANTED, "success does not leave a stale lockout state behind");
     }
 
-    // LOCKED_OUT short-circuits even a correct PIN while the lockout window holds
+    // LOCKED_OUT short-circuits even a correct PIN while the lockout window holds.
+    // A single failure already opens a lock window (login_backoff.h's ladder
+    // step 0 = 5000ms) -- no need to walk the whole ladder to prove this.
     {
         lcd_keypad_state_t ks;
         lcd_keypad_state_init(&ks);
         s_fake_verify_result = LCD_PIN_ROLE_NONE;
-        for (uint32_t attempt = 0; attempt < OTA_AUTH_LOCKOUT_THRESHOLD; attempt++) {
-            lcd_pin_entry_reset(&ks.entry);
-            lcd_pin_entry_push_digit(&ks.entry, '0');
-            lcd_pin_entry_push_digit(&ks.entry, '0');
-            lcd_pin_entry_push_digit(&ks.entry, '0');
-            lcd_pin_entry_push_digit(&ks.entry, '0');
-            lcd_pin_role_t role;
-            lcd_keypad_state_submit(&ks, attempt, &role);
-        }
+        lcd_pin_entry_push_digit(&ks.entry, '0');
+        lcd_pin_entry_push_digit(&ks.entry, '0');
+        lcd_pin_entry_push_digit(&ks.entry, '0');
+        lcd_pin_entry_push_digit(&ks.entry, '0');
+        lcd_pin_role_t role;
+        lcd_keypad_state_submit(&ks, 0, &role); // one failure, opens the 5000ms window
+
         s_fake_verify_result = LCD_PIN_ROLE_ADMIN; // now "enter" the correct PIN
         lcd_pin_entry_reset(&ks.entry);
         lcd_pin_entry_push_digit(&ks.entry, '1');
         lcd_pin_entry_push_digit(&ks.entry, '2');
         lcd_pin_entry_push_digit(&ks.entry, '3');
         lcd_pin_entry_push_digit(&ks.entry, '4');
-        lcd_pin_role_t role;
-        lcd_keypad_submit_result_t r = lcd_keypad_state_submit(&ks, OTA_AUTH_LOCKOUT_THRESHOLD, &role);
+        lcd_keypad_submit_result_t r = lcd_keypad_state_submit(&ks, LOGIN_BACKOFF_LADDER_MS[0] - 1, &role);
         TEST_CHECK(r == LCD_KEYPAD_SUBMIT_LOCKED_OUT,
                    "a correct PIN entered during an active lockout window is still refused");
     }

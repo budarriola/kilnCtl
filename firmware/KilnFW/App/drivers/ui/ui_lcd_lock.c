@@ -26,6 +26,7 @@ static lv_obj_t *s_prompt_mbox;
 static lv_obj_t *s_prompt_countdown_label;
 
 static ui_lcd_lock_policy_fn_t s_policy_fn;
+static ui_lcd_lock_relock_cb_t s_relock_cb; // see ui_lcd_lock.h's doc comment
 
 static ui_lcd_lock_policy_t default_policy(void)
 {
@@ -36,6 +37,11 @@ static ui_lcd_lock_policy_t default_policy(void)
 void ui_lcd_lock_set_policy_fn(ui_lcd_lock_policy_fn_t fn)
 {
     s_policy_fn = fn;
+}
+
+void ui_lcd_lock_set_relock_cb(ui_lcd_lock_relock_cb_t fn)
+{
+    s_relock_cb = fn;
 }
 
 static ui_lcd_lock_policy_t current_policy(void)
@@ -162,6 +168,9 @@ static void tick_timer_cb(lv_timer_t *t)
                 ui_lcd_keypad_force_close();
             }
             ESP_LOGI(TAG, "LCD session locked (inactivity timeout)");
+            if (s_relock_cb) {
+                s_relock_cb();
+            }
             break;
         case LCD_LOCK_TICK_OK:
             close_prompt();

@@ -62,6 +62,7 @@ try {
         (Join-Path $testDir "test_sim_kiln.c"),
         (Join-Path $testDir "test_sim_plant_three_node.c"),
         (Join-Path $testDir "test_ota_auth.c"),
+        (Join-Path $testDir "test_login_backoff.c"),
         (Join-Path $testDir "test_ota_image_crc.c"),
         (Join-Path $testDir "test_auth_reset_gesture.c"),
         # docs/WEB_AUTH_PLAN.md section 7/8 (LCD half only) -- the LCD's
@@ -212,6 +213,10 @@ try {
         (Join-Path $driversDir "net/ota_auth.c"),
         (Join-Path $driversDir "http/ota_image_crc.c"),
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
+        # 2026-09-28: lcd_auth_state.c's lockout now shares login_backoff.c's
+        # ladder with web_auth_login_http.c's login lockout -- see that
+        # file's link line (exe45) below, which also needs this same object.
+        (Join-Path $driversDir "net/login_backoff.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/web_auth_session.c"),
         (Join-Path $driversDir "net/web_auth_login.c"),
@@ -2146,6 +2151,7 @@ try {
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'net/login_backoff.c')`" " +
             "`"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
             "`"$(Join-Path $driversDir 'http/login_ip_scope.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +

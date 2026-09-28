@@ -281,6 +281,12 @@ static void ui_home_show_start_confirm_gated_cb(void *user_data)
     ui_home_show_start_confirm();
 }
 
+static void ui_home_show_stop_confirm_gated_cb(void *user_data)
+{
+    (void)user_data;
+    ui_home_show_stop_confirm();
+}
+
 void ui_home_fire_btn_cb(lv_event_t *e)
 {
     (void)e;
@@ -291,10 +297,15 @@ void ui_home_fire_btn_cb(lv_event_t *e)
      * budget is tracked by check_all_task_stack_budgets.py). */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id)) {
-        /* Stop is never gated -- docs/WEB_AUTH_PLAN.md section 9: a PIN
-         * surface must never be able to prevent a running firing from being
-         * stopped. Only the Start half below goes through the lock. */
-        ui_home_show_stop_confirm();
+        /* Owner decision, 2026-09-28 (reverses the old "Stop is never
+         * gated" rule that used to sit here): Stop now requires the same PIN
+         * as Start. The owner's own words: "stop needs login. there is an
+         * estop button" -- the hardware E-stop (docs/SAFETY_CASE.md H7) is
+         * the independent safety backstop, not this keypad, so an LCD PIN
+         * gate no longer needs to stay clear of Stop.
+         * tools/check_stop_path_requires_pin.ps1 enforces this mechanically. */
+        ui_lcd_lock_run_gated("Enter PIN to stop firing", LCD_PIN_ROLE_USER,
+                               ui_home_show_stop_confirm_gated_cb, NULL);
     } else {
         ui_lcd_lock_run_gated("Enter PIN to start firing", LCD_PIN_ROLE_USER,
                                ui_home_show_start_confirm_gated_cb, NULL);
@@ -328,6 +339,13 @@ void ui_home_pause_resume_btn_cb(lv_event_t *e)
     free(st);
 }
 
+static void ui_home_menu_nav_gated_cb(void *user_data)
+{
+    (void)user_data;
+    ui_page_config_reset_to_first_page();
+    kiln_ui_show("config");
+}
+
 void ui_home_menu_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -336,12 +354,19 @@ void ui_home_menu_nav_cb(lv_event_t *e)
      * budget this page is fit to. Temperature (manual relay control) is now
      * reached via ui_page_config.c's hub, one tap further than before.
      *
+     * Owner decision, 2026-09-28: every page reachable off the home
+     * dashboard other than the dashboard itself now requires the PIN (see
+     * ui_lcd_lock.h's ui_lcd_lock_run_gated() doc comment) -- this is one of
+     * the two gated exits off "home" that comment names.
+     *
      * Rewind the hub first: it is built once and keeps its paging position,
      * so without this, Menu drops you on whichever hub page you were last on.
      * Back from a sub-page deliberately still returns to the page you left
-     * from -- only Menu means "take me to the top of the menu". */
-    ui_page_config_reset_to_first_page();
-    kiln_ui_show("config");
+     * from -- only Menu means "take me to the top of the menu". Rewinding
+     * happens inside the gated callback so a refused/cancelled PIN prompt
+     * never resets the hub's paging position for nothing. */
+    ui_lcd_lock_run_gated("Enter PIN to open Menu", LCD_PIN_ROLE_USER,
+                           ui_home_menu_nav_gated_cb, NULL);
 }
 
 /* UI_PLAN.md 6.1: tap the profile name left of Start to open the picker in
@@ -354,11 +379,22 @@ void ui_home_menu_nav_cb(lv_event_t *e)
  * build, so without this the pick list would be frozen at whatever the
  * profile set was the first time this button was pressed, surviving any
  * later create/delete/import made from the builder or the web dashboard. */
+static void ui_home_profile_btn_gated_cb(void *user_data)
+{
+    (void)user_data;
+    ui_page_profile_picker_pick_refresh();
+    kiln_ui_show("profile_picker");
+}
+
 void ui_home_profile_btn_cb(lv_event_t *e)
 {
     (void)e;
-    ui_page_profile_picker_pick_refresh();
-    kiln_ui_show("profile_picker");
+    /* Owner decision, 2026-09-28: the other gated exit off "home" (see
+     * ui_home_menu_nav_cb() above and ui_lcd_lock.h's doc comment) -- the
+     * refresh happens inside the gated callback for the same
+     * cancel-should-cost-nothing reason. */
+    ui_lcd_lock_run_gated("Enter PIN to pick a profile", LCD_PIN_ROLE_USER,
+                           ui_home_profile_btn_gated_cb, NULL);
 }
 
 /* UI_PLAN.md 6.1 -- the picker's PICK-mode selection callback, registered

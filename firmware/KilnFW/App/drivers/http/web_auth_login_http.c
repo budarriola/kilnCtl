@@ -70,6 +70,8 @@
 #include "http_auth_http.h" // kiln_http_register()
 #include "http_form.h"      // http_form_find_field()
 #include "http_session_iface.h" // http_session_table(), http_session_hash_token()
+#include "../net/login_backoff.h" // LOGIN_BACKOFF_LADDER_MS + login_backoff_* -- shared with the
+                                    // LCD PIN keypad (lcd_auth_state.h), 2026-09-28
 #include "login_ip_scope.h"   // login_ip_scope_classify() -- remote-vs-local backoff scope
 #include "ota_http_util.h"   // ota_http_hex_encode()
 #include "security_http_core.h" // SECURITY_HTTP_USERNAME_MAX/PASSWORD_MAX
@@ -113,63 +115,15 @@ extern const uint8_t login_page_html_gz_end[] asm("_binary_login_page_html_gz_en
 // --- Escalating backoff ladder (owner decision 2026-09-21, see this file's
 // header comment) -------------------------------------------------------
 //
-// One static table, in the order the ladder is walked. `failure_count`
-// (1-based) after a failure indexes this table directly (clamped to the
-// last entry): 1st failure -> 5s, 2nd -> 10s, 3rd -> 30s, 4th -> 60s, 5th+
-// -> 300s. Once a slot's failure_count has reached the table's length AND
-// its lock has expired, the NEXT touch resets failure_count to 0 -- "the
-// cycle resets" -- so a subsequent failure starts back at the 5s step
-// rather than staying pinned at 300s forever.
-static const uint32_t LOGIN_BACKOFF_LADDER_MS[] = { 5000u, 10000u, 30000u, 60000u, 300000u };
-#define LOGIN_BACKOFF_LADDER_LEN (sizeof(LOGIN_BACKOFF_LADDER_MS) / sizeof(LOGIN_BACKOFF_LADDER_MS[0]))
-_Static_assert(LOGIN_BACKOFF_LADDER_LEN == 5, "login backoff ladder must have exactly 5 steps: 5s,10s,30s,60s,300s");
-
-typedef struct {
-    uint32_t failure_count;   // consecutive failures since the last success or cycle reset, 0..LOGIN_BACKOFF_LADDER_LEN
-    uint32_t locked_until_ms; // 0 = not currently locked
-} login_backoff_state_t;
-
-// True iff `s` is currently locked (now_ms has not yet reached locked_until_ms).
-static bool login_backoff_is_locked(const login_backoff_state_t *s, uint32_t now_ms)
-{
-    if (s->locked_until_ms == 0u) {
-        return false;
-    }
-    return (int32_t)(s->locked_until_ms - now_ms) > 0;
-}
-
-// Must be called before consulting is_locked()/failure_count on any read
-// path -- if the ladder's last step has both been reached AND its lock has
-// already expired, this is the point where "the cycle resets": the next
-// failure starts over at the 5s step, rather than the slot staying pinned
-// at the 300s tier indefinitely once it has fired once.
-static void login_backoff_cycle_reset_if_due(login_backoff_state_t *s, uint32_t now_ms)
-{
-    if (s->failure_count >= LOGIN_BACKOFF_LADDER_LEN && !login_backoff_is_locked(s, now_ms)) {
-        s->failure_count = 0;
-        s->locked_until_ms = 0;
-    }
-}
-
-// Records one failed attempt: advances (and clamps) the consecutive-failure
-// count and imposes the matching ladder step's wait, starting now. Callers
-// must never call this for an attempt that was itself refused by
-// is_locked() -- see login_post_handler()'s structure, which only reaches
-// this after a request has actually run the KDF, i.e. was NOT refused.
-static void login_backoff_record_failure(login_backoff_state_t *s, uint32_t now_ms)
-{
-    if (s->failure_count < LOGIN_BACKOFF_LADDER_LEN) {
-        s->failure_count++;
-    }
-    s->locked_until_ms = now_ms + LOGIN_BACKOFF_LADDER_MS[s->failure_count - 1];
-}
-
-// A successful login clears the ladder entirely for this slot.
-static void login_backoff_record_success(login_backoff_state_t *s)
-{
-    s->failure_count = 0;
-    s->locked_until_ms = 0;
-}
+// Extracted to ../net/login_backoff.h 2026-09-28 (owner decision: "apply the
+// web password policies to the LCD PIN too") so the LCD PIN keypad
+// (lcd_auth_state.c) can mirror this exact ladder and stepping logic by
+// calling the same functions against its OWN, separate login_backoff_state_t
+// instance, rather than a second hand-copied definition that could drift
+// from this one. This file's own per-IP table below (s_login_lockouts,
+// s_remote_login_slot) is unaffected and stays exactly as separate from the
+// LCD's instance as WEB_AUTH_PLAN.md section 7 requires -- only the ladder
+// constant and the four pure functions are now shared, never the state.
 
 typedef struct {
     bool in_use;

@@ -272,13 +272,16 @@ if (Test-Path $configMigrationStepsNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
-# test_check_stop_path_never_gated.ps1 is a negative test, not a guard -- it
-# proves check_stop_path_never_gated.ps1's scan (docs/WEB_AUTH_PLAN.md
-# section 9, the LCD Stop-is-never-gated property) can actually detect a PIN
-# gate moved onto the Stop branch. Named test_*, not check_*, so the glob
-# above does not pick it up; wired explicitly here, same pattern as the two
-# negative tests just above.
-$stopPathNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_stop_path_never_gated.ps1"
+# test_check_stop_path_requires_pin.ps1 is a negative test, not a guard --
+# it proves check_stop_path_requires_pin.ps1's scan (owner decision
+# 2026-09-28, reversing docs/WEB_AUTH_PLAN.md section 9's old
+# Stop-is-never-gated rule: "stop needs login. there is an estop button")
+# can actually detect a PIN gate removed from the Stop branch. Named test_*,
+# not check_*, so the glob above does not pick it up; wired explicitly here,
+# same pattern as the two negative tests just above. (This test and its
+# check were renamed from *_never_gated to *_requires_pin on 2026-09-28,
+# inverting every assertion to match the reversal.)
+$stopPathNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_stop_path_requires_pin.ps1"
 if (Test-Path $stopPathNegativeTest) {
     $checks += Get-Item $stopPathNegativeTest
     $checks = $checks | Sort-Object FullName
@@ -292,6 +295,30 @@ if (Test-Path $stopPathNegativeTest) {
 } else {
     Write-Host ""
     Write-Host "WARNING: expected negative test $stopPathNegativeTest not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
+# test_check_lcd_home_nav_gated.ps1 is a negative test, not a guard -- it
+# proves check_lcd_home_nav_gated.ps1's scan (owner decision 2026-09-28: only
+# the LCD home/dashboard view stays reachable without a PIN) can actually
+# detect a missing gate on the Config-hub/profile-picker nav callbacks, and a
+# wrongly-added gate on the credential-reset gesture. Named test_*, not
+# check_*, so the glob above does not pick it up; wired explicitly here, same
+# pattern as the negative tests above.
+$lcdHomeNavNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_lcd_home_nav_gated.ps1"
+if (Test-Path $lcdHomeNavNegativeTest) {
+    $checks += Get-Item $lcdHomeNavNegativeTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected negative test $lcdHomeNavNegativeTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing negative test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected negative test $lcdHomeNavNegativeTest not found -- proceeding" -ForegroundColor Yellow
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 

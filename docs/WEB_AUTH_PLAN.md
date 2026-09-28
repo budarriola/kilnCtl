@@ -889,8 +889,10 @@ properly rather than incidentally:
   make it acceptable on a network-reachable route.
 - The lockout is keyed to the panel as a whole, not per PIN, so an attacker
   cannot halve the work by alternating between the two PINs.
-- A locked-out panel still shows the Dashboard and still stops a firing
-  (item 9). Lockout must never be reachable as a denial of a stop.
+- A locked-out panel still shows the Dashboard (view-only). **Superseded
+  2026-09-28:** it no longer stops a firing without a PIN -- see section 9's
+  2026-09-28 addendum. The hardware E-stop is the backstop for a locked-out
+  panel now, not an ungated LCD Stop button.
 
 Because the administrator PIN can authorise a factory reset from the panel, it
 is worth noting explicitly that the *credential reset* gesture (item 10) does
@@ -1004,10 +1006,20 @@ enabled, disabled, locked, or mid-prompt:**
   applies without modification: an expired or session-less client must be
   able to end any of these, since `/api/profile_exec/stop` does not own them
   and cannot substitute for aborting them.
-- The LCD Stop control. `ui_home_fire_btn_cb()` must never route through the
-  keypad. On the LCD the Start/Stop control is one merged widget that reads
-  "Stop" only while RUNNING or PAUSED — so the gate is: **that widget demands
-  a PIN when it would Start, and never when it would Stop.**
+- ~~The LCD Stop control. `ui_home_fire_btn_cb()` must never route through the
+  keypad.~~ **Reversed by owner decision, 2026-09-28** (verbatim: "stop needs
+  login. there is an estop button"): on the LCD, an operator who is not
+  logged in may now only VIEW the dashboard; Stop, like Start and every other
+  LCD page/action, requires the PIN. The hardware E-stop
+  (`docs/SAFETY_CASE.md` H7, firmware-mediated on this bench) is the actual
+  safety backstop for this path, independent of LCD auth state, which is why
+  the LCD keypad no longer needs to stay clear of Stop. This bullet is scoped
+  to the LCD only — every bullet above it (the HTTP routes) is unchanged;
+  `POST /api/profile_exec/stop` still bypasses authentication unconditionally.
+  See `firmware/KilnFW/App/drivers/ui/ui_lcd_lock.h`'s `ui_lcd_lock_run_gated()`
+  doc comment for the full LCD-side design (page-level gating off the home
+  dashboard, the inactivity-relock-to-home seam, and the two exceptions that
+  stay reachable without a PIN).
 - The physical E-stop, every Pico-side guard, every trip, and the
   `heat_enable` release path. None of these traverse HTTP or the UI at all, so
   they are unaffected by construction — but it is stated here so a future
@@ -1029,23 +1041,84 @@ safety action; it re-enables heat after one.
 *Acceptance:* a host test drives the enforcement function with every
 combination of {auth off, auth on + no session, auth on + locked, auth on +
 user, auth on + admin} against `/api/profile_exec/stop` and asserts ALLOW in
-all five; a bench check confirms the LCD Stop button works with the LCD locked
-and a firing running.
+all five. ~~a bench check confirms the LCD Stop button works with the LCD
+locked and a firing running~~ -- superseded 2026-09-28: the LCD Stop button no
+longer works while locked, by owner decision; see the addendum below.
 
 **Status, 2026-09-17 — both LCD and HTTP sides done.**
 
-LCD side: `ui_home_fire_btn_cb()` (`firmware/KilnFW/App/drivers/ui/ui_page_home_actions.c`)
-already matches this section exactly — its RUNNING/PAUSED branch calls
-`ui_home_show_stop_confirm()` directly with no PIN gate, and only its Start
-branch goes through `ui_lcd_lock_run_gated()`. This is now enforced
-mechanically: `tools/check_stop_path_never_gated.ps1` fails the build if a
-future change adds a gate call to the Stop branch (or removes the Stop call
-entirely, or strips the Start gate so the check can no longer tell the two
-branches apart), and its negative test
-(`firmware/KilnFW/App/test/test_check_stop_path_never_gated.ps1`) proves the
-check catches a PIN gate actually moved onto the Stop branch — verified
-against the real production file, restored by hand, sha256-confirmed
-unchanged.
+LCD side (**superseded 2026-09-28, see addendum below**): `ui_home_fire_btn_cb()`
+(`firmware/KilnFW/App/drivers/ui/ui_page_home_actions.c`)
+matched this section exactly as it read at the time — its RUNNING/PAUSED
+branch called `ui_home_show_stop_confirm()` directly with no PIN gate, and
+only its Start branch went through `ui_lcd_lock_run_gated()`. This was
+enforced mechanically by `tools/check_stop_path_never_gated.ps1` and its
+negative test `firmware/KilnFW/App/test/test_check_stop_path_never_gated.ps1`.
+
+**Addendum, 2026-09-28 — LCD side reversed.** Owner decision: "stop needs
+login. there is an estop button." Both branches of `ui_home_fire_btn_cb()`
+now go through `ui_lcd_lock_run_gated()`; the check and its negative test
+were renamed and inverted in place — `tools/check_stop_path_requires_pin.ps1`
+and `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1` — rather
+than left as dead files asserting a rule that no longer holds. Beyond just
+Stop, every LCD page/action reachable from the home dashboard now requires
+the PIN when not logged in (previously only Start did); see
+`ui_lcd_lock.h`'s `ui_lcd_lock_run_gated()` doc comment for the full design,
+including the inactivity-timeout relock-to-home seam and the two exceptions
+that stay reachable without a PIN (the physical credential-reset gesture,
+and whatever a board needs before any PIN has ever been configured). The
+HTTP side (this section's bullets above, and everything below this
+addendum) is unchanged — this decision is LCD-only.
+
+**Addendum, 2026-09-28 — LCD PIN now mirrors the web login's lockout policy.**
+Owner decision: "apply the web password policies to the LCD PIN too" (keep
+the 4-8 digit PIN, but give it the web login's failure-lockout backoff and
+the same idle/session timeout semantics). Three parts:
+
+1. **Lockout/backoff.** The LCD PIN keypad's lockout (`lcd_keypad_state_t.lockout`,
+   `firmware/KilnFW/App/drivers/ui/lcd_auth_state.h`) used to reuse
+   `ota_auth_lockout_state_t` (the OTA surface's 3-failures/60s-doubling-to-
+   900s-ceiling scheme) — itself already stale, since the web login moved OFF
+   that same shared scheme on 2026-09-21 onto its own fixed 5s/10s/30s/60s/
+   300s ladder (`LOGIN_BACKOFF_LADDER_MS`, this section's note above) without
+   the LCD following. The ladder and its four pure stepping functions
+   (`login_backoff_is_locked/cycle_reset_if_due/record_failure/record_success`)
+   are now extracted into `firmware/KilnFW/App/drivers/net/login_backoff.h`/`.c`,
+   and both `web_auth_login_http.c` and `lcd_auth_state.c` call the SAME
+   functions against their OWN, separate `login_backoff_state_t` instances —
+   sharing the policy, per this instruction's own preference, rather than a
+   second hand-copied ladder that could drift. Per this section's own rule,
+   each surface's lockout STATE stays isolated: the LCD's instance is never
+   compared to, merged with, or read by the web login's per-IP table, and
+   vice versa.
+2. **Idle/session timeout.** Not changed, per the owner's explicit
+   instruction to keep timeouts at their current values. Both the LCD's
+   inactivity timeout (`lcd_timeout_s`) and the web session's timeout
+   (`web_timeout_s`) already share the same semantics — both live in the same
+   `web_auth_policy_t` (`web_auth_store.c`), both are independently
+   owner-configurable in whole seconds/minutes, and both have a dedicated
+   "never" sentinel (`web_timeout_s == -1`, `lcd_timeout_s == 0` /
+   `LCD_LOCK_TIMEOUT_NEVER`, `security_backend_web_auth.c` around line 241).
+   There is no fixed numeric mismatch to reconcile: each is simply whatever
+   the operator has set for that surface, same as before this change.
+3. **Reboot persistence.** Neither lockout persists across a reboot. The web
+   login's per-IP table (`s_login_lockouts`/`s_remote_login_slot`,
+   `web_auth_login_http.c`) and the LCD's `lcd_keypad_state_t`
+   (`static lcd_keypad_state_t s_ks`, `ui_lcd_keypad.c`) are both plain static
+   RAM with no NVS write anywhere in either path — a reset clears both, and
+   this matches: the LCD now behaves exactly like the web login already did.
+4. **E-stop.** Unaffected by construction — the lockout only ever gates
+   `lcd_keypad_state_submit()` (the on-screen PIN keypad's OK button), which
+   has no call path to the physical E-stop hardware interlock
+   (`docs/SAFETY_CASE.md` H7, firmware-mediated, entirely separate wiring/
+   firmware path). No code in `login_backoff.c`/`lcd_auth_state.c` references
+   the E-stop or safety-trip machinery at all.
+
+Host tests: `firmware/KilnFW/App/test/test_login_backoff.c` (the shared
+ladder/cycle-reset/clamp behavior in isolation) and
+`firmware/KilnFW/App/test/test_lcd_auth_state.c`'s existing lockout-escalation
+section, updated to key off `LOGIN_BACKOFF_LADDER_LEN` (5) instead of the old
+`OTA_AUTH_LOCKOUT_THRESHOLD` (3).
 
 HTTP side, defect found and closed (section 5's enforcement point): the
 first implementation of `http_auth_check()`/`kiln_http_prehandler()`
