@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -971,7 +972,7 @@ def control_set_zone_type(
 # control_mode, limits, zone_type or model (k_dc/tau_s/dead_time_s) collateral.
 #
 # Why this exists: backup_import.c's coupling-cell import bug (fixed in
-# b4bad2c7 -- an on/off-typed zone's coupling row/column was zeroed on
+# fee835fa/b4bad2c7 -- an on/off-typed zone's coupling row/column was zeroed on
 # import instead of preserved) left bench zone 2's cross-terms at 0. The
 # only pre-existing coupling writer is load_config_preset() (config_presets.py),
 # a whole bench_fixture.json-shaped preset POST that also overwrites PID
@@ -1002,14 +1003,11 @@ def control_set_zone_type(
 # specifically so a whole-page save from an operator's browser -- which only
 # ever renders/submits ALL cells together -- doesn't accidentally delete a
 # measurement other code paths (autotune's own coupling-cell setter) wrote.
-# This omit-preserve semantics does NOT let this tool skip the GET-merge-POST
-# discipline, though: zones_http_client.build_post_body() always emits a
-# COMPLETE field set (every top-level scalar, every timing profile, every
-# zone's every field) regardless of what the caller overrides, echoing
-# `current`'s value for anything not explicitly overridden -- so the POST
-# this tool sends is wire-identical to a whole-page save's, just with only
-# the target cell's overlay differing from a verbatim echo (see
-# RealPostBodyTest below, adapted from control_set_zone_type()'s own).
+# The REQUIRED per-zone fields (PID gains, relay_mask, control_mode, ...)
+# still have to be posted, so the body is still built by the GET-merge-POST
+# path (zones_http_client.build_post_body(), which echoes every field), and
+# then the omit-preserved measured fields are stripped back out -- see
+# "GET-merge-POST rounding" below.
 #
 # zones_http_client.build_post_body()'s only per-zone list-shaped override
 # key is "coupling_coeff" (_PRESET_ZONE_COUPLING_FIELD) -- a bare
@@ -1022,21 +1020,48 @@ def control_set_zone_type(
 # unchanged, not zeroed) with only index `from_zone` replaced -- never a
 # bare "coupling_cN" key.
 #
-# GET-merge-POST rounding advisory (same one control_set_zone_type()/
-# control_set_zone_limits() carry, not something either of those avoids):
-# GET /api/zones prints every float, including pid_kp/ki/kd and this tool's
-# own coupling cells, at %.4f -- a GET-merge-POST necessarily re-posts every
-# OTHER field at whatever precision GET already rounded it to, which can
-# nudge a very small value (e.g. pid_ki) by up to 5e-5 on an entirely
-# unrelated write. This is not new to this tool and not something a partial
-# POST body could dodge either (the handler is a whole-page submit -- every
-# zone's non-coupling fields, e.g. relay_mask/control_mode/pid_kp, have NO
-# omit-preserve fallback and default to 0 if left out, so a body posting
-# only the coupling fields would zero the rest of the config outright).
-# Building the body via the same GET-merge-POST path as the other two narrow
-# writers, letting the read-back's 0.05-tolerance collateral-diff catch any
-# unexpected drift, is the same -- and only -- mitigation those tools use.
+# GET-merge-POST rounding, and what this tool strips to avoid it: GET
+# /api/zones prints most floats at %.4f (model_tau_s/model_dead_time_s at
+# %.1f), so a GET-merge-POST re-posts every field at GET's rounded precision.
+# For fields parse_zone_fields() REQUIRES (pid_kp/ki/kd, cal, ramp,
+# relay_mask, control_mode, ...; omitted means 400 or 0) there is no way
+# around that on this whole-page handler -- the same residual
+# control_set_zone_type()/control_set_zone_limits() carry: at most 5e-5 on a
+# gain, below parse_zone_fields()'s own 0.0001 tuning_valid-invalidation
+# tolerance, and exactly zero on a value that already went through one
+# %.4f round trip (a prior page save or a backup import, which also exports
+# at %.4f). For the MEASURED fields parse_zone_fields() omit-PRESERVES from
+# the live struct (z%u_k/z%u_tau/z%u_deadtime, z%u_coupling_diag_k_dc and
+# every z%u_coupling_c%u), this tool drops them from the body
+# (_strip_omit_preserved_zone_fields()) except the one target cell, so the
+# plant model, the coupling diagonal gain and every OTHER coupling cell of
+# every zone are preserved bit-exact by the firmware rather than re-posted
+# rounded. coupling_tau_c%u/coupling_dead_time_c%u have no POST field at all
+# and are memcpy()'d from the live struct unconditionally. The read-back's
+# collateral diff (_zone_collateral_diff(), exact equality on the printed
+# values) then catches anything else that moved.
 # ---------------------------------------------------------------------------
+#: POST keys parse_zone_fields() (zones_http_post_parse.c) treats as
+#: omit-PRESERVES-current -- verified per key against that file: z%u_k/
+#: z%u_tau/z%u_deadtime (`http_form_find_field(...) > 0` else current_z),
+#: z%u_coupling_diag_k_dc and z%u_coupling_c%u
+#: (`zones_config_json_field_present()` else current_z). Nothing else is
+#: stripped: a required field left out of the body would 400 or zero.
+_ZONE_OMIT_PRESERVED_KEY_RE = re.compile(r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+)$")
+
+
+def _strip_omit_preserved_zone_fields(body: str, keep_key: str) -> str:
+    """Drop every _ZONE_OMIT_PRESERVED_KEY_RE key from a build_post_body()
+    form body except `keep_key`. Raises ZonesHttpError if `keep_key` is not
+    in the body (the write would silently be a no-op)."""
+    pairs = urllib.parse.parse_qsl(body, keep_blank_values=True)
+    if not any(k == keep_key for k, _ in pairs):
+        raise zones_http_client.ZonesHttpError(
+            f"built POST body carries no {keep_key!r} field -- refusing to post a no-op")
+    kept = [(k, v) for k, v in pairs if k == keep_key or not _ZONE_OMIT_PRESERVED_KEY_RE.match(k)]
+    return urllib.parse.urlencode(kept)
+
+
 _ZONE_COUPLING_READBACK_TOLERANCE = 0.0005  # GET prints coupling_c%u at %.4f
 
 
@@ -1053,19 +1078,20 @@ def control_set_zone_coupling(
     zone) heater, i.e. GET /api/zones' zones[zone].coupling_c{from_zone} --
     touching ONLY that one field over the GET-merge-POST /api/zones path
     (zones_http_client.build_post_body()) -- every other field the board
-    reports (PID gains, control_mode, relay_mask, limits, zone_type, model
-    k_dc/tau_s/dead_time_s, every OTHER coupling cell, timing profiles, ...)
-    is echoed back exactly as read, never overwritten. Modeled directly on
+    reports is either echoed back as GET printed it (the fields the firmware
+    requires: PID gains, control_mode, relay_mask, limits, zone_type, timing
+    profiles, ...) or left out of the body so the firmware preserves it
+    bit-exact (model k_dc/tau_s/dead_time_s, coupling_diag_k_dc, every OTHER
+    coupling cell of every zone). Modeled directly on
     control_set_zone_type()/control_set_zone_limits(); see this module's
     section comment just above for the wire-format detail (field names,
-    units, bounds, the diagonal refusal, and the omit-preserves convention
-    that does NOT change this tool's own GET-merge-POST discipline).
+    units, bounds, the diagonal refusal, and which fields are stripped).
 
     The only pre-existing coupling writer is load_config_preset()
     (config_presets.py), which overwrites PID gains and control_mode for
     every zone along with whatever coupling matrix a preset also carries --
     forbidden for a single-cell fix. This tool exists because
-    backup_import.c's coupling-cell import bug (fixed in b4bad2c7) left
+    backup_import.c's coupling-cell import bug (fixed in fee835fa/b4bad2c7) left
     bench zone 2's coupling cross-terms zeroed with no narrow way to restore
     them short of a whole-page preset.
 
@@ -1151,7 +1177,9 @@ def control_set_zone_coupling(
         )
 
     try:
-        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [zone_override]}),
+            f"z{zone}_{field_name}")
     except zones_http_client.ZonesHttpError as exc:
         return f"error: could not build POST body from the GET snapshot: {exc}"
 

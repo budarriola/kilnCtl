@@ -45,6 +45,16 @@ def _snapshot(zones):
     return {"thermo_count": len(zones), "relay_count": len(zones), "zones": zones}
 
 
+def _fake_build(cur, preset):
+    """Stand-in for build_post_body(): emits the override row's cells plus a
+    required field (kp) and an omit-preserved one (k), so the tool's
+    stripping step has something real to act on."""
+    z = preset["zones"][0]
+    i = z["index"]
+    cells = "&".join(f"z{i}_coupling_c{j}={c}" for j, c in enumerate(z["coupling_coeff"]))
+    return f"z{i}_kp=1.0&z{i}_k=3.0&{cells}"
+
+
 def _idle_exec_status():
     return unittest.mock.Mock(state_name="idle", profile_id=0, name="")
 
@@ -85,7 +95,7 @@ class ArgValidationTest(_Base):
         after = copy.deepcopy(before)
         after["zones"][0]["coupling_c1"] = 100.0
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=1, coeff=100.0, confirm=True)
         self.assertIn("ok - zone 0", result)
@@ -157,14 +167,14 @@ class HappyPathTest(_Base):
         after = copy.deepcopy(before)
         after["zones"][0]["coupling_c2"] = 24.52
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body") as build_mock, \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build) as build_mock, \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok") as post_mock:
             result = mc.control_set_zone_coupling(zone=0, from_zone=2, coeff=24.52, confirm=True)
         self.assertIn("ok - zone 0", result)
         self.assertIn("coupling_c2=24.52", result)
         build_mock.assert_called_once_with(
             before, {"zones": [{"index": 0, "coupling_coeff": [0.0, 5.0, 24.52]}]})
-        post_mock.assert_called_once_with("10.0.0.5", "body")
+        post_mock.assert_called_once_with("10.0.0.5", "z0_kp=1.0&z0_coupling_c2=24.52")
 
     def test_restores_all_four_bench_cells(self):
         """The actual HP-02-adjacent restoration this tool was built for:
@@ -176,7 +186,7 @@ class HappyPathTest(_Base):
             after = copy.deepcopy(before)
             after["zones"][zone][f"coupling_c{from_zone}"] = coeff
             with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-                 unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+                 unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
                  unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
                 result = mc.control_set_zone_coupling(zone=zone, from_zone=from_zone, coeff=coeff, confirm=True)
             self.assertIn(f"ok - zone {zone}", result, (zone, from_zone, coeff, result))
@@ -210,7 +220,7 @@ class PostRefusalTest(_Base):
     def test_post_not_ok_is_surfaced(self):
         before = _snapshot([_zone(0), _zone(1), _zone(2)])
         with unittest.mock.patch.object(zones_http_client, "get_zones", return_value=before), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="zone coupling_coeff out of range"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=1, coeff=24.52, confirm=True)
         self.assertIn("refused", result.lower())
@@ -223,7 +233,7 @@ class PostRefusalTest(_Base):
             "refused -- a firing or autotune run is active; zone configuration cannot be "
             "changed until it ends")
         with unittest.mock.patch.object(zones_http_client, "get_zones", return_value=before), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", side_effect=err):
             result = mc.control_set_zone_coupling(zone=0, from_zone=1, coeff=24.52, confirm=True)
         self.assertTrue(result.startswith("refused"), result)
@@ -239,7 +249,7 @@ class ReadBackMismatchTest(_Base):
         before = _snapshot([_zone(0), _zone(1), _zone(2)])
         after = copy.deepcopy(before)  # unchanged -- POST silently didn't land
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=2, coeff=24.52, confirm=True)
         self.assertIn("FAILED", result)
@@ -253,7 +263,7 @@ class CollateralChangeTest(_Base):
         after["zones"][0]["coupling_c2"] = 24.52
         after["zones"][0]["pid_kp"] = 2.5  # collateral drift -- must be caught
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=2, coeff=24.52, confirm=True)
         self.assertIn("FAILED", result)
@@ -269,7 +279,7 @@ class CollateralChangeTest(_Base):
         after["zones"][0]["coupling_c2"] = 24.52
         after["zones"][0]["coupling_c1"] = 9.99  # collateral -- untouched sibling cell drifted
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=2, coeff=24.52, confirm=True)
         self.assertIn("FAILED", result)
@@ -283,7 +293,7 @@ class CollateralChangeTest(_Base):
         after["zones"][0]["coupling_c2"] = 24.52
         after["zones"][1]["coupling_c2"] = 99.0  # collateral -- zone 1 untouched by this call
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=2, coeff=24.52, confirm=True)
         self.assertIn("FAILED", result)
@@ -296,11 +306,50 @@ class CollateralChangeTest(_Base):
         after["zones"][0]["coupling_c2"] = 24.52
         after["timing_profiles"][0]["ramp_lock_band_c"] = 0.0
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body"), \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", side_effect=_fake_build), \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok"):
             result = mc.control_set_zone_coupling(zone=0, from_zone=2, coeff=24.52, confirm=True)
         self.assertIn("FAILED", result)
         self.assertIn("timing_profiles", result)
+
+
+class EndToEndRealBodyTest(_Base):
+    def test_tool_posts_only_the_target_cell_in_bench_orientation(self):
+        """Tool -> real build_post_body() -> posted form body. zone=2,
+        from_zone=0 (bench z2[0]) must reach the wire as z2_coupling_c0 and
+        NOTHING else coupling/model-shaped (those are omit-preserved by
+        parse_zone_fields()); every remaining field must equal a plain echo
+        of the GET snapshot. A transposed mapping would post z0_coupling_c2."""
+        import urllib.parse
+        sys.path.insert(0, os.path.dirname(__file__))
+        import test_zones_http_client as tz
+        cur = tz._sample_get_response()
+        for i in range(3):
+            for j in range(3):
+                cur["zones"][i][f"coupling_c{j}"] = 0.0 if i == j else 10.0 * i + j + 1.5
+            cur["zones"][i].update(model_k_dc=33.8493, model_tau_s=247.1, model_dead_time_s=26.0,
+                                   coupling_diag_k_dc=12.3456)
+        after = copy.deepcopy(cur)
+        after["zones"][2]["coupling_c0"] = 8.08
+        echo = dict(urllib.parse.parse_qsl(zones_http_client.build_post_body(cur, {"zones": []})))
+        with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[cur, after]),              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok") as post_mock:
+            result = mc.control_set_zone_coupling(zone=2, from_zone=0, coeff=8.08, confirm=True)
+        self.assertIn("ok - zone 2", result)
+        posted = dict(urllib.parse.parse_qsl(post_mock.call_args[0][1]))
+        self.assertEqual(posted["z2_coupling_c0"], repr(8.08))
+        stripped = {k for k in echo if mc._ZONE_OMIT_PRESERVED_KEY_RE.match(k)}
+        self.assertEqual(len(stripped), 3 * (3 + 4))  # 3 cells + k/tau/deadtime/diag per zone
+        self.assertEqual(set(posted) - set(echo), set())
+        self.assertEqual(set(echo) - set(posted), stripped - {"z2_coupling_c0"})
+        for k, v in posted.items():
+            if k != "z2_coupling_c0":
+                self.assertEqual(v, echo[k], k)
+        for required in ("z2_kp", "z2_ki", "z2_kd", "z0_kp", "z1_kp"):
+            self.assertIn(required, posted)
+
+    def test_strip_refuses_a_body_without_the_target_key(self):
+        with self.assertRaises(zones_http_client.ZonesHttpError):
+            mc._strip_omit_preserved_zone_fields("z0_kp=1.0&z0_coupling_c1=5.0", "z0_coupling_c2")
 
 
 if __name__ == "__main__":
