@@ -225,12 +225,17 @@ void profile_executor_fault_halt(const char *reason)
         xSemaphoreGive(s_exec.lock);
         return;
     }
-    if (s_exec.state != PROFILE_EXEC_FAULTED) {
+    if (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) {
         /* First tick of this condition -- claim the fault. An already-
          * FAULTED run (a guard trip that beat this call to it) keeps its own
          * fault_reason; overwriting it here would discard the more specific
          * cause an operator needs, the same "first fault wins" rule exec_
-         * mode_state_check()'s was_faulted guard documents. */
+         * mode_state_check()'s was_faulted guard documents. A DONE run is
+         * NOT claimed either: it already finished cleanly (the tick loop
+         * recorded RUN_STATE_PHASE_DONE), so a divergence appearing while
+         * that finished run still awaits dismissal must not rewrite the
+         * completed firing's record as FAULTED -- halt() below dismisses it
+         * as DONE, exactly as the pre-fault_halt() hook did. */
         exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
         if (reason != NULL) {
             strncpy(s_exec.fault_reason, reason, sizeof(s_exec.fault_reason) - 1);

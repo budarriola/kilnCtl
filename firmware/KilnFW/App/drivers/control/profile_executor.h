@@ -519,7 +519,9 @@ void profile_executor_halt(void);
  * HALTED). If the run is already FAULTED (e.g. a guard trip beat this call
  * to it, same tick or an earlier one), `reason` is NOT applied -- the
  * existing fault_reason is kept, same "first fault wins" rule exec_mode_
- * state_check()'s was_faulted guard uses.
+ * state_check()'s was_faulted guard uses. Only a RUNNING/PAUSED run is
+ * claimed: a DONE run (finished cleanly, awaiting dismissal) is dismissed
+ * as DONE by the same halt() body, never rewritten as FAULTED.
  *
  * Idempotent under repeated calls while the underlying condition persists,
  * exactly like profile_executor_halt(): the first call drives the run to

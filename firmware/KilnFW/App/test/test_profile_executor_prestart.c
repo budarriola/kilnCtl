@@ -435,6 +435,11 @@ static uint8_t g_last_zone_claim_mask = 0;
 static int g_run_state_note_calls = 0;
 static run_state_phase_t g_last_run_state_note_phase = RUN_STATE_PHASE_HALTED;
 static run_state_snapshot_t g_last_run_state_note_snap;
+/* Deep copy of snap->fault_reason: the snapshot's fault_reason is a pointer
+ * into the caller's own stack buffer (profile_executor_halt()'s halt_snap),
+ * dead by the time a test inspects it -- the stub re-points the saved
+ * snapshot at this buffer instead. */
+static char g_last_run_state_note_reason[sizeof(((run_snapshot_buf_t *)0)->reason)];
 
 bool relay_authority_zone_claim_begin(relay_heat_zone_claimant_t who, uint8_t zone_mask,
                                        uint8_t *conflict_mask_out)
@@ -491,6 +496,12 @@ void run_state_note(run_state_phase_t phase, const run_state_snapshot_t *snap)
     g_last_run_state_note_phase = phase;
     if (snap) {
         g_last_run_state_note_snap = *snap;
+        g_last_run_state_note_reason[0] = '\0';
+        if (snap->fault_reason) {
+            strncpy(g_last_run_state_note_reason, snap->fault_reason, sizeof(g_last_run_state_note_reason) - 1);
+            g_last_run_state_note_reason[sizeof(g_last_run_state_note_reason) - 1] = '\0';
+            g_last_run_state_note_snap.fault_reason = g_last_run_state_note_reason;
+        }
     }
 }
 
@@ -2844,9 +2855,13 @@ static void test_fault_halt_records_faulted_with_reason(void)
     s_exec.claimed_relay_mask = 0x05;
     s_exec.fault_reason[0] = '\0';
     g_run_state_note_calls = 0;
+    unsigned dispatch_before = s_stub_dispatch_count;
 
     profile_executor_fault_halt("config/ceiling divergence: heat disabled");
 
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before + 1,
+               "a caller NOT on the flash worker (safety_poll_task's PSRAM stack on target) must route the "
+               "NVS-writing halt() tail through uart_bridge_ext_run_on_flash_worker() exactly once");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "fault_halt() must still end at IDLE, same as halt()");
     TEST_CHECK(g_run_state_note_calls == 1, "must record exactly one run_state_note() call");
     TEST_CHECK(g_last_run_state_note_phase == RUN_STATE_PHASE_FAULTED,
@@ -2873,9 +2888,13 @@ static void test_fault_halt_is_idempotent_across_repeated_ticks(void)
      * ceiling_sync.c calls this same hook, unconditionally, on every tick
      * the divergence stays active (see enforce_ceiling_divergence()'s own
      * doc comment on why it is not edge-triggered on the disable side). */
+    unsigned dispatch_before_repeats = s_stub_dispatch_count;
     for (int i = 0; i < 5; i++) {
         profile_executor_fault_halt("config/ceiling divergence: heat disabled");
     }
+    TEST_CHECK(s_stub_dispatch_count == dispatch_before_repeats,
+               "five more calls while already IDLE must short-circuit BEFORE the flash-worker dispatch -- "
+               "on target each dispatch blocks safety_poll_task (the link heartbeat) on the worker");
     TEST_CHECK(g_run_state_note_calls == 1,
                "five more calls while already IDLE must NOT write run_state again -- a config divergence "
                "that lasts hours must not hammer NVS once per tick");
@@ -2904,6 +2923,25 @@ static void test_fault_halt_preserves_earlier_guard_trip_reason(void)
                strcmp(g_last_run_state_note_snap.fault_reason, "over-temp") == 0,
                "the earlier guard trip's own reason must win -- 'first fault wins', same rule exec_mode_"
                "state_check()'s was_faulted guard documents");
+}
+
+static void test_fault_halt_on_done_run_keeps_done(void)
+{
+    TEST_SECTION("profile_executor_fault_halt() on a DONE run awaiting dismissal -- dismissed as DONE, "
+                 "never rewritten as FAULTED");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.fault_reason[0] = 0;
+    g_run_state_note_calls = 0;
+
+    profile_executor_fault_halt("config/ceiling divergence: heat disabled");
+
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a DONE run must still be dismissed to IDLE");
+    TEST_CHECK(g_run_state_note_calls == 1, "must record exactly once");
+    TEST_CHECK(g_last_run_state_note_phase == RUN_STATE_PHASE_DONE,
+               "a firing that already completed cleanly must stay DONE -- a divergence noticed afterward "
+               "did not stop it");
 }
 
 static void test_operator_halt_still_records_halted(void)
@@ -9917,6 +9955,7 @@ void run_test_profile_executor_prestart(void)
     test_fault_halt_records_faulted_with_reason();
     test_fault_halt_is_idempotent_across_repeated_ticks();
     test_fault_halt_preserves_earlier_guard_trip_reason();
+    test_fault_halt_on_done_run_keeps_done();
     test_operator_halt_still_records_halted();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();
