@@ -324,10 +324,22 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     (void)msg;
     return ESP_OK;
 }
+// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the handler-level order
+// test below (test_backup_import_post_*) needs to see what status/body the
+// real backup_import_post_handler() actually sent for a refusal, so these two
+// capture their last argument into static buffers rather than discarding it.
+// Purely additive -- every prior test in this file calls backup_import_apply()
+// directly and never inspects these, so capturing here cannot change any
+// existing test's outcome.
+static char s_post_last_status[32] = "";
+static char s_post_last_body[256] = "";
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;
-    (void)status;
+    if (status) {
+        strncpy(s_post_last_status, status, sizeof(s_post_last_status) - 1);
+        s_post_last_status[sizeof(s_post_last_status) - 1] = '\0';
+    }
     return ESP_OK;
 }
 // 2026-09-25 fix-then-push review: backup_import_post_handler() now sends a
@@ -337,7 +349,10 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
     (void)r;
-    (void)s;
+    if (s) {
+        strncpy(s_post_last_body, s, sizeof(s_post_last_body) - 1);
+        s_post_last_body[sizeof(s_post_last_body) - 1] = '\0';
+    }
     return ESP_OK;
 }
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
@@ -384,9 +399,17 @@ char g_stub_ota_interlock_reason[OTA_INTERLOCK_REASON_MAX] = "";
 // the store.
 bool g_stub_ota_interlock_saw_ack = false;
 
+// Task 1c: proves backup_import_post_handler()'s mode-gate -> interlock ->
+// http_async_job_busy() ordering the same way test_zones_http.c's
+// g_probe_interlock_called does -- a call counter, additive to the existing
+// stub, so test_kiln_cfg_store.c's own interlock-backstop test (sharing this
+// one definition) is unaffected.
+int g_stub_ota_interlock_call_count = 0;
+
 ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
                                                  size_t reason_cap)
 {
+    g_stub_ota_interlock_call_count++;
     g_stub_ota_interlock_saw_ack = ack_no_safety_processor;
     if (reason_out && reason_cap) {
         strncpy(reason_out, g_stub_ota_interlock_reason, reason_cap - 1);
@@ -396,16 +419,14 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
 }
 
 // The other two ota_http.h symbols backup_http.c's handler now references.
-// Neither is reachable from these tests -- they live in
-// backup_import_post_handler(), the HTTP entry point, while every test here
-// calls backup_import_apply() directly -- but the linker still needs a body
-// for each. Deliberately trivial: if a future test ever does exercise the
-// handler, these firing would be the signal that this stub needs real
-// behaviour rather than silently passing.
+// ota_http_req_ack_no_safety() is reachable now that Task 1c drives the real
+// handler directly -- controllable via the global below (default false,
+// unchanged from this stub's original hardcoded body).
+bool g_stub_ota_ack_no_safety = false;
 bool ota_http_req_ack_no_safety(httpd_req_t *req)
 {
     (void)req;
-    return false;
+    return g_stub_ota_ack_no_safety;
 }
 
 esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
@@ -416,6 +437,25 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
     (void)reason;
     return ESP_OK;
 }
+
+// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): backup_import_post_handler()
+// also checks http_async_job_busy() after the mode gate and the OTA
+// interlock, the same three-stage order zones_post_handler() uses. Unlike
+// the mode gate and the interlock, this symbol is NOT locally stubbed here --
+// this file is #included into the "main" combined host-test executable
+// (test_main.c), which links exactly one real http_async_job_busy() (reached
+// via test_http_async_job.c's own #include of http_async_job.c). Admitting a
+// real job to force it busy would leave that ONE SHARED instance busy for
+// every test that runs afterward in this executable (host xTaskCreate() never
+// actually runs the job body to clear it -- the same "MUST RUN LAST" hazard
+// test_zones_http.c's own busy test documents), and dozens of unrelated
+// suites run after this one (run_test_kiln_cfg_store(), run_test_safety_cfg_store(),
+// run_test_http_async_job() itself, etc.) -- so that path is not exercised
+// here. The busy-refused leg of the ordering is covered by direct code
+// inspection instead (backup_import.c's handler calls http_async_job_busy()
+// immediately after ota_http_check_interlocks() returns OK, before reading
+// the body) plus the two tests below, which prove the two legs that ARE safe
+// to drive end-to-end without touching the shared job singleton.
 
 // ---------------------------------------------------------------------------
 // zones_http.h stub state -- one entry per MAX31856_CHANNEL_COUNT zone.
@@ -1743,17 +1783,71 @@ static void test_malformed_body_writes_nothing(void)
 // mode-gate logic at all -- the old test here (asserting the sentinel
 // prefix) tested code that no longer exists and has been removed.
 //
-// This file has no handler-level test harness (no staged httpd_req_t /
-// content_len driver for backup_import_post_handler(), unlike
-// test_zones_http.c's run_zones_post()) -- building one is out of scope for
-// this pass. The ordering fix itself is covered by:
-//   - direct code inspection: backup_import_post_handler() calls
-//     system_mode_gate_check() before ota_http_check_interlocks(), matching
-//     the pattern proven by test_zones_post_refused_by_mode_gate_before_interlock()
-//     in test_zones_http.c.
-//   - s_test_profile_running_for_mode_gate/s_test_autotune_running_for_mode_gate
-//     above remain in place (defaulted idle) for a future handler-level test
-//     to use once that harness exists.
+// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known test gaps): the handler-level
+// harness this comment used to say was out of scope now exists, following
+// test_zones_http.c's run_zones_post() pattern exactly -- a staged
+// httpd_req_t driving the real backup_import_post_handler() (#included above)
+// directly, with content_len=0 for every test below since all three prove a
+// refusal that happens before the handler ever reads the body.
+static esp_err_t run_backup_import_post(void)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 0;
+    return backup_import_post_handler(&req);
+}
+
+static void reset_backup_import_post_stubs(void)
+{
+    s_test_profile_running_for_mode_gate = false;
+    s_test_autotune_running_for_mode_gate = false;
+    g_stub_ota_interlock_result = OTA_INTERLOCK_OK;
+    g_stub_ota_interlock_reason[0] = '\0';
+    g_stub_ota_interlock_call_count = 0;
+    s_post_last_status[0] = '\0';
+    s_post_last_body[0] = '\0';
+}
+
+// Proves the ordering fix itself, not just its presence in the source: the
+// mode gate must refuse and return BEFORE ota_http_check_interlocks() is ever
+// called, same convention as
+// test_zones_post_refused_by_mode_gate_before_interlock() in test_zones_http.c.
+static void test_backup_import_post_refused_by_mode_gate_before_interlock(void)
+{
+    TEST_SECTION("backup_import_post_handler -- system_mode_gate refuses BEFORE "
+                 "ota_http_check_interlocks() is even called, while profile_executor "
+                 "reports RUNNING");
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+
+    esp_err_t err = run_backup_import_post();
+
+    TEST_CHECK(err == ESP_OK, "backup_import_post_handler must always return ESP_OK");
+    TEST_CHECK(g_stub_ota_interlock_call_count == 0,
+              "ota_http_check_interlocks() must never be reached once system_mode_gate has already refused");
+}
+
+// Proves the interlock IS reached once the mode gate passes (so the fix
+// didn't just move the dead-code problem one level down).
+static void test_backup_import_post_refused_by_interlock_after_mode_gate_passes(void)
+{
+    TEST_SECTION("backup_import_post_handler -- ota_http_check_interlocks() is reached and can "
+                 "still refuse once the mode gate itself passes");
+    reset_backup_import_post_stubs();
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+
+    esp_err_t err = run_backup_import_post();
+
+    TEST_CHECK(err == ESP_OK, "backup_import_post_handler must always return ESP_OK");
+    TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the interlock must be reached once the gate passes");
+}
+
+// The third leg of this order (http_async_job_busy(), checked after the
+// interlock passes) is deliberately NOT driven end-to-end here -- see the
+// comment above ota_http_req_ack_no_safety()/http_async_job_busy's home in
+// this file for why forcing the one real, shared instance busy would leak
+// into dozens of unrelated suites that run later in this same combined
+// executable. Covered by direct code inspection instead.
 
 static void test_wrong_kind_refused(void)
 {
@@ -4071,6 +4165,9 @@ static void test_kiln_configs_partial_write_set_on_mid_pass_create_failure(void)
 
 void run_test_backup_import(void)
 {
+    test_backup_import_post_refused_by_mode_gate_before_interlock();
+    test_backup_import_post_refused_by_interlock_after_mode_gate_passes();
+
     test_malformed_body_writes_nothing();
     test_wrong_kind_refused();
     test_unknown_version_refused();
