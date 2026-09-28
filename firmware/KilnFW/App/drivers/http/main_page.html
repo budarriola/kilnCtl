@@ -316,6 +316,18 @@
   #profileLimitIcon.limit-icon-danger { color: var(--bad); font-weight: bold; }
   #profileLimitIcon.limit-icon-warn { color: var(--bad); }
   #profileLimitIcon.limit-icon-info { color: var(--muted); }
+  /* Profile-picker load status (owner report, 2026-09-27): the dashboard
+     never auto-prompts a login on page load, so a background 401 on
+     GET /api/profiles used to leave #profileSelect silently empty forever
+     with no way to notice or retry. This line sits right under the select:
+     a quiet "log in" nudge (a real click, so app.js's fetch wrapper treats
+     it as a user action and may raise the shared modal) on an auth refusal,
+     or a visible error note for any other failure. Hidden whenever a load
+     succeeds. Reuses --muted/--bad -- no new colours, same rule as the
+     feasibility icons above. */
+  #profilePickerStatus { font-size: 0.85em; margin: 0.2em 0 0.4em; }
+  #profilePickerStatus.status-fault { color: var(--bad); }
+  #profilePickerStatus[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -421,6 +433,7 @@
 <div id="runPicker">
   <label for="profileSelect">Firing profile</label>
   <select id="profileSelect"></select>
+  <div id="profilePickerStatus" hidden></div>
   <button id="profileFeasIcon" type="button" hidden aria-label="Feasibility notice for this profile"></button>
   <button id="profileLimitIcon" type="button" hidden aria-label="Configured-limit headroom notice for this profile"></button>
   <button id="relayLifeIcon" type="button" hidden aria-label="Relay contact-life warning" title=""></button>
@@ -1336,11 +1349,54 @@ function loadFavoriteIds() {
   }).catch(function () { return []; });
 }
 
+// Status line under #profileSelect (owner report, 2026-09-27 -- see the
+// #profilePickerStatus CSS comment above for the full rationale). Three
+// states: hidden (last load succeeded), a clickable "log in" nudge (the
+// load was refused for lack of a session -- window.kcIsAuthCancelled()
+// distinguishes this from a real failure), or a plain error note (anything
+// else -- a genuine network/server failure should stay visible, not look
+// like an empty picker with no explanation).
+function hideProfilePickerStatus() {
+  const el = document.getElementById('profilePickerStatus');
+  if (!el) return;
+  el.hidden = true;
+  el.textContent = '';
+  el.className = '';
+}
+function showProfilePickerLoginPrompt() {
+  const el = document.getElementById('profilePickerStatus');
+  if (!el) return;
+  el.hidden = false;
+  el.className = '';
+  el.textContent = '';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  // Reuses app.js's login-modal "Forgot password?" link styling (theme.css)
+  // rather than inventing a second small-link visual -- same "popup/controls
+  // follow the color theme" rule.
+  btn.className = 'kc-login-forgot-link';
+  btn.textContent = 'Log in to load profiles';
+  // A real click: app.js's window.fetch wrapper only raises the shared login
+  // modal for a user-initiated request (see kcRequestIsUserInitiated) -- this
+  // handler runs synchronously inside the click's dispatch, so the fetch
+  // loadProfileList() issues from here qualifies.
+  btn.addEventListener('click', function () { loadProfileList(); });
+  el.appendChild(btn);
+}
+function showProfilePickerError() {
+  const el = document.getElementById('profilePickerStatus');
+  if (!el) return;
+  el.hidden = false;
+  el.className = 'status-fault';
+  el.textContent = 'Could not load profiles.';
+}
+
 function loadProfileList() {
   return Promise.all([
     fetch('/api/profiles').then(function (r) { return r.json(); }),
     loadFavoriteIds()
   ]).then(function (both) {
+    hideProfilePickerStatus();
     const list = both[0], favIds = both[1];
     const sel = document.getElementById('profileSelect');
     sel.innerHTML = '';
@@ -1378,7 +1434,13 @@ function loadProfileList() {
     appendGroup('Favorites', groups.favorites, true);
     appendGroup('Recently fired', groups.recent, false);
     appendGroup('All', groups.all, false);
-  }).catch(function () {});
+  }).catch(function (err) {
+    if (window.kcIsAuthCancelled(err)) {
+      showProfilePickerLoginPrompt();
+    } else {
+      showProfilePickerError();
+    }
+  });
 }
 
 // -- Kiln config indicator (read-only) -----------------------------------
@@ -3843,6 +3905,64 @@ function updateChartMode(st) {
   wasIdle = idleNow;
 }
 
+// Owner report, 2026-09-27: "i perodicly see a profile flash on the graph
+// even though there is nothing running. i would like to see the last
+// profile there untill i start or select another." Root cause: the idle
+// branch below used to unconditionally call
+// `setActivePlanFor(sel ? sel.value : undefined)` the instant a run (or
+// even just the exec-state bookkeeping) transitioned to idle -- but
+// `sel.value` is just whatever the browser currently has the rebuilt
+// <select> sitting on (its first/default option after loadProfileList()
+// last repopulated it), almost never the profile that was actually running
+// a moment ago. That swapped the just-finished run's curve for an
+// unrelated, arbitrary profile's curve the instant it ended -- the
+// "flash". The same wrong default (`setActivePlanFor(sel.value)`) was also
+// used to choose the very first thing shown on page load, before the
+// operator had ever touched the picker.
+//
+// Fix: track the "last relevant profile" (last one that actually ran, or
+// last one the operator explicitly picked, whichever happened later)
+// instead of ever falling back to the picker's incidental current value.
+// A run ending no longer touches activePlan at all -- it just persists the
+// plan that WAS running so a later page load can restore it. Persisted in
+// localStorage (wrapped try/catch, degrades to "nothing remembered" in
+// private browsing / storage-disabled) since there is no spare URI-handler
+// headroom for a new route (CLAUDE.md) and firmware's own
+// GET /api/status `last_run` block is preferred first where it applies
+// (survives a reload with no client-side storage at all, and always wins
+// a tie against a stale persisted selection because the run-end path
+// below re-persists over any older selection every time a run finishes).
+var LAST_PROFILE_STORAGE_KEY = 'kcLastPreviewedProfileId';
+function getPersistedLastProfileId() {
+  try {
+    var v = window.localStorage.getItem(LAST_PROFILE_STORAGE_KEY);
+    return (v === null) ? undefined : v;
+  } catch (e) { return undefined; }
+}
+function setPersistedLastProfileId(id) {
+  try {
+    if (id === undefined || id === null || id === '') {
+      window.localStorage.removeItem(LAST_PROFILE_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(LAST_PROFILE_STORAGE_KEY, String(id));
+    }
+  } catch (e) { /* private browsing / storage disabled -- fine to lose this */ }
+}
+// Picks what the idle preview should show when nothing else has set it yet
+// (page load, or the picker went from empty to populated after a login):
+// an explicit earlier selection (localStorage) first, else the board's own
+// last-run record (`GET /api/status`'s OPEN-tier `last_run`, already
+// fetched by poll() -- never gated behind a login), else whatever the
+// picker itself currently shows as a last resort.
+function pickInitialProfileId(sel) {
+  var id = getPersistedLastProfileId();
+  if (!id && lastExecStatus && lastExecStatus.last_run && lastExecStatus.last_run.present) {
+    id = lastExecStatus.last_run.profile_id;
+  }
+  if (!id && sel) { id = sel.value; }
+  return id;
+}
+
 // Tracks the profile id the running/paused/etc. plan curve was last fetched
 // for, so a poll tick that reports the SAME run doesn't refetch/redraw every
 // 2s -- only an actual change (new run started, or exec state going idle)
@@ -3857,15 +3977,16 @@ function pollExec() {
     var idleNow = !st || st.state === 'idle';
     var planId = idleNow ? undefined : st.profile_id;
     if (planId !== lastExecPlanId) {
-      lastExecPlanId = planId;
       if (idleNow) {
-        // A run just ended -- don't leave its plan curve on screen under the
-        // idle dots. Fall back to previewing whatever's currently picked (or
-        // nothing, if the list hasn't loaded / nothing's selected yet).
-        var sel = document.getElementById('profileSelect');
-        setActivePlanFor(sel ? sel.value : undefined);
+        // A run just ended -- leave its curve on screen (activePlan already
+        // holds it) instead of switching to an arbitrary default. Persist it
+        // as the "last relevant profile", superseding any older selection.
+        if (lastExecPlanId !== undefined) { setPersistedLastProfileId(lastExecPlanId); }
+        lastExecPlanId = planId;
       } else {
+        lastExecPlanId = planId;
         setActivePlanFor(planId);
+        setPersistedLastProfileId(planId);
       }
     }
     updateChartMode(st);
@@ -4043,16 +4164,16 @@ function poll() {
       wasFiringActive = firingNowActive;
       var planId = idleNow ? undefined : st.profile_id;
       if (planId !== lastExecPlanId) {
-        lastExecPlanId = planId;
         if (idleNow) {
-          // A run just ended -- don't leave its plan curve on screen under
-          // the idle dots. Fall back to previewing whatever's currently
-          // picked (or nothing, if the list hasn't loaded / nothing's
-          // selected yet).
-          var sel = document.getElementById('profileSelect');
-          setActivePlanFor(sel ? sel.value : undefined);
+          // A run just ended -- see the "Owner report, 2026-09-27" comment
+          // above pollExec(): leave its curve on screen (activePlan already
+          // holds it), just persist it as the last relevant profile.
+          if (lastExecPlanId !== undefined) { setPersistedLastProfileId(lastExecPlanId); }
+          lastExecPlanId = planId;
         } else {
+          lastExecPlanId = planId;
           setActivePlanFor(planId);
+          setPersistedLastProfileId(planId);
         }
       }
     }
@@ -4077,15 +4198,45 @@ function poll() {
 // wasIdle is true; the moment a run actually starts, pollExec's own
 // lastExecPlanId switch takes over and the preview label goes away with it.
 document.getElementById('profileSelect').addEventListener('change', function (e) {
-  if (wasIdle) setActivePlanFor(e.target.value);
+  if (wasIdle) {
+    setActivePlanFor(e.target.value);
+    // An explicit pick is a "last relevant profile" event too -- record it
+    // so it outranks whatever ran or was picked before it (see the
+    // "Owner report, 2026-09-27" comment above pollExec()).
+    setPersistedLastProfileId(e.target.value);
+  }
   updateProfileFeasIcon();
   updateProfileLimitIcon();
 });
 
+function reloadAfterLoginPickers() {
+  var sel = document.getElementById('profileSelect');
+  var hadNoProfiles = sel && sel.options.length === 0;
+  loadZones();
+  loadProfileList().then(function () {
+    if (!sel) return;
+    // Only re-derive the active-plan preview/icons when the picker actually
+    // went from empty to populated (or vice versa) -- an operator who has
+    // already picked a profile and logged in for an unrelated reason (e.g.
+    // the Run button's own 401) must not have that selection reset under
+    // them.
+    if (hadNoProfiles && wasIdle) setActivePlanFor(pickInitialProfileId(sel));
+    updateProfileFeasIcon();
+    updateProfileLimitIcon();
+  });
+  loadKilnConfigIndicator();
+}
+// Owner ask, 2026-09-27: a fetch-once loader that swallowed a background 401
+// (see #profilePickerStatus above) gets a chance to reload once a login
+// succeeds ANYWHERE on the page -- app.js dispatches this event from the one
+// choke point every successful login (401 retry or 403 role-elevate) passes
+// through, so this listener need not special-case which action triggered it.
+window.addEventListener('kc-login', reloadAfterLoginPickers);
+
 loadZones().then(function () {
   loadProfileList().then(function () {
     var sel = document.getElementById('profileSelect');
-    if (wasIdle && sel) setActivePlanFor(sel.value);
+    if (wasIdle && sel) setActivePlanFor(pickInitialProfileId(sel));
     updateProfileFeasIcon();
     updateProfileLimitIcon();
   });

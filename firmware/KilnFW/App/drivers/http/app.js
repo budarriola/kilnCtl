@@ -559,6 +559,23 @@
         if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
           previouslyFocused.focus();
         }
+        if (ok && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' &&
+            typeof Event !== 'undefined') {
+          // Owner ask, 2026-09-27: a page-local loader that fetched once at
+          // load time and swallowed a background 401/403 as AuthCancelled
+          // (e.g. the dashboard's #profileSelect picker) has no other way to
+          // learn a login later succeeded -- this is the single choke point
+          // every successful login passes through (401 retry, 403 role
+          // elevation, or a direct openLoginModal() call), so dispatching
+          // here covers all of them without any caller special-casing which
+          // action triggered the login. Not fired on cancel/decline: nothing
+          // changed for a page to re-fetch. Guarded: the node-only test
+          // harnesses (test_login_auth_wrapper.js, test_forgot_password_modal.js)
+          // run this same code against a minimal fake `window`/`document`
+          // with no dispatchEvent/Event, same discipline as this file's other
+          // `typeof X !== 'undefined'` feature checks.
+          window.dispatchEvent(new Event('kc-login'));
+        }
         resolve(ok);
       }
       function onCancel(evt) {
