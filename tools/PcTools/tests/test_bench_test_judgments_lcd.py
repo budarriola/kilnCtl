@@ -578,10 +578,12 @@ class LcdPinLockTest(unittest.TestCase):
         r = J.judge_lcd_pin_lock(True, True, False, True)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_stop_gated_behind_pin_fails(self):
-        # This is the safety-critical check: Stop must NEVER be gated.
+    def test_stop_not_gated_fails(self):
+        # Owner decision 2026-09-28: Stop must require the PIN; a Stop that
+        # opens Confirm Stop with no keypad is a FAIL.
         r = J.judge_lcd_pin_lock(True, True, True, False)
         self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("Stop", r.reason)
 
     def test_missing_data_is_inconclusive_not_pass(self):
         r = J.judge_lcd_pin_lock(None, None, None, None)
@@ -590,7 +592,7 @@ class LcdPinLockTest(unittest.TestCase):
     def test_missing_data_names_every_unresolved_stage(self):
         r = J.judge_lcd_pin_lock(None, None, None, None)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
-        for stage in ("keypad_raised", "wrong_pin_refused", "right_pin_started", "stop_not_gated"):
+        for stage in ("keypad_raised", "wrong_pin_refused", "right_pin_started", "stop_gated"):
             self.assertIn(stage, r.reason)
 
     def test_missing_data_names_only_the_unresolved_stage(self):
@@ -604,7 +606,7 @@ class LcdPinLockTest(unittest.TestCase):
         self.assertIn("wrong_pin_refused", r.reason)
         self.assertNotIn("keypad_raised,", r.reason)
         self.assertNotIn("right_pin_started", r.reason)
-        self.assertNotIn("stop_not_gated", r.reason)
+        self.assertNotIn("stop_gated", r.reason)
 
 
 if __name__ == "__main__":

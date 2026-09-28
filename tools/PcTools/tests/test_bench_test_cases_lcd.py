@@ -2105,7 +2105,7 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         self.assertEqual(sec.set_lcd_pin_calls, [("admin", "1234")])
         self.assertEqual(ctx["_lcd_pin"], {"right_pin": "1234", "wrong_pin": "1235"})
         # The idle-branch keypad/PIN checks all completed (this fixture never
-        # exercises the firing/Stop branch, so `stop_not_gated` stays None
+        # exercises the firing/Stop branch, so `stop_gated` stays None
         # and the overall verdict is judge_lcd_pin_lock's own by-design
         # INCONCLUSIVE for an idle-only run -- not what this test is about).
         self.assertEqual(result.observed.get("keypad_raised"), True)
@@ -2292,7 +2292,7 @@ class Lcd19Test(unittest.TestCase):
         self.assertNotIn(mock.call("start"), spy.call_args_list)
         self.assertEqual(result.observed.get("keypad_raised"), True)
         # enter_pin() now drives the keypad: a wrong PIN is refused (keypad
-        # stays open) and the right PIN opens Confirm Start. stop_not_gated
+        # stays open) and the right PIN opens Confirm Start. stop_gated
         # is never observed on the idle branch, so the case still tops out
         # at INCONCLUSIVE, not PASS -- see judge_lcd_pin_lock.
         self.assertEqual(result.observed.get("wrong_pin_refused"), True)
@@ -2383,7 +2383,7 @@ class Lcd19Test(unittest.TestCase):
 
     def test_dropped_digit_leaves_refused_none_but_records_why(self):
         # 2026-09-24 bench root cause (20260925T055159Z_full): keypad_raised
-        # was true but wrong_pin_refused/right_pin_started/stop_not_gated
+        # was true but wrong_pin_refused/right_pin_started/stop_gated
         # all read None with nothing in `observed` to explain why --
         # _entry_all_clicked_ok() correctly refuses to draw a conclusion
         # when a digit click didn't land "ok", but the `entry` it inspected
@@ -2424,28 +2424,10 @@ class Lcd19Test(unittest.TestCase):
         self.assertNotIn("0000", blob)
         self.assertNotIn("1234", blob)
 
-    def test_stop_opens_confirm_dialog_directly_not_gated(self):
-        # A Confirm Stop dialog (ui_confirm.c) has only its confirm_label
-        # ("Stop") + "Cancel" -- no "OK" -- distinguishing it from the PIN
-        # keypad. Stop landing directly on Confirm Stop (no keypad) means
-        # Stop was correctly never gated.
-        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
-        srv = FakeSrvFull(ui)
-        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
-            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
-            result = C._case_lcd19(ctx)
-        self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
-        self.assertNotIn(mock.call("Start"), spy.call_args_list)
-        # Dismissal in `finally` must use "Cancel" only, never the dialog's
-        # own confirm button.
-        self.assertEqual(spy.call_args_list[-1], mock.call("Cancel"))
-        self.assertEqual(result.observed.get("stop_not_gated"), True)
-        self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
-
-    def test_stop_gated_behind_keypad_fails(self):
-        # If the PIN keypad ("OK" present) appears instead of Confirm Stop
-        # directly, Stop was gated -- a safety regression -- and this must
-        # be a real FAIL, not vacuously always True.
+    def test_stop_raises_keypad_is_gated(self):
+        # Owner decision 2026-09-28 ("stop needs login. there is an estop
+        # button"): with the session locked, a Stop tap must raise the PIN
+        # keypad ("OK" present alongside "Cancel") rather than Confirm Stop.
         ui = PopupUiTest(trigger_name="Stop", overlay_names=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "OK", "Cancel"])
         srv = FakeSrvFull(ui)
         # "OK" is present alongside "Cancel" -- this is the keypad shape, so
@@ -2458,12 +2440,32 @@ class Lcd19Test(unittest.TestCase):
         self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
         self.assertNotIn(mock.call("Start"), spy.call_args_list)
         self.assertNotIn(mock.call("Cancel"), spy.call_args_list)
-        self.assertEqual(result.verdict, Verdict.FAIL)
-        self.assertIn("Stop", result.reason)
+        self.assertEqual(result.observed.get("stop_gated"), True)
+        self.assertNotEqual(result.verdict, Verdict.FAIL)
         self.assertEqual(result.observed["overlay_dismiss"]["dismiss_method"], "backdrop_touch_inject")
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
         self.assertIn((20, 160, True), srv._touch.injected)
         self.assertIn((20, 160, False), srv._touch.injected)
+
+    def test_stop_opens_confirm_dialog_directly_fails(self):
+        # A Confirm Stop dialog (ui_confirm.c) has only its confirm_label
+        # ("Stop") + "Cancel" -- no "OK". Stop landing directly on Confirm
+        # Stop with the session locked means Stop was NOT gated -- a
+        # regression against the 2026-09-28 owner decision, and a real FAIL.
+        ui = PopupUiTest(trigger_name="Stop", overlay_names=["Stop", "Cancel"])
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(ui, "click_by_name", wraps=ui.click_by_name) as spy:
+            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000", "firing_active_with_lock": True}}
+            result = C._case_lcd19(ctx)
+        self.assertEqual(spy.call_args_list[0], mock.call("Stop"))
+        self.assertNotIn(mock.call("Start"), spy.call_args_list)
+        # Dismissal in `finally` must use "Cancel" only, never the dialog's
+        # own confirm button.
+        self.assertEqual(spy.call_args_list[-1], mock.call("Cancel"))
+        self.assertEqual(result.observed.get("stop_gated"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("Stop", result.reason)
+        self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
 
     def test_dismiss_overlay_not_needed_when_nothing_open(self):
         ui = PopupUiTest(trigger_name="Start", overlay_names=[])

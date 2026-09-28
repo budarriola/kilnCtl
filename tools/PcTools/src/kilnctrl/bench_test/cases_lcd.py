@@ -2010,8 +2010,9 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 # standalone bench_test_run(suite="lcd") run can exercise this case too.
 # NOT_RUN happens only when KILNCTL_LCD_PIN (or ctx["lcd_admin_pin"]) is
 # unset -- a FAIL happens instead if the env var is set but seeding itself
-# fails (malformed PIN, GET/set_lcd_pin failure). Stop-is-never-gated is
-# checked without assuming any particular shape for the rest.
+# fails (malformed PIN, GET/set_lcd_pin failure). Stop-requires-the-PIN
+# (owner decision 2026-09-28, reversing the old "Stop is never gated" rule)
+# is checked without assuming any particular shape for the rest.
 #
 # Both the PIN keypad (ui_lcd_keypad.c) and the Confirm Start/Confirm Stop
 # dialogs (ui_confirm.c) are top-layer lv_msgbox popups, not pages -- current
@@ -2423,7 +2424,7 @@ def _case_lcd19(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/auth/config failed (status={status0})", observed=aborted)
     orig = _web._policy_from_config(cfg0)
 
-    keypad_raised = wrong_pin_refused = right_pin_started = stop_not_gated = None
+    keypad_raised = wrong_pin_refused = right_pin_started = stop_gated = None
     result: Optional[CaseResult] = None
     state: Dict[str, Any] = {"orig": orig}
     if pin_seed_state is not None:
@@ -2518,12 +2519,15 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                     if names is not None:
                         has_cancel = "Cancel" in names
                         has_ok = "OK" in names
-                        if has_cancel and not has_ok:
-                            stop_not_gated = True  # Confirm Stop shown directly, no PIN keypad
-                        elif has_cancel and has_ok:
-                            stop_not_gated = False  # PIN keypad appeared -- Stop was gated
+                        # Owner decision 2026-09-28 ("stop needs login.
+                        # there is an estop button"): with the session
+                        # locked, Stop must raise the PIN keypad first.
+                        if has_cancel and has_ok:
+                            stop_gated = True  # PIN keypad appeared -- Stop is gated
+                        elif has_cancel and not has_ok:
+                            stop_gated = False  # Confirm Stop shown directly, no PIN keypad
                         # else: neither popup present -- leave None (INCONCLUSIVE)
-            result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated)
+            result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_gated)
             result.observed = dict(result.observed or {})
             result.observed.update(state)
     finally:

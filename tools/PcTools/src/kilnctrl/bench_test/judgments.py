@@ -1351,15 +1351,17 @@ def judge_lcd_diagnostics_pages(pages_paged: int, expected_pages: int,
 
 
 def judge_lcd_pin_lock(keypad_raised: Optional[bool], wrong_pin_refused: Optional[bool],
-                        right_pin_started: Optional[bool], stop_not_gated: Optional[bool]) -> CaseResult:
+                        right_pin_started: Optional[bool], stop_gated: Optional[bool]) -> CaseResult:
     """LCD-19: after `lcd_timeout_min`, Start raises the keypad; a wrong PIN
-    is refused; the right PIN starts; Stop is NEVER gated (plan: a tap on
-    Stop during a firing with the lock engaged must stop it with no PIN
-    prompt) -- this last check is the one that matters for safety, so it is
-    checked even though the others may be INCONCLUSIVE."""
+    is refused; the right PIN starts; Stop IS gated too. Owner decision
+    2026-09-28 ("stop needs login. there is an estop button") reversed the
+    old "Stop is never gated" rule: with the lock engaged, a Stop tap must
+    raise the PIN keypad before Confirm Stop, since the hardware E-stop is
+    the independent backstop. Checked even when the others are
+    INCONCLUSIVE."""
     observed = {
         "keypad_raised": keypad_raised, "wrong_pin_refused": wrong_pin_refused,
-        "right_pin_started": right_pin_started, "stop_not_gated": stop_not_gated,
+        "right_pin_started": right_pin_started, "stop_gated": stop_gated,
     }
     if keypad_raised is False:
         return CaseResult(Verdict.FAIL, reason="Start tap after the LCD timeout did not raise the PIN keypad", observed=observed)
@@ -1367,13 +1369,13 @@ def judge_lcd_pin_lock(keypad_raised: Optional[bool], wrong_pin_refused: Optiona
         return CaseResult(Verdict.FAIL, reason="a wrong PIN was not refused", observed=observed)
     if right_pin_started is False:
         return CaseResult(Verdict.FAIL, reason="the correct PIN did not start the firing", observed=observed)
-    if stop_not_gated is False:
+    if stop_gated is False:
         return CaseResult(
             Verdict.FAIL,
-            reason="Stop was gated behind the PIN lock; the plan requires Stop is never gated",
+            reason="Stop opened Confirm Stop without the PIN keypad; owner decision 2026-09-28 requires Stop to need the PIN",
             observed=observed,
         )
-    if None in (keypad_raised, wrong_pin_refused, right_pin_started, stop_not_gated):
+    if None in (keypad_raised, wrong_pin_refused, right_pin_started, stop_gated):
         # Name which stage(s) read None rather than a generic "missing
         # UI_TEST API or camera" -- 2026-09-25 (LCD-19 bench evidence,
         # 20260925T170357Z_full/summary.json): the keypad was confirmed
@@ -1387,7 +1389,7 @@ def judge_lcd_pin_lock(keypad_raised: Optional[bool], wrong_pin_refused: Optiona
             "keypad_raised": keypad_raised,
             "wrong_pin_refused": wrong_pin_refused,
             "right_pin_started": right_pin_started,
-            "stop_not_gated": stop_not_gated,
+            "stop_gated": stop_gated,
         }
         unresolved = [name for name, value in stage_names.items() if value is None]
         return CaseResult(
