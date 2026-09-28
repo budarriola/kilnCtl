@@ -2168,7 +2168,19 @@ function renderSpiWedged(data) {
 function renderLastRun(st) {
   const el = document.getElementById('lastRunBanner');
   const lr = st.last_run;
-  if (!lr || !lr.present) { el.innerHTML = ''; return; }
+  // 2026-09-28 owner request ("i dont want to see this on the web page, i
+  // just want to see the profile graph and the temp/dutycycle history on
+  // the graph"): a normal, deliberate ending (done, or an operator/
+  // controller-issued stop -- run_state.h's RUN_STATE_PHASE_DONE/HALTED)
+  // is not actionable and no longer gets this card at all. What stays: an
+  // UNEXPECTED ending -- lr.interrupted (the record was still RUNNING/
+  // PAUSED at boot, i.e. power loss or an unrecorded stop -- see
+  // run_state.c's phase_is_interrupted()) or lr.phase === 'faulted' (the
+  // controller detected and recorded a fault). Those remain genuinely
+  // actionable safety information. The backend keeps recording and
+  // serving last_run/ack_last_run unchanged (bench tooling and the ack
+  // route still use it) -- only this dashboard card's visibility narrowed.
+  if (!lr || !lr.present || !(lr.interrupted || lr.phase === 'faulted')) { el.innerHTML = ''; return; }
 
   var names = [];
   for (var b = 0; b < 8; b++) { if (lr.zone_mask & (1 << b)) names.push(zoneName(b)); }
