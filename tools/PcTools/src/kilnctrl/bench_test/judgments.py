@@ -1562,17 +1562,24 @@ def judge_stop(state_after_stop: str, duties: "list[float]", relays: "list[bool]
 
 
 def judge_unauthenticated_stop(http_status: Optional[int], state_after: str) -> CaseResult:
-    """HP-06: stop is never gated -- an unauthenticated POST still succeeds
-    (200, SAFETY_REDUCE tier) and the firing actually stops."""
-    if http_status != 200:
+    """HP-06: owner decision 2026-09-28 ("stop needs login. there is an
+    estop button.") re-tiered POST /api/profile_exec/stop from
+    ROUTE_TIER_SAFETY_REDUCE to ROUTE_TIER_USER -- an unauthenticated POST
+    must now be REFUSED (401, no session) and the firing must still be
+    RUNNING afterward. This inverts HP-06's pre-2026-09-28 expectation
+    (200 + stopped); the physical E-stop is the backstop for an
+    unauthenticated user now, not this HTTP route."""
+    if http_status != 401:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"POST /api/profile_exec/stop (no session) returned {http_status!r}, expected 200",
+            reason=f"POST /api/profile_exec/stop (no session) returned {http_status!r}, expected 401",
             observed={"status": http_status},
         )
-    if state_after == "running":
+    if state_after != "running":
         return CaseResult(
-            Verdict.FAIL, reason="firing still RUNNING after the unauthenticated stop", observed={"state": state_after}
+            Verdict.FAIL,
+            reason="firing is no longer RUNNING after the refused, unauthenticated stop attempt",
+            observed={"state": state_after},
         )
     return CaseResult(Verdict.PASS, observed={"status": http_status, "state": state_after})
 

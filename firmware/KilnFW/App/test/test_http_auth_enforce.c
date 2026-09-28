@@ -140,16 +140,18 @@ static void test_insufficient_tier_denied(void) {
 static void test_safety_reduce_always_allowed(void) {
     TEST_SECTION("http_auth_check -- ROUTE_TIER_SAFETY_REDUCE is allowed regardless of role or lockout");
 
-    // SCENARIO (plan section 9): POST /api/profile_exec/stop can only ever
-    // reduce heat/risk, so it must be reachable with no session at all, and
-    // with a role the resolver would otherwise report for a locked-out or
-    // never-logged-in client (HTTP_AUTH_ROLE_NONE) -- exactly the same value
-    // an expired or unresolvable session collapses to.
-    route_tier_t tier;
-    TEST_CHECK(http_auth_lookup_tier("/api/profile_exec/stop", HTTP_POST, &tier) &&
-                   tier == ROUTE_TIER_SAFETY_REDUCE,
-               "POST /api/profile_exec/stop is ROUTE_TIER_SAFETY_REDUCE in route_tier_table.h, not USER");
-
+    // SCENARIO: a route that can only ever reduce heat/risk must be
+    // reachable with no session at all, and with a role the resolver would
+    // otherwise report for a locked-out or never-logged-in client
+    // (HTTP_AUTH_ROLE_NONE) -- exactly the same value an expired or
+    // unresolvable session collapses to. As of the 2026-09-28 owner decision
+    // ("stop needs login. there is an estop button."), POST
+    // /api/profile_exec/stop is no longer one of these routes -- it is
+    // ROUTE_TIER_USER now (see test_web_auth_safety_interaction.c). The
+    // routes still carrying ROUTE_TIER_SAFETY_REDUCE are
+    // /api/zones/current_sweep/abort, /api/autotune/abort and
+    // /api/diagnostics/danger/stop; this test exercises the generic tier
+    // behavior directly rather than naming any one route.
     TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth ON + SAFETY_REDUCE + no session (or locked out) -> ALLOW, never DENY_NO_SESSION");
     TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_ALLOW,

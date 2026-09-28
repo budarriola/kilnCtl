@@ -162,16 +162,21 @@ class StopTest(unittest.TestCase):
 
 
 class UnauthenticatedStopTest(unittest.TestCase):
-    def test_200_and_stopped_passes(self):
-        r = J.judge_unauthenticated_stop(200, "idle")
+    # Owner decision 2026-09-28 ("stop needs login. there is an estop
+    # button.") re-tiered POST /api/profile_exec/stop from
+    # ROUTE_TIER_SAFETY_REDUCE to ROUTE_TIER_USER -- HP-06's expectation
+    # inverted: an unauthenticated stop must now be REFUSED (401) and the
+    # firing must still be running.
+    def test_401_and_still_running_passes(self):
+        r = J.judge_unauthenticated_stop(401, "running")
         self.assertEqual(r.verdict, Verdict.PASS)
 
-    def test_non_200_fails(self):
-        r = J.judge_unauthenticated_stop(401, "running")
+    def test_non_401_fails(self):
+        r = J.judge_unauthenticated_stop(200, "running")
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_still_running_after_200_fails(self):
-        r = J.judge_unauthenticated_stop(200, "running")
+    def test_no_longer_running_after_401_fails(self):
+        r = J.judge_unauthenticated_stop(401, "idle")
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 

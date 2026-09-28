@@ -149,8 +149,6 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/readiness", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/history.csv", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/profile_plan", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/api/board_temps", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/api/firing_history", HTTP_GET, ROUTE_TIER_OPEN),
     /* NOTE: the plan also lists "GET /api/unit_pref" here -- that route
      * does not exist in the tree (see file header comment). No row for it. */
     ROUTE_TIER("/status", HTTP_GET, ROUTE_TIER_OPEN),
@@ -159,14 +157,22 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/wifi", HTTP_GET, ROUTE_TIER_OPEN),
 
     /* ---- USER -- start and stop a firing, and nothing else (plan section
-     * 1, "USER"). NOTE: /api/profile_exec/stop is classified
-     * ROUTE_TIER_SAFETY_REDUCE, not ROUTE_TIER_USER -- plan section 9
-     * requires it be reachable with no session and regardless of lockout
-     * state (a locked-out owner watching a kiln climb must still be able to
-     * stop it). This is decided HERE, in the one table both the mechanical
-     * coverage check and the enforcement pre-handler consult, rather than
-     * as a URI string match inside the enforcement function -- see
-     * ROUTE_TIER_SAFETY_REDUCE's own doc comment above. */
+     * 1, "USER").
+     *
+     * Owner decision, 2026-09-28 (verbatim: "stop needs login. there is an
+     * estop button."), which supersedes plan section 9's "stop must be
+     * reachable with no session" for THIS route specifically: the physical
+     * E-stop interlock (SaftyFW, firmware-mediated -- see
+     * project_estop_jumper_is_fitted notes) is now the always-reachable,
+     * no-credential safety backstop for the web GUI, so
+     * POST /api/profile_exec/stop is ordinary ROUTE_TIER_USER, matching
+     * /api/profile_exec/start below -- an operator who can start a firing
+     * from this GUI can also stop it, and neither is reachable pre-login.
+     * ROUTE_TIER_SAFETY_REDUCE is unaffected for every OTHER route still
+     * using it below (current_sweep/abort, autotune/abort, danger/stop):
+     * those each abort a relay-driving diagnostic/test task that has no
+     * physical E-stop equivalent, so their own no-session requirement
+     * stands unchanged. */
     /* WEB_AUTH_PLAN.md section 8: the explicit "stay unlocked" action. USER
      * tier so the shared pre-handler's own activity-touch (see
      * http_auth_decision_counts_as_activity()) extends the session on this
@@ -175,7 +181,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * handler itself. */
     ROUTE_TIER("/api/auth/session/extend", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/start", HTTP_POST, ROUTE_TIER_USER),
-    ROUTE_TIER("/api/profile_exec/stop", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
+    ROUTE_TIER("/api/profile_exec/stop", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/pause", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/resume", HTTP_POST, ROUTE_TIER_USER),
     ROUTE_TIER("/api/profile_exec/ack_last_run", HTTP_POST, ROUTE_TIER_USER),
@@ -204,8 +210,10 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* SAFETY_REDUCE, not ADMIN: aborts the current-sweep task
      * (zones_current_sweep_abort(), zones_current_sweep_task.c), which drives
      * relays to measure per-zone current -- an expired session must not be
-     * able to keep that running. Same principle as /api/profile_exec/stop
-     * above. */
+     * able to keep that running -- always reachable with no session,
+     * unaffected by /api/profile_exec/stop's 2026-09-28 move to
+     * ROUTE_TIER_USER above (that route has a physical E-stop backstop;
+     * this diagnostic relay-drive task does not). */
     ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/zones/current_sweep/status", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/settings/tz", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -270,14 +278,25 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/relay_cycles/reset", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/relay_cycles/restore", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/thermo/faults", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Owner decision, 2026-09-28 (web-auth gate tightening): only reader is
+     * diagnostics_page.html (ADMIN-tier page shell); the dashboard never
+     * fetches this. Moved out of OPEN -- it was reachable data for a page
+     * the dashboard doesn't itself need. */
+    ROUTE_TIER("/api/board_temps", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Owner decision, 2026-09-28: only reader is zones_page.html's
+     * per-profile firing history card (ADMIN-tier /settings/zones shell);
+     * the dashboard does not fetch this route. Moved out of OPEN. */
+    ROUTE_TIER("/api/firing_history", HTTP_GET, ROUTE_TIER_ADMIN),
 
     /* Tuning */
     ROUTE_TIER("/api/autotune/start", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/autotune/accept", HTTP_POST, ROUTE_TIER_ADMIN),
     /* SAFETY_REDUCE, not ADMIN: aborts a running autotune
      * (autotune_engine_abort() -> abort_locked() -> force_relays_off(),
-     * autotune_engine_guard.c), which drives relays for the relay-step test.
-     * Same principle as /api/profile_exec/stop above. */
+     * autotune_engine_guard.c), which drives relays for the relay-step test
+     * -- always reachable with no session, same reasoning as
+     * current_sweep/abort above (no physical E-stop equivalent for this
+     * relay-drive test, unlike /api/profile_exec/stop). */
     ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/adaptive_tune/enable", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/adaptive_tune/revert", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -296,8 +315,9 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* SAFETY_REDUCE, not ADMIN: exits the danger-mode relay window
      * (danger_mode_stop() -> kiln_io_owner_command_all_relays_off() plus
      * releasing heat-enable, danger_mode.c), which is a window explicitly
-     * armed to drive relays outside the normal safety-gated path. Same
-     * principle as /api/profile_exec/stop above. */
+     * armed to drive relays outside the normal safety-gated path -- always
+     * reachable with no session, same reasoning as current_sweep/abort and
+     * autotune/abort above. */
     ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/diagnostics/danger", HTTP_GET, ROUTE_TIER_ADMIN),
 

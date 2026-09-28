@@ -339,12 +339,18 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // no page load ever shows or redirects to a login form now.
             // A page-shell GET serves the shell directly -- it's the SAME
             // static bytes an unauthenticated caller could already fetch
-            // by any other means, and its own script is what notices the
-            // first data/action fetch failing and raises the cancelable
-            // modal in place. This supersedes the 2026-09-21 "just show a
-            // login page no matter where they come from" redirect: that
+            // by any other means. This supersedes the 2026-09-21 "just show
+            // a login page no matter where they come from" redirect: that
             // was itself the "shows the login before I've done anything"
             // behaviour the 2026-09-24 report asks to remove.
+            //
+            // Owner decision, 2026-09-28 (web-auth gate tightening): every
+            // page but the dashboard now requires login, so app.js's
+            // pollSession() (see maybeGateThisPage()) proactively raises the
+            // SAME cancelable modal right after this shell loads, rather
+            // than waiting for the page's first data/action fetch to fail --
+            // still never a separate "authentication required" page, and
+            // Cancel still returns to the dashboard.
             if (is_page_shell_get(ctx)) {
                 req->user_ctx = ctx->real_user_ctx;
                 return ctx->real_handler(req);

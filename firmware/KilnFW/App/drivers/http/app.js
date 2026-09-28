@@ -2339,6 +2339,45 @@
     return el;
   }
 
+  // Owner decision, 2026-09-28: an unauthenticated web user may only VIEW
+  // the dashboard(s) -- every other page requires login, via the existing
+  // cancelable login pop-up, never a separate "authentication required"
+  // page. The server still serves every page's static shell unauthenticated
+  // (is_page_shell_get() in http_auth_http.c -- harmless, since the shell
+  // carries no per-caller data and every real data/action route is gated at
+  // the /api/ layer), so this is a client-side proactive gate reusing that
+  // same openLoginModal() machinery rather than a new server-rendered page.
+  // Paths reachable with no login at all: the dashboard itself, /login, and
+  // the Wi-Fi provisioning/AP-setup flow's own pages (a device with no
+  // credential yet, or on the AP network, must be able to get online before
+  // any session can exist).
+  var OPEN_WITHOUT_LOGIN_PATHS = {
+    '/': true,
+    '/login': true,
+    '/status': true,
+    '/scan': true,
+    '/networks': true,
+    '/wifi': true
+  };
+  var pageGateChecked = false;
+  function maybeGateThisPage(role) {
+    if (pageGateChecked) return;
+    pageGateChecked = true;
+    if (OPEN_WITHOUT_LOGIN_PATHS[window.location.pathname]) return;
+    // role === 'admin' covers both a real admin session and section 11's
+    // auth-off collapse (role always reports 'admin' when web auth is
+    // disabled) -- in either case the page needs no gate. A 'user' session
+    // is also allowed through: it's still a real login, and any action the
+    // page itself cannot perform is refused by the /api/ tier check as
+    // usual.
+    if (role === 'admin' || role === 'user') return;
+    openLoginModal('Administrator login required').then(function (ok) {
+      if (!ok) {
+        window.location.href = '/';
+      }
+    });
+  }
+
   function pollSession() {
     if (document.visibilityState === 'hidden') {
       sessionPollTimer = setTimeout(pollSession, SESSION_POLL_MS);
@@ -2351,6 +2390,7 @@
       })
       .then(function (st) {
         var role = st && st.role;
+        maybeGateThisPage(role);
         // Transition from a real session to "none" -- the server has
         // actually expired it. Return to the Dashboard, per the plan's
         // wording ("the interface returns to the Dashboard"), not /login.
