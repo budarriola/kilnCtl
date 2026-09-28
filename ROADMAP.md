@@ -112,15 +112,30 @@
 >   tune ON -- turning it OFF during a run is allowed, since it can only
 >   PREVENT a future change, never apply one. The revert handler is
 >   unaffected and still refuses unconditionally while a run is active.
->   **Known gap, still open:** `kiln_cfg_http.c`, `backup_import.c`,
->   `uart_bridge_ext_control.c`, `cfg_fs_format_http.c`, the UART
->   `factory_reset_execute()` path, and `adaptive_tune_http.c`'s
->   enable/revert handlers have no host-test harness exercising the HTTP/
->   UART entry point itself (pre-existing gap for the first four, not
->   introduced by this change); their gate wiring is verified by
->   code-pattern review and an ESP-IDF target build only, not by a
->   host-test assertion. `zones_http_pid.c` and `iter_tune_http.c` DO now
->   have handler-level tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+>   **2026-09-28: further gaps closed.** `adaptive_tune_http.c`'s
+>   `enable`/`revert` handlers now have their own host-test executable
+>   (`test_adaptive_tune_http_gate.c`), and the UART
+>   `factory_reset_execute()` path now has a host test in `test_ota_http.c`
+>   proving the `FACTORY_RESET_ERR_MODE_GATE_REFUSED` return-code contract
+>   `uart_bridge_system.c`'s mapping depends on. Separately, PcTools'
+>   `factory_default_then_load_preset()` used to treat a still-live UART
+>   link as proof a factory reset succeeded (`get_fw_version()` is a query,
+>   answered whether or not the board ever rebooted) -- fixed via
+>   `InfoClient.wait_for_boot_push()`, which waits for the device's own
+>   unsolicited boot-time push and reports "refused" on a timeout. And the
+>   96-byte mode-gate reason buffers this plan's handlers added were
+>   confirmed already covered by the existing
+>   `check_httpd_task_stack_budget.py`/`check_system_uart_bridge_stack_budget.py`
+>   pair (each walks its full call graph from one root rather than
+>   enumerating buffers by name) -- no new check needed. Full detail:
+>   `docs/SYSTEM_MODE_GATE_PLAN.md` §3.6 slices 4/5/7/8.
+>   **Known gap, still open:** `kiln_cfg_http.c`, `backup_import.c`, and
+>   `cfg_fs_format_http.c`'s handler-level gate wiring is verified (see
+>   `test_kiln_cfg_http.c`/`test_backup_import.c`); `uart_bridge_ext_control.c`'s
+>   `SET_ZONE_PID`/`SET_ZONE_MODEL` still has no host-test harness exercising
+>   the UART entry point itself, verified only by code-pattern review and an
+>   ESP-IDF target build. `zones_http_pid.c` and `iter_tune_http.c` DO have
+>   handler-level tests (`test_zones_http.c`, `test_iter_tune_http.c`).
 >   Evaluated 2026-09-25 whether a small harness for
 >   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` gate could
 >   be added cheaply: no -- `control_handle_message()` sits inside a

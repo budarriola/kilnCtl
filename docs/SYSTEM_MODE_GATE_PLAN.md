@@ -286,32 +286,57 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    `http_async_job_busy()` (landed alongside A1). Handler-level test:
    `test_zones_http.c`'s
    `test_zones_post_refused_by_mode_gate_before_interlock`.
-   **Known test gaps (still open):** `kiln_cfg_http.c`, `backup_import.c`,
-   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL`, and
-   `adaptive_tune_http.c`'s `enable`/`revert` handlers (including the
-   2026-09-25 enabled=false carve-out) have no host-test harness exercising
-   the HTTP/UART entry point itself — their gate wiring is verified by
-   code-pattern review and an ESP-IDF target build only, not a host-test
-   assertion; `test_adaptive_tune_http.c` deliberately hand-mirrors only
-   `status_get_handler()`'s render format and never links the rest of the
-   translation unit (its own header comment explains why), so it cannot
-   reach `enable_post_handler()`/`revert_post_handler()` either. `zones_http_pid.c`
-   and `iter_tune_http.c` DO have handler-level tests (`test_zones_http.c`,
-   `test_iter_tune_http.c`).
+   **Known test gap (still open):** `kiln_cfg_http.c`'s and
+   `backup_import.c`'s handler-level gate wiring are now covered
+   (`test_kiln_cfg_http.c`, `test_backup_import.c`).
+   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` still has no
+   host-test harness exercising the UART entry point itself — its gate
+   wiring is verified by code-pattern review and an ESP-IDF target build
+   only. `zones_http_pid.c` and `iter_tune_http.c` DO have handler-level
+   tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+   **Closed:** `adaptive_tune_http.c`'s `enable`/`revert` handlers (including
+   the 2026-09-25 enabled=false carve-out) now have their own executable,
+   `test_adaptive_tune_http_gate.c` (separate from `test_adaptive_tune_http.c`,
+   which deliberately hand-mirrors only `status_get_handler()`'s render
+   format and never links the rest of the translation unit).
 5. **LANDED, 2026-09-25** — `SYS_ACTION_FACTORY_RESET` wired into
    `factory_reset.c` (after auth) and the UART-exclusive
    `factory_reset_execute()` entry point (`uart_bridge_system.c`);
    `SYS_ACTION_CFGFS_FORMAT` wired into `cfg_fs_format_http.c` (first line
    of the handler), per owner decision Q3 above (refuse outright while
-   running). **Known test gap (still open):** no host test exists for the
-   UART `factory_reset_execute()` path (no `test_factory_reset.c` file in
-   this codebase).
+   running). **Closed:** the UART `factory_reset_execute()` path (no
+   dedicated `test_factory_reset.c` file exists) is now covered by
+   `test_ota_http.c`'s
+   `test_factory_reset_execute_refused_by_mode_gate_during_firing()`,
+   proving the exact return-code contract `uart_bridge_system.c`'s mapping
+   depends on (`FACTORY_RESET_ERR_MODE_GATE_REFUSED`, never
+   `ESP_ERR_INVALID_STATE`).
 6. **Deferred, not landed this pass** — `check_uri_handler_cap.ps1`-style
    mechanical check (or extend an existing one) confirming every route in a
    to-be-decided "gated action" allowlist actually calls
    `system_mode_gate_check()` before doing its mutation, so this doesn't
    silently rot the way the recovery banner did before `d89256fe`'s audit
    caught it.
+7. **LANDED, 2026-09-28** — PcTools' `factory_default_then_load_preset()`
+   (`mcp_server_ui_test.py`) used to "confirm" a factory reset by calling
+   `get_fw_version()`, a plain UART query the always-alive INFO task answers
+   whether or not the board ever rebooted — indistinguishable from a reset
+   silently refused by this gate. Fixed by
+   `InfoClient.wait_for_boot_push()` (`info.py`), which blocks specifically
+   for the device's own UNSOLICITED once-per-boot FW-version push and
+   reports "refused" on a timeout instead of treating a still-live link as
+   success. Unit-tested with a bare `InfoClient` (no real serial link),
+   `tools/PcTools/tests/test_info_boot_push.py`.
+8. **Verified, no code change needed, 2026-09-28** — the 96-byte
+   `SYSTEM_MODE_GATE_REASON_MAX` refusal-reason buffers this plan's HTTP
+   handlers added are already covered by `check_httpd_task_stack_budget.py`
+   (each handler is its own enumerated root, not a hardcoded buffer list),
+   and the UART `factory_reset_execute()` path's own buffer is covered the
+   same way by `check_system_uart_bridge_stack_budget.py` (rooted at
+   `system_bridge_task`, which statically reaches it). Both are wired into
+   `check_all_task_stack_budgets.py`. Not re-validated against a fresh
+   target build in this pass — the next `check_00_kilnfw_target_build.ps1`
+   run will reflect any actual `CEILING_BYTES` movement.
 
 Each slice lands independently and is negative-tested per COMMON.md/
 IMPLEMENTER.md discipline before merge; no slice depends on a later one.
