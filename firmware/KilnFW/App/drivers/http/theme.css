@@ -365,7 +365,7 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
                padding: 0.4em 0.6em; background: var(--bg); border-top: 1px solid var(--ui-accent-5);
                display: flex; gap: 0.5em; }
 .kc-stop-bar[hidden] { display: none; }
-.kc-stop-btn, .kc-pause-btn { display: block; flex: 1; box-sizing: border-box; min-height: var(--ui-touch);
+.kc-stop-btn, .kc-pause-btn, .kc-edit-firing-btn { display: block; flex: 1; box-sizing: border-box; min-height: var(--ui-touch);
                border: none; border-radius: var(--ui-radius);
                font-size: 1em; font-weight: bold; cursor: pointer; }
 .kc-stop-btn { background: var(--ui-accent-5); color: #fff; }
@@ -379,6 +379,15 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
    fired; it was a one-off hex that did not track its own token. */
 .kc-pause-btn { background: var(--ui-accent-1); color: #fff; }
 .kc-pause-btn[hidden] { display: none; }
+/* "Edit firing" (owner request: adjust the running firing's dwell/target/
+   ramp on the web GUI, next to Start/Stop) navigates to the existing
+   /live_profile page rather than acting itself, so it is neither the
+   Stop button's "aborts the run" red nor the Pause button's warm accent-1 --
+   accent-2 (purple) is otherwise unused on this bar and reads as a neutral
+   "go edit something" affordance. Shares the same box/touch-target rule as
+   Stop/Pause so it never reads as a lesser control at a glance. */
+.kc-edit-firing-btn { background: var(--ui-accent-2); color: #fff; }
+.kc-edit-firing-btn[hidden] { display: none; }
 
 /* Connection-lost banner (UI_PLAN.md item 4). Not fixed -- it sits in-flow
    right after the topbar, so it pushes content down rather than overlapping

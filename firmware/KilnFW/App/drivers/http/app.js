@@ -1995,10 +1995,18 @@
   // not an abort.
   var STOPPABLE_STATES = { running: true, paused: true };
   var ACK_STATES = { faulted: true, done: true };
+  // Owner request: a button next to Start/Stop to adjust the CURRENTLY
+  // RUNNING firing's dwell times/targets/ramp rates, reusing the existing
+  // /live_profile page (docs/LIVE_PROFILE_EDIT_PLAN.md) rather than a new
+  // editor. That plan's section 10/decision 4 allows editing in RUNNING,
+  // PAUSED, *and* FAULTED alike (a fault freezes heat, not the schedule) --
+  // deliberately not DONE, where there is no live run left to adjust.
+  var EDITABLE_STATES = { running: true, paused: true, faulted: true };
 
   var stopBarEl = null;
   var pauseResumeBtnEl = null;
   var ackBtnEl = null;
+  var editFiringBtnEl = null;
   function buildStopBar() {
     var el = document.createElement('div');
     el.className = 'kc-stop-bar';
@@ -2064,8 +2072,27 @@
     });
     ackBtnEl = ackBtn;
 
+    // "Edit firing" -- next to Start/Stop per the owner's own wording. A
+    // plain navigation (not a fetch) to the existing ADMIN-tier /live_profile
+    // page shell: that page shell is served without a session
+    // (route_tier_table.h's kPageShellUris, same as /profiles' own nav.js
+    // link already relies on) and the page's own script triggers the shared
+    // cancelable login modal itself the moment it fetches an ADMIN /api/...
+    // route -- no separate auth handling belongs on this button, and
+    // duplicating it here would be a second, driftable copy of that gate.
+    var editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'kc-edit-firing-btn';
+    editBtn.textContent = 'Edit firing';
+    editBtn.setAttribute('hidden', '');
+    editBtn.addEventListener('click', function () {
+      window.location.href = '/live_profile';
+    });
+    editFiringBtnEl = editBtn;
+
     el.appendChild(pauseBtn);
     el.appendChild(btn);
+    el.appendChild(editBtn);
     el.appendChild(ackBtn);
     document.body.appendChild(el);
     return el;
@@ -2111,6 +2138,17 @@
     } else {
       ackBtnEl.setAttribute('hidden', '');
     }
+  }
+
+  // Independent of setStopOrAckState()'s Stop/Ack toggle -- EDITABLE_STATES
+  // (running/paused/faulted) overlaps both STOPPABLE_STATES and the faulted
+  // half of ACK_STATES, so this button can be visible alongside either of
+  // the other two, never alongside neither (state === 'done' hides it, same
+  // as the rest of the bar).
+  function setEditFiringVisible(state) {
+    if (!editFiringBtnEl) return;
+    if (EDITABLE_STATES[state]) editFiringBtnEl.removeAttribute('hidden');
+    else editFiringBtnEl.setAttribute('hidden', '');
   }
 
   function setStopBarVisible(visible) {
@@ -2194,6 +2232,7 @@
         setStopBarVisible(!!(lastExecState && (STOPPABLE_STATES[lastExecState] || ACK_STATES[lastExecState])));
         setPauseResumeState(lastExecState);
         setStopOrAckState(lastExecState);
+        setEditFiringVisible(lastExecState);
         scheduleNext(HEARTBEAT_MIN_MS);
       })
       .catch(function () {
