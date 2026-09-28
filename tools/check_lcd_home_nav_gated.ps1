@@ -112,16 +112,32 @@ function Invoke-HomeNavGateScan {
     $codeLines = Get-CodeOnlyLines -Path $SourceFile
     $text = [string]::Join("`n", $codeLines)
 
+    # Broad pattern: used only for the reset gesture, which must reference
+    # NO gate at all, so any mention counts against it.
     $gatePattern = 'ui_lcd_lock_run_gated|LCD_PIN_ROLE_[A-Za-z0-9_]+'
 
     $menuBody = Get-FunctionBody -Text $text -FunctionName "ui_home_menu_nav_cb"
     $profileBody = Get-FunctionBody -Text $text -FunctionName "ui_home_profile_btn_cb"
+    $pauseBody = Get-FunctionBody -Text $text -FunctionName "ui_home_pause_resume_btn_cb"
     $resetBody = Get-FunctionBody -Text $text -FunctionName "ui_home_auth_reset_corner_tap_cb"
 
+    # Strict shape for the gated callbacks (2026-09-28 review of 3e7bb20b:
+    # the broad token match above accepted a stray LCD_PIN_ROLE_* beside an
+    # ungated action): the named gated callback must be an argument of a
+    # ui_lcd_lock_run_gated(...) call, and the outer event callback must not
+    # perform the action itself.
+    function Test-GatedOuter {
+        param([string]$Body, [string]$GatedCb, [string]$ForbiddenDirect)
+        $viaGate = [regex]::IsMatch($Body, 'ui_lcd_lock_run_gated\s*\([^;]*\b' + [regex]::Escape($GatedCb) + '\b')
+        $direct = [regex]::IsMatch($Body, $ForbiddenDirect)
+        return ($viaGate -and -not $direct)
+    }
+
     return [PSCustomObject]@{
-        MenuNavGated    = [regex]::IsMatch($menuBody, $gatePattern)
-        ProfileBtnGated = [regex]::IsMatch($profileBody, $gatePattern)
-        AuthResetGated  = [regex]::IsMatch($resetBody, $gatePattern)
+        MenuNavGated     = Test-GatedOuter -Body $menuBody -GatedCb 'ui_home_menu_nav_gated_cb' -ForbiddenDirect '\bkiln_ui_show\s*\('
+        ProfileBtnGated  = Test-GatedOuter -Body $profileBody -GatedCb 'ui_home_profile_btn_gated_cb' -ForbiddenDirect '\bkiln_ui_show\s*\('
+        PauseResumeGated = Test-GatedOuter -Body $pauseBody -GatedCb 'ui_home_pause_resume_gated_cb' -ForbiddenDirect '\bprofile_executor_(pause|resume)\s*\('
+        AuthResetGated   = [regex]::IsMatch($resetBody, $gatePattern)
     }
 }
 
@@ -138,6 +154,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not $result.ProfileBtnGated) {
         $failures += "ui_home_profile_btn_cb() (-> profile picker) does not reference a PIN gate -- owner decision 2026-09-28 requires every page reached from home to demand the PIN."
     }
+    if (-not $result.PauseResumeGated) {
+        $failures += "ui_home_pause_resume_btn_cb() does not pass ui_home_pause_resume_gated_cb to ui_lcd_lock_run_gated(), or pauses/resumes directly -- owner decision 2026-09-28 requires the PIN for every LCD action other than viewing the dashboard."
+    }
     if ($result.AuthResetGated) {
         $failures += "ui_home_auth_reset_corner_tap_cb() (the physical credential-reset gesture) references a PIN gate -- this gesture must stay reachable WITHOUT a PIN, since it is the recovery path for a lost PIN. Gating it would make it useless."
     }
@@ -150,6 +169,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         throw "$($failures.Count) failure(s) above. Owner decision 2026-09-28: only the home/dashboard view itself stays reachable without a PIN."
     }
 
-    Write-Host "LCD home nav gated check passed: Config hub and profile picker are gated; the credential-reset gesture is not."
+    Write-Host "LCD home nav gated check passed: Config hub, profile picker and Pause/Resume are gated; the credential-reset gesture is not."
     exit 0
 }

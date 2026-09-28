@@ -30,6 +30,13 @@
 #   5. The REAL production file, dot-sourced and scanned directly (not a
 #      copy) -> passes clean, proving today's real check is not vacuous on
 #      the actual tree.
+#   6. A Stop branch that calls ui_home_show_stop_confirm() directly (no
+#      PIN) next to a stray LCD_PIN_ROLE_USER token -> caught via
+#      StopBranchDirectConfirm/StopBranchConfirmViaGate. The first version of
+#      this check PASSED this shape (2026-09-28 review of 3e7bb20b).
+#   7. A Stop branch that runs a gate with some other callback and only then
+#      calls ui_home_show_stop_confirm() directly (confirm opens regardless
+#      of the PIN outcome) -> caught the same way.
 #
 # This does not touch the real repo tree; steps 1-4 are entirely synthetic
 # scratch files, and step 5 only READS the real tree
@@ -82,7 +89,7 @@ try {
 $goodFile = Join-Path $scratchDir "good.c"
 Set-Content -Path $goodFile -Value $goodBody -Encoding utf8
 $r1 = Invoke-StopPathGateScan -SourceFile $goodFile
-if ((-not $r1.StopBranchGated) -or (-not $r1.StopBranchCallsStop) -or (-not $r1.StartBranchGated)) {
+if ((-not $r1.StopBranchGated) -or (-not $r1.StopBranchCallsStop) -or (-not $r1.StartBranchGated) -or (-not $r1.StopBranchConfirmViaGate) -or $r1.StopBranchDirectConfirm) {
     $failures += "Assertion 1 FAILED: correctly-shaped synthetic file scored StopBranchGated=$($r1.StopBranchGated) StopBranchCallsStop=$($r1.StopBranchCallsStop) StartBranchGated=$($r1.StartBranchGated), expected true/true/true."
 } else {
     Write-Host "Assertion 1 OK: correctly-shaped synthetic file passes (Stop gated, Start gated)."
@@ -144,11 +151,40 @@ if (-not (Test-Path $realFile)) {
     $failures += "Assertion 5 FAILED: real file $realFile not found."
 } else {
     $r5 = Invoke-StopPathGateScan -SourceFile $realFile
-    if ((-not $r5.StopBranchGated) -or (-not $r5.StopBranchCallsStop) -or (-not $r5.StartBranchGated)) {
+    if ((-not $r5.StopBranchGated) -or (-not $r5.StopBranchCallsStop) -or (-not $r5.StartBranchGated) -or (-not $r5.StopBranchConfirmViaGate) -or $r5.StopBranchDirectConfirm) {
         $failures += "Assertion 5 FAILED: the REAL production file scored StopBranchGated=$($r5.StopBranchGated) StopBranchCallsStop=$($r5.StopBranchCallsStop) StartBranchGated=$($r5.StartBranchGated), expected true/true/true -- today's real check is either vacuous or the real file regressed."
     } else {
         Write-Host "Assertion 5 OK: the REAL production ui_home_fire_btn_cb() passes (Stop gated, Start gated) -- not vacuous on the actual tree."
     }
+}
+
+# --- Assertion 6: direct ungated confirm plus a stray gate token -> caught.
+$sneakyBody = $goodBody -replace [regex]::Escape('ui_lcd_lock_run_gated("Enter PIN to stop firing", LCD_PIN_ROLE_USER,
+                               ui_home_show_stop_confirm_gated_cb, NULL);'), "lcd_pin_role_t unused_role = LCD_PIN_ROLE_USER; (void)unused_role; ui_home_show_stop_confirm();"
+if ($sneakyBody -eq $goodBody) {
+    throw "test setup error: the replace for assertion 6 did not match anything in `$goodBody"
+}
+$sneakyFile = Join-Path $scratchDir "sneaky_stop.c"
+Set-Content -Path $sneakyFile -Value $sneakyBody -Encoding utf8
+$r6 = Invoke-StopPathGateScan -SourceFile $sneakyFile
+if ((-not $r6.StopBranchDirectConfirm) -or $r6.StopBranchConfirmViaGate) {
+    $failures += "Assertion 6 FAILED: a direct ungated ui_home_show_stop_confirm() beside a stray LCD_PIN_ROLE_USER token scored StopBranchDirectConfirm=$($r6.StopBranchDirectConfirm) StopBranchConfirmViaGate=$($r6.StopBranchConfirmViaGate), expected true/false."
+} else {
+    Write-Host "Assertion 6 OK: a direct confirm call beside a stray gate token is detected."
+}
+
+# --- Assertion 7: gate some other action, then confirm directly -> caught.
+$gateThenDirectBody = $goodBody -replace [regex]::Escape('ui_home_show_stop_confirm_gated_cb, NULL);'), "some_other_cb, NULL); ui_home_show_stop_confirm();"
+if ($gateThenDirectBody -eq $goodBody) {
+    throw "test setup error: the replace for assertion 7 did not match anything in `$goodBody"
+}
+$gateThenDirectFile = Join-Path $scratchDir "gate_then_direct.c"
+Set-Content -Path $gateThenDirectFile -Value $gateThenDirectBody -Encoding utf8
+$r7 = Invoke-StopPathGateScan -SourceFile $gateThenDirectFile
+if ((-not $r7.StopBranchDirectConfirm) -or $r7.StopBranchConfirmViaGate) {
+    $failures += "Assertion 7 FAILED: gate-other-callback-then-direct-confirm scored StopBranchDirectConfirm=$($r7.StopBranchDirectConfirm) StopBranchConfirmViaGate=$($r7.StopBranchConfirmViaGate), expected true/false."
+} else {
+    Write-Host "Assertion 7 OK: a gate on another callback followed by a direct confirm is detected."
 }
 
 } finally {
@@ -165,5 +201,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_stop_path_requires_pin: all 5 assertions passed."
+Write-Host "test_check_stop_path_requires_pin: all 7 assertions passed."
 exit 0

@@ -23,9 +23,13 @@
 # reference a PIN gate (ui_lcd_lock_run_gated() / LCD_PIN_ROLE_*) --
 # the RUNNING/PAUSED branch (the button reads "Stop") equally with the
 # Idle/Done/Faulted branch (the button reads "Start"). The Stop branch must
-# still ultimately reach ui_home_show_stop_confirm() (directly, or via a
-# gated callback wrapper such as ui_home_show_stop_confirm_gated_cb) so the
-# existing confirm dialog is never bypassed.
+# reach the confirm dialog ONLY through the gate: it must pass
+# ui_home_show_stop_confirm_gated_cb to a ui_lcd_lock_run_gated(...) call
+# (PIN first, then confirm), and must not call ui_home_show_stop_confirm()
+# directly anywhere in the branch. (2026-09-28 review of 3e7bb20b: the first
+# version accepted any gate token plus any stop-confirm reference in the
+# branch, so a direct ungated ui_home_show_stop_confirm() call beside a stray
+# LCD_PIN_ROLE_USER token passed.)
 #
 # Usage: powershell -ExecutionPolicy Bypass -File tools\check_stop_path_requires_pin.ps1 [-SourceFile <path>]
 param(
@@ -136,11 +140,18 @@ function Invoke-StopPathGateScan {
 
     $stopBranchGated = [regex]::IsMatch($stopBranch, $gatePattern)
     $stopBranchCallsStop = [regex]::IsMatch($stopBranch, $stopCallPattern)
+    # PIN-then-confirm: the wrapper must be an argument of the gate call
+    # itself ([^;]* keeps the match inside one statement).
+    $stopBranchConfirmViaGate = [regex]::IsMatch($stopBranch,
+        'ui_lcd_lock_run_gated\s*\([^;]*\bui_home_show_stop_confirm_gated_cb\b')
+    $stopBranchDirectConfirm = [regex]::IsMatch($stopBranch, '\bui_home_show_stop_confirm\s*\(')
     $startBranchGated = [regex]::IsMatch($startBranch, $gatePattern)
 
     return [PSCustomObject]@{
         StopBranchGated      = $stopBranchGated
         StopBranchCallsStop  = $stopBranchCallsStop
+        StopBranchConfirmViaGate = $stopBranchConfirmViaGate
+        StopBranchDirectConfirm  = $stopBranchDirectConfirm
         StartBranchGated     = $startBranchGated
         StopBranchText       = $stopBranch
         StartBranchText      = $startBranch
@@ -159,6 +170,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     if (-not $result.StopBranchGated) {
         $failures += "the RUNNING/PAUSED branch (Stop) does not reference a PIN gate (ui_lcd_lock_run_gated / LCD_PIN_ROLE_*) -- owner decision 2026-09-28 requires Stop to be gated the same as Start ('stop needs login. there is an estop button')."
+    }
+    if ($result.StopBranchDirectConfirm) {
+        $failures += "the RUNNING/PAUSED branch (Stop) calls ui_home_show_stop_confirm() directly -- that opens the confirm dialog with no PIN; it must only be reached as ui_home_show_stop_confirm_gated_cb passed to ui_lcd_lock_run_gated()."
+    }
+    if (-not $result.StopBranchConfirmViaGate) {
+        $failures += "the RUNNING/PAUSED branch (Stop) does not pass ui_home_show_stop_confirm_gated_cb to ui_lcd_lock_run_gated() -- the required order is PIN first, then the confirm dialog."
     }
     if (-not $result.StartBranchGated) {
         $failures += "the else branch (Start) does not reference a PIN gate at all -- this check cannot distinguish a correctly-gated Stop from a file where gating was removed everywhere, so this counts as a failure to keep the check honest."
