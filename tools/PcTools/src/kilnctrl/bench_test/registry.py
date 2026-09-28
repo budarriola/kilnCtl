@@ -175,7 +175,7 @@ _AT = [
 _HP = [
     ("HP-01", "Single zone"), ("HP-02", "All zones"),
     ("HP-03", "On/off device zone"), ("HP-04", "Pause / resume"),
-    ("HP-05", "Stop"), ("HP-06", "Stop is never gated"),
+    ("HP-05", "Stop"), ("HP-06", "Stop requires login"),
     ("HP-07", "Faulted run"), ("HP-08", "Firing history"),
 ]
 _WEB_IDS = [

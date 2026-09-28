@@ -574,7 +574,7 @@ equivalent -- Testable on bench vs hardware-gated -- Result.
 |---|---|---|---|---|---|---|
 | Dashboard poll (page load) | `GET /api/status` | OPEN | `get_board_state` (superset) | Home page | Testable | PASS 2026-09-21 (A1); PASS 2026-09-21 (W2, first live web_commission_row.py run, see BENCH_TEST_LOG web-interface class section) |
 | Start firing | `POST /api/profile_exec/start` | USER | `profiles_start` | Home "Start" / profile picker | Testable (bench load) | PASS 2026-09-21 (C11, owner-authorized: E-stop verified via C5, throwaway low-temp profile M18C_TEST started, "ok - firing #0"; stopped via profiles_stop() before hand-back) |
-| Stop firing | `POST /api/profile_exec/stop` | SAFETY_REDUCE | `profiles_stop` | Home stop control | Testable | |
+| Stop firing | `POST /api/profile_exec/stop` | USER | `profiles_stop` | Home stop control | Testable | |
 | Pause firing | `POST /api/profile_exec/pause` | USER | `profiles_pause` | -- | Testable | PASS 2026-09-21 (C12: paused, state=2, all zones relay=off duty=0.00 confirmed via profiles_get_exec_status) |
 | Resume firing | `POST /api/profile_exec/resume` | USER | `profiles_resume` | -- | Testable | PASS 2026-09-21 (C12: resumed cleanly, "ok - resumed") |
 | Dismiss last run (`ackLastRunBtn`) | `POST /api/profile_exec/ack_last_run` | USER | `profiles_ack_last_run` | -- | Testable | FAIL-EXPECTED 2026-09-21 (web_commission_row.py W3, live CDP: button not in DOM -- no last-run banner condition on this bench right now, JS only injects it when one exists; see BENCH_TEST_LOG) |

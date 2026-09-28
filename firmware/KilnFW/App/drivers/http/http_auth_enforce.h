@@ -107,9 +107,10 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 //
 //   web_enabled == true, tier == ROUTE_TIER_SAFETY_REDUCE:
 //     ALLOW, regardless of role -- including HTTP_AUTH_ROLE_NONE. Plan
-//     section 9: a route that can only ever reduce heat/risk (today, POST
-//     /api/profile_exec/stop) must never become harder to reach once auth
-//     is on than it was with auth off -- a locked-out owner watching a kiln
+//     section 9: a route that can only ever reduce heat/risk (today the
+//     current-sweep/autotune/danger-mode aborts; POST /api/profile_exec/stop
+//     is USER since the 2026-09-28 owner decision) must never become harder
+//     to reach once auth is on than it was with auth off -- a locked-out owner watching a kiln
 //     climb is a worse failure mode than the one authentication protects
 //     against. This is decided from route_tier_table.h's own per-route
 //     classification, not a URI string match inside this function or the

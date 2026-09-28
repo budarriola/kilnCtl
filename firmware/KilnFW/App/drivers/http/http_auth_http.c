@@ -294,10 +294,10 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     char token[128];
     token[0] = '\0';
     // Skip the session lookup entirely for OPEN and SAFETY_REDUCE routes
-    // (e.g. POST /api/profile_exec/stop) and whenever web auth is off --
+    // (e.g. POST /api/autotune/abort) and whenever web auth is off --
     // http_auth_check() would ALLOW all of those regardless of role, and
-    // this also means the Dashboard's hot GET /api/status path (and the
-    // stop button) never pays for a session-table lookup they cannot need.
+    // this also means the Dashboard's hot GET /api/status path never pays
+    // for a session-table lookup it cannot need.
     // Not an optimization this decision structurally depends on:
     // http_auth_check() called with role == HTTP_AUTH_ROLE_NONE
     // unconditionally still ALLOWs every one of those cases on its own, so

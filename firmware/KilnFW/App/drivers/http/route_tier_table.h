@@ -168,11 +168,12 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * POST /api/profile_exec/stop is ordinary ROUTE_TIER_USER, matching
      * /api/profile_exec/start below -- an operator who can start a firing
      * from this GUI can also stop it, and neither is reachable pre-login.
-     * ROUTE_TIER_SAFETY_REDUCE is unaffected for every OTHER route still
-     * using it below (current_sweep/abort, autotune/abort, danger/stop):
-     * those each abort a relay-driving diagnostic/test task that has no
-     * physical E-stop equivalent, so their own no-session requirement
-     * stands unchanged. */
+     * ROUTE_TIER_SAFETY_REDUCE is left as-is for every OTHER route still
+     * using it below (current_sweep/abort, autotune/abort, danger/stop).
+     * The physical E-stop removes element power on its own for those too
+     * (firmware/SaftyFW/README.md, "Wiring the E-stop"), so whether they
+     * should also require login under the "dashboards only" decision is an
+     * open owner question, not something this change decided. */
     /* WEB_AUTH_PLAN.md section 8: the explicit "stay unlocked" action. USER
      * tier so the shared pre-handler's own activity-touch (see
      * http_auth_decision_counts_as_activity()) extends the session on this
@@ -210,10 +211,9 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* SAFETY_REDUCE, not ADMIN: aborts the current-sweep task
      * (zones_current_sweep_abort(), zones_current_sweep_task.c), which drives
      * relays to measure per-zone current -- an expired session must not be
-     * able to keep that running -- always reachable with no session,
-     * unaffected by /api/profile_exec/stop's 2026-09-28 move to
-     * ROUTE_TIER_USER above (that route has a physical E-stop backstop;
-     * this diagnostic relay-drive task does not). */
+     * able to keep that running -- always reachable with no session.
+     * Not changed by /api/profile_exec/stop's 2026-09-28 move to
+     * ROUTE_TIER_USER above; see the note there. */
     ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/zones/current_sweep/status", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/settings/tz", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -294,9 +294,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* SAFETY_REDUCE, not ADMIN: aborts a running autotune
      * (autotune_engine_abort() -> abort_locked() -> force_relays_off(),
      * autotune_engine_guard.c), which drives relays for the relay-step test
-     * -- always reachable with no session, same reasoning as
-     * current_sweep/abort above (no physical E-stop equivalent for this
-     * relay-drive test, unlike /api/profile_exec/stop). */
+     * -- always reachable with no session, same as current_sweep/abort
+     * above. */
     ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
     ROUTE_TIER("/api/adaptive_tune/enable", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/adaptive_tune/revert", HTTP_POST, ROUTE_TIER_ADMIN),

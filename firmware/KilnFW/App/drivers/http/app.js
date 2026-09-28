@@ -2346,7 +2346,9 @@
   // (is_page_shell_get() in http_auth_http.c -- harmless, since the shell
   // carries no per-caller data and every real data/action route is gated at
   // the /api/ layer), so this is a client-side proactive gate reusing that
-  // same openLoginModal() machinery rather than a new server-rendered page.
+  // same login-modal machinery rather than a new server-rendered page.
+  // Tested by test_page_login_gate.js (extracted from the next line through
+  // pollSession()).
   // Paths reachable with no login at all: the dashboard itself, /login, and
   // the Wi-Fi provisioning/AP-setup flow's own pages (a device with no
   // credential yet, or on the AP network, must be able to get online before
@@ -2371,8 +2373,21 @@
     // page itself cannot perform is refused by the /api/ tier check as
     // usual.
     if (role === 'admin' || role === 'user') return;
-    openLoginModal('Administrator login required').then(function (ok) {
+    // The page's own first data fetch has usually already 401'd and raised
+    // the modal through the fetch wrapper by the time this poll answers.
+    // Join THAT login (ensureAdminLogin()'s pendingLogin singleton) rather
+    // than calling openLoginModal() a second time: two concurrent opens of
+    // the one shared modal DOM each attach their own submit handler, so a
+    // single Log in click would POST /api/auth/login twice (doubling the
+    // lockout ladder's failure count on a wrong password). If the operator
+    // already declined that modal, go straight back to the dashboard.
+    if (authPromptDeclined) {
+      window.location.href = '/';
+      return;
+    }
+    ensureAdminLogin('Sign in required').then(function (ok) {
       if (!ok) {
+        authPromptDeclined = true;
         window.location.href = '/';
       }
     });

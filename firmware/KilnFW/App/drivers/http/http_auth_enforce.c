@@ -52,12 +52,12 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
         return bootstrap_needed ? HTTP_AUTH_DECISION_ALLOW : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
     }
 
-    // Plan section 9: a route that can only ever reduce heat/risk (today,
-    // POST /api/profile_exec/stop, ROUTE_TIER_SAFETY_REDUCE) must be
-    // reachable regardless of role or session state -- including
-    // HTTP_AUTH_ROLE_NONE and a locked-out client. Authentication must
-    // never be able to make stopping a firing harder than it is with auth
-    // off; checked here, before the no-session denial below, so nothing
+    // Plan section 9: a route that can only ever reduce heat/risk
+    // (ROUTE_TIER_SAFETY_REDUCE -- today the current-sweep, autotune and
+    // danger-mode aborts; POST /api/profile_exec/stop moved to USER by the
+    // 2026-09-28 owner decision) must be reachable regardless of role or
+    // session state -- including HTTP_AUTH_ROLE_NONE and a locked-out
+    // client. Checked here, before the no-session denial below, so nothing
     // past this line can veto it.
     if (tier == ROUTE_TIER_SAFETY_REDUCE) {
         return HTTP_AUTH_DECISION_ALLOW;
