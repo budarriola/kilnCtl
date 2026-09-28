@@ -2508,6 +2508,102 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+// HP-02 (bench, 2026-09-25..27, ESP 0fb8ad98): zone 2 had been left typed
+// on/off (zone_type 1) by an earlier HP-03/HP-07 preset, and the 3-zone
+// profile carried no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6
+// holds such a zone's relay OFF for the whole firing while (pre-fix) pass 1
+// still ran its PID and reported duty 1.00 -- a zone that could never heat,
+// with nothing naming why. profile_executor_run() now refuses that
+// configuration up front, naming the zone and the remedies.
+static void test_run_refuses_on_off_zone_without_any_rule(void)
+{
+    TEST_SECTION("profile_executor_run() refuses an on/off-typed zone the profile has no on/off rule for "
+                 "in any segment (HP-02), and accepts the same profile once a rule exists");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x03; /* zone 0 heater, zone 1 on/off */
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].ramp_c_per_hr = 0.0f;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_out.on_off_rule_count = 0;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    s_test_heat_zone_claim_refused = false;
+
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_max_temp_c[1] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+    g_stub_control_mode[1] = ZONE_CONTROL_MODE_PID; /* the bench state: typed on/off, mode still PID */
+    g_stub_zone_is_on_off[1] = true;
+
+    // RED: no on/off rule anywhere in the profile for zone 1. err is sized
+    // like dashboard_exec_http.c's start handler (128 B): the remedy must
+    // survive that buffer, not only a generous test one.
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "an on/off zone with no rule in any segment must be refused at run start");
+    TEST_CHECK(strstr(err, "on/off") != NULL, "the refusal must say the zone is typed on/off");
+    TEST_CHECK(strstr(err, "zone 1") != NULL, "the refusal must name the zone");
+    TEST_CHECK(strstr(err, "make it a heater") != NULL,
+               "the full remedy must fit the HTTP handler's 128 B err_msg (not truncated)");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused run must stay IDLE");
+
+    // A DISABLED rule is not a rule (the tick path treats enable==0 as "no
+    // rule" too -- profile_resolve_on_off_rule()).
+    s_test_profiles_http_get_out.on_off_rule_count = 1;
+    s_test_profiles_http_get_out.on_off_rules[0].segment_index = 0;
+    s_test_profiles_http_get_out.on_off_rules[0].zone_index = 1;
+    s_test_profiles_http_get_out.on_off_rules[0].enable = 0;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "a disabled rule must not satisfy the check");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused run must stay IDLE (disabled rule)");
+
+    // GREEN: enable the rule -- identical setup otherwise.
+    s_test_profiles_http_get_out.on_off_rules[0].enable = 1;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "the same profile with one enabled on/off rule for zone 1 must start");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "a successful run must reach RUNNING");
+    TEST_CHECK(s_exec.zones[1].relay_starved_s == 0.0f && s_exec.zones[1].relay_denied_reason == 0,
+               "run start must zero the HP-02 starvation fields");
+    profile_executor_halt();
+
+    // GREEN 2: retyping the zone back to a heater also lifts the refusal
+    // (the bench remedy), with no rule at all.
+    g_stub_zone_is_on_off[1] = false;
+    s_test_profiles_http_get_out.on_off_rule_count = 0;
+    s_exec.state = PROFILE_EXEC_IDLE;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "a heater-typed zone needs no on/off rule");
+    profile_executor_halt();
+
+    // Review fix: a BUILTIN schedule is exempt -- profiles_http_get() gives
+    // it every configured zone and it cannot carry on/off rules, so refusing
+    // would make every builtin unrunnable on a board with a vent. Plan sec 3
+    // rule 6 (device held OFF) applies instead.
+    g_stub_zone_is_on_off[1] = true;
+    s_exec.state = PROFILE_EXEC_IDLE;
+    err[0] = '\0';
+    ok = profile_executor_run(PROFILE_BUILTIN_ID_BASE, err, sizeof(err));
+    TEST_CHECK(ok, "a builtin schedule must not be refused over an on/off zone it has no rule for");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "builtin with an on/off zone reaches RUNNING");
+    profile_executor_halt();
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    g_stub_zone_is_on_off[1] = false;
+}
+
 // Review of 933a7eec: autotune start peeks profile_executor_zone_is_active()
 // and profile start peeks autotune_engine_is_active_on_zone(), but each peek
 // runs BEFORE the caller's own module lock, so two starts on the same zone
@@ -9676,6 +9772,7 @@ void run_test_profile_executor_prestart(void)
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();

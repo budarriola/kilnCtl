@@ -61,6 +61,11 @@ static void fill_worst_case_zone(profile_exec_zone_status_t *z, uint8_t zi)
     z->cooling_limited = true;
     z->heat_blocked = true;
     z->heat_blocked_sources = 0xFFFFFFFFu; /* "%lu" worst case */
+    /* HP-02 (2026-09-27): relay starvation reporting, same worst-case
+     * convention -- the widest "%.1f" dashboard_json.h's sizing note budgets
+     * (10B, "-1234567.0") and the uint8_t max for "%u". */
+    z->relay_starved_s = -1234567.0f;
+    z->relay_denied_reason = 255;
     z->ff_hold_used_matrix = true;
     z->ff_hold_infeasible = true;
     z->ff_membership_change_count = 0xFFFFFFFFu; /* "%lu" worst case, same as heat_blocked_sources */
@@ -194,6 +199,9 @@ static void test_control_status_json_is_complete_and_well_formed_at_3_zones(void
     TEST_CHECK(strstr(json, "\"bd_load_cap_boost\"") != NULL, "must contain bd_load_cap_boost -- previously "
               "invisible off-board entirely");
     TEST_CHECK(strstr(json, "\"bd_final_commanded\"") != NULL, "must contain bd_final_commanded");
+    TEST_CHECK(strstr(json, "\"relay_starved_s\":-1234567.0") != NULL,
+              "must contain relay_starved_s at its worst-case width (HP-02 starvation reporting)");
+    TEST_CHECK(strstr(json, "\"relay_denied_reason\":255") != NULL, "must contain relay_denied_reason");
     /* All 3 zones must actually be present, not just zone 0 before a bail. */
     int zone_objects = 0;
     for (const char *p = json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
@@ -231,6 +239,9 @@ static void test_exec_status_json_is_complete_and_well_formed_at_3_zones(void)
     TEST_CHECK(strstr(json, "\"ff_hold_used_matrix\"") != NULL, "must contain ff_hold_used_matrix");
     TEST_CHECK(strstr(json, "\"ff_hold_infeasible\"") != NULL, "must contain ff_hold_infeasible");
     TEST_CHECK(strstr(json, "\"ff_membership_change_count\"") != NULL, "must contain ff_membership_change_count");
+    TEST_CHECK(strstr(json, "\"relay_starved_s\":-1234567.0") != NULL,
+              "must contain relay_starved_s at its worst-case width (HP-02 starvation reporting)");
+    TEST_CHECK(strstr(json, "\"relay_denied_reason\":255") != NULL, "must contain relay_denied_reason");
     int zone_objects = 0;
     for (const char *p = json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
     TEST_CHECK(zone_objects == 3, "all 3 active zones must be present");

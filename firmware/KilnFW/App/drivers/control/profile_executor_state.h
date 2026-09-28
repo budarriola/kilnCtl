@@ -198,6 +198,16 @@ typedef struct {
      * bitwise OR of safety_fault_source_t (safety_link.h). */
     bool     heat_blocked;
     uint32_t heat_blocked_sources;
+    /* HP-02 (2026-09-27): seconds this zone has continuously reported a duty
+     * of at least PROFILE_EXECUTOR_RELAY_STARVED_DUTY while its relay was
+     * NOT commanded on -- the "wants heat, gets none" condition heat_blocked
+     * above only covers for the authority-latch case. Reset to 0 the tick
+     * the relay is commanded on or the duty drops. relay_denied_reason is
+     * the profile_exec_relay_denied_t value naming which mechanism refused
+     * the relay on the most recent tick, 0 when none did. See
+     * zone_runtime_t's own field comment (profile_executor_internal.h). */
+    float    relay_starved_s;
+    uint8_t  relay_denied_reason;
     /* Coupled-hold solve status (Opus review, blocker 3 -- these used to be
      * written by zone_feedforward() and read nowhere off-board, exactly the
      * "producer with no consumer" bug class this repo has hit repeatedly).

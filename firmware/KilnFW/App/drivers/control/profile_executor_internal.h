@@ -566,6 +566,22 @@ typedef struct {
      * Observed on the bench doing exactly that for two minutes. */
     bool     heat_blocked;
     uint32_t heat_blocked_sources;
+
+    /* HP-02 bench bug (2026-09-25..27): a zone that keeps asking for heat
+     * and never gets a relay. relay_starved_s accumulates the seconds this
+     * zone's duty has read >= PROFILE_EXECUTOR_RELAY_STARVED_DUTY while
+     * relay_commanded_on stayed false, and resets to 0 on any tick the relay
+     * is actually commanded on (or the duty drops). A healthy PID zone at
+     * full duty can legitimately show a few seconds here (a phase-staggered
+     * first window, a min-off hold); one that shows minutes is the exact
+     * "duty 1.00, relay off, faulted false, heat_blocked false" signature
+     * the bench saw for 76 s with nothing anywhere naming the cause.
+     * relay_denied_reason names which mechanism refused the relay on the
+     * most recent tick (profile_exec_relay_denied_t, profile_executor.h)
+     * -- 0 whenever nothing did. Both are reported over
+     * GET /api/profile_exec and /api/control. */
+    float    relay_starved_s;
+    uint8_t  relay_denied_reason;
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
 

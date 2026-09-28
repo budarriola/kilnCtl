@@ -216,6 +216,24 @@ void heater_output_seed_phase(heater_output_state_t *state, uint32_t window_ms, 
  * transition if the relay was on. */
 void heater_output_force_off(heater_output_state_t *state);
 
+/* The caller decided NOT to honour the ON this tick's heater_output_duty()/
+ * heater_output_bangbang() call returned (profile_executor.c's
+ * max_simultaneous_relays load cap, 2026-09-27). Those calls already
+ * recorded relay_on = true and counted a transition for a relay that is now
+ * not going to close, so without this the state would say "on" for a relay
+ * that is off: the min-on hold would then start defending an on-time that
+ * never happened, and cycle_count would drift from what the contacts did.
+ * relay_on_before_tick/cycle_count_before_tick are the values from BEFORE
+ * this tick's decision call (the caller snapshots them); the result is what
+ * that call would have left had it decided OFF itself -- relay_on false,
+ * on_elapsed_ms 0, and one transition counted only if the relay really was
+ * on before (which also restarts bang-bang's since_last_change_ms, so the
+ * min_off_ms hold covers the real OFF). Window timing
+ * (window_elapsed_ms/on_ms_this_window) is deliberately left alone: the denied on-time is repaid through the
+ * caller's deferred_on_ms credit, not by rewinding the window. */
+void heater_output_note_denied(heater_output_state_t *state, bool relay_on_before_tick,
+                               uint32_t cycle_count_before_tick);
+
 #ifdef __cplusplus
 }
 #endif

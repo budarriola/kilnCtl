@@ -153,6 +153,28 @@ void heater_output_force_off(heater_output_state_t *state)
     state->on_elapsed_ms = 0;
 }
 
+void heater_output_note_denied(heater_output_state_t *state, bool relay_on_before_tick,
+                               uint32_t cycle_count_before_tick)
+{
+    /* Rebuild the "decided OFF" outcome from the pre-tick snapshot rather
+     * than decrementing: the decision call may or may not have counted a
+     * transition (it did iff relay_on flipped), and the only thing that
+     * decides whether the physical relay switches this tick is where it
+     * was before. */
+    state->cycle_count = cycle_count_before_tick + (relay_on_before_tick ? 1u : 0u);
+    state->relay_on = false;
+    state->on_elapsed_ms = 0;
+    /* Review fix (reset-one-side class): bang-bang's min_off_ms debounce
+     * derives from since_last_change_ms. A denial of a relay that really was
+     * ON is a real ON->OFF switch, so the off-time starts now; without this
+     * a re-grant next tick could close the contacts again inside min_off_ms.
+     * (A denial from OFF leaves whatever the decision call left: bangbang()
+     * zeroed it on its phantom flip, which only delays the next ON.) */
+    if (relay_on_before_tick) {
+        state->since_last_change_ms = 0;
+    }
+}
+
 uint32_t heater_output_required_window_ms(uint32_t min_on_ms)
 {
     uint32_t effective = (min_on_ms < HEATER_MIN_ON_MS_FLOOR) ? HEATER_MIN_ON_MS_FLOOR : min_on_ms;

@@ -20,6 +20,7 @@
 #include "kiln_io_owner.h"
 #include "live_profile.h"
 #include "ota_state.h"
+#include "profiles_builtin.h" /* PROFILE_BUILTIN_ID_BASE -- HP-02 refusal exempts builtins */
 #include "profiles_store.h"
 #include "readiness_gate.h"
 #include "relay_authority.h"
@@ -729,6 +730,54 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
 
+    /* HP-02 bench bug (2026-09-25..27, ESP 0fb8ad98): an on/off-typed zone
+     * (ZONE_TYPE_ON_OFF, left behind by HP-03/HP-07's zone_type override)
+     * in a profile carrying no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md
+     * sec 3 rule 6 holds such a zone's relay OFF for the whole firing, and
+     * the tick loop never applies its PID/bang-bang decision (the on/off
+     * path owns its apply_relay() call) -- so the bench saw duty 1.00,
+     * relay off, faulted false, heat_blocked false for 76 s while zone 2
+     * rose 0.9 C against 11 C and 9 C for its neighbours, with nothing
+     * naming why. A zone that no segment of this profile can ever turn on
+     * is a configuration mismatch between the profile and the zone type;
+     * refuse it here, once, naming the fix, rather than run a firing whose
+     * third zone can never heat. A rule in ANY segment is enough to pass:
+     * per-segment "no rule" is legitimate (a vent that only opens during
+     * the cooling segment) and is reported live instead, through
+     * relay_denied_reason == PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE.
+     *
+     * Builtin schedules are exempt (review fix): profiles_http_get() gives a
+     * builtin the mask of EVERY configured zone and a builtin can carry no
+     * on/off rules, so refusing here would make every builtin unrunnable on
+     * any board with a vent typed on/off -- none of the three remedies is
+     * available for a builtin short of retyping the vent. Plan sec 3 rule 6
+     * (device OFF) is the intended behaviour there, and relay_denied_reason
+     * still names it live. The message fits the HTTP start handler's 128 B
+     * err_msg (dashboard_exec_http.c) so the remedy is not truncated away. */
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (profile_id >= PROFILE_BUILTIN_ID_BASE) break;
+        if (!(p.zone_mask & (1u << zi)) || !zone_is_on_off(zi)) continue;
+        bool any_rule = false;
+        for (uint8_t ri = 0; ri < p.on_off_rule_count && ri < PROFILE_MAX_ON_OFF_RULES; ri++) {
+            const profile_on_off_rule_t *pr = &p.on_off_rules[ri];
+            if (pr->enable && pr->zone_index == zi && pr->segment_index < p.segment_count) {
+                any_rule = true;
+                break;
+            }
+        }
+        if (any_rule) continue;
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "zone %u is typed on/off but no on/off rule in this profile targets it: "
+                     "add one, drop it from the mask, or make it a heater",
+                     (unsigned)zi);
+        }
+        ESP_LOGW(PE_TAG, "refusing run: on/off zone %u has no on/off rule in any of %u segment(s)",
+                 zi, (unsigned)p.segment_count);
+        return false;
+    }
+
     int8_t first_active = -1;
     uint8_t active_rank = 0;
     float baseline_target_c = p.segments[0].target_c;
@@ -873,6 +922,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * fail-safe-shaped reset: never actuated, no held time. */
         z->on_off_actuated_on = false;
         z->on_off_actuated_held_s = 0.0f;
+        /* HP-02 starvation reporting starts from zero every run/resume. */
+        z->relay_starved_s = 0.0f;
+        z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_NONE;
 
         /* Ramp baseline: the first active zone's actual (calibrated) reading
          * if we have one, else the segment's own target (makes ramp math a

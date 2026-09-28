@@ -1488,6 +1488,15 @@ class HP02DiagnosticTest(unittest.TestCase):
             "_now": lambda: clock["t"],
             "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
             "_http_get_json": get_json,
+            # All-heater zone config through the same seam
+            # `_check_zone_ceilings` and HP-02's zone_type precondition
+            # read -- keeps these tests off the network (they used to
+            # wait out a real GET to 10.0.0.5 per call).
+            "_get_zones_config": lambda host: {"zones": [
+                {"index": 0, "zone_type": 0, "max_temp_c": 300.0},
+                {"index": 1, "zone_type": 0, "max_temp_c": 300.0},
+                {"index": 2, "zone_type": 0, "max_temp_c": 300.0},
+            ]},
         }
         _always_ok_preflight(ctx)
         return ctx
@@ -1602,3 +1611,210 @@ class HP02DiagnosticTest(unittest.TestCase):
         run = ctx["_hp02"]
         self.assertEqual(len(run["zone_diag_samples"]), 3)
         self.assertEqual(calls["n"], 3)
+
+
+class StarvedZonesTest(unittest.TestCase):
+    """`_starved_zones` -- HP-02's root-cause symptom check against the
+    `relay_denied_reason`/`relay_starved_s` fields firmware now emits."""
+
+    def test_names_zone_with_denied_reason(self):
+        samples = [
+            {"zones": {0: {"duty": 1.0, "relay_denied_reason": 0, "relay_starved_s": 0.0},
+                       2: {"duty": 1.0, "relay_denied_reason": 1, "relay_starved_s": 12.0}}},
+        ]
+        flagged = C._starved_zones(samples)
+        self.assertEqual(list(flagged), [2])
+        self.assertIn("no on/off rule", flagged[2])
+
+    def test_names_zone_starved_long_without_reason(self):
+        samples = [
+            {"zones": {1: {"duty": 1.0, "relay_denied_reason": 0, "relay_starved_s": 30.0}}},
+            {"zones": {1: {"duty": 1.0, "relay_denied_reason": 0, "relay_starved_s": 76.0}}},
+        ]
+        flagged = C._starved_zones(samples)
+        self.assertEqual(list(flagged), [1])
+        self.assertIn("76s", flagged[1])
+
+    def test_short_starvation_is_normal_pwm_timing(self):
+        samples = [{"zones": {1: {"duty": 1.0, "relay_denied_reason": 0, "relay_starved_s": 8.0}}}]
+        self.assertEqual(C._starved_zones(samples), {})
+
+    def test_old_firmware_without_fields_flags_nothing(self):
+        samples = [{"zones": {2: {"duty": 1.0, "heat_blocked": False}}}, {}]
+        self.assertEqual(C._starved_zones(samples), {})
+
+
+class HP02OnOffTypedZonePreconditionTest(unittest.TestCase):
+    """HP-02's real bench root cause (2026-09-25..27): zone 2 left at
+    zone_type 1 by an earlier HP-03/HP-07 restore that was never read back.
+    The case must refuse up front, by name, before starting any profile."""
+
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+        self._saved_pehc = _install_fake_profile_edit_http_client(_FakeProfileEditHttpClient())
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+        _restore_profile_edit_http_client(self._saved_pehc)
+
+    def _ctx(self, profiles):
+        srv = _FakeSrv(
+            readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
+            profiles=profiles,
+        )
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+            "_http_get_json": lambda host, path: (200, {}),
+        }
+        _always_ok_preflight(ctx)
+        return ctx
+
+    def test_on_off_typed_zone_fails_before_starting(self):
+        self.fake_zhc.snapshot["zones"][2]["zone_type"] = 1
+        profiles = _FakeProfilesClientHP()
+        result = C._case_hp02(self._ctx(profiles))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("[2]", result.reason)
+        self.assertIn("zone_type", result.reason)
+        self.assertIn("restore", result.reason)
+        self.assertEqual(profiles.started, [], "no profile may start on a mis-typed zone")
+
+    def test_all_heater_zones_proceed_to_the_run(self):
+        statuses = [_ExecStatus("running", []), _ExecStatus("done", [])]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+        ctx["srv"]._thermo.read = HP02DiagnosticTest._stepped_thermo(
+            [_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 30.0)]
+        )
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(len(profiles.started), 1)
+
+    def test_unreadable_zone_config_does_not_block_the_run(self):
+        """Same tolerance as `_check_zone_ceilings`: a GET failure is a
+        tooling problem, not a board finding."""
+        statuses = [_ExecStatus("running", []), _ExecStatus("done", [])]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+
+        def raising(host):
+            raise OSError("unreachable")
+
+        ctx["_get_zones_config"] = raising
+        ctx["srv"]._thermo.read = HP02DiagnosticTest._stepped_thermo(
+            [_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 30.0)]
+        )
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_fail_reason_names_starved_zone(self):
+        statuses = [_ExecStatus("running", []), _ExecStatus("done", [])]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        ctx = self._ctx(profiles)
+
+        def get_json(host, path):
+            if path == "/api/profile_exec":
+                return 200, {"zones": [
+                    {"zone": 0, "duty": 0.5, "relay_on": True, "heat_blocked": False,
+                     "relay_starved_s": 0.0, "relay_denied_reason": 0},
+                    {"zone": 1, "duty": 0.5, "relay_on": True, "heat_blocked": False,
+                     "relay_starved_s": 0.0, "relay_denied_reason": 0},
+                    {"zone": 2, "duty": 1.0, "relay_on": False, "heat_blocked": False,
+                     "relay_starved_s": 70.0, "relay_denied_reason": 1},
+                ]}
+            return 200, {}
+
+        ctx["_http_get_json"] = get_json
+        ctx["srv"]._thermo.read = HP02DiagnosticTest._stepped_thermo(
+            [_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 25.9)]
+        )
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("relay starved", result.reason)
+        self.assertIn("zone 2", result.reason)
+        self.assertIn("no on/off rule", result.reason)
+        sample_zone = ctx["_hp02"]["zone_diag_samples"][0]["zones"][2]
+        self.assertEqual(sample_zone["relay_denied_reason"], 1)
+        self.assertEqual(sample_zone["relay_starved_s"], 70.0)
+        self.assertFalse(sample_zone["relay_on"])
+
+
+class ZonesRestoreReadbackTest(unittest.TestCase):
+    """`_post_zones_restore` with `expected_snapshot`: an "ok" POST is only
+    believed once GET /api/zones reads the original `zone_type`/`max_temp_c`
+    back -- the missing check that let HP-02's zone 2 stay on/off."""
+
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+        self.ctx = {"_sleep": lambda s: None}
+        self.expected = {"zones": [
+            {"index": 0, "zone_type": 0, "max_temp_c": 300.0},
+            {"index": 1, "zone_type": 0, "max_temp_c": 300.0},
+            {"index": 2, "zone_type": 0, "max_temp_c": 300.0},
+        ]}
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+
+    def test_matching_readback_is_success(self):
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body", expected_snapshot=self.expected)
+        self.assertIsNone(err)
+        self.assertEqual(len(self.fake_zhc.posted_bodies), 1)
+
+    def test_zone_type_left_on_off_is_reported_and_retried(self):
+        self.fake_zhc.snapshot["zones"][2]["zone_type"] = 1
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body", expected_snapshot=self.expected)
+        self.assertIsNotNone(err)
+        self.assertIn("zone 2 zone_type is 1, expected 0", err)
+        self.assertEqual(len(self.fake_zhc.posted_bodies), C._HP07_RESTORE_ATTEMPTS)
+
+    def test_max_temp_mismatch_is_reported(self):
+        self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 36.4
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body", expected_snapshot=self.expected)
+        self.assertIn("zone 0 max_temp_c is 36.4, expected 300.0", err)
+
+    def test_no_expected_snapshot_keeps_old_behaviour(self):
+        self.fake_zhc.snapshot["zones"][2]["zone_type"] = 1
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body")
+        self.assertIsNone(err)
+
+    def test_hp03_surfaces_a_restore_that_did_not_land(self):
+        """End to end through `_case_hp03`: the fake board accepts every POST
+        with "ok" but its GET keeps reporting zone 2 as on/off."""
+        import kilnctrl.zones_http_client as real
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=2, relay_commanded_on=False)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        srv = _FakeSrv(readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)], profiles=profiles)
+        clock = {"t": 0.0}
+        ctx = {"srv": srv, "host": "10.0.0.5",
+               "_now": lambda: clock["t"],
+               "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s)}
+        _always_ok_preflight(ctx)
+        saved_pehc = _install_fake_profile_edit_http_client(_FakeProfileEditHttpClient())
+        gets = {"n": 0}
+        base_get = self.fake_zhc.get_zones
+
+        def get_zones(host):
+            gets["n"] += 1
+            snap = {"zones": [dict(z) for z in base_get(host)["zones"]]}
+            if gets["n"] > 1:  # every GET after the pre-case snapshot: zone 2 stuck on/off
+                snap["zones"][2]["zone_type"] = 1
+            return snap
+
+        real.get_zones = get_zones
+        try:
+            result = C._case_hp03(ctx)
+        finally:
+            _restore_profile_edit_http_client(saved_pehc)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("read-back: zone 2 zone_type is 1, expected 0", result.reason)
+        self.assertIn("restore by hand", result.reason)

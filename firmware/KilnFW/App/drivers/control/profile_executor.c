@@ -668,6 +668,21 @@ on_off_trigger_rule_t profile_resolve_on_off_rule(const profile_t *p, uint8_t zo
     return resolved;
 }
 
+/* HP-02 observability: accumulate the seconds a zone has spent asking for
+ * (near) full heat while its relay was NOT commanded on, resetting the moment
+ * the two agree again. Called once per active zone per tick, after this
+ * tick's apply_relay() has settled relay_commanded_on. A few seconds here is
+ * normal PWM timing (first window, min-off hold); minutes is the bench's
+ * "duty 1.00, relay off, nothing else set" signature. */
+static void profile_executor_account_relay_starvation(zone_runtime_t *z, float dt_s)
+{
+    if (z->duty >= PROFILE_EXECUTOR_RELAY_STARVED_DUTY && !z->relay_commanded_on) {
+        z->relay_starved_s += dt_s;
+    } else {
+        z->relay_starved_s = 0.0f;
+    }
+}
+
 /* ---- control task ----------------------------------------------------------- */
 
 void executor_task_entry(void *arg)
@@ -1323,12 +1338,41 @@ void executor_task_entry(void *arg)
          * 6A.5 load-staggering) can see every active zone's raw want-on
          * before deciding which ones actually get the relay this tick. */
         bool want_relay_on[MAX31856_CHANNEL_COUNT] = {0};
+        /* heater_state as it stood BEFORE this tick's heater_output_duty()/
+         * heater_output_bangbang() call, so the load-cap loop below can hand
+         * a denied zone back the "decided OFF" outcome through
+         * heater_output_note_denied() (HP-02 pass-1 window-advance fix,
+         * 2026-09-27). */
+        bool relay_on_before_tick[MAX31856_CHANNEL_COUNT] = {0};
+        uint32_t cycles_before_tick[MAX31856_CHANNEL_COUNT] = {0};
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
             zone_runtime_t *z = &s_exec.zones[zi];
+            relay_on_before_tick[zi] = z->heater_state.relay_on;
+            cycles_before_tick[zi] = z->heater_state.cycle_count;
+            z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_NONE; /* re-derived every tick below */
 
             float duty = 0.0f;
             z->last_pid_terms = (pid_terms_t){0}; /* only ZONE_CONTROL_MODE_PID/PID_FUZZY below fill this in */
+            if (zone_on_off[zi]) {
+                /* HP-02 root cause (bench, 2026-09-25..27, ESP 0fb8ad98): an
+                 * on/off-typed zone whose control_mode is still PID used to
+                 * fall into the switch below and run the full PID/PWM chain
+                 * -- z->duty read 1.00 and heater_state marched through
+                 * windows -- while its relay was owned entirely by the on/off
+                 * decision path further down (apply_relay() is never called
+                 * for an on/off zone from the heater apply loop), so the
+                 * dashboard showed a zone calling for full heat that could
+                 * never heat, with nothing else set. docs/ON_OFF_ZONE_PLAN.md
+                 * sec 3: an on/off zone's relay follows its rules and the
+                 * failsafe, never a PID output. Report duty 0 and leave
+                 * heater_state alone; the on/off path keeps its own
+                 * cycle_count mirror below. */
+                z->duty = 0.0f;
+                z->cooling_limited_hold_s = 0.0f;
+                z->cooling_limited = false;
+                continue;
+            }
             switch (z->control_mode) {
             case ZONE_CONTROL_MODE_PID: {
                 /* &z->pid_cfg directly -- no copy, no adjustment. Bit-for-bit
@@ -1430,6 +1474,15 @@ void executor_task_entry(void *arg)
                 if (victim < 0) break; /* shouldn't happen given wanted > cap, but don't loop forever */
                 want_relay_on[victim] = false;
                 s_exec.zones[victim].deferred_on_ms += (float)dt_ms;
+                /* Pass 1 already recorded this zone's relay as ON in
+                 * heater_state (heater_output_duty()/_bangbang() run before
+                 * the cap can deny). Without this, the min-on hold defended
+                 * an on-time that never reached the contacts and cycle_count
+                 * counted a switch that never happened. Rewind to the
+                 * "decided OFF" outcome from the pre-tick snapshot. */
+                heater_output_note_denied(&s_exec.zones[victim].heater_state,
+                                          relay_on_before_tick[victim], cycles_before_tick[victim]);
+                s_exec.zones[victim].relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
                 wanted--;
             }
         }
@@ -1442,8 +1495,9 @@ void executor_task_entry(void *arg)
          * heater has already been considered by the pass-1 load-cap loop
          * above. want_relay_on[] at this point already reflects that cap-
          * adjusted heater decision (an on/off zone's own want_relay_on[]
-         * entry is still the pass-1 default false -- it is decided below,
-         * per zone, AFTER this count is taken), so seeding the running
+         * entry is the pass-1 default false: pass 1 skips on/off zones
+         * outright since the HP-02 fix -- it is decided below, per zone,
+         * AFTER this count is taken), so seeding the running
          * count from it and growing it as on/off zones are granted a relay
          * below gives on/off zones the cap's last, unclaimed slots without
          * ever revisiting a heater's already-decided state. Denial is
@@ -1470,6 +1524,10 @@ void executor_task_entry(void *arg)
              * before this feature existed. */
             if (!zone_on_off[zi]) {
                 apply_relay(zi, want_relay_on[zi]);
+                if (z->heat_blocked) {
+                    z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
+                }
+                profile_executor_account_relay_starvation(z, dt_s);
             }
 
             /* Guards 1/2/3/7 all gate their multi-tick accumulation windows
@@ -1817,9 +1875,12 @@ void executor_task_entry(void *arg)
                 }
 
                 /* Requirement 5: relay-cycles accounting. On/off zones never
-                 * run heater_output_bangbang()/heater_output_duty() (those
-                 * are HEATER-mode-only, see the control-mode switch above),
-                 * so z->heater_state.cycle_count is otherwise NEVER touched
+                 * run heater_output_bangbang()/heater_output_duty() (pass 1
+                 * skips an on/off zone before its control-mode switch --
+                 * this was NOT true before the HP-02 fix, when an on/off
+                 * zone whose control_mode was still PID ran the whole PWM
+                 * chain and both this mirror and heater_output.c advanced
+                 * the same counter), so z->heater_state.cycle_count is otherwise NEVER touched
                  * for an on/off zone and relay_cycles_add() below (unchanged
                  * code) would silently attribute it zero cycles for a whole
                  * firing regardless of how often its relay actually
@@ -1834,6 +1895,26 @@ void executor_task_entry(void *arg)
                 }
 
                 apply_relay(zi, actuated_on);
+                /* HP-02 observability: name WHY an on/off zone's relay is off
+                 * this tick, precedence highest first -- the authority block
+                 * and the cap are things an operator can act on now; "no rule
+                 * for this segment" is the plan's rule 6 and is expected for
+                 * a segment the author left the zone out of, but a whole run
+                 * of it (see profile_executor_run.c's start-time refusal) was
+                 * exactly the bench symptom. */
+                if (!actuated_on) {
+                    if (z->heat_blocked) {
+                        z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
+                    } else if (tick_result.cap_denied) {
+                        z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
+                    } else if (!resolved_rule.enable) {
+                        z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE;
+                    }
+                }
+                /* relay_starved_s is a duty-vs-relay disagreement counter and
+                 * an on/off zone reports duty 0, so it stays 0 here by
+                 * construction; the call keeps the two paths symmetric. */
+                profile_executor_account_relay_starvation(z, dt_s);
             }
 
             /* Contact-cycle accounting (TODO.md 6A.1): hand relay_cycles.c

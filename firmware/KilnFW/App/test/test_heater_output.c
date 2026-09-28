@@ -404,4 +404,55 @@ void run_test_heater_output(void)
         r = heater_output_duty_relay_step(&s, &cfg, 0.15f, 5000, false);
         TEST_CHECK(r == false, "10000ms of continuous on-time reached: the deferred OFF is applied");
     }
+    /* heater_output_note_denied() (2026-09-27, HP-02 follow-up): the load
+     * cap in profile_executor.c overrides an ON that heater_output_duty()
+     * already recorded. The state must end up exactly as if the call had
+     * decided OFF: relay_on false, on-hold cleared, and a transition counted
+     * only when the relay really was on before this tick. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        /* Case A: relay was OFF before the tick; duty() flipped it ON. */
+        bool before_on = s.relay_on;
+        uint32_t before_cycles = s.cycle_count;
+        bool r = heater_output_duty(&s, &cfg, 1.0f, 0);
+        TEST_CHECK(r == true && s.cycle_count == 1, "sanity: duty 1.0 opens the window ON and counts one transition");
+        heater_output_note_denied(&s, before_on, before_cycles);
+        TEST_CHECK(s.relay_on == false, "denied: state reads OFF, matching the relay that never closed");
+        TEST_CHECK(s.cycle_count == 0, "denied from OFF: the phantom ON->OFF transition is not counted");
+        TEST_CHECK(s.on_elapsed_ms == 0, "denied: no continuous on-time accrues for the min-on hold");
+        TEST_CHECK(s.on_ms_this_window == 60000 && s.window_started,
+                   "window timing is left alone -- the credit path repays the denial, not a rewind");
+        /* Case B: relay really was ON before the tick (granted last tick);
+         * denying it now is a real OFF transition on the contacts. */
+        r = heater_output_duty(&s, &cfg, 1.0f, 1000);
+        TEST_CHECK(r == true && s.cycle_count == 1, "sanity: granted again, back ON with one transition");
+        before_on = s.relay_on;
+        before_cycles = s.cycle_count;
+        r = heater_output_duty(&s, &cfg, 1.0f, 1000);
+        TEST_CHECK(r == true && s.cycle_count == 1, "sanity: staying ON counts nothing");
+        heater_output_note_denied(&s, before_on, before_cycles);
+        TEST_CHECK(s.relay_on == false, "denied while ON: state reads OFF");
+        TEST_CHECK(s.cycle_count == 2, "denied while ON: the real ON->OFF switch is counted exactly once");
+    }
+    /* Review fix: a bang-bang zone denied while really ON must restart the
+     * min_off_ms debounce -- a re-grant one tick later may not close the
+     * contacts again inside min_off_ms. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 0, .min_off_ms = 5000};
+        heater_output_reset(&s);
+        bool r = heater_output_bangbang(&s, &cfg, true, 10000);
+        TEST_CHECK(r == true, "sanity: bang-bang turns ON once min_off has elapsed");
+        r = heater_output_bangbang(&s, &cfg, true, 10000);
+        TEST_CHECK(r == true && s.since_last_change_ms == 10000, "sanity: held ON, debounce timer running");
+        bool before_on = s.relay_on;
+        uint32_t before_cycles = s.cycle_count;
+        r = heater_output_bangbang(&s, &cfg, true, 1000);
+        heater_output_note_denied(&s, before_on, before_cycles);
+        TEST_CHECK(s.since_last_change_ms == 0, "denied while ON: the real OFF restarts the min_off timer");
+        r = heater_output_bangbang(&s, &cfg, true, 1000);
+        TEST_CHECK(r == false, "re-grant 1 s after a real OFF is held off by min_off_ms (5 s)");
+    }
 }

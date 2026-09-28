@@ -370,6 +370,8 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->cooling_limited = z->cooling_limited;
             zo->heat_blocked = z->heat_blocked;
             zo->heat_blocked_sources = z->heat_blocked_sources;
+            zo->relay_starved_s = z->relay_starved_s;
+            zo->relay_denied_reason = z->relay_denied_reason;
             zo->ff_hold_used_matrix = z->ff_hold_used_matrix;
             zo->ff_hold_infeasible = z->ff_hold_infeasible;
             zo->ff_climb_used_matrix = z->ff_climb_used_matrix;

@@ -65,9 +65,14 @@
  * (1x "%.2f" at up to 8B, "-1234.56"): the key+colon+comma
  * (`"ramp_dwell_credit_s":`, then a trailing comma before the next field)
  * is 24B, plus the 8B value = 32B more, bringing the worst case to
- * 616+32 = 648B. 1024/zone still leaves >375B headroom. See
- * test_dashboard_json.c's fill_worst_case_zone() for the exact widths this
- * measures against. */
+ * 616+32 = 648B.
+ *
+ * HP-02 (2026-09-27) added "relay_starved_s" (%.1f, "-1234567.0" = 10B
+ * value, 18B key+colon+comma) and "relay_denied_reason" (%u on a uint8_t,
+ * "255" = 3B, 22B key+colon+comma) to BOTH shapes: 10+18+3+22 = 53B more,
+ * bringing this shape's worst case to 648+53 = 701B. 1024/zone still leaves
+ * >320B headroom. See test_dashboard_json.c's fill_worst_case_zone() for the
+ * exact widths this measures against. */
 #define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 1024)
 
 /* ROADMAP.md M15 B4 (2026-09-04) raised the /api/control per-zone budget
@@ -84,8 +89,10 @@
  * (%.4f) 32B, bd_post_clamp_total (%.4f) 33B, bd_load_cap_boost (%.4f)
  * 31B, bd_final_commanded (%.4f, no trailing comma but the closing `}`
  * this budget already accounts for covers that) 31B. Sum: 24+25+35+34+35+
- * 90+32+33+31+31 = 370B. 381+370 = 751B measured worst case; 900/zone
- * leaves ~149B headroom. See test_dashboard_json.c's fill_worst_case_zone()
+ * 90+32+33+31+31 = 370B. 381+370 = 751B measured worst case. HP-02
+ * (2026-09-27) added relay_starved_s/relay_denied_reason here too, the same
+ * 53B computed for the profile_exec shape above: 751+53 = 804B; 900/zone
+ * leaves ~96B headroom. See test_dashboard_json.c's fill_worst_case_zone()
  * for the exact widths this measures against -- it fills every new
  * duty_breakdown field at the same -1234.xxxx worst-case magnitude used for
  * every existing %.2f/%.4f field in that helper. */

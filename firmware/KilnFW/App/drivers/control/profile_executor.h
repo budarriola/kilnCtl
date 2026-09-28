@@ -340,6 +340,30 @@ typedef struct {
 #define PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C 2.0f
 #define PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S 60.0f
 
+/* HP-02 bench bug (2026-09-27): "wants heat, never gets a relay" reporting
+ * (profile_exec_zone_status_t::relay_starved_s / relay_denied_reason).
+ * A zone whose duty reads at least PROFILE_EXECUTOR_RELAY_STARVED_DUTY while
+ * its relay is not commanded on is counting starvation seconds; the reason
+ * codes below name the mechanism that refused the relay on the latest tick.
+ * Values are part of the JSON contract (GET /api/profile_exec, /api/control)
+ * and read by the bench harness (cases_heat.py) -- append, never renumber. */
+#define PROFILE_EXECUTOR_RELAY_STARVED_DUTY 0.99f
+typedef enum {
+    PROFILE_EXEC_RELAY_DENIED_NONE = 0,
+    /* The zone is typed ZONE_TYPE_ON_OFF and the profile has no enabled
+     * on/off rule for it in the current segment, so docs/ON_OFF_ZONE_PLAN.md
+     * sec 3 rule 6 holds the relay OFF -- regardless of what its (unused)
+     * control mode's duty says. profile_executor_run() refuses a profile
+     * where this would hold for EVERY segment; this reports the per-segment
+     * case that refusal cannot see. */
+    PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE = 1,
+    /* max_simultaneous_relays denied this zone the relay this tick. */
+    PROFILE_EXEC_RELAY_DENIED_LOAD_CAP = 2,
+    /* relay_authority blocked the zone (heat_blocked/heat_blocked_sources
+     * carry the detail). */
+    PROFILE_EXEC_RELAY_DENIED_AUTHORITY = 3,
+} profile_exec_relay_denied_t;
+
 #define PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN 0.5f
 
 #define PROFILE_EXECUTOR_TICK_MS 1000u /* 1 Hz per TODO.md 6A.7 */

@@ -437,8 +437,18 @@ def _zone_diag_snapshot(ctx: dict) -> Dict[str, Any]:
                     continue
                 snapshot["zones"][idx] = {
                     "duty": zone.get("duty"),
+                    "relay_on": zone.get("relay_on"),
                     "heat_blocked": zone.get("heat_blocked"),
                     "heat_blocked_sources": zone.get("heat_blocked_sources"),
+                    # HP-02 root-cause follow-up (2026-09-27): firmware now
+                    # names WHY a zone's relay is off while it asks for heat
+                    # (`relay_denied_reason`, profile_executor.h's
+                    # profile_exec_relay_denied_t: 1 on/off zone with no rule,
+                    # 2 load cap, 3 authority block) and how long duty has
+                    # been high with the relay never commanded on
+                    # (`relay_starved_s`). Absent on older firmware -> None.
+                    "relay_starved_s": zone.get("relay_starved_s"),
+                    "relay_denied_reason": zone.get("relay_denied_reason"),
                 }
     except Exception:
         pass
@@ -550,20 +560,106 @@ def _blocked_while_energized_zones(zone_diag_samples: List[Dict[str, Any]]) -> L
     return sorted(flagged)
 
 
+_RELAY_DENIED_REASON_NAMES = {
+    0: "none",
+    1: "on/off zone with no on/off rule for this segment",
+    2: "max_simultaneous_relays load cap",
+    3: "relay authority block",
+}
+
+#: `relay_starved_s` above which a zone counts as starved for the HP-02
+#: symptom check. PWM timing alone (first window, a min-off hold) accounts
+#: for a few tens of seconds at most with the bench's default window; the
+#: bench failure itself showed duty 1.00 with the relay never on for 76 s.
+_RELAY_STARVED_MIN_S = 60.0
+
+
+def _starved_zones(zone_diag_samples: List[Dict[str, Any]]) -> Dict[int, str]:
+    """HP-02 root-cause symptom (2026-09-25..27): a zone that keeps asking
+    for heat and never gets its relay. Names every zone whose polled
+    `/api/profile_exec` snapshot ever reported a non-zero
+    `relay_denied_reason`, or a `relay_starved_s` at or above
+    `_RELAY_STARVED_MIN_S`, mapped to a one-line explanation (the last
+    non-zero reason seen wins). Firmware older than the fix carries neither
+    field, so this returns {} there rather than guessing."""
+    flagged: Dict[int, str] = {}
+    for snapshot in zone_diag_samples or []:
+        for idx, zone in (snapshot.get("zones") or {}).items():
+            reason = zone.get("relay_denied_reason")
+            starved_s = zone.get("relay_starved_s")
+            if reason:
+                name = _RELAY_DENIED_REASON_NAMES.get(reason, f"reason {reason}")
+                flagged[idx] = f"relay denied: {name}"
+            elif starved_s is not None and starved_s >= _RELAY_STARVED_MIN_S and idx not in flagged:
+                flagged[idx] = f"duty high with relay never on for {starved_s:.0f}s"
+    return dict(sorted(flagged.items()))
+
+
+def _on_off_typed_zones(snapshot: dict, zone_mask: int) -> List[int]:
+    """Zones in `zone_mask` whose GET /api/zones `zone_type` is not 0
+    (heater). The bench profile has no on/off rules, so such a zone can
+    never heat under it (docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6) -- the
+    HP-02 bench failure's actual root cause was zone 2 left at zone_type 1
+    by an earlier HP-03/HP-07 run whose restore was never read back."""
+    found = []
+    for zone in snapshot.get("zones", []) or []:
+        idx = zone.get("index")
+        if idx is None or not (zone_mask & (1 << idx)):
+            continue
+        if zone.get("zone_type", 0) != 0:
+            found.append(idx)
+    return found
+
+
 def _case_hp02(ctx: dict) -> CaseResult:
-    run = _hp_run(ctx, zone_mask=0b111)
+    zone_mask = 0b111
+    host = ctx.get("host")
+    if host:
+        # Precondition, read-only: every masked zone must be a heater.
+        # Same seam/tolerance as `_check_zone_ceilings` -- an unreadable
+        # snapshot passes through so a tooling failure never masquerades as
+        # a board finding; the run itself then reports whatever it sees.
+        from .. import zones_http_client
+
+        get_zones = ctx.get("_get_zones_config", zones_http_client.get_zones)
+        try:
+            snapshot = get_zones(host)
+        except Exception:
+            snapshot = None
+        if snapshot is not None:
+            on_off = _on_off_typed_zones(snapshot, zone_mask)
+            if on_off:
+                return CaseResult(
+                    Verdict.FAIL,
+                    reason=(
+                        f"zone(s) {on_off} are typed on/off (zone_type != 0) on the board; the bench "
+                        f"profile has no on/off rules, so they could never heat (firmware now refuses "
+                        f"such a start). Leftover of an HP-03/HP-07 zone-config restore that did not "
+                        f"land -- restore zone_type 0 by hand before re-running"
+                    ),
+                    observed={"zone_types": {z.get("index"): z.get("zone_type") for z in snapshot.get("zones", []) or []}},
+                    expected={"zone_type": 0},
+                )
+    run = _hp_run(ctx, zone_mask=zone_mask)
     ctx["_hp02"] = run
     if not run["ok"]:
         return CaseResult(Verdict.FAIL, reason=run["reason"], observed={"start": run["start_zones"], "end": run["end_zones"]})
-    result = J.judge_all_zones_rise(_rises(run["start_zones"], run["end_zones"]), zone_mask=0b111, min_rise=5.0)
+    result = J.judge_all_zones_rise(_rises(run["start_zones"], run["end_zones"]), zone_mask=zone_mask, min_rise=5.0)
     if result.verdict != Verdict.PASS:
         blocked = _blocked_while_energized_zones(run["zone_diag_samples"])
+        starved = _starved_zones(run["zone_diag_samples"])
         observed = dict(result.observed or {})
         observed["zone_diag_samples"] = run["zone_diag_samples"]
+        notes = []
         if blocked:
+            notes.append(f"zone(s) {blocked} had duty>0 while heat_blocked")
+        if starved:
+            detail = "; ".join(f"zone {idx}: {why}" for idx, why in starved.items())
+            notes.append(f"relay starved -- {detail}")
+        if notes:
             return CaseResult(
                 Verdict.FAIL,
-                reason=f"{result.reason} (zone(s) {blocked} had duty>0 while heat_blocked)",
+                reason=f"{result.reason} ({'; '.join(notes)})",
                 observed=observed,
                 expected=result.expected,
             )
@@ -768,7 +864,7 @@ def _case_hp03(ctx: dict) -> CaseResult:
         raise
     finally:
         _cleanup_bench_profile(ctx)
-        restore_error = _post_zones_restore(ctx, host, restore_body)
+        restore_error = _post_zones_restore(ctx, host, restore_body, expected_snapshot=snapshot)
         if restore_error is not None:
             restore_note = (
                 f"zone {target_zone} zones config restore failed ({restore_error}) -- "
@@ -883,13 +979,47 @@ _HP07_RESTORE_ATTEMPTS = 2
 _HP07_RESTORE_RETRY_DELAY_S = 5.0
 
 
-def _post_zones_restore(ctx: dict, host: str, restore_body: str) -> Optional[str]:
+def _restore_readback_mismatch(expected_snapshot: dict, actual_snapshot: dict) -> Optional[str]:
+    """Compares the persistent-config fields HP-03/HP-07 change (`zone_type`,
+    `max_temp_c`) between the pre-case GET snapshot and a post-restore GET.
+    Returns None when every zone matches, else one line naming the first
+    mismatch. Only fields present in BOTH snapshots are compared, so an
+    older firmware that omits one never trips this."""
+    actual_by_idx = {z.get("index"): z for z in actual_snapshot.get("zones", []) or []}
+    for zone in expected_snapshot.get("zones", []) or []:
+        idx = zone.get("index")
+        if idx is None or idx not in actual_by_idx:
+            continue
+        actual = actual_by_idx[idx]
+        for key in ("zone_type", "max_temp_c"):
+            if key not in zone or key not in actual:
+                continue
+            exp, act = zone[key], actual[key]
+            if isinstance(exp, float) or isinstance(act, float):
+                if exp is None or act is None or abs(float(exp) - float(act)) > 0.05:
+                    return f"read-back: zone {idx} {key} is {act}, expected {exp}"
+            elif exp != act:
+                return f"read-back: zone {idx} {key} is {act}, expected {exp}"
+    return None
+
+
+def _post_zones_restore(
+    ctx: dict, host: str, restore_body: str, expected_snapshot: Optional[dict] = None,
+) -> Optional[str]:
     """POSTs a GET-snapshot-derived `restore_body` back to /api/zones,
     retrying once after `_HP07_RESTORE_RETRY_DELAY_S`. Returns None on an
     "ok" response, else the last attempt's error text. Shared by HP-03 and
-    HP-07, the two cases that change persistent zone config."""
+    HP-07, the two cases that change persistent zone config.
+
+    With `expected_snapshot` (the pre-case GET), an "ok" is only believed
+    once a fresh GET /api/zones reads back the same `zone_type`/`max_temp_c`
+    per zone -- HP-02's bench failure (2026-09-25..27) was zone 2 left at
+    zone_type 1 by a restore whose "ok" text was trusted without a
+    read-back. A mismatch counts as a failed attempt and is retried like a
+    refusal."""
     from .. import zones_http_client
 
+    get_zones = ctx.get("_get_zones_config", zones_http_client.get_zones)
     sleep = ctx.get("_sleep", time.sleep)
     last_error = ""
     for attempt in range(1, _HP07_RESTORE_ATTEMPTS + 1):
@@ -899,8 +1029,19 @@ def _post_zones_restore(ctx: dict, host: str, restore_body: str) -> Optional[str
             last_error = f"{type(exc).__name__}: {exc}"
         else:
             if restore_result == "ok":
-                return None
-            last_error = f"refused: {restore_result}"
+                if expected_snapshot is None:
+                    return None
+                try:
+                    actual = get_zones(host)
+                except Exception as exc:
+                    last_error = f"read-back GET /api/zones failed: {type(exc).__name__}: {exc}"
+                else:
+                    mismatch = _restore_readback_mismatch(expected_snapshot, actual)
+                    if mismatch is None:
+                        return None
+                    last_error = mismatch
+            else:
+                last_error = f"refused: {restore_result}"
         if attempt < _HP07_RESTORE_ATTEMPTS:
             sleep(_HP07_RESTORE_RETRY_DELAY_S)
     return last_error
@@ -927,6 +1068,7 @@ def _surface_restore_failure_on_inflight(inflight: Optional[BaseException], note
 def _restore_zone_limit(
     ctx: dict, host: str, restore_body: str, target_zone: int,
     lowered_limit_c: float, original_max_temp_c: Optional[float],
+    expected_snapshot: Optional[dict] = None,
 ) -> Optional[str]:
     """POSTs `restore_body` to put zone `target_zone`'s `max_temp_c` back to
     its pre-HP-07 value, retrying once after a short delay in case the board
@@ -937,7 +1079,7 @@ def _restore_zone_limit(
     this loudly (never swallow it): a zone left at `lowered_limit_c` refuses
     every subsequent case's own profile start (see `_check_zone_ceilings`,
     which exists specifically to catch this class of leftover)."""
-    last_error = _post_zones_restore(ctx, host, restore_body)
+    last_error = _post_zones_restore(ctx, host, restore_body, expected_snapshot=expected_snapshot)
     if last_error is None:
         return None
     original_note = f"{original_max_temp_c:.1f}C" if original_max_temp_c is not None else "unknown"
@@ -1308,6 +1450,7 @@ def _case_hp07(ctx: dict) -> CaseResult:
         _cleanup_bench_profile(ctx)
         restore_note = _restore_zone_limit(
             ctx, host, restore_body, target_zone, limit_c, original_max_temp_c,
+            expected_snapshot=snapshot,
         )
         if restore_note:
             _surface_restore_failure_on_inflight(inflight, restore_note)

@@ -100,7 +100,8 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         "%s{\"zone\":%u,\"control_mode\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,"
                         "\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
                         "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u,"
-                        "\"heat_blocked\":%s,\"heat_blocked_sources\":%lu,\"ff_hold_used_matrix\":%s,"
+                        "\"heat_blocked\":%s,\"heat_blocked_sources\":%lu,"
+                        "\"relay_starved_s\":%.1f,\"relay_denied_reason\":%u,\"ff_hold_used_matrix\":%s,"
                         "\"ff_hold_infeasible\":%s,\"ff_membership_change_count\":%lu,"
                         "\"bd_ff_hold\":%.4f,\"bd_ff_climb\":%.4f,\"bd_coupling_correction\":%.4f,"
                         "\"bd_ff_rate_pretaper\":%.5f,\"bd_ff_rate_posttaper\":%.5f,"
@@ -113,6 +114,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         (double)z->pid_d, (double)z->pid_ff, z->cooling_limited ? "true" : "false",
                         z->faulted ? "true" : "false", z->fault_guard,
                         z->heat_blocked ? "true" : "false", (unsigned long)z->heat_blocked_sources,
+                        (double)z->relay_starved_s, (unsigned)z->relay_denied_reason,
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
                         (unsigned long)z->ff_membership_change_count,
                         bd_finite_or_zero((double)bd->ff_hold), bd_finite_or_zero((double)bd->ff_climb),
@@ -139,6 +141,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         "%s{\"zone\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,\"relay_on\":%s,"
                         "\"duty\":%.3f,\"control_mode\":%u,\"faulted\":%s,\"fault_reason\":\"%s\","
                         "\"fault_guard\":%u,\"heat_blocked\":%s,\"heat_blocked_sources\":%lu,"
+                        "\"relay_starved_s\":%.1f,\"relay_denied_reason\":%u,"
                         "\"ff_hold_used_matrix\":%s,\"ff_hold_infeasible\":%s,"
                         "\"ff_membership_change_count\":%lu,"
                         "\"ramp_lag_sustained\":%s,\"ramp_lag_held_s\":%.2f,"
@@ -156,6 +159,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         (double)z->duty, z->control_mode, z->faulted ? "true" : "false", reason_escaped,
                         z->fault_guard, z->heat_blocked ? "true" : "false",
                         (unsigned long)z->heat_blocked_sources,
+                        (double)z->relay_starved_s, (unsigned)z->relay_denied_reason,
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
                         (unsigned long)z->ff_membership_change_count,
                         z->ramp_lag_sustained ? "true" : "false", (double)z->ramp_lag_held_s,
