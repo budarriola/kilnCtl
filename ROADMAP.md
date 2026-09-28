@@ -1,7 +1,18 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-09-27, the system-mode
-> gate's last deferred slice (2, "recovery wording") landed: `system_mode_
+> **Status:** planning · **Last reviewed:** 2026-09-28. `04fb2afe` fixed
+> `GET /api/zones`/backup export rounding PID gains and coupling cells to
+> `%.4f` (small `Ki` values printed as zero); they now print at `%.9g`, and
+> OTA-bench PID comparisons are tolerance-based. `cc71612d` closed the
+> guard-disable-ack-gate item by owner decision (thermal protection gets no
+> disable switch, ever) and recorded HP-07's 2026-09-28 bench rerun as a
+> PASS. Open: the `tuning_valid` tolerance gap the precision fix exposed,
+> `backup_import`'s NVS-save batching, dropping the dashboard's "Previous
+> firing ended" card on a normal/deliberate stop, and three new owner
+> requests (live-edit button for a running profile, a stop confirm dialog,
+> and login required for everything but the dashboards) — see M18 below.
+> **2026-09-27:** the system-mode gate's last deferred slice (2, "recovery
+> wording") landed: `system_mode_
 > gate_check()` now runs inside `profile_executor_run()`'s and
 > `autotune_begin_run_locked()`'s choke points and inside their two HTTP
 > call sites, so a start refused for recovery mode reads the same string on
@@ -4154,6 +4165,49 @@ Owner instruction, 2026-09-21.
   non-S6a-never-cleared) and negative-tested. Review fix: once a clear has
   gone out, a DIAG showing the trip gone or any new own-fault-source rising
   edge closes the window.
+- [x] **Full-precision numeric printing, 2026-09-28 (`04fb2afe`):**
+  `GET /api/zones` and backup export used to print PID gains, `model_k_dc`,
+  `coupling_diag_k_dc` and `coupling_c%u` at `%.4f`, silently rounding a
+  small `Ki` (or other small-magnitude value) to zero on read-back. Both now
+  print at `%.9g`. The narrow MCP writers (`control_set_zone_limits`,
+  `control_set_zone_type`, `control_set_zone_coupling`) no longer zero a
+  small `Ki` on their GET-merge-POST round trip, and OTA-bench PID
+  comparisons are now tolerance-based (`judgments.pid_gains_match`) instead
+  of exact-string.
+- [ ] **`tuning_valid` invalidation tolerance (open, predates `04fb2afe`):**
+  the compare in `zones_http_post_parse.c` that decides whether a re-posted
+  value counts as "changed enough to invalidate `tuning_valid`" still uses
+  an absolute `0.0001` tolerance. A small-`Ki` edit (now printed and
+  re-posted at full `%.9g` precision rather than being rounded to zero) can
+  still fail to clear `tuning_valid` because the absolute delta is below
+  0.0001 even though the value genuinely changed. Needs a relative
+  tolerance. Found as a byproduct of the `04fb2afe` precision fix.
+- [ ] **`backup_import` batched NVS save (in progress):** the ~61 s import
+  currently issues one NVS save per field as it restores each store.
+  Planned: `_no_save` setter variants for the hot paths, one trailing save
+  per store, a RAM rollback if a mid-batch setter fails partway through, and
+  timing instrumentation to confirm the win. Not started.
+- [ ] **Web dashboard: drop the "Previous firing ended" card after a normal
+  or deliberate stop (owner request, 2026-09-28).** Keep it only for an
+  *unexpected* end (fault/trip/crash) — a normal Stop or a profile reaching
+  its own end should clear the card rather than leave it displayed.
+- [ ] **Owner requests, 2026-09-28 (new, pending):**
+  - (a) A web GUI button next to Start/Stop to live-edit the running
+    profile's dwell times, target temps and ramp rates. The backend already
+    exists (`firmware/KilnFW/App/drivers/http/profiles_live_http.c`,
+    `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, exposed to PcTools as
+    the `profile_live_*` MCP quartet); web UI coverage for it is still
+    being researched, not yet built.
+  - (b) A confirm dialog before stopping a running profile, on both the web
+    UI and the LCD. The physical E-stop must stay immediate and bypass this
+    dialog entirely.
+  - (c) **Owner decision, supersedes the earlier "show login only when an
+    action needs it" request:** without login, the web and LCD show only
+    the dashboards. Every other page and action — including Stop — now
+    requires login. Session timeouts are unchanged. Setup/AP provisioning,
+    the bootstrap-password flow, TOTP reset, and the LCD reset touch
+    sequence stay reachable without login, since they exist to recover
+    access in the first place.
 
 ---
 
