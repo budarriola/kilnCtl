@@ -173,11 +173,25 @@ static void try_submit(void)
         case LCD_KEYPAD_SUBMIT_GRANTED:
             finish(true, role);
             break;
-        case LCD_KEYPAD_SUBMIT_LOCKED_OUT:
+        case LCD_KEYPAD_SUBMIT_LOCKED_OUT: {
             lcd_pin_entry_reset(&s_ks.entry);
             refresh_dots();
-            set_status("Too many attempts -- panel locked, try again later");
+            /* Honest wait, not "panel locked" -- the backoff ladder
+             * (login_backoff.h, shared with the web login) always clears on
+             * its own after locked_until_ms, so state the actual remaining
+             * wait rather than implying a stuck/disabled panel. Ceil to
+             * whole seconds the same way web_auth_login_http.c rounds its
+             * Retry-After header. No periodic refresh here (no new timer/
+             * task, matching this file's existing no-new-timer convention)
+             * -- this is the remaining time AT THE MOMENT OF DISPLAY, same
+             * as the web login's own one-shot message. */
+            uint32_t remaining_ms = s_ks.lockout.locked_until_ms - now_ms;
+            uint32_t remaining_s = (remaining_ms + 999u) / 1000u;
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Wrong PIN -- try again in %us", (unsigned)remaining_s);
+            set_status(buf);
             break;
+        }
         case LCD_KEYPAD_SUBMIT_DENIED:
             lcd_pin_entry_reset(&s_ks.entry);
             refresh_dots();
