@@ -61,6 +61,7 @@
 #include <string.h>
 
 #include "test_common.h"
+#include "fake_gpio.h" /* fault-hold tests read the physical fault pin level */
 #include "fake_time.h" /* hal_time.h's host fake -- safety_link_inbox.c's safety_exchange() now
                         * calls hal_time_now_us() for link_reply_us (HW_ABSTRACTION.md "Still
                         * open") -- see fake_time.c already linked into this executable's build
@@ -2248,10 +2249,16 @@ static void test_fault_hold_immediate_deassert_stays_high_until_hold_elapses(voi
     reset_fault_hold_test_state();
     SafetyLinkClass link = make_link();
     link.initialized = true;
+    // Drive a real (fake) output pin so the checks below pin the PHYSICAL
+    // line level safety_apply_fault_locked() writes, not only the mask.
+    fake_gpio_reset();
+    link.fault_io = 6;
+    TEST_CHECK(hal_gpio_init_out(link.fault_io, false) == HAL_OK, "fault pin init");
 
     TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, true) == ESP_OK,
                "assert succeeds");
     TEST_CHECK(link.fault_sources == SAFETY_FAULT_SRC_APP, "line is asserted");
+    TEST_CHECK(fake_gpio_current_level(link.fault_io), "physical fault pin driven high");
 
     // Immediate deassert request, same instant (0ms elapsed) -- must be
     // deferred, not applied, per the whole point of this fix.
@@ -2262,6 +2269,8 @@ static void test_fault_hold_immediate_deassert_stays_high_until_hold_elapses(voi
                "this is the exact starved-ack scenario the fix exists for");
     TEST_CHECK((link.fault_pending_deassert_mask & SAFETY_FAULT_SRC_APP) != 0u,
                "the bit is parked pending, not silently dropped");
+    TEST_CHECK(fake_gpio_current_level(link.fault_io),
+               "REGRESSION PIN: physical fault pin still high after the fast deassert");
 
     // The poll-tick servicer must not release it early either.
     fake_time_advance_ms(299); // non-round, just under the 300ms hold
@@ -2276,6 +2285,8 @@ static void test_fault_hold_immediate_deassert_stays_high_until_hold_elapses(voi
     TEST_CHECK(link.fault_sources == 0u,
                "released once the hold time has elapsed, via the poll-tick servicer");
     TEST_CHECK(link.fault_pending_deassert_mask == 0u, "pending mask cleared along with it");
+    TEST_CHECK(!fake_gpio_current_level(link.fault_io),
+               "physical fault pin released low by the servicer");
 }
 
 static void test_fault_hold_reassert_during_hold_cancels_pending_deassert(void)

@@ -66,11 +66,15 @@ void     safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link);
  * deassert that safety_link_set_fault_source() deferred because the source's
  * minimum hold time had not yet elapsed. Called from safety_poll_task()
  * (safety_link_poll.c) on every pass, including the sub-period idle-drain
- * chunks, so a pending release is applied within roughly one
- * SAFETY_LINK_IDLE_TICK_MS of the hold expiring -- never earlier, since it is
- * the poll task's own tick that drives it, not a timer or a sleep in the
- * original caller. No-op, cheap (one lock take, one mask check), whenever
- * nothing is pending. */
+ * chunks, so a pending release is applied within one SAFETY_LINK_IDLE_TICK_MS
+ * of the hold expiring while the task sits in its idle sleep -- and within
+ * one poll-loop pass otherwise, which can include a GET_STATUS exchange
+ * (SAFETY_LINK_REPLY_TIMEOUT_MS) and a bounded cfg refetch
+ * (SAFETY_CFG_STORE_REFETCH_BUDGET_MS), so worst case a few seconds late.
+ * Never earlier. Late is the fail-safe direction (the line stays asserted
+ * longer); a wedged poll task would leave the line asserted until reboot.
+ * No-op, cheap (one lock take, one mask check), whenever nothing is
+ * pending. */
 void     safety_link_service_pending_fault_deassert(SafetyLinkClass *link);
 
 /* Shared bounded-wait/unknown-outcome helper (M15 B2) -- declared here
