@@ -642,6 +642,25 @@ the authoritative field for "which guard tripped" — `trip_mask` adds nothing
 which is a real architecture change (removing or narrowing the early-return
 above), not a wire-format one.
 
+**2026-09-27, starved-ack fix (KilnFW side).** S6a's `SAFTYFW_MAIN_FAULT_DEBOUNCE_MS`
+(`src/debounce_policy.h`, 200 ms, 10 ms sampling) only latches mainFault after
+the isolated fault line has read continuously high for that long. KilnFW's own
+escalate-then-ack sequence (`escalate_guard_trip()` asserting the line, then
+`profile_executor_halt()` -> `clear_this_runs_faults()` deasserting it, both in
+the same task, sometimes milliseconds apart) could release the line before
+this debounce window finished counting — a fast enough primary-side ack
+silently starving the backup processor's own latch of the very trip the ESP
+had just decided to escalate. Fixed on the KilnFW side, not here, since the
+Pico's own debounce is correct and this processor has no way to know how
+quickly the other side acks its own trips: `SAFETY_FAULT_MIN_HOLD_MS`
+(`firmware/KilnFW/App/drivers/safety/safety_link.h`, 300 ms =
+`SAFTYFW_MAIN_FAULT_DEBOUNCE_MS` + 100 ms margin) now holds a fault source
+asserted for at least that long before honoring a deassert request,
+regardless of ack speed. Kept in sync with this file's `SAFTYFW_MAIN_FAULT_
+DEBOUNCE_MS` by `firmware/KilnFW/App/test/safety_fault_hold_mirror_drift_check.py`
+— if this constant ever changes, that check fails until the KilnFW side is
+deliberately updated to match.
+
 ---
 
 ## 10. Testing without hardware

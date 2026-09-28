@@ -13,6 +13,30 @@
 > (`control_set_zone_limits`, `safety_get_unset_commissioning_params`)
 > landed, and a further LCD-01/LCD-19 harness/firmware review-fix chain
 > landed (thirty-ninth sweep) — open items below.
+> - **Safety fault-line starved-ack fix, 2026-09-27 — LANDED:** `escalate_guard_
+>   trip()` (`profile_executor_relay_io.c`) asserts the isolated hardware fault
+>   line, and the very next thing that happens is `profile_executor_halt()` ->
+>   `clear_this_runs_faults()` deasserting it again, sometimes milliseconds
+>   later — fast enough that the RP2040 safety processor's own S6a mainFault
+>   debounce (`SAFTYFW_MAIN_FAULT_DEBOUNCE_MS`, 200 ms) could see the line drop
+>   before its debounce window finished counting, starving the backup
+>   processor's own latch of the trip KilnFW had just decided to escalate.
+>   Fixed in `safety_link.c`/`.h`: a fault source that has been asserted must
+>   now stay asserted for `SAFETY_FAULT_MIN_HOLD_MS` (300 ms = the Pico's
+>   debounce plus a 100 ms margin) before a deassert request actually takes
+>   effect; a deassert requested before that elapses is deferred and finished
+>   later by the existing `safety_poll_task()` tick
+>   (`safety_link_service_pending_fault_deassert()`), never by blocking the
+>   caller. A re-assert during the hold cancels the pending deassert. External
+>   status reporting (`safety_link_get_fault_sources()`, `GET` endpoints, link
+>   frames) needed no change: a bit pending deassert is deliberately still
+>   counted asserted in `fault_sources`, so every existing reader keeps seeing
+>   the true physical line state. Host-tested (assert/immediate-deassert/
+>   still-high, hold-elapses/releases, re-assert-cancels, already-past-hold-is-
+>   immediate, per-bit independence) in `test_safety_link_compile.c`; the two
+>   independently-built firmware targets' constants are tied together by
+>   `firmware/KilnFW/App/test/safety_fault_hold_mirror_drift_check.py`, which
+>   fails loudly if either constant changes without the other being revisited.
 > - **System-mode command gate, 2026-09-25 — owner decisions recorded, slices
 >   2/3/4/5 LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
 >   `firmware/KilnFW/TODO.md` 10.14's Phase 6 (a single owning function/table

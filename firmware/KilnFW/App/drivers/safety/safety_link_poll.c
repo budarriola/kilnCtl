@@ -574,6 +574,13 @@ void safety_poll_task(void *arg)
         heat_enable_service_pending_release();
         safety_poll_service_pico_half_recapture();
         safety_link_service_log_relay(link);
+        /* SAFETY_FAULT_MIN_HOLD_MS's own comment (safety_link.h) -- finishes a
+         * deassert deferred by safety_link_set_fault_source() once its hold
+         * time has elapsed. Runs every pass, including the period==0 (polling
+         * off) branch below, so a deferred release is never stranded just
+         * because polling is disabled. No-op, cheap, whenever nothing is
+         * pending. */
+        safety_link_service_pending_fault_deassert(link);
 
         if (period == 0u) {
             /* Polling off: still drain anything the peer pushes unsolicited,
@@ -731,6 +738,11 @@ void safety_poll_task(void *arg)
                 (void)safety_drain_inbox(link, 0);
                 xSemaphoreGive(link->xact_lock);
             }
+            /* Same servicer as above -- a long poll period must not strand a
+             * pending fault-hold release for the whole sleep_ms; this applies
+             * it within one chunk (<=SAFETY_LINK_IDLE_TICK_MS) of its hold
+             * time elapsing instead. */
+            safety_link_service_pending_fault_deassert(link);
             vTaskDelay(pdMS_TO_TICKS(chunk_ms));
             remaining_ms -= chunk_ms;
         }

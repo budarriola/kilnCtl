@@ -62,6 +62,17 @@ uint16_t safety_age_ms_locked(const SafetyLinkClass *link);
 bool     safety_link_up_locked(const SafetyLinkClass *link);
 void     safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link);
 
+/* SAFETY_FAULT_MIN_HOLD_MS's own comment (safety_link.h): finishes a
+ * deassert that safety_link_set_fault_source() deferred because the source's
+ * minimum hold time had not yet elapsed. Called from safety_poll_task()
+ * (safety_link_poll.c) on every pass, including the sub-period idle-drain
+ * chunks, so a pending release is applied within roughly one
+ * SAFETY_LINK_IDLE_TICK_MS of the hold expiring -- never earlier, since it is
+ * the poll task's own tick that drives it, not a timer or a sleep in the
+ * original caller. No-op, cheap (one lock take, one mask check), whenever
+ * nothing is pending. */
+void     safety_link_service_pending_fault_deassert(SafetyLinkClass *link);
+
 /* Shared bounded-wait/unknown-outcome helper (M15 B2) -- declared here
  * (public type/doc lives in safety_link.h) so every safety_link_*.c file can
  * reach it without an extra include. See safety_link.h for the full

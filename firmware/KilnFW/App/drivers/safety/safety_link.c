@@ -42,6 +42,7 @@
 #include "hal_esp_common.h"
 #include "hal_gpio.h"
 #include "hal_sysinfo.h"
+#include "hal_time.h"
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
@@ -964,10 +965,43 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
         return ESP_FAIL;
     }
     uint32_t before = link->fault_sources;
+    uint64_t now_ms = hal_time_now_ms();
     if (assert_fault) {
+        /* Re-assert of a bit already pending deassert simply cancels the
+         * pending release -- the line never moved, so there is nothing to
+         * restart, and its original assert timestamp stays put (SAFETY_FAULT_
+         * MIN_HOLD_MS's own comment). A bit that is genuinely newly asserted
+         * (was 0 in fault_sources) gets a fresh timestamp. */
+        uint32_t newly_asserted = source_mask & ~link->fault_sources;
+        for (uint8_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+            if ((newly_asserted & (1u << b)) != 0u) {
+                link->fault_assert_tick_ms[b] = now_ms;
+            }
+        }
         link->fault_sources |= source_mask;
+        link->fault_pending_deassert_mask &= ~source_mask;
     } else {
-        link->fault_sources &= ~source_mask;
+        /* Per-bit: a bit that has not yet been continuously asserted for
+         * SAFETY_FAULT_MIN_HOLD_MS is deferred (parked in fault_pending_
+         * deassert_mask, still counted asserted in fault_sources) rather than
+         * released immediately -- see that constant's comment in safety_link.h.
+         * safety_link_service_pending_fault_deassert() finishes it later, from
+         * the poll tick, once the hold time elapses. */
+        uint32_t to_release_now = 0u;
+        for (uint8_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+            uint32_t bit = (1u << b);
+            if ((source_mask & bit) == 0u || (link->fault_sources & bit) == 0u) {
+                continue;
+            }
+            uint64_t elapsed = now_ms - link->fault_assert_tick_ms[b];
+            if (elapsed >= SAFETY_FAULT_MIN_HOLD_MS) {
+                to_release_now |= bit;
+            } else {
+                link->fault_pending_deassert_mask |= bit;
+            }
+        }
+        link->fault_sources &= ~to_release_now;
+        link->fault_pending_deassert_mask &= ~to_release_now;
     }
     uint32_t after = link->fault_sources;
     if (after != before) {
@@ -984,6 +1018,50 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
                  (after != 0u) ? "ASSERTED" : "released", (unsigned)before, (unsigned)after);
     }
     return ESP_OK;
+}
+
+void safety_link_service_pending_fault_deassert(SafetyLinkClass *link)
+{
+    /* SAFETY_FAULT_MIN_HOLD_MS's own comment (safety_link.h): finishes a
+     * deassert safety_link_set_fault_source() deferred. Called from the poll
+     * task on every pass (safety_link_poll.c) -- never blocks, never sleeps,
+     * takes state_lock only for the short, bounded body below. */
+    if (!link || !link->initialized) {
+        return;
+    }
+    if (!safety_lock(link)) {
+        return;
+    }
+    if (link->fault_pending_deassert_mask == 0u) {
+        safety_unlock(link);
+        return;
+    }
+    uint64_t now_ms = hal_time_now_ms();
+    uint32_t before = link->fault_sources;
+    uint32_t released = 0u;
+    for (uint8_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+        uint32_t bit = (1u << b);
+        if ((link->fault_pending_deassert_mask & bit) == 0u) {
+            continue;
+        }
+        uint64_t elapsed = now_ms - link->fault_assert_tick_ms[b];
+        if (elapsed >= SAFETY_FAULT_MIN_HOLD_MS) {
+            released |= bit;
+        }
+    }
+    link->fault_sources &= ~released;
+    link->fault_pending_deassert_mask &= ~released;
+    uint32_t after = link->fault_sources;
+    if (after != before) {
+        safety_record_fault_edge_locked(link, before, after);
+    }
+    safety_apply_fault_locked(link);
+    safety_unlock(link);
+
+    if (after != before) {
+        ESP_LOGW(TAG, "isolated fault line released after minimum hold time (sources 0x%02X -> 0x%02X)",
+                 (unsigned)before, (unsigned)after);
+    }
 }
 
 esp_err_t safety_link_set_fault(SafetyLinkClass *link, bool assert_fault)

@@ -828,6 +828,33 @@ typedef enum {
 #define SAFETY_LINK_FAULT_EDGE_RING_LEN   16u
 #define SAFETY_LINK_FAULT_SRC_BIT_COUNT   6u
 
+/* 2026-09-27 (starved-ack fix): the minimum time an isolated fault source
+ * must stay asserted before a deassert request may actually release it.
+ *
+ * escalate_guard_trip() (profile_executor_relay_io.c) asserts this line via
+ * safety_link_set_fault_source(..., true) on a guard trip; the very next
+ * thing that happens is profile_executor_halt() -> clear_this_runs_faults(),
+ * which can request the deassert milliseconds later. The RP2040 safety
+ * processor only latches mainFault (S6a) after sampling the line
+ * continuously high for SAFTYFW_MAIN_FAULT_DEBOUNCE_MS
+ * (firmware/SaftyFW/src/debounce_policy.h, currently 200 ms, at 10 ms
+ * sampling) -- a fast enough ack can release the line before the Pico's
+ * debounce window has even finished counting, starving the backup
+ * processor's own latch of the very trip the ESP just decided to escalate.
+ * The backup path must not depend on how quickly the primary acks its own
+ * trip.
+ *
+ * 300 ms = SAFTYFW_MAIN_FAULT_DEBOUNCE_MS (200 ms) + a 100 ms margin for
+ * sampling/scheduling jitter on both sides. Kept in sync with the Pico
+ * constant by firmware/KilnFW/App/test/safety_fault_hold_mirror_drift_
+ * check.py (there is no shared header across the two independently-built
+ * firmware targets -- CommonFW carries only the wire protocol, not this
+ * timing constant -- so a numeric mirror-drift check is the enforcement
+ * mechanism, same family as approach_rate_cap_mirror_drift_check.py). If
+ * SAFTYFW_MAIN_FAULT_DEBOUNCE_MS ever changes, that check fails until this
+ * constant is deliberately updated to match. */
+#define SAFETY_FAULT_MIN_HOLD_MS 300u
+
 typedef struct {
     uint32_t uptime_ms;          /* xTaskGetTickCount()-derived, monotonic, immune to SNTP steps */
     uint32_t unix_time_s;        /* wall clock at record time, 0 if SNTP never synced
@@ -1514,7 +1541,36 @@ typedef struct {
     uint32_t            push_gap_baseline_frames_received;
     bool                push_gap_baseline_valid;
 
-    uint32_t fault_sources;        /* bitwise OR of safety_fault_source_t */
+    uint32_t fault_sources;        /* bitwise OR of safety_fault_source_t; a bit set here
+                                     * means the isolated line IS physically asserted for
+                                     * that reason -- true even while the SAME bit also sits
+                                     * in fault_pending_deassert_mask below, since the line
+                                     * has not actually been released yet. */
+
+    /* 2026-09-27 (starved-ack fix, SAFETY_FAULT_MIN_HOLD_MS's own comment):
+     * a deassert request for a bit that has not yet been continuously
+     * asserted for SAFETY_FAULT_MIN_HOLD_MS is deferred rather than applied
+     * immediately -- see safety_link_set_fault_source() and safety_link_
+     * service_pending_fault_deassert() (safety_link.c). A bit set here is
+     * still counted asserted in fault_sources above; both masks clear that
+     * bit together once the hold time elapses. A re-assert of a pending bit
+     * before that (safety_link_set_fault_source(..., true)) simply clears it
+     * from this mask -- the line never moved, so there is nothing else to
+     * undo. Read/written only under state_lock. */
+    uint32_t fault_pending_deassert_mask;
+
+    /* hal_time_now_ms() at the most recent 0->1 transition of each fault-
+     * source bit (indexed by bit position, 0..SAFETY_LINK_FAULT_SRC_BIT_
+     * COUNT-1) -- meaningful only while that bit is currently set in
+     * fault_sources. Used solely to measure whether SAFETY_FAULT_MIN_HOLD_MS
+     * has elapsed before honoring a deassert; distinct from fault_edge_last_
+     * rising_uptime_ms below, which is a diagnostic history ring (xTaskGetTick
+     * Count()-derived, never read to make a control decision) -- this array
+     * uses hal_time_now_ms() specifically so the hold-time logic is host-
+     * testable via fake_time.h's controllable clock, since the FreeRTOS tick
+     * stub used by these host tests always reads 0 (App/test/stubs/freertos/
+     * task.h). Read/written only under state_lock. */
+    uint64_t fault_assert_tick_ms[SAFETY_LINK_FAULT_SRC_BIT_COUNT];
 
     /* 2026-09-24 fault-edge instrumentation (see safety_fault_edge_t's
      * comment above). Ring is a plain fixed array; fault_edge_ring_head is

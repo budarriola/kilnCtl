@@ -2219,6 +2219,155 @@ static void test_link_reply_us_not_recorded_when_nothing_answers(void)
                "moved to safety_poll_task()'s elapsed-time push-gap check");
 }
 
+// --------------------------------------------------------------------------
+// 2026-09-27 (starved-ack fix): SAFETY_FAULT_MIN_HOLD_MS (safety_link.h) --
+// a fault source that has been asserted must stay asserted for at least this
+// long before a deassert request may actually release it, so a fast ack from
+// KilnFW (escalate_guard_trip() -> profile_executor_halt() -> clear_this_
+// runs_faults(), all in the same task, milliseconds apart) cannot starve the
+// RP2040 safety processor's own SAFTYFW_MAIN_FAULT_DEBOUNCE_MS-based S6a
+// latch. Uses fake_time.h (hal_time_now_ms()'s host fake), not the FreeRTOS
+// tick stub -- this file's own header comment documents xTaskGetTickCount()
+// as frozen at 0 in this build, which would make any tick-based elapsed-time
+// assertion vacuously true. Advances are deliberately non-round (299ms,
+// 301ms rather than 300ms flat) per fake_time.h's own "must not reintroduce
+// the idealized-input bug class" contract, except where the test is
+// specifically pinning the exact boundary.
+// --------------------------------------------------------------------------
+
+static void reset_fault_hold_test_state(void)
+{
+    fake_time_reset_all();
+}
+
+static void test_fault_hold_immediate_deassert_stays_high_until_hold_elapses(void)
+{
+    TEST_SECTION("SAFETY_FAULT_MIN_HOLD_MS -- assert then immediate deassert: the line "
+                 "stays high (fault_sources still set) until the hold time elapses");
+
+    reset_fault_hold_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, true) == ESP_OK,
+               "assert succeeds");
+    TEST_CHECK(link.fault_sources == SAFETY_FAULT_SRC_APP, "line is asserted");
+
+    // Immediate deassert request, same instant (0ms elapsed) -- must be
+    // deferred, not applied, per the whole point of this fix.
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, false) == ESP_OK,
+               "deassert request itself still returns ESP_OK -- it is accepted, just deferred");
+    TEST_CHECK(link.fault_sources == SAFETY_FAULT_SRC_APP,
+               "REGRESSION PIN: the line stays asserted immediately after a fast deassert -- "
+               "this is the exact starved-ack scenario the fix exists for");
+    TEST_CHECK((link.fault_pending_deassert_mask & SAFETY_FAULT_SRC_APP) != 0u,
+               "the bit is parked pending, not silently dropped");
+
+    // The poll-tick servicer must not release it early either.
+    fake_time_advance_ms(299); // non-round, just under the 300ms hold
+    safety_link_service_pending_fault_deassert(&link);
+    TEST_CHECK(link.fault_sources == SAFETY_FAULT_SRC_APP,
+               "still asserted 299ms in -- one ms short of the 300ms minimum hold");
+
+    // Cross the threshold; the servicer (the poll tick, not the original
+    // caller) is what actually releases it.
+    fake_time_advance_ms(2); // now 301ms since the original assert
+    safety_link_service_pending_fault_deassert(&link);
+    TEST_CHECK(link.fault_sources == 0u,
+               "released once the hold time has elapsed, via the poll-tick servicer");
+    TEST_CHECK(link.fault_pending_deassert_mask == 0u, "pending mask cleared along with it");
+}
+
+static void test_fault_hold_reassert_during_hold_cancels_pending_deassert(void)
+{
+    TEST_SECTION("SAFETY_FAULT_MIN_HOLD_MS -- a re-assert during the hold window cancels "
+                 "the pending deassert and keeps the line high");
+
+    reset_fault_hold_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, true) == ESP_OK,
+               "assert succeeds");
+    fake_time_advance_ms(37); // non-round, well inside the hold window
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, false) == ESP_OK,
+               "deassert request deferred");
+    TEST_CHECK((link.fault_pending_deassert_mask & SAFETY_FAULT_SRC_APP) != 0u,
+               "pending, as expected");
+
+    // Re-assert before the hold elapses: must cancel the pending release.
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, true) == ESP_OK,
+               "re-assert succeeds");
+    TEST_CHECK(link.fault_sources == SAFETY_FAULT_SRC_APP, "still asserted");
+    TEST_CHECK((link.fault_pending_deassert_mask & SAFETY_FAULT_SRC_APP) == 0u,
+               "REGRESSION PIN: the re-assert cancels the pending deassert -- it must not "
+               "still fire later just because it was queued before the re-assert");
+
+    // Even well past the ORIGINAL assert's hold time, the line must stay up,
+    // since the servicer has nothing pending to act on any more.
+    fake_time_advance_ms(500);
+    safety_link_service_pending_fault_deassert(&link);
+    TEST_CHECK(link.fault_sources == SAFETY_FAULT_SRC_APP,
+               "still asserted long after the original hold window -- the cancelled deassert "
+               "never comes back on its own");
+}
+
+static void test_fault_hold_deassert_after_hold_elapsed_is_immediate(void)
+{
+    TEST_SECTION("SAFETY_FAULT_MIN_HOLD_MS -- a deassert requested AFTER the hold time has "
+                 "already elapsed is applied immediately, with no deferral at all");
+
+    reset_fault_hold_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, true) == ESP_OK,
+               "assert succeeds");
+    fake_time_advance_ms(613); // non-round, well past the 300ms hold
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, false) == ESP_OK,
+               "deassert succeeds");
+    TEST_CHECK(link.fault_sources == 0u,
+               "released immediately -- the hold time had already elapsed, so there is nothing "
+               "to defer");
+    TEST_CHECK(link.fault_pending_deassert_mask == 0u,
+               "nothing was ever parked pending for this bit");
+}
+
+static void test_fault_hold_is_independent_per_bit(void)
+{
+    TEST_SECTION("SAFETY_FAULT_MIN_HOLD_MS -- one source's hold timer does not affect "
+                 "another source's own independent hold");
+
+    reset_fault_hold_test_state();
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP, true) == ESP_OK,
+               "APP source asserts");
+    fake_time_advance_ms(250); // non-round; APP is now 250ms into its hold
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_MANUAL, true) == ESP_OK,
+               "MANUAL source asserts later -- its own hold starts from here, not from APP's");
+
+    // Deassert both now: APP has not yet held 300ms (only 250ms), MANUAL has
+    // held 0ms -- both must defer.
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_APP | SAFETY_FAULT_SRC_MANUAL,
+                                             false) == ESP_OK,
+               "combined deassert request accepted");
+    TEST_CHECK(link.fault_sources == (SAFETY_FAULT_SRC_APP | SAFETY_FAULT_SRC_MANUAL),
+               "both still asserted -- neither has held long enough yet");
+
+    // Advance so APP crosses 300ms total (250 + 51 = 301) but MANUAL has only
+    // been waiting 51ms of its own, independent hold.
+    fake_time_advance_ms(51);
+    safety_link_service_pending_fault_deassert(&link);
+    TEST_CHECK((link.fault_sources & SAFETY_FAULT_SRC_APP) == 0u,
+               "APP releases once ITS OWN 300ms hold (from its own assert time) elapses");
+    TEST_CHECK((link.fault_sources & SAFETY_FAULT_SRC_MANUAL) != 0u,
+               "MANUAL stays asserted -- its own hold, timed from its own later assert, has not "
+               "elapsed yet, and APP's timer must not have been used for it");
+}
+
 // Negative-test companion, finding 4 (same follow-up review): an earlier
 // version of this fix gated safety_exchange()'s returned `err` on safety_
 // link_up_locked(), so a miss on a link that still read "up" by that ~1500 ms
@@ -2328,11 +2477,17 @@ static void test_fault_edge_records_a_single_transition(void)
 {
     TEST_SECTION("safety_link_get_fault_edges -- one assert then one clear records two edges");
 
+    fake_time_reset_all();
     SafetyLinkClass link = make_link();
     link.initialized = true;
 
     TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_THERMO, true) == ESP_OK,
                "asserting THERMO succeeds");
+    // 2026-09-27 (SAFETY_FAULT_MIN_HOLD_MS): this test is exercising the
+    // fault-edge ring/counters, not the hold-time deferral (covered by its
+    // own tests above) -- advance well past the hold so this clear is
+    // recorded as an immediate edge, same as before that fix.
+    fake_time_advance_ms(301);
     TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_THERMO, false) == ESP_OK,
                "clearing THERMO succeeds");
 
@@ -2401,15 +2556,21 @@ static void test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order(void)
                  "only the most recent RING_LEN, in oldest-to-newest order, while total_recorded "
                  "keeps counting past the ring's capacity");
 
+    fake_time_reset_all();
     SafetyLinkClass link = make_link();
     link.initialized = true;
 
     // Alternate MANUAL on/off. Each call is one transition (one edge), so
     // driving this SAFETY_LINK_FAULT_EDGE_RING_LEN + 5 times wraps the ring
-    // by exactly 5 entries.
+    // by exactly 5 entries. 2026-09-27 (SAFETY_FAULT_MIN_HOLD_MS): each
+    // deassert must be requested well past the hold time from its own
+    // assert, or it would be deferred rather than recorded as an immediate
+    // edge -- this test is exercising the ring/counters, not the hold-time
+    // deferral (covered by its own tests above).
     uint32_t total_transitions = SAFETY_LINK_FAULT_EDGE_RING_LEN + 5u;
     for (uint32_t i = 0; i < total_transitions; i++) {
         bool assert_now = (i % 2u) == 0u;
+        fake_time_advance_ms(301);
         TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_MANUAL, assert_now) == ESP_OK,
                    "each alternating transition succeeds");
     }
@@ -2498,6 +2659,10 @@ int main(void)
     test_link_loss_during_update_denies_heat_end_to_end();
     test_link_reply_us_records_a_matched_exchange();
     test_link_reply_us_not_recorded_when_nothing_answers();
+    test_fault_hold_immediate_deassert_stays_high_until_hold_elapses();
+    test_fault_hold_reassert_during_hold_cancels_pending_deassert();
+    test_fault_hold_deassert_after_hold_elapsed_is_immediate();
+    test_fault_hold_is_independent_per_bit();
     test_exchange_timeout_is_reported_even_when_link_reads_up();
     test_recapture_cannot_stall_the_heartbeat_task();
 

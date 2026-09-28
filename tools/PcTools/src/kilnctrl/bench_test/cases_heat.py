@@ -1074,6 +1074,14 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
     zone_status = _zone_status(st, target_zone)
     faulted = bool(getattr(zone_status, "faulted", False))
     fault_guard = getattr(zone_status, "fault_guard", None)
+    # This ack (srv._profiles.stop(), which reaches profile_executor_halt() ->
+    # clear_this_runs_faults() on the board) is not what makes the Pico's own
+    # S6a mainFault latch reliable -- that's KilnFW's SAFETY_FAULT_MIN_HOLD_MS
+    # (firmware/KilnFW/App/drivers/safety/safety_link.h, 300ms), which holds
+    # the isolated fault line asserted regardless of how quickly this ack
+    # arrives. This case's logic is unchanged and does not depend on ack
+    # timing either way; the comment is here only so a future reader does not
+    # assume this ack's speed is load-bearing for the backup processor's trip.
     ack_result = srv._profiles.stop()
     sleep(2)
     st_after = srv._profiles.get_exec_status()
