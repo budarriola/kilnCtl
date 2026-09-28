@@ -2928,9 +2928,11 @@ function proceedToStart(id, startName) {
         }
         pollExec();
       }).catch(function (err) {
-        // Was a bare `.catch(pollExec)`: a non-JSON error body (the plain-text
-        // 409 the recovery-mode refusal above this handler still sends) threw
-        // here and the operator saw the Start button do absolutely nothing. Poll
+        // Was a bare `.catch(pollExec)`: a non-JSON error body threw here and
+        // the operator saw the Start button do absolutely nothing. The start
+        // routes' own refusals (recovery mode included) are JSON 409s,
+        // {ok:false, readiness_item, error}, handled above; this catch is for
+        // anything else -- a network error or an unexpected non-JSON body. Poll
         // as before, but say something first -- unless the operator simply
         // cancelled the sign-in prompt, which is not a board failure.
         if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
