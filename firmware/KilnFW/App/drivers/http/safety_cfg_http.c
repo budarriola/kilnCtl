@@ -1839,7 +1839,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     // row now walks ct_auto_zero_job as an extra_root and grades against a
     // ceiling derived from this real depth, not a borrowed one.
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 6144, ct_auto_zero_job, jc);
+        http_async_job_try_start(req, "http_async_job", 8192, ct_auto_zero_job, jc);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }
@@ -2028,7 +2028,7 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
     // codes are unchanged. No request body to carry through (this route
     // takes no parameters), so ctx is NULL. ---
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 6144, bench_preset_job, NULL);
+        http_async_job_try_start(req, "http_async_job", 8192, bench_preset_job, NULL);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }

@@ -24,7 +24,7 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
 
 /* Same bound parse_zone_fields()'s z%u_ramp enforces. 0 is legal (the
  * documented "never configured" encoding). */
-bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
+bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -34,6 +34,14 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     }
     s_zones.cfg.zones[zone_index].max_ramp_c_per_hr = c_per_hr;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
+{
+    if (!zones_config_set_max_ramp_no_save(zone_index, c_per_hr)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -48,7 +56,7 @@ bool zones_config_get_coil_power_w(uint8_t zone_index, float *out_power_w)
 
 /* Same bound parse_zone_fields()'s z%u_coil_power enforces. 0 is legal (the
  * documented "not overridden" encoding). */
-bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
+bool zones_config_set_coil_power_w_no_save(uint8_t zone_index, float power_w)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -59,6 +67,14 @@ bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
     }
     s_zones.cfg.zones[zone_index].coil_power_w = power_w;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
+{
+    if (!zones_config_set_coil_power_w_no_save(zone_index, power_w)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -72,7 +88,7 @@ bool zones_config_get_cal_offset(uint8_t zone_index, float *out_cal_offset_c)
 }
 
 /* Same bound parse_zone_fields()'s z%u_cal enforces. */
-bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
+bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -82,6 +98,14 @@ bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
     }
     s_zones.cfg.zones[zone_index].cal_offset_c = cal_offset_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
+{
+    if (!zones_config_set_cal_offset_no_save(zone_index, cal_offset_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -99,19 +123,47 @@ bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index)
     return s_zones.cfg.zones[zone_index].adaptive_tune_enabled != 0;
 }
 
-bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+bool zones_config_set_adaptive_tune_enabled_no_save(uint8_t zone_index, bool enabled)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
     s_zones.cfg.zones[zone_index].adaptive_tune_enabled = enabled ? 1 : 0;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+{
+    if (!zones_config_set_adaptive_tune_enabled_no_save(zone_index, enabled)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
 uint32_t zones_config_generation(void)
 {
     return s_config_generation;
+}
+
+/* Whole-struct snapshot/restore pair for a caller (backup_import.c) that
+ * batches many _no_save() setter calls together and needs to roll RAM back
+ * atomically if one of them fails partway through, without ever calling
+ * nvs_save() itself -- same "RAM must never run ahead of NVS" discipline as
+ * every other setter in this file, just applied to a whole batch instead of
+ * one field. zones_cfg_t is <= ZONES_CONFIG_BLOB_MAX_SIZE (896 B); the
+ * struct copy here is a plain memcpy, cheap next to the flash I/O this
+ * whole change exists to amortize, so no allocation of any kind is needed
+ * on either side of this pair. */
+void zones_config_get_full_copy(zones_cfg_t *out)
+{
+    *out = s_zones.cfg;
+}
+
+void zones_config_restore_snapshot_no_save(const zones_cfg_t *snapshot)
+{
+    s_zones.cfg = *snapshot;
+    s_config_generation++;
 }
 
 /* TODO.md 8.2 "Tie it to the guards, not only the UI" -- see
@@ -203,7 +255,7 @@ bool zones_config_get_tc_type(uint8_t zone_index, uint8_t *out_tc_type)
     return true;
 }
 
-bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
+bool zones_config_set_tc_type_no_save(uint8_t zone_index, uint8_t tc_type)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -216,6 +268,14 @@ bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
     }
     s_zones.cfg.zones[zone_index].tc_type = tc_type;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
+{
+    if (!zones_config_set_tc_type_no_save(zone_index, tc_type)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -248,7 +308,7 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 
 /* Same bound parse_zone_fields()'s z%u_relay_mask handling enforces --
  * relay_mask may only reference relays 1..relay_count. */
-bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask)
+bool zones_config_set_relay_mask_no_save(uint8_t zone_index, uint8_t relay_mask)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -259,6 +319,14 @@ bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask)
     }
     s_zones.cfg.zones[zone_index].relay_mask = relay_mask;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask)
+{
+    if (!zones_config_set_relay_mask_no_save(zone_index, relay_mask)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -275,7 +343,7 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
  * enforces -- thermo_mask may only reference channels 1..thermo_count.
  * Unlike the POST handler this setter has no "omitted means preserve the
  * legacy mapping" case -- see this function's header comment. */
-bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
+bool zones_config_set_thermo_mask_no_save(uint8_t zone_index, uint8_t thermo_mask)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -287,6 +355,14 @@ bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
     }
     s_zones.cfg.zones[zone_index].thermo_mask = thermo_mask;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
+{
+    if (!zones_config_set_thermo_mask_no_save(zone_index, thermo_mask)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -302,7 +378,7 @@ bool zones_config_get_ct_mask(uint8_t zone_index, uint8_t *out_mask)
 /* Same bound parse_zone_fields()'s z%u_ct_mask handling enforces -- ct_mask
  * may only reference channels 1..ZONE_CT_CHANNEL_COUNT, a fixed hardware
  * count (not relay_count/thermo_count-relative like the two setters above). */
-bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
+bool zones_config_set_ct_mask_no_save(uint8_t zone_index, uint8_t ct_mask)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -313,6 +389,14 @@ bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
     }
     s_zones.cfg.zones[zone_index].ct_mask = ct_mask;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
+{
+    if (!zones_config_set_ct_mask_no_save(zone_index, ct_mask)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -330,7 +414,7 @@ bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap)
  * (http_form_find_field() returning -2), applied to a NUL-terminated C
  * string. NULL is treated as an empty name (clears it), matching a POST that
  * omits the field. */
-bool zones_config_set_name(uint8_t zone_index, const char *name)
+bool zones_config_set_name_no_save(uint8_t zone_index, const char *name)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -342,6 +426,14 @@ bool zones_config_set_name(uint8_t zone_index, const char *name)
     strncpy(s_zones.cfg.zones[zone_index].name, name ? name : "", ZONE_NAME_MAX_LEN);
     s_zones.cfg.zones[zone_index].name[ZONE_NAME_MAX_LEN] = '\0';
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_name(uint8_t zone_index, const char *name)
+{
+    if (!zones_config_set_name_no_save(zone_index, name)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -420,7 +512,7 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     return true;
 }
 
-bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
+bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -466,6 +558,14 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
      * this returns false on a save failure while the config change stands --
      * unchanged behaviour, and the generation reflects the in-RAM truth. */
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
+{
+    if (!zones_config_set_pid_no_save(zone_index, kp, ki, kd)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -483,7 +583,7 @@ bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
 /* Writer for the getter above. Same bound parse_zone_fields()'s
  * z%u_fuzzy_strength enforces (0..ZONE_FUZZY_STRENGTH_PCT_MAX) -- refused,
  * never clamped, same discipline as every other setter in this file. */
-bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
+bool zones_config_set_fuzzy_strength_pct_no_save(uint8_t zone_index, float pct)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -493,6 +593,14 @@ bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
     }
     s_zones.cfg.zones[zone_index].fuzzy_strength_pct = pct;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
+{
+    if (!zones_config_set_fuzzy_strength_pct_no_save(zone_index, pct)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -516,7 +624,7 @@ bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
  * clamped, matching every other setter in this file. backup_http.c's import
  * needs this to round-trip the field, the same reason every other setter in
  * this file exists. */
-bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
+bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -526,6 +634,14 @@ bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
     }
     s_zones.cfg.zones[zone_index].coupling_diag_k_dc = k_dc;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (!zones_config_set_coupling_diag_k_dc_no_save(zone_index, k_dc)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -676,7 +792,7 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
  * j's row at a time, and must never wipe out zone j's other, previously
  * measured neighbors just because this run didn't touch them. Same bounds
  * as the whole-row setter above, applied to the one cell being written. */
-bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
     if (zone_index >= s_zones.cfg.thermo_count || neighbor_index >= MAX31856_CHANNEL_COUNT) {
@@ -707,6 +823,15 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     z->coupling_tau_s[neighbor_index] = tau_s;
     z->coupling_dead_time_s[neighbor_index] = dead_time_s;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
+{
+    if (!zones_config_set_coupling_cell_no_save(zone_index, neighbor_index, coeff, tau_s, dead_time_s)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -878,7 +1003,7 @@ bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min)
 
 /* Same bound parse_zone_fields()'s z%u_sanity enforces. 0 is legal (the
  * documented "never configured" encoding). */
-bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
+bool zones_config_set_sanity_rate_no_save(uint8_t zone_index, float c_per_min)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -888,6 +1013,14 @@ bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
     }
     s_zones.cfg.zones[zone_index].sanity_rate_c_per_min = c_per_min;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
+{
+    if (!zones_config_set_sanity_rate_no_save(zone_index, c_per_min)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -901,7 +1034,7 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
 }
 
 /* Same bound parse_zone_fields()'s z%u_mode enforces (0-3). */
-bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
+bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode_t mode)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -911,6 +1044,14 @@ bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
     }
     s_zones.cfg.zones[zone_index].control_mode = (uint8_t)mode;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
+{
+    if (!zones_config_set_control_mode_no_save(zone_index, mode)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -925,7 +1066,7 @@ bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
 
 /* Same bound zones_config_set_control_mode() enforces, against ZONE_TYPE's
  * own max instead of zone_control_mode_t's. */
-bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
+bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -935,6 +1076,14 @@ bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
     }
     s_zones.cfg.zones[zone_index].zone_type = (uint8_t)type;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
+{
+    if (!zones_config_set_zone_type_no_save(zone_index, type)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -986,13 +1135,21 @@ bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on)
 /* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure,
  * group 1. Same [0,1] bound validate_zones_cfg() enforces on this field
  * (z->failsafe_state > 1). */
-bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state)
+bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
     s_zones.cfg.zones[zone_index].failsafe_state = on_state ? 1u : 0u;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state)
+{
+    if (!zones_config_set_failsafe_state_no_save(zone_index, on_state)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1014,7 +1171,7 @@ bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c)
  * group 2. 0 is accepted (explicit "reset to firmware default"); a non-zero
  * value must fall in [ZONE_HYST_C_MIN, ZONE_HYST_C_MAX] -- same
  * "(0, MIN)-sliver refused" shape validate_zones_cfg() enforces. */
-bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
+bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c)
 {
     if (zone_index >= s_zones.cfg.thermo_count || !isfinite(hyst_c) || hyst_c < 0.0f ||
         hyst_c > ZONE_HYST_C_MAX || (hyst_c != 0.0f && hyst_c < ZONE_HYST_C_MIN)) {
@@ -1022,6 +1179,14 @@ bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
     }
     s_zones.cfg.zones[zone_index].hyst_c = hyst_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
+{
+    if (!zones_config_set_hyst_c_no_save(zone_index, hyst_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1042,7 +1207,7 @@ bool zones_config_get_min_on_s(uint8_t zone_index, uint16_t *out_s)
 /* Writer for the getter above -- 2026-09-16 backup-round-trip-gap closure,
  * group 2. Same "0 = reset to default, (0, MIN)-sliver refused" shape as
  * zones_config_set_hyst_c(), bounded against ZONE_MIN_ON_OFF_S_MIN/MAX. */
-bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
+bool zones_config_set_min_on_s_no_save(uint8_t zone_index, uint16_t min_on_s)
 {
     if (zone_index >= s_zones.cfg.thermo_count || min_on_s > ZONE_MIN_ON_OFF_S_MAX ||
         (min_on_s != 0u && min_on_s < ZONE_MIN_ON_OFF_S_MIN)) {
@@ -1050,6 +1215,14 @@ bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
     }
     s_zones.cfg.zones[zone_index].min_on_s = min_on_s;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
+{
+    if (!zones_config_set_min_on_s_no_save(zone_index, min_on_s)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1068,7 +1241,7 @@ bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s)
 }
 
 /* Writer for the getter above -- same shape as zones_config_set_min_on_s(). */
-bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
+bool zones_config_set_min_off_s_no_save(uint8_t zone_index, uint16_t min_off_s)
 {
     if (zone_index >= s_zones.cfg.thermo_count || min_off_s > ZONE_MIN_ON_OFF_S_MAX ||
         (min_off_s != 0u && min_off_s < ZONE_MIN_ON_OFF_S_MIN)) {
@@ -1076,6 +1249,14 @@ bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
     }
     s_zones.cfg.zones[zone_index].min_off_s = min_off_s;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
+{
+    if (!zones_config_set_min_off_s_no_save(zone_index, min_off_s)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1096,7 +1277,7 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
  * setter matches it exactly rather than becoming stricter than the page it
  * mirrors. Both fields checked before either is written, same
  * reject-nothing-half-applied discipline as zones_config_set_model(). */
-bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float min_temp_c)
+bool zones_config_set_temp_limits_no_save(uint8_t zone_index, float max_temp_c, float min_temp_c)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -1111,6 +1292,14 @@ bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float mi
     z->max_temp_c = max_temp_c;
     z->min_temp_c = min_temp_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float min_temp_c)
+{
+    if (!zones_config_set_temp_limits_no_save(zone_index, max_temp_c, min_temp_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1132,7 +1321,7 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
  * min_on_ms/min_off_ms-vs-window_ms cross-check: parse_zone_fields() (the
  * POST authority) does not enforce one either -- see
  * zones_config_set_temp_limits()'s comment for the identical reasoning. */
-bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
+bool zones_config_set_heater_cfg_no_save(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -1163,6 +1352,14 @@ bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_
     z->heater_min_on_ms = min_on_ms;
     z->heater_min_off_ms = min_off_ms;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
+{
+    if (!zones_config_set_heater_cfg_no_save(zone_index, window_ms, min_on_ms, min_off_ms)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1276,13 +1473,21 @@ bool zones_config_get_timing_profile_index(uint8_t zone_index, uint8_t *out_inde
     return true;
 }
 
-bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
+bool zones_config_set_timing_profile_index_no_save(uint8_t zone_index, uint8_t index)
 {
     if (zone_index >= s_zones.cfg.thermo_count || index >= s_zones.cfg.timing_profile_count) {
         return false;
     }
     s_zones.cfg.zones[zone_index].timing_profile = index;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
+{
+    if (!zones_config_set_timing_profile_index_no_save(zone_index, index)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1319,7 +1524,7 @@ bool zones_config_get_timing_profile_raw(uint8_t profile_index, char *out_name, 
     return true;
 }
 
-bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name,
+bool zones_config_set_timing_profile_raw_no_save(uint8_t profile_index, const char *name,
                                          float progress_duty_min, float progress_window_s,
                                          float drift_hysteresis_c, float frozen_eps_c,
                                          float cross_zone_period_s, float bangbang_hysteresis_c,
@@ -1377,6 +1582,19 @@ bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name
         s_zones.cfg.timing_profile_count = (uint8_t)(profile_index + 1);
     }
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name,
+                                         float progress_duty_min, float progress_window_s,
+                                         float drift_hysteresis_c, float frozen_eps_c,
+                                         float cross_zone_period_s, float bangbang_hysteresis_c,
+                                         float cooling_limited_margin_c, float cooling_limited_hold_s,
+                                         float ramp_lock_band_c)
+{
+    if (!zones_config_set_timing_profile_raw_no_save(profile_index, name, progress_duty_min, progress_window_s, drift_hysteresis_c, frozen_eps_c, cross_zone_period_s, bangbang_hysteresis_c, cooling_limited_margin_c, cooling_limited_hold_s, ramp_lock_band_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1427,7 +1645,7 @@ bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult)
  * than having to know and pass 2.0 by hand. Setting one zone's value never
  * touches any other zone's -- that independence is the entire point of this
  * pass. */
-bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
+bool zones_config_set_ease_off_window_mult_no_save(uint8_t zone_index, float mult)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(mult) ||
         (mult != 0.0f && (mult < ZONE_EASE_OFF_WINDOW_MULT_MIN || mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
@@ -1435,6 +1653,14 @@ bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
     }
     s_zones.cfg.zones[zone_index].ease_off_window_mult = mult;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
+{
+    if (!zones_config_set_ease_off_window_mult_no_save(zone_index, mult)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1471,7 +1697,7 @@ bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_
  * setter in this file. 0 is accepted as an explicit "remove this zone's cap"
  * -- an A/B campaign ending an arm should be able to ask for that directly.
  * Setting one zone's value never touches any other zone's. */
-bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr)
+bool zones_config_set_approach_rate_cap_c_per_hr_no_save(uint8_t zone_index, float cap_c_per_hr)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(cap_c_per_hr) ||
         (cap_c_per_hr != 0.0f && (cap_c_per_hr < ZONE_APPROACH_RATE_CAP_C_PER_HR_MIN ||
@@ -1480,6 +1706,14 @@ bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c
     }
     s_zones.cfg.zones[zone_index].approach_rate_cap_c_per_hr = cap_c_per_hr;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr)
+{
+    if (!zones_config_set_approach_rate_cap_c_per_hr_no_save(zone_index, cap_c_per_hr)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1511,7 +1745,7 @@ bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c)
 /* Writer for the getter above. Refused, never clamped, matching every other
  * setter in this file. 0 is accepted as an explicit "reset to the firmware
  * default." Setting one zone's value never touches any other zone's. */
-bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
+bool zones_config_set_error_band_c_no_save(uint8_t zone_index, float band_c)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(band_c) ||
         (band_c != 0.0f && (band_c < ZONE_ERROR_BAND_C_MIN || band_c > ZONE_ERROR_BAND_C_MAX))) {
@@ -1519,6 +1753,14 @@ bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
     }
     s_zones.cfg.zones[zone_index].error_band_c = band_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
+{
+    if (!zones_config_set_error_band_c_no_save(zone_index, band_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1539,7 +1781,7 @@ bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_pe
     return true;
 }
 
-bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
+bool zones_config_set_rate_band_c_per_s_no_save(uint8_t zone_index, float band_c_per_s)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(band_c_per_s) ||
         (band_c_per_s != 0.0f &&
@@ -1548,6 +1790,14 @@ bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
     }
     s_zones.cfg.zones[zone_index].rate_band_c_per_s = band_c_per_s;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
+{
+    if (!zones_config_set_rate_band_c_per_s_no_save(zone_index, band_c_per_s)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1581,13 +1831,27 @@ bool zones_config_get_relay_type(uint8_t zone_index, uint8_t *out_relay_type)
  * makes the identical per-zone push directly after a successful load rather
  * than routing through this setter, since a load has no "successful save" of
  * its own to gate the push on. */
-bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
+/* Mutation-only half of zones_config_set_relay_type() below -- see
+ * zones_config_accessors.h's doc comment on the _no_save convention. Does
+ * NOT save to NVS and does NOT push the new type to relay_cycles_set_type():
+ * a batched caller (backup_import.c) calls zones_config_save_now() once
+ * after its whole batch and pushes the type itself afterward -- see
+ * backup_import.c's own commit-loop comment. */
+bool zones_config_set_relay_type_no_save(uint8_t zone_index, uint8_t relay_type)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || relay_type > ZONE_RELAY_TYPE_MAX) {
         return false;
     }
     s_zones.cfg.zones[zone_index].relay_type = relay_type;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
+{
+    if (!zones_config_set_relay_type_no_save(zone_index, relay_type)) {
+        return false;
+    }
     if (nvs_save() != ESP_OK) {
         return false;
     }
@@ -1618,7 +1882,7 @@ bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c)
 /* Writer for the getter above. Refused, never clamped, matching every other
  * setter in this file. 0 is accepted as an explicit "reset to the firmware
  * default." Setting one zone's value never touches any other zone's. */
-bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
+bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(band_c) ||
         (band_c != 0.0f && (band_c < ZONE_PROGRESS_BAND_C_MIN || band_c > ZONE_PROGRESS_BAND_C_MAX))) {
@@ -1626,6 +1890,14 @@ bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
     }
     s_zones.cfg.zones[zone_index].progress_band_c = band_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
+{
+    if (!zones_config_set_progress_band_c_no_save(zone_index, band_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1634,7 +1906,7 @@ bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
  * independent bound (matching which ceiling parse_zone_fields() applies to
  * that specific key) -- no cross-field check between any pair of these 8,
  * matching the POST authority's own lack of one. */
-bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_window_s,
+bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_dir_window_s,
                                        float wrong_dir_rate_c_per_min, float off_settle_s,
                                        float runaway_rate_c_per_min, float runaway_margin_c,
                                        float drift_period_s, float sensor_fault_debounce_ticks,
@@ -1680,6 +1952,18 @@ bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_windo
     z->guard_sensor_fault_debounce_ticks = sensor_fault_debounce_ticks;
     z->guard_frozen_window_s = frozen_window_s;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_window_s,
+                                       float wrong_dir_rate_c_per_min, float off_settle_s,
+                                       float runaway_rate_c_per_min, float runaway_margin_c,
+                                       float drift_period_s, float sensor_fault_debounce_ticks,
+                                       float frozen_window_s)
+{
+    if (!zones_config_set_guard_thresholds_no_save(zone_index, wrong_dir_window_s, wrong_dir_rate_c_per_min, off_settle_s, runaway_rate_c_per_min, runaway_margin_c, drift_period_s, sensor_fault_debounce_ticks, frozen_window_s)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1694,7 +1978,7 @@ bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_
 
 /* Same bound parse_zone_fields()'s z%u_xzone enforces. 0 is legal (the
  * documented "guard disabled" encoding). */
-bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
+bool zones_config_set_cross_zone_delta_no_save(uint8_t zone_index, float max_delta_c)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -1704,6 +1988,14 @@ bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
     }
     s_zones.cfg.zones[zone_index].cross_zone_max_delta_c = max_delta_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
+{
+    if (!zones_config_set_cross_zone_delta_no_save(zone_index, max_delta_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1719,7 +2011,7 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
     return true;
 }
 
-bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -1751,6 +2043,14 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
      * firing is running is precisely what TODO.md 6A.7's reload path
      * exists to prevent. */
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    if (!zones_config_set_model_no_save(zone_index, k_dc, tau_s, dead_time_s)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1779,7 +2079,7 @@ bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_
     return true;
 }
 
-bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
+bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -1791,6 +2091,14 @@ bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, fl
     z->model_fit_temp_c = fit_temp_c;
     z->model_fit_ambient_c = fit_ambient_c;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
+{
+    if (!zones_config_set_model_fit_context_no_save(zone_index, fit_temp_c, fit_ambient_c)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1803,7 +2111,7 @@ bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc
     return true;
 }
 
-bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k_dc)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
@@ -1818,6 +2126,14 @@ bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
     }
     s_zones.cfg.zones[zone_index].autotune_baseline_k_dc = k_dc;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (!zones_config_set_autotune_baseline_k_dc_no_save(zone_index, k_dc)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 
@@ -1855,7 +2171,7 @@ bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *
     return true;
 }
 
-bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
+bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuning_quality_t *q)
 {
     /* q->valid must be true -- see this setter's own header comment
      * (zones_http.h) for why a caller wanting to CLEAR the record uses
@@ -1883,6 +2199,14 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
      * function's own header comment (zones_http.h) for why. */
     z->tuning_seq++;
     s_config_generation++;
+    return true;
+}
+
+bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
+{
+    if (!zones_config_set_tuning_quality_no_save(zone_index, q)) {
+        return false;
+    }
     return nvs_save() == ESP_OK;
 }
 

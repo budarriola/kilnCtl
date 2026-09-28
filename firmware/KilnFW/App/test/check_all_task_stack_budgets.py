@@ -994,15 +994,19 @@ CEILING_BYTES = {
     # actually measures, not a hand-copied guess -- still INDETERMINATE (the
     # walk cannot follow every indirect call in this chain), so this is a
     # real lower bound, not a proven worst case.
-    # 2026-09-28 A4 review: backup_import_job (slice A4) added as a third
-    # extra_roots entry; its backup_import_apply() chain is now the deepest
-    # known callback at 3728 B, for 3760 B total -- the same shape the old
-    # httpd-hosted measurement of this chain reported (~3808 B), since the
-    # code moved tasks but did not change. Adding that ESP_LOG overhead
-    # (~1344 B) gives about 5104 B of 6144 B, roughly 1 KB spare. Still a
-    # lower bound (INDETERMINATE), so the ceiling tracks what the walk
-    # actually measures.
-    "http_async_job": 3760,
+    # 2026-09-28 A4 review, follow-up: backup_import_job's real resolved
+    # depth (this checker's own re-measurement, not the earlier hand estimate
+    # above) is 4528 B, over the 3760 B ceiling that review landed --
+    # tightened here to the number the walk actually reports. All three
+    # http_async_job_try_start() call sites (ct_auto_zero_job,
+    # bench_preset_job, backup_import_job) were raised from a declared 6144 B
+    # to 8192 B in the same change: adding the ~1344 B ESP_LOG-through-
+    # uart_log_vprintf overhead (see the ct_auto_zero_job comment above) to
+    # 4528 B gives about 5872 B of 8192 B, ~2.3 KB spare -- the old 6144 B
+    # stack left only ~270 B, too tight given this is still an INDETERMINATE
+    # lower bound (unresolved indirect calls in backup_import_apply()'s own
+    # chain), not a proven worst case.
+    "http_async_job": 4528,
     "recovery_exit": 80,
     "backlight_pwm": 112,
     "i2c_owner_ns2009": 144,

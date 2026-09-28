@@ -53,6 +53,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h" /* esp_timer_get_time() -- batched-save timing instrumentation, see
+                         * zones_snapshot's comment below */
 
 #include "MAX31856.h"
 #include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up -- kiln_configs[] restore */
@@ -2028,24 +2030,12 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             return false;
         }
     }
-    /* opus review finding (LOW-MEDIUM): the settings_source commit loop below
-     * uses the _no_save() variant so a mid-batch failure (an out-of-range
-     * override_source pass 1 somehow missed, or a future refusal added to
-     * the setter) leaves whatever pairs already committed THIS pass sitting
-     * mutated in RAM with settings_source_dirty never getting persisted --
-     * the live config and flash silently disagree until something else
-     * happens to save. Snapshot every zone's settings_source[group] before
-     * this loop starts so the failure arm can restore the exact pre-import
-     * values rather than leaving a half-applied set live. */
-    uint8_t settings_source_before[MAX31856_CHANNEL_COUNT][SRC_GROUP_COUNT];
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
-            if (!zones_config_get_settings_source(zi, group, &settings_source_before[zi][group])) {
-                settings_source_before[zi][group] = ZONE_SETTINGS_SOURCE_CUSTOM;
-            }
-        }
-    }
-    bool settings_source_dirty = false; /* set true once any _no_save() commit below succeeds; see item 3 comment */
+    /* opus review finding (LOW-MEDIUM), originally closed with a narrow
+     * settings_source[]-only snapshot/restore here: superseded below by
+     * zones_snapshot, a whole-zones_cfg_t snapshot taken right before the
+     * timing-profile/per-zone commit loops, which now covers every field
+     * those loops touch (not just settings_source) with a single restore
+     * call on any mid-batch failure. */
 
     /* 2026-09-10 opus review: zones_http_post.c's zones_post_handler() gates every
      * max_temp_c RAISE on safety_ceiling_sync_guard_raise() so the Pico's own
@@ -2141,8 +2131,12 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         if (n_pairs > 0) {
             char reason[128];
             safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_NONE;
-            if (!safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
-                                              sizeof(reason), &out_class)) {
+            int64_t pico_roundtrip_start_us = esp_timer_get_time();
+            bool pico_ok = safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
+                                              sizeof(reason), &out_class);
+            ESP_LOGI(BACKUP_TAG, "backup import: Pico i_normal_a round trip (%d pairs) took %lld ms",
+                    n_pairs, (long long)((esp_timer_get_time() - pico_roundtrip_start_us) / 1000));
+            if (!pico_ok) {
                 /* err_msg's real caller buffer is 160 B (backup_http.c's
                  * POST handler); this fixed 84-byte prefix leaves only 75
                  * bytes free before the terminator, not 80 -- %.80s could
@@ -2176,13 +2170,35 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * either "overwrite an existing slot" or "grow by exactly one", never
      * a gap -- matching the pass-1 cross-check above, which already
      * confirmed every zone's timing_profile index is < timing_profile_candidate_count. */
+    /* ---- Batched commit: everything from here down mutates zones_cfg_t
+     * in RAM only (the _no_save() variants) and persists once, via a single
+     * zones_config_save_now() call after the whole batch, instead of the
+     * ~35-setters-times-N-zones worth of individual nvs_save() calls this
+     * loop used to make (each one a CRC recompute, a cfg LittleFS write, an
+     * NVS commit, and a blocking flash-worker dispatch -- see this file's
+     * outer comment / the MCP tooling note on POST /api/backup/import's
+     * cost). Snapshot the whole live config first so a mid-batch failure
+     * anywhere below (timing profiles, per-zone fields, settings_source) can
+     * restore RAM to exactly what it was before this function touched
+     * anything, rather than leaving some fields committed and others not
+     * with nothing persisted for any of it -- same "RAM must never run ahead
+     * of NVS" discipline this file already applied narrowly to
+     * settings_source_before[][] above, now covering the entire batch. Every
+     * `return false` between this snapshot and the final save below must
+     * restore it first. */
+    zones_cfg_t zones_snapshot;
+    zones_config_get_full_copy(&zones_snapshot);
+    bool relay_type_changed[MAX31856_CHANNEL_COUNT] = {0};
+    int64_t setter_loop_start_us = esp_timer_get_time();
+
     for (size_t i = 0; i < timing_profile_candidate_count; i++) {
         timing_profile_candidate_t *tp = &timing_profile_candidates[i];
-        if (!zones_config_set_timing_profile_raw((uint8_t)i, tp->name, tp->progress_duty_min,
+        if (!zones_config_set_timing_profile_raw_no_save((uint8_t)i, tp->name, tp->progress_duty_min,
                                                  tp->progress_window_s, tp->drift_hysteresis_c, tp->frozen_eps_c,
                                                  tp->cross_zone_period_s, tp->bangbang_hysteresis_c,
                                                  tp->cooling_limited_margin_c, tp->cooling_limited_hold_s,
                                                  tp->ramp_lock_band_c)) {
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             snprintf(err_msg, err_cap, "timing profile entry %u rejected at commit", (unsigned)i);
             return false;
         }
@@ -2190,21 +2206,24 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
 
     for (size_t i = 0; i < zone_candidate_count; i++) {
         zone_candidate_t *zc = &zone_candidates[i];
-        if (!zones_config_set_pid(zc->index, zc->kp, zc->ki, zc->kd)) {
+        if (!zones_config_set_pid_no_save(zc->index, zc->kp, zc->ki, zc->kd)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting PID gains",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_model && !zones_config_set_model(zc->index, zc->k_dc, zc->tau_s, zc->dead_time_s)) {
+        if (zc->has_model && !zones_config_set_model_no_save(zc->index, zc->k_dc, zc->tau_s, zc->dead_time_s)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting the plant model -- value "
                     "outside this firmware's sanity bounds",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_tc && !zones_config_set_tc_type(zc->index, zc->tc_type)) {
+        if (zc->has_tc && !zones_config_set_tc_type_no_save(zc->index, zc->tc_type)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting tc_type",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         /* Version 2 fields -- see zone_candidate_t's comment. Every one of
@@ -2213,65 +2232,75 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * concurrent config change between the two passes (same rationale
          * as the PID/model/tc_type "should not happen" comments above), not
          * a bug in this pass's own bounds. */
-        if (zc->has_name && !zones_config_set_name(zc->index, zc->name)) {
+        if (zc->has_name && !zones_config_set_name_no_save(zc->index, zc->name)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting name",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_relay_mask && !zones_config_set_relay_mask(zc->index, zc->relay_mask)) {
+        if (zc->has_relay_mask && !zones_config_set_relay_mask_no_save(zc->index, zc->relay_mask)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting relay_mask",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_thermo_mask && !zones_config_set_thermo_mask(zc->index, zc->thermo_mask)) {
+        if (zc->has_thermo_mask && !zones_config_set_thermo_mask_no_save(zc->index, zc->thermo_mask)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting thermo_mask",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_ct_mask && !zones_config_set_ct_mask(zc->index, zc->ct_mask)) {
+        if (zc->has_ct_mask && !zones_config_set_ct_mask_no_save(zc->index, zc->ct_mask)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting ct_mask",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_cal && !zones_config_set_cal_offset(zc->index, zc->cal_offset_c)) {
+        if (zc->has_cal && !zones_config_set_cal_offset_no_save(zc->index, zc->cal_offset_c)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting cal_offset_c",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_ramp && !zones_config_set_max_ramp(zc->index, zc->max_ramp_c_per_hr)) {
+        if (zc->has_ramp && !zones_config_set_max_ramp_no_save(zc->index, zc->max_ramp_c_per_hr)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting max_ramp_c_per_hr",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_sanity && !zones_config_set_sanity_rate(zc->index, zc->sanity_rate_c_per_min)) {
+        if (zc->has_sanity && !zones_config_set_sanity_rate_no_save(zc->index, zc->sanity_rate_c_per_min)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting sanity_rate_c_per_min",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_mode && !zones_config_set_control_mode(zc->index, (zone_control_mode_t)zc->control_mode)) {
+        if (zc->has_mode && !zones_config_set_control_mode_no_save(zc->index, (zone_control_mode_t)zc->control_mode)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting control_mode",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_temp_limits && !zones_config_set_temp_limits(zc->index, zc->max_temp_c, zc->min_temp_c)) {
+        if (zc->has_temp_limits && !zones_config_set_temp_limits_no_save(zc->index, zc->max_temp_c, zc->min_temp_c)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting temp limits",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_heater_cfg &&
-            !zones_config_set_heater_cfg(zc->index, zc->heater_window_ms, zc->heater_min_on_ms,
+            !zones_config_set_heater_cfg_no_save(zc->index, zc->heater_window_ms, zc->heater_min_on_ms,
                                          zc->heater_min_off_ms)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting heater timing",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_guard &&
-            !zones_config_set_guard_thresholds(zc->index, zc->guard_wrong_dir_window_s,
+            !zones_config_set_guard_thresholds_no_save(zc->index, zc->guard_wrong_dir_window_s,
                                                zc->guard_wrong_dir_rate_c_per_min, zc->guard_off_settle_s,
                                                zc->guard_runaway_rate_c_per_min, zc->guard_runaway_margin_c,
                                                zc->guard_drift_period_s, zc->guard_sensor_fault_debounce_ticks,
@@ -2279,18 +2308,21 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting guard thresholds",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_cross_zone && !zones_config_set_cross_zone_delta(zc->index, zc->cross_zone_max_delta_c)) {
+        if (zc->has_cross_zone && !zones_config_set_cross_zone_delta_no_save(zc->index, zc->cross_zone_max_delta_c)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting cross_zone_max_delta_c",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_fuzzy_strength && !zones_config_set_fuzzy_strength_pct(zc->index, zc->fuzzy_strength_pct)) {
+        if (zc->has_fuzzy_strength && !zones_config_set_fuzzy_strength_pct_no_save(zc->index, zc->fuzzy_strength_pct)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting fuzzy_strength_pct",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         /* Per-cell, not whole-row: an import that only supplies (or only
@@ -2299,7 +2331,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * preserves the current value" convention as fuzzy_strength_pct
          * above, applied per cell instead of per field. */
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            /* ZONES_CFG_VERSION 11->12: zones_config_set_coupling_cell() is
+            /* ZONES_CFG_VERSION 11->12: zones_config_set_coupling_cell_no_save() is
              * now all-or-nothing across all three of coeff/tau/dead_time --
              * see its own header comment. An import that only supplies coeff
              * (every pre-v12 export, and any v12 export whose autotune run
@@ -2339,10 +2371,11 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                     dead_time_s = cur_dead_row[j];
                 }
             }
-            if (!zones_config_set_coupling_cell(zc->index, j, coeff, tau_s, dead_time_s)) {
+            if (!zones_config_set_coupling_cell_no_save(zc->index, j, coeff, tau_s, dead_time_s)) {
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u (channel %u) rejected at commit setting coupling_c%u",
                         (unsigned)i, zc->index, (unsigned)j);
+                zones_config_restore_snapshot_no_save(&zones_snapshot);
                 return false;
             }
         }
@@ -2351,10 +2384,11 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * convention as fuzzy_strength_pct above (this is a measured
          * quantity, not a setting an absent import should reset). */
         if (zc->has_coupling_diag_k_dc &&
-            !zones_config_set_coupling_diag_k_dc(zc->index, zc->coupling_diag_k_dc)) {
+            !zones_config_set_coupling_diag_k_dc_no_save(zc->index, zc->coupling_diag_k_dc)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting coupling_diag_k_dc",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         /* 2026-09-16 backup-round-trip-gap closure -- "omit preserves the
@@ -2363,84 +2397,101 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * optional in pass 1, so an absent key here means an older backup
          * (or a hand-edited one), not "reset to zero". */
         if (zc->has_ease_off_window_mult &&
-            !zones_config_set_ease_off_window_mult(zc->index, zc->ease_off_window_mult)) {
+            !zones_config_set_ease_off_window_mult_no_save(zc->index, zc->ease_off_window_mult)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting ease_off_window_mult",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_approach_rate_cap &&
-            !zones_config_set_approach_rate_cap_c_per_hr(zc->index, zc->approach_rate_cap_c_per_hr)) {
+            !zones_config_set_approach_rate_cap_c_per_hr_no_save(zc->index, zc->approach_rate_cap_c_per_hr)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting approach_rate_cap_c_per_hr",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_error_band_c && !zones_config_set_error_band_c(zc->index, zc->error_band_c)) {
+        if (zc->has_error_band_c && !zones_config_set_error_band_c_no_save(zc->index, zc->error_band_c)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting error_band_c",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_rate_band_c_per_s && !zones_config_set_rate_band_c_per_s(zc->index, zc->rate_band_c_per_s)) {
+        if (zc->has_rate_band_c_per_s && !zones_config_set_rate_band_c_per_s_no_save(zc->index, zc->rate_band_c_per_s)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting rate_band_c_per_s",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        /* zones_config_set_relay_type() pushes the new type out to
-         * relay_cycles_set_type() for this zone's relays internally
-         * (confirmed by direct read of zones_config_accessors.c) -- no
-         * separate zones_config_push_relay_type() call needed here. */
-        if (zc->has_relay_type && !zones_config_set_relay_type(zc->index, zc->relay_type)) {
+        /* zones_config_set_relay_type_no_save() does NOT push the new type
+         * out to relay_cycles_set_type() -- that push is deferred until
+         * after the single batched zones_config_save_now() call below
+         * succeeds (relay_type_changed[] records which zones need it), same
+         * "commit RAM, then push hardware only once the save that backs it
+         * is confirmed" ordering as everything else in this batch. */
+        if (zc->has_relay_type && !zones_config_set_relay_type_no_save(zc->index, zc->relay_type)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting relay_type",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_progress_band_c && !zones_config_set_progress_band_c(zc->index, zc->progress_band_c)) {
+        if (zc->has_relay_type) {
+            relay_type_changed[zc->index] = true;
+        }
+        if (zc->has_progress_band_c && !zones_config_set_progress_band_c_no_save(zc->index, zc->progress_band_c)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting progress_band_c",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_zone_type && !zones_config_set_zone_type(zc->index, (zone_type_t)zc->zone_type)) {
+        if (zc->has_zone_type && !zones_config_set_zone_type_no_save(zc->index, (zone_type_t)zc->zone_type)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting zone_type",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_model_fit_context &&
-            !zones_config_set_model_fit_context(zc->index, zc->model_fit_temp_c, zc->model_fit_ambient_c)) {
+            !zones_config_set_model_fit_context_no_save(zc->index, zc->model_fit_temp_c, zc->model_fit_ambient_c)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting model fit context",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_coil_power_w && !zones_config_set_coil_power_w(zc->index, zc->coil_power_w)) {
+        if (zc->has_coil_power_w && !zones_config_set_coil_power_w_no_save(zc->index, zc->coil_power_w)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting coil_power_w",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_autotune_baseline_k_dc &&
-            !zones_config_set_autotune_baseline_k_dc(zc->index, zc->autotune_baseline_k_dc)) {
+            !zones_config_set_autotune_baseline_k_dc_no_save(zc->index, zc->autotune_baseline_k_dc)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting autotune_baseline_k_dc",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_adaptive_tune_enabled &&
-            !zones_config_set_adaptive_tune_enabled(zc->index, zc->adaptive_tune_enabled)) {
+            !zones_config_set_adaptive_tune_enabled_no_save(zc->index, zc->adaptive_tune_enabled)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting adaptive_tune_enabled",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_tuning_quality && !zones_config_set_tuning_quality(zc->index, &zc->tuning_quality)) {
+        if (zc->has_tuning_quality && !zones_config_set_tuning_quality_no_save(zc->index, &zc->tuning_quality)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting tuning quality",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         /* CT normals -- the owner's own named example, and a SEPARATE NVS
@@ -2453,6 +2504,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting normal_current_a",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         /* 2026-09-16 backup-round-trip-gap closure, group 1/2/3. The
@@ -2465,32 +2517,37 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * index that only accidentally matches the *target's* live
          * profile_count, so skip restoring this field in that case and
          * leave the target's own timing_profile index untouched. */
-        if (zc->has_failsafe_state && !zones_config_set_failsafe_state(zc->index, zc->failsafe_state)) {
+        if (zc->has_failsafe_state && !zones_config_set_failsafe_state_no_save(zc->index, zc->failsafe_state)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting failsafe_state",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_hyst_c && !zones_config_set_hyst_c(zc->index, zc->hyst_c)) {
+        if (zc->has_hyst_c && !zones_config_set_hyst_c_no_save(zc->index, zc->hyst_c)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting hyst_c",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_min_on_s && !zones_config_set_min_on_s(zc->index, zc->min_on_s)) {
+        if (zc->has_min_on_s && !zones_config_set_min_on_s_no_save(zc->index, zc->min_on_s)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting min_on_s",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_min_off_s && !zones_config_set_min_off_s(zc->index, zc->min_off_s)) {
+        if (zc->has_min_off_s && !zones_config_set_min_off_s_no_save(zc->index, zc->min_off_s)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting min_off_s",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         if (zc->has_timing_profile && timing_profile_candidate_count > 0 &&
-            !zones_config_set_timing_profile_index(zc->index, zc->timing_profile)) {
+            !zones_config_set_timing_profile_index_no_save(zc->index, zc->timing_profile)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting timing_profile",
                     (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
         /* No has_* guard -- zc->settings_source is ALWAYS a real value (either
@@ -2526,33 +2583,25 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * here instead of zones_config_set_settings_source_unchecked() --
          * that function calls nvs_save() on every single (zone, group) pair,
          * which for a 3-zone import meant 15 flash writes for this block
-         * alone. settings_source_dirty is set below and a single
-         * zones_config_save_now() call, after this whole per-zone loop
-         * finishes, persists the lot in one write. */
+         * alone. Now folded into the single zones_config_save_now() call
+         * after the whole batch (timing profiles + every zone's fields,
+         * settings_source included) finishes, persisting the lot in one
+         * write. */
         for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
             if (!zones_config_set_settings_source_unchecked_no_save(zc->index, group, zc->settings_source[group])) {
-                /* opus review finding (LOW-MEDIUM): restore every zone's
-                 * settings_source[] to its pre-import snapshot before
-                 * returning -- otherwise whatever (zone, group) pairs this
-                 * loop already committed this pass stay mutated in RAM,
-                 * unpersisted (settings_source_dirty never reaches the save
-                 * below), silently disagreeing with flash. Best-effort: the
-                 * restore uses the same unchecked/no-save setter, so a
-                 * restore failure here would itself need a restore -- but
-                 * these are the exact values that were live and valid a
-                 * moment ago, so failure is not expected. */
-                for (uint8_t rzi = 0; rzi < MAX31856_CHANNEL_COUNT; rzi++) {
-                    for (uint8_t rgroup = 0; rgroup < SRC_GROUP_COUNT; rgroup++) {
-                        zones_config_set_settings_source_unchecked_no_save(rzi, rgroup,
-                                                                            settings_source_before[rzi][rgroup]);
-                    }
-                }
+                /* Whole-batch restore (see zones_snapshot above) now covers
+                 * this failure too -- superseding the narrower per-field
+                 * settings_source_before[][] restore this block used before
+                 * the whole-struct snapshot/restore pair existed; every
+                 * other field this loop already committed this pass (name,
+                 * PID, masks, cal, ramp, limits, coupling cells, ...) needed
+                 * the same rollback and previously did not get it. */
+                zones_config_restore_snapshot_no_save(&zones_snapshot);
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
                         (unsigned)i, zc->index);
                 return false;
             }
-            settings_source_dirty = true;
         }
     }
     /* 2026-09-15 (Opus review item 3): safety_tc_type is no longer written
@@ -2567,9 +2616,45 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * door immediately after. has_safety_tc/dsafety are still parsed and
      * range-checked above so an out-of-range value in an old backup still
      * fails the import loudly, rather than being silently ignored. */
-    if (settings_source_dirty && !zones_config_save_now()) {
-        snprintf(err_msg, err_cap, "settings_source commit succeeded live but failed to persist to flash");
-        return false;
+    int64_t setter_loop_elapsed_ms = (esp_timer_get_time() - setter_loop_start_us) / 1000;
+    ESP_LOGI(BACKUP_TAG,
+            "backup import: setter loop (%u timing profiles, %u zones) took %lld ms",
+            (unsigned)timing_profile_candidate_count, (unsigned)zone_candidate_count,
+            (long long)setter_loop_elapsed_ms);
+
+    /* Single batched save covering timing_profiles[] + the whole per-zone
+     * loop above (settings_source included) -- the point of this whole
+     * change. Only actually saves when this batch touched anything: a
+     * no-op/empty import (candidate_count == 0 for both arrays) must not
+     * pay for a flash write it has no reason to make, same as the old
+     * settings_source_dirty gate this replaces. */
+    if (timing_profile_candidate_count > 0 || zone_candidate_count > 0) {
+        int64_t save_start_us = esp_timer_get_time();
+        bool save_ok = zones_config_save_now();
+        int64_t save_elapsed_ms = (esp_timer_get_time() - save_start_us) / 1000;
+        ESP_LOGI(BACKUP_TAG, "backup import: batched zones_config_save_now() took %lld ms (ok=%d)",
+                (long long)save_elapsed_ms, (int)save_ok);
+        if (!save_ok) {
+            /* The batch is fully committed in RAM at this point (every
+             * setter above already returned true) but failed to reach
+             * flash -- restoring RAM here would silently discard a config
+             * the caller was just told succeeded up to this point and that
+             * matches nothing on flash either way, so this reports the
+             * failure loudly (partial_write, per this function's caller)
+             * rather than rolling back a save that already ran; the
+             * live config and flash are left exactly as nvs_save() itself
+             * left them (same behavior as every other setter's own inline
+             * nvs_save() before this change). */
+            snprintf(err_msg, err_cap, "batch commit succeeded live but failed to persist to flash");
+            return false;
+        }
+        /* Push relay_type changes to hardware only now that the save
+         * backing them is confirmed -- see the _no_save() comment above. */
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (relay_type_changed[zi]) {
+                zones_config_push_relay_type(zi);
+            }
+        }
     }
 
     return true;
@@ -3064,7 +3149,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     ctx->content_len = (size_t)req->content_len;
 
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 6144, backup_import_job, ctx);
+        http_async_job_try_start(req, "http_async_job", 8192, backup_import_job, ctx);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }

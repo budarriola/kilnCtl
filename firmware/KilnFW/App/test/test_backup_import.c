@@ -633,6 +633,9 @@ extern char g_stub_safety_cfg_write_reason[128];
 extern int g_stub_safety_cfg_write_n_pairs;
 extern bool g_stub_safety_cfg_write_commit_arg;
 extern safety_cfg_post_pair_t g_stub_safety_cfg_write_pairs[8];
+extern int g_settings_source_save_calls;
+extern bool s_relay_type_pushed[STUB_ZONE_COUNT];
+extern int g_relay_type_push_calls;
 static int g_total_write_calls;
 static int g_profile_save_calls;
 static uint8_t g_last_saved_profile_id;
@@ -692,6 +695,13 @@ static void reset_stub_state(void)
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
         test_stub_zones_set_max_ramp(i, true, 1000.0f);
     }
+    g_settings_source_save_calls = 0;
+    /* s_test_snapshot itself is not reset here -- zones_config_get_full_copy()
+     * always overwrites it in full before any test's import can reach a
+     * restore, same as the real zones_cfg_t snapshot it stands in for, so
+     * stale content from a prior test can never be observed. */
+    memset(s_relay_type_pushed, 0, sizeof(s_relay_type_pushed));
+    g_relay_type_push_calls = 0;
 }
 
 // ---- zones_http.h getters this TU needs (not already supplied elsewhere) --
@@ -1280,7 +1290,27 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_pid_called = true;
+    s_writes[zone_index].kp = kp;
+    s_writes[zone_index].ki = ki;
+    s_writes[zone_index].kd = kd;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_model_called = true;
+    s_writes[zone_index].k_dc = k_dc;
+    s_writes[zone_index].tau_s = tau_s;
+    s_writes[zone_index].dead_time_s = dead_time_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_model_called = true;
@@ -1298,7 +1328,23 @@ bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_tc_type_no_save(uint8_t zone_index, uint8_t tc_type)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_tc_called = true;
+    s_writes[zone_index].tc_type = tc_type;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_name(uint8_t zone_index, const char *name)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_name_called = true;
+    strncpy(s_writes[zone_index].name, name ? name : "", sizeof(s_writes[zone_index].name) - 1);
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_name_no_save(uint8_t zone_index, const char *name)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_name_called = true;
@@ -1314,7 +1360,23 @@ bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_relay_mask_no_save(uint8_t zone_index, uint8_t relay_mask)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_relay_mask_called = true;
+    s_writes[zone_index].relay_mask = relay_mask;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_thermo_mask_called = true;
+    s_writes[zone_index].thermo_mask = thermo_mask;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_thermo_mask_no_save(uint8_t zone_index, uint8_t thermo_mask)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_thermo_mask_called = true;
@@ -1330,7 +1392,23 @@ bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_ct_mask_no_save(uint8_t zone_index, uint8_t ct_mask)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_ct_mask_called = true;
+    s_writes[zone_index].ct_mask = ct_mask;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_cal_called = true;
+    s_writes[zone_index].cal_offset_c = cal_offset_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_cal_called = true;
@@ -1346,6 +1424,14 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_ramp_called = true;
+    s_writes[zone_index].max_ramp_c_per_hr = c_per_hr;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
@@ -1354,7 +1440,23 @@ bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_sanity_rate_no_save(uint8_t zone_index, float c_per_min)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_sanity_called = true;
+    s_writes[zone_index].sanity_rate_c_per_min = c_per_min;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_mode_called = true;
+    s_writes[zone_index].control_mode = (uint8_t)mode;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode_t mode)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_mode_called = true;
@@ -1371,7 +1473,26 @@ bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float mi
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_temp_limits_no_save(uint8_t zone_index, float max_temp_c, float min_temp_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_temp_limits_called = true;
+    s_writes[zone_index].max_temp_c = max_temp_c;
+    s_writes[zone_index].min_temp_c = min_temp_c;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_heater_called = true;
+    s_writes[zone_index].heater_window_ms = window_ms;
+    s_writes[zone_index].heater_min_on_ms = min_on_ms;
+    s_writes[zone_index].heater_min_off_ms = min_off_ms;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_heater_cfg_no_save(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_heater_called = true;
@@ -1391,7 +1512,25 @@ bool zones_config_set_guard_thresholds(uint8_t zone_index, float f1, float f2, f
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float f1, float f2, float f3, float f4, float f5,
+                                       float f6, float f7, float f8)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_guard_called = true;
+    float *g = s_writes[zone_index].guard;
+    g[0] = f1; g[1] = f2; g[2] = f3; g[3] = f4; g[4] = f5; g[5] = f6; g[6] = f7; g[7] = f8;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_xzone_called = true;
+    s_writes[zone_index].cross_zone_max_delta_c = max_delta_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_cross_zone_delta_no_save(uint8_t zone_index, float max_delta_c)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_xzone_called = true;
@@ -1407,7 +1546,23 @@ bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_fuzzy_strength_pct_no_save(uint8_t zone_index, float pct)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_fuzzy_strength_called = true;
+    s_writes[zone_index].fuzzy_strength_pct = pct;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_coupling_diag_k_dc_called = true;
+    s_writes[zone_index].coupling_diag_k_dc = k_dc;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_coupling_diag_k_dc_called = true;
@@ -1423,7 +1578,23 @@ bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_ease_off_window_mult_no_save(uint8_t zone_index, float mult)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_ease_off_window_mult_called = true;
+    s_writes[zone_index].ease_off_window_mult = mult;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_approach_rate_cap_called = true;
+    s_writes[zone_index].approach_rate_cap_c_per_hr = cap_c_per_hr;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_approach_rate_cap_c_per_hr_no_save(uint8_t zone_index, float cap_c_per_hr)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_approach_rate_cap_called = true;
@@ -1439,7 +1610,23 @@ bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_error_band_c_no_save(uint8_t zone_index, float band_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_error_band_c_called = true;
+    s_writes[zone_index].error_band_c = band_c;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_rate_band_c_per_s_called = true;
+    s_writes[zone_index].rate_band_c_per_s = band_c_per_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_rate_band_c_per_s_no_save(uint8_t zone_index, float band_c_per_s)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_rate_band_c_per_s_called = true;
@@ -1455,6 +1642,14 @@ bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_relay_type_no_save(uint8_t zone_index, uint8_t relay_type)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_relay_type_called = true;
+    s_writes[zone_index].relay_type = relay_type;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
@@ -1463,7 +1658,23 @@ bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_progress_band_c_called = true;
+    s_writes[zone_index].progress_band_c = band_c;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_zone_type_called = true;
+    s_writes[zone_index].zone_type = (uint8_t)type;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_zone_type_called = true;
@@ -1480,7 +1691,24 @@ bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, fl
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_model_fit_context_called = true;
+    s_writes[zone_index].model_fit_temp_c = fit_temp_c;
+    s_writes[zone_index].model_fit_ambient_c = fit_ambient_c;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_coil_power_w_called = true;
+    s_writes[zone_index].coil_power_w = power_w;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_coil_power_w_no_save(uint8_t zone_index, float power_w)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_coil_power_w_called = true;
@@ -1496,7 +1724,23 @@ bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_autotune_baseline_k_dc_called = true;
+    s_writes[zone_index].autotune_baseline_k_dc = k_dc;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_adaptive_tune_enabled_called = true;
+    s_writes[zone_index].adaptive_tune_enabled = enabled;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_adaptive_tune_enabled_no_save(uint8_t zone_index, bool enabled)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_adaptive_tune_enabled_called = true;
@@ -1518,7 +1762,29 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuning_quality_t *q)
+{
+    if (!q || zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_tuning_quality_called = true;
+    s_writes[zone_index].tuning_quality = *q;
+    /* Also feed test_profile_feasibility.c's storage -- that file owns the
+     * one zones_config_get_tuning_quality() definition in this binary (see
+     * this file's forward-declared hook above), so a test seeding a zone's
+     * tuning quality before calling run_export() needs the GETTER to answer
+     * with it too, not just this observability copy. */
+    test_stub_zones_set_full_tuning_quality(zone_index, q);
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_failsafe_state_called = true;
+    s_writes[zone_index].failsafe_state = on_state;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_failsafe_state_called = true;
@@ -1534,7 +1800,23 @@ bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_hyst_c_called = true;
+    s_writes[zone_index].hyst_c = hyst_c;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_min_on_s_called = true;
+    s_writes[zone_index].min_on_s = min_on_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_min_on_s_no_save(uint8_t zone_index, uint16_t min_on_s)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_min_on_s_called = true;
@@ -1550,6 +1832,14 @@ bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_min_off_s_no_save(uint8_t zone_index, uint16_t min_off_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_min_off_s_called = true;
+    s_writes[zone_index].min_off_s = min_off_s;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
 {
     if (zone_index >= STUB_ZONE_COUNT || index >= s_timing_profile_count) return false;
@@ -1558,7 +1848,42 @@ bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_timing_profile_index_no_save(uint8_t zone_index, uint8_t index)
+{
+    if (zone_index >= STUB_ZONE_COUNT || index >= s_timing_profile_count) return false;
+    s_writes[zone_index].set_timing_profile_index_called = true;
+    s_writes[zone_index].timing_profile_index = index;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name,
+                                         float progress_duty_min, float progress_window_s,
+                                         float drift_hysteresis_c, float frozen_eps_c,
+                                         float cross_zone_period_s, float bangbang_hysteresis_c,
+                                         float cooling_limited_margin_c, float cooling_limited_hold_s,
+                                         float ramp_lock_band_c)
+{
+    if (!name || profile_index > s_timing_profile_count || profile_index >= STUB_ZONE_COUNT) return false;
+    timing_profile_write_t *tp = &s_timing_profiles[profile_index];
+    strncpy(tp->name, name, sizeof(tp->name) - 1);
+    tp->name[sizeof(tp->name) - 1] = '\0';
+    tp->progress_duty_min = progress_duty_min;
+    tp->progress_window_s = progress_window_s;
+    tp->drift_hysteresis_c = drift_hysteresis_c;
+    tp->frozen_eps_c = frozen_eps_c;
+    tp->cross_zone_period_s = cross_zone_period_s;
+    tp->bangbang_hysteresis_c = bangbang_hysteresis_c;
+    tp->cooling_limited_margin_c = cooling_limited_margin_c;
+    tp->cooling_limited_hold_s = cooling_limited_hold_s;
+    tp->ramp_lock_band_c = ramp_lock_band_c;
+    if (profile_index == s_timing_profile_count) {
+        s_timing_profile_count = (uint8_t)(profile_index + 1);
+    }
+    s_set_timing_profile_raw_calls++;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_timing_profile_raw_no_save(uint8_t profile_index, const char *name,
                                          float progress_duty_min, float progress_window_s,
                                          float drift_hysteresis_c, float frozen_eps_c,
                                          float cross_zone_period_s, float bangbang_hysteresis_c,
@@ -1612,6 +1937,17 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
 /* backup_import_apply() commits per-cell now -- see zone_write_t's own
  * comment for why this stub tracks a called-flag PER CELL. */
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) return false;
+    s_writes[zone_index].set_coupling_cell_called[neighbor_index] = true;
+    s_writes[zone_index].coupling_coeff[neighbor_index] = coeff;
+    s_writes[zone_index].coupling_tau_s[neighbor_index] = tau_s;
+    s_writes[zone_index].coupling_dead_time_s[neighbor_index] = dead_time_s;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
     if (zone_index >= STUB_ZONE_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) return false;
@@ -1699,13 +2035,76 @@ bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint
     return true;
 }
 
-static int g_settings_source_save_calls;
+int g_settings_source_save_calls;
 
 bool zones_config_save_now(void)
 {
     g_settings_source_save_calls++;
     g_total_write_calls++;
     return true;
+}
+
+/* Batched-save follow-up (2026-09-28): backup_import.c now snapshots the
+ * WHOLE live config once before its per-zone/timing-profile commit loop
+ * (zones_config_get_full_copy()) and restores it wholesale
+ * (zones_config_restore_snapshot_no_save()) if any setter in that loop
+ * fails partway through, instead of the narrower per-field restore this
+ * file used to model. The real functions (zones_config_accessors.c) copy a
+ * live zones_cfg_t struct; this stub's "live config" is s_writes[]/
+ * s_timing_profiles[]/s_timing_profile_count instead, so it snapshots THOSE
+ * into a private static buffer rather than *out -- backup_import.c only
+ * ever holds `out`/`snapshot` opaquely (declares a local zones_cfg_t,
+ * passes its address to both calls, never reads or writes through it
+ * itself), so a stub that never touches *out is exactly as faithful as one
+ * that does, and sidesteps a real problem: zone_write_t alone is far larger
+ * per zone than zones_cfg_t's real ~896 B ceiling once STUB_ZONE_COUNT
+ * copies of it are included, so memcpy-ing this stub's state into a
+ * zones_cfg_t-sized buffer would overflow it. Single static slot is
+ * correct because backup_import.c only ever takes one snapshot per import
+ * attempt and never nests a second one inside it (single in-flight
+ * http_async_job, and this whole call sequence runs on that one job's own
+ * task, synchronously, start to finish). */
+typedef struct {
+    zone_write_t writes[STUB_ZONE_COUNT];
+    timing_profile_write_t timing_profiles[STUB_ZONE_COUNT];
+    uint8_t timing_profile_count;
+} test_zones_snapshot_t;
+static test_zones_snapshot_t s_test_snapshot; /* see reset_stub_state()'s comment on why this is not cleared there */
+
+void zones_config_get_full_copy(zones_cfg_t *out)
+{
+    (void)out;
+    memcpy(s_test_snapshot.writes, s_writes, sizeof(s_writes));
+    memcpy(s_test_snapshot.timing_profiles, s_timing_profiles, sizeof(s_timing_profiles));
+    s_test_snapshot.timing_profile_count = s_timing_profile_count;
+}
+
+void zones_config_restore_snapshot_no_save(const zones_cfg_t *snapshot)
+{
+    (void)snapshot;
+    memcpy(s_writes, s_test_snapshot.writes, sizeof(s_writes));
+    memcpy(s_timing_profiles, s_test_snapshot.timing_profiles, sizeof(s_timing_profiles));
+    s_timing_profile_count = s_test_snapshot.timing_profile_count;
+}
+
+/* zones_config_push_relay_type() -- zones_http_internal.h declares this
+ * (relay_cycles_set_type() push-out, defined for real in
+ * zones_config_store.c); backup_import.c now calls it itself, once per
+ * zone whose relay_type actually changed, only AFTER the single batched
+ * zones_config_save_now() above succeeds (see backup_import.c's
+ * relay_type_changed[] comment). Recorded per-zone plus a total count so
+ * a host test can assert it fires exactly once per changed zone and never
+ * before the save. */
+bool s_relay_type_pushed[STUB_ZONE_COUNT];
+int g_relay_type_push_calls;
+
+void zones_config_push_relay_type(uint8_t zone_index)
+{
+    if (zone_index >= STUB_ZONE_COUNT) {
+        return;
+    }
+    s_relay_type_pushed[zone_index] = true;
+    g_relay_type_push_calls++;
 }
 /* Stub for zones_http.c's real zones_config_settings_source_import_has_cycle()
  * (zones_http.h) -- backup_http.c's pass-1 cross-entry cycle check calls
@@ -2963,6 +3362,69 @@ static void test_settings_source_commit_failure_restores_pre_import_values(void)
               "the imported value (1) the commit wrote before zone 1's failure");
 }
 
+static void test_backup_import_batched_save_fires_exactly_once(void)
+{
+    TEST_SECTION("backup_import_apply -- a successful multi-zone import commits every zone's "
+                 "settings through the batched _no_save setters and persists with exactly one "
+                 "zones_config_save_now() call, not one per zone/field");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":2,\"pid_kd\":3},"
+        "{\"index\":1,\"pid_kp\":4,\"pid_ki\":5,\"pid_kd\":6}]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "multi-zone import with no forced failure succeeds");
+    TEST_CHECK(g_settings_source_save_calls == 1,
+              "zones_config_save_now() fires exactly once for the whole batch, not per zone");
+}
+
+static void test_backup_import_failure_restores_whole_batch_not_just_settings_source(void)
+{
+    TEST_SECTION("backup_import_apply -- a mid-batch commit failure rolls back the WHOLE RAM "
+                 "snapshot, not just the settings_source field the failure was injected on: an "
+                 "unrelated already-committed field (zone 0's pid) on a different zone must also "
+                 "revert, and the batched save/relay-push must never fire");
+    reset_stub_state();
+
+    float seed_kp = 0.0f, seed_ki = 0.0f, seed_kd = 0.0f;
+    TEST_CHECK(zones_config_set_pid(0, 11.0f, 22.0f, 33.0f), "seed zone 0's pre-import pid");
+    TEST_CHECK(zones_config_get_pid(0, &seed_kp, &seed_ki, &seed_kd) &&
+                  seed_kp == 11.0f && seed_ki == 22.0f && seed_kd == 33.0f,
+              "live seed: zone 0's pid reads back as seeded before import");
+
+    s_force_fail_settings_source_zone = 1;
+    s_force_fail_settings_source_group = SRC_GROUP_LIMITS;
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":99,\"pid_ki\":99,\"pid_kd\":99,\"settings_source\":1},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    s_force_fail_settings_source_zone = 0xFFu;
+    s_force_fail_settings_source_group = 0xFFu;
+
+    TEST_CHECK(!ok, "the injected commit failure on zone 1 is refused");
+
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd) &&
+                  kp == 11.0f && ki == 22.0f && kd == 33.0f,
+              "zone 0's pid (committed earlier in the same failed batch, unrelated to the "
+              "injected settings_source failure) is rolled back to its pre-import seed, not "
+              "left at the imported value (99/99/99) -- proves the snapshot restore is "
+              "whole-config, not field-specific");
+    TEST_CHECK(g_settings_source_save_calls == 0,
+              "a refused batch never reaches the single batched zones_config_save_now() call");
+    TEST_CHECK(g_relay_type_push_calls == 0,
+              "a refused batch never pushes relay_type hardware changes either");
+}
+
 // ---------------------------------------------------------------------------
 // Export coverage (PID_EXPANSION_PLAN.md line ~715): backup_export_get_
 // handler() was completely untested before this -- a silent no-op or a
@@ -3523,6 +3985,9 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK_NEAR(g_last_saved_profile.segments[0].target_c, 1200.0, 1e-6, "profile segment target_c round-trips");
     TEST_CHECK_NEAR(g_last_saved_profile.segments[0].ramp_c_per_hr, 100.0, 1e-6, "profile segment ramp_c_per_hr round-trips");
     TEST_CHECK(g_last_saved_profile.segments[0].dwell_min == 10, "profile segment dwell_min round-trips");
+    TEST_CHECK(g_settings_source_save_calls == 1,
+              "the whole zone-field batch above persists through exactly one "
+              "zones_config_save_now() call, not one per field");
 }
 
 // Bench A4 (2026-09-28): an export/import round trip of a live 3-zone
@@ -4458,6 +4923,8 @@ void run_test_backup_import(void)
     test_settings_source_cross_entry_legal_chain_still_imports();
     test_settings_source_restore_onto_differently_configured_board_succeeds();
     test_settings_source_commit_failure_restores_pre_import_values();
+    test_backup_import_batched_save_fires_exactly_once();
+    test_backup_import_failure_restores_whole_batch_not_just_settings_source();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_backup_export_kiln_config_package_present();

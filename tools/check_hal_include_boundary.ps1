@@ -268,6 +268,7 @@ $EspTimerAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";            Header = "esp_timer.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner, already exempt for esp_wifi.h/esp_netif.h; esp_timer_create/esp_timer_start_periodic for the AP-fallback/rescan timer objects only, no timestamp reads"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h";   Header = "esp_timer.h"; Reason = "wifi_prov family -- shared internal header (esp_timer_handle_t fields only)"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/lvgl_port.c";             Header = "esp_timer.h"; Reason = "esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback -- named explicitly in the plan's Phase 4 expected-final-entries list (lvgl_port)"; ExpiresAtPhase = "n/a (out of scope: lvgl_port, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/backup_import.c";      Header = "esp_timer.h"; Reason = "esp_timer_get_time() timestamp reads only, for the batched-save timing instrumentation (setter loop / zones_config_save_now() / Pico round-trip elapsed ms) added alongside the backup_import NVS-batching change -- no cross-target HAL timer abstraction in scope, same as the other esp_timer.h sites on this list"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
 )
 
 # nvs.h / nvs_flash.h -- promoted from the count-ratchet to strict per-file

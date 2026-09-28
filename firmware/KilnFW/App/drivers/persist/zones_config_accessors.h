@@ -506,6 +506,8 @@ bool zones_config_get_safety_tc_type(uint8_t *out_tc_type);
 bool zones_config_get_tc_type(uint8_t zone_index, uint8_t *out_tc_type);
 bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type);
 
+bool zones_config_set_tc_type_no_save(uint8_t zone_index, uint8_t tc_type);
+
 /* Setter for zones_config_get_safety_tc_type()'s global RP2040-safety-
  * processor setting. Same bound/shape as zones_config_set_tc_type() above. */
 bool zones_config_set_safety_tc_type(uint8_t tc_type);
@@ -602,6 +604,8 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask);
  * past relay_count references a relay that does not exist on this board). */
 bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask);
 
+bool zones_config_set_relay_mask_no_save(uint8_t zone_index, uint8_t relay_mask);
+
 /* TODO.md 10.8: bit N-1 = MAX31856 channel N belongs to this zone's control
  * temperature, N in 1..MAX31856_CHANNEL_COUNT -- same bit-numbering
  * convention as relay_mask above, deliberately: it is the natural pattern
@@ -639,6 +643,8 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask);
  * thermo_count, same bound parse_zone_fields() enforces. */
 bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask);
 
+bool zones_config_set_thermo_mask_no_save(uint8_t zone_index, uint8_t thermo_mask);
+
 /* 2026-08-27: bit N-1 = SaftyFW current-sense channel N feeds this zone's
  * live-current display, N in 1..ZONE_CT_CHANNEL_COUNT (a fixed hardware
  * count, unlike relay_mask/thermo_mask which are bounded by the operator-
@@ -653,6 +659,8 @@ bool zones_config_get_ct_mask(uint8_t zone_index, uint8_t *out_mask);
  * zones_config_set_thermo_mask(). ct_mask is checked against the fixed
  * ZONE_CT_CHANNEL_COUNT, not against any operator-configured count. */
 bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask);
+
+bool zones_config_set_ct_mask_no_save(uint8_t zone_index, uint8_t ct_mask);
 
 /* TODO.md 10.3: the operator-chosen name a zone_cfg_t already stores
  * (ZONE_NAME_MAX_LEN, currently 15 chars) but which, until now, had no
@@ -678,6 +686,8 @@ bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap);
  * field. name may be NULL, treated the same as an empty string (clears the
  * zone's name), matching a POST that omits z%u_name. */
 bool zones_config_set_name(uint8_t zone_index, const char *name);
+
+bool zones_config_set_name_no_save(uint8_t zone_index, const char *name);
 
 /* Owner report 2026-08-27+1 ("the user should be able to assign names to
  * relays not assigned to zones as well"): the operator-entered name for one
@@ -744,6 +754,8 @@ bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index);
  * own header comment for the "own the write" convention this follows. */
 bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled);
 
+bool zones_config_set_adaptive_tune_enabled_no_save(uint8_t zone_index, bool enabled);
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd);
 
 /* Writer for pid_autotune's results-acceptance flow (TODO.md 6A.4:
@@ -755,6 +767,8 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
  * discipline as the form-submit path, just for a single field group instead
  * of the whole page. */
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd);
+
+bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd);
 
 /* The FOPDT plant model autotune fitted for this zone (TODO.md 6A.4),
  * persisted so TODO.md 6A.2's feedforward term
@@ -786,6 +800,8 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
  * fit is a lie); it is not treated as a validation failure. */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
 
+bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
+
 /* model_fit_temp_c/model_fit_ambient_c getter/setter (ZONES_CFG_VERSION
  * 23->24) -- the operating point a model was fitted at, deliberately kept
  * separate from zones_config_get/set_model() itself rather than widening
@@ -805,6 +821,8 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
  * explicitly marks a fit's context as unknown/cleared. */
 bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c);
 bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c);
+
+bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_temp_c, float fit_ambient_c);
 
 /* zone_cfg_t::autotune_baseline_k_dc (ZONES_CFG_VERSION 25->26) -- the K_dc
  * value the last full autotune Accept actually wrote, kept separate from
@@ -831,6 +849,8 @@ bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, fl
  * forever just because it upgraded before this field existed). */
 bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc);
 bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc);
+
+bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k_dc);
 
 /* zone_model_at()/coupling_at() -- HIGH_TEMPERATURE_TRANSFER_ANALYSIS's
  * "cheap seam" (item 2): every control-path reader of a zone's plant model
@@ -903,6 +923,8 @@ bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *
  * immediately, same discipline as every other setter in this file. */
 bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q);
 
+bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuning_quality_t *q);
+
 /* zone_cfg_t::fuzzy_strength_pct read-only accessor for the control loop
  * (PID_EXPANSION_PLAN.md Phase 3 wiring, profile_executor.c) -- the one
  * operator-set knob pid_fuzzy_adjust() needs each tick a
@@ -919,6 +941,8 @@ bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct);
  * backup_http.c's import needs this to round-trip the field, the same reason
  * every other setter in this file exists. */
 bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct);
+
+bool zones_config_set_fuzzy_strength_pct_no_save(uint8_t zone_index, float pct);
 
 /* zone_cfg_t::coupling_diag_k_dc (PID_EXPANSION_PLAN.md section 3.2 follow-up,
  * ZONES_CFG_VERSION 14->15, 2026-09-02) -- the diagonal cell of the SAME
@@ -937,6 +961,8 @@ bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc);
  * matching every other setter in this file. backup_http.c's import needs
  * this to round-trip the field. */
 bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc);
+
+bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc);
 
 /* zone_cfg_t::coupling_coeff[] (PID_EXPANSION_PLAN.md section 2c's cross-zone
  * feedforward row, widened to a full directed row ZONES_CFG_VERSION 10->11,
@@ -990,6 +1016,9 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
  * never end up from two different fits. backup_http.c's import is this
  * function's other caller, alongside autotune_engine.c's finalize_fit(). */
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s);
+
+bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s);
 
 /* zone_cfg_t::settings_source[group] (PID_EXPANSION_PLAN.md section 3.5's
@@ -1089,10 +1118,14 @@ bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min);
  * the documented "never configured" encoding, not a rejection). */
 bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min);
 
+bool zones_config_set_sanity_rate_no_save(uint8_t zone_index, float c_per_min);
+
 /* Setter for zones_config_get_max_ramp() above. Same bound
  * parse_zone_fields()'s z%u_ramp enforces
  * (0..ZONE_MAX_RAMP_C_PER_HR_MAX). */
 bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr);
+
+bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr);
 
 /* zone_cfg_t::coil_power_w raw accessor (ZONES_CFG_VERSION 24->25). Returns
  * the RAW stored value, 0.0f meaning "not overridden" -- see that field's
@@ -1117,6 +1150,8 @@ bool zones_config_get_coil_power_w(uint8_t zone_index, float *out_power_w);
  * write time could go stale). */
 bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w);
 
+bool zones_config_set_coil_power_w_no_save(uint8_t zone_index, float power_w);
+
 /* Getter/setter pair for a zone's cal_offset_c -- applied at read time by
  * zones_config_apply_cal() below, but until now there was no way to read the
  * stored offset itself back out (only its already-applied effect on a
@@ -1125,6 +1160,8 @@ bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w);
  * parse_zone_fields()'s z%u_cal enforces. */
 bool zones_config_get_cal_offset(uint8_t zone_index, float *out_cal_offset_c);
 bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c);
+
+bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c);
 
 /* TODO.md 6A.1's control modes. OFF: never commands heat (safe default, and
  * what a zone the board supports but the kiln doesn't use should be set to).
@@ -1153,6 +1190,8 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
  * value is rejected, matching the POST handler's "out of range (0-3)" error. */
 bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode);
 
+bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode_t mode);
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 1: "is this zone a heat source at all" --
  * deliberately NOT a zone_control_mode_t value (see that plan section for
  * why overloading mode would be wrong). ZONE_TYPE_HEATER == 0 is the
@@ -1172,6 +1211,8 @@ bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type);
  * as zones_config_set_control_mode() -- an out-of-range value is refused,
  * never clamped. */
 bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type);
+
+bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type);
 
 /* docs/ON_OFF_ZONE_PLAN.md sec 1's "one rule governs everything" predicate:
  * true iff `zone_index` is a valid, configured ZONE_TYPE_ON_OFF zone. False
@@ -1216,6 +1257,8 @@ bool zones_config_get_failsafe_state(uint8_t zone_index, bool *out_on);
  * Pico; see on_off_trigger_decide.h for who consumes the new value. */
 bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state);
 
+bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state);
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 3's temperature hysteresis: stored value 0
  * means "not configured" and the caller substitutes the plan's 2.0 C
  * default -- same "0 substituted with a firmware default" convention
@@ -1236,6 +1279,8 @@ bool zones_config_get_hyst_c(uint8_t zone_index, float *out_hyst_c);
  * ZONE_HYST_C_MAX] or a non-finite one. Never clamped. */
 bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c);
 
+bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c);
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 3's minimum on/off dwell: stored 0 means
  * "not configured", substituted with the plan's 30 s default. Out-of-range
  * zone_index: returns false, *out_s left at the 30 s default -- same
@@ -1249,7 +1294,11 @@ bool zones_config_get_min_off_s(uint8_t zone_index, uint16_t *out_s);
  * bounded against ZONE_MIN_ON_OFF_S_MIN/MAX. 2026-09-16 backup-round-trip-
  * gap closure, group 2. */
 bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s);
+
+bool zones_config_set_min_on_s_no_save(uint8_t zone_index, uint16_t min_on_s);
 bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s);
+
+bool zones_config_set_min_off_s_no_save(uint8_t zone_index, uint16_t min_off_s);
 
 /* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 still means
  * "not set" here, at the storage/getter layer this function lives at --
@@ -1298,6 +1347,8 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
  * heater_window_ms/min_on_ms/min_off_ms below. */
 bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float min_temp_c);
 
+bool zones_config_set_temp_limits_no_save(uint8_t zone_index, float max_temp_c, float min_temp_c);
+
 /* TODO.md 6A.9: per-zone heater_output_cfg_t timing, page-configurable.
  * 0 in any of the three outputs means "not configured" -- the caller
  * (profile_executor.c/autotune_engine.c) substitutes its own
@@ -1318,6 +1369,8 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
  * combination the web page itself would happily save. */
 bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms);
 
+bool zones_config_set_heater_cfg_no_save(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms);
+
 /* Guard 8's cross-zone plausibility threshold (TODO.md 6A.3/6A.5), in degC.
  * 0 means "not configured", and here that DISABLES the guard rather than
  * selecting a default -- unlike sanity_rate_c_per_min. A usable number
@@ -1333,6 +1386,8 @@ bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_
  * enforces (0..ZONE_CROSS_ZONE_DELTA_C_MAX) -- 0 is legal (it's the
  * documented "guard disabled" encoding, not a rejection). */
 bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c);
+
+bool zones_config_set_cross_zone_delta_no_save(uint8_t zone_index, float max_delta_c);
 
 /* TODO.md 6A.3's remaining named thresholds (wrong-dir rate/window,
  * off-settle, runaway rate/margin, drift period, sensor debounce count,
@@ -1400,6 +1455,8 @@ bool zones_config_get_timing_profile_index(uint8_t zone_index, uint8_t *out_inde
  * that actually exists). Refused, never clamped. */
 bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index);
 
+bool zones_config_set_timing_profile_index_no_save(uint8_t zone_index, uint8_t index);
+
 /* How many of zones_cfg_t::timing_profiles[]'s MAX31856_CHANNEL_COUNT slots
  * are currently meaningful. Never 0 on a config zones_config_is_valid()
  * reports true for. */
@@ -1436,6 +1493,13 @@ bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name
                                          float cooling_limited_margin_c, float cooling_limited_hold_s,
                                          float ramp_lock_band_c);
 
+bool zones_config_set_timing_profile_raw_no_save(uint8_t profile_index, const char *name,
+                                         float progress_duty_min, float progress_window_s,
+                                         float drift_hysteresis_c, float frozen_eps_c,
+                                         float cross_zone_period_s, float bangbang_hysteresis_c,
+                                         float cooling_limited_margin_c, float cooling_limited_hold_s,
+                                         float ramp_lock_band_c);
+
 /* Runtime accessor pair for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION
  * 21->22, docs/audits/consumer_without_producer_2026-09-06.md finding 1) --
  * guard 1's arrival band. Declared here (not only zones_config_json.h) so
@@ -1445,6 +1509,8 @@ bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name
  * zones_config_json.h declaration. */
 bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c);
 bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c);
+
+bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c);
 
 /* Setter for the getter above, one bundled call matching
  * zones_config_get_guard_thresholds()'s own "bundle the related group"
@@ -1456,6 +1522,12 @@ bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c);
  * No cross-field check between any pair of these 8 exists in
  * parse_zone_fields() either, so none is added here. */
 bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_window_s,
+                                       float wrong_dir_rate_c_per_min, float off_settle_s,
+                                       float runaway_rate_c_per_min, float runaway_margin_c,
+                                       float drift_period_s, float sensor_fault_debounce_ticks,
+                                       float frozen_window_s);
+
+bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_dir_window_s,
                                        float wrong_dir_rate_c_per_min, float off_settle_s,
                                        float runaway_rate_c_per_min, float runaway_margin_c,
                                        float drift_period_s, float sensor_fault_debounce_ticks,

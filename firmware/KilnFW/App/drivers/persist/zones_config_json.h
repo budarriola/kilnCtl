@@ -2290,6 +2290,22 @@ typedef struct {
     uint32_t crc32;
 } zones_cfg_t;
 
+/* Whole-struct snapshot/restore pair -- see zones_config_accessors.c's header
+ * comment on the pair for why a batched multi-setter caller (backup_import.c)
+ * needs this instead of zones_config_export_blob()/zones_config_import_blob()
+ * (zones_config_json.h/zones_http.c): those two are the validated, versioned,
+ * NVS-persisting path for a blob crossing a trust boundary (a saved kiln
+ * config, a backup restore's OWN outer blob); this pair is for a caller that
+ * already holds a live, already-valid zones_cfg_t and just needs to put it
+ * back in RAM, unconditionally and without touching flash, after some of its
+ * OWN batched field writes committed but a later one in the same batch
+ * failed. Declared here (not zones_config_accessors.h) because zones_cfg_t
+ * itself is only visible after this point -- zones_config_json.h includes
+ * zones_config_accessors.h, not the other way around, per this header's own
+ * forward-declaration note near ZONE_TIMING_PROFILE_INDEX_DEFAULT. */
+void zones_config_get_full_copy(zones_cfg_t *out);
+void zones_config_restore_snapshot_no_save(const zones_cfg_t *snapshot);
+
 /* ---- Historical on-flash layouts (ZONES_CFG_VERSION 1..11) ---------------
  * EXACT field-for-field snapshots of what zone_cfg_t/zones_cfg_t looked like
  * at each prior version, recovered from this file's git history (see
@@ -3429,6 +3445,8 @@ bool zones_config_json_parse_timing_profile_fields(const char *body, uint8_t p, 
 bool zones_config_get_ease_off_window_mult(uint8_t zone_index, float *out_mult);
 bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult);
 
+bool zones_config_set_ease_off_window_mult_no_save(uint8_t zone_index, float mult);
+
 /* Runtime accessor pair for zone_cfg_t::approach_rate_cap_c_per_hr
  * (ZONES_CFG_VERSION 17->18, PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_
  * TARGET_DESIGN_STUDY.md option (b)) -- same declaration placement/rationale
@@ -3454,6 +3472,8 @@ bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult);
 bool zones_config_get_approach_rate_cap_c_per_hr(uint8_t zone_index, float *out_cap_c_per_hr);
 bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr);
 
+bool zones_config_set_approach_rate_cap_c_per_hr_no_save(uint8_t zone_index, float cap_c_per_hr);
+
 /* Runtime accessor pairs for zone_cfg_t::error_band_c / ::rate_band_c_per_s
  * (ZONES_CFG_VERSION 18->19, PID_EXPANSION_PLAN.md sec 3.6g) -- same
  * declaration placement/rationale as the ease_off_window_mult and
@@ -3473,8 +3493,12 @@ bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c
  * discipline as every setter in this file. */
 bool zones_config_get_error_band_c(uint8_t zone_index, float *out_band_c);
 bool zones_config_set_error_band_c(uint8_t zone_index, float band_c);
+
+bool zones_config_set_error_band_c_no_save(uint8_t zone_index, float band_c);
 bool zones_config_get_rate_band_c_per_s(uint8_t zone_index, float *out_band_c_per_s);
 bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s);
+
+bool zones_config_set_rate_band_c_per_s_no_save(uint8_t zone_index, float band_c_per_s);
 
 /* Runtime accessor pair for zone_cfg_t::relay_type (ZONES_CFG_VERSION
  * 19->20, RELAY_LIFE_BUDGET.md) -- same declaration placement/
@@ -3491,6 +3515,8 @@ bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s);
  * call site's own comment. */
 bool zones_config_get_relay_type(uint8_t zone_index, uint8_t *out_relay_type);
 bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type);
+
+bool zones_config_set_relay_type_no_save(uint8_t zone_index, uint8_t relay_type);
 
 /* Runtime accessor pair for zone_cfg_t::progress_band_c (ZONES_CFG_VERSION
  * 21->22, docs/audits/consumer_without_producer_2026-09-06.md finding 1) --
@@ -3510,6 +3536,8 @@ bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type);
  * every setter in this file. */
 bool zones_config_get_progress_band_c(uint8_t zone_index, float *out_band_c);
 bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c);
+
+bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c);
 
 #ifdef __cplusplus
 }
