@@ -1214,5 +1214,32 @@ class Otp05Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.SKIP)
 
 
+class PidGainsMatchTest(unittest.TestCase):
+    """GET /api/zones moved pid gains from %.4f to %.9g (2026-09-28); an OTA
+    push or rollback across that change must not read as changed gains."""
+
+    def test_format_straddle_is_a_match(self):
+        before = {0: {"pid_kp": 5.0, "pid_ki": 0.6, "pid_kd": 0.02}}
+        after = {0: {"pid_kp": 5.0, "pid_ki": 0.600000024, "pid_kd": 0.0199999996}}
+        self.assertTrue(J.pid_gains_match(before, after))
+
+    def test_small_ki_rounded_by_old_format_is_a_match(self):
+        self.assertTrue(J.pid_gains_match({0: {"pid_ki": 0.0}}, {0: {"pid_ki": 3.39999995e-05}}))
+
+    def test_default_gains_replacing_tuned_is_a_mismatch(self):
+        self.assertFalse(J.pid_gains_match({0: {"pid_ki": 0.6}}, {0: {"pid_ki": 0.5}}))
+
+    def test_zone_set_or_none_mismatch(self):
+        self.assertFalse(J.pid_gains_match({0: {"pid_ki": 0.6}}, {1: {"pid_ki": 0.6}}))
+        self.assertFalse(J.pid_gains_match({0: {"pid_ki": 0.6}}, None))
+        self.assertTrue(J.pid_gains_match(None, None))
+
+    def test_judge_ota_rollback_passes_across_format_change(self):
+        r = J.judge_ota_rollback(True, {0: {"pid_ki": 0.6}}, {0: {"pid_ki": 0.600000024}}, False)
+        self.assertEqual(r.verdict, Verdict.PASS)
+        r = J.judge_ota_rollback(True, {0: {"pid_ki": 0.6}}, {0: {"pid_ki": 0.1}}, False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -433,13 +433,19 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * invalidate ONLY on an actual gain change.
      *
      * Tolerance, not exact equality, for the change check: GET /api/zones
-     * emits pid_kp/ki/kd at %.4f (this file's own APPEND format string
-     * above), so an ORDINARY read-back-and-repost round trip through the
-     * page's own form fields already loses precision below the 4th decimal
-     * place -- an exact `!=` here would invalidate a good record on every
-     * single resave, even one that changes nothing about the gains at all.
-     * 0.0001 matches that same %.4f resolution; a real operator-entered
-     * change is never that close to the stored value by accident. */
+     * used to emit pid_kp/ki/kd at %.4f, so an ordinary read-back-and-repost
+     * round trip through the page's own form fields lost precision below
+     * the 4th decimal place -- an exact `!=` here would have invalidated a
+     * good record on every single resave, even one that changes nothing
+     * about the gains at all. 2026-09-28: GET /api/zones now emits these at
+     * %.9g (zones_http_get.c), lossless for a float32, so an ordinary round
+     * trip no longer loses precision at all. 0.0001 is left unchanged by
+     * that fix, and it is an ABSOLUTE tolerance: for a small-gain zone (a
+     * tuned Ki like 0.000034) a real operator edit to, say, 0.00005 is
+     * inside it and does NOT invalidate the tuning record. That gap predates
+     * the %.9g change (it was unavoidable while GET rounded at %.4f); now
+     * that the round trip is lossless a relative tolerance would close it,
+     * but that is a separate behavior change, not made here. */
     z->tuning_valid = current_z->tuning_valid;
     z->tuning_method = current_z->tuning_method;
     z->tuning_rule = current_z->tuning_rule;

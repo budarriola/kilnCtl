@@ -1899,6 +1899,40 @@ def judge_ota_push_refused(
     return CaseResult(Verdict.PASS, observed=observed)
 
 
+# GET /api/zones printed pid_kp/ki/kd at %.4f before 2026-09-28 and at %.9g
+# after, so a before/after read that straddles that firmware change (an OTA
+# push across it, or a rollback past it) sees e.g. 0.6 vs 0.600000024 for an
+# unchanged gain. Compare within %.4f's half-step (5e-5) plus a tiny relative
+# term instead of exact dict equality; the hazard these checks exist for
+# (firmware-default gains replacing tuned ones) is far larger than that.
+_PID_GAIN_MATCH_ABS_TOL = 5e-5
+_PID_GAIN_MATCH_REL_TOL = 1e-6
+
+
+def pid_gains_match(before: "Optional[dict]", after: "Optional[dict]") -> bool:
+    """True when two {zone_index: {pid_kp, pid_ki, pid_kd}} maps hold the same
+    zones and every gain agrees within the GET-format tolerance above."""
+    import math
+    if before is None or after is None:
+        return before is after
+    if set(before) != set(after):
+        return False
+    for zi, gb in before.items():
+        ga = after[zi]
+        if not isinstance(gb, dict) or not isinstance(ga, dict) or set(gb) != set(ga):
+            return False
+        for key, vb in gb.items():
+            va = ga[key]
+            if not isinstance(vb, (int, float)) or not isinstance(va, (int, float)):
+                if vb != va:
+                    return False
+                continue
+            if not math.isclose(float(vb), float(va), rel_tol=_PID_GAIN_MATCH_REL_TOL,
+                                abs_tol=_PID_GAIN_MATCH_ABS_TOL):
+                return False
+    return True
+
+
 def judge_ota_rollback(
     fw_build_matches_pre_update: Optional[bool],
     pid_gains_before: "Optional[dict]",
@@ -1927,7 +1961,7 @@ def judge_ota_rollback(
         return CaseResult(Verdict.FAIL, reason="fw_build after rollback does not match the pre-update (pre-E01) value", observed=observed)
     if pid_gains_before is None or pid_gains_after is None:
         return CaseResult(Verdict.INCONCLUSIVE, reason="PID gains were not readable before or after the rollback", observed=observed)
-    if pid_gains_before != pid_gains_after:
+    if not pid_gains_match(pid_gains_before, pid_gains_after):
         return CaseResult(
             Verdict.FAIL, reason=f"PID gains changed by rollback: before={pid_gains_before} after={pid_gains_after}",
             observed=observed,

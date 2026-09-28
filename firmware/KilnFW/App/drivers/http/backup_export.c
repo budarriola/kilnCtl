@@ -267,7 +267,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         }
         bool have_model = zones_config_get_model(zi, &k_dc, &tau_s, &dead_time_s);
         bool have_tc = zones_config_get_tc_type(zi, &tc_type);
-        backup_stream_printf(&s, "%s{\"index\":%u,\"pid_kp\":%.4f,\"pid_ki\":%.4f,\"pid_kd\":%.4f,",
+        backup_stream_printf(&s, "%s{\"index\":%u,\"pid_kp\":%.9g,\"pid_ki\":%.9g,\"pid_kd\":%.9g,",
                             first_zone ? "" : ",", zi, (double)kp, (double)ki, (double)kd);
         first_zone = false;
         /* model_* and tc_type are emitted only when answerable -- see
@@ -277,7 +277,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
          * restore not to overwrite a fitted model on a board that has one
          * with a "no model" this backup never actually measured. */
         if (have_model) {
-            backup_stream_printf(&s, "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f,",
+            backup_stream_printf(&s, "\"model_k_dc\":%.9g,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f,",
                                 (double)k_dc, (double)tau_s, (double)dead_time_s);
         }
         if (have_tc) {
@@ -405,7 +405,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * (always 0), same always-emit convention every other field in
              * this block already follows. */
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-                backup_stream_printf(&s, "\"coupling_c%u\":%.4f,", (unsigned)j, (double)coupling_row[j]);
+                backup_stream_printf(&s, "\"coupling_c%u\":%.9g,", (unsigned)j, (double)coupling_row[j]);
             }
             /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): coupling_tau_c%u/
              * coupling_dead_time_c%u, same per-cell always-emit shape as
@@ -425,7 +425,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * see backup_import_apply()'s own comment on the matching parse. */
             float coupling_diag_k_dc = 0.0f;
             zones_config_get_coupling_diag_k_dc(zi, &coupling_diag_k_dc);
-            backup_stream_printf(&s, "\"coupling_diag_k_dc\":%.4f,", (double)coupling_diag_k_dc);
+            backup_stream_printf(&s, "\"coupling_diag_k_dc\":%.9g,", (double)coupling_diag_k_dc);
             backup_stream_printf(&s, "\"settings_source\":%u,", (unsigned)settings_source);
             for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
                 backup_stream_printf(&s, "\"settings_source_g%u\":%u,", (unsigned)g,

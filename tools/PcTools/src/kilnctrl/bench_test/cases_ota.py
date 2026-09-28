@@ -345,7 +345,7 @@ def _case_ote01(ctx: dict) -> CaseResult:
     fingerprint_identical = None
     try:
         zones_after = zones.get_zones(host)
-        fingerprint_identical = (_pid_gains(zones_before) == _pid_gains(zones_after)) if zones_before else None
+        fingerprint_identical = J.pid_gains_match(_pid_gains(zones_before), _pid_gains(zones_after)) if zones_before else None
     except Exception:
         pass
     boot_guard_recovery_mode = _boot_guard_recovery_mode(ctx, host)
@@ -620,7 +620,7 @@ def _case_ote06(ctx: dict) -> CaseResult:
     fingerprint_identical = None
     try:
         zones_after = zones.get_zones(host)
-        fingerprint_identical = (_pid_gains(zones_before) == _pid_gains(zones_after)) if zones_before else None
+        fingerprint_identical = J.pid_gains_match(_pid_gains(zones_before), _pid_gains(zones_after)) if zones_before else None
     except Exception:
         pass
 

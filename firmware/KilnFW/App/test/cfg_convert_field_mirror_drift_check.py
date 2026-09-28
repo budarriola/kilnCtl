@@ -48,7 +48,9 @@ BACKUP_HEADER_REL = "firmware/KilnFW/App/drivers/http/backup_http_internal.h"
 CFG_CONVERT_REL = "tools/PcTools/src/kilnctrl/cfg_convert.py"
 
 # Quoted JSON keys inside a backup_stream_printf(...) call's format string,
-# e.g. "\"pid_kp\":%.4f" -> pid_kp. Deliberately narrow (only inside this one
+# e.g. "\"pid_kp\":%.9g" -> pid_kp (the value's own format specifier is
+# irrelevant to this regex -- it only matches up to the colon). Deliberately
+# narrow (only inside this one
 # call) so it does not pick up unrelated quoted strings (log messages, the
 # Content-Disposition header, etc.) elsewhere in the file.
 STREAM_PRINTF_CALL_RE = re.compile(r'backup_stream_printf\((.*?)\);', re.DOTALL)

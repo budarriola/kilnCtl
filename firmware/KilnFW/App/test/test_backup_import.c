@@ -3037,8 +3037,8 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(strstr(s_export_body, "\"target_c\":1200.00,\"ramp_c_per_hr\":100.00,\"dwell_min\":10") != NULL,
               "the seeded profile's one segment is emitted exactly");
 
-    TEST_CHECK(strstr(s_export_body, "\"index\":1,\"pid_kp\":5.0000,\"pid_ki\":0.6000,\"pid_kd\":0.0200") != NULL,
-              "zone 1's pid gains are emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"index\":1,\"pid_kp\":5,\"pid_ki\":0.600000024,\"pid_kd\":0.0199999996") != NULL,
+              "zone 1's pid gains are emitted exactly (%.9g, 2026-09-28)");
     TEST_CHECK(strstr(s_export_body, "\"tc_type\":4") != NULL, "zone 1's tc_type is emitted");
     TEST_CHECK(strstr(s_export_body, "\"name\":\"Mid\"") != NULL, "zone 1's name is emitted");
     TEST_CHECK(strstr(s_export_body, "\"relay_mask\":2,\"thermo_mask\":2,\"ct_mask\":2") != NULL,
@@ -3056,20 +3056,21 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     /* The three newer fields the task brief specifically calls out. */
     TEST_CHECK(strstr(s_export_body, "\"fuzzy_strength_pct\":42.25") != NULL,
               "fuzzy_strength_pct is emitted exactly (Phase 2/4 field)");
-    TEST_CHECK(strstr(s_export_body, "\"coupling_c0\":10.5000") != NULL,
-              "coupling_c0 (indexed key, version 4) is emitted exactly");
-    TEST_CHECK(strstr(s_export_body, "\"coupling_c1\":0.0000") != NULL,
-              "the diagonal cell coupling_c1 (zone 1's own index) is emitted as 0, never omitted");
-    TEST_CHECK(strstr(s_export_body, "\"coupling_c2\":3.2500") != NULL,
-              "coupling_c2 is emitted exactly, DISTINCT from coupling_c0");
-    TEST_CHECK(strstr(s_export_body, "\"coupling_diag_k_dc\":33.5000") != NULL,
-              "coupling_diag_k_dc is emitted exactly (ZONES_CFG_VERSION 14->15 field)");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_c0\":10.5") != NULL,
+              "coupling_c0 (indexed key, version 4) is emitted exactly (%.9g, 2026-09-28)");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_c1\":0,") != NULL,
+              "the diagonal cell coupling_c1 (zone 1's own index) is emitted as 0, never omitted "
+              "(%.9g, 2026-09-28)");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_c2\":3.25") != NULL,
+              "coupling_c2 is emitted exactly, DISTINCT from coupling_c0 (%.9g, 2026-09-28)");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_diag_k_dc\":33.5") != NULL,
+              "coupling_diag_k_dc is emitted exactly (ZONES_CFG_VERSION 14->15 field) (%.9g, 2026-09-28)");
     TEST_CHECK(strstr(s_export_body, "\"settings_source\":2") != NULL,
               "settings_source is emitted exactly");
 
     char model_needle[96];
     if (have_model) {
-        snprintf(model_needle, sizeof(model_needle), "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f",
+        snprintf(model_needle, sizeof(model_needle), "\"model_k_dc\":%.9g,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f",
                  (double)exp_k_dc, (double)exp_tau_s, (double)exp_dead_time_s);
         TEST_CHECK(strstr(s_export_body, model_needle) != NULL,
                   "when the model getter answers, export emits its exact values");

@@ -452,7 +452,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                                   pid_fuzzy_derive_bands(ht_model_k_dc, ht_model_tau_s, NULL, NULL);
         APPEND(
             "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.3f,"
-            "\"pid_kp\":%.4f,\"pid_ki\":%.4f,\"pid_kd\":%.4f,\"max_ramp_c_per_hr\":%.2f,"
+            "\"pid_kp\":%.9g,\"pid_ki\":%.9g,\"pid_kd\":%.9g,\"max_ramp_c_per_hr\":%.2f,"
             "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,\"max_temp_c\":%.1f,"
             "\"min_temp_c\":%.1f,\"heater_window_ms\":%.0f,\"heater_min_on_ms\":%.0f,"
             "\"heater_min_off_ms\":%.0f,"
@@ -465,10 +465,15 @@ esp_err_t zones_get_handler(httpd_req_t *req)
              * absent key and a zero would mean the same thing to a client,
              * and always emitting keeps the page's read-back-and-repost
              * round-trip (see the POST side) from depending on which zones
-             * happen to have been autotuned. %.4f on K because a small-gain
-             * zone's fit can land in the fractional range and the
-             * feedforward divides by it. */
-            "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f,"
+             * happen to have been autotuned. %.9g on K (2026-09-28, small-
+             * gain-Ki loss fix) because a small-gain zone's fit can land in
+             * the fractional range and the feedforward divides by it --
+             * %.4f used to round a tuned value like 0.000034 to 0.0000 on
+             * every narrow GET-merge-POST writer that re-posts this field
+             * (control_set_zone_limits/_type/_coupling); %.9g is lossless
+             * for a float32 (see zones_config_export_canonical()'s own
+             * "%.9g" precedent, test_zones_http.c). */
+            "\"model_k_dc\":%.9g,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f,"
             /* tc_type is CONFIG, not a live reading, so it deliberately does
              * NOT go anywhere near kc-live-value on the page -- see
              * zones_page.html's rendering of this field. */
@@ -523,9 +528,9 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * coupling identification's own diagonal cell -- see zone_cfg_t::
          * coupling_diag_k_dc's own doc comment. Always emitted, same always-
          * emit/read-back-and-repost reasoning as fuzzy_strength_pct/
-         * coupling_c%u above. %.4f matches model_k_dc's own precision -- same
-         * unit, same small-gain-zone concern. */
-        APPEND("\"coupling_diag_k_dc\":%.4f,", (double)z->coupling_diag_k_dc);
+         * coupling_c%u above. %.9g (2026-09-28) matches model_k_dc's own
+         * precision -- same unit, same small-gain-zone concern, same fix. */
+        APPEND("\"coupling_diag_k_dc\":%.9g,", (double)z->coupling_diag_k_dc);
         /* ZONES_CFG_VERSION 16->17 (PID_EXPANSION_PLAN.md sec 3.6d): the
          * terminal ease-off taper window multiplier, now per-zone -- was a
          * single top-level "ease_off_window_mult" key applied to every zone
@@ -580,9 +585,10 @@ esp_err_t zones_get_handler(httpd_req_t *req)
          * saved configs stays a per-key diff rather than needing array-aware
          * tooling. Always emitted for every cell including the diagonal
          * (always 0) -- same always-emit, read-back-and-repost reasoning as
-         * model_k_dc/timing_profile above. */
+         * model_k_dc/timing_profile above. %.9g (2026-09-28), same fix as
+         * model_k_dc/coupling_diag_k_dc above. */
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            APPEND("\"coupling_c%u\":%.4f,", j, (double)z->coupling_coeff[j]);
+            APPEND("\"coupling_c%u\":%.9g,", j, (double)z->coupling_coeff[j]);
         }
         /* ZONES_CFG_VERSION 11->12's coupling_tau_s[]/coupling_dead_time_s[]
          * MOVED to GET /api/zones_diag (docs/audits/

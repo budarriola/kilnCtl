@@ -939,7 +939,7 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
 #: [affected][stepped] coupling matrix -- zone i's list entry j is "how much
 #: zone i (the AFFECTED zone) rises per the firmware's units when zone j (the
 #: STEPPED zone) is driven", exactly zones_http_handlers.c's
-#: `"coupling_c%u":%.4f` per-zone-i emission (line ~332) and the matching
+#: `"coupling_c%u":%.9g` per-zone-i emission (2026-09-28; was %.4f, line ~332) and the matching
 #: z%u_coupling_c%u POST field (line ~956, parse_zone_fields()). A preset
 #: names it "coupling_coeff": [c0, c1, ..., c{N-1}] -- SAME length and
 #: ORDERING as GET /api/zones' own coupling_c0..c{N-1} keys for that zone, not

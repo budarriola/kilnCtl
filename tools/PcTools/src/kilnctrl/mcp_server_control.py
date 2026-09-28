@@ -982,7 +982,8 @@ def control_set_zone_type(
 # Wire format (read from zones_http_post_parse.c/zones_http_get.c directly,
 # not assumed): GET /api/zones reports coupling as MAX31856_CHANNEL_COUNT
 # indexed keys PER ZONE, "coupling_c0".."coupling_c{N-1}" (zones_http_get.c:
-# APPEND("\"coupling_c%u\":%.4f,", j, ...)), where zone i's coupling_c{j} is
+# APPEND("\"coupling_c%u\":%.9g,", j, ...) as of 2026-09-28 -- was %.4f, see
+# "GET-merge-POST rounding" below), where zone i's coupling_c{j} is
 # zone j's (the STEPPED zone) measured/authored effect on zone i (the
 # AFFECTED zone) -- row i = affected, column j = stepped, per this module's
 # own _describe_coupling_matrix(). The matching POST field is
@@ -1023,14 +1024,19 @@ def control_set_zone_type(
 # GET-merge-POST rounding, and what this tool strips to avoid it: GET
 # /api/zones prints most floats at %.4f (model_tau_s/model_dead_time_s at
 # %.1f), so a GET-merge-POST re-posts every field at GET's rounded precision.
-# For fields parse_zone_fields() REQUIRES (pid_kp/ki/kd, cal, ramp,
-# relay_mask, control_mode, ...; omitted means 400 or 0) there is no way
-# around that on this whole-page handler -- the same residual
-# control_set_zone_type()/control_set_zone_limits() carry: at most 5e-5 on a
-# gain, below parse_zone_fields()'s own 0.0001 tuning_valid-invalidation
-# tolerance, and exactly zero on a value that already went through one
-# %.4f round trip (a prior page save or a backup import, which also exports
-# at %.4f). For the MEASURED fields parse_zone_fields() omit-PRESERVES from
+# 2026-09-28: pid_kp/ki/kd, model_k_dc, coupling_diag_k_dc and coupling_c%u
+# moved to %.9g (zones_http_get.c/backup_export.c) specifically because this
+# rounding was silently zeroing a tuned Ki like 0.000034 on every narrow
+# GET-merge-POST writer -- %.9g is lossless for a float32, so those fields no
+# longer accumulate residual on a round trip. cal_offset_c/max_ramp_c_per_hr/
+# and the rest of the REQUIRED fields (relay_mask, control_mode, ...; omitted
+# means 400 or 0) are still printed at their prior, coarser precision (%.3f/
+# %.2f/%.1f/%.0f) and still carry the same residual
+# control_set_zone_type()/control_set_zone_limits() always have: well below
+# parse_zone_fields()'s own 0.0001 tuning_valid-invalidation tolerance, and
+# exactly zero on a value that already went through one such round trip (a
+# prior page save or a backup import, which also exports at that same
+# precision). For the MEASURED fields parse_zone_fields() omit-PRESERVES from
 # the live struct (z%u_k/z%u_tau/z%u_deadtime, z%u_coupling_diag_k_dc and
 # every z%u_coupling_c%u), this tool drops them from the body
 # (_strip_omit_preserved_zone_fields()) except the one target cell, so the
@@ -1062,7 +1068,11 @@ def _strip_omit_preserved_zone_fields(body: str, keep_key: str) -> str:
     return urllib.parse.urlencode(kept)
 
 
-_ZONE_COUPLING_READBACK_TOLERANCE = 0.0005  # GET prints coupling_c%u at %.4f
+_ZONE_COUPLING_READBACK_TOLERANCE = 0.0005  # generous vs. GET's %.9g coupling_c%u
+                                             # print (2026-09-28; was %.4f) --
+                                             # kept unchanged since it was
+                                             # already comfortably above any
+                                             # float32 rounding noise
 
 
 @_srv._tool()
@@ -1115,8 +1125,8 @@ def control_set_zone_coupling(
         SYSTEM_MODE_GATE_PLAN.md).
 
     After a confirmed write, re-fetches GET /api/zones and FAILS LOUD unless
-    the target cell reads back within 0.0005 (GET's own %.4f print
-    precision) of `coeff`, or if ANY other config field (any zone, or
+    the target cell reads back within 0.0005 (comfortably above GET's own
+    %.9g print precision, 2026-09-28; was %.4f) of `coeff`, or if ANY other config field (any zone, or
     top-level -- including every OTHER coupling cell) differs between the
     before and after snapshots -- reusing control_set_zone_limits()'s
     _zone_collateral_diff() so the same firmware-derived-telemetry

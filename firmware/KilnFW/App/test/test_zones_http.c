@@ -37,6 +37,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
 
 int g_test_failures = 0;
 int g_test_count = 0;
@@ -5912,14 +5914,14 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET reports the posted control_mode (PID_FUZZY)");
     TEST_CHECK(strstr(s_last_resp_body, "\"fuzzy_strength_pct\":12.50") != NULL,
               "GET reports the posted fuzzy_strength_pct exactly");
-    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c1\":1.5000") != NULL,
-              "GET reports the posted coupling_coeff[1] exactly");
-    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c2\":3.2500") != NULL,
-              "GET reports the posted coupling_coeff[2] exactly");
-    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c0\":0.0000") != NULL,
-              "GET reports the untouched diagonal cell as 0 (never omitted)");
-    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_diag_k_dc\":25.7500") != NULL,
-              "GET reports the posted coupling_diag_k_dc exactly");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c1\":1.5") != NULL,
+              "GET reports the posted coupling_coeff[1] exactly (%.9g, 2026-09-28)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c2\":3.25") != NULL,
+              "GET reports the posted coupling_coeff[2] exactly (%.9g, 2026-09-28)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c0\":0,") != NULL,
+              "GET reports the untouched diagonal cell as 0 (never omitted) (%.9g, 2026-09-28)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_diag_k_dc\":25.75") != NULL,
+              "GET reports the posted coupling_diag_k_dc exactly (%.9g, 2026-09-28)");
     TEST_CHECK(strstr(s_last_resp_body, "\"ease_off_window_mult\":3.500") != NULL,
               "GET reports the posted per-zone ease_off_window_mult exactly");
     TEST_CHECK(strstr(s_last_resp_body, "\"settings_source\":255") != NULL,
@@ -5999,14 +6001,14 @@ static void test_post_then_get_round_trips_model_across_an_omitting_save(void)
     memset(&req, 0, sizeof(req));
     esp_err_t err = zones_get_handler(&req);
     TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
-    TEST_CHECK(strstr(s_last_resp_body, "\"model_k_dc\":42.7310") != NULL,
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_k_dc\":42.730999") != NULL,
               "GET after the omitting save must still report the ORIGINAL model_k_dc -- this is "
               "the exact assertion that would have caught the live incident before it happened");
     TEST_CHECK(strstr(s_last_resp_body, "\"model_tau_s\":255.6") != NULL,
               "GET after the omitting save must still report the original model_tau_s");
     TEST_CHECK(strstr(s_last_resp_body, "\"model_dead_time_s\":40.3") != NULL,
               "GET after the omitting save must still report the original model_dead_time_s");
-    TEST_CHECK(strstr(s_last_resp_body, "\"pid_kp\":2.0000") != NULL,
+    TEST_CHECK(strstr(s_last_resp_body, "\"pid_kp\":2,") != NULL,
               "the field POST 2 actually changed (pid_kp) did take effect -- proves this is a real "
               "per-field save, not a no-op");
 
@@ -6024,7 +6026,7 @@ static void test_post_then_get_round_trips_model_across_an_omitting_save(void)
     memset(&req, 0, sizeof(req));
     err = zones_get_handler(&req);
     TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
-    TEST_CHECK(strstr(s_last_resp_body, "\"model_k_dc\":0.0000") != NULL,
+    TEST_CHECK(strstr(s_last_resp_body, "\"model_k_dc\":0,") != NULL,
               "an explicit all-zero POST must still clear the model on purpose");
 }
 
@@ -6369,9 +6371,17 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->relay_mask = 255;
         z->thermo_mask = 255;
         z->cal_offset_c = ZONE_CAL_OFFSET_MAX_C;
-        z->pid_kp = ZONE_PID_GAIN_MAX;
-        z->pid_ki = ZONE_PID_GAIN_MAX;
-        z->pid_kd = ZONE_PID_GAIN_MAX;
+        /* pid_kp/ki/kd, coupling_c%u and coupling_diag_k_dc render at "%.9g"
+         * (2026-09-28), where the MAX bound is NOT the widest value: 1000.0f
+         * renders as "1000" (4 chars) but any in-range value below 1e-4 with
+         * nine significant digits renders in exponent form, 14 chars (e.g.
+         * 1.17549435e-38, FLT_MIN). Pin those fields at that widest in-range
+         * value instead. model_k_dc stays at ZONE_MODEL_K_MAX because
+         * fuzzy_model_valid and the derived bands depend on it (see below);
+         * that leaves at most ~10 bytes/zone of model_k_dc width unmeasured. */
+        z->pid_kp = 1.17549435e-38f;
+        z->pid_ki = 1.17549435e-38f;
+        z->pid_kd = 1.17549435e-38f;
         z->max_ramp_c_per_hr = ZONE_MAX_RAMP_C_PER_HR_MAX;
         z->sanity_rate_c_per_min = ZONE_SANITY_RATE_MAX_C_PER_MIN;
         z->control_mode = 255;
@@ -6410,11 +6420,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
          * two fields cannot be independently maximised, and the combination
          * that maximises the total is this one.  */
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            z->coupling_coeff[j] = ZONE_COUPLING_COEFF_MAX;
+            z->coupling_coeff[j] = 1.17549435e-38f; /* %.9g-widest, see pid_kp above */
             z->coupling_tau_s[j] = ZONE_MODEL_TIME_MAX_S;
             z->coupling_dead_time_s[j] = ZONE_MODEL_TIME_MAX_S;
         }
-        z->coupling_diag_k_dc = ZONE_MODEL_K_MAX;
+        z->coupling_diag_k_dc = 1.17549435e-38f; /* %.9g-widest, see pid_kp above */
         z->ease_off_window_mult = ZONE_EASE_OFF_WINDOW_MULT_MAX;
         z->approach_rate_cap_c_per_hr = ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX;
         z->error_band_c = ZONE_ERROR_BAND_C_MAX;
@@ -6690,6 +6700,63 @@ static void test_zones_get_handler_succeeds_when_malloc_does_not_fail(void)
               "the heap-allocated buffer must render real config, same as the stack version did");
     TEST_CHECK(strstr(s_last_resp_body, "Kiln Zone") != NULL,
               "a real zone name set just above must actually appear in the rendered JSON");
+}
+
+// Finds `"<key>":<number>` in body and parses the number with strtod(). Not a
+// general JSON parser -- deliberately narrow, same convention as this file's
+// other s_test_* helpers, matching how test_zones_get_handler_* above use
+// strstr() on the rendered body rather than a real parser.
+static double s_test_extract_double_after_key(const char *body, const char *key)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(body, needle);
+    if (p == NULL) {
+        return NAN;
+    }
+    p += strlen(needle);
+    return strtod(p, NULL);
+}
+
+// 2026-09-28 fix: GET /api/zones used to print pid_kp/pid_ki/pid_kd and the
+// coupling_c%u cells at "%.4f", which rounds any value smaller than 0.00005
+// to "0.0000" -- silently zeroing a tuned Ki like 0.000034 every time a
+// narrow GET-merge-POST writer (control_set_zone_limits/_type/_coupling in
+// PcTools) re-posted a config it had just read. zones_config_export_canonical()
+// already used "%.9g" for exactly this reason (test_zones_http.c's own
+// canonical-export tests); this test proves zones_get_handler()'s live
+// /api/zones path now matches that precedent and round-trips a small gain
+// and a small coupling cell losslessly.
+static void test_zones_get_handler_small_gain_round_trips_at_full_precision(void)
+{
+    TEST_SECTION("zones_get_handler -- small pid_ki/coupling_c values round-trip at full precision "
+                 "(%.9g, not the lossy %.4f this fixed)");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.relay_count = 2;
+    s_zones.cfg.zones[0].pid_kp = 12.5f;
+    s_zones.cfg.zones[0].pid_ki = 0.000034f;
+    s_zones.cfg.zones[0].pid_kd = 1.0f;
+    s_zones.cfg.zones[0].coupling_coeff[1] = 0.000034f;
+
+    test_post_hooks_reset();
+    s_last_resp_body[0] = '\0';
+    s_last_resp_len = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK on a normal call");
+
+    double got_ki = s_test_extract_double_after_key(s_last_resp_body, "pid_ki");
+    TEST_CHECK(!isnan(got_ki) && fabs(got_ki - 0.000034) < 1e-9,
+              "pid_ki=0.000034 must round-trip through GET /api/zones losslessly, not collapse to "
+              "0.0000 the way %.4f used to render it");
+
+    double got_c1 = s_test_extract_double_after_key(s_last_resp_body, "coupling_c1");
+    TEST_CHECK(!isnan(got_c1) && fabs(got_c1 - 0.000034) < 1e-9,
+              "coupling_c1=0.000034 must round-trip through GET /api/zones losslessly, same as pid_ki");
 }
 
 // ---------------------------------------------------------------------------
@@ -6972,7 +7039,7 @@ static void test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed(v
     for (uint8_t affected = 0; affected < MAX31856_CHANNEL_COUNT; affected++) {
         for (uint8_t stepped = 0; stepped < MAX31856_CHANNEL_COUNT; stepped++) {
             char needle[40];
-            snprintf(needle, sizeof(needle), "\"coupling_c%u\":%.4f", (unsigned)stepped,
+            snprintf(needle, sizeof(needle), "\"coupling_c%u\":%.9g", (unsigned)stepped,
                      (double)matrix[affected][stepped]);
             char msg[192];
             snprintf(msg, sizeof(msg),
@@ -6988,9 +7055,12 @@ static void test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed(v
     // must not be confused with z0's step on z1 (27.32) -- a transposed
     // apply would swap exactly this pair and still "look plausible" (both
     // are positive, both in range) without this check.
-    TEST_CHECK(zone_json_field_present(s_last_resp_body, 0, "\"coupling_c1\":27.3200"),
+    char needle_c1_z0[40], needle_c0_z1[40];
+    snprintf(needle_c1_z0, sizeof(needle_c1_z0), "\"coupling_c1\":%.9g", (double)matrix[0][1]);
+    snprintf(needle_c0_z1, sizeof(needle_c0_z1), "\"coupling_c0\":%.9g", (double)matrix[1][0]);
+    TEST_CHECK(zone_json_field_present(s_last_resp_body, 0, needle_c1_z0),
               "zone 0 (affected) reports coupling_c1 (stepped=1) as 27.32, z1's step raising z0");
-    TEST_CHECK(zone_json_field_present(s_last_resp_body, 1, "\"coupling_c0\":14.3000"),
+    TEST_CHECK(zone_json_field_present(s_last_resp_body, 1, needle_c0_z1),
               "zone 1 (affected) reports coupling_c0 (stepped=0) as only 14.30, z0's step raising z1");
 
     nvs_test_enable(false);
@@ -14964,6 +15034,7 @@ void run_test_zones_http(void)
     test_tuning_rec_body_len_strips_the_idf_appended_nul();
     test_zones_get_handler_malloc_failure_returns_clean_500();
     test_zones_get_handler_succeeds_when_malloc_does_not_fail();
+    test_zones_get_handler_small_gain_round_trips_at_full_precision();
     test_fuzzy_strength_pct_setter_round_trip_and_bounds();
     test_coupling_row_whole_setter_round_trip_and_bounds();
     test_coupling_zeroed_for_on_off_zone_row_and_column();
