@@ -22,9 +22,24 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (192 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-25, when `control_set_zone_limits`
-was added -- a narrow writer for one zone's `max_temp_c`/`min_temp_c` only
+the rest behind a search facade (194 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-27, when `backup_export`/
+`backup_import` were added -- wrapping `GET /api/backup/export` and
+`POST /api/backup/import` (`backup_export.c`/`backup_import.c`, both
+ROUTE_TIER_ADMIN). `backup_export` is READ-ONLY, writes the raw JSON to
+`logs/backup_export/` (gitignored) and reports size/version/section counts
+plus a bare `[bool]` for whether any Wi-Fi/password-shaped field was found,
+never the value. `backup_import` refuses unless `confirm=True` exactly and
+reads `GET /api/readiness` before and after; unlike `kiln_config_apply` this
+route is fully SYNCHRONOUS (no job id, no status-poll route) -- the POST
+response is the outcome itself, so "polling" and "the POST" measure the same
+interval. It classifies a non-2xx by body/status into the mode-gate 409
+(`system_mode_gate_http_send_refusal`), the async-job-busy 409
+(`"another commissioning operation is running"`, an unrelated ct_auto_zero
+lock), the ordinary OTA-interlock 409, the needs-ack 428, a 400 validation
+refusal, and a 500 PARTIAL-WRITE failure (reported as a failure, never
+papered over). The one before it was `control_set_zone_limits`,
+2026-09-25 -- a narrow writer for one zone's `max_temp_c`/`min_temp_c` only
 (GET-merge-POST `/api/zones`, no PID/control_mode collateral; the Pico's
 `abs_max_temp_c` follows the zone maxima via firmware, so it reports that
 ceiling rather than gating on it). The one before it was

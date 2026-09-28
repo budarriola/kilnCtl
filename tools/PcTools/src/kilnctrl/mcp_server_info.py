@@ -908,6 +908,209 @@ def get_readiness(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) -> str:
+    """READ-ONLY: fetch the board's settings/profile backup (GET
+    /api/backup/export, backup_export.c's backup_export_get_handler(),
+    ROUTE_TIER_ADMIN) and write the raw JSON to a local file. Pure GET, no
+    side effects on the board.
+
+    Default `out_path` is ``logs/backup_export/kilnctl_backup_<UTC
+    timestamp>.json`` (repo-relative; ``logs/backup_export/`` is
+    gitignored, same convention as ``logs/bench_test/``) -- pass an
+    explicit path to save elsewhere.
+
+    Reports the byte size written, the document's ``version`` field
+    (BACKUP_FORMAT_VERSION on the board), and a one-line-per-section count
+    (profiles/zones/kiln_configs -- whichever top-level array keys are
+    present, with how many entries each holds).
+
+    Also scans the raw response text for Wi-Fi/password-shaped substrings
+    ("wifi", "ssid", "password", "passphrase", "psk") and reports ONLY
+    whether any were found, never the matched text or its value --
+    backup_http.h's own header comment says this document should never
+    carry Wi-Fi credentials or the web admin password by design (restoring
+    a backup onto a different board must never silently change what
+    network it joins or overwrite its own web auth), so a `True` here means
+    "stop and look by hand," not routine data.
+
+    Host is auto-resolved the same way get_readiness()/get_heap_status() do.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_readiness()
+    from . import backup_export_http_client
+
+    resolved = _ota_resolve_host(host)
+    try:
+        raw_text, parsed = backup_export_http_client.get_export(resolved)
+    except backup_export_http_client.BackupExportHttpError as exc:
+        return f"error: could not fetch GET /api/backup/export (host={resolved}): {exc}"
+
+    if out_path is None:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        out_path = os.path.join("logs", "backup_export", f"kilnctl_backup_{stamp}.json")
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    data_bytes = raw_text.encode("utf-8")
+    with open(out_path, "wb") as f:
+        f.write(data_bytes)
+
+    section_lines = []
+    for key, value in parsed.items():
+        if key in ("kind", "version"):
+            continue
+        if isinstance(value, list):
+            section_lines.append(f"{key}: {len(value)} entries")
+        else:
+            section_lines.append(f"{key}: present (not a list)")
+
+    sensitive = backup_export_http_client.scan_for_sensitive_fields(raw_text)
+
+    lines = [
+        f"host={resolved}",
+        f"wrote {len(data_bytes)} bytes to {out_path}",
+        f"kind={parsed.get('kind')!r} version={parsed.get('version')!r}",
+    ]
+    lines.extend(f"  {s}" for s in section_lines)
+    lines.append(f"contains wifi/password-shaped fields: {sensitive}")
+    return "\n".join(lines)
+
+
+@_srv._tool()
+def backup_import(
+    path: str,
+    confirm: bool = False,
+    mode: str = "merge",
+    dry_run: bool = False,
+    ack_delete_count: Optional[int] = None,
+    ack_no_safety: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Restore a settings/profile backup from a local file (POST
+    /api/backup/import, backup_import.c's backup_import_post_handler(),
+    ROUTE_TIER_ADMIN). `path` is a local file path -- e.g. one written by
+    ``backup_export()`` -- read and sent verbatim as the request body.
+
+    UNLIKE ``kiln_config_apply()``, this route is SYNCHRONOUS: there is no
+    job id and no status-poll route. The board validates the whole document
+    (a two-pass validate-then-commit parser -- nothing is written unless
+    every profile/zone/kiln_config entry validates first) and either
+    commits or refuses within the one POST/response round trip. This tool
+    reports the same elapsed wall time for "the POST" and "the full job"
+    for that reason -- there is only one interval to measure, and this
+    docstring/result says so rather than implying a poll that does not
+    exist for this route.
+
+    REFUSES UNLESS ``confirm is True`` (exactly `True`) -- without it,
+    nothing is read off disk or sent to the board; the tool reports what it
+    WOULD do and stops. This holds even for ``dry_run=True``: the board's
+    own dry-run mode computes and returns a plan without writing anything,
+    but this tool still will not talk to the board at all without an
+    explicit confirm, so a caller cannot forget it once and get used to
+    dry-run POSTs going through silently.
+
+    Always fetches GET /api/readiness FIRST (before touching the file or
+    the board) and reports its summary; re-fetches it AFTER the POST and
+    reports that too, so a caller can see what changed. A readiness fetch
+    failure on either end is reported but does not by itself refuse the
+    restore (readiness is diagnostic context here, not a precondition the
+    firmware itself checks for this route).
+
+    A non-2xx response is classified and reported by REFUSAL CATEGORY, not
+    just status code, since a plain 409 is ambiguous on this route
+    (backup_import_http_client.classify_refusal()):
+      * "mode_gate" (409) -- a firing or autotune run is active; ALL zone/
+        profile/kiln_config writes are refused while one is running,
+        PAUSED included.
+      * "async_busy" (409) -- an unrelated commissioning job (ct_auto_zero)
+        is mid-commit; retry once it finishes.
+      * "interlock" (409) -- an ordinary OTA-interlock precondition (heater
+        on, zone over temperature, another update in flight, etc).
+      * "interlock_needs_ack" (428) -- the safety link is down; retry with
+        ``ack_no_safety=True`` if that is actually intended.
+      * "validation" (400) -- the document was refused before anything was
+        written (the board's own error message is included verbatim).
+      * "partial_write" (500) -- FAILS LOUD: a partial write landed
+        (kiln_configs[] committed before profiles/zones failed) -- this is
+        reported as a failure, never papered over as a partial success.
+
+    `mode` is "merge" (default) or "mirror" (mirror also deletes
+    unmatched kiln config slots on the board -- see backup_import.c's own
+    comment; `ack_delete_count` must exactly match the number of slots a
+    non-dry-run mirror restore would delete, or it refuses).
+
+    Never prints, logs, or echoes a credential.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as get_readiness()
+    from . import backup_import_http_client
+    from . import readiness_http_client
+
+    resolved = _ota_resolve_host(host)
+
+    def _readiness_summary(label: str) -> str:
+        try:
+            data = readiness_http_client.get_readiness(resolved)
+        except readiness_http_client.ReadinessHttpError as exc:
+            return f"{label}: could not read GET /api/readiness: {exc}"
+        items = data.get("items", [])
+        ok = sum(1 for i in items if i.get("status") == "ok")
+        not_done = sum(1 for i in items if i.get("status") == "not_done")
+        other = len(items) - ok - not_done
+        return f"{label}: {ok} ok, {not_done} not_done, {other} other ({len(items)} total)"
+
+    before_readiness = _readiness_summary("readiness before")
+
+    if confirm is not True:
+        return (
+            f"DRY RUN -- pass confirm=True (exactly) to actually POST {path} to "
+            f"/api/backup/import (host={resolved}, mode={mode!r}, dry_run={dry_run}). "
+            f"{before_readiness}"
+        )
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            body_text = f.read()
+    except OSError as exc:
+        return f"error: could not read {path}: {exc}"
+
+    t0 = time.monotonic()
+    try:
+        status, resp_text = backup_import_http_client.post_import(
+            resolved, body_text, mode=mode, dry_run=dry_run,
+            ack_delete_count=ack_delete_count, ack_no_safety=ack_no_safety)
+    except backup_import_http_client.BackupImportHttpError as exc:
+        return f"error: POST /api/backup/import failed transport-side (host={resolved}): {exc}"
+    elapsed_s = time.monotonic() - t0
+
+    after_readiness = _readiness_summary("readiness after")
+
+    if 200 <= status < 300:
+        if dry_run:
+            return (
+                f"ok - dry run only, nothing written. plan:\n{resp_text}\n"
+                f"(POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the full job "
+                f"took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
+                f"{after_readiness}"
+            )
+        return (
+            f"ok - restored. (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
+            f"full job took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
+            f"{after_readiness}"
+        )
+
+    category = backup_import_http_client.classify_refusal(status, resp_text)
+    if category == backup_import_http_client.REFUSAL_PARTIAL_WRITE:
+        return (
+            f"FAILED: HTTP {status} -- a PARTIAL write landed before the restore failed: "
+            f"{resp_text} (POST elapsed {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
+            f"{after_readiness}"
+        )
+    return (
+        f"refused: HTTP {status} [{category}]: {resp_text} (POST elapsed {elapsed_s:.2f}s) "
+        f"(host={resolved})\n{before_readiness}\n{after_readiness}"
+    )
+
+
+@_srv._tool()
 def boot_guard_get(host: Optional[str] = None) -> str:
     """READ-ONLY: fetch boot_guard's recovery-mode counter (GET
     /api/boot_guard, App/drivers/http/ota_http_recovery.c's
