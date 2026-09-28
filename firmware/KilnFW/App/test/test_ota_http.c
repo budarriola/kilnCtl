@@ -1565,6 +1565,39 @@ static void assert_webauth12b_credential_survived(const char *scope_name)
               scope_name);
 }
 
+// Task 1d (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the UART path
+// (SYSTEM_CMD_FACTORY_RESET, uart_bridge_system.c) never goes through
+// reset_post_handler()'s HTTP auth/interlock gate above -- it calls
+// factory_reset_execute() directly and switches on ITS return code, per
+// uart_bridge_system.c's own comment: FACTORY_RESET_ERR_MODE_GATE_REFUSED is
+// logged as a refusal ("nothing erased"), distinct from a genuine erase
+// failure (which still reboots). This proves the return-code contract that
+// mapping depends on: a direct call during an active run returns exactly
+// that sentinel, and nothing is actually erased -- never ESP_ERR_INVALID_STATE
+// (which the erase loop can also legitimately return, the exact ambiguity
+// factory_reset.h's own doc comment warns about, see uart_bridge_system.c's
+// 2026-09-25 review-fix comment on this same overlap).
+static void test_factory_reset_execute_refused_by_mode_gate_during_firing(void)
+{
+    TEST_SECTION("factory_reset_execute() -- returns FACTORY_RESET_ERR_MODE_GATE_REFUSED directly "
+                 "(the UART path's own call site, no HTTP handler involved) while a firing is active, "
+                 "and erases nothing");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    seed_webauth12b_credential();
+    g_stub_profile_state = PROFILE_EXEC_RUNNING;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED,
+              "must return exactly the mode-gate sentinel, not ESP_ERR_INVALID_STATE or ESP_OK -- "
+              "uart_bridge_system.c's if/else chain switches on this exact value");
+    assert_webauth12b_credential_survived("factory_reset_execute() refused by the mode gate must erase "
+                                          "nothing at all, not even the scopes it would normally touch");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
 static void test_credential_survives_factory_reset_wifi_scope(void)
 {
     TEST_SECTION("factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) -- a kiln_auth credential must survive");
@@ -2731,6 +2764,7 @@ void run_test_ota_http(void)
     test_missing_auth_header_never_reaches_interlock();
     test_authenticated_request_does_reach_interlock();
     test_factory_reset_refused_by_system_mode_gate_during_firing();
+    test_factory_reset_execute_refused_by_mode_gate_during_firing();
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
