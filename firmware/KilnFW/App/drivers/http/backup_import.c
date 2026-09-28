@@ -2313,7 +2313,14 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 float cur_coeff_row[MAX31856_CHANNEL_COUNT] = {0};
                 float cur_tau_row[MAX31856_CHANNEL_COUNT] = {0};
                 float cur_dead_row[MAX31856_CHANNEL_COUNT] = {0};
-                zones_config_get_coupling(zc->index, cur_coeff_row);
+                /* _raw, not the masking zones_config_get_coupling(): this
+                 * value is written straight back to storage below, and the
+                 * masked getter reads 0.0 for any cell touching an on/off
+                 * zone (docs/ON_OFF_ZONE_PLAN.md sec 1) -- an import that
+                 * supplies only tau/dead_time for such a cell would then
+                 * commit that 0.0 over the real stored coefficient, the same
+                 * loss the export-side fix (bench A4, 2026-09-28) closed. */
+                zones_config_get_coupling_raw(zc->index, cur_coeff_row);
                 zones_config_get_coupling_tau(zc->index, cur_tau_row);
                 zones_config_get_coupling_dead_time(zc->index, cur_dead_row);
                 if (!zc->has_coupling_cell[j]) {
@@ -2697,6 +2704,41 @@ typedef struct {
     size_t content_len;
 } backup_import_job_ctx_t;
 
+/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
+ * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
+ * Only the Xtensa GCC target build's stack depth is measured. */
+#if defined(_MSC_VER)
+#define BACKUP_IMPORT_NOINLINE
+#else
+#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
+#endif
+
+/* Same two checks, same order, same refusal bytes as the top of
+ * backup_import_post_handler(), re-run on the job task just before
+ * backup_import_apply() -- see the call site's comment. noinline so the two
+ * reason buffers' frame is gone before backup_import_apply()'s deep commit
+ * chain runs on this task's 6144 B stack. Returns true if a refusal was
+ * sent. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_job_recheck_refused(httpd_req_t *async_req, bool ack_no_safety)
+{
+    sys_mode_snapshot_t mode_snap = { 0 };
+    relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+    char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+    mode_reason[0] = '\0';
+    if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+        ESP_LOGW(BACKUP_TAG, "backup import refused by system mode gate (job re-check): %s", mode_reason);
+        system_mode_gate_http_send_refusal(async_req, mode_reason);
+        return true;
+    }
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    ota_interlock_result_t gate = ota_http_check_interlocks(ack_no_safety, reason, sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        ota_http_send_interlock_refusal(async_req, gate, reason);
+        return true;
+    }
+    return false;
+}
+
 /* The slow tail of backup_import_post_handler() (docs/HTTP_POST_OWNER_
  * MIGRATION_PLAN.md slice A4) -- runs on its own task via
  * http_async_job_try_start(), not on httpd_worker: reads the (possibly up to
@@ -2747,6 +2789,19 @@ static void backup_import_job(httpd_req_t *async_req, void *arg)
         received += (size_t)ret;
     }
     body[received] = '\0';
+
+    /* TOCTOU re-check (2026-09-28 review of A4): the mode gate and interlock
+     * ran on httpd_worker before the handoff, but httpd_worker is now free
+     * while this job reads the body, so an HTTP profile/autotune start (or
+     * a heater command) can land in between. Re-run both here, immediately
+     * before the first write, with the same refusal bytes the handler
+     * sends. This narrows -- does not close -- the window: a start that
+     * lands during backup_import_apply()'s own commit pass is not refused
+     * by anything in this file. */
+    if (backup_import_job_recheck_refused(async_req, ack_no_safety)) {
+        free(body);
+        return;
+    }
 
     char err_msg[160];
     /* Task 5: kiln_cfg_plan_t heap-allocated -- same reasoning as the pre-A4

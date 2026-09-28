@@ -759,7 +759,13 @@ TASKS = [
          # sdkconfig to read (see the extra_roots-callable comment on the
          # measurement loop above) rather than a plain list built at import
          # time, before --elf/--sdkconfig are even parsed.
-         extra_roots=lambda: [("ct_auto_zero_job", "safety_cfg_http.c")] +
+         # backup_import_job (slice A4, 2026-09-28) is the third registered
+         # fn: backup_import_apply()'s two-pass commit, which used to run on
+         # httpd_worker's 8192 B stack, now runs here on 6144 B -- added in
+         # the A4 review so the checker measures that chain instead of
+         # silently grading only the two A1/A2 jobs.
+         extra_roots=lambda: [("ct_auto_zero_job", "safety_cfg_http.c"),
+                              ("backup_import_job", "backup_import.c")] +
              ([("bench_preset_job", "safety_cfg_http.c")]
               if sdkconfig_bool("CONFIG_KILNCTL_DEV_TOOLS") else [])),
     dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",
@@ -988,7 +994,15 @@ CEILING_BYTES = {
     # actually measures, not a hand-copied guess -- still INDETERMINATE (the
     # walk cannot follow every indirect call in this chain), so this is a
     # real lower bound, not a proven worst case.
-    "http_async_job": 3312,
+    # 2026-09-28 A4 review: backup_import_job (slice A4) added as a third
+    # extra_roots entry; its backup_import_apply() chain is now the deepest
+    # known callback at 3728 B, for 3760 B total -- the same shape the old
+    # httpd-hosted measurement of this chain reported (~3808 B), since the
+    # code moved tasks but did not change. Adding that ESP_LOG overhead
+    # (~1344 B) gives about 5104 B of 6144 B, roughly 1 KB spare. Still a
+    # lower bound (INDETERMINATE), so the ceiling tracks what the walk
+    # actually measures.
+    "http_async_job": 3760,
     "recovery_exit": 80,
     "backlight_pwm": 112,
     "i2c_owner_ns2009": 144,

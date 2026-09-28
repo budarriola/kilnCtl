@@ -306,6 +306,17 @@ argument to see a call site at all.
   plus code review of the byte-for-byte response preservation instead;
   the bench-responsiveness re-check this plan's own "Constraints" section
   calls for remains open for a future bench session.
+- Review fixes (2026-09-28). First, `backup_import_job()` now re-runs the
+  mode gate and interlock after the body read, just before
+  `backup_import_apply()`. Off `httpd_worker`, an HTTP profile/autotune
+  start is no longer serialized behind this handler. Second,
+  `check_all_task_stack_budgets.py` now measures `backup_import_job` as an
+  `http_async_job` extra root: 3760 B, lower bound, on a 6144 B stack.
+- **Open follow-up (residual TOCTOU):** a start that lands *during* the
+  commit pass is still admitted. Neither `profile_executor_run`'s nor
+  `autotune_engine`'s start chokepoint consults any "restore in flight"
+  fact. Closing that needs a readiness-gate item or a busy check at those
+  chokepoints. The gap is not in this handler.
 
 ## Not worth doing, with reasons
 

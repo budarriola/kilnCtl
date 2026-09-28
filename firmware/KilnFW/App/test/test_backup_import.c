@@ -355,12 +355,22 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
     }
     return ESP_OK;
 }
+// Optional body feed for tests that drive backup_import_job() directly
+// (A4 review, 2026-09-28). NULL (the default) keeps the original "return 0"
+// behaviour every earlier test relied on.
+static const char *s_recv_feed = NULL;
+static size_t s_recv_feed_off = 0;
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
-    return 0;
+    if (!s_recv_feed) {
+        return 0;
+    }
+    size_t left = strlen(s_recv_feed) - s_recv_feed_off;
+    size_t n = left < buf_len ? left : buf_len;
+    memcpy(buf, s_recv_feed + s_recv_feed_off, n);
+    s_recv_feed_off += n;
+    return (int)n;
 }
 
 // wifi_provision_http_get_server() is already defined by test_wifi_prov.c
@@ -1878,6 +1888,68 @@ static void test_backup_import_post_refused_by_interlock_after_mode_gate_passes(
     // delete/save paths call this same stub and would refuse every later
     // slot operation (43 setup failures in the kiln_configs tests below).
     reset_backup_import_post_stubs();
+}
+
+// A4 review (2026-09-28): backup_import_job() runs on the async task after
+// httpd_worker's own mode-gate/interlock checks, so a firing started in
+// between must still be refused before anything is written. Drives the
+// static job body directly (this file #includes backup_import.c) with a real
+// body fed through the httpd_req_recv() stub.
+static const char *k_job_body =
+    "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+    "\"zones\":[{\"index\":0,\"pid_kp\":2,\"pid_ki\":0,\"pid_kd\":0}]}";
+
+static void run_backup_import_job_with_body(const char *body)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    backup_import_job_ctx_t *ctx = malloc(sizeof(*ctx));
+    TEST_CHECK(ctx != NULL, "ctx allocation");
+    if (!ctx) {
+        return;
+    }
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->mode = KILN_CFG_RESTORE_MERGE;
+    ctx->ack_delete_count = -1;
+    ctx->content_len = strlen(body);
+    s_recv_feed = body;
+    s_recv_feed_off = 0;
+    backup_import_job(&req, ctx); /* frees ctx */
+    s_recv_feed = NULL;
+    s_recv_feed_off = 0;
+}
+
+static void test_backup_import_job_rechecks_mode_gate_before_writing(void)
+{
+    TEST_SECTION("backup_import_job -- a firing that started after the handler's checks is "
+                 "refused by the job's own re-check, before any write");
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+
+    /* Positive control: with nothing running the same body DOES write, so
+     * the refusal below is not vacuous. */
+    g_total_write_calls = 0;
+    run_backup_import_job_with_body(k_job_body);
+    TEST_CHECK(g_total_write_calls > 0, "control: the job reaches backup_import_apply() and writes");
+
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    g_total_write_calls = 0;
+    run_backup_import_job_with_body(k_job_body);
+    TEST_CHECK(strncmp(s_post_last_status, "409", 3) == 0, "the job's re-check sends the mode gate's 409");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written once the re-check refuses");
+    TEST_CHECK(g_stub_ota_interlock_call_count == 0, "mode gate refuses before the interlock, same order");
+
+    reset_backup_import_post_stubs();
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+    g_total_write_calls = 0;
+    run_backup_import_job_with_body(k_job_body);
+    TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the job re-runs the interlock");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written once the interlock re-check refuses");
+
+    reset_backup_import_post_stubs();
+    reset_stub_state();
 }
 
 // The third leg of this order (http_async_job_busy(), checked after the
@@ -3485,6 +3557,39 @@ static void test_export_preserves_coupling_matrix_when_a_zone_is_on_off(void)
                     "z2[1] round-trips -- NOT zeroed by exporting through the on/off row mask");
 }
 
+// Import-side sibling of the test above (2026-09-28 review of the A4 fix):
+// backup_import.c's per-cell commit merge reads the CURRENT coefficient back
+// for any cell whose import supplies tau/dead_time but omits coupling_c%u,
+// then writes it straight back through zones_config_set_coupling_cell().
+// Reading that through the masking zones_config_get_coupling() committed a
+// real 0.0 over the stored coefficient of any cell touching an on/off zone
+// -- the same loss as the export bug, via a tau-only (hand-edited or
+// partial) backup instead of a plain round trip.
+static void test_import_tau_only_cell_preserves_coeff_touching_on_off_zone(void)
+{
+    TEST_SECTION("backup_import_apply -- a tau-only cell touching an on/off zone preserves the "
+                 "stored coupling coefficient instead of committing the masked 0.0");
+    reset_stub_state();
+
+    TEST_CHECK(zones_config_set_coupling_cell(0, 2, 24.52f, 111.0f, 22.0f), "seed z0[2] coeff/tau/dead_time");
+    s_writes[2].zone_type = (uint8_t)ZONE_TYPE_ON_OFF;
+    memset(s_writes[0].set_coupling_cell_called, 0, sizeof(s_writes[0].set_coupling_cell_called));
+    g_total_write_calls = 0;
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"coupling_tau_c2\":200.0}]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a tau-only cell entry must import");
+    TEST_CHECK(s_writes[0].set_coupling_cell_called[2], "cell 2 was committed (tau supplied)");
+    TEST_CHECK_NEAR(s_writes[0].coupling_tau_s[2], 200.0, 1e-6, "the supplied tau_s was updated");
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[2], 24.52, 1e-3,
+                    "z0[2] coeff PRESERVED at the stored 24.52 -- not the masked 0.0 for an on/off column");
+    TEST_CHECK_NEAR(s_writes[0].coupling_dead_time_s[2], 22.0, 1e-6, "dead_time_s preserved");
+}
+
 // A NON-empty timing_profiles[] bundle: this is the case the empty-bundle
 // fix above deliberately does NOT exercise, so it needs its own test proving
 // the bundle itself round-trips and a zone's timing_profile index that
@@ -4276,6 +4381,7 @@ void run_test_backup_import(void)
 {
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();
+    test_backup_import_job_rechecks_mode_gate_before_writing();
 
     test_malformed_body_writes_nothing();
     test_wrong_kind_refused();
@@ -4324,6 +4430,7 @@ void run_test_backup_import(void)
     test_ct_normals_and_new_fields_round_trip_through_export_import();
     test_timing_profiles_bundle_round_trips_nonempty();
     test_export_preserves_coupling_matrix_when_a_zone_is_on_off();
+    test_import_tau_only_cell_preserves_coeff_touching_on_off_zone();
 
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
     test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();
