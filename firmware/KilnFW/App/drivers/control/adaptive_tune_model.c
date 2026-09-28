@@ -550,6 +550,33 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
                       // path (adaptive_tune_refine_zone_locked()) -- not duplicated here, see this function's
                       // header comment.
         }
+        if (zone_is_on_off(j)) {
+            // A4 review follow-up B (2026-09-28): zones_config_get_coupling()
+            // (the getter prior_row was just filled from, above) always masks
+            // an on/off zone's COLUMN to 0.0f -- "this zone injects no heat
+            // into anyone" (docs/ON_OFF_ZONE_PLAN.md sec 1). That masked 0.0
+            // is not "no prior", it's "control ignores this cell entirely",
+            // and this loop's own near-zero branch below treats prior==0 as
+            // "no confident prior yet" and blends 0.15*fit through
+            // zones_config_set_coupling_cell(), permanently overwriting
+            // whatever real coefficient is actually stored in flash for this
+            // column (found on the bench: an on/off zone 2 retyped from a
+            // heater still had real z0[2]/z1[2] cells, and an adaptive update
+            // after retyping stomped them to ~0.15*fit).
+            //
+            // Fix is to skip the column outright rather than read
+            // zones_config_get_coupling_raw() for the prior: an on/off zone's
+            // outgoing coupling is inert everywhere control reads it (the
+            // masking getter is a live-control-loop guard, not just a backup
+            // quirk), so a fitted coefficient into that column would never be
+            // read back except by another adaptive pass computing yet another
+            // fit against it -- there is no reader this write could ever
+            // usefully feed. Skipping preserves whatever real, pre-retype
+            // value is already on disk (in case the zone is ever retyped back
+            // to a heater) instead of clobbering it with a coefficient fit
+            // while the zone was on/off.
+            continue;
+        }
         float fit = C[zi][j];
         if (!isfinite(fit)) {
             continue; // skip only this cell -- do not let one bad column poison the whole row

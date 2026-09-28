@@ -69,10 +69,34 @@ typedef enum {
  * the caller must not touch req again; fn will run on its own task and
  * reply on the async copy. Returns HTTP_ASYNC_JOB_BUSY or
  * HTTP_ASYNC_JOB_RESOURCE_FAILURE if refused (see that enum's own doc
- * comment for the distinction) -- in every refusal case, req is left
+ * comment for the distinction) -- in every refusal case, req ITSELF is left
  * completely untouched (undone via httpd_req_async_handler_complete() on
  * the async copy first, if one was created) and the caller must respond
  * synchronously on req itself.
+ *
+ * HTTP_ASYNC_JOB_RESOURCE_FAILURE specifically (A4 review follow-up C,
+ * 2026-09-28): by the time xTaskCreate() fails, httpd_req_async_handler_begin()
+ * already succeeded, which means req's body (if any -- backup_import's POST
+ * always has one) was never read by anyone: not by httpd_worker (the whole
+ * point of the async handoff is that it does NOT read the body before
+ * handing off) and not by fn (it never got to run). The caller's synchronous
+ * error response on req only replaces the RESPONSE half of the exchange --
+ * it does nothing about the unread REQUEST body still sitting in the socket,
+ * and esp_http_server's keep-alive parser will then try to read the next
+ * request starting mid-body. Rather than have every caller read and discard
+ * up to content_len bytes it never asked for (and bound how much it's
+ * willing to drain), this function force-closes the underlying session on
+ * this one path via httpd_sess_trigger_close() -- sockfd is captured off the
+ * async copy before completing it, since complete() frees that copy. The
+ * caller's synchronous response is unaffected: esp_http_server still sends
+ * a queued response body before actually closing a session marked this way,
+ * same "Connection: close" semantics as any ordinary non-keep-alive reply.
+ * HTTP_ASYNC_JOB_BUSY needs no such handling: it refuses before
+ * httpd_req_async_handler_begin() is ever called, so req is in exactly the
+ * same state an ordinary synchronous handler leaves it in on any other
+ * early refusal (the framework's normal per-request cleanup, which every
+ * other precondition check in these handlers already relies on, still
+ * applies to it).
  *
  * task_name is used both for the FreeRTOS task name and for
  * stack_margin_register() -- pass the same literal every call site uses

@@ -1358,6 +1358,18 @@ static void reset_readiness_facts_to_ready(void)
     s_test_readiness_facts.estop_verified = true;
 }
 
+// backup_import_restore_in_flight() fake (2026-09-28, A4 review follow-up A):
+// backup_import.c is not linked into this executable (it needs
+// esp_http_server.h and the whole backup/profiles HTTP surface, not
+// host-buildable here) -- this is the one symbol profile_executor_run.c now
+// calls from it. Defaults false (no restore in progress), same "default
+// describes nothing wrong" convention as s_test_readiness_facts above.
+static bool s_test_restore_in_flight = false;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+
 // ---------------------------------------------------------------------------
 // Tests -- profile_executor_start() is DELIBERATELY never called anywhere in
 // this file. s_exec is a static struct with internal linkage in
@@ -1422,6 +1434,18 @@ static void test_run_refused_by_readiness_recovery_mode(void)
      * fires first, rather than readiness_gate_evaluate()'s own recovery item
      * (whose message also contains "RECOVERY MODE") catching it instead. */
     run_and_expect_gate_refusal("a recovery-mode boot refuses a firing at run()", "no firing or autotune");
+}
+
+static void test_run_refused_by_restore_in_flight(void)
+{
+    /* 2026-09-28, A4 review follow-up A: a backup restore in progress refuses
+     * a firing at the same choke point recovery mode does. */
+    TEST_SECTION("profile_executor_run() is refused by the system mode gate -- restore in flight");
+    reset_readiness_facts_to_ready();
+    s_test_restore_in_flight = true;
+    run_and_expect_gate_refusal("a backup restore in flight refuses a firing at run()",
+                                "backup restore is in progress");
+    s_test_restore_in_flight = false;
 }
 
 static void test_run_refused_by_readiness_safety_trip(void)
@@ -9734,6 +9758,7 @@ void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
     test_run_refused_by_readiness_recovery_mode();
+    test_run_refused_by_restore_in_flight();
     test_run_refused_by_readiness_safety_trip();
     test_run_refused_by_readiness_crash_report();
     test_run_refused_by_readiness_estop_unverified();

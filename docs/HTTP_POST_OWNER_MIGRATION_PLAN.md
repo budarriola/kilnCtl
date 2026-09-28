@@ -312,11 +312,42 @@ argument to see a call site at all.
   start is no longer serialized behind this handler. Second,
   `check_all_task_stack_budgets.py` now measures `backup_import_job` as an
   `http_async_job` extra root: 3760 B, lower bound, on a 6144 B stack.
-- **Open follow-up (residual TOCTOU):** a start that lands *during* the
-  commit pass is still admitted. Neither `profile_executor_run`'s nor
-  `autotune_engine`'s start chokepoint consults any "restore in flight"
-  fact. Closing that needs a readiness-gate item or a busy check at those
-  chokepoints. The gap is not in this handler.
+- **Residual TOCTOU -- CLOSED (2026-09-28, A4 review follow-up A):** a start
+  landing *during* the commit pass is now refused. `backup_import.c` owns a
+  lock-free atomic flag (`backup_restore_state.h`'s
+  `backup_import_restore_in_flight()`), set before `backup_import_job`'s
+  commit pass and cleared on every exit path (success, the re-checked mode
+  gate/interlock refusal, and any other early return) via a thin wrapper
+  (`backup_import_job()`) around the renamed original body
+  (`backup_import_job_inner()`) -- the wrapper's `atomic_store` on the way
+  out is what guarantees the clear runs regardless of which path the inner
+  function took. The flag is set BEFORE the job-side TOCTOU re-check reads
+  the heat claim, and each start path re-reads the flag at its commit point,
+  after publishing its heat claim (and undoes the claim if set) -- a
+  store-then-read pair on each side, so a start and a restore can never both
+  proceed. The early gate check alone would have left a window as long as
+  the start's pre-commit validation; the commit-point re-read closes it.
+  `system_mode_gate.c`'s
+  `sys_mode_snapshot_t` gained a `restore_in_flight` field, consulted at the
+  same choke point RECOVERY MODE already gates (`profile_executor_run.c`,
+  `autotune_engine.c`), so all three transports (HTTP, UART, LCD) refuse
+  with the same wording: "a backup restore is in progress; wait for it to
+  finish before starting". Host-tested in `test_backup_import.c` (the flag
+  is already set when the job's re-check reads the heat claim, and reads
+  false before and after the job on both the success and refused-recheck
+  exit paths) and in `test_profile_executor_prestart.c`/
+  `test_autotune_engine_prestart.c` (a fake `backup_import_restore_in_flight()`
+  refuses a start with the gate's exact message, ahead of the generic
+  prestart guard). The commit-point re-read has no host test: those
+  executables never start the executor, so it is covered by review and the
+  target build only. Negative-tested by hand: disabling the gate check in
+  `system_mode_gate.c` reproduces both refusal tests failing; restored, and
+  a forced full rebuild of all 63 host-test executables passes clean.
+  `.dram0.bss` for this follow-up pass (Items A/B/C together, new atomic
+  flag included): **99768 B** against the 101000 B ceiling (up from the
+  99720 B recorded above for the original A4 slice). URI routes unchanged,
+  163/170. `check_stack_margin_registration.ps1` passes, 10 spare task
+  slots, no new task registered by this pass.
 
 ## Not worth doing, with reasons
 

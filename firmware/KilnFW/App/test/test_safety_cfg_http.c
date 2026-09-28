@@ -136,6 +136,21 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (
  * commissioning_post_handler() tests below need a real body delivered. */
 static const char *s_stub_req_body = NULL;
 static size_t s_stub_req_body_sent = 0;
+
+// A4 review follow-up C (2026-09-28): this executable #includes
+// safety_cfg_http.c, which calls http_async_job_try_start() for real
+// (ct_auto_zero_job/bench_preset_job) -- so it links http_async_job.c, whose
+// fixed xTaskCreate()-failure path now calls httpd_req_to_sockfd(). Declared
+// once in the shared stub header, defined once per executable that needs it
+// (same convention as httpd_req_recv() just below). This executable's own
+// tests never drive that specific failure path, so a fixed placeholder is
+// enough to satisfy the linker.
+int httpd_req_to_sockfd(httpd_req_t *r)
+{
+    (void)r;
+    return -1;
+}
+
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;

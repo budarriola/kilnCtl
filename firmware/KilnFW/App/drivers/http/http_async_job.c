@@ -119,10 +119,28 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
     if (xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx, tskIDLE_PRIORITY + 5,
                      &s_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "%s: failed to create the job task", task_name ? task_name : "?");
-        // Undo the begin() on the ASYNC copy -- per this helper's own doc
-        // comment, the ORIGINAL req is left completely untouched either way,
-        // so the caller can still respond on it synchronously.
+        // A4 review follow-up C (2026-09-28): httpd_req_async_handler_begin()
+        // already succeeded above, so req's body (if any) has never been
+        // read by anyone and never will be -- see this function's own header
+        // doc comment for why that makes this path different from every
+        // other refusal in this helper. Capture the sockfd off the ASYNC
+        // copy before completing it (complete() frees that copy), then
+        // force the session closed so esp_http_server never tries to parse
+        // a keep-alive request starting mid-body. Undo the begin() on the
+        // ASYNC copy same as before -- the ORIGINAL req is still left
+        // completely untouched itself, so the caller can still respond on
+        // it synchronously; only the underlying session is now marked to
+        // close once that response is sent.
+        int sockfd = httpd_req_to_sockfd(async_req);
+        httpd_handle_t handle = req->handle;
         httpd_req_async_handler_complete(async_req);
+        if (sockfd >= 0) {
+            httpd_sess_trigger_close(handle, sockfd);
+        } else {
+            ESP_LOGW(TAG, "%s: could not resolve sockfd to force-close after a failed job task create -- "
+                          "a keep-alive client may now desync on this connection's unread body",
+                     task_name ? task_name : "?");
+        }
         portENTER_CRITICAL(&s_mux);
         s_busy = false;
         portEXIT_CRITICAL(&s_mux);

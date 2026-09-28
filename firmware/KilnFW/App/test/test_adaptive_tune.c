@@ -198,6 +198,12 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
     for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = s_fake_coupling[zone_index][j];
+    /* Mirror the real getter's on/off masking (zones_config_accessors.c): the
+     * whole row if this zone is on/off, else every on/off COLUMN reads 0.0 --
+     * so A4 follow-up B's test exercises the masked-zero prior it guards. */
+    for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (s_stub_zone_is_on_off[zone_index] || s_stub_zone_is_on_off[j]) out_row[j] = 0.0f;
+    }
     return true;
 }
 /* PID_EXPANSION_PLAN.md sec 3.2 ("the solver switch itself"): this file only
@@ -520,6 +526,7 @@ void run_test_adaptive_tune(void)
     test_coupling_cell_per_run_move_is_bounded_by_abs_cap();
     test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_confident_prior();
     test_coupling_ratio_guard_upper_bound_rejects_fit_above_absolute_ceiling();
+    test_coupled_refine_skips_on_off_column_leaves_stored_cell_untouched();
 
     TEST_SECTION("adaptive_tune: joint observation floor counts distinct dwells (D4)");
     test_joint_floor_counts_distinct_dwells_not_rows();

@@ -120,6 +120,19 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
             }
             return true;
         }
+        /* 2026-09-28, A4 review follow-up A: a backup restore's commit pass
+         * (backup_import_apply(), tens of seconds, on the http_async_job
+         * task) writes the same profile/zone state a start reads. Refused
+         * here, at the same choke point recovery_mode already gates, so all
+         * three transports (HTTP, UART, LCD) get the same wording. */
+        if (snap->restore_in_flight) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- a backup restore is in progress; wait for it to finish before "
+                         "starting");
+            }
+            return true;
+        }
         return false;
 
     case SYS_ACTION_OTA_START:

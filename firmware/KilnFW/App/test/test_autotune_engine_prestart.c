@@ -985,6 +985,15 @@ static void reset_readiness_facts_to_ready(void)
     s_test_readiness_facts.estop_verified = true;
 }
 
+// backup_import_restore_in_flight() fake -- same reasoning as
+// test_profile_executor_prestart.c's identical fake (2026-09-28, A4 review
+// follow-up A): backup_import.c is not linked into this executable.
+static bool s_test_restore_in_flight = false;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+
 // The distinguishing observation is the same one
 // test_profile_executor_prestart.c's equivalent tests use: the gate runs
 // BEFORE the s_at.lock == NULL guard, so a blocked board answers the gate's
@@ -1020,6 +1029,16 @@ static void test_begin_run_refused_by_readiness_recovery_mode(void)
     /* system_mode_gate.c's wording, not readiness_gate.h's -- proves slice
      * 2's mode-gate call fires first (see test_profile_executor_prestart.c). */
     begin_run_and_expect_gate_refusal("a recovery-mode boot refuses an autotune start", "no firing or autotune");
+}
+
+static void test_begin_run_refused_by_restore_in_flight(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the system mode gate -- restore in flight");
+    reset_readiness_facts_to_ready();
+    s_test_restore_in_flight = true;
+    begin_run_and_expect_gate_refusal("a backup restore in flight refuses an autotune start",
+                                       "backup restore is in progress");
+    s_test_restore_in_flight = false;
 }
 
 static void test_begin_run_refused_by_readiness_safety_trip(void)
@@ -6636,6 +6655,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_before_start();
     test_run_relay_refuses_before_start();
     test_begin_run_refused_by_readiness_recovery_mode();
+    test_begin_run_refused_by_restore_in_flight();
     test_begin_run_refused_by_readiness_safety_trip();
     test_begin_run_refused_by_readiness_crash_report();
     test_begin_run_refused_by_readiness_estop_unverified();

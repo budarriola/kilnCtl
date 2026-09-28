@@ -123,6 +123,12 @@ typedef struct {
                                 // already checks its own OTA interlock separately and first)
     bool recovery_mode;        // boot_guard_is_recovery_mode() -- consulted by SYS_ACTION_START_PROFILE/
                                 // SYS_ACTION_START_AUTOTUNE's rule (slice 2); unused by every other rule
+    bool restore_in_flight;    // backup_import_restore_in_flight() -- consulted by SYS_ACTION_START_PROFILE/
+                                // SYS_ACTION_START_AUTOTUNE's rule (2026-09-28 A4 review follow-up A):
+                                // a backup restore's commit pass (tens of seconds, on the http_async_job
+                                // task) writes the same profiles/zones state a start reads; refusing a
+                                // start while it is set closes the window a restore-in-flight start could
+                                // otherwise land in. Unused by every other rule.
     bool safety_tripped;       // ARMED-latch trip state -- reserved, unused by this pass's rules
     bool readiness_gate_ready; // !readiness_gate_refuses_start() -- reserved, unused by this pass's rules
 } sys_mode_snapshot_t;

@@ -75,8 +75,15 @@ void test_stub_kiln_cfg_export_content_toggle_byte0(void);
 // below is the one test that sets this to prove the refusal is wired.
 static bool s_test_profile_running_for_mode_gate = false;
 static bool s_test_autotune_running_for_mode_gate = false;
+// Reviewer addition (A4 follow-up A): sample the restore-in-flight flag at
+// the moment the job-side re-check reads the heat claim, so a test can prove
+// the flag is actually SET there (store-then-read pairing), not merely clear
+// before and after.
+bool backup_import_restore_in_flight(void);
+static bool s_test_restore_flag_seen_set_at_heat_read = false;
 void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
 {
+    if (backup_import_restore_in_flight()) s_test_restore_flag_seen_set_at_heat_read = true;
     if (profile_running_out) *profile_running_out = s_test_profile_running_for_mode_gate;
     if (autotune_running_out) *autotune_running_out = s_test_autotune_running_for_mode_gate;
 }
@@ -1947,6 +1954,37 @@ static void test_backup_import_job_rechecks_mode_gate_before_writing(void)
     run_backup_import_job_with_body(k_job_body);
     TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the job re-runs the interlock");
     TEST_CHECK(g_total_write_calls == 0, "nothing written once the interlock re-check refuses");
+
+    reset_backup_import_post_stubs();
+    reset_stub_state();
+}
+
+// A4 review follow-up A (2026-09-28): backup_import_restore_in_flight() must
+// read false before/after the job and (observably) true while it runs, so
+// profile_executor_run()/autotune_begin_run_locked() can refuse a start that
+// lands during the commit pass. The relay_authority_heat_run_active() stub
+// samples it at the job-side re-check (it must already be set there), and
+// this checks it is false before and false again after the job returns
+// (every exit path clears it).
+static void test_backup_import_job_clears_restore_in_flight_flag(void)
+{
+    TEST_SECTION("backup_import_job -- restore_in_flight flag is false before and after the job runs");
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+
+    TEST_CHECK(!backup_import_restore_in_flight(), "flag starts clear");
+    s_test_restore_flag_seen_set_at_heat_read = false;
+    run_backup_import_job_with_body(k_job_body);
+    TEST_CHECK(s_test_restore_flag_seen_set_at_heat_read,
+               "flag is already set when the job's re-check reads the heat claim");
+    TEST_CHECK(!backup_import_restore_in_flight(), "flag is cleared once the job returns (success path)");
+
+    /* Same check on a refused-by-recheck exit path -- an early return out of
+     * backup_import_job_inner() must still clear it. */
+    s_test_profile_running_for_mode_gate = true;
+    run_backup_import_job_with_body(k_job_body);
+    TEST_CHECK(!backup_import_restore_in_flight(), "flag is cleared even when the job's re-check refuses");
+    s_test_profile_running_for_mode_gate = false;
 
     reset_backup_import_post_stubs();
     reset_stub_state();
@@ -4382,6 +4420,7 @@ void run_test_backup_import(void)
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();
     test_backup_import_job_rechecks_mode_gate_before_writing();
+    test_backup_import_job_clears_restore_in_flight_flag();
 
     test_malformed_body_writes_nothing();
     test_wrong_kind_refused();

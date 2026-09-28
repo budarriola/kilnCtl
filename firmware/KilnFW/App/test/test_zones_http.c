@@ -437,6 +437,19 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
     }
     return ESP_OK;
 }
+// A4 review follow-up C (2026-09-28): this executable links http_async_job.c
+// (for http_async_job_busy(), see build_host_tests.ps1), whose
+// fixed xTaskCreate()-failure path now calls httpd_req_to_sockfd(). Declared
+// once in the shared stub header, defined once per executable that needs it
+// (same convention as httpd_resp_sendstr() just above); this executable
+// never actually drives that failure path in its own tests, so a fixed
+// placeholder is enough to satisfy the linker.
+int httpd_req_to_sockfd(httpd_req_t *r)
+{
+    (void)r;
+    return -1;
+}
+
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;

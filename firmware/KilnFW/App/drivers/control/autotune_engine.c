@@ -1,4 +1,6 @@
 #include "autotune_engine_internal.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
+                                    * A4 review follow-up A */
 #include "heat_enable.h"
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_at's definition below */
@@ -992,8 +994,12 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         sys_mode_snapshot_t mode_snap;
         memset(&mode_snap, 0, sizeof(mode_snap));
         mode_snap.recovery_mode = facts.recovery_mode;
+        /* 2026-09-28, A4 review follow-up A: same reasoning as
+         * profile_executor_run()'s identical check -- a backup restore's
+         * commit pass writes the same zone state an autotune start reads. */
+        mode_snap.restore_in_flight = backup_import_restore_in_flight();
         if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, err_msg, err_cap)) {
-            ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the system mode gate (recovery mode)",
+            ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the system mode gate (recovery mode or restore)",
                      (unsigned)zone_index);
             return false;
         }
@@ -1240,6 +1246,23 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
             snprintf(err_msg, err_cap,
                      "a zone current sweep is running -- autotune cannot run at the same time");
         }
+        return false;
+    }
+
+    /* Restore-in-flight, second look -- same pairing as profile_executor_run()'s
+     * identical check after its heat claim: the gate check near the top of this
+     * function ran before the lock/validation work, so re-read the flag now that
+     * the heat claim backup_import_job()'s re-check reads is published. */
+    if (backup_import_restore_in_flight()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        sys_mode_snapshot_t late_snap;
+        memset(&late_snap, 0, sizeof(late_snap));
+        late_snap.restore_in_flight = true;
+        (void)system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &late_snap, err_msg, err_cap);
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)zone_index);
         return false;
     }
 

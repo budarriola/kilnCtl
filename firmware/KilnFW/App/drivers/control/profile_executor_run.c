@@ -16,6 +16,8 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
+                                    * A4 review follow-up A */
 #include "heat_enable.h"
 #include "kiln_io_owner.h"
 #include "live_profile.h"
@@ -212,8 +214,13 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         sys_mode_snapshot_t mode_snap;
         memset(&mode_snap, 0, sizeof(mode_snap));
         mode_snap.recovery_mode = facts.recovery_mode;
+        /* 2026-09-28, A4 review follow-up A: a backup restore's commit pass
+         * writes the same profile/zone state this start would read -- refuse
+         * while backup_import.c has one in flight, same choke point as the
+         * recovery-mode check just above. */
+        mode_snap.restore_in_flight = backup_import_restore_in_flight();
         if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, err_msg, err_cap)) {
-            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode)",
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode or restore)",
                      (unsigned)profile_id);
             return false;
         }
@@ -1152,6 +1159,28 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             snprintf(err_msg, err_cap,
                      "a zone current sweep is running -- it cannot run at the same time as a firing");
         }
+        return false;
+    }
+
+    /* Restore-in-flight, second look (A4 review follow-up A, reviewer fix):
+     * the gate check at the top of this function reads the flag long before
+     * this commit (baseline SPI reads, config reads in between), so a restore
+     * could set it after that read and still see no heat claim at its own
+     * job-side re-check. Re-reading it HERE, after the heat claim above is
+     * published, pairs with backup_import_job(): that side stores the flag
+     * and then reads the claim (relay_authority_heat_run_active()), this
+     * side publishes the claim and then reads the flag -- both seq_cst /
+     * critical-section ordered, so at least one of the two refuses. */
+    if (backup_import_restore_in_flight()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        sys_mode_snapshot_t late_snap;
+        memset(&late_snap, 0, sizeof(late_snap));
+        late_snap.restore_in_flight = true;
+        (void)system_mode_gate_check(SYS_ACTION_START_PROFILE, &late_snap, err_msg, err_cap);
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)profile_id);
         return false;
     }
 

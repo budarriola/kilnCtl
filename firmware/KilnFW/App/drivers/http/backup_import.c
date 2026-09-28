@@ -33,6 +33,9 @@
 #include "backup_http.h"
 #include "backup_http_internal.h"
 #include "backup_json.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28 A4 review
+                                    * follow-up A; s_backup_restore_in_flight below is this
+                                    * file's definition of it. */
 
 #include "http_async_job.h" /* http_async_job_busy() -- refuse a restore while ct_auto_zero's
                               * async job is mid-commit, 2026-09-25 fix-then-push review */
@@ -40,6 +43,9 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdatomic.h> /* _Atomic bool s_backup_restore_in_flight below -- same MSVC
+                         * /experimental:c11atomics requirement live_profile.c's
+                         * s_live_profile_generation already needs (build_host_tests.ps1). */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2689,6 +2695,24 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     return true;
 }
 
+/* Restore-in-flight flag (2026-09-28, A4 review follow-up A) -- see
+ * backup_restore_state.h's doc comment for the contract. Owned entirely by
+ * this file; set/cleared only in backup_import_job() below, read (lock-free)
+ * by profile_executor_run.c/autotune_engine.c via the getter, through
+ * system_mode_gate_check()'s SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE
+ * rule. _Atomic, never a lock: CLAUDE.md's lock-order note (s_exec.lock then
+ * s_at.lock, relay_authority a leaf) has no slot for a NEW lock taken from
+ * those two choke points, and a plain `bool` read from another task while
+ * this one writes it would be a data race the same class
+ * wifi_provision_http.c's s_httpd_open_sockets/live_profile.c's
+ * s_live_profile_generation already avoid the same way. */
+static _Atomic bool s_backup_restore_in_flight = false;
+
+bool backup_import_restore_in_flight(void)
+{
+    return atomic_load(&s_backup_restore_in_flight);
+}
+
 /* Context for backup_import_job() below, heap-allocated (plain malloc --
  * tiny, no reason to burn PSRAM bookkeeping on it) by
  * backup_import_post_handler() and freed by the job on every exit path.
@@ -2755,7 +2779,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_job_recheck_refused(httpd_req_t
  * does that once this function returns, on every path. ctx is freed here,
  * on every path, since backup_import_post_handler() no longer owns it once
  * http_async_job_try_start() returns HTTP_ASYNC_JOB_STARTED. */
-static void backup_import_job(httpd_req_t *async_req, void *arg)
+static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
 {
     backup_import_job_ctx_t *ctx = (backup_import_job_ctx_t *)arg;
     kiln_cfg_restore_mode_t mode = ctx->mode;
@@ -2795,9 +2819,14 @@ static void backup_import_job(httpd_req_t *async_req, void *arg)
      * while this job reads the body, so an HTTP profile/autotune start (or
      * a heater command) can land in between. Re-run both here, immediately
      * before the first write, with the same refusal bytes the handler
-     * sends. This narrows -- does not close -- the window: a start that
-     * lands during backup_import_apply()'s own commit pass is not refused
-     * by anything in this file. */
+     * sends. Follow-up A (same day): by the time this line runs,
+     * backup_import_job()'s wrapper has already set
+     * s_backup_restore_in_flight, so a start that instead commits AFTER
+     * this point -- including during backup_import_apply()'s own commit
+     * pass -- is refused by profile_executor_run()'s/autotune_engine.c's
+     * gate check and commit-point re-read of that flag. See
+     * backup_import_job()'s comment for the store-then-read pairing that
+     * makes this close the window rather than merely narrow it. */
     if (backup_import_job_recheck_refused(async_req, ack_no_safety)) {
         free(body);
         return;
@@ -2853,6 +2882,35 @@ static void backup_import_job(httpd_req_t *async_req, void *arg)
     httpd_resp_set_type(async_req, "application/json");
     const char *ok_json = "{\"ok\":true}";
     httpd_resp_send(async_req, ok_json, strlen(ok_json));
+}
+
+/* Thin wrapper (2026-09-28, A4 review follow-up A): sets
+ * s_backup_restore_in_flight BEFORE backup_import_job_inner()'s own TOCTOU
+ * re-check (backup_import_job_recheck_refused()) runs, and clears it
+ * unconditionally once backup_import_job_inner() returns, on every one of
+ * its exit paths (short-circuit refusal, OOM, truncated upload, pass-1
+ * validation failure, a committed success, everything) -- a single set/clear
+ * pair around the one call, rather than threading a clear into each of
+ * backup_import_job_inner()'s several `return` statements individually.
+ *
+ * Ordering: this is one half of a Dekker-style pair. This side stores the
+ * flag (seq_cst) and THEN reads the heat claim (backup_import_job_recheck_
+ * refused() -> relay_authority_heat_run_active(), a critical section). The
+ * start side (profile_executor_run()/autotune_begin_run_locked(), which
+ * every HTTP, UART and LCD start funnels through) publishes its heat claim
+ * (relay_authority_heat_zone_claim_begin(), a critical section) and THEN
+ * re-reads this flag at its commit point, undoing the claim and refusing if
+ * it is set. Whatever the interleaving, at least one side sees the other,
+ * so a start and a restore never both proceed. The start side's EARLY gate
+ * check (top of each function) is only the legible common-case refusal; on
+ * its own it would leave a window as long as the start's pre-commit
+ * validation (baseline SPI reads etc.), which is why the commit-point
+ * re-read exists (reviewer fix, same day). */
+static void backup_import_job(httpd_req_t *async_req, void *arg)
+{
+    atomic_store(&s_backup_restore_in_flight, true);
+    backup_import_job_inner(async_req, arg);
+    atomic_store(&s_backup_restore_in_flight, false);
 }
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)

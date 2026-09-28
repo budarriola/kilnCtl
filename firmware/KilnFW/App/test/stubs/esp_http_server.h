@@ -33,6 +33,11 @@ typedef struct httpd_req {
     // httpd_register_uri_handler() and restore the real handler's original
     // user_ctx before dispatching to it.
     void *user_ctx;
+    // Matches real esp_http_server's httpd_req_t::handle -- added 2026-09-28
+    // for http_async_job.c's A4 review follow-up C fix
+    // (httpd_sess_trigger_close() needs the owning handle, not just a
+    // sockfd).
+    httpd_handle_t handle;
 } httpd_req_t;
 
 typedef enum {
@@ -149,6 +154,25 @@ static inline esp_err_t httpd_req_async_handler_complete(httpd_req_t *r)
 {
     g_test_stub_async_complete_calls++;
     free(r);
+    return ESP_OK;
+}
+
+/* Added 2026-09-28 for http_async_job.c's A4 review follow-up C fix -- the
+ * xTaskCreate()-failure path force-closes the session so an unread request
+ * body can never be mistaken for the start of the next keep-alive request.
+ * Same "static inline, fixed/shared behavior, selectany counter" convention
+ * as the async begin/complete pair just above: records (handle, sockfd) of
+ * its last call so a test can assert it fired, with no real socket to touch
+ * on the host. */
+__declspec(selectany) int g_test_stub_sess_trigger_close_calls = 0;
+__declspec(selectany) httpd_handle_t g_test_stub_sess_trigger_close_last_handle = NULL;
+__declspec(selectany) int g_test_stub_sess_trigger_close_last_sockfd = -1;
+
+static inline esp_err_t httpd_sess_trigger_close(httpd_handle_t handle, int sockfd)
+{
+    g_test_stub_sess_trigger_close_calls++;
+    g_test_stub_sess_trigger_close_last_handle = handle;
+    g_test_stub_sess_trigger_close_last_sockfd = sockfd;
     return ESP_OK;
 }
 

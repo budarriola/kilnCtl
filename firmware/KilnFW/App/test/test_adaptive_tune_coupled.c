@@ -297,6 +297,53 @@ static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
                "D3: a single run's coupling-cell move must never exceed the per-run absolute cap");
 }
 
+// A4 review follow-up B (2026-09-28): zones_config_get_coupling() always
+// masks an on/off zone's COLUMN to 0.0 (docs/ON_OFF_ZONE_PLAN.md sec 1), but
+// that 0.0 is a live-control-loop mask, not "no prior on record" -- the real
+// coefficient measured before the zone was retyped is still sitting in flash.
+// Before this fix, adaptive_tune_refine_coupled_locked() read that masked 0.0
+// as prior_row[j], took the near-zero blend branch, and permanently
+// overwrote the real stored cell with 0.15*fit. The fix skips any column
+// whose zone is on/off outright, so the stored cell must be completely
+// untouched by an adaptive update, not merely "close to its old value" --
+// this test seeds a real, nonzero coefficient in the on/off column and
+// checks it for byte-for-byte survival.
+static void test_coupled_refine_skips_on_off_column_leaves_stored_cell_untouched(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f;
+    s_stub_zone_is_on_off[1] = true; // zone 1 (column under test) is on/off
+    const float real_prior_before_retype = 17.25f;
+    s_fake_coupling[0][1] = real_prior_before_retype; // real cell measured while zone 1 was still a heater
+    const float ambient = 20.0f;
+    const float duty_pts[5][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}};
+    for (int k = 0; k < 5; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_ref_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    TEST_CHECK(adaptive_tune_joint_ring_count == 5, "setup: 5 distinct joint dwells queued");
+
+    for (int run = 0; run < 30; run++) {
+        profile_firing_run_record_t rec = make_clean_record(20, 0, 900);
+        adaptive_tune_run_end(&rec, true);
+    }
+
+    TEST_CHECK(s_fake_coupling[0][1] == real_prior_before_retype,
+               "an on/off column's stored coupling cell survives an adaptive update untouched");
+    // Column 2 (a heater, not on/off) still refines normally -- proves the
+    // skip is scoped to the on/off column and not a wider regression.
+    TEST_CHECK_NEAR(s_fake_coupling[0][2], k_ref_C[0][2], 1.0,
+                     "a non-on/off column in the same row still converges normally");
+}
+
 // F5/D1: zero coverage of either direction of the ratio guard's upper
 // bound (upper = max(prior*5, ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS)).
 // Accept direction: a confident-but-low prior must still accept a fit far
