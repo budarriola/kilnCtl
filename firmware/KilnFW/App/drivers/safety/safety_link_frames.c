@@ -931,6 +931,21 @@ static uint8_t s_boot_clear_attempts = 0;
 static uint32_t s_boot_clear_last_attempt_tick_ms = 0;
 static uint32_t s_boot_clean_deadline_ms = 0;
 
+/* True if any of this board's own fault-source bits had a rising edge at or
+ * after since_ms (safety_record_fault_edge_locked()'s per-bit timestamps,
+ * safety_link.c). Caller holds state_lock. Wrap-safe signed difference, same
+ * idiom as the deadline check in safety_apply_diag(). */
+static bool safety_boot_clear_fault_rose_since_locked(const SafetyLinkClass *link, uint32_t since_ms)
+{
+    for (uint8_t b = 0; b < SAFETY_LINK_FAULT_SRC_BIT_COUNT; b++) {
+        if (link->fault_edge_last_rising_valid[b] &&
+            (int32_t)(link->fault_edge_last_rising_uptime_ms[b] - since_ms) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void safety_link_mark_boot_clean(void)
 {
     s_boot_clean = true;
@@ -978,6 +993,24 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
              * or not an attempt ever succeeded. See s_boot_clean's own doc
              * comment above for the "hours later" real-trip scenario this
              * closes. */
+            s_boot_clean = false;
+        } else if (s_boot_clear_attempts > 0u &&
+                   (link->cached.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED ||
+                    link->cached.diag_trip_reason != SAFETY_LINK_TRIP_REASON_MAIN_FAULT ||
+                    safety_boot_clear_fault_rose_since_locked(link, s_boot_clear_last_attempt_tick_ms))) {
+            /* 2026-09-28 review fix: the retry budget exists ONLY to re-offer
+             * the SAME stale S6a a refused clear left latched. Once a clear
+             * has gone out, either (a) a DIAG shows that trip gone -- the
+             * Pico accepted it, so any S6a seen after this is a NEW trip --
+             * or (b) this board raised any fault source again since the last
+             * attempt, so an S6a still showing may now be this boot's own,
+             * genuine assertion. Either way the stale latch is no longer the
+             * only possible explanation, and the pre-retry one-shot would
+             * never have fired again here either: close the window for good.
+             * Without this, a real S6a latched later inside the 30 s window
+             * (link blip, PC SET_FAULT, ...) and released after
+             * SAFETY_FAULT_MIN_HOLD_MS would be auto-cleared by a leftover
+             * retry slot. */
             s_boot_clean = false;
         } else if (s_boot_clear_attempts < SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS &&
                    (s_boot_clear_attempts == 0u ||

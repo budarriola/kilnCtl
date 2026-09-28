@@ -4155,7 +4155,9 @@ Owner instruction, 2026-09-21.
   the existing gate condition, no new signal needed. All prior guards
   (S6a-only, `fault_sources==0`, the 30 s window) unchanged. Host-tested
   (refused-then-retried-succeeds, persistent-refusal-gives-up-after-bound,
-  non-S6a-never-cleared) and negative-tested.
+  non-S6a-never-cleared) and negative-tested. Review fix: once a clear has
+  gone out, a DIAG showing the trip gone or any new own-fault-source rising
+  edge closes the window.
 
 ---
 

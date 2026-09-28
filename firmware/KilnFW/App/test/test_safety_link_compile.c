@@ -2734,6 +2734,40 @@ static void test_boot_clear_refused_then_retried_succeeds(void)
     TEST_CHECK(s_stub_broadcast_count == base + 2, "no further send once the Pico's own DIAG shows "
                                                      "the trip is gone");
     TEST_CHECK(s_boot_clear_attempts == 2, "attempt count stays at 2 -- success needed no 3rd attempt");
+
+    // Review fix: a NEW S6a arriving after the Pico accepted the clear, still
+    // inside the 30 s window with a spare retry slot, must NOT be auto-cleared.
+    s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 2,
+               "an S6a re-latched after an accepted clear is never auto-cleared by a leftover slot");
+    TEST_CHECK(s_boot_clean == false, "accepted clear closes the boot-clean window for good");
+}
+
+static void test_boot_clear_stops_after_own_fault_source_rises(void)
+{
+    TEST_SECTION("safety_link_service_boot_clear_if_pending -- once a clear has gone out, "
+                 "a rising edge on any of this board's own fault sources closes the retry "
+                 "window, even after that source is released again (fault_sources back to 0)");
+
+    fake_time_reset_all();
+    SafetyLinkClass link = boot_clear_test_setup();
+    unsigned base = s_stub_broadcast_count;
+
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 1,
+               "first attempt sends CLEAR_TRIP");
+
+    // This board genuinely asserts its fault line (e.g. a link blip or a PC
+    // SET_FAULT), holds it past SAFETY_FAULT_MIN_HOLD_MS, then releases it.
+    s_fake_tick_count += 500u;
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_MANUAL, true) == ESP_OK, "assert");
+    fake_time_advance_us((uint64_t)(SAFETY_FAULT_MIN_HOLD_MS + 1u) * 1000u);
+    TEST_CHECK(safety_link_set_fault_source(&link, SAFETY_FAULT_SRC_MANUAL, false) == ESP_OK, "release");
+    TEST_CHECK(link.fault_sources == 0u, "fault_sources back to 0 -- the old gate alone would pass");
+
+    s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 1,
+               "no retry once this board has raised a fault since the last attempt");
+    TEST_CHECK(s_boot_clean == false, "window closed");
 }
 
 static void test_boot_clear_persistent_refusal_gives_up_after_bound(void)
@@ -2859,6 +2893,7 @@ int main(void)
     test_fault_edge_uninitialized_link_refuses();
 
     test_boot_clear_refused_then_retried_succeeds();
+    test_boot_clear_stops_after_own_fault_source_rises();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();
 
