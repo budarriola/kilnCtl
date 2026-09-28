@@ -168,7 +168,17 @@ class InfoClient:
         value = self._query(INFO_CMD_GET_FW_VERSION, devices.info_get_fw_version(), timeout)
         return value  # type: ignore[return-value]
 
-    def wait_for_boot_push(self, timeout: float) -> Optional[FirmwareVersion]:
+    def arm_boot_push(self) -> None:
+        """Forget any boot push already observed, so a following
+        ``wait_for_boot_push(timeout, arm=False)`` only reports one that
+        arrives after this call. Call it BEFORE sending the command that
+        triggers the reboot: arming after the send leaves a window in which
+        a fast reboot's push lands first and is then cleared away, turning a
+        real reboot into a false "not confirmed"."""
+        self._boot_push_event.clear()
+        self._last_boot_push = None
+
+    def wait_for_boot_push(self, timeout: float, arm: bool = True) -> Optional[FirmwareVersion]:
         """Block until the device's own once-per-boot, UNSOLICITED FW-version
         push (info_boot_push_task) arrives, or ``timeout`` elapses.
 
@@ -179,12 +189,14 @@ class InfoClient:
         "reboot not confirmed" (e.g. a factory reset refused by the mode
         gate, which acks the request but never reboots), never as success.
 
-        Clears any push already observed before waiting, so only a push that
-        arrives strictly after this call counts -- callers should call this
-        right after sending the reset/reboot-triggering command.
+        With ``arm=True`` (the default) any push already observed is cleared
+        first, so only a push that arrives strictly after this call counts.
+        A caller that triggers the reboot itself should instead call
+        :meth:`arm_boot_push` before sending the command and pass
+        ``arm=False`` here, which closes the send-to-wait race.
         """
-        self._boot_push_event.clear()
-        self._last_boot_push = None
+        if arm:
+            self.arm_boot_push()
         if self._boot_push_event.wait(timeout):
             return self._last_boot_push
         return None

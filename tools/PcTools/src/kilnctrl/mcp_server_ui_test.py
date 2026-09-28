@@ -200,6 +200,9 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
         return f"error: {exc}"
+    # Arm BEFORE sending, so a reboot fast enough to push before the wait
+    # below starts is still counted rather than cleared away.
+    _srv._info.arm_boot_push()
     send_result = _srv._link.send(
         dst_task=UART_TASK_ID_SYSTEM, src_task=UART_TASK_ID_SYSTEM,
         payload=devices.system_factory_reset(scope), dst_device=Device.ESP,
@@ -216,7 +219,7 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     # uart_bridge_system.c). A refused reset still ACKs the request above
     # (the ACK only confirms delivery of the command, not that it will be
     # honored), so send_result.ok alone is not proof either.
-    if _srv._info.wait_for_boot_push(timeout=FACTORY_RESET_REBOOT_TIMEOUT_S) is None:
+    if _srv._info.wait_for_boot_push(timeout=FACTORY_RESET_REBOOT_TIMEOUT_S, arm=False) is None:
         return (
             f"refused: factory reset request was ACKed, but no reboot was observed "
             f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s (no unsolicited FW-version "

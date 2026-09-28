@@ -1825,6 +1825,12 @@ static void test_backup_import_post_refused_by_mode_gate_before_interlock(void)
     TEST_CHECK(err == ESP_OK, "backup_import_post_handler must always return ESP_OK");
     TEST_CHECK(g_stub_ota_interlock_call_count == 0,
               "ota_http_check_interlocks() must never be reached once system_mode_gate has already refused");
+    TEST_CHECK(strncmp(s_post_last_status, "409", 3) == 0,
+              "the refusal must be the mode gate's own 409, not some other early exit");
+    // Every later test in this combined executable shares these stubs
+    // (kiln_cfg_store_delete()/save_current() consult the same
+    // ota_http_check_interlocks() stub), so leave them at their defaults.
+    reset_backup_import_post_stubs();
 }
 
 // Proves the interlock IS reached once the mode gate passes (so the fix
@@ -1840,6 +1846,10 @@ static void test_backup_import_post_refused_by_interlock_after_mode_gate_passes(
 
     TEST_CHECK(err == ESP_OK, "backup_import_post_handler must always return ESP_OK");
     TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the interlock must be reached once the gate passes");
+    // Must not leak OTA_INTERLOCK_REFUSED into later suites: kiln_cfg_store's
+    // delete/save paths call this same stub and would refuse every later
+    // slot operation (43 setup failures in the kiln_configs tests below).
+    reset_backup_import_post_stubs();
 }
 
 // The third leg of this order (http_async_job_busy(), checked after the

@@ -146,6 +146,24 @@ class WaitForBootPushTests(unittest.TestCase):
         result = client.wait_for_boot_push(timeout=0.2)
         self.assertIsNone(result)
 
+    def test_push_between_arm_and_wait_is_counted_with_arm_false(self):
+        # factory_default_then_load_preset() arms before sending the reset,
+        # then waits with arm=False: a reboot that pushes before the wait
+        # starts must still count, not be cleared away.
+        client = _bare_info_client()
+        client._handle_reply(_fw_version_frame(commit="stale-push"))
+        client.arm_boot_push()
+        client._handle_reply(_fw_version_frame(commit="fast-reboot"))
+        result = client.wait_for_boot_push(timeout=0.2, arm=False)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.commit, "fast-reboot")
+
+    def test_arm_discards_a_push_observed_before_it(self):
+        client = _bare_info_client()
+        client._handle_reply(_fw_version_frame(commit="stale-push"))
+        client.arm_boot_push()
+        self.assertIsNone(client.wait_for_boot_push(timeout=0.2, arm=False))
+
     def test_on_boot_push_callback_still_fires_alongside_the_event(self):
         # wait_for_boot_push() is additive -- the pre-existing on_boot_push
         # callback (session-log rollover in mcp_server.py) must be unaffected.
