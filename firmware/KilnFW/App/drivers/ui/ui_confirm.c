@@ -20,10 +20,34 @@ static void free_ctx(lv_obj_t *mbox)
     lv_free(ctx);
 }
 
+/* The most recently shown, still-open dialog, for ui_confirm_close_open().
+ * Cleared by mbox_deleted_cb() whenever that msgbox is deleted, whichever
+ * path closed it, so it can never dangle. */
+static lv_obj_t *s_open_mbox;
+
+static void mbox_deleted_cb(lv_event_t *e)
+{
+    if (lv_event_get_target(e) == s_open_mbox) {
+        s_open_mbox = NULL;
+    }
+}
+
 static void confirm_close_cb(lv_event_t *e)
 {
     lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
     free_ctx(mbox);
+    lv_msgbox_close(mbox);
+}
+
+void ui_confirm_close_open(void)
+{
+    lv_obj_t *mbox = s_open_mbox;
+    if (!mbox) {
+        return;
+    }
+    s_open_mbox = NULL;
+    free_ctx(mbox);
+    lv_obj_set_user_data(mbox, NULL);
     lv_msgbox_close(mbox);
 }
 
@@ -70,6 +94,8 @@ void ui_confirm_show(const ui_confirm_params_t *params)
     ctx->on_confirm = params->on_confirm;
     ctx->user_data = params->user_data;
     lv_obj_set_user_data(mbox, ctx);
+    lv_obj_add_event_cb(mbox, mbox_deleted_cb, LV_EVENT_DELETE, NULL);
+    s_open_mbox = mbox;
 
     lv_obj_t *yes = lv_msgbox_add_footer_button(mbox, params->confirm_label ? params->confirm_label : "Confirm");
     style_footer_button(yes, params->confirm_color);

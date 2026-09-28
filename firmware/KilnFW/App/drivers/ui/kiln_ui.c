@@ -124,9 +124,9 @@ static kiln_ui_page_t *find_page(const char *name)
     return NULL;
 }
 
-/* ui_lcd_lock.h's ui_lcd_lock_set_relock_cb() seam -- called on an
- * inactivity-timeout re-lock (never on a policy-transition force-lock) so a
- * session that expires several pages deep does not leave that page's buttons
+/* ui_lcd_lock.h's ui_lcd_lock_set_relock_cb() seam -- called on every
+ * unlocked->locked edge (inactivity timeout, policy/credential force-lock,
+ * auth enabled) so a session that ends several pages deep does not leave that page's buttons
  * usable until the operator navigates back out and in again. See that
  * header's doc comment for the full 2026-09-28 owner-decision rationale.
  * Guard against navigating "home" -> "home": kiln_ui_show() logs every call

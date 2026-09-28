@@ -5,6 +5,7 @@
 #include "esp_log.h"
 
 #include "lvgl_port.h"
+#include "ui_confirm.h"
 #include "ui_lcd_keypad.h"
 #include "ui_theme.h"
 
@@ -27,6 +28,17 @@ static lv_obj_t *s_prompt_countdown_label;
 
 static ui_lcd_lock_policy_fn_t s_policy_fn;
 static ui_lcd_lock_relock_cb_t s_relock_cb; // see ui_lcd_lock.h's doc comment
+
+// Last lock state tick_timer_cb() observed while the policy was enabled, for
+// edge-detecting EVERY unlocked->locked transition, not only the inactivity
+// timeout (2026-09-28 review of 3e7bb20b): ui_lcd_lock_force_lock() (web
+// policy transition, LCD PIN/password change) and enabling auth while the
+// panel sits on a non-home page all lock the session without passing through
+// LCD_LOCK_TICK_EXPIRED, and used to leave the operator on a gated page with
+// no session. Starts true so the boot page (home, or touch_cal on an
+// uncalibrated panel) is never kicked on the first tick. Set false while the
+// policy is disabled, so enabling auth reads as an edge on its first tick.
+static bool s_was_locked = true;
 
 static ui_lcd_lock_policy_t default_policy(void)
 {
@@ -143,6 +155,7 @@ static void tick_timer_cb(lv_timer_t *t)
                 ui_lcd_keypad_force_close();
             }
         }
+        s_was_locked = false; // auth off: the panel is effectively unlocked
         return; // section 11: auth off, nothing further to tick
     }
     if (s_lock.timeout_s != policy.timeout_s) {
@@ -168,10 +181,7 @@ static void tick_timer_cb(lv_timer_t *t)
                 ui_lcd_keypad_force_close();
             }
             ESP_LOGI(TAG, "LCD session locked (inactivity timeout)");
-            if (s_relock_cb) {
-                s_relock_cb();
-            }
-            break;
+            break; // the relock itself runs on the edge below
         case LCD_LOCK_TICK_OK:
             close_prompt();
             break;
@@ -179,6 +189,25 @@ static void tick_timer_cb(lv_timer_t *t)
         default:
             break;
     }
+
+    /* Owner decision 2026-09-28: without a session only the dashboard is
+     * reachable. On every unlocked->locked edge -- inactivity timeout,
+     * ui_lcd_lock_force_lock() from a policy/credential change, or auth just
+     * enabled -- close anything a lapsed session left tappable (an open
+     * Confirm Start/Stop dialog, a keypad) and return to home. Runs here on
+     * the LVGL timer, never from the httpd task that may have force-locked. */
+    bool locked_now = lcd_lock_is_locked(&s_lock);
+    if (locked_now && !s_was_locked) {
+        close_prompt();
+        if (ui_lcd_keypad_is_open()) {
+            ui_lcd_keypad_force_close();
+        }
+        ui_confirm_close_open();
+        if (s_relock_cb) {
+            s_relock_cb();
+        }
+    }
+    s_was_locked = locked_now;
 }
 
 static void on_touch_pressed(lv_event_t *e)

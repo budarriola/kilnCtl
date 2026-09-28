@@ -99,11 +99,15 @@ typedef void (*ui_lcd_lock_gated_cb_t)(void *user_data);
 void ui_lcd_lock_run_gated(const char *prompt, lcd_pin_role_t min_role, ui_lcd_lock_gated_cb_t action,
                             void *user_data);
 
-// Installs a callback the lock calls right after the inactivity timeout
-// re-locks the session (LCD_LOCK_TICK_EXPIRED, ui_lcd_lock.c's
-// tick_timer_cb()) -- never on a policy-transition force-lock, which already
-// happens on whatever page the operator is looking at and does not need a
-// forced navigation. docs/WEB_AUTH_PLAN.md section 8 says locking "returns
+// Installs a callback the lock calls on EVERY unlocked->locked edge that
+// ui_lcd_lock.c's tick_timer_cb() observes while the policy is enabled: the
+// inactivity timeout (LCD_LOCK_TICK_EXPIRED), a ui_lcd_lock_force_lock() from
+// a policy or credential change, and auth being enabled while the panel was
+// unlocked-by-policy (2026-09-28 review of 3e7bb20b -- the first version fired
+// on the inactivity timeout only, which left the force-lock and enable paths
+// sitting on a gated page with no session). Always runs on the LVGL timer,
+// never from the httpd task. Before calling it the tick also closes any open
+// ui_confirm dialog and keypad. docs/WEB_AUTH_PLAN.md section 8 says locking "returns
 // the interface to the Dashboard"; before page-level gating (2026-09-28
 // owner decision, see ui_lcd_lock_run_gated()'s comment above) that was true
 // for the web GUI but not enforced on the LCD, since only the Start button

@@ -314,13 +314,14 @@ void ui_home_fire_btn_cb(lv_event_t *e)
 
 /* Merged Pause/Resume button -- owner request 2026-08-30: mirrors app.js's
  * sticky-bar toggle on the web dashboard (one button, label/action flips
- * with state) rather than two separate buttons. Reads state at click time
- * for the same stale-tap reason ui_home_fire_btn_cb() does. No confirmation dialog
+ * with state) rather than two separate buttons. Reads state at action time
+ * (inside the PIN-gated callback) for the same stale-tap reason
+ * ui_home_fire_btn_cb() does. No confirmation dialog
  * -- neither web surface asks before pausing or resuming, only before
  * Start/Stop. */
-void ui_home_pause_resume_btn_cb(lv_event_t *e)
+static void ui_home_pause_resume_gated_cb(void *user_data)
 {
-    (void)e;
+    (void)user_data;
     /* Runs on the LVGL task -- heap-allocate rather than add another
      * 1384-byte profile_exec_status_t stack local; needs the full struct's
      * .state to distinguish RUNNING from PAUSED, which the narrow
@@ -337,6 +338,19 @@ void ui_home_pause_resume_btn_cb(lv_event_t *e)
         profile_executor_resume();
     }
     free(st);
+}
+
+void ui_home_pause_resume_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Owner decision, 2026-09-28: every LCD action other than viewing the
+     * dashboard needs the PIN -- Pause/Resume included, same as Start/Stop.
+     * State is read inside the gated callback (after any PIN entry), never
+     * here, so a firing that changed state while the keypad was open is
+     * acted on as it is now, not as it was at the tap.
+     * tools/check_lcd_home_nav_gated.ps1 enforces this mechanically. */
+    ui_lcd_lock_run_gated("Enter PIN to pause/resume", LCD_PIN_ROLE_USER,
+                           ui_home_pause_resume_gated_cb, NULL);
 }
 
 static void ui_home_menu_nav_gated_cb(void *user_data)
