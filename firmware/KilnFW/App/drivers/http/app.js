@@ -2072,21 +2072,38 @@
     });
     ackBtnEl = ackBtn;
 
-    // "Edit firing" -- next to Start/Stop per the owner's own wording. A
-    // plain navigation (not a fetch) to the existing ADMIN-tier /live_profile
-    // page shell: that page shell is served without a session
-    // (route_tier_table.h's kPageShellUris, same as /profiles' own nav.js
-    // link already relies on) and the page's own script triggers the shared
-    // cancelable login modal itself the moment it fetches an ADMIN /api/...
-    // route -- no separate auth handling belongs on this button, and
-    // duplicating it here would be a second, driftable copy of that gate.
+    // "Edit firing" -- next to Start/Stop per the owner's own wording. Opens
+    // the existing ADMIN-tier /live_profile editor, but signs in FIRST, in
+    // place, before leaving the current page: the click issues the editor's
+    // own read-only status GET (/api/profile/live, ADMIN) through the
+    // global fetch wrapper, which raises the shared cancelable login modal
+    // on a 401/403 and retries once on success. Only then does the tab
+    // navigate. Cancel leaves the operator where they were (no navigation,
+    // no error text). Deliberately not a bare navigation: once every
+    // non-dashboard page shell is gated behind login (owner decision
+    // 2026-09-28), an unauthenticated GET /live_profile no longer gets the
+    // shell -- and even while the shell is still served open, a Cancel
+    // there strands the operator on an empty editor instead of the page
+    // they came from. The gate itself stays the firmware's (the same /api
+    // tier check the editor's own fetches meet); this only orders "sign
+    // in" before "leave the page".
     var editBtn = document.createElement('button');
     editBtn.type = 'button';
     editBtn.className = 'kc-edit-firing-btn';
     editBtn.textContent = 'Edit firing';
     editBtn.setAttribute('hidden', '');
     editBtn.addEventListener('click', function () {
-      window.location.href = '/live_profile';
+      editBtn.disabled = true;
+      fetch('/api/profile/live', { __kcUserAction: true })
+        .then(function () {
+          window.location.href = '/live_profile';
+        })
+        .catch(function () {
+          // AuthCancelled (the operator declined to sign in) stays quiet;
+          // a network failure is already covered by the connection-lost
+          // banner, and navigating would only fail the same way.
+          editBtn.disabled = false;
+        });
     });
     editFiringBtnEl = editBtn;
 
@@ -2143,11 +2160,15 @@
   // Independent of setStopOrAckState()'s Stop/Ack toggle -- EDITABLE_STATES
   // (running/paused/faulted) overlaps both STOPPABLE_STATES and the faulted
   // half of ACK_STATES, so this button can be visible alongside either of
-  // the other two, never alongside neither (state === 'done' hides it, same
-  // as the rest of the bar).
+  // the other two, never alone. 'done' hides it (the bar stays up with only
+  // the ACKNOWLEDGE button: no live run is left to edit), as does 'idle'.
+  // Also hidden on /live_profile itself, where it would only reload the
+  // editor and discard any field the operator had not submitted yet.
   function setEditFiringVisible(state) {
     if (!editFiringBtnEl) return;
-    if (EDITABLE_STATES[state]) editFiringBtnEl.removeAttribute('hidden');
+    if (EDITABLE_STATES[state] && window.location.pathname !== '/live_profile') {
+      editFiringBtnEl.removeAttribute('hidden');
+    }
     else editFiringBtnEl.setAttribute('hidden', '');
   }
 

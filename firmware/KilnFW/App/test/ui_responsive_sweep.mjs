@@ -468,6 +468,10 @@ const SETUP_SCRIPT = `
     var pauseBtn = bar.querySelector('.kc-pause-btn');
     if (stopBtn) stopBtn.removeAttribute('hidden');
     if (pauseBtn) { pauseBtn.removeAttribute('hidden'); pauseBtn.textContent = 'Pause'; }
+    // RUNNING's full set is three buttons (Pause, STOP FIRING, Edit firing):
+    // the widest, most wrap-prone the bar gets at phone width.
+    var editBtn = bar.querySelector('.kc-edit-firing-btn');
+    if (editBtn) editBtn.removeAttribute('hidden');
     if (window.kcNav && window.kcNav.updateBodyPadding) window.kcNav.updateBodyPadding();
   }
 
