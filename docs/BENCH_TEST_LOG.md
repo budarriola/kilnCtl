@@ -1834,3 +1834,13 @@ owner-pending rather than attempted. A3 (`crash_report/clear`) and A4
 board (acknowledged, not absent, so not the sanctioned no-op case) and no
 backup was exported from this board immediately before this session, so
 neither sanctioned precondition was met.
+
+## 2026-09-28 HP-07 rerun -- PASS
+
+- `20260928T201814Z_heat_hp07_rerun` HP-07: zone0 `max_temp_c` lowered to
+  ambient+3 C (32.26 C) while idle and the profile target set equal to it.
+  The live approach tripped S6a as designed (`trip_reason=6`,
+  `trip_mask=0x0020`). `safety_clear_trip()` cleared it in 0.61 s, the limit
+  was restored, and the board was left idle with no trip. Supersedes the
+  2026-09-25 HP-07 FAIL above (`trip_reason=0 != expected 6`) for this
+  configuration.

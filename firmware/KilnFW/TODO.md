@@ -955,12 +955,9 @@ including which guards have been observed firing (guard-precedence findings:
 several guards overlap on the same physical failure and the shortest window
 wins — see `docs/GUARD_TEST_MATRIX.md`), lives in that doc, not here.
 
-- [ ] **A guard must never be disable-able from the web UI without an
-      explicit, logged, per-firing acknowledgement**, gated behind a Kconfig
-      option off in production (Marlin's `THERMAL_PROTECTION_*` stance). No
-      "disable thermal protection" affordance exists today, so there's
-      nothing to gate yet — but the acknowledged, Kconfig-gated design itself
-      isn't built either.
+- [x] **Owner decision, 2026-09-28: thermal protection gets no disable
+      switch, ever.** No per-firing-acknowledgement/Kconfig gate design is
+      needed since no "disable thermal protection" affordance will exist.
 - [x] **Guard thresholds are per-zone config.** The first eight closed
       2026-08-16 (`zone_cfg_t`, `zones_page.html`'s "Advanced guard
       thresholds" disclosure). The rest closed 2026-08-26 at the owner's

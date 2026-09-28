@@ -129,23 +129,12 @@
 >   pair (each walks its full call graph from one root rather than
 >   enumerating buffers by name) -- no new check needed. Full detail:
 >   `docs/SYSTEM_MODE_GATE_PLAN.md` §3.6 slices 4/5/7/8.
->   **Known gap, still open:** `kiln_cfg_http.c`, `backup_import.c`, and
->   `cfg_fs_format_http.c`'s handler-level gate wiring is verified (see
->   `test_kiln_cfg_http.c`/`test_backup_import.c`); `uart_bridge_ext_control.c`'s
->   `SET_ZONE_PID`/`SET_ZONE_MODEL` still has no host-test harness exercising
->   the UART entry point itself, verified only by code-pattern review and an
->   ESP-IDF target build. `zones_http_pid.c` and `iter_tune_http.c` DO have
->   handler-level tests (`test_zones_http.c`, `test_iter_tune_http.c`).
->   Evaluated 2026-09-25 whether a small harness for
->   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` gate could
->   be added cheaply: no -- `control_handle_message()` sits inside a
->   677-line file sharing static helpers and a large dependency surface
->   (thermocouple channel accessors, `zones_config_*`, `unit_pref_get/set`,
->   `profiles_builtin`, `profile_executor`, `relay_authority`, `run_state`,
->   `kiln_io`) with the PROFILES-task half of the same file, none of it
->   stubbed today -- cheaper to review by hand (confirmed present and
->   correctly wired, see the note above) than to build a fake-dependency
->   harness for one pass. Left open rather than rushed.
+>   **Closed 2026-09-28** (`a2bc530e`): `uart_bridge_ext_control.c`'s
+>   `SET_ZONE_PID`/`SET_ZONE_MODEL` gate now has its own host-test harness,
+>   `test_uart_bridge_ext_control_gate.c` -- the gate itself was already in
+>   place at `uart_bridge_ext_control.c:99-104`; only the test coverage was
+>   missing. Negative-tested (12/24 assertions fail with the gate forced off,
+>   restored by hand, full rebuild, 24/24 green, 64/64 host-test executables).
 >   **Correction, 2026-09-25 (review):** an earlier draft of this note
 >   claimed the recovery-mode HTTP-only-wording slice 2 was "folded into"
 >   the same-day zones/config work above -- that was false; slice 2 is a
@@ -323,6 +312,13 @@
 >   FAULTED/DONE transition sites; a host test drives `escalate_guard_trip()`
 >   from a dwelling RUNNING state and requires zero `exec_mode_state_check()`
 >   violations afterward (confirmed failing against the unfixed helper first).
+>   **HP-07 re-run on the bench 2026-09-28, PASS** (`20260928T201814Z_heat_hp07_rerun`,
+>   `docs/BENCH_TEST_LOG.md`), superseding the 2026-09-25 FAIL
+>   (`trip_reason=0 != expected 6`): zone0 `max_temp_c` lowered to
+>   ambient+3 C (32.26 C) while idle with the profile target set equal to it,
+>   the live approach tripped S6a as designed (`trip_reason=6`,
+>   `trip_mask=0x0020`), `safety_clear_trip()` cleared it in 0.61 s, the limit
+>   was restored, and the board was left idle with no trip.
 >   `adc7f65c` corrects the rule-4/rule-5 rationale comments the audit found
 >   false. **Owner decision:** the production `assert()` at
 >   `profile_executor.c:1814` is left unchanged for now — a future change is
@@ -2387,7 +2383,7 @@ open is short:
 | [`docs/RELEASE_HARDENING_PLAN.md`](docs/RELEASE_HARDENING_PLAN.md) | What has to be true before this controls a real kiln unattended: coredump readback for the open `profile_executor` panic, a release-gate audit against this repo's own vacuous-pass history, long-duration soak with a machine-checked verdict, guard provocation on hardware split into what the 4 W bench can and cannot ever close, failure injection, OTA/recovery mechanics, and the first-firing checklist (**closed** — [`docs/FIRST_FIRING_CHECKLIST.md`](docs/FIRST_FIRING_CHECKLIST.md), blocker 8). Risk-ordered, remaining blockers marked. **Corrected 2026-09-17 roadmap-upkeep sweep: this row's "starts once `docs/KILN_PROFILES_PLAN.md` is finished" was stale** — the plan's own doc shows it opened 2026-09-16 and several BLOCKER sub-items already closed (e.g. `bfa60679`, Blocker 6's schema-downgrade-hazard sub-item), regardless of `KILN_PROFILES_PLAN.md`'s status; read that plan's own status line for what remains, not this gating note |
 | [`docs/WEB_AUTH_PLAN.md`](docs/WEB_AUTH_PLAN.md) | Username/password and roles for the web GUI plus a numeric PIN for the LCD: an always-open Dashboard tier, `user` (start/stop only) and `administrator` (everything else), the full three-tier classification of all 140 HTTP routes, hashed and salted credentials in NVS, a fail-closed enforcement point with a mechanical route-tier check, an inactivity lock with a ten-second stay-unlocked prompt on both interfaces, and an E-stop-gated physical credential reset. Authentication ships defaulted OFF on both interfaces, so a field-upgraded board is unchanged. **Corrected 2026-09-17 roadmap-upkeep sweep: "Follows `docs/RELEASE_HARDENING_PLAN.md`" was stale — both plans opened the same day (2026-09-16) and have been landing concurrently since (route tiers, credential storage, LCD PIN entry, the web login surface, admin password/settings page, and the web-GUI inactivity lock all host-tested per `docs/WEB_AUTH_PLAN.md`'s own status line), not sequenced as this row claimed** |
 
-**Software backlog state, 2026-09-23:** every remaining unchecked box in `firmware/SaftyFW/TODO.md` (26) and `tools/PcTools/TODO.md` (4, two duplicates) is hardware-gated. `firmware/KilnFW/TODO.md`'s remaining open items are 6A.3 (guard-disable ack gate, design-only, owner decision pending) and the two "POST handlers should post commands to owner tasks" items (~lines 1950/1958, architectural, scoped not urgent per `docs/HTTP_HANDLER_OWNERSHIP.md`).
+**Software backlog state, 2026-09-23:** every remaining unchecked box in `firmware/SaftyFW/TODO.md` (26) and `tools/PcTools/TODO.md` (4, two duplicates) is hardware-gated. `firmware/KilnFW/TODO.md`'s remaining open items are the two "POST handlers should post commands to owner tasks" items (~lines 1950/1958, architectural, scoped not urgent per `docs/HTTP_HANDLER_OWNERSHIP.md`). **6A.3's guard-disable ack gate closed 2026-09-28 by owner decision: thermal protection gets no disable switch, ever, so the item needs no design.**
 
 ---
 
