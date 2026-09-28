@@ -817,6 +817,11 @@ def control_set_zone_limits(
 # ---------------------------------------------------------------------------
 ZONE_TYPE_HEATER = 0
 ZONE_TYPE_ON_OFF = 1
+#: zones_config_accessors.h's ZONE_COUPLING_COEFF_MAX -- the firmware's own
+#: range ceiling for an off-diagonal coupling_coeff cell (the diagonal is
+#: forced to exactly 0). Mirrored here, not imported, the same way this
+#: module already mirrors ZONE_TYPE_HEATER/ZONE_TYPE_ON_OFF from the C enum.
+ZONE_COUPLING_COEFF_MAX = 100.0
 _ZONE_TYPE_NAMES = {ZONE_TYPE_HEATER: "heater/PID", ZONE_TYPE_ON_OFF: "on/off"}
 # What else the firmware does differently once a zone has this type -- none
 # of it is a live relay/integral side effect (the write is refused mid-run),
@@ -956,3 +961,234 @@ def control_set_zone_type(
 
     return (f"ok - zone {zone}: zone_type={got} ({_ZONE_TYPE_NAMES.get(got, '?')}) "
             f"(confirmed by read-back; host={resolved})\n{_ZONE_TYPE_CONSEQUENCE[zone_type]}")
+
+
+# ---------------------------------------------------------------------------
+# control_set_zone_coupling -- narrow writer for ONE coupling-matrix cell,
+# modeled directly on control_set_zone_type()/control_set_zone_limits() above
+# (same GET-merge-POST /api/zones path, zones_http_client.build_post_body(),
+# same confirm gate, same mode-gate/collateral read-back discipline). No PID,
+# control_mode, limits, zone_type or model (k_dc/tau_s/dead_time_s) collateral.
+#
+# Why this exists: backup_import.c's coupling-cell import bug (fixed in
+# b4bad2c7 -- an on/off-typed zone's coupling row/column was zeroed on
+# import instead of preserved) left bench zone 2's cross-terms at 0. The
+# only pre-existing coupling writer is load_config_preset() (config_presets.py),
+# a whole bench_fixture.json-shaped preset POST that also overwrites PID
+# gains and control_mode for every zone -- forbidden for a single-cell fix,
+# same reasoning as control_set_zone_type()'s own HP-02 incident.
+#
+# Wire format (read from zones_http_post_parse.c/zones_http_get.c directly,
+# not assumed): GET /api/zones reports coupling as MAX31856_CHANNEL_COUNT
+# indexed keys PER ZONE, "coupling_c0".."coupling_c{N-1}" (zones_http_get.c:
+# APPEND("\"coupling_c%u\":%.4f,", j, ...)), where zone i's coupling_c{j} is
+# zone j's (the STEPPED zone) measured/authored effect on zone i (the
+# AFFECTED zone) -- row i = affected, column j = stepped, per this module's
+# own _describe_coupling_matrix(). The matching POST field is
+# "z{i}_coupling_c{j}" (zones_http_post_parse.c: `snprintf(key, ...,
+# "z%u_coupling_c%u", i, j)`), parsed with zones_config_json_parse_float_field()
+# ranged to [0, ZONE_COUPLING_COEFF_MAX] (100.0f) for j != i, and to exactly
+# [0, 0] (i.e. only 0 is accepted) for the diagonal j == i -- the firmware
+# refuses a nonzero diagonal outright ("zone coupling_coeff out of range"),
+# it does not silently zero it, so this tool refuses the diagonal client-side
+# too rather than relying on that 400.
+#
+# Each z{i}_coupling_c{j} field is OPTIONAL and, unlike most per-zone fields
+# on this whole-page-submit handler (which default to 0 if omitted, since
+# `tmp` starts zeroed), an OMITTED coupling cell PRESERVES the currently-
+# stored value (zones_http_post_parse.c's per-cell loop: `if (...field_present...)
+# ... else { z->coupling_coeff[j] = current_z->coupling_coeff[j]; }` -- the
+# same convention as z%u_fuzzy_strength/coupling_diag_k_dc, added 2026-08-30
+# specifically so a whole-page save from an operator's browser -- which only
+# ever renders/submits ALL cells together -- doesn't accidentally delete a
+# measurement other code paths (autotune's own coupling-cell setter) wrote.
+# This omit-preserve semantics does NOT let this tool skip the GET-merge-POST
+# discipline, though: zones_http_client.build_post_body() always emits a
+# COMPLETE field set (every top-level scalar, every timing profile, every
+# zone's every field) regardless of what the caller overrides, echoing
+# `current`'s value for anything not explicitly overridden -- so the POST
+# this tool sends is wire-identical to a whole-page save's, just with only
+# the target cell's overlay differing from a verbatim echo (see
+# RealPostBodyTest below, adapted from control_set_zone_type()'s own).
+#
+# zones_http_client.build_post_body()'s only per-zone list-shaped override
+# key is "coupling_coeff" (_PRESET_ZONE_COUPLING_FIELD) -- a bare
+# "coupling_c{j}" override key is recognized only as a REFERENCE field
+# (silently ignored, never applied; see build_post_body()'s own
+# _ZONE_COUPLING_CELL_RE branch) to support a preset authored by copying a
+# live GET/backup-export response verbatim. This tool therefore builds the
+# override as a full-width "coupling_coeff" list seeded from the zone's
+# CURRENT GET-reported cells (so every other cell in the row round-trips
+# unchanged, not zeroed) with only index `from_zone` replaced -- never a
+# bare "coupling_cN" key.
+#
+# GET-merge-POST rounding advisory (same one control_set_zone_type()/
+# control_set_zone_limits() carry, not something either of those avoids):
+# GET /api/zones prints every float, including pid_kp/ki/kd and this tool's
+# own coupling cells, at %.4f -- a GET-merge-POST necessarily re-posts every
+# OTHER field at whatever precision GET already rounded it to, which can
+# nudge a very small value (e.g. pid_ki) by up to 5e-5 on an entirely
+# unrelated write. This is not new to this tool and not something a partial
+# POST body could dodge either (the handler is a whole-page submit -- every
+# zone's non-coupling fields, e.g. relay_mask/control_mode/pid_kp, have NO
+# omit-preserve fallback and default to 0 if left out, so a body posting
+# only the coupling fields would zero the rest of the config outright).
+# Building the body via the same GET-merge-POST path as the other two narrow
+# writers, letting the read-back's 0.05-tolerance collateral-diff catch any
+# unexpected drift, is the same -- and only -- mitigation those tools use.
+# ---------------------------------------------------------------------------
+_ZONE_COUPLING_READBACK_TOLERANCE = 0.0005  # GET prints coupling_c%u at %.4f
+
+
+@_srv._tool()
+def control_set_zone_coupling(
+    zone: int,
+    from_zone: int,
+    coeff: float,
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Set ONE cell of the coupling matrix -- zone `zone`'s (the AFFECTED
+    zone) measured/authored response to zone `from_zone`'s (the STEPPED
+    zone) heater, i.e. GET /api/zones' zones[zone].coupling_c{from_zone} --
+    touching ONLY that one field over the GET-merge-POST /api/zones path
+    (zones_http_client.build_post_body()) -- every other field the board
+    reports (PID gains, control_mode, relay_mask, limits, zone_type, model
+    k_dc/tau_s/dead_time_s, every OTHER coupling cell, timing profiles, ...)
+    is echoed back exactly as read, never overwritten. Modeled directly on
+    control_set_zone_type()/control_set_zone_limits(); see this module's
+    section comment just above for the wire-format detail (field names,
+    units, bounds, the diagonal refusal, and the omit-preserves convention
+    that does NOT change this tool's own GET-merge-POST discipline).
+
+    The only pre-existing coupling writer is load_config_preset()
+    (config_presets.py), which overwrites PID gains and control_mode for
+    every zone along with whatever coupling matrix a preset also carries --
+    forbidden for a single-cell fix. This tool exists because
+    backup_import.c's coupling-cell import bug (fixed in b4bad2c7) left
+    bench zone 2's coupling cross-terms zeroed with no narrow way to restore
+    them short of a whole-page preset.
+
+    Refused:
+      - if `zone == from_zone` (the diagonal; the firmware forces it to
+        exactly 0 and refuses any other value -- zones_config_json.c/
+        zones_http_post_parse.c);
+      - if `zone` or `from_zone` is not one of the indices GET /api/zones
+        reports;
+      - if `coeff` is not a finite number, or is outside [0, 100.0]
+        (ZONE_COUPLING_COEFF_MAX -- the firmware's own range for an
+        off-diagonal cell; negative coupling is not a representable value
+        here);
+      - unless `confirm is True` exactly (a dry run otherwise -- no POST);
+      - unless the profile executor reads idle/done/faulted and autotune
+        reads idle/done/aborted (anything else, including an unreadable
+        state, refuses) -- the same system_mode_gate window
+        control_set_zone_limits()/control_set_zone_type() respect, since
+        POST /api/zones refuses EVERY zone/relay/guard config write while a
+        firing or autotune run is active (owner decision Q2, 2026-09-25,
+        SYSTEM_MODE_GATE_PLAN.md).
+
+    After a confirmed write, re-fetches GET /api/zones and FAILS LOUD unless
+    the target cell reads back within 0.0005 (GET's own %.4f print
+    precision) of `coeff`, or if ANY other config field (any zone, or
+    top-level -- including every OTHER coupling cell) differs between the
+    before and after snapshots -- reusing control_set_zone_limits()'s
+    _zone_collateral_diff() so the same firmware-derived-telemetry
+    exclusions (generation, safety_ceiling, measured currents) apply.
+
+    Uses the http_auth ADMIN-session seam via zones_http_client -- never
+    prints, logs, or echoes a credential.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as control_set_zone_limits()
+
+    if zone == from_zone:
+        return f"refused: zone == from_zone ({zone}) -- the coupling diagonal is always 0, never writable"
+
+    if isinstance(coeff, bool) or not isinstance(coeff, (int, float)) or not math.isfinite(coeff):
+        return f"refused: coeff={coeff!r} is not a finite number"
+    if coeff < 0.0 or coeff > ZONE_COUPLING_COEFF_MAX:
+        return (f"refused: coeff={coeff!r} is out of range -- must be within "
+                f"[0, {ZONE_COUPLING_COEFF_MAX:g}] (ZONE_COUPLING_COEFF_MAX)")
+
+    resolved = _ota_resolve_host(host)
+
+    running_reason = _profile_or_autotune_running_reason()
+    if running_reason is not None:
+        return f"refused: {running_reason} -- zone coupling is not changed mid-run (host={resolved})"
+
+    try:
+        before = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: GET /api/zones failed (host={resolved}): {exc}"
+
+    zones = before.get("zones") or []
+    valid_indices = sorted(z.get("index") for z in zones if "index" in z)
+    if zone not in valid_indices:
+        return f"refused: zone {zone} is out of range -- board reports zones {valid_indices} (host={resolved})"
+    if from_zone not in valid_indices:
+        return f"refused: from_zone {from_zone} is out of range -- board reports zones {valid_indices} (host={resolved})"
+
+    current = _zone_by_index(zones, zone) or {}
+    field_name = f"coupling_c{from_zone}"
+    current_cell = current.get(field_name)
+
+    # Full-width overlay, seeded from what GET reported for every cell of this
+    # zone's row -- build_post_body()'s "coupling_coeff" override key applies
+    # this whole list (skipping the diagonal itself), so a bare "coupling_cN"
+    # override key would be silently ignored (see the section comment above)
+    # and every OTHER cell must round-trip through this list unchanged, not
+    # zeroed by an absent index.
+    n = len(valid_indices)
+    coeffs = [current.get(f"coupling_c{j}") for j in range(n)]
+    coeffs[from_zone] = coeff
+    changed_fields = {field_name}
+    zone_override: "dict[str, Any]" = {"index": zone, "coupling_coeff": coeffs}
+
+    if confirm is not True:
+        return (
+            f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set zone {zone}'s "
+            f"{field_name}={coeff:g} (current: {field_name}={current_cell!r}; host={resolved})"
+        )
+
+    try:
+        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: could not build POST body from the GET snapshot: {exc}"
+
+    try:
+        post_result = zones_http_client.post_zones(resolved, body)
+    except zones_http_client.ZonesHttpError as exc:
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run started after this tool's own precheck "
+                    f"(host={resolved})")
+        return f"error: POST /api/zones failed (host={resolved}): {exc}"
+    if post_result != "ok":
+        return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
+
+    try:
+        after = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: POST /api/zones returned ok, but the confirming re-fetch of GET "
+                f"/api/zones failed (host={resolved}): {exc} -- state UNKNOWN, re-check before "
+                f"trusting this")
+
+    after_zones = after.get("zones") or []
+    after_zone = _zone_by_index(after_zones, zone)
+    if after_zone is None:
+        return f"FAILED: zone {zone} missing from the re-fetched GET /api/zones response (host={resolved})"
+
+    got = after_zone.get(field_name)
+    if not isinstance(got, (int, float)) or abs(float(got) - float(coeff)) > _ZONE_COUPLING_READBACK_TOLERANCE:
+        return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
+                f"landed -- {field_name}: wanted {coeff!r}, board now reports {got!r} "
+                f"(host={resolved}). Do not trust this as applied.")
+
+    collateral = _zone_collateral_diff(before, after, zone, changed_fields)
+    if collateral:
+        return (f"FAILED: zone {zone}'s {field_name} landed correctly, but other field(s) changed "
+                f"unexpectedly -- {'; '.join(collateral)} (host={resolved}). This tool must touch "
+                f"only {field_name}; investigate before trusting this board's config.")
+
+    return (f"ok - zone {zone}: {field_name}={got:g} (zone {from_zone}'s effect on zone {zone}) "
+            f"(confirmed by read-back; host={resolved})")

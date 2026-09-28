@@ -22,9 +22,37 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (195 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-09-28, when `control_set_zone_type`
-was added -- a narrow writer for one zone's `zone_type` field only
+the rest behind a search facade (196 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-09-28, when `control_set_zone_coupling`
+was added -- a narrow writer for ONE coupling-matrix cell (GET-merge-POST
+`/api/zones`, no PID/control_mode/limits/zone_type/model collateral), modeled
+directly on `control_set_zone_type`/`control_set_zone_limits`. Motivated by
+the same class of gap: the backup-import coupling-loss bug fixed in `b4bad2c7`
+zeroed bench zone 2's coupling cross-terms, and the only existing writer that
+can restore them, `load_config_preset()`, is a whole-page write forbidden for
+a single-cell fix. Signature `control_set_zone_coupling(zone, from_zone,
+coeff, confirm=False)` -- one cell per call, matching the precedent tools'
+narrowness; the wire field is `z{zone}_coupling_c{from_zone}` (firmware:
+`zones_http_post_parse.c`), range `[0, 100.0]` off-diagonal
+(`ZONE_COUPLING_COEFF_MAX`), diagonal always 0 and refused if submitted
+nonzero. The firmware POST handler parses every zone's every field
+unconditionally (no partial-field POST is possible for anything touching a
+zone), so this tool still reads the full zone row via GET, replaces only the
+target cell, and reposts the row's whole `coupling_coeff` list --
+`zones_http_client.build_post_body()` only recognizes that full-width list
+key as an override; a bare `coupling_cN` override key is silently ignored.
+As of 2026-08-30 the firmware field itself is optional-with-preserve
+(omitted means "keep current value"), but that per-cell convenience does not
+extend to sibling per-zone fields, so the GET-merge-POST discipline is kept
+regardless. Refuses `zone == from_zone`, non-finite/out-of-range `coeff`,
+either zone index absent from the board, and unless `confirm is True`
+exactly; refuses loud on the `system_mode_gate` 409 (firing/autotune
+running); reads back afterward and fails loud unless the target cell landed
+within GET's `%.4f` print tolerance and nothing else in `/api/zones`
+changed. It does not avoid the general GET-%.4f-rounding advisory below --
+neither `control_set_zone_type` nor `control_set_zone_limits` do either --
+it documents rather than papers over it. The one before it was
+`control_set_zone_type`, 2026-09-28 -- a narrow writer for one zone's `zone_type` field only
 (GET-merge-POST `/api/zones`, no PID/control_mode/limits collateral, modeled
 directly on `control_set_zone_limits`), fixing the gap where the only
 existing `zone_type` writer, `load_config_preset()`, is a whole-page write

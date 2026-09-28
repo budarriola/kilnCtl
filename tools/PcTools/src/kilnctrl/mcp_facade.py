@@ -286,6 +286,8 @@ KEYWORDS = {
                                 "restore", "max_temp_c", "min_temp_c", "abs_max"),
     "control_set_zone_type": ("zone type", "on/off", "on-off", "heater", "PID", "hysteresis",
                               "zone_type", "control strategy"),
+    "control_set_zone_coupling": ("coupling", "coupling matrix", "coupling_c", "coupling_coeff",
+                                  "cross-zone", "cross zone", "cell", "restore"),
     "wifi_add_network": ("provision", "credentials", "ssid", "join"),
     "ota_update_esp": ("over", "air", "upload", "firmware", "http"),
     "codec_decode_frame": ("wire", "bytes", "protocol", "parse", "hex"),
