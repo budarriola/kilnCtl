@@ -1215,6 +1215,83 @@ static void test_whole_page_post_invalidates_tuning_quality_only_when_gains_actu
     }
 }
 
+// 2026-09-28: the gain-change tolerance above switched from a fixed 0.0001
+// absolute compare to a relative one (1e-6f + 1e-5f*fabsf(cur)) because the
+// absolute form swallowed a real operator edit on a small-gain zone (a tuned
+// Ki like 0.000034 -> 0.00005 is well inside 0.0001) while still needing to
+// absorb float32 round-trip noise from a lossless %.9g repost. This proves
+// all three claims against the SAME small-Ki zone.
+static void test_small_ki_edit_tolerance_is_relative_not_absolute(void)
+{
+    TEST_SECTION("parse_zone_fields -- relative gain tolerance clears a real small-Ki edit but "
+                 "absorbs %.9g round-trip noise");
+
+    zone_cfg_t current = make_stored_zone();
+    current.pid_ki = 0.000034f;
+    current.tuning_valid = 1;
+    current.tuning_method = 0;
+    current.tuning_rule = 0;
+    current.tuning_baseline_c = 25.0f;
+
+    // Case 1: a real operator edit, 0.000034 -> 0.00005. The old 0.0001
+    // absolute tolerance let this through unnoticed; it must invalidate now.
+    {
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *body = "z0_name=Top&z0_tctype=3&z0_relay_mask=2&z0_thermo_mask=1&z0_timingprofile=0&"
+                            "z0_cal=1.5&z0_kp=2.0&z0_ki=0.00005&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                            "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                    /*timing_profile_count=*/1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a well-formed submission with an edited small Ki is accepted");
+        TEST_CHECK_NEAR(out.pid_ki, 0.00005f, 1e-9, "sanity: ki really did change in the parsed result");
+        TEST_CHECK(!out.tuning_valid,
+                  "a real small-Ki edit (0.000034 -> 0.00005, well inside the old 0.0001 absolute "
+                  "tolerance) must invalidate the tuning-quality record under the relative tolerance");
+    }
+
+    // Case 2: an identical repost of the same small Ki -- must NOT invalidate.
+    {
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *body = "z0_name=Top&z0_tctype=3&z0_relay_mask=2&z0_thermo_mask=1&z0_timingprofile=0&"
+                            "z0_cal=1.5&z0_kp=2.0&z0_ki=0.000034&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                            "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                    /*timing_profile_count=*/1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a well-formed submission with an identical small Ki is accepted");
+        TEST_CHECK(out.tuning_valid,
+                  "reposting the SAME small Ki must leave a good tuning-quality record standing");
+    }
+
+    // Case 3: the %.9g-rendered round trip GET /api/zones now performs
+    // (zones_http_get.c, 04fb2afe) -- lossless for a float32, but the
+    // decimal string a browser or PcTools reposts is not bit-identical to
+    // the stored float until it is reparsed, so this proves the reparsed
+    // value still lands inside the relative tolerance's noise floor.
+    {
+        char ki_str[32];
+        snprintf(ki_str, sizeof(ki_str), "%.9g", (double)current.pid_ki);
+        char body[256];
+        snprintf(body, sizeof(body),
+                 "z0_name=Top&z0_tctype=3&z0_relay_mask=2&z0_thermo_mask=1&z0_timingprofile=0&"
+                 "z0_cal=1.5&z0_kp=2.0&z0_ki=%s&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                 "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0",
+                 ki_str);
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                    /*timing_profile_count=*/1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a well-formed submission with a %.9g-rendered small Ki is accepted");
+        TEST_CHECK(out.tuning_valid,
+                  "a %.9g round-trip repost of the SAME small Ki must not invalidate the tuning-quality "
+                  "record -- this is the noise floor the 1e-6f tolerance floor exists to absorb");
+    }
+}
+
 // Sibling check: a zone index still IN range (i < thermo_count) that omits
 // its thermo_mask field keeps the documented legacy "zone i reads channel i"
 // fallback -- the fix above must not have disturbed this existing,
@@ -14931,6 +15008,7 @@ void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
+    test_small_ki_edit_tolerance_is_relative_not_absolute();
     test_in_range_zone_thermo_mask_legacy_fallback_unchanged();
     test_old_behaviour_would_have_zeroed_it();
 

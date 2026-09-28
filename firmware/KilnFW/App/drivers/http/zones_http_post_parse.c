@@ -439,13 +439,29 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * good record on every single resave, even one that changes nothing
      * about the gains at all. 2026-09-28: GET /api/zones now emits these at
      * %.9g (zones_http_get.c), lossless for a float32, so an ordinary round
-     * trip no longer loses precision at all. 0.0001 is left unchanged by
-     * that fix, and it is an ABSOLUTE tolerance: for a small-gain zone (a
-     * tuned Ki like 0.000034) a real operator edit to, say, 0.00005 is
-     * inside it and does NOT invalidate the tuning record. That gap predates
-     * the %.9g change (it was unavoidable while GET rounded at %.4f); now
-     * that the round trip is lossless a relative tolerance would close it,
-     * but that is a separate behavior change, not made here. */
+     * trip no longer loses precision at all -- but a FIXED absolute
+     * tolerance was still wrong at the other end of the range: for a
+     * small-gain zone (a tuned Ki like 0.000034) a real operator edit to,
+     * say, 0.00005 is inside 0.0001 and would NOT invalidate the tuning
+     * record, silently keeping a stale record for a gain that actually
+     * changed by ~50%. 2026-09-28 follow-up: switched to a relative
+     * tolerance, `1e-6f + 1e-5f*fabsf(cur)` -- the `1e-6f` floor still
+     * absorbs float32 round-trip noise (a %.9g repost, or PcTools' own
+     * repr(float) repost, of a near-zero gain) where the relative term alone
+     * would be too tight, and the `1e-5f*fabsf(cur)` term scales with the
+     * gain so a small-Ki edit like the one above is no longer swallowed. An
+     * older client that still round-trips through a %.4f-rendered page
+     * carries up to 5e-5 of rounding noise (half the last decimal place) on
+     * an unedited gain; the relative term alone matches that at cur=5
+     * (1e-5*5 = 5e-5) and clears it with growing margin above that -- so an
+     * identical repost of a LARGE gain (Kp/Ki/Kd of a few units or more,
+     * which is where an ordinary tuned PID loop on this hardware actually
+     * lives) never falsely invalidates. Below cur=5, %.4f rounding noise can
+     * still exceed the relative term and an unedited repost from a %.4f-only
+     * client could rarely trip a false invalidation -- strictly the same
+     * exposure the old 0.0001 absolute tolerance already had below cur=1,
+     * not a regression, and %.9g/repr(float) clients (every current one)
+     * are unaffected since they do not round at all. */
     z->tuning_valid = current_z->tuning_valid;
     z->tuning_method = current_z->tuning_method;
     z->tuning_rule = current_z->tuning_rule;
@@ -493,8 +509,9 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * zone and persisted the clear to NVS -- a reset-one-side defect, the
      * enable side having no idea the save happened. */
     z->adaptive_tune_enabled = current_z->adaptive_tune_enabled;
-    if (fabsf(z->pid_kp - current_z->pid_kp) > 0.0001f || fabsf(z->pid_ki - current_z->pid_ki) > 0.0001f ||
-        fabsf(z->pid_kd - current_z->pid_kd) > 0.0001f) {
+    if (fabsf(z->pid_kp - current_z->pid_kp) > (1e-6f + 1e-5f * fabsf(current_z->pid_kp)) ||
+        fabsf(z->pid_ki - current_z->pid_ki) > (1e-6f + 1e-5f * fabsf(current_z->pid_ki)) ||
+        fabsf(z->pid_kd - current_z->pid_kd) > (1e-6f + 1e-5f * fabsf(current_z->pid_kd))) {
         z->tuning_valid = 0;
     }
     snprintf(key, sizeof(key), "z%u_ramp", i);
