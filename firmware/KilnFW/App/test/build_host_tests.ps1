@@ -1605,6 +1605,29 @@ try {
 
     Invoke-HostTestExe -Name "adaptive_tune_http_gate" -ExePath $exeAtGate -BuildCmd $cmdAtGate
 
+    # ---- test_uart_bridge_ext_control_gate.c: its own separate executable -----
+    # #includes uart_bridge_ext_control.c (CONTROL task 8) directly (static
+    # control_handle_message(), no other seam) to prove
+    # CONTROL_CMD_SET_ZONE_PID/SET_ZONE_MODEL are refused by the system mode
+    # gate while a firing or autotune run is active, same owner decision Q2
+    # as adaptive_tune_http_gate above. system_mode_gate.c is linked in for
+    # real (no system_mode_gate_http.c here -- this file's gate check replies
+    # over the UART bridge's own ok/err framing, never HTTP). See the test
+    # file's own header comment for why it pre-empts the UART_BRIDGE_H guard
+    # (uart_bridge.h drags in safety_link.h -> screen_idle.h -> panel_spi.h,
+    # which needs real ESP-IDF SPI/I2C driver headers no host stub covers,
+    # and CONTROL task 8 needs nothing from uart_bridge.h but the
+    # uart_protocol_t type).
+    $exeUartBridgeControlGate = Join-Path $outDir "kilnctl_host_tests_uart_bridge_ext_control_gate.exe"
+    $uartBridgeControlGateObjDir = Join-Path $outDir "uartbridgecontrolgate"
+    New-Item -ItemType Directory -Force -Path $uartBridgeControlGateObjDir | Out-Null
+    $cmdUartBridgeControlGate = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeControlGateObjDir\\`" /Fe:`"$exeUartBridgeControlGate`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_ext_control_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_ext_control_gate" -ExePath $exeUartBridgeControlGate -BuildCmd $cmdUartBridgeControlGate
+
     # ---- test_ft6336u.c: its own 24th, separate executable --------------------
     # HAL Phase 1b (docs/HW_ABSTRACTION.md): FT6336U.c was rewritten to go
     # through interface/hal_i2c.h instead of driver/i2c_master.h + i2c_owner.c
@@ -2759,7 +2782,12 @@ try {
     # call -- adaptive_tune_http.c's enable_post_handler()/revert_post_handler()
     # system_mode_gate wiring (Task 1a, docs/SYSTEM_MODE_GATE_PLAN.md known
     # gap), previously untested at the handler level.
-    $totalExpected = 63
+    # 63 -> 64: added test_uart_bridge_ext_control_gate.c's own Invoke-HostTestExe
+    # call -- uart_bridge_ext_control.c's CONTROL task 8
+    # CONTROL_CMD_SET_ZONE_PID/SET_ZONE_MODEL system_mode_gate wiring, same
+    # owner decision Q2 gap class as adaptive_tune_http_gate above, previously
+    # untested at the UART bridge handler level.
+    $totalExpected = 64
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
