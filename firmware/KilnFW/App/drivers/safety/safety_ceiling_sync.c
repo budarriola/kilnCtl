@@ -305,11 +305,18 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
  * and ACTIVELY disables heat -- kiln_io_owner_command_all_relays_off() (the
  * one sanctioned "relays off now" entry point; see CLAUDE.md's "Bypassed
  * owner module" note on why this must never be a direct relay write) and
- * profile_executor_halt() (so a RUNNING firing does not immediately try to
- * re-energize on its own next tick -- an all-relays-off with the executor
- * still RUNNING is exactly the "reset one side, not the other" shape this
- * function exists to avoid). Both calls are safe to make when nothing is
- * running or already off -- see their own doc comments.
+ * profile_executor_fault_halt() (so a RUNNING firing does not immediately
+ * try to re-energize on its own next tick -- an all-relays-off with the
+ * executor still RUNNING is exactly the "reset one side, not the other"
+ * shape this function exists to avoid). Installed as this file's `halt_run`
+ * hook via a fixed-reason void(void) adapter (main_control_bringup.c's
+ * profile_executor_divergence_fault_halt()) rather than profile_executor_
+ * halt() itself, as of the fix recording a divergence-caused stop as
+ * PROFILE_EXEC_FAULTED/RUN_STATE_PHASE_FAULTED -- a deliberate operator Stop
+ * and a controller-forced stop must not be recorded identically (see
+ * profile_executor.h's doc comment on profile_executor_fault_halt()). Both
+ * calls are safe to make when nothing is running or already off -- see
+ * their own doc comments.
  *
  * There is no separate "clear the alarm" action: this function is called
  * every tick and simply stops calling the disable path (and stops logging)
@@ -334,14 +341,26 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
  *     next edge. A steady stream of "make it so" RPCs to an owner that is
  *     almost always already in the requested state is judged an acceptable
  *     cost against that gap.
- *  2. profile_executor_halt() (like kiln_io_owner_command_all_relays_off())
- *     is invoked from inside this call chain, which importantly means a
- *     persistently diverged board blocks safety_poll_task itself on
- *     whatever lock profile_executor_halt() takes (profile_executor.c's
+ *  2. profile_executor_fault_halt() (like kiln_io_owner_command_all_relays_
+ *     off()) is invoked from inside this call chain, which importantly means
+ *     a persistently diverged board blocks safety_poll_task itself on
+ *     whatever lock profile_executor_fault_halt() takes (profile_executor.c's
  *     `s_exec.lock`, a portMAX_DELAY/blocking take) for as long as that
  *     lock is held elsewhere. Since safety_poll_task is also the ESP side
  *     of the safety link's liveness heartbeat, a late heartbeat during that
- *     window can trip the Pico's own S6b (link-dead) guard.
+ *     window can trip the Pico's own S6b (link-dead) guard. On the FIRST
+ *     tick a given divergence actually transitions the run to FAULTED,
+ *     profile_executor_fault_halt() adds a SECOND blocking wait on top of
+ *     that lock: since it is called from safety_poll_task's PSRAM stack, it
+ *     dispatches profile_executor_halt()'s NVS-writing tail onto
+ *     bx_flash_worker via uart_bridge_ext_run_on_flash_worker() (see that
+ *     function's own doc comment) and blocks for the worker to run it --
+ *     bounded by the worker's queue depth (1) and whatever job already
+ *     ahead of it takes, not portMAX_DELAY-forever, but still real added
+ *     latency on this same heartbeat task. Every later tick of the same
+ *     standing divergence short-circuits at the PROFILE_EXEC_IDLE check
+ *     before ever reaching that dispatch, so this is a one-time cost per
+ *     divergence episode, not a per-tick one.
  *
  * BOTH judged deliberate and fail-safe, not bugs: heat is already forced
  * off by the very divergence that is doing the blocking, so a heartbeat

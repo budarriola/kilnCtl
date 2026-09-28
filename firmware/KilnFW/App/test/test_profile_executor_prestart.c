@@ -426,6 +426,16 @@ static int g_zone_claim_end_calls = 0;
 static relay_heat_zone_claimant_t g_last_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
 static uint8_t g_last_zone_claim_mask = 0;
 
+/* profile_executor_fault_halt() coverage (divergence-fault-halt regression
+ * test, review of safety_ceiling_sync.c:548-549): counts run_state_note()
+ * calls and records the phase/snapshot of the most recent one, so a test can
+ * assert BOTH which phase got recorded and that a repeated call (mirroring
+ * safety_ceiling_sync.c calling the hook every tick while a divergence
+ * lasts) writes it only once. */
+static int g_run_state_note_calls = 0;
+static run_state_phase_t g_last_run_state_note_phase = RUN_STATE_PHASE_HALTED;
+static run_state_snapshot_t g_last_run_state_note_snap;
+
 bool relay_authority_zone_claim_begin(relay_heat_zone_claimant_t who, uint8_t zone_mask,
                                        uint8_t *conflict_mask_out)
 {
@@ -477,7 +487,11 @@ esp_err_t run_state_init(void)
 
 void run_state_note(run_state_phase_t phase, const run_state_snapshot_t *snap)
 {
-    (void)phase; (void)snap;
+    g_run_state_note_calls++;
+    g_last_run_state_note_phase = phase;
+    if (snap) {
+        g_last_run_state_note_snap = *snap;
+    }
 }
 
 void run_state_note_progress(const run_state_snapshot_t *snap)
@@ -2809,6 +2823,104 @@ static void test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active(void)
     char msg[160];
     uint32_t v = exec_mode_state_check(msg, sizeof(msg));
     TEST_CHECK(v == 0, "exec_mode_state_check must report zero violations after a halt out of a dwell");
+}
+
+// profile_executor_fault_halt() tests (review of safety_ceiling_sync.c:548-
+// 549 calling the hook installed at main_control_bringup.c:162 every tick a
+// config/ceiling divergence lasts): that hook used to be profile_executor_
+// halt() directly, which records RUN_STATE_PHASE_HALTED -- indistinguishable
+// from a deliberate operator Stop, and (since main_page.html's 8f4d2b20
+// change) silently hidden from the "Previous firing ended" dashboard card.
+// profile_executor_fault_halt() is the fix: it forces PROFILE_EXEC_FAULTED
+// with a caller-given reason before delegating to the exact same halt()
+// shutdown, so the ending is recorded as RUN_STATE_PHASE_FAULTED instead.
+static void test_fault_halt_records_faulted_with_reason(void)
+{
+    TEST_SECTION("profile_executor_fault_halt() out of RUNNING -- records FAULTED with the given reason, "
+                 "not HALTED");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x05;
+    s_exec.fault_reason[0] = '\0';
+    g_run_state_note_calls = 0;
+
+    profile_executor_fault_halt("config/ceiling divergence: heat disabled");
+
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "fault_halt() must still end at IDLE, same as halt()");
+    TEST_CHECK(g_run_state_note_calls == 1, "must record exactly one run_state_note() call");
+    TEST_CHECK(g_last_run_state_note_phase == RUN_STATE_PHASE_FAULTED,
+               "a divergence-caused stop must record FAULTED, not HALTED -- that is the whole fix");
+    TEST_CHECK(g_last_run_state_note_snap.fault_reason != NULL &&
+               strcmp(g_last_run_state_note_snap.fault_reason, "config/ceiling divergence: heat disabled") == 0,
+               "the recorded snapshot must carry the given reason");
+}
+
+static void test_fault_halt_is_idempotent_across_repeated_ticks(void)
+{
+    TEST_SECTION("profile_executor_fault_halt() called every tick (mirroring safety_ceiling_sync.c calling "
+                 "the hook on every tick a divergence lasts) -- writes run_state exactly once");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x05;
+    g_run_state_note_calls = 0;
+
+    profile_executor_fault_halt("config/ceiling divergence: heat disabled");
+    TEST_CHECK(g_run_state_note_calls == 1, "the first call must write once");
+
+    /* Simulate several more ticks of a standing divergence -- safety_
+     * ceiling_sync.c calls this same hook, unconditionally, on every tick
+     * the divergence stays active (see enforce_ceiling_divergence()'s own
+     * doc comment on why it is not edge-triggered on the disable side). */
+    for (int i = 0; i < 5; i++) {
+        profile_executor_fault_halt("config/ceiling divergence: heat disabled");
+    }
+    TEST_CHECK(g_run_state_note_calls == 1,
+               "five more calls while already IDLE must NOT write run_state again -- a config divergence "
+               "that lasts hours must not hammer NVS once per tick");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "state must still be IDLE after the repeated calls");
+}
+
+static void test_fault_halt_preserves_earlier_guard_trip_reason(void)
+{
+    TEST_SECTION("profile_executor_fault_halt() on a run already FAULTED by a guard trip -- keeps the "
+                 "guard's own fault_reason, does not overwrite it with the divergence reason");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x05;
+    g_run_state_note_calls = 0;
+
+    (void)escalate_guard_trip(0, THERMAL_GUARD_TRIP_MAX_TEMP, "over-temp");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "the guard trip must have already faulted the run");
+
+    profile_executor_fault_halt("config/ceiling divergence: heat disabled");
+
+    TEST_CHECK(g_run_state_note_calls == 1, "must still record exactly once");
+    TEST_CHECK(g_last_run_state_note_phase == RUN_STATE_PHASE_FAULTED, "must still be FAULTED");
+    TEST_CHECK(g_last_run_state_note_snap.fault_reason != NULL &&
+               strcmp(g_last_run_state_note_snap.fault_reason, "over-temp") == 0,
+               "the earlier guard trip's own reason must win -- 'first fault wins', same rule exec_mode_"
+               "state_check()'s was_faulted guard documents");
+}
+
+static void test_operator_halt_still_records_halted(void)
+{
+    TEST_SECTION("profile_executor_halt() (a plain operator Stop, unrelated to fault_halt()) still records "
+                 "HALTED -- regression guard that the two paths stayed distinct");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x05;
+    g_run_state_note_calls = 0;
+
+    profile_executor_halt();
+
+    TEST_CHECK(g_run_state_note_calls == 1, "must record exactly once");
+    TEST_CHECK(g_last_run_state_note_phase == RUN_STATE_PHASE_HALTED,
+               "a plain operator Stop out of RUNNING must still record HALTED, not FAULTED");
 }
 
 /* T2 (2026-09-01 re-audit of ae5905f/S1/S2): pins the invariant the whole
@@ -9802,6 +9914,10 @@ void run_test_profile_executor_prestart(void)
     test_guard_trip_releases_heat_enable();
     test_halt_releases_heat_enable();
     test_halt_from_dwelling_clears_dwelling_ramp_lock_and_active();
+    test_fault_halt_records_faulted_with_reason();
+    test_fault_halt_is_idempotent_across_repeated_ticks();
+    test_fault_halt_preserves_earlier_guard_trip_reason();
+    test_operator_halt_still_records_halted();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();
     test_heat_enable_release_survives_a_down_link();

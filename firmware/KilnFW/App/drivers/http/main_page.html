@@ -2249,6 +2249,10 @@ function renderLastRun(st) {
   // actionable safety information. The backend keeps recording and
   // serving last_run/ack_last_run unchanged (bench tooling and the ack
   // route still use it) -- only this dashboard card's visibility narrowed.
+  // (2026-09-28: a safety_ceiling_sync config/ceiling divergence used to
+  // reach HALTED here too via profile_executor_halt() -- now it records
+  // FAULTED via profile_executor_fault_halt(), so HALTED really does mean
+  // "deliberate" below, not merely "controller-issued and hoped to be".)
   if (!lr || !lr.present || !(lr.interrupted || lr.phase === 'faulted')) { el.innerHTML = ''; return; }
 
   var names = [];

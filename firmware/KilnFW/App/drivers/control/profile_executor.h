@@ -507,6 +507,29 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap);
  * from PROFILE_EXEC_IDLE. */
 void profile_executor_halt(void);
 
+/* Same shutdown as profile_executor_halt() (relays off, fail-toward-off
+ * cleanup, terminal transition, run_state_note()), except the ending is
+ * recorded as PROFILE_EXEC_FAULTED with `reason` copied into
+ * s_exec.fault_reason, not PROFILE_EXEC_IDLE/RUN_STATE_PHASE_HALTED --
+ * for a controller-detected condition (e.g. a safety_ceiling_sync config/
+ * ceiling divergence) that must never be recorded the same way as a
+ * deliberate operator Stop (RUN_STATE_PHASE_HALTED and RUN_STATE_PHASE_
+ * FAULTED are no longer interchangeable for display purposes -- see
+ * main_page.html's renderLastRun(), which now surfaces FAULTED but hides
+ * HALTED). If the run is already FAULTED (e.g. a guard trip beat this call
+ * to it, same tick or an earlier one), `reason` is NOT applied -- the
+ * existing fault_reason is kept, same "first fault wins" rule exec_mode_
+ * state_check()'s was_faulted guard uses.
+ *
+ * Idempotent under repeated calls while the underlying condition persists,
+ * exactly like profile_executor_halt(): the first call drives the run to
+ * PROFILE_EXEC_IDLE (via the same halt() body) and writes run_state once;
+ * every call after that observes PROFILE_EXEC_IDLE up front and returns
+ * immediately, without a second run_state/NVS write. A no-op from
+ * PROFILE_EXEC_IDLE, same as profile_executor_halt(). `reason` may be NULL
+ * (leaves fault_reason as whatever a prior fault already set, or empty). */
+void profile_executor_fault_halt(const char *reason);
+
 /* Pause/resume: pause drops every active zone's relays and freezes the
  * shared ramp/dwell schedule; resume picks up exactly where it left off.
  * Both return false (no state change) if the executor isn't in a state

@@ -54,6 +54,22 @@ static void main_control_bringup_all_relays_off_void(void)
     }
 }
 
+/* Same void(void) adaptation as the relays-off hook above, for the same
+ * reason: safety_ceiling_sync_set_disable_heat_hooks() wants a void(void)
+ * action, and profile_executor_fault_halt() takes a reason string that
+ * nothing about the hook call site varies -- see review finding on
+ * safety_ceiling_sync.c:548-549 previously installing profile_executor_
+ * halt() directly here, which recorded a divergence-caused stop as
+ * RUN_STATE_PHASE_HALTED, indistinguishable from a deliberate operator
+ * Stop (and, since main_page.html's 8f4d2b20 change, silently hidden from
+ * the "Previous firing ended" card). profile_executor_fault_halt() records
+ * RUN_STATE_PHASE_FAULTED with this reason instead, same as any other
+ * controller-detected fault. */
+static void profile_executor_divergence_fault_halt(void)
+{
+    profile_executor_fault_halt("config/ceiling divergence: heat disabled (see safety_ceiling_sync log)");
+}
+
 void main_control_bringup(main_boot_ctx_t *ctx)
 {
     /* 2026-09-22 fix: creates safety_ceiling_sync.c's two internal mutexes
@@ -138,7 +154,8 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // (via main_control_bringup_all_relays_off_void() above) fails closed
     // through post_and_wait()'s NULL-queue check the same way every other
     // kiln_io_owner_command_*() call already does before kiln_io_owner_
-    // start() runs, and profile_executor_halt() is documented to tolerate
+    // start() runs, and profile_executor_fault_halt() (like profile_
+    // executor_halt(), which it delegates to) is documented to tolerate
     // being called before/without profile_executor_start() (see its own
     // guard, and the RECOVERY MODE note near this function's profile_
     // executor_start() call below) -- so moving the install earlier costs no
@@ -159,7 +176,8 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // autotune (profile_executor_start()/autotune_engine_start(), below).
     heat_enable_init(&ctx->safety);
 
-    safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void, profile_executor_halt);
+    safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void,
+                                                profile_executor_divergence_fault_halt);
     /* 2026-09-15 audit fix, Defect 2: broadens the standing divergence check
      * from abs_max_temp_c alone to the active kiln-config slot's full
      * captured Pico record -- see safety_ceiling_sync.h's doc comment on

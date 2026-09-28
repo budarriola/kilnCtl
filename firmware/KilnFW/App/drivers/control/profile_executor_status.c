@@ -20,6 +20,16 @@
 #include "run_state.h"
 #include "zones_config_accessors.h"
 
+/* Hand-declared rather than #include "uart_bridge.h" -- same reasoning as
+ * relay_cycles.c's/safety_cfg_store.c's identical block: that header pulls
+ * in ILI9488.h/screen_idle.h/kiln_io.h for hardware-bridge task
+ * declarations this file needs none of, and which are not part of this
+ * module's host-test stub surface (test_profile_executor_prestart.c
+ * #includes bx_worker_stub.h for these instead). Used by profile_executor_
+ * fault_halt() below -- see its own comment for why. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
+
 void profile_executor_halt(void)
 {
     /* See profile_executor_run()'s guard comment above -- s_exec.lock is
@@ -144,6 +154,109 @@ void profile_executor_halt(void)
                  esp_err_to_name(flush_err));
     }
     ESP_LOGI(PE_TAG, "profile executor halted");
+}
+
+/* Job wrapper so profile_executor_halt() can be dispatched through
+ * uart_bridge_ext_run_on_flash_worker() (see profile_executor_fault_halt()
+ * below) -- that entry point's signature is `void (*)(void *arg)`, and
+ * halt() takes nothing. */
+static void fault_halt_run_halt_job(void *arg)
+{
+    (void)arg;
+    profile_executor_halt();
+}
+
+/* See profile_executor.h's doc comment. Forces PROFILE_EXEC_FAULTED (with
+ * `reason`, unless a fault already latched the reason it wants kept) BEFORE
+ * delegating to the exact same shutdown profile_executor_halt() performs --
+ * that function's own state_at_halt capture is what turns FAULTED-going-in
+ * into RUN_STATE_PHASE_FAULTED coming out (see its own comment on
+ * `end_phase`), so this wrapper needs no separate relay/persist/run_state
+ * logic of its own; it earns its idempotency the same way halt() already
+ * has it, from halt()'s own "no-op from PROFILE_EXEC_IDLE" early return.
+ *
+ * PSRAM-stack hazard: profile_executor_halt() ends by calling run_state_
+ * note()/firing_stats_persist()/relay_cycles_flush(), all real NVS/flash
+ * writes. Each of those has its own caller_stack_is_external() guard (run_
+ * state.c/profile_executor_firing_stats.c/relay_cycles.c) so a call from a
+ * PSRAM-backed stack REFUSES loudly rather than aborting the whole board --
+ * but a refusal here would mean this divergence's FAULTED ending silently
+ * never reaches NVS, which defeats the entire point of this function
+ * (docs/audits -- the "Previous firing ended" card reads the PERSISTED
+ * run_state, not live executor state). safety_ceiling_sync.c's disable_
+ * halt_run hook, the caller this function exists for, fires from
+ * safety_poll_task (safety_link.c's xTaskCreatePinnedToCoreWithCaps(...,
+ * MALLOC_CAP_SPIRAM, ...) -- an 8192 B PSRAM stack), so this cannot just
+ * call halt() inline. Routed through the same flash-safe worker every
+ * other PSRAM-stack caller of NVS-touching code in this codebase already
+ * uses (relay_cycles_reset(), safety_cfg_store_flush_if_dirty()) --
+ * checking uart_bridge_ext_is_on_flash_worker() first, exactly like relay_
+ * cycles_reset()'s identical guard -- needed because this same hook can
+ * also fire from kiln_cfg_swap.c's synchronous safety_ceiling_sync_
+ * reconcile_on_link_up() while a config-package swap is applying. That
+ * caller runs on the dedicated kiln_cfg_swap_worker task (kiln_cfg_swap.c:511,
+ * its OWN internal-SRAM-stack task, distinct from bx_flash_worker), so it is
+ * NOT "already on the worker" and this guard does not fire for it -- it
+ * dispatches through uart_bridge_ext_run_on_flash_worker() same as any other
+ * caller, one internal-stack task blocking on another, which is an ordinary
+ * cross-task call and not the hazard this guard exists for. The guard
+ * matters only for a caller that is a job ALREADY running ON bx_flash_worker
+ * itself (dispatched there by someone else) and calls back in -- dispatching
+ * a second time from inside that job would be flash_worker.h's documented
+ * RE-ENTRANCY HAZARD and deadlock the board; no such caller of this hook is
+ * known today, but the guard costs nothing and matches every other PSRAM-
+ * safe caller's idiom in this codebase. The FAULTED-state transition and the
+ * idempotency check above happen BEFORE this dispatch and touch no
+ * flash/NVS (a mutex take/give only), so they are safe on either stack;
+ * only the tail that halt() performs needs routing. */
+void profile_executor_fault_halt(const char *reason)
+{
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(PE_TAG, "profile_executor_fault_halt() called before profile_executor_start() -- refused");
+        return;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (s_exec.state == PROFILE_EXEC_IDLE) {
+        /* Already halted by an earlier tick (or was never running) -- a
+         * standing divergence calls this hook every tick, and re-running
+         * halt()'s NVS/run_state tail for each one would hammer NVS for as
+         * long as the divergence lasts. Same "no-op from PROFILE_EXEC_IDLE"
+         * early return profile_executor_halt() already has. */
+        xSemaphoreGive(s_exec.lock);
+        return;
+    }
+    if (s_exec.state != PROFILE_EXEC_FAULTED) {
+        /* First tick of this condition -- claim the fault. An already-
+         * FAULTED run (a guard trip that beat this call to it) keeps its own
+         * fault_reason; overwriting it here would discard the more specific
+         * cause an operator needs, the same "first fault wins" rule exec_
+         * mode_state_check()'s was_faulted guard documents. */
+        exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
+        if (reason != NULL) {
+            strncpy(s_exec.fault_reason, reason, sizeof(s_exec.fault_reason) - 1);
+            s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
+        }
+    }
+    xSemaphoreGive(s_exec.lock);
+
+    /* Lock released above before calling back in -- profile_executor_halt()
+     * takes s_exec.lock itself and this is not a recursive mutex. Runs the
+     * exact same relay-off/persist/run_state_note(RUN_STATE_PHASE_FAULTED,
+     * ...) path a guard trip dismissed via halt() would -- on whichever
+     * stack is safe to do it from, per this function's own doc comment. */
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        profile_executor_halt();
+    } else {
+        esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(fault_halt_run_halt_job, NULL);
+        if (dispatch_err != ESP_OK) {
+            ESP_LOGE(PE_TAG,
+                     "profile_executor_fault_halt: could not dispatch profile_executor_halt() to the "
+                     "flash-safe worker (%s) -- heat stays disabled via safety_ceiling_sync's own "
+                     "gating, but this run's FAULTED ending may not have persisted to NVS; a later "
+                     "divergence tick (or an operator Stop) will retry",
+                     esp_err_to_name(dispatch_err));
+        }
+    }
 }
 
 bool profile_executor_pause(void)
