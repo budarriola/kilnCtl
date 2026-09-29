@@ -153,10 +153,29 @@ brute-forceable over a LAN in minutes.
 **Does:** a curious person on the same network, an accidental upload of the
 wrong image, a replayed capture of a previous upload.
 
-**Does not:** anyone who already knows the AP password — by design, that is the
-credential. Nor anyone who has compromised the ESP itself, because *the ESP is
-the only thing authorising the Pico update*. If the ESP is owned, the safety
-processor can be reflashed with whatever the attacker likes.
+**Does not, with web auth off:** anyone who already knows the AP password — by
+design, that is the credential in that state (owner decision, 2026-09-29: web
+auth off is exactly as open as it always was, never a new policy). Nor anyone
+who has compromised the ESP itself, because *the ESP is the only thing
+authorising the Pico update*. If the ESP is owned, the safety processor can be
+reflashed with whatever the attacker likes.
+
+**With web auth on, this AP-password gap is closed for these routes.**
+`POST /api/ota/esp`, `/api/ota/esp/rollback`, `/api/ota/esp/recovery_exit`,
+`/api/ota/esp/boot_guard_reset`, `/api/ota/pico`, `/api/ota/pico/rollback`,
+`/api/factory_reset`, `/api/cfgfs/format_confirm` and `/api/sw_reset` are all
+`ROUTE_TIER_ADMIN` in `route_tier_table.h` (owner decision, plan item 2b,
+`docs/WEB_AUTH_PLAN.md`), so `kiln_http_register()`'s enforcement pre-handler
+already refuses any request with no administrator web session — 401/403 —
+*before* the handler (and therefore this section's HMAC check) ever runs. The
+AP-password challenge/HMAC above is kept in addition, not replaced, so a
+caller must hold both an administrator session AND a correct MAC once auth is
+on. Knowing only the AP password is no longer sufficient in that state: it
+was never rotated with the web password and can otherwise outlive it. PcTools
+(`tools/PcTools/src/kilnctrl/ota_http_client.py`) already sends the
+administrator session on every one of these calls via `http_auth.urlopen()`
+(logging in from `KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` on a 401), in
+addition to computing the MAC below.
 
 That last one is the interesting gap, and there is a real answer to it if it is
 ever judged worth the cost: **have the Pico bootloader verify a signature over

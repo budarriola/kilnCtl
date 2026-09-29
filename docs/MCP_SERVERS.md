@@ -390,6 +390,23 @@ reset was skipped for lack of credentials rather than saying nothing. Pass
 logged or echoed, and the result always names the counter's before/after
 values (or the skip reason).
 
+**Owner decision 2026-09-29: this route, and the other eight routes whose
+auth is keyed on the AP-password HMAC, now also require an administrator web
+session -- tightening only, the HMAC is unchanged.** `boot_guard_reset_esp()`
+(and `format_cfgfs()`, `sw_reset()`, `rollback_esp()`, `rollback_pico()`,
+`recovery_exit_esp()`, `push_esp_image()`, `push_pico_image()`) all call
+through `http_auth.urlopen()`, which logs in with
+`KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` on a 401 and resends -- so every
+one of these calls already presents both the administrator session AND the
+AP-password MAC. On the firmware side this was already wired: all nine
+routes are `ROUTE_TIER_ADMIN` in `route_tier_table.h`
+(`docs/WEB_AUTH_PLAN.md` item 2b), so `kiln_http_register()`'s pre-handler
+refuses a request with no administrator session (401/403) before the HMAC
+check in `ota_http.c` is ever reached, whenever web auth is on. With web auth
+OFF, per that same plan item, these nine routes deliberately keep the legacy
+AP-password-only gate rather than becoming unauthenticated -- that is the one
+named exception to "auth off is exactly as open as today," not an oversight.
+
 **Data-partition erase during a commission reflash (owner decision
 2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`
 plus a required `confirm_erase: bool = False` gate. This exists for one
