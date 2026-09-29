@@ -677,6 +677,42 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
     divergence_state_lock_give();
 }
 
+/* Restore-window variant of enforce_ceiling_divergence() (2026-09-28): the
+ * SAME ceiling-only comparison and the SAME heat-off hooks, but no latch
+ * update, no latch-generation stamp, no standing-warning evaluation and a
+ * WARN instead of the ALARM -- see the call site in
+ * reconcile_on_link_up_impl(). A torn mid-commit read can therefore only
+ * ever cost a redundant relays-off/halt (no-ops when, as expected, nothing
+ * is heating), never a missed one. Caller holds s_reconcile_lock (the
+ * static below is serialized by it, same as s_last_log_us). */
+static void enforce_heat_off_during_restore(float target_c, bool target_known, float pico_c, bool pico_known,
+                                            int64_t now_us)
+{
+    static int64_t s_restore_log_us = -CONFIG_DIVERGENCE_LOG_INTERVAL_US;
+    if (!target_known) {
+        return; /* same "no ESP ceiling opinion, nothing to compare" rule as enforce_ceiling_divergence() */
+    }
+    config_identity_field_t esp_field = { .name = "abs_max_temp_c", .known = true, .value = target_c };
+    config_identity_field_t pico_field = { .name = "abs_max_temp_c", .known = pico_known, .value = pico_c };
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    if (!config_divergence_check(&esp_field, &pico_field, 1, reason, sizeof(reason))) {
+        return;
+    }
+    if (s_disable_all_relays_off) {
+        s_disable_all_relays_off();
+    }
+    if (s_disable_halt_run) {
+        s_disable_halt_run();
+    }
+    if (now_us - s_restore_log_us >= CONFIG_DIVERGENCE_LOG_INTERVAL_US) {
+        s_restore_log_us = now_us;
+        ESP_LOGW(TAG,
+                 "backup restore in flight: ceiling comparison disagrees (%s) -- heat forced off, divergence "
+                 "latch left for the first tick after the restore",
+                 reason);
+    }
+}
+
 /* Serializes the whole of reconcile_on_link_up_impl() below,
  * including enforce_ceiling_divergence()'s ~1.5 KB of file-scope statics and
  * that function's own now_us/s_last_log_us/s_reconcile_backoff statics --
@@ -763,25 +799,32 @@ static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
      * case this enforcement absolutely must not go quiet during. */
     /* 2026-09-28: a backup restore's commit pass (backup_import.c) writes
      * zones one at a time with no lock shared with this reader, so a tick
-     * landing mid-commit can read a torn, cross-zone snapshot and raise a
-     * spurious divergence -- forcing relays off and halting a run that was
-     * never actually diverged. Skip enforcement for this tick only (same
-     * level-triggered, next-tick-retries shape as the s_reconcile_lock busy
-     * skip above); leave whatever divergence/standing-warning state is
-     * already latched untouched rather than clearing it, since we have no
-     * fresh, consistent read to justify clearing it. This is safe because
-     * backup import refuses to start while a profile/autotune run is active
-     * (system_mode_gate SYS_ACTION_WRITE_ZONES_CONFIG,
-     * backup_import.c:2752/2939) -- no run is being masked mid-restore -- and
-     * the Pico's own ceiling is already raised to the restore's final value
-     * before this loop runs (safety_ceiling_sync_guard_raise() from
-     * backup_import.c), so no under-protective ceiling results either way. */
-    if (!backup_import_restore_in_flight()) {
+     * landing mid-commit can read a torn, cross-zone snapshot and look
+     * diverged when it is not. While backup_import_restore_in_flight() is
+     * true, do NOT update the divergence/standing-warning latches or raise
+     * the ALARM (no fresh, consistent read to justify either setting or
+     * clearing them; the next tick after the flag clears re-evaluates in
+     * full), but STILL force heat off if the ceiling comparison disagrees
+     * -- see enforce_heat_off_during_restore(). Heat is not supposed to be
+     * on during a restore at all (the import refuses to start with a run
+     * active or any heater commanded on, and profile/autotune starts are
+     * refused while the flag is set), so the heat-off hooks cost nothing
+     * in the expected case; but a zone current sweep and manual/danger-mode
+     * relay-on are NOT gated on the flag, and a firing can start in the gap
+     * between the POST handler's mode gate and backup_import_job() setting
+     * the flag, so a blanket skip here (the first version of this change,
+     * review 2026-09-28) could have left a real divergence unenforced with
+     * relays energized. */
+    {
         float target_c = safety_ceiling_policy_target_c(new_max_temp_c, MAX31856_CHANNEL_COUNT);
         bool target_known = target_c > 0.0f;
         float pico_c = 0.0f;
         bool pico_known = safety_ceiling_sync_get_current_pico_ceiling(&pico_c);
-        enforce_ceiling_divergence(target_c, target_known, pico_c, pico_known);
+        if (backup_import_restore_in_flight()) {
+            enforce_heat_off_during_restore(target_c, target_known, pico_c, pico_known, now_us);
+        } else {
+            enforce_ceiling_divergence(target_c, target_known, pico_c, pico_known);
+        }
     }
 
     if (!safety_ceiling_reconcile_should_attempt(&s_reconcile_backoff, now_us)) {

@@ -76,7 +76,7 @@ int g_test_count = 0;
 // not linked into this executable (same reasoning as every other fake in
 // this file: it would pull in the whole httpd/NVS ecosystem). Defaults
 // false (no restore running), matching every existing test in this file
-// unless test_divergence_skipped_during_backup_restore() below opts in.
+// unless test_divergence_during_backup_restore() below opts in.
 // ---------------------------------------------------------------------
 static bool s_restore_in_flight = false;
 
@@ -769,24 +769,27 @@ static void test_tc_type_revert_divergence_detected(void)
 
 // ---------------------------------------------------------------------
 // 6. 2026-09-28: a backup restore's commit pass writes zones one at a time
-//    with no lock shared with this reader, so a divergence tick landing
-//    mid-commit must be skipped -- proving reconcile_on_link_up_impl()'s
-//    backup_import_restore_in_flight() gate actually suppresses
-//    enforce_ceiling_divergence() while set, leaves whatever latch state
-//    was already there untouched, and resumes enforcing the very next tick
-//    once the flag clears.
+//    with no lock shared with this reader, so a tick landing mid-commit
+//    must not LATCH (or clear) divergence off a possibly torn read -- but
+//    must still force heat off if the ceiling comparison disagrees, since
+//    a zone current sweep / manual relay-on is not gated on the restore
+//    flag and could be energizing a relay (review 2026-09-28: the first
+//    version skipped enforcement outright). Once the flag clears, the next
+//    tick evaluates and latches normally.
 //
-// NEGATIVE TEST (run and confirmed before this file was finalized):
-// commenting out the `if (!backup_import_restore_in_flight())` guard
-// (safety_ceiling_sync.c) fails this test -- s_relays_off_calls/
-// s_halt_run_calls become 1 on the in-flight tick instead of staying 0.
-// Restore BY HAND, delete the App/test build directory, and force a full
-// rebuild before trusting a green result again.
+// NEGATIVE TESTS (run and confirmed before this file was finalized):
+//  - replacing the restore-window call with nothing (a blanket skip, the
+//    reviewed first version) fails the "fires while a restore is in
+//    flight" checks (hook counts stay 0);
+//  - dropping the restore branch so enforce_ceiling_divergence() always
+//    runs fails the "latch not set / not cleared during the restore"
+//    checks.
+// Restore BY HAND and force a full rebuild before trusting green again.
 // ---------------------------------------------------------------------
-static void test_divergence_skipped_during_backup_restore(void)
+static void test_divergence_during_backup_restore(void)
 {
-    TEST_SECTION("2026-09-28: enforce_ceiling_divergence() is skipped for a tick while a backup "
-                 "restore is in flight, and resumes on the next tick once it clears");
+    TEST_SECTION("2026-09-28: while a backup restore is in flight, heat-off still fires on a ceiling "
+                 "mismatch but the divergence latch is neither set nor cleared");
     test_reset_all();
     safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
 
@@ -797,21 +800,36 @@ static void test_divergence_skipped_during_backup_restore(void)
 
     s_restore_in_flight = true;
     safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
-    TEST_CHECK(s_relays_off_calls == 0, "all-relays-off hook does NOT fire while a restore is in flight");
-    TEST_CHECK(s_halt_run_calls == 0, "halt-run hook does NOT fire while a restore is in flight");
+    TEST_CHECK(s_relays_off_calls == 1, "all-relays-off hook STILL fires while a restore is in flight");
+    TEST_CHECK(s_halt_run_calls == 1, "halt-run hook STILL fires while a restore is in flight");
     TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0),
-               "latch state is left untouched (still clear from test_reset_all) during the skipped tick");
+               "divergence latch is NOT set off a (possibly torn) restore-window read");
 
-    // The restore's commit pass finishes -- the very next tick must enforce
-    // normally, off the same still-diverged values.
+    // Restore finishes -- the very next tick latches normally, off the same
+    // still-diverged values.
     s_restore_in_flight = false;
     safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
     bool diverged = safety_ceiling_sync_is_diverged(reason, sizeof(reason));
-    TEST_CHECK(diverged, "divergence is detected on the very next tick once the restore flag clears");
-    TEST_CHECK(reason[0] != '\0', "reason is populated once enforcement resumes");
-    TEST_CHECK(s_relays_off_calls == 1, "all-relays-off hook fires once enforcement resumes");
-    TEST_CHECK(s_halt_run_calls == 1, "halt-run hook fires once enforcement resumes");
+    TEST_CHECK(diverged, "divergence is latched on the very next tick once the restore flag clears");
+    TEST_CHECK(reason[0] != '\0', "reason is populated once full enforcement resumes");
+    TEST_CHECK(s_relays_off_calls == 2, "all-relays-off hook fires again once full enforcement resumes");
+    TEST_CHECK(s_halt_run_calls == 2, "halt-run hook fires again once full enforcement resumes");
+
+    // A consistent read during a later restore must not CLEAR the existing
+    // latch either, and must not fire the hooks.
+    fake_pico_ceiling_set(80.0f);
+    s_restore_in_flight = true;
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+    TEST_CHECK(safety_ceiling_sync_is_diverged(NULL, 0),
+               "an already-latched divergence is left latched during a restore-window tick");
+    TEST_CHECK(s_relays_off_calls == 2 && s_halt_run_calls == 2,
+               "no heat-off hook fires on a restore-window tick whose ceilings agree");
+
+    s_restore_in_flight = false;
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+    TEST_CHECK(!safety_ceiling_sync_is_diverged(NULL, 0),
+               "latch clears on the first post-restore tick once the ceilings agree");
 }
 
 int main(void)
@@ -849,7 +867,7 @@ int main(void)
     test_armed_refusal_appends_suffix_and_truncates_long_reason();
     test_tc_type_revert_divergence_detected();
     test_stale_cache_does_not_hide_a_revert();
-    test_divergence_skipped_during_backup_restore();
+    test_divergence_during_backup_restore();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
