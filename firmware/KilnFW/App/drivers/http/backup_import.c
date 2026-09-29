@@ -53,10 +53,10 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h" /* esp_timer_get_time() -- batched-save timing instrumentation, see
-                         * zones_snapshot's comment below */
 
 #include "MAX31856.h"
+#include "hal_time.h" /* hal_time_now_us() -- batched-save timing instrumentation, see
+                        * zones_snapshot's comment below. HAL_INCLUDE_BOUNDARY: never esp_timer.h here */
 #include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up -- kiln_configs[] restore */
 #include "live_profile.h" /* live_edit_name_collides() -- Opus review finding B, the pass-1
                             * dup-name pre-check below (before pass 2 writes anything) */
@@ -2131,11 +2131,11 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         if (n_pairs > 0) {
             char reason[128];
             safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_NONE;
-            int64_t pico_roundtrip_start_us = esp_timer_get_time();
+            uint64_t pico_roundtrip_start_us = hal_time_now_us();
             bool pico_ok = safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
                                               sizeof(reason), &out_class);
             ESP_LOGI(BACKUP_TAG, "backup import: Pico i_normal_a round trip (%d pairs) took %lld ms",
-                    n_pairs, (long long)((esp_timer_get_time() - pico_roundtrip_start_us) / 1000));
+                    n_pairs, (long long)((hal_time_now_us() - pico_roundtrip_start_us) / 1000u));
             if (!pico_ok) {
                 /* err_msg's real caller buffer is 160 B (backup_http.c's
                  * POST handler); this fixed 84-byte prefix leaves only 75
@@ -2189,7 +2189,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     zones_cfg_t zones_snapshot;
     zones_config_get_full_copy(&zones_snapshot);
     bool relay_type_changed[MAX31856_CHANNEL_COUNT] = {0};
-    int64_t setter_loop_start_us = esp_timer_get_time();
+    uint64_t setter_loop_start_us = hal_time_now_us();
 
     for (size_t i = 0; i < timing_profile_candidate_count; i++) {
         timing_profile_candidate_t *tp = &timing_profile_candidates[i];
@@ -2616,7 +2616,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * door immediately after. has_safety_tc/dsafety are still parsed and
      * range-checked above so an out-of-range value in an old backup still
      * fails the import loudly, rather than being silently ignored. */
-    int64_t setter_loop_elapsed_ms = (esp_timer_get_time() - setter_loop_start_us) / 1000;
+    long long setter_loop_elapsed_ms = (long long)((hal_time_now_us() - setter_loop_start_us) / 1000u);
     ESP_LOGI(BACKUP_TAG,
             "backup import: setter loop (%u timing profiles, %u zones) took %lld ms",
             (unsigned)timing_profile_candidate_count, (unsigned)zone_candidate_count,
@@ -2629,9 +2629,9 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * pay for a flash write it has no reason to make, same as the old
      * settings_source_dirty gate this replaces. */
     if (timing_profile_candidate_count > 0 || zone_candidate_count > 0) {
-        int64_t save_start_us = esp_timer_get_time();
+        uint64_t save_start_us = hal_time_now_us();
         bool save_ok = zones_config_save_now();
-        int64_t save_elapsed_ms = (esp_timer_get_time() - save_start_us) / 1000;
+        long long save_elapsed_ms = (long long)((hal_time_now_us() - save_start_us) / 1000u);
         ESP_LOGI(BACKUP_TAG, "backup import: batched zones_config_save_now() took %lld ms (ok=%d)",
                 (long long)save_elapsed_ms, (int)save_ok);
         if (!save_ok) {
@@ -2658,6 +2658,33 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     }
 
     return true;
+}
+
+/* See the call site in backup_import_apply() below for why. Mirrors
+ * zones_http_post.c's post-commit apply_lower block. */
+static void backup_import_track_ceiling_lower(void)
+{
+    float new_max_temp_c[MAX31856_CHANNEL_COUNT];
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        float cur_max = 0.0f, cur_min = 0.0f;
+        if (!zones_config_get_temp_limits(zi, &cur_max, &cur_min)) {
+            cur_max = 0.0f;
+        }
+        new_max_temp_c[zi] = cur_max;
+    }
+    safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
+    char ceiling_reason[192];
+    ceiling_reason[0] = '\0';
+    safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                     ceiling_reason, sizeof(ceiling_reason));
+    if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
+        ESP_LOGW(BACKUP_TAG,
+                 "backup import: safety processor ceiling not lowered to track the live zone max -- %s -- "
+                 "Pico ceiling stays wider than the ESP max until the next zones save",
+                 ceiling_reason);
+    } else if (ceiling_result == SAFETY_CEILING_SYNC_LOWERED) {
+        ESP_LOGI(BACKUP_TAG, "backup import: safety processor ceiling lowered to track the live zone max");
+    }
 }
 
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
@@ -2767,6 +2794,28 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
 
     bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates,
                                          timing_profile_candidates);
+    /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
+     * exit from backup_import_apply_locked(), success or failure. Two cases
+     * need it. (1) A successful import that lowered a zone max_temp_c --
+     * zones_http_post.c's POST handler already tracks that with
+     * safety_ceiling_sync_apply_lower() after its commit, and this path
+     * never did, so the Pico's abs_max_temp_c stayed above the new ESP
+     * target. (2) A failure AFTER safety_ceiling_sync_guard_raise() already
+     * raised and confirmed the Pico ceiling (i_normal_a push refused, or the
+     * whole-snapshot rollback of a mid-batch setter failure): the ESP zone
+     * max is back at its old value while the Pico sits at the raised one.
+     * Either way safety_ceiling_sync.c's divergence check (exact equality
+     * after normalization) flags the mismatch and disables heat, and
+     * safety_ceiling_sync_reconcile_on_link_up() only ever RAISES, so
+     * nothing brought it back. apply_lower() reads its target from the LIVE
+     * zones config passed in (whatever RAM holds now: committed batch,
+     * rolled-back snapshot, or untouched), is a no-op when that is not a
+     * lowering or the Pico's current value is unknown, and only ever
+     * tightens the Pico down TO the live ESP max, never below it -- so the
+     * "Pico ceiling never tighter than the ESP" invariant holds. Best-effort,
+     * same as the POST handler: a failure is logged, never this request's
+     * own failure. */
+    backup_import_track_ceiling_lower();
 
     free(timing_profile_candidates);
     free(zone_candidates);

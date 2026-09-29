@@ -636,6 +636,13 @@ extern safety_cfg_post_pair_t g_stub_safety_cfg_write_pairs[8];
 extern int g_settings_source_save_calls;
 extern bool s_relay_type_pushed[STUB_ZONE_COUNT];
 extern int g_relay_type_push_calls;
+/* safety_ceiling_sync_apply_lower() fake (review of 34a2da1b): counts calls
+ * and captures the per-zone target it was handed, so a test can assert
+ * backup_import_apply() tracks the Pico ceiling DOWN to whatever the live
+ * zones config holds after the import -- committed batch or rolled-back
+ * snapshot. Defined below next to the guard_raise() fake. */
+static int g_apply_lower_calls;
+static float g_apply_lower_last_max[STUB_ZONE_COUNT];
 static int g_total_write_calls;
 static int g_profile_save_calls;
 static uint8_t g_last_saved_profile_id;
@@ -702,6 +709,8 @@ static void reset_stub_state(void)
      * stale content from a prior test can never be observed. */
     memset(s_relay_type_pushed, 0, sizeof(s_relay_type_pushed));
     g_relay_type_push_calls = 0;
+    g_apply_lower_calls = 0;
+    memset(g_apply_lower_last_max, 0, sizeof(g_apply_lower_last_max));
 }
 
 // ---- zones_http.h getters this TU needs (not already supplied elsewhere) --
@@ -839,6 +848,23 @@ bool safety_ceiling_sync_guard_raise(SafetyLinkClass *link, const float *new_max
         *out_refusal_class = SAFETY_CEILING_REFUSAL_NONE;
     }
     return true;
+}
+
+void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max_temp_c, size_t n,
+                                      safety_ceiling_sync_result_t *out_result, char *reason_out,
+                                      size_t reason_cap)
+{
+    (void)link;
+    g_apply_lower_calls++;
+    for (size_t i = 0; i < n && i < STUB_ZONE_COUNT; i++) {
+        g_apply_lower_last_max[i] = new_max_temp_c[i];
+    }
+    if (out_result) {
+        *out_result = SAFETY_CEILING_SYNC_NONE;
+    }
+    if (reason_out && reason_cap > 0) {
+        reason_out[0] = '\0';
+    }
 }
 
 /* 2026-09-16 config-backup round-trip gap closure: backup_import.c
@@ -3382,6 +3408,64 @@ static void test_backup_import_batched_save_fires_exactly_once(void)
               "zones_config_save_now() fires exactly once for the whole batch, not per zone");
 }
 
+static void test_backup_import_success_tracks_pico_ceiling_down_to_new_max(void)
+{
+    TEST_SECTION("backup_import_apply -- a successful import that LOWERS a zone max_temp_c calls "
+                 "safety_ceiling_sync_apply_lower() once, after the save, with the new live max, so "
+                 "the Pico ceiling does not stay above the ESP target (divergence disables heat)");
+    reset_stub_state();
+    TEST_CHECK(zones_config_set_temp_limits(0, 1200.0f, 0.0f), "seed zone 0 max 1200 C");
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"max_temp_c\":1000,\"min_temp_c\":0}]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+
+    if (!ok) {
+        printf("    import refused: %s\n", err);
+    }
+    TEST_CHECK(ok, "the lowering import succeeds");
+    TEST_CHECK(g_settings_source_save_calls == 1, "the batch saved once");
+    TEST_CHECK(g_apply_lower_calls == 1, "apply_lower() ran exactly once");
+    TEST_CHECK(g_apply_lower_last_max[0] == 1000.0f,
+              "apply_lower() was handed the NEW live zone 0 max (1000), not the old 1200");
+}
+
+static void test_backup_import_rollback_tracks_pico_ceiling_back_to_restored_max(void)
+{
+    TEST_SECTION("backup_import_apply -- a mid-batch failure AFTER guard_raise() raised the Pico "
+                 "ceiling rolls RAM back and then calls apply_lower() with the RESTORED (pre-import) "
+                 "max, so the raised Pico ceiling is brought back down to the ESP target");
+    reset_stub_state();
+    TEST_CHECK(zones_config_set_temp_limits(1, 1200.0f, 0.0f), "seed zone 1 max 1200 C");
+    g_total_write_calls = 0;
+
+    s_force_fail_settings_source_zone = 1;
+    s_force_fail_settings_source_group = SRC_GROUP_LIMITS;
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"max_temp_c\":1250,\"min_temp_c\":0,"
+        "\"settings_source\":255}]}";
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    s_force_fail_settings_source_zone = 0xFFu;
+    s_force_fail_settings_source_group = 0xFFu;
+
+    float mx = 0.0f, mn = 0.0f;
+    printf("    refusal: %s\n", ok ? "(none)" : err);
+    TEST_CHECK(g_total_write_calls > 0,
+              "control: the import got past pass-1 validation into the commit loop (a pass-1 "
+              "refusal would reach apply_lower() too and make this test vacuous)");
+    TEST_CHECK(!ok, "the injected commit failure is refused");
+    TEST_CHECK(zones_config_get_temp_limits(1, &mx, &mn) && mx == 1200.0f,
+              "zone 1's max rolled back to its pre-import 1200 C");
+    TEST_CHECK(g_settings_source_save_calls == 0, "no save on a rolled-back batch");
+    TEST_CHECK(g_apply_lower_calls == 1, "apply_lower() still ran on the failure path");
+    TEST_CHECK(g_apply_lower_last_max[1] == 1200.0f,
+              "apply_lower() was handed the RESTORED max (1200), not the refused 1250");
+}
+
 static void test_backup_import_failure_restores_whole_batch_not_just_settings_source(void)
 {
     TEST_SECTION("backup_import_apply -- a mid-batch commit failure rolls back the WHOLE RAM "
@@ -4925,6 +5009,8 @@ void run_test_backup_import(void)
     test_settings_source_commit_failure_restores_pre_import_values();
     test_backup_import_batched_save_fires_exactly_once();
     test_backup_import_failure_restores_whole_batch_not_just_settings_source();
+    test_backup_import_success_tracks_pico_ceiling_down_to_new_max();
+    test_backup_import_rollback_tracks_pico_ceiling_back_to_restored_max();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_backup_export_kiln_config_package_present();
