@@ -12,15 +12,30 @@
 > web dashboard's "previous firing ended" card except for an interrupted or
 > faulted run. `c2240cb1`/`389275a5` landed a 5-degree minimum vertical span
 > on every LCD and web temperature graph; `e6d7db5f`/`3d90c8eb` landed
-> non-repeating web y-axis tick labels. Open: `backup_import`'s NVS-save
-> batching, and three 2026-09-28 owner requests — a stop confirm dialog
-> (already existed on both UIs before this round; the login-required work
-> below covers what's actually new), login required for Stop and everything
-> but the dashboards on both web and LCD (in review, not yet landed), and
-> an LCD PIN that follows the web password's lockout/backoff and idle-
-> timeout rules (in review) — see M18 below. In review, not yet landed: a
-> divergence-triggered stop now records FAULTED with a reason (was HALTED
-> with an empty reason), and `backup_import` batches its NVS saves.
+> non-repeating web y-axis tick labels. **Landed 2026-09-28:** the three
+> owner login-gate requests — unauthenticated web and LCD users now see
+> dashboards only (`48962395`/`d25d5ccf`, plus `5901b09d`'s doc fixes;
+> `/api/profile_exec/stop` moved to USER tier, `/api/board_temps` and
+> `/api/firing_history` to ADMIN — the other three SAFETY_REDUCE routes,
+> `current_sweep/abort`/`autotune/abort`/`diagnostics/danger/stop`, are
+> untouched, since the physical E-stop is the backstop), and the LCD PIN
+> gate (`89fbe6d6` requires the PIN before Stop, Pause/Resume, Menu and the
+> profile picker; relock returns home; shares the web login's
+> `login_backoff` lockout ladder; `e4c5d7da` fixed the keypad's lockout text
+> to state the actual wait, "Wrong PIN -- try again in Ns"). `/wifi`,
+> `/networks` and `/scan` are now open only while unprovisioned, ADMIN once
+> provisioned (`59e84b57`/`f3991c09`, owner decision). `057ca631`/
+> `c26df2ce` landed the divergence-triggered stop recording FAULTED with a
+> reason (was HALTED with an empty reason). `c22ff081`/`5d0a2756`/
+> `7b107411` landed `backup_import`'s NVS-save batching (single zones save,
+> whole-snapshot rollback on a mid-batch failure) plus Pico-ceiling tracking
+> after import/rollback. **In progress:** the LCD "edit current firing"
+> screen is in Opus review; Wi-Fi AP fallback with auto-reconnect to the
+> home network when no web users are logged in is being implemented.
+> **Pending bench work:** flash the landed firmware above; verify LCD-19
+> and the login gates on real hardware; bench-verify the live-edit feature
+> end to end; re-measure `backup_import` timing after the NVS-save
+> batching.
 > **2026-09-27:** the system-mode gate's last deferred slice (2, "recovery
 > wording") landed: `system_mode_
 > gate_check()` now runs inside `profile_executor_run()`'s and
@@ -4192,46 +4207,58 @@ Owner instruction, 2026-09-21.
   could fail to clear `tuning_valid` even though the value genuinely
   changed. Now a relative tolerance; also carries a magnitude-sweep test and
   a comment fix from review.
-- [ ] **`backup_import` batched NVS save (in review, not yet landed):** the
-  ~61 s import currently issues one NVS save per field as it restores each
-  store. Planned: `_no_save` setter variants for the hot paths, one trailing
-  save per store, a RAM rollback if a mid-batch setter fails partway
-  through, and timing instrumentation to confirm the win.
+- [x] **`backup_import` batched NVS save, landed (`c22ff081`, `5d0a2756`,
+  `7b107411`).** The ~61 s import used to issue one NVS save per field as it
+  restored each store; it now uses `_no_save` setter variants for the hot
+  paths with one trailing save per store, a RAM rollback if a mid-batch
+  setter fails partway through, and tracks the Pico's `abs_max_temp_c`
+  ceiling down after import/rollback. Still pending: re-measure the actual
+  timing win on the bench.
 - [x] **Web dashboard: drop the "Previous firing ended" card after a normal
   or deliberate stop, landed (`fd792793`).** The card now shows only for an
   *unexpected* end (fault/trip/crash) — a normal Stop or a profile reaching
   its own end clears it instead of leaving it displayed.
-- [ ] **Divergence-triggered stop recorded as FAULTED (in review, not yet
-  landed):** was recorded as HALTED with an empty reason; now records
-  FAULTED with a reason.
+- [x] **Divergence-triggered stop recorded as FAULTED, landed (`c26df2ce`,
+  `057ca631`).** Was recorded as HALTED with an empty reason; now records
+  FAULTED with a reason. `057ca631`'s review fix keeps a DONE run DONE
+  instead of overwriting it if a divergence appears after completion.
 - [x] **Owner requests, 2026-09-28:**
   - (a) **Landed (`d484e51a`, `f017b285`):** an "Edit firing" button next to
     Start/Stop on the web UI opens `/live_profile`, prompting for login
     first if not already signed in (backend: `profiles_live_http.c`,
     `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, the `profile_live_*` MCP
-    quartet).
+    quartet). **In progress:** the LCD counterpart ("edit current firing"
+    screen) is in Opus review, not yet landed.
   - (b) A confirm dialog before stopping a running profile, on both the web
     UI and the LCD — this already existed on both UIs before this round of
     requests (a prior status line here mistakenly listed it as still
-    pending in `1037c4ff`; corrected). What's new and **in review, not yet
-    landed**: Stop itself now requires login on both UIs, per (c) below. The
-    physical E-stop stays immediate, always available without login, and
-    bypasses both the confirm dialog and the login requirement entirely.
+    pending in `1037c4ff`; corrected). **Landed:** Stop itself now requires
+    login on both UIs, per (c) below. The physical E-stop stays immediate,
+    always available without login, and bypasses both the confirm dialog
+    and the login requirement entirely.
   - (c) **Owner decision, supersedes the earlier "show login only when an
-    action needs it" request. In review, not yet landed on either UI:**
-    without login, the web and LCD show only the dashboards. Every other
-    page and action — including Stop — requires login. The LCD's PIN gate
+    action needs it" request. Landed on both UIs (`48962395`, `d25d5ccf`,
+    `5901b09d`, `89fbe6d6`, `e4c5d7da`):** without login, the web and LCD
+    show only the dashboards. Every other page and action — including
+    Stop — requires login (`/api/profile_exec/stop` moved to USER tier,
+    `/api/board_temps`/`/api/firing_history` to ADMIN). The LCD's PIN gate
     follows the same rules as the web password: the shared
     `login_backoff` module's lockout/backoff ladder (5/10/30/60/300 s) and
-    the same idle-timeout semantics. Setup/AP provisioning, the
-    bootstrap-password flow, TOTP reset, and the LCD reset touch sequence
-    stay reachable without login, since they exist to recover access in the
-    first place.
+    the same idle-timeout semantics; the keypad's lockout text now states
+    the actual wait ("Wrong PIN -- try again in Ns"). Setup/AP
+    provisioning, the bootstrap-password flow, TOTP reset, and the LCD
+    reset touch sequence stay reachable without login, since they exist to
+    recover access in the first place. `/wifi`/`/networks`/`/scan` are a
+    separate, narrower case: open only while the board is unprovisioned
+    (`59e84b57`, `f3991c09`), ADMIN once provisioned, matching the
+    captive-portal first-time-setup requirement.
+  - **In progress, not yet landed:** Wi-Fi AP fallback with auto-reconnect
+    to the home network when no web users are logged in.
   - **Pending bench work (not yet done):** flash the landed firmware above
-    to the bench board; verify LCD-19 and the login gate on hardware once
-    the login-required work lands; bench-verify the live-edit feature end
-    to end; measure `backup_import` timing after the NVS-save batching
-    lands; measure `crash_report/clear` latency.
+    to the bench board; verify LCD-19 and the login gates on hardware;
+    bench-verify the live-edit feature end to end once its LCD half lands;
+    re-measure `backup_import` timing now that NVS-save batching has
+    landed; measure `crash_report/clear` latency.
 
 ---
 
