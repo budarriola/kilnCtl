@@ -78,4 +78,6 @@ def get_status(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S) -> dict:
     try:
         return json.loads(body_text)
     except Exception as exc:
-        raise WifiProvHttpError(f"GET /status response was not valid JSON: {body_text!r}") from exc
+        # Never echo the body: GET /status carries `ap_password` in plaintext
+        # to AP-side callers (wifi_provision_http.c's on_ap narrowing).
+        raise WifiProvHttpError(f"GET /status response was not valid JSON ({len(body_text)} bytes)") from exc

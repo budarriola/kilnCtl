@@ -84,11 +84,15 @@ def wifi_get_status(host: Optional[str] = None) -> str:
 
     `ap_pending_teardown` (be7bcad4, 2026-09-28 -- true while home Wi-Fi is
     back up but the fallback AP is deliberately being kept alive because a
-    session is logged in) is carried over the UART link this tool otherwise
-    uses at all -- only GET /status (wifi_provision_http.c) serializes it.
-    Pass `host` to also fetch that over HTTP, best-effort: unreachable, not
-    JSON, or missing the key (older firmware, or no `host` given) all print
-    "unknown (...)" rather than failing the whole call. As of be7bcad4, GET
+    session is logged in) is NOT carried over the UART link this tool
+    otherwise uses -- only GET /status (wifi_provision_http.c) serializes it,
+    so it is fetched over HTTP, best-effort. Host resolution follows the
+    other tools' convention (`_ota_resolve_host`): an explicit `host` wins;
+    otherwise the STA IP this same UART read just reported is used when
+    `sta_connected` (the only state in which a teardown can be pending). With
+    neither, no network call is made. Unreachable, not JSON, or missing the
+    key (older firmware) all print "unknown (...)" rather than failing the
+    whole call. As of be7bcad4, GET
     /status does not separately expose an `ap_fallback_active` field either
     (that flag is internal-only, never serialized) -- nothing else to add
     here without a firmware change.
@@ -98,14 +102,15 @@ def wifi_get_status(host: Optional[str] = None) -> str:
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     ap_password_state = "[set]" if status.ap_password else "[unset]"
-    ap_pending_teardown = "unknown (no host given, or older firmware)"
-    if host:
+    http_host = host or (status.sta_ip if status.sta_connected and status.sta_ip else None)
+    ap_pending_teardown = "unknown (no host given and no STA IP)"
+    if http_host:
         try:
-            data = wifi_prov_http_client.get_status(host)
+            data = wifi_prov_http_client.get_status(http_host)
         except wifi_prov_http_client.WifiProvHttpError:
             ap_pending_teardown = "unknown (unreachable over HTTP)"
         else:
-            if "ap_pending_teardown" in data:
+            if isinstance(data, dict) and "ap_pending_teardown" in data:
                 ap_pending_teardown = str(bool(data["ap_pending_teardown"]))
             else:
                 ap_pending_teardown = "unknown (older firmware)"

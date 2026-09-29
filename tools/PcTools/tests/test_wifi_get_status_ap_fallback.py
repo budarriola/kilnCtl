@@ -37,15 +37,16 @@ def _fake_response(body: bytes, status: int = 200):
     return _Ctx()
 
 
-def _fake_uart_status(state: int = 3) -> UartWifiStatus:
+def _fake_uart_status(state: int = 3, sta_connected: bool = True,
+                      sta_ip: str = "10.0.0.5") -> UartWifiStatus:
     return UartWifiStatus(
         mode=0,
         state=state,
-        sta_connected=True,
+        sta_connected=sta_connected,
         ssid="home-network",
         ap_ssid="kilnctl-board",
         ap_password="",
-        sta_ip="10.0.0.5",
+        sta_ip=sta_ip,
         sta_rssi=-40,
         ap_clients=0,
     )
@@ -79,24 +80,51 @@ class StateNameTest(unittest.TestCase):
 class ApPendingTeardownTest(unittest.TestCase):
     """wifi_get_status(host=...)'s best-effort HTTP supplement."""
 
-    def _run(self, host):
+    def _run(self, host, **uart_kwargs):
         from kilnctrl import mcp_server_wifi as wifi_tools
         from kilnctrl import mcp_server as _srv
 
         wifi = unittest.mock.MagicMock(spec=["get_status"])
-        wifi.get_status.return_value = _fake_uart_status()
+        wifi.get_status.return_value = _fake_uart_status(**uart_kwargs)
         with unittest.mock.patch.object(_srv, "_wifi", wifi):
             return wifi_tools.wifi_get_status(host=host)
 
-    def test_no_host_given_reports_unknown_without_a_network_call(self):
-        # NEGATIVE-shaped: proves the no-host path never touches urllib at
-        # all (an unmocked urlopen call here would raise/hang against a
-        # real socket) -- this is also the case every existing caller of
-        # wifi_get_status() with no `host` argument exercises.
+    def test_no_host_and_no_sta_ip_reports_unknown_without_a_network_call(self):
+        # With no explicit host and STA not connected there is nothing to
+        # resolve: urllib must never be touched.
         with unittest.mock.patch("urllib.request.urlopen") as mock_urlopen:
-            output = self._run(host=None)
+            output = self._run(host=None, sta_connected=False, sta_ip="")
         mock_urlopen.assert_not_called()
-        self.assertIn("ap_pending_teardown=unknown", output)
+        self.assertIn("ap_pending_teardown=unknown (no host given and no STA IP)", output)
+
+    def test_no_host_resolves_to_uart_sta_ip(self):
+        # Same auto-resolution convention as _ota_resolve_host: the STA IP
+        # the UART read just reported is used when no host is given.
+        body = json.dumps({"ap_pending_teardown": True}).encode()
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)) as mock_urlopen:
+            output = self._run(host=None, sta_ip="10.0.0.77")
+        self.assertEqual(mock_urlopen.call_args[0][0].full_url, "http://10.0.0.77/status")
+        self.assertIn("ap_pending_teardown=True", output)
+
+    def test_explicit_host_wins_over_sta_ip(self):
+        body = json.dumps({"ap_pending_teardown": False}).encode()
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)) as mock_urlopen:
+            self._run(host="192.168.4.1", sta_ip="10.0.0.77")
+        self.assertEqual(mock_urlopen.call_args[0][0].full_url, "http://192.168.4.1/status")
+
+    def test_non_json_body_never_echoed(self):
+        # GET /status carries ap_password in plaintext to AP-side callers;
+        # a malformed body must not reach the error message or the output.
+        body = b'{"ap_password":"secret-value-xyz", truncated'
+        from kilnctrl import wifi_prov_http_client
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            with self.assertRaises(wifi_prov_http_client.WifiProvHttpError) as ctx:
+                wifi_prov_http_client.get_status("10.0.0.5")
+        self.assertNotIn("secret-value-xyz", str(ctx.exception))
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            output = self._run(host="10.0.0.5")
+        self.assertNotIn("secret-value-xyz", output)
+        self.assertIn("ap_pending_teardown=unknown (unreachable over HTTP)", output)
 
     def test_field_present_true(self):
         body = json.dumps({"mode": "home", "state": "connected", "ap_pending_teardown": True}).encode()
