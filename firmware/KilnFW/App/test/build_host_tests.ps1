@@ -334,11 +334,13 @@ try {
         (Join-Path $driversDir "http/http_auth_enforce.c"),
         (Join-Path $driversDir "http/http_auth_policy_iface.c"),
         (Join-Path $driversDir "http/http_session_iface.c"),
-        # NOTE: no wifi_prov_unprovisioned_stub.c here -- this executable's
-        # own $sources list already includes test_wifi_prov.c, which
-        # #includes the REAL wifi_prov.c and so already defines
-        # wifi_prov_is_unprovisioned(); linking the stub too would collide
-        # (LNK2005).
+        # wifi_prov_unprovisioned_stub.c: test_wifi_prov.c (which used to
+        # supply the real wifi_prov_is_unprovisioned() for this executable
+        # for free) moved OUT of "main" into its own standalone executable
+        # 2026-09-28 (see the header comment near the top of this file), so
+        # http_auth_policy_iface.c's http_auth_policy_wifi_unprovisioned()
+        # needs this stub linked in here now instead.
+        (Join-Path $testDir "stubs/wifi_prov_unprovisioned_stub.c"),
         # http_auth_http.c's resolve_role_for_request() calls
         # httpd_req_get_hdr_value_len/_str and ota_http_get_client_ip, real
         # esp_http_server.h symbols this executable has no other source for
