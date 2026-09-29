@@ -2660,9 +2660,24 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     return true;
 }
 
+/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
+ * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
+ * Only the Xtensa GCC target build's stack depth is measured. */
+#if defined(_MSC_VER)
+#define BACKUP_IMPORT_NOINLINE
+#else
+#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
+#endif
+
 /* See the call site in backup_import_apply() below for why. Mirrors
- * zones_http_post.c's post-commit apply_lower block. */
-static void backup_import_track_ceiling_lower(void)
+ * zones_http_post.c's post-commit apply_lower block. NOINLINE: inlined, its
+ * locals (the reason buffer and the per-zone array) land in
+ * backup_import_apply()'s own frame, which sits under the much deeper
+ * backup_import_apply_locked() chain, and push http_async_job's measured
+ * depth over its check_all_task_stack_budgets.py ceiling (4784 B vs 4528 B,
+ * measured). Kept out of line its frame is a sibling of that chain, not
+ * stacked under it. */
+static BACKUP_IMPORT_NOINLINE void backup_import_track_ceiling_lower(void)
 {
     float new_max_temp_c[MAX31856_CHANNEL_COUNT];
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -2861,15 +2876,6 @@ typedef struct {
     bool ack_no_safety;
     size_t content_len;
 } backup_import_job_ctx_t;
-
-/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
- * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
- * Only the Xtensa GCC target build's stack depth is measured. */
-#if defined(_MSC_VER)
-#define BACKUP_IMPORT_NOINLINE
-#else
-#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
-#endif
 
 /* Same two checks, same order, same refusal bytes as the top of
  * backup_import_post_handler(), re-run on the job task just before
