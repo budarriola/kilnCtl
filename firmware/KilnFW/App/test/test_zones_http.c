@@ -916,6 +916,16 @@ size_t safety_cfg_store_param_count(void)
 {
     return s_cfg_row_count;
 }
+// 2026-09-28: safety_ceiling_sync.c (linked for real, see above) now calls
+// backup_import_restore_in_flight() too, to skip enforce_ceiling_divergence()
+// mid backup-restore commit. This executable never links backup_import.c
+// (its real definition), so it needs its own stub -- always false (no
+// restore in flight) since none of this file's existing tests exercise a
+// backup restore.
+bool backup_import_restore_in_flight(void)
+{
+    return false;
+}
 // 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
 // MEDIUM 5): safety_ceiling_sync.c (linked for real, see above) now calls
 // this too, from the same broadened standing-divergence path. This

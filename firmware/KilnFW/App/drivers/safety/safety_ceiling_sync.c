@@ -37,6 +37,12 @@
  * merely warned. That warning is now an ERROR on this component
  * (-Werror=implicit-function-declaration, App/drivers/CMakeLists.txt), so
  * the same mistake cannot compile again here or anywhere else in App/. */
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28,
+                                    * skip enforce_ceiling_divergence() while a backup
+                                    * restore's commit pass is torn-writing zones one at
+                                    * a time (see the call site below). Lock-free read,
+                                    * same choke-point rationale as that header's own
+                                    * doc comment and profile_executor_run.c's include. */
 #include "safety_cfg_write.h"
 #include "safety_cfg_store.h"
 #include "zones_config_accessors.h"
@@ -755,7 +761,22 @@ static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
      * divergent case -- the Pico is ARMED and refuses a raise -- is exactly
      * the case the backoff spends most of its time in, and that is the ONE
      * case this enforcement absolutely must not go quiet during. */
-    {
+    /* 2026-09-28: a backup restore's commit pass (backup_import.c) writes
+     * zones one at a time with no lock shared with this reader, so a tick
+     * landing mid-commit can read a torn, cross-zone snapshot and raise a
+     * spurious divergence -- forcing relays off and halting a run that was
+     * never actually diverged. Skip enforcement for this tick only (same
+     * level-triggered, next-tick-retries shape as the s_reconcile_lock busy
+     * skip above); leave whatever divergence/standing-warning state is
+     * already latched untouched rather than clearing it, since we have no
+     * fresh, consistent read to justify clearing it. This is safe because
+     * backup import refuses to start while a profile/autotune run is active
+     * (system_mode_gate SYS_ACTION_WRITE_ZONES_CONFIG,
+     * backup_import.c:2752/2939) -- no run is being masked mid-restore -- and
+     * the Pico's own ceiling is already raised to the restore's final value
+     * before this loop runs (safety_ceiling_sync_guard_raise() from
+     * backup_import.c), so no under-protective ceiling results either way. */
+    if (!backup_import_restore_in_flight()) {
         float target_c = safety_ceiling_policy_target_c(new_max_temp_c, MAX31856_CHANNEL_COUNT);
         bool target_known = target_c > 0.0f;
         float pico_c = 0.0f;
