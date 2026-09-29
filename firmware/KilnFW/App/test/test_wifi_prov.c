@@ -69,6 +69,11 @@ unsigned char g_stub_last_queue_item[256];
 // wifi_prov_get_ap_client_count(), which ap_teardown_should_defer() (wifi_prov_link.c)
 // consults when web auth is off. See stubs/esp_wifi.h.
 int g_stub_ap_sta_count = 0;
+// esp_netif_get_ip_info()'s reported IP address (2026-09-28, see
+// stubs/esp_netif.h's comment) -- controllable so sta_link_is_live()/
+// reconcile_sta_state() can be tested with a station that genuinely holds a
+// lease, not just "associated." Any non-zero value stands in for a real IP.
+uint32_t g_stub_netif_ip_addr = 0;
 
 // wifi_provision_http_start()/wifi_provision_http_get_server() are declared
 // by the real wifi_provision_http.h (off-limits -- another agent owns
@@ -99,6 +104,29 @@ bool g_stub_web_auth_enabled = false;
 bool http_auth_policy_web_enabled(void) { return g_stub_web_auth_enabled; }
 bool g_stub_any_session_active = false;
 bool http_auth_any_session_active(void) { return g_stub_any_session_active; }
+
+// stack_margin_register() is declared by the real stack_margin.h (safe to
+// include -- that header is deliberately FreeRTOS-free, see its own top
+// comment) but its .c is NOT host-tested (needs uxTaskGetStackHighWaterMark());
+// wifi_prov_start() now calls it once at task-creation time (2026-09-28,
+// registering wifi_prov_owner for stack-margin reporting). This fake just
+// counts calls and records the last name/size, same "count it, don't
+// simulate it" shape as time_sync_notify_got_ip() above.
+#include "../drivers/common/stack_margin.h"
+int g_stub_stack_margin_register_calls = 0;
+char g_stub_stack_margin_register_last_name[32] = {0};
+uint32_t g_stub_stack_margin_register_last_bytes = 0;
+bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t configured_stack_bytes)
+{
+    (void)task_handle_slot;
+    g_stub_stack_margin_register_calls++;
+    if (name) {
+        strncpy(g_stub_stack_margin_register_last_name, name,
+                sizeof(g_stub_stack_margin_register_last_name) - 1);
+    }
+    g_stub_stack_margin_register_last_bytes = configured_stack_bytes;
+    return true;
+}
 
 #include "../drivers/net/wifi_prov.c"
 // wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3, "files over 1500 lines
@@ -162,6 +190,7 @@ static void reset_state(void)
     g_stub_web_auth_enabled = false;
     g_stub_any_session_active = false;
     g_stub_ap_sta_count = 0;
+    g_stub_netif_ip_addr = 0; // no lease by default -- sta_link_is_live() reads false unless a test opts in
 }
 
 // ---- Tests -----------------------------------------------------------
@@ -820,6 +849,127 @@ static void test_disconnect_while_fallback_ap_up_waits_for_rescan(void)
     memset(&s_wifi, 0, sizeof(s_wifi));
 }
 
+static void test_reconcile_sta_state_drops_ap_when_link_regained(void)
+{
+    TEST_SECTION("reconcile_sta_state -- IP lost then regained without a fresh GOT_IP event (e.g. a dropped "
+                 "queued event, or LOST_IP/GOT_IP with nothing watching for it): the ground-truth repair now "
+                 "also drops the fallback AP, not just the state field (2026-09-28 follow-up)");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING; // stale -- the station actually reconnected already
+    s_wifi.ap_fallback_active = true;            // the fallback AP is up from the earlier drop
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta(); // sta_link_is_live() bails out early without one
+    g_stub_ap_info_result = ESP_OK;              // associated
+    g_stub_netif_ip_addr = 0x0101A8C0;            // and holds a real lease -- link is genuinely live
+    g_stub_web_auth_enabled = false;
+    g_stub_ap_sta_count = 0;                     // nobody on the AP -- teardown must not be deferred
+
+    bool live = reconcile_sta_state();
+
+    TEST_CHECK(live, "reconcile_sta_state() reports the link live");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "state corrected to CONNECTED");
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 1, "the fallback AP is torn down, not left stranded up");
+    TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_STA, "radio mode is now STA-only");
+    TEST_CHECK(!s_wifi.ap_fallback_active, "ap_fallback_active cleared");
+    TEST_CHECK(!s_wifi.ap_pending_teardown, "nothing left pending");
+}
+
+static void test_reconcile_sta_state_defers_ap_drop_while_session_active(void)
+{
+    TEST_SECTION("reconcile_sta_state -- link regained the same way, but a web session is still active: "
+                 "teardown defers exactly like a normal reconnect, not torn down out from under an operator");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    s_wifi.ap_fallback_active = true;
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    g_stub_ap_info_result = ESP_OK;
+    g_stub_netif_ip_addr = 0x0101A8C0;
+    g_stub_web_auth_enabled = true;
+    g_stub_any_session_active = true;
+
+    bool live = reconcile_sta_state();
+
+    TEST_CHECK(live, "link still reported live");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "state still corrected to CONNECTED");
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 0, "AP teardown deferred -- a session is active");
+    TEST_CHECK(s_wifi.ap_pending_teardown, "ap_pending_teardown set so do_rescan_tick() retries later");
+    TEST_CHECK(s_wifi.ap_fallback_active, "ap_fallback_active untouched while deferred (AP still up)");
+}
+
+static void test_reconcile_sta_state_no_ap_action_when_state_already_agreed(void)
+{
+    TEST_SECTION("reconcile_sta_state -- state already says CONNECTED (nothing to repair): no AP action is "
+                 "taken on every live-link tick, only when a disagreement is actually found and fixed");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_CONNECTED; // already agrees with the live link
+    s_wifi.ap_fallback_active = true;         // e.g. a deferred teardown mid-flight, owned by do_rescan_tick()
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    g_stub_ap_info_result = ESP_OK;
+    g_stub_netif_ip_addr = 0x0101A8C0;
+
+    bool live = reconcile_sta_state();
+
+    TEST_CHECK(live, "link reported live");
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 0,
+               "no radio call -- state already agreed, so this path leaves the fallback-AP decision to "
+               "whichever path is already driving it (do_rescan_tick()'s existing pending-teardown recheck)");
+}
+
+static void test_reconcile_sta_state_never_touches_operator_chosen_ap(void)
+{
+    TEST_SECTION("reconcile_sta_state -- mode == WIFI_PROV_MODE_AP (operator's deliberate AP choice): a live "
+                 "station link never tears the AP down");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_AP;
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_AP_MODE;
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    g_stub_wifi_mode = WIFI_MODE_AP;
+    g_stub_ap_info_result = ESP_OK;
+    g_stub_netif_ip_addr = 0x0101A8C0;
+
+    bool live = reconcile_sta_state();
+
+    TEST_CHECK(!live, "AP mode: reconcile reports not-live without looking at the station");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_AP_MODE, "state left at AP_MODE");
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 0, "no radio call -- the operator-chosen AP stays up");
+}
+
+static void test_got_ip_after_reconcile_dropped_ap_is_a_no_op(void)
+{
+    TEST_SECTION("try_drop_fallback_ap_after_join -- reconcile_sta_state() already dropped the AP, then a queued "
+                 "GOT_IP arrives while a session is active: no second set_mode, no false pending teardown");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    s_wifi.ap_fallback_active = true;
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    g_stub_ap_info_result = ESP_OK;
+    g_stub_netif_ip_addr = 0x0101A8C0;
+
+    (void)reconcile_sta_state();
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 1 && g_stub_wifi_mode == WIFI_MODE_STA, "setup: reconcile dropped the AP");
+
+    g_stub_web_auth_enabled = true;
+    g_stub_any_session_active = true;
+    do_ev_got_ip();
+
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 1, "no redundant esp_wifi_set_mode(STA)");
+    TEST_CHECK(!s_wifi.ap_pending_teardown, "no pending teardown reported for an AP that is not running");
+    TEST_CHECK(!s_wifi.ap_fallback_active, "ap_fallback_active stays cleared");
+}
+
 static void test_teardown_and_mode_changes_clear_fallback_active(void)
 {
     TEST_SECTION("ap_fallback_active -- cleared by an actual AP teardown and by a switch to AP mode");
@@ -889,6 +1039,11 @@ void run_test_wifi_prov(void)
     test_rescan_tick_retries_deferred_teardown_until_session_ends();
     test_ap_fallback_tick_leaves_running_ap_alone();
     test_disconnect_while_fallback_ap_up_waits_for_rescan();
+    test_reconcile_sta_state_drops_ap_when_link_regained();
+    test_reconcile_sta_state_defers_ap_drop_while_session_active();
+    test_reconcile_sta_state_no_ap_action_when_state_already_agreed();
+    test_reconcile_sta_state_never_touches_operator_chosen_ap();
+    test_got_ip_after_reconcile_dropped_ap_is_a_no_op();
     test_teardown_and_mode_changes_clear_fallback_active();
 }
 

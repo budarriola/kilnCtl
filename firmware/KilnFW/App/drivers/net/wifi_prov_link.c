@@ -279,6 +279,53 @@ static bool ap_teardown_should_defer(void)
     return wifi_prov_get_ap_client_count() > 0;
 }
 
+/* Runs on owner_task(). Shared tail of "the station is confirmed joined (or
+ * confirmed reachable) -- now decide whether the fallback AP can come down."
+ * Used by do_ev_got_ip(), do_confirm_static_reachable(), and (2026-09-28
+ * follow-up) reconcile_sta_state(): all three reach the same decision once
+ * they've independently established "the link is actually up," and prior to
+ * this follow-up only the first two ever acted on it -- see
+ * reconcile_sta_state()'s call site below for the gap this closes.
+ *
+ * A STATIC join that hasn't yet been confirmed reachable at its configured
+ * address is left alone entirely (same gate do_ev_got_ip() already applied);
+ * otherwise this defers under the same ap_teardown_should_defer() policy
+ * every other teardown path uses, or drops the AP and reverts to STA-only. */
+static void try_drop_fallback_ap_after_join(void)
+{
+    if (s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC && !s_wifi.static_ip_confirmed) {
+        return;
+    }
+    /* Review fix (2026-09-28): nothing to tear down if the AP interface is
+     * already down -- e.g. reconcile_sta_state() already dropped it and a
+     * queued GOT_IP arrives afterward, or a brief blip healed before
+     * do_ap_fallback_tick() ever raised the AP. Without this, a logged-in
+     * session would set ap_pending_teardown (surfaced as "[AP kept up]" by
+     * wifi_status_ui.c and by /status) for an AP that isn't running, and a
+     * redundant esp_wifi_set_mode(STA) would follow. A failed get_mode falls
+     * through to the original behavior. */
+    wifi_mode_t cur_mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&cur_mode) == ESP_OK && cur_mode == WIFI_MODE_STA) {
+        s_wifi.ap_pending_teardown = false;
+        s_wifi.ap_fallback_active = false;
+        return;
+    }
+    if (ap_teardown_should_defer()) {
+        s_wifi.ap_pending_teardown = true;
+        ESP_LOGI(WIFI_PROV_TAG,
+                 "station joined but a user is logged in (or a client is on the AP) -- "
+                 "keeping fallback AP up until they're gone");
+        return;
+    }
+    s_wifi.ap_pending_teardown = false;
+    s_wifi.ap_fallback_active = false;
+    ESP_LOGI(WIFI_PROV_TAG, "station joined, dropping fallback AP");
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+    }
+}
+
 void cancel_ap_fallback_timer(void)
 {
     if (s_wifi.ap_fallback_timer) {
@@ -382,6 +429,20 @@ bool reconcile_sta_state(void)
                  (int)s_wifi.state);
         s_wifi.state = WIFI_PROV_STATE_CONNECTED;
         cancel_ap_fallback_timer();
+        /* 2026-09-28 review follow-up: this is the "IP lost, then regained"
+         * (or "a queued GOT_IP was dropped") path -- the only ground-truth
+         * repair point in the file, per this function's own header comment.
+         * Before this fix it repaired state/rssi/ip-cache but never revisited
+         * the fallback AP, so a board that reconnected this way (rather than
+         * via a fresh IP_EVENT_STA_GOT_IP) could sit APSTA with the fallback
+         * AP up indefinitely even once the home link was solid again. Route
+         * it through the same deferred-teardown decision GOT_IP itself uses
+         * -- try_drop_fallback_ap_after_join() is a no-op past its static-IP
+         * gate but otherwise defers/drops exactly as a normal reconnect
+         * would. Mode is already confirmed HOME by the check at the top of
+         * this function, so a deliberate operator AP/APSTA choice (mode ==
+         * WIFI_PROV_MODE_AP) is never reachable here. */
+        try_drop_fallback_ap_after_join();
     }
     return true;
 }
@@ -692,22 +753,10 @@ void do_ev_got_ip(void)
     /* 2026-09-28 owner request: never cut a logged-in operator off by
      * dropping the AP out from under them the instant home Wi-Fi comes back.
      * Deferred here means do_rescan_tick()'s existing 30s cadence retries
-     * the teardown -- no new timer, no new task. */
-    if (ap_teardown_should_defer()) {
-        s_wifi.ap_pending_teardown = true;
-        ESP_LOGI(WIFI_PROV_TAG,
-                 "station joined but a user is logged in (or a client is on the AP) -- "
-                 "keeping fallback AP up until they're gone");
-        return;
-    }
-    s_wifi.ap_pending_teardown = false;
-    s_wifi.ap_fallback_active = false;
-
-    ESP_LOGI(WIFI_PROV_TAG, "station joined, dropping fallback AP");
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) {
-        ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
-    }
+     * the teardown -- no new timer, no new task. (2026-09-28 follow-up:
+     * factored into try_drop_fallback_ap_after_join(), shared with
+     * do_confirm_static_reachable() and reconcile_sta_state().) */
+    try_drop_fallback_ap_after_join();
 }
 
 /* Runs on owner_task(), posted for by wifi_prov_note_possible_static_
@@ -728,20 +777,11 @@ void do_confirm_static_reachable(void)
     /* Same logged-in-user defer as do_ev_got_ip() above -- a static-IP join
      * reaching this function has already proven L3 reachability, but that is
      * an orthogonal condition to "is anyone logged in right now", and both
-     * must hold before the AP actually comes down. */
-    if (ap_teardown_should_defer()) {
-        s_wifi.ap_pending_teardown = true;
-        ESP_LOGI(WIFI_PROV_TAG,
-                 "static IP confirmed reachable but a user is logged in (or a client is on the AP) -- "
-                 "keeping fallback AP up until they're gone");
-        return;
-    }
-    s_wifi.ap_pending_teardown = false;
-    s_wifi.ap_fallback_active = false;
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) {
-        ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
-    }
+     * must hold before the AP actually comes down. (2026-09-28 follow-up:
+     * shared with do_ev_got_ip() and reconcile_sta_state() via
+     * try_drop_fallback_ap_after_join(); static_ip_confirmed is already true
+     * by this point, so its gate is a no-op here.) */
+    try_drop_fallback_ap_after_join();
 }
 
 /* Public entry point for confirming a STATIC join is actually reachable --

@@ -190,7 +190,23 @@ $requiredNames = @(
     # mark has to stay measurable. Tagged boot-once (not config/on-demand):
     # ABSENT would still mean its stack_margin_register() call site never
     # fired at all, which is a fault; DEAD after boot is its normal state.
-    "pico_auto_update"  # liveness: boot-once
+    "pico_auto_update",  # liveness: boot-once
+
+    # 2026-09-28: wifi_prov_owner (wifi_prov.c's owner_task) was exempted
+    # below with a stale reason ("provisioning-only command owner, torn down
+    # with the provisioning session") -- it is in fact created once,
+    # unconditionally, in main_boot_early.c's wifi_prov_start() call and
+    # never torn down (owner_task() runs for(;;) for the process lifetime;
+    # see its own header comment "the ONE task that ever writes s_wifi").
+    # Moved from $exemptCreatedNames to here once ap_teardown_should_defer()
+    # (wifi_prov_link.c) added an http_auth_policy_web_enabled()/
+    # http_auth_any_session_active() read plus wifi_prov_get_ap_client_count()'s
+    # wifi_sta_list_t (wifi_prov_api.c, ~124 bytes measured against the real
+    # ESP-IDF wifi_sta_info_t/ESP_WIFI_MAX_CONN_NUM=10 layout -- not large
+    # enough on its own to justify raising the task's existing 4096 B stack,
+    # but this task's high-water mark had never been measured at all before
+    # this fix, on a heap-allocated stack that carries no .dram0.bss cost).
+    "wifi_prov_owner"  # liveness: always
 )
 # 2026-09-08: the six UART bridge tasks above (thermo/touch/ui_test/io/
 # uart_log/safety) were long-lived (`while (true)`, never self-deleting)
@@ -539,7 +555,6 @@ $exemptCreatedNames = @{
     "recovery_exit_reboot" = "ota_http_recovery.c ota_recovery_exit_reboot_task: registered under the shortened name 'recovery_exit' (see that file's comment), not this FreeRTOS task-name string"
     "sw_reset_reboot"      = "sw_reset_http.c sw_reset_reboot_task: one-shot reboot-after-delay (send ANNOUNCE_REBOOT, then hal_wdt_reboot()), never returns to measure -- same shape as factory_reset_reboot/ota_rollback_reboot above"
     "ota_pico_relay"    = "ota_pico_relay.c relay_task_fn: one-shot relay session, self-deletes"
-    "wifi_prov_owner"   = "wifi_prov.c owner_task: provisioning-only command owner, torn down with the provisioning session"
     "info_boot_push"    = "uart_bridge_info.c info_boot_push_task: one-shot boot version push, self-deletes"
     # (b) long-lived, registered for real, under a different literal name.
     "i2c_owner_task"    = "i2c_owner.c owner_task: registered per-caller under 'i2c_owner_sx1509'/'i2c_owner_ns2009' (SX1509.c/NS2009.c), not this FreeRTOS task-name string -- see i2c_owner.c's own comment"

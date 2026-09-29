@@ -98,6 +98,7 @@
 #include "nvs_flash.h"
 
 #include "settings.h"
+#include "stack_margin.h"
 #include "wifi_provision_state.h"
 
 const char *WIFI_PROV_TAG = "wifi_prov";
@@ -691,14 +692,29 @@ esp_err_t wifi_prov_start(void)
         ESP_LOGE(WIFI_PROV_TAG, "xQueueCreate(wifi_owner) failed");
         return ESP_ERR_NO_MEM;
     }
+    /* 2026-09-28 stack-margin registration: this task is long-lived (created
+     * once here, never torn down -- see owner_task()'s own header, "the ONE
+     * task that ever writes s_wifi", running for(;;) for the process
+     * lifetime), so its check_stack_margin_registration.ps1 exemption
+     * ("provisioning-only command owner, torn down with the provisioning
+     * session") was stale even before this change. It became actively wrong
+     * once ap_teardown_should_defer() (wifi_prov_link.c, 2026-09-28) added an
+     * http_auth_policy_web_enabled()/http_auth_any_session_active() read and
+     * wifi_prov_get_ap_client_count()'s wifi_sta_list_t (wifi_prov_api.c) --
+     * new work on a task whose high-water mark was never being measured at
+     * all. static TaskHandle_t so stack_margin_register()'s slot outlives
+     * this function, same pattern as every other registered task
+     * (boot_button.c's s_task_handle, etc.). */
+    static TaskHandle_t s_owner_task_handle;
     BaseType_t task_created =
-        xTaskCreatePinnedToCore(owner_task, "wifi_prov_owner", 4096, NULL, 5, NULL, tskNO_AFFINITY);
+        xTaskCreatePinnedToCore(owner_task, "wifi_prov_owner", 4096, NULL, 5, &s_owner_task_handle, tskNO_AFFINITY);
     if (task_created != pdPASS) {
         ESP_LOGE(WIFI_PROV_TAG, "xTaskCreatePinnedToCore(wifi_prov_owner) failed");
         vQueueDelete(s_wifi_cmd_queue);
         s_wifi_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("wifi_prov_owner", &s_owner_task_handle, 4096);
 
     err = esp_wifi_start();
     if (err != ESP_OK) {

@@ -59,11 +59,20 @@ static inline esp_err_t esp_netif_set_ip_info(esp_netif_t *netif, const esp_neti
     return ESP_OK;
 }
 
+/* 2026-09-28: controllable by a test (default 0, i.e. every pre-existing
+ * caller's "no lease" behavior is unchanged) so wifi_prov_link.c's
+ * sta_link_is_live()/reconcile_sta_state() can be exercised on a station
+ * that genuinely holds a live IP -- see that comment's "associated but no
+ * lease" check, which no test could previously satisfy since this stub
+ * always reported addr 0. Declared here (not just defined in a .c) so any
+ * host-test file including this stub may set it. */
+extern uint32_t g_stub_netif_ip_addr;
+
 static inline esp_err_t esp_netif_get_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *info)
 {
     (void)netif;
     if (info) {
-        info->ip.addr = 0;
+        info->ip.addr = g_stub_netif_ip_addr;
         info->netmask.addr = 0;
         info->gw.addr = 0;
     }
