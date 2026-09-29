@@ -399,6 +399,20 @@ void do_ap_fallback_tick(void)
     if (reconcile_sta_state()) {
         return;
     }
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    /* 2026-09-28 review fix: if the AP is already running (boot join and
+     * start_sta_join() both start in APSTA, and a deferred teardown leaves
+     * it up), leave it alone -- re-running set_mode/apply_ap_config() on a
+     * live AP is the same "re-apply to force clients to re-pick it up" move
+     * do_set_ap_password() makes deliberately, and must not happen here as a
+     * side effect of a timer. See s_wifi.ap_fallback_active's comment. */
+    wifi_mode_t cur_mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&cur_mode) == ESP_OK && (cur_mode == WIFI_MODE_APSTA || cur_mode == WIFI_MODE_AP)) {
+        ESP_LOGW(WIFI_PROV_TAG, "station join did not land within the timeout -- fallback AP already up, "
+                                "retrying on the rescan cadence");
+        s_wifi.ap_fallback_active = true;
+        return;
+    }
     ESP_LOGW(WIFI_PROV_TAG, "station join did not land within the timeout -- bringing the fallback AP up");
     /* Mode first, then config -- the current mode here can be STA-only (see
      * on_ip_event()), which does not include the AP interface; the same
@@ -408,8 +422,8 @@ void do_ap_fallback_tick(void)
         ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(APSTA) failed: %s", esp_err_to_name(err));
     } else {
         apply_ap_config();
+        s_wifi.ap_fallback_active = true;
     }
-    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
 }
 
 void ap_fallback_timer_cb(void *arg)
@@ -450,6 +464,7 @@ void do_rescan_tick(void)
             return; /* still logged in / still a client on the AP -- try again next tick */
         }
         s_wifi.ap_pending_teardown = false;
+        s_wifi.ap_fallback_active = false;
         ESP_LOGI(WIFI_PROV_TAG, "no user logged in (or no AP client) any more -- dropping deferred fallback AP");
         esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err != ESP_OK) {
@@ -509,6 +524,9 @@ void start_sta_join(void)
 {
     select_and_apply_join_candidate();
     cancel_ap_fallback_timer();
+    /* Operator-initiated join: fast immediate retries again for this
+     * attempt's own timeout window (see s_wifi.ap_fallback_active). */
+    s_wifi.ap_fallback_active = false;
     s_wifi.state = WIFI_PROV_STATE_CONNECTING;
     esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (mode_err != ESP_OK) {
@@ -563,6 +581,20 @@ void do_ev_sta_disconnected(void)
         }
         bool was_connected = (s_wifi.state == WIFI_PROV_STATE_CONNECTED);
         s_wifi.state = was_connected ? WIFI_PROV_STATE_RECONNECTING : WIFI_PROV_STATE_CONNECTING;
+        /* The station is really down, so a deferred AP teardown (which only
+         * means anything while CONNECTED) is no longer pending; the next
+         * GOT_IP re-decides it. */
+        s_wifi.ap_pending_teardown = false;
+        if (s_wifi.ap_fallback_active) {
+            /* 2026-09-28 review fix: the fallback AP is already up and may
+             * have clients on it. No immediate retry and no timer re-arm --
+             * do_rescan_tick()'s 30 s cadence retries the join instead. See
+             * s_wifi.ap_fallback_active's comment for why. */
+            s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+            ESP_LOGI(WIFI_PROV_TAG, "station disconnected while the fallback AP is up -- next join attempt on the "
+                                    "rescan cadence");
+            return;
+        }
         ESP_LOGI(WIFI_PROV_TAG, "station disconnected, retrying join");
         /* Still deliberately NOT re-running select_and_apply_join_candidate()'s
          * scan-based tie-break here, but for a DIFFERENT reason than the
@@ -669,6 +701,7 @@ void do_ev_got_ip(void)
         return;
     }
     s_wifi.ap_pending_teardown = false;
+    s_wifi.ap_fallback_active = false;
 
     ESP_LOGI(WIFI_PROV_TAG, "station joined, dropping fallback AP");
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -704,6 +737,7 @@ void do_confirm_static_reachable(void)
         return;
     }
     s_wifi.ap_pending_teardown = false;
+    s_wifi.ap_fallback_active = false;
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));

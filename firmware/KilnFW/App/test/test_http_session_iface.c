@@ -398,6 +398,51 @@ static void test_logout_does_not_require_a_still_valid_session(void)
                "logout tore the session down with no IP check to satisfy");
 }
 
+// 2026-09-28 AP-fallback teardown gate: http_auth_any_session_active() is
+// what wifi_prov_link.c's ap_teardown_should_defer() asks (test_wifi_prov.c
+// only fakes it). Drives the REAL function against the REAL table/policy:
+// empty table, a live session, the same session once expired, a logout,
+// and the deliberate fail-toward-TRUE on an UNREADABLE policy record.
+static void test_any_session_active(void)
+{
+    TEST_SECTION("http_auth_any_session_active -- counts only still-valid sessions, "
+                 "fails toward TRUE on an UNREADABLE policy");
+
+    reset_all();
+    set_policy_timeout(60);
+    TEST_CHECK(!http_auth_any_session_active(), "empty table -- nobody logged in");
+
+    make_session("tok-any-1", WEB_AUTH_SESSION_ROLE_USER, 0);
+    fake_time_advance_ms(59000);
+    TEST_CHECK(http_auth_any_session_active(), "a session inside its timeout counts as logged in");
+
+    fake_time_advance_ms(2000); // 61s -- past the 60s timeout, slot still in_use
+    TEST_CHECK(!http_auth_any_session_active(),
+               "an expired-but-still-in_use slot does NOT count -- an idle tab must not hold the AP up");
+
+    make_session("tok-any-2", WEB_AUTH_SESSION_ROLE_ADMIN, 61000);
+    TEST_CHECK(http_auth_any_session_active(), "a fresh login counts again");
+    http_auth_session_logout("tok-any-2");
+    TEST_CHECK(!http_auth_any_session_active(), "logout ends it");
+
+    make_session("tok-any-3", WEB_AUTH_SESSION_ROLE_USER, 61000);
+    fake_time_advance_ms(120000); // well expired under a readable policy
+    TEST_CHECK(!http_auth_any_session_active(), "setup: expired under the readable policy");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "setup: open kiln_auth");
+    uint8_t blob[64];
+    size_t blob_len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, "auth_policy", blob, &blob_len) == HAL_OK, "setup: read policy blob");
+    TEST_CHECK(blob_len > 0 && blob_len <= sizeof(blob), "setup: policy blob length sane");
+    blob[blob_len - 1] ^= 0xFFu; // corrupt the trailing crc32
+    TEST_CHECK(hal_kv_set_blob(&h, "auth_policy", blob, blob_len) == HAL_OK, "setup: write corrupted blob");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit corruption");
+    hal_kv_close(&h);
+    TEST_CHECK(http_auth_any_session_active(),
+               "UNREADABLE policy reports TRUE (keep the AP up) even with every session expired");
+    set_policy_timeout(60); // repair for later tests
+}
+
 void run_test_http_session_iface(void) {
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
@@ -410,4 +455,5 @@ void run_test_http_session_iface(void) {
     test_logout_destroys_the_session();
     test_logout_is_idempotent_and_tolerates_unknown_tokens();
     test_logout_does_not_require_a_still_valid_session();
+    test_any_session_active();
 }

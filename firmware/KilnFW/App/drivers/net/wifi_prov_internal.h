@@ -130,6 +130,21 @@ struct wifi_prov_state {
      * independent and a static join can need BOTH satisfied before the AP
      * actually comes down. */
     bool ap_pending_teardown;
+
+    /* 2026-09-28 review fix: true once do_ap_fallback_tick() has raised (or
+     * found already up) the fallback AP after a failed/lost home join, until
+     * that AP is actually torn down again (do_ev_got_ip()/
+     * do_confirm_static_reachable()/do_rescan_tick()'s deferred teardown),
+     * an operator-initiated start_sta_join(), or a switch to AP mode. While
+     * set, do_ev_sta_disconnected() neither retries esp_wifi_connect()
+     * immediately nor re-arms the fallback timer: with the home network gone
+     * every failed connect produces another DISCONNECTED, so the immediate
+     * retry kept the STA radio scanning off the AP's channel nearly
+     * continuously, and each re-armed timer re-ran do_ap_fallback_tick()'s
+     * esp_wifi_set_mode(APSTA)+apply_ap_config() on the already-running AP
+     * about once a minute -- both disrupt the very clients the fallback AP
+     * exists for. do_rescan_tick()'s 30 s cadence is the retry instead. */
+    bool ap_fallback_active;
 };
 
 extern struct wifi_prov_state s_wifi;

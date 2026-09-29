@@ -348,6 +348,8 @@ esp_err_t do_set_mode(wifi_prov_mode_t mode, bool *out_join_after_reply)
 
     if (mode == WIFI_PROV_MODE_AP) {
         cancel_ap_fallback_timer();
+        s_wifi.ap_pending_teardown = false;
+        s_wifi.ap_fallback_active = false;
         s_wifi.state = WIFI_PROV_STATE_AP_MODE;
         /* Mode first, then config -- switching here from home mode while
          * connected leaves the driver in WIFI_MODE_STA, which doesn't

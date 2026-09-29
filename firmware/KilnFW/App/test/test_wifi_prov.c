@@ -774,6 +774,81 @@ static void test_rescan_tick_retries_deferred_teardown_until_session_ends(void)
     TEST_CHECK(!s_wifi.ap_pending_teardown, "flag cleared once the teardown actually runs");
 }
 
+static void test_ap_fallback_tick_leaves_running_ap_alone(void)
+{
+    TEST_SECTION("do_ap_fallback_tick -- AP already up (APSTA): no set_mode/apply_ap_config on the live AP, "
+                 "just record the fallback (2026-09-28 review fix)");
+
+    reset_state();
+    s_wifi.state = WIFI_PROV_STATE_CONNECTING;
+    g_stub_wifi_mode = WIFI_MODE_APSTA; // boot join / start_sta_join() already run APSTA
+    g_stub_ap_info_result = ESP_FAIL;
+
+    do_ap_fallback_tick();
+
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 0, "the running AP is not re-applied (would disrupt its clients)");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_RECONNECTING, "state still records the fallback");
+    TEST_CHECK(s_wifi.ap_fallback_active, "ap_fallback_active set -- retries move to the rescan cadence");
+}
+
+static void test_disconnect_while_fallback_ap_up_waits_for_rescan(void)
+{
+    TEST_SECTION("do_ev_sta_disconnected -- fallback AP up: no immediate esp_wifi_connect() retry loop "
+                 "(2026-09-28 review fix); before the fallback, retries stay immediate");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.saved_nets.count = 1;
+    s_wifi.state = WIFI_PROV_STATE_CONNECTING;
+    g_stub_ap_info_result = ESP_FAIL; // really down -- reconcile_sta_state() finds no live link
+    g_stub_wifi_connect_calls = 0;
+
+    s_wifi.ap_fallback_active = false;
+    do_ev_sta_disconnected();
+    TEST_CHECK(g_stub_wifi_connect_calls == 1, "inside the join timeout window: immediate retry, as before");
+
+    s_wifi.ap_fallback_active = true;
+    s_wifi.ap_pending_teardown = true; // stale from an earlier deferred teardown
+    do_ev_sta_disconnected();
+    TEST_CHECK(g_stub_wifi_connect_calls == 1, "fallback AP up: NO immediate retry -- do_rescan_tick() owns it");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_RECONNECTING, "state is RECONNECTING");
+    TEST_CHECK(!s_wifi.ap_pending_teardown, "a real disconnect clears the now-meaningless pending teardown");
+
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 2, "the 30 s rescan tick is what retries the join");
+    TEST_CHECK(s_wifi.ap_fallback_active, "still in fallback until a join lands");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
+static void test_teardown_and_mode_changes_clear_fallback_active(void)
+{
+    TEST_SECTION("ap_fallback_active -- cleared by an actual AP teardown and by a switch to AP mode");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    s_wifi.ap_fallback_active = true;
+    do_ev_got_ip();
+    TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_STA, "setup: AP torn down (nobody logged in)");
+    TEST_CHECK(!s_wifi.ap_fallback_active, "teardown clears ap_fallback_active");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    s_wifi.ap_fallback_active = true;
+    g_stub_web_auth_enabled = true;
+    g_stub_any_session_active = true;
+    do_ev_got_ip();
+    TEST_CHECK(s_wifi.ap_fallback_active, "a DEFERRED teardown keeps ap_fallback_active (AP still up)");
+
+    bool join_after = true;
+    do_set_mode(WIFI_PROV_MODE_AP, &join_after);
+    TEST_CHECK(!s_wifi.ap_fallback_active, "switch to AP mode clears ap_fallback_active");
+    TEST_CHECK(!s_wifi.ap_pending_teardown, "switch to AP mode clears ap_pending_teardown");
+    TEST_CHECK(!wifi_prov_get_ap_pending_teardown(), "/status and the LCD no longer report [AP kept up]");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
 // OWN, SEPARATE executable (build_host_tests.ps1's exe51), not part of the
 // "main" combined executable this file used to live in: the fakes below for
 // http_auth_policy_web_enabled()/http_auth_any_session_active() (added
@@ -812,6 +887,9 @@ void run_test_wifi_prov(void)
     test_got_ip_drops_ap_auth_off_no_ap_client();
     test_confirm_static_reachable_defers_ap_teardown_while_session_active();
     test_rescan_tick_retries_deferred_teardown_until_session_ends();
+    test_ap_fallback_tick_leaves_running_ap_alone();
+    test_disconnect_while_fallback_ap_up_waits_for_rescan();
+    test_teardown_and_mode_changes_clear_fallback_active();
 }
 
 int main(void)
