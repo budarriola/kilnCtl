@@ -951,8 +951,15 @@ size_t safety_cfg_store_param_count(void)
 // restore_in_flight_refused() below flips s_test_backup_restore_in_flight to
 // exercise the sweep's own refusal.
 static bool s_test_backup_restore_in_flight = false;
+// Backup/sweep review (2026-09-28): what zones_current_sweep_is_active()
+// read at the most recent call into this stub. Lets the during-refetch test
+// prove the sweep publishes s_sweep.active BEFORE its post-claim re-read
+// (the Dekker order backup_import_job() relies on), not merely that it
+// refuses.
+static bool s_test_restore_probe_saw_sweep_active = false;
 bool backup_import_restore_in_flight(void)
 {
+    s_test_restore_probe_saw_sweep_active = zones_current_sweep_is_active();
     return s_test_backup_restore_in_flight;
 }
 // 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
@@ -13223,10 +13230,9 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
 // early check is what actually fires here -- so the heat claim is never
 // taken in the first place, and there is nothing to give back
 // (claim_end_calls stays 0, not 1 as it was when this was the only check).
-// This test now exists purely to prove the LATER, TOCTOU-closing check
-// still exists and still works once the flag is set only after the early
-// check has already passed -- see the GREEN-then-set-late variant just
-// below.
+// The LATER, TOCTOU-closing check is covered separately by
+// test_zones_current_sweep_start_restore_in_flight_refused_during_refetch()
+// below, which sets the flag only after the early check has passed.
 static void test_zones_current_sweep_start_restore_in_flight_refused(void)
 {
     static kiln_io_t dummy_io;
@@ -13384,6 +13390,9 @@ static void test_zones_current_sweep_start_restore_in_flight_refused_during_refe
               "the claim WAS taken this time (the race window is after the early check)");
     TEST_CHECK(s_test_heat_sweep_claim_end_calls == 1,
               "...and is handed back, not leaked, once the later check refuses");
+    TEST_CHECK(s_test_restore_probe_saw_sweep_active,
+              "s_sweep.active is published BEFORE the post-claim flag re-read (backup_import_job() sets its "
+              "flag then reads active, so the opposite order lets both proceed)");
 
     reset_sweep_state_for_test();
     zones_http_set_hw(NULL, NULL, NULL);

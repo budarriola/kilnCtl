@@ -449,12 +449,18 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
     return g_stub_ota_ack_no_safety;
 }
 
+// Records the reason the code under test actually handed to the refusal
+// sender, so a test can prove a specific interlock reason (e.g. the zone
+// sweep's) reaches the response unmodified rather than only that the
+// interlock was called.
+static char g_stub_ota_last_refusal_reason[OTA_INTERLOCK_REASON_MAX] = "";
 esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
                                           const char *reason)
 {
     (void)req;
     (void)r;
-    (void)reason;
+    snprintf(g_stub_ota_last_refusal_reason, sizeof(g_stub_ota_last_refusal_reason), "%s",
+             reason ? reason : "");
     return ESP_OK;
 }
 
@@ -2277,6 +2283,7 @@ static void reset_backup_import_post_stubs(void)
     g_stub_ota_interlock_result = OTA_INTERLOCK_OK;
     g_stub_ota_interlock_reason[0] = '\0';
     g_stub_ota_interlock_call_count = 0;
+    g_stub_ota_last_refusal_reason[0] = '\0';
     s_post_last_status[0] = '\0';
     s_post_last_body[0] = '\0';
 }
@@ -2351,6 +2358,8 @@ static void test_backup_import_post_refused_by_sweep_reason_via_interlock(void)
 
     TEST_CHECK(err == ESP_OK, "backup_import_post_handler must always return ESP_OK");
     TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the interlock (which owns the sweep check) is reached");
+    TEST_CHECK(strcmp(g_stub_ota_last_refusal_reason, "a zone current sweep is running") == 0,
+              "the sweep's own reason reaches the refusal sender unmodified");
     reset_backup_import_post_stubs();
 }
 
@@ -2451,13 +2460,12 @@ static void test_backup_import_job_clears_restore_in_flight_flag(void)
 // starts after the handler's own checks but before the job's re-check must
 // still be caught, same as the firing/autotune case
 // test_backup_import_job_rechecks_mode_gate_before_writing() already proves.
-// Ordering note (mind-the-TOCTOU review point): backup_import_job() sets
-// s_backup_restore_in_flight BEFORE backup_import_job_inner()'s re-check
-// runs (see backup_import_job()'s own doc comment), and that re-check's
-// interlock call is what would observe a live sweep -- so the flag is
-// already published by the time anything checks sweep state here, the same
-// flag-set-then-check order test_backup_import_job_clears_restore_in_flight_
-// flag() already proves for the mode-gate half of this same re-check.
+// Ordering note: backup_import_job() sets s_backup_restore_in_flight BEFORE
+// this re-check reads zones_current_sweep_is_active(). That is only half of
+// the race closure: zones_current_sweep_start() must likewise publish
+// s_sweep.active BEFORE its own post-claim re-read of the flag -- proven by
+// test_zones_current_sweep_start_restore_in_flight_refused_during_refetch()
+// in test_zones_http.c.
 static void test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock(void)
 {
     TEST_SECTION("backup_import_job -- a sweep that started after the handler's checks is refused "
@@ -2472,6 +2480,8 @@ static void test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock
 
     TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the job re-runs the interlock, which owns the sweep check");
     TEST_CHECK(g_total_write_calls == 0, "nothing written once the sweep-carrying interlock re-check refuses");
+    TEST_CHECK(strcmp(g_stub_ota_last_refusal_reason, "a zone current sweep is running") == 0,
+              "the job's re-check sends the sweep's own reason unmodified");
 
     reset_backup_import_post_stubs();
     reset_stub_state();

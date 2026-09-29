@@ -2389,17 +2389,27 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
      * published, is this side's own half of the protection: a restore whose
      * commit pass is already under way is always caught here, closing the
      * same class of window profile/autotune start already closes for
-     * themselves. This does not by itself make a sweep-vs-restore race fully
-     * symmetric (backup_import.c's own preconditions, not this flag, are
-     * what would have to catch a sweep that starts after those preconditions
-     * were checked but before the flag is set) -- out of scope for this
-     * fix, which only closes the "restore already in flight" side. */
+     * themselves.
+     *
+     * Symmetry (backup/sweep review, 2026-09-28): backup_import_job() sets
+     * its flag and THEN reads s_sweep.active (via
+     * ota_http_check_interlocks()'s zones_current_sweep_is_active()), not
+     * the sweep heat claim above. So s_sweep.active must be published BEFORE
+     * this re-read: with the old order (read flag, then set active) a
+     * restore could set its flag and read active=false in the gap, and both
+     * sides would proceed. Publish first, re-read second, roll back on
+     * refusal -- each side writes its own marker before reading the other's.
+     * Both accesses are volatile/atomic, which the Xtensa GCC backend
+     * serializes with memw. A concurrent reader that sees active=true for
+     * the few instructions before a rollback refuses spuriously, never
+     * unsafely. */
+    s_sweep.active = true;
     if (backup_import_restore_in_flight()) {
+        s_sweep.active = false;
         relay_authority_heat_sweep_claim_end();
         return ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT;
     }
 
-    s_sweep.active = true;
     s_sweep.abort_requested = false;
     s_sweep.state = ZONE_SWEEP_RUNNING;
     s_sweep.zone_index = 0;
