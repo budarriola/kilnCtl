@@ -1,5 +1,6 @@
 #include "ui_lcd_lock.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -39,6 +40,15 @@ static ui_lcd_lock_relock_cb_t s_relock_cb; // see ui_lcd_lock.h's doc comment
 // uncalibrated panel) is never kicked on the first tick. Set false while the
 // policy is disabled, so enabling auth reads as an edge on its first tick.
 static bool s_was_locked = true;
+
+// Set by ui_lcd_lock_force_lock(), which runs on the httpd task
+// (security_backend_web_auth.c's policy/credential-change call sites) --
+// never touch s_lock or any LVGL object from there (LVGL is only safe to
+// touch from the LVGL task/port lock). This is the whole hand-off: a single
+// atomic flag, no lock held across any producer call. tick_timer_cb() below
+// (LVGL task) is the only reader/clearer, and it is also the only place
+// lcd_lock_force_lock(&s_lock) and the LVGL close_prompt()/keypad calls run.
+static atomic_bool s_force_lock_requested = false;
 
 static ui_lcd_lock_policy_t default_policy(void)
 {
@@ -131,6 +141,20 @@ static void show_prompt(uint32_t seconds_left)
 static void tick_timer_cb(lv_timer_t *t)
 {
     (void)t;
+
+    // Consume any pending ui_lcd_lock_force_lock() request from the httpd
+    // task here, on the LVGL task, so lcd_lock_force_lock(&s_lock) is only
+    // ever called from this one place. The actual close_prompt()/keypad
+    // teardown for this transition happens below via the existing
+    // "locked_now && !s_was_locked" edge detection -- no need to duplicate it
+    // here.
+    if (atomic_exchange(&s_force_lock_requested, false)) {
+        if (!lcd_lock_is_locked(&s_lock)) {
+            lcd_lock_force_lock(&s_lock);
+            ESP_LOGI(TAG, "LCD session force-locked (policy transition)");
+        }
+    }
+
     ui_lcd_lock_policy_t policy = current_policy();
     if (!policy.enabled) {
         // Item 4b fix (2026-09-17 adversarial review, 1179e2d3): this used
@@ -252,15 +276,14 @@ void ui_lcd_lock_note_activity(void)
 
 void ui_lcd_lock_force_lock(void)
 {
-    if (lcd_lock_is_locked(&s_lock)) {
-        return;
-    }
-    lcd_lock_force_lock(&s_lock);
-    close_prompt();
-    if (ui_lcd_keypad_is_open()) {
-        ui_lcd_keypad_force_close();
-    }
-    ESP_LOGI(TAG, "LCD session force-locked (policy transition)");
+    // Called from the httpd task (security_backend_web_auth.c). Must never
+    // touch s_lock or any LVGL object directly here -- LVGL is only safe to
+    // touch from the LVGL task/port lock, and s_lock is otherwise only ever
+    // read/written from that same task's tick_timer_cb(). Post the request
+    // and return; tick_timer_cb() performs the actual lock transition and
+    // any resulting close_prompt()/keypad teardown within one tick
+    // (UI_LCD_LOCK_TICK_PERIOD_MS).
+    atomic_store(&s_force_lock_requested, true);
 }
 
 typedef struct {

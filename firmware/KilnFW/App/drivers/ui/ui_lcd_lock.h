@@ -53,7 +53,11 @@ bool ui_lcd_lock_has_role(lcd_pin_role_t role);
 // security_backend_web_auth.c's set_policy path. A no-op if already locked.
 // Equivalent in effect to letting the inactivity tick expire the session,
 // exposed directly so a caller never has to fake a clock jump to get the
-// same result.
+// same result. Safe to call from the httpd task: it only posts an atomic
+// request and returns immediately, never touching s_lock or any LVGL object
+// itself -- the actual lock transition (and any resulting close_prompt()/
+// keypad teardown) runs on the LVGL task's tick, within one
+// UI_LCD_LOCK_TICK_PERIOD_MS (1s).
 void ui_lcd_lock_force_lock(void);
 
 // Any touch delivered to LVGL counts as activity (section 8: "including a
