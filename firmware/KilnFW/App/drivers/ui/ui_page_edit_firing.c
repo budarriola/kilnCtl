@@ -224,7 +224,32 @@ void ui_page_edit_firing_prepare(void)
 static void poll_timer_cb(lv_timer_t *t)
 {
     (void)t;
-    if (!s_pg || !s_pg->active) {
+    if (!s_pg) {
+        return;
+    }
+    if (!s_pg->active) {
+        /* The page was opened (or the previous firing ended) with nothing
+         * running -- without this, the page would only ever notice a firing
+         * that starts later by being closed and reopened (review follow-up
+         * (c)). Reuses ui_page_edit_firing_prepare()'s own load path
+         * (edit_firing_load()) rather than duplicating it, and leaves the
+         * working allocation in place across a failed attempt so an idle
+         * page isn't malloc'ing/freeing every REFRESH_MS tick; unload's
+         * release_working() still frees it exactly as before, and the PIN
+         * gate this page sits behind is unaffected -- this timer only ever
+         * runs once the page is already the loaded screen. */
+        if (!s_pg->working) {
+            s_pg->working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!s_pg->working) {
+                s_pg->working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_8BIT);
+            }
+        }
+        if (s_pg->working && edit_firing_load(s_pg->working, &s_pg->ctx)) {
+            s_pg->active = true;
+            s_pg->cur_seg = s_pg->ctx.running_seg;
+            s_pg->applied_generation = 0;
+            refresh();
+        }
         return;
     }
     edit_firing_poll_t pr;

@@ -183,10 +183,18 @@ bool edit_firing_apply(const profile_t *candidate, edit_firing_ctx_t *ctx, char 
         return false;
     }
 
-    /* 3. Window check against the same origin reference the HTTP route uses. */
+    /* 3. Window check against the same origin reference the HTTP route uses.
+     * origin_is_builtin defaults to the same id-range test the HTTP fork
+     * route (profiles_live_http.c) uses, and is overridden from the
+     * persisted live_edit_v1 record ONLY when that record actually belongs
+     * to THIS origin -- live_profile_load_record() returns whatever record
+     * is on flash with no origin filtering of its own, so a stale record
+     * left behind by a different profile's edit (e.g. after a discard that
+     * predates this firing) must never be allowed to steer this firing's
+     * fork/window-check decision. */
     bool origin_is_builtin = (st.profile_id >= PROFILES_MAX_COUNT);
     live_edit_record_t rec;
-    if (live_profile_load_record(&rec)) {
+    if (live_profile_load_record(&rec) && rec.origin_id == st.profile_id) {
         origin_is_builtin = rec.origin_is_builtin;
     }
     profile_t *origin = alloc_profile();

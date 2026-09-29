@@ -383,6 +383,48 @@ static void test_apply_builtin_origin(void)
     TEST_CHECK(strcmp(rec.origin_name, "C6TEST") == 0, "origin name is the builtin code, as the fork route uses");
 }
 
+static void test_apply_stale_foreign_origin_record_never_borrowed(void)
+{
+    TEST_SECTION("edit_firing_apply -- origin_is_builtin is derived from THIS firing's origin id, never taken "
+                 "from a stale live_edit record left pending by a DIFFERENT origin (review follow-up (a))");
+    reset_world();
+
+    // A previous, still-undecided live edit is on flash for the BUILTIN origin
+    // -- e.g. that firing tripped or rebooted before the operator ever answered
+    // the save-as/overwrite/discard prompt (live_edit_should_prompt()'s own
+    // scenario). It is deliberately left pending: nothing decides or clears it.
+    g_fake_builtin_on = true;
+    g_fake_builtin_profile = make_profile("Cone 6 old");
+    char err[128];
+    live_edit_record_t stale_rec;
+    profile_t tmp;
+    TEST_CHECK(live_profile_fork(PROFILE_BUILTIN_ID_BASE, true, "C6TEST", &g_fake_builtin_profile, &tmp, &stale_rec,
+                                  err, sizeof(err)),
+               "stale fork for a builtin origin, left pending/undecided");
+
+    // A NEW firing starts on a different, USER-SLOT origin (5, "Glaze") with no
+    // pending record of its own -- the only record on flash still names the
+    // builtin above.
+    g_fake_live_status.active = true;
+    g_fake_live_status.profile_id = 5;
+    g_fake_live_status.segment_index = 1;
+
+    profile_t w;
+    edit_firing_ctx_t ctx;
+    TEST_CHECK(edit_firing_load(&w, &ctx), "load origin 5 (Glaze, a user slot)");
+    TEST_CHECK(edit_firing_step(&w, 2, ctx.running_seg, EDIT_FIRING_FIELD_TARGET, +1),
+               "edit an upcoming, in-window segment -- otherwise unremarkable");
+    bool ok = edit_firing_apply(&w, &ctx, err, sizeof(err));
+    TEST_CHECK(!ok, "still refused -- the stale builtin record must be resolved before a new one forks");
+    TEST_CHECK(strstr(err, "already pending for a different profile") != NULL,
+               "refused for the REAL reason (live_profile_fork()'s own stale-origin guard, reached only "
+               "because the window check ahead of it correctly loaded origin 5 as a non-builtin) -- "
+               "with the bug, origin_is_builtin is wrongly borrowed as true from the stale builtin record, "
+               "profiles_builtin_get() then refuses id 5, and the apply is refused for the WRONG reason");
+    TEST_CHECK(strstr(err, "origin profile not readable") == NULL,
+               "must not report the wrong-accessor symptom of the origin_is_builtin-from-a-foreign-record bug");
+}
+
 static void test_poll(void)
 {
     TEST_SECTION("edit_firing_poll -- ended / other firing / edited elsewhere / pickup refusal");
@@ -440,6 +482,7 @@ int main(void)
     test_apply_success_forks_then_saves();
     test_apply_refusals_write_nothing();
     test_apply_builtin_origin();
+    test_apply_stale_foreign_origin_record_never_borrowed();
     test_poll();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
