@@ -16,9 +16,11 @@
 > owner login-gate requests — unauthenticated web and LCD users now see
 > dashboards only (`48962395`/`d25d5ccf`, plus `5901b09d`'s doc fixes;
 > `/api/profile_exec/stop` moved to USER tier, `/api/board_temps` and
-> `/api/firing_history` to ADMIN — the other three SAFETY_REDUCE routes,
-> `current_sweep/abort`/`autotune/abort`/`diagnostics/danger/stop`, are
-> untouched, since the physical E-stop is the backstop), and the LCD PIN
+> `/api/firing_history` to ADMIN, and a `59e84b57` follow-up moved the other
+> three former SAFETY_REDUCE routes — `current_sweep/abort`, `autotune/abort`
+> and `diagnostics/danger/stop` — to ADMIN too (the physical E-stop stays
+> the unauthenticated backstop for all of them; `ROUTE_TIER_SAFETY_REDUCE`
+> itself is left in the enum, unused), and the LCD PIN
 > gate (`89fbe6d6` requires the PIN before Stop, Pause/Resume, Menu and the
 > profile picker; relock returns home; shares the web login's
 > `login_backoff` lockout ladder; `e4c5d7da` fixed the keypad's lockout text
@@ -4241,7 +4243,11 @@ Owner instruction, 2026-09-21.
     `5901b09d`, `89fbe6d6`, `e4c5d7da`):** without login, the web and LCD
     show only the dashboards. Every other page and action — including
     Stop — requires login (`/api/profile_exec/stop` moved to USER tier,
-    `/api/board_temps`/`/api/firing_history` to ADMIN). The LCD's PIN gate
+    `/api/board_temps`/`/api/firing_history` to ADMIN; a `59e84b57`
+    follow-up also moved `current_sweep/abort`, `autotune/abort` and
+    `diagnostics/danger/stop` from SAFETY_REDUCE to ADMIN, so those three
+    now need login too — the physical E-stop is the unauthenticated
+    backstop for all of them). The LCD's PIN gate
     follows the same rules as the web password: the shared
     `login_backoff` module's lockout/backoff ladder (5/10/30/60/300 s) and
     the same idle-timeout semantics; the keypad's lockout text now states
