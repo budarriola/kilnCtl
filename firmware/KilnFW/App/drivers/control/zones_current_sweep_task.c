@@ -2244,6 +2244,22 @@ static void zone_sweep_record_ct_attribution(void)
 
 zone_sweep_refusal_t zones_current_sweep_start(void)
 {
+    /* Early restore-in-flight check (2026-09-28, backup/sweep review
+     * follow-up 2): the ct_topology_unknown block a little further down can
+     * block this httpd worker for ~4-5 s inside safety_cfg_store_refetch()
+     * before the function ever reaches the existing post-claim
+     * backup_import_restore_in_flight() check near the bottom. A restore
+     * already in flight is going to refuse this start anyway (that later
+     * check is unconditional and still runs, kept as-is for the TOCTOU
+     * reasons documented at its own call site), so there is no reason to
+     * pay the refetch's latency first -- check the flag up front too, before
+     * any other work, so the common case (a restore already known to be
+     * running) is refused immediately instead of after a multi-second
+     * stall. Lock-free read, same as every other caller of this accessor. */
+    if (backup_import_restore_in_flight()) {
+        return ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT;
+    }
+
     /* Only state (RUNNING/PAUSED) is needed here -- profile_executor_get_
      * active_id() is the narrow sibling of profile_executor_get_status()
      * profile_executor.h recommends for exactly this, avoiding a 1384-byte
@@ -2357,9 +2373,13 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
                                                                       : ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING;
     }
 
-    /* Restore-in-flight (2026-09-28, A4 review follow-up B): the only
-     * check of this flag on the sweep start path --
-     * zone_sweep_check_refusal() above does not consult it. Placed after the
+    /* Restore-in-flight (2026-09-28, A4 review follow-up B): the
+     * TOCTOU-closing check of this flag on the sweep start path --
+     * zone_sweep_check_refusal() above does not consult it, and the early
+     * check at the top of this function (backup/sweep review follow-up 2)
+     * only shortcuts the common case, since a restore can still start in the
+     * window between that early check and this one (which includes the
+     * multi-second ct_topology_unknown refetch above). Placed after the
      * heat claim, same shape as profile_executor_run()'s/
      * autotune_begin_run_locked()'s re-read after their own claim, so a
      * restore could not set the flag in a gap and still see no heat claim

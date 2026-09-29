@@ -2325,6 +2325,35 @@ static void test_backup_import_post_refused_by_interlock_after_mode_gate_passes(
     reset_backup_import_post_stubs();
 }
 
+// Backup/sweep review follow-up 1 (2026-09-28): backup_import.c never wrote
+// a zone-current-sweep-specific check of its own -- it reuses
+// ota_http_check_interlocks(), which already refuses unconditionally
+// (ota_http.c's own "B2, opus review 2026-08-27" check, ahead of every other
+// precondition in that function) whenever zones_current_sweep_is_active()
+// is true, with the reason "a zone current sweep is running". Since this
+// file's own ota_http_check_interlocks() stub is a total pass-through (any
+// result/reason it's told to report, it reports), this test documents that
+// wiring rather than re-deriving ota_http.c's own sweep logic (already
+// covered end-to-end, with the real function, by test_ota_http.c's
+// s_test_sweep_active tests): the exact reason a live sweep produces flows
+// through backup_import_post_handler() unmodified and un-swallowed, at the
+// same call site test_backup_import_post_refused_by_interlock_after_mode_
+// gate_passes() above already proves is reached once the mode gate passes.
+static void test_backup_import_post_refused_by_sweep_reason_via_interlock(void)
+{
+    TEST_SECTION("backup_import_post_handler -- a zone current sweep's own interlock reason "
+                 "passes through unmodified");
+    reset_backup_import_post_stubs();
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+    snprintf(g_stub_ota_interlock_reason, sizeof(g_stub_ota_interlock_reason), "a zone current sweep is running");
+
+    esp_err_t err = run_backup_import_post();
+
+    TEST_CHECK(err == ESP_OK, "backup_import_post_handler must always return ESP_OK");
+    TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the interlock (which owns the sweep check) is reached");
+    reset_backup_import_post_stubs();
+}
+
 // A4 review (2026-09-28): backup_import_job() runs on the async task after
 // httpd_worker's own mode-gate/interlock checks, so a firing started in
 // between must still be refused before anything is written. Drives the
@@ -2413,6 +2442,36 @@ static void test_backup_import_job_clears_restore_in_flight_flag(void)
     run_backup_import_job_with_body(k_job_body);
     TEST_CHECK(!backup_import_restore_in_flight(), "flag is cleared even when the job's re-check refuses");
     s_test_profile_running_for_mode_gate = false;
+
+    reset_backup_import_post_stubs();
+    reset_stub_state();
+}
+
+// Same reused wiring, at the job's TOCTOU re-check point: a sweep that
+// starts after the handler's own checks but before the job's re-check must
+// still be caught, same as the firing/autotune case
+// test_backup_import_job_rechecks_mode_gate_before_writing() already proves.
+// Ordering note (mind-the-TOCTOU review point): backup_import_job() sets
+// s_backup_restore_in_flight BEFORE backup_import_job_inner()'s re-check
+// runs (see backup_import_job()'s own doc comment), and that re-check's
+// interlock call is what would observe a live sweep -- so the flag is
+// already published by the time anything checks sweep state here, the same
+// flag-set-then-check order test_backup_import_job_clears_restore_in_flight_
+// flag() already proves for the mode-gate half of this same re-check.
+static void test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock(void)
+{
+    TEST_SECTION("backup_import_job -- a sweep that started after the handler's checks is refused "
+                 "by the job's own re-check, before any write");
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+    snprintf(g_stub_ota_interlock_reason, sizeof(g_stub_ota_interlock_reason), "a zone current sweep is running");
+    g_total_write_calls = 0;
+
+    run_backup_import_job_with_body(k_job_body);
+
+    TEST_CHECK(g_stub_ota_interlock_call_count == 1, "the job re-runs the interlock, which owns the sweep check");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written once the sweep-carrying interlock re-check refuses");
 
     reset_backup_import_post_stubs();
     reset_stub_state();
@@ -4972,7 +5031,9 @@ void run_test_backup_import(void)
 {
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();
+    test_backup_import_post_refused_by_sweep_reason_via_interlock();
     test_backup_import_job_rechecks_mode_gate_before_writing();
+    test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock();
     test_backup_import_job_clears_restore_in_flight_flag();
 
     test_malformed_body_writes_nothing();

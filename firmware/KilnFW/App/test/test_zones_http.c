@@ -882,9 +882,34 @@ static void test_cfg_set_u8(uint16_t param_id, uint8_t v, bool is_set)
     s_cfg_row_count++;
 }
 
+// backup/sweep review follow-up 2 (2026-09-28): counts real calls into this
+// stub so a test can prove zones_current_sweep_start()'s early restore-in-
+// flight check skips the (up to ~5 s on real hardware) refetch entirely,
+// rather than merely reaching the same refusal after paying for it.
+static int s_cfg_refetch_call_count = 0;
+
+// backup/sweep review follow-up 2 (2026-09-28): when set, this stub flips
+// s_test_backup_restore_in_flight true DURING the refetch call, simulating a
+// backup restore that starts in the window between the early restore-in-
+// flight check (top of zones_current_sweep_start()) and the later,
+// post-claim re-check -- the exact gap the early check's own comment says it
+// does NOT close. Lets a test prove the later check is still load-bearing,
+// not merely restating the early one.
+static bool s_cfg_refetch_sets_restore_in_flight = false;
+
+// Forward-declared: the real definition (and the backup_import_restore_in_
+// flight() stub it backs) lives further down this file, alongside the other
+// restore-in-flight test plumbing; declared here so this earlier stub can
+// set it.
+static bool s_test_backup_restore_in_flight;
+
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
 {
     (void)link; (void)config_crc;
+    s_cfg_refetch_call_count++;
+    if (s_cfg_refetch_sets_restore_in_flight) {
+        s_test_backup_restore_in_flight = true;
+    }
     if (!s_cfg_refetch_ok) {
         return false;
     }
@@ -13190,6 +13215,18 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
 // closes_the_race() above, proving this is a SECOND, independently
 // load-bearing gate rather than a re-derivation of the early informational
 // checks (which never consult this flag at all).
+//
+// Updated (backup/sweep review follow-up 2, same day): zones_current_sweep_
+// start() now ALSO checks this flag at the very top, before any other work
+// (see test_zones_current_sweep_start_restore_in_flight_refused_early()
+// below). With the flag already set at entry, as this test sets it, that
+// early check is what actually fires here -- so the heat claim is never
+// taken in the first place, and there is nothing to give back
+// (claim_end_calls stays 0, not 1 as it was when this was the only check).
+// This test now exists purely to prove the LATER, TOCTOU-closing check
+// still exists and still works once the flag is set only after the early
+// check has already passed -- see the GREEN-then-set-late variant just
+// below.
 static void test_zones_current_sweep_start_restore_in_flight_refused(void)
 {
     static kiln_io_t dummy_io;
@@ -13200,9 +13237,10 @@ static void test_zones_current_sweep_start_restore_in_flight_refused(void)
     memset(&dummy_thermo, 0, sizeof(dummy_thermo));
     dummy_thermo.initialized = true;
 
-    // RED: every other precondition clean, atomic heat claim succeeds --
-    // yet a restore flagged in flight must still refuse, with the claim
-    // handed back (never left dangling on a refused start).
+    // RED: every other precondition clean -- a restore flagged in flight
+    // must still refuse. With the flag already set before the call, the NEW
+    // early check (top of the function) is what answers, before the atomic
+    // heat claim is ever taken -- so there is no claim to give back.
     reset_sweep_state_for_test();
     zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
     s_zones_config_valid = true;
@@ -13212,8 +13250,10 @@ static void test_zones_current_sweep_start_restore_in_flight_refused(void)
               "a backup restore in flight refuses the sweep even when every other gate is clean");
     TEST_CHECK(!s_sweep.active, "a run refused for a restore in flight must never mark the sweep active");
     TEST_CHECK(s_sweep.task == NULL, "a refused start must never have spawned the sweep task");
-    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 1,
-              "the heat claim taken just before the refusal is given back, not leaked");
+    TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 0,
+              "the early check answers before the atomic heat claim is ever attempted");
+    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 0,
+              "no claim was taken, so there is nothing to give back");
 
     // GREEN: identical setup, flag now clear -- proves the RED result above
     // was really this check, not some other stub failing closed.
@@ -13229,6 +13269,130 @@ static void test_zones_current_sweep_start_restore_in_flight_refused(void)
     zones_http_set_hw(NULL, NULL, NULL);
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones_config_valid = false;
+}
+
+// backup/sweep review follow-up 2 (2026-09-28): zones_current_sweep_start()
+// used to consult backup_import_restore_in_flight() only AFTER the atomic
+// heat claim, which itself runs after the ct_topology_unknown block's bounded
+// live refetch (safety_cfg_store_refetch(), up to ~5 s on real hardware
+// behind s_store_lock). A restore already known to be in flight is refused
+// either way, but paying that latency first is pure waste in the common
+// case. Proves the NEW early check (top of the function) answers before the
+// refetch is ever attempted, while the later, TOCTOU-closing check
+// (test_zones_current_sweep_start_restore_in_flight_refused() above) still
+// runs and still catches a restore that starts in the gap.
+static void test_zones_current_sweep_start_restore_in_flight_refused_early(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    // Set up exactly the condition that would otherwise force the ~5s
+    // refetch (uncommitted CT topology row, link up, peer known) AND flag a
+    // restore in flight. If the early check works, the refetch stub is never
+    // even called.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false);
+    s_test_safety_link_up = true;
+    s_peer_build_status_known = true;
+    s_cfg_refetch_ok = true;
+    s_cfg_refetch_call_count = 0;
+    s_test_backup_restore_in_flight = true;
+
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT,
+              "restore in flight refuses even in the exact shape that would otherwise trigger a live refetch");
+    TEST_CHECK(s_cfg_refetch_call_count == 0,
+              "the early check must short-circuit before safety_cfg_store_refetch() is ever called");
+    TEST_CHECK(!s_sweep.active, "an early-refused start must never mark the sweep active");
+    TEST_CHECK(s_sweep.task == NULL, "an early-refused start must never have spawned the sweep task");
+    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 0,
+              "the early check runs before any heat claim is taken, so nothing needs to be given back");
+
+    // GREEN: identical setup, flag clear -- the refetch DOES run and the
+    // sweep starts, proving the RED result above was really the early check
+    // and not some other stub failing closed.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false);
+    s_test_safety_link_up = true;
+    s_peer_build_status_known = true;
+    s_cfg_refetch_ok = true;
+    s_cfg_refetch_sets_ct_topology = true;
+    s_cfg_refetch_call_count = 0;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK,
+              "with the flag clear, the identical setup reaches and passes the refetch, then starts cleanly");
+    TEST_CHECK(s_cfg_refetch_call_count == 1, "the refetch really is reached once the flag is clear");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+    s_peer_build_status_known = false;
+    s_cfg_refetch_sets_ct_topology = false;
+}
+
+// backup/sweep review follow-up 2 (2026-09-28), TOCTOU half: proves the
+// later, post-claim restore-in-flight re-check
+// (test_zones_current_sweep_start_restore_in_flight_refused() above) is not
+// merely restating the early one -- it catches a restore that starts DURING
+// the ct_topology_unknown block's refetch, i.e. strictly after the early
+// check already passed with the flag clear. The refetch stub flips the flag
+// mid-call (s_cfg_refetch_sets_restore_in_flight) to simulate exactly that
+// window.
+static void test_zones_current_sweep_start_restore_in_flight_refused_during_refetch(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    test_cfg_rows_reset();
+    test_cfg_set_u8(0x031Fu, 0u, false);
+    s_test_safety_link_up = true;
+    s_peer_build_status_known = true;
+    s_cfg_refetch_ok = true;
+    s_cfg_refetch_sets_ct_topology = true;
+    s_cfg_refetch_call_count = 0;
+    s_test_backup_restore_in_flight = false;          // early check passes clean
+    s_cfg_refetch_sets_restore_in_flight = true;       // ...then flips true mid-refetch
+
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT,
+              "a restore that starts during the refetch is still caught by the later, post-claim check");
+    TEST_CHECK(s_cfg_refetch_call_count == 1,
+              "the early check passed clean, so the refetch really ran before the flag flipped");
+    TEST_CHECK(!s_sweep.active, "a run refused this way must never mark the sweep active");
+    TEST_CHECK(s_sweep.task == NULL, "a refused start must never have spawned the sweep task");
+    TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 1,
+              "the claim WAS taken this time (the race window is after the early check)");
+    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 1,
+              "...and is handed back, not leaked, once the later check refuses");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+    s_peer_build_status_known = false;
+    s_cfg_refetch_sets_ct_topology = false;
+    s_cfg_refetch_sets_restore_in_flight = false;
+    s_test_backup_restore_in_flight = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -15441,6 +15605,8 @@ void run_test_zones_http(void)
     test_zones_current_sweep_start_wired_refusals();
     test_zones_current_sweep_start_atomic_gate_closes_the_race();
     test_zones_current_sweep_start_restore_in_flight_refused();
+    test_zones_current_sweep_start_restore_in_flight_refused_early();
+    test_zones_current_sweep_start_restore_in_flight_refused_during_refetch();
 
     test_reconcile_on_link_up_null_link_is_a_noop();
     test_reconcile_on_link_up_invalid_config_is_a_noop();
