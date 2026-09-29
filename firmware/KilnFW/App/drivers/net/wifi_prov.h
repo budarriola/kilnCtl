@@ -163,7 +163,9 @@ wifi_prov_state_t wifi_prov_get_state(void);
  * RECONNECTING depending on what's happened since). */
 wifi_prov_mode_t wifi_prov_get_mode(void);
 
-/* True exactly when wifi_prov_get_state() == WIFI_PROV_STATE_UNPROVISIONED --
+/* True exactly when wifi_prov_get_state() == WIFI_PROV_STATE_UNPROVISIONED AND
+ * no STA network is saved (both checked, so an AP-fallback state that still has
+ * credentials can never read as unprovisioned) --
  * home mode, AP-only, no STA credentials saved yet. Added 2026-09-28 for
  * http_auth_policy_iface.h's ROUTE_TIER_WIFI_SETUP predicate (owner decision:
  * /wifi, /networks and /scan stay open with no session ONLY during this

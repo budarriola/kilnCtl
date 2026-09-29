@@ -502,6 +502,12 @@ static const char *const kPageShellUris[] = {
     PAGE_SHELL_URI("/readiness"),
     PAGE_SHELL_URI("/setup"),
     PAGE_SHELL_URI("/ota"),
+    /* ROUTE_TIER_WIFI_SETUP, not USER/ADMIN: open outright while
+     * unprovisioned; once provisioned the shell is still served so nav.js's
+     * "Network settings" link lands on the page and app.js raises the login
+     * modal, instead of a bare 401 body. Static embedded HTML, no per-board
+     * data; /scan and /networks keep their real tier gate. */
+    PAGE_SHELL_URI("/wifi"),
 };
 
 #define PAGE_SHELL_URI_COUNT \

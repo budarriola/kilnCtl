@@ -575,6 +575,33 @@ static void test_do_set_mode_home_sets_connecting_and_defers_the_join(void)
                "run later by owner_task(), does that");
 }
 
+// wifi_prov_is_unprovisioned() opens /wifi, /networks and /scan with no
+// session (ROUTE_TIER_WIFI_SETUP). It must read true ONLY with no saved STA
+// network: every other state, and UNPROVISIONED with a network saved (a
+// future AP-fallback path reusing that state), must read false.
+static void test_is_unprovisioned_requires_no_saved_network(void)
+{
+    TEST_SECTION("wifi_prov_is_unprovisioned() -- true only for UNPROVISIONED with zero saved networks");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+    TEST_CHECK(!wifi_prov_is_unprovisioned(), "zeroed state (AP_MODE) is not unprovisioned");
+
+    s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
+    TEST_CHECK(wifi_prov_is_unprovisioned(), "UNPROVISIONED with no saved network is unprovisioned");
+
+    const wifi_prov_state_t others[] = { WIFI_PROV_STATE_AP_MODE, WIFI_PROV_STATE_CONNECTING,
+                                         WIFI_PROV_STATE_CONNECTED, WIFI_PROV_STATE_RECONNECTING };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        s_wifi.state = others[i];
+        TEST_CHECK(!wifi_prov_is_unprovisioned(), "any non-UNPROVISIONED state is not unprovisioned");
+    }
+
+    s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
+    s_wifi.saved_nets.count = 1;
+    TEST_CHECK(!wifi_prov_is_unprovisioned(),
+               "UNPROVISIONED with a saved network (AP fallback with credentials) is NOT unprovisioned");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
 void run_test_wifi_prov(void)
 {
     test_static_ip_confirmed_false_at_boot();
@@ -593,4 +620,5 @@ void run_test_wifi_prov(void)
     test_reply_slot_stale_generation_never_matches_after_reuse();
     test_do_add_network_sets_connecting_and_defers_the_join();
     test_do_set_mode_home_sets_connecting_and_defers_the_join();
+    test_is_unprovisioned_requires_no_saved_network();
 }

@@ -276,6 +276,36 @@ class WebX03Test(unittest.TestCase):
                 result = REGISTRY["WEB-X-03"].judge(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    # ROUTE_TIER_WIFI_SETUP (owner decision 2026-09-28): graded from the
+    # board's live GET /status state, never left to the catch-all.
+    def _run_wifi_setup(self, wifi_state, scan_status):
+        text = 'ROUTE_TIER("/wifi", HTTP_GET, ROUTE_TIER_WIFI_SETUP),'
+        ctx = {"host": "1.2.3.4"}
+        responses = {
+            "/api/auth/config": (200, '{"web_enabled":true}'),
+            "/wifi": (scan_status, None),
+        }
+        if wifi_state is not None:
+            responses["/status"] = (200, '{"mode":"home","state":"%s"}' % wifi_state)
+        with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+            with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
+                return REGISTRY["WEB-X-03"].judge(ctx)
+
+    def test_wifi_setup_open_while_unprovisioned_passes(self):
+        self.assertEqual(self._run_wifi_setup("unprovisioned", 200).verdict, Verdict.PASS)
+
+    def test_wifi_setup_refused_while_unprovisioned_fails(self):
+        self.assertEqual(self._run_wifi_setup("unprovisioned", 401).verdict, Verdict.FAIL)
+
+    def test_wifi_setup_open_once_provisioned_fails(self):
+        self.assertEqual(self._run_wifi_setup("connected", 200).verdict, Verdict.FAIL)
+
+    def test_wifi_setup_gated_once_provisioned_passes(self):
+        self.assertEqual(self._run_wifi_setup("connected", 401).verdict, Verdict.PASS)
+
+    def test_wifi_setup_unreadable_status_grades_as_admin(self):
+        self.assertEqual(self._run_wifi_setup(None, 200).verdict, Verdict.FAIL)
+
     # Lazy login (2026-09-24): a listed page shell answers 200 with no
     # session by design, auth on or off; its /api rows stay gated.
     _SHELL_TEXT = "\n".join([
@@ -315,7 +345,7 @@ class WebX03Test(unittest.TestCase):
         with open(C._route_tier_table_path({}), "r", encoding="utf-8") as f:
             text = f.read()
         shells = C.parse_page_shell_uris(text)
-        self.assertEqual(len(shells), 15)
+        self.assertEqual(len(shells), 16)
         gets = {uri for uri, method, _tier in C.parse_route_tier_table(text) if method == "HTTP_GET"}
         for uri in shells:
             self.assertFalse(uri.startswith("/api/"), uri)

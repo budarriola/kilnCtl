@@ -471,17 +471,17 @@ static void test_decision_counts_as_activity(void) {
 // Owner report 2026-09-24: page shells are served without a session so the
 // UI never opens on a login; the /api/ gate is what protects data. This pins
 // the allowlist's shape so the page-shell bypass can never widen by accident:
-// exactly the fifteen static shells, GET only, never an /api/ route, never an
+// exactly the sixteen static shells, GET only, never an /api/ route, never an
 // unlisted non-/api GET (a future download/export route stays fail-closed).
 static void test_page_shell_allowlist(void) {
-    TEST_CHECK(PAGE_SHELL_URI_COUNT == 15, "kPageShellUris lists exactly the 15 static page shells");
+    TEST_CHECK(PAGE_SHELL_URI_COUNT == 16, "kPageShellUris lists exactly the 16 static page shells");
     for (size_t i = 0; i < PAGE_SHELL_URI_COUNT; i++) {
         const char *uri = kPageShellUris[i];
         route_tier_t tier = ROUTE_TIER_OPEN;
         TEST_CHECK(uri != NULL && strncmp(uri, "/api/", 5) != 0, "no page-shell entry is an /api/ route");
         TEST_CHECK(http_auth_lookup_tier(uri, HTTP_GET, &tier) &&
-                       (tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN),
-                   "every page-shell entry has a USER/ADMIN GET row in kRouteTierTable");
+                       (tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN || tier == ROUTE_TIER_WIFI_SETUP),
+                   "every page-shell entry has a USER/ADMIN/WIFI_SETUP GET row in kRouteTierTable");
         TEST_CHECK(http_auth_is_page_shell_get(uri, HTTP_GET), "a listed page shell qualifies on GET");
         TEST_CHECK(!http_auth_is_page_shell_get(uri, HTTP_POST), "a listed page shell never qualifies on POST");
     }
@@ -499,7 +499,7 @@ static void test_page_shell_allowlist(void) {
             shells++;
         }
     }
-    TEST_CHECK(shells == 15, "exactly 15 table rows resolve as page shells");
+    TEST_CHECK(shells == 16, "exactly 16 table rows resolve as page shells");
     TEST_CHECK(!http_auth_is_page_shell_get("/api/zones", HTTP_GET), "GET /api/zones is not a page shell");
     TEST_CHECK(!http_auth_is_page_shell_get("/api/autotune", HTTP_GET), "GET /api/autotune is not a page shell");
     TEST_CHECK(!http_auth_is_page_shell_get("/settings/export", HTTP_GET),
@@ -563,6 +563,13 @@ static void test_wifi_setup_tier_provisioned_gating(void) {
     check_wifi_setup_route_provisioned_gating("/wifi", HTTP_GET, "GET /wifi");
     check_wifi_setup_route_provisioned_gating("/networks", HTTP_GET, "GET /networks");
     check_wifi_setup_route_provisioned_gating("/scan", HTTP_GET, "GET /scan");
+
+    // Provisioned + no session: the /wifi page shell is still served (so the
+    // nav link lands on the page and app.js raises the login modal), but its
+    // two JSON reads are not shells and stay 401.
+    TEST_CHECK(http_auth_is_page_shell_get("/wifi", HTTP_GET), "GET /wifi is a page shell");
+    TEST_CHECK(!http_auth_is_page_shell_get("/networks", HTTP_GET), "GET /networks is not a page shell");
+    TEST_CHECK(!http_auth_is_page_shell_get("/scan", HTTP_GET), "GET /scan is not a page shell");
 
     // The sibling mutation routes stay ordinary ROUTE_TIER_ADMIN,
     // unconditional on provisioning state -- confirms this change did not

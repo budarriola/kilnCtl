@@ -147,7 +147,11 @@ exists. Only `POST /api/unit_pref` is registered, and it belongs in ADMIN
 below; the value the dashboard needs is already in `GET /api/status`'s JSON.)
 
 Also OPEN, read-only and needed before anyone can log in at all:
-`GET /status`, `GET /scan`, `GET /networks`, `GET /wifi`.
+`GET /status`. `GET /scan`, `GET /networks` and `GET /wifi` are
+`ROUTE_TIER_WIFI_SETUP` (owner decision 2026-09-28): OPEN only while no STA
+credentials are saved (`wifi_prov_is_unprovisioned()`, first setup), ADMIN
+otherwise. `/wifi` is also a page shell, so its HTML loads without a session
+and the page itself redirects to login.
 
 ### USER — start and stop a firing, and nothing else
 
@@ -1002,7 +1006,10 @@ enabled, disabled, locked, or mid-prompt:**
   instead). The bypass reasoning here is kept only as historical rationale
   for that earlier design and no longer describes current behavior.
 - `POST /api/zones/current_sweep/abort`, `POST /api/autotune/abort`, and
-  `POST /api/diagnostics/danger/stop`. Nominally ADMIN, but each one aborts an
+  `POST /api/diagnostics/danger/stop`. **Superseded by owner decision,
+  2026-09-28:** all three are now plain ADMIN, the same role as the routes
+  that start them, and require a session; the physical E-stop is the
+  unauthenticated power cut. Historical rationale follows. Each one aborts an
   operation that is actively driving relays — the current-sweep task, a
   running autotune (via `force_relays_off()`), and the danger-mode relay
   window (via `kiln_io_owner_command_all_relays_off()` plus releasing
@@ -1018,8 +1025,8 @@ enabled, disabled, locked, or mid-prompt:**
   (`docs/SAFETY_CASE.md` H7, firmware-mediated on this bench) is the actual
   safety backstop for this path, independent of LCD auth state, which is why
   the LCD keypad no longer needs to stay clear of Stop. This bullet is scoped
-  to the LCD only — every bullet above it (the HTTP routes) is unchanged;
-  `POST /api/profile_exec/stop` still bypasses authentication unconditionally.
+  to the LCD only. (The HTTP routes above no longer bypass authentication
+  either, per the same 2026-09-28 decisions.)
   See `firmware/KilnFW/App/drivers/ui/ui_lcd_lock.h`'s `ui_lcd_lock_run_gated()`
   doc comment for the full LCD-side design (page-level gating off the home
   dashboard, the inactivity-relock-to-home seam, and the two exceptions that

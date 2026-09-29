@@ -170,21 +170,14 @@ def _case_web_x01(ctx: dict) -> CaseResult:
 #: state (route_tier_table.h's own doc comment: OPEN "safe to reveal/costs
 #: nothing", SAFETY_REDUCE "can only make the kiln safer").
 _ALWAYS_OPEN_TIERS = frozenset({"ROUTE_TIER_OPEN", "ROUTE_TIER_SAFETY_REDUCE", "ROUTE_TIER_ADMIN_BOOTSTRAP"})
-# ROUTE_TIER_WIFI_SETUP (owner decision 2026-09-28) graded here as an ADMIN
-# tier: without querying GET /status for the board's live provisioning state,
-# this sweep has no way to tell which of the tier's two behaviours to expect,
-# and every bench board this sweep runs against is provisioned (CLAUDE.md's
-# bench notes), so ADMIN-shaped grading (401/403/3xx once web_enabled, no
-# violation with auth off) is the correct expectation here today. A future
-# bench board captured mid first-time-setup would need this sweep to read
-# /status itself before grading this tier, same as _wifi_status() below
-# already does for WEB-WIFI-06 -- not done here since it would otherwise
-# always report 200 as a violation, and this suite has run against
-# unprovisioned boards. Falling through to the catch-all `else: ok = True`
-# below (this tier's previous, unclassified fate) silently never checks
-# /wifi/scan/networks at all, which is the vacuous-pass class CLAUDE.md's
-# "Negative-test every check" note warns about.
-_ADMIN_TIERS = frozenset({"ROUTE_TIER_ADMIN", "ROUTE_TIER_USER", "ROUTE_TIER_WIFI_SETUP"})
+# ROUTE_TIER_WIFI_SETUP (owner decision 2026-09-28: /wifi, /networks, /scan
+# open with no session only while unprovisioned). _case_web_x03 reads the
+# board's live GET /status "state" once: "unprovisioned" grades this tier as
+# always-open; anything else (including an unreadable /status) grades it as
+# ADMIN. Never left to the sweep's catch-all `ok = True`, which would check
+# nothing at all.
+_WIFI_SETUP_TIER = "ROUTE_TIER_WIFI_SETUP"
+_ADMIN_TIERS = frozenset({"ROUTE_TIER_ADMIN", "ROUTE_TIER_USER"})
 
 #: GET routes that are read-only by tier but have a real side effect on the
 #: board, so the sweep must never invoke them even though their tier would
@@ -264,9 +257,18 @@ def _case_web_x03(ctx: dict) -> CaseResult:
         if status == 200 and body:
             web_enabled = '"web_enabled":true' in body.replace(" ", "")
 
+    wifi_unprovisioned = False
+    if host and any(t == _WIFI_SETUP_TIER for _u, _m, t in rows):
+        _st, wifi_body = _wifi_status(host)
+        wifi_unprovisioned = bool(wifi_body) and wifi_body.get("state") == "unprovisioned"
+
     results: List[dict] = []
     for uri, method, tier in rows:
         row: dict = {"uri": uri, "method": method, "tier": tier, "exercised": False, "ok": True}
+        # The tier this row is graded as on this board right now.
+        grade_tier = tier
+        if tier == _WIFI_SETUP_TIER:
+            grade_tier = "ROUTE_TIER_OPEN" if wifi_unprovisioned else "ROUTE_TIER_ADMIN"
         if uri in _SIDE_EFFECT_EXCLUDE:
             # Read-only by tier but has a real side effect -- see
             # _SIDE_EFFECT_EXCLUDE's comment. Never fetched.
@@ -282,7 +284,7 @@ def _case_web_x03(ctx: dict) -> CaseResult:
         status, _body = _http_get_raw(host, uri)
         row["exercised"] = True
         row["status"] = status
-        if tier in _ALWAYS_OPEN_TIERS:
+        if grade_tier in _ALWAYS_OPEN_TIERS:
             # This check's job is confirming the route isn't gated behind
             # auth it shouldn't be (401/403), never that a bare GET with no
             # query string succeeds -- /api/profile_plan is ROUTE_TIER_OPEN
@@ -296,14 +298,14 @@ def _case_web_x03(ctx: dict) -> CaseResult:
             # defect this sweep exists to catch. >=500 (server error) also
             # still fails.
             row["ok"] = status is not None and status not in (401, 403, 404) and status < 500
-        elif tier in _ADMIN_TIERS and method == "HTTP_GET" and uri in page_shells:
+        elif grade_tier in _ADMIN_TIERS and method == "HTTP_GET" and uri in page_shells:
             # A page shell is served without a session by design (the lazy-
             # login pre-handler exemption, http_auth_is_page_shell_get());
             # anything but 200 is a defect whether auth is on or off. The
             # page's own /api fetches are separate rows, still gated.
             row["detail"] = "page shell: served without a session by design"
             row["ok"] = status == 200
-        elif tier in _ADMIN_TIERS:
+        elif grade_tier in _ADMIN_TIERS:
             if web_enabled:
                 row["ok"] = status in (401, 403) or (status is not None and 300 <= status < 400)
             else:
