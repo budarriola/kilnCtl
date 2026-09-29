@@ -796,7 +796,11 @@
 >   That 06e191a4 citation is itself now superseded by a further unrelated
 >   edit to the file; the underlying claim (the `max_uri_handlers` cap-vs-
 >   route-count guard) still holds, so it was refreshed to
->   blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`f22fcfff` (citation refreshed 2026-09-24).
+>   blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c
+>   f22fcfff (not backtick-quoted, superseded) was itself superseded by the
+>   2026-09-28 AP-fallback change's unrelated `/status` JSON
+>   `ap_pending_teardown` field; the underlying claim still holds, refreshed to
+>   blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`d23cefe4` (citation refreshed 2026-09-28).
 > - **Pending:** `cfg_fs_list`'s scratch heap move is still in review.
 > - **Bench commission flash still blocked, and now on a second, independent
 >   gap**: `check_00_kilnfw_target_build.ps1` publishes only

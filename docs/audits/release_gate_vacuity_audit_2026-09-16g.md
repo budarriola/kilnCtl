@@ -190,9 +190,11 @@ citation 8fc84030, prefix not backtick-quoted here for the same reason),
 then commit b7bc31d2's move of `networks_get_handler`'s JSON buffer off the
 stack to heap scratch, unrelated to this check's subject (the auth/gate
 logic the negative test exercises is unchanged), then a further unrelated
-edit that superseded citation 06e191a4 too --
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`f22fcfff`
-is the current one (citation refreshed 2026-09-24); see
+edit that superseded citation 06e191a4 too, then the 2026-09-28 AP-fallback
+change's `/status` JSON `ap_pending_teardown` field, unrelated to this
+check's subject, which superseded citation f22fcfff --
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`d23cefe4`
+is the current one (citation refreshed 2026-09-28); see
 check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3
 spare slots for 137 routes against a cap of 140. That cap/count pair is
