@@ -103,7 +103,8 @@ typedef enum {
                                       // adaptive_tune_http.c's revert handler and its
                                       // enable handler's enabled=true case only -- see
                                       // rollout note's 2026-09-25 narrowing
-    SYS_ACTION_RAW_RELAY_DEBUG_WRITE, // wired: kiln_io_owner.c's relay_on_blocked()
+    SYS_ACTION_RAW_RELAY_DEBUG_WRITE, // wired: kiln_io_owner.c's relay_on_blocked() (relay-ON only;
+                                      // also consults restore_in_flight -- 2026-09-28 A4 follow-up B)
     SYS_ACTION_FACTORY_RESET,        // wired: factory_reset.c's reset_post_handler() and
                                       // uart_bridge_system.c's factory_reset_execute()
     SYS_ACTION_CFGFS_FORMAT,         // wired: cfg_fs_format_http.c's format_confirm_post_handler()
@@ -128,7 +129,13 @@ typedef struct {
                                 // a backup restore's commit pass (tens of seconds, on the http_async_job
                                 // task) writes the same profiles/zones state a start reads; refusing a
                                 // start while it is set closes the window a restore-in-flight start could
-                                // otherwise land in. Unused by every other rule.
+                                // otherwise land in. Also consulted by SYS_ACTION_RAW_RELAY_DEBUG_WRITE
+                                // (2026-09-28, A4 review follow-up B): manual/danger-mode relay-ON and the
+                                // zone current sweep start (zones_current_sweep_task.c, which checks this
+                                // flag directly rather than through this gate -- see its own call site)
+                                // were the two heat paths this flag did not yet reach. Unused by every
+                                // other rule. Never consulted for a relay-OFF -- this module is never
+                                // called on that path.
     bool safety_tripped;       // ARMED-latch trip state -- reserved, unused by this pass's rules
     bool readiness_gate_ready; // !readiness_gate_refuses_start() -- reserved, unused by this pass's rules
 } sys_mode_snapshot_t;

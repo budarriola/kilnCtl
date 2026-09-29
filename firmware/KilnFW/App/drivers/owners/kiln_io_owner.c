@@ -13,6 +13,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28 A4 review
+                                    * follow-up B; see system_mode_gate_blocks_relay() below */
 #include "crash_report.h" /* crash_report_has_unacknowledged() -- see relay_on_blocked() below */
 #include "danger_mode.h" /* danger_mode_active() -- see relay_on_blocked() below */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- previously transitive via ota_http.h */
@@ -226,6 +228,10 @@ static bool system_mode_gate_blocks_relay(void)
     sys_mode_snapshot_t snap = {0};
     snap.profile_running = profile_running;
     snap.autotune_running = autotune_running;
+    /* 2026-09-28, A4 review follow-up B: backup_import_restore_in_flight()
+     * is a lock-free atomic read, same choke-point rationale as the two
+     * facts above -- safe to call here with no lock held. */
+    snap.restore_in_flight = backup_import_restore_in_flight();
     return system_mode_gate_check(SYS_ACTION_RAW_RELAY_DEBUG_WRITE, &snap, NULL, 0);
 }
 

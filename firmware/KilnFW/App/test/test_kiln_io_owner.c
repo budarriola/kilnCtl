@@ -169,6 +169,15 @@ void relay_authority_heat_run_active(bool *profile, bool *autotune)
     if (autotune) *autotune = s_stub_autotune_running;
 }
 
+// backup_import_restore_in_flight() -- 2026-09-28 A4 review follow-up B:
+// kiln_io_owner.c now consults this atomic flag from
+// system_mode_gate_blocks_relay() (relay-ON only). Stub controllable per test.
+static bool s_stub_restore_in_flight = false;
+bool backup_import_restore_in_flight(void)
+{
+    return s_stub_restore_in_flight;
+}
+
 // -----------------------------------------------------------------------------
 
 static void test_relay_pin_mask_is_the_four_relay_pins(void)
@@ -412,6 +421,31 @@ static void test_relay_on_blocked_gates_on_autotune_run(void)
     s_stub_autotune_running = false;
 }
 
+static void test_relay_on_blocked_gates_on_restore_in_flight(void)
+{
+    TEST_SECTION("relay_on_blocked() -- a backup restore in flight blocks manual relay-ON via out_mode_blocked "
+                 "(2026-09-28, A4 follow-up B)");
+
+    uint32_t sources = 0;
+    bool updating = false;
+    bool crash_unack = false;
+    bool mode_blocked = false;
+
+    s_stub_restore_in_flight = true;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == true,
+               "a backup restore in flight blocks manual relay-ON");
+    TEST_CHECK(mode_blocked == true, "out_mode_blocked is set so the caller reports ERR_RUNNING");
+    TEST_CHECK(updating == false && crash_unack == false,
+               "the mode gate does not also claim the updating/crash_unack reasons");
+
+    s_stub_restore_in_flight = false;
+    mode_blocked = false;
+    TEST_CHECK(relay_on_blocked(&sources, &updating, &crash_unack, &mode_blocked) == false,
+               "once the restore finishes, relay-ON is unblocked again on the very next call");
+
+    s_stub_restore_in_flight = false; // leave stubs in their default state
+}
+
 // crash_unack must still be reported ahead of RUNNING when both apply --
 // relay_on_blocked() checks crash_report_has_unacknowledged() before
 // system_mode_gate_blocks_relay() (kiln_io_owner.c's own precedence comment
@@ -511,6 +545,31 @@ static void test_relay_off_writes_pass_through_while_running(void)
                "was never called");
 
     s_stub_profile_running = false;
+
+    // 2026-09-28, A4 follow-up B: relay-OFF must never be blocked by the new
+    // restore_in_flight gate either -- same shape as the profile check above.
+    s_stub_restore_in_flight = true;
+
+    owner_cmd_t cmd_off2 = { .type = CMD_SET_RELAY, .args.set_relay = { .relay = 1, .on = false } };
+    owner_result_t r_off2;
+    memset(&r_off2, 0, sizeof(r_off2));
+    handle_set_relay(&cmd_off2, &r_off2);
+    TEST_CHECK(r_off2.relay_result != KILN_IO_OWNER_RELAY_ERR_RUNNING,
+               "a single relay-OFF write is not refused for a restore in flight");
+    TEST_CHECK(r_off2.relay_result == KILN_IO_OWNER_RELAY_ERR_IO_FAIL,
+               "the OFF write reached the real I/O call -- the mode gate never ran");
+
+    owner_cmd_t cmd_mask_off2 = { .type = CMD_SET_RELAY_MASK, .args.set_relay_mask = { .mask = 0x0Fu, .value = 0x00u } };
+    owner_result_t r_mask_off2;
+    memset(&r_mask_off2, 0, sizeof(r_mask_off2));
+    handle_set_relay_mask(&cmd_mask_off2, &r_mask_off2);
+    TEST_CHECK(r_mask_off2.relay_result != KILN_IO_OWNER_RELAY_ERR_RUNNING,
+               "an all-relays-off mask write is not refused for a restore in flight");
+    TEST_CHECK(r_mask_off2.relay_result == KILN_IO_OWNER_RELAY_ERR_IO_FAIL,
+               "the all-off mask write reached the real I/O call too -- any_on was false, so relay_on_blocked() "
+               "was never called");
+
+    s_stub_restore_in_flight = false;
 }
 
 int main(void)
@@ -527,6 +586,7 @@ int main(void)
     test_relay_on_blocked_danger_mode_bypasses_every_gate();
     test_relay_on_blocked_gates_on_profile_run();
     test_relay_on_blocked_gates_on_autotune_run();
+    test_relay_on_blocked_gates_on_restore_in_flight();
     test_relay_on_blocked_crash_unack_precedes_running();
     test_relay_on_blocked_danger_mode_does_not_bypass_mode_gate();
     test_relay_off_writes_pass_through_while_running();

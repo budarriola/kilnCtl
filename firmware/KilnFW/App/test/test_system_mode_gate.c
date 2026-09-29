@@ -282,6 +282,31 @@ static void test_factory_reset_and_cfgfs_format_refused_cross_product(void)
     }
 }
 
+static void test_relay_write_refused_while_restore_in_flight(void)
+{
+    TEST_SECTION("SYS_ACTION_RAW_RELAY_DEBUG_WRITE -- restore_in_flight refusal (2026-09-28, A4 follow-up B)");
+
+    // A clean, all-false snapshot except restore_in_flight: proves the rule
+    // reacts to this flag alone, not merely alongside profile/autotune --
+    // same shape as test_start_actions_refuse_only_on_recovery_mode()'s
+    // "clean" case for recovery_mode.
+    sys_mode_snapshot_t snap = good_snapshot();
+    snap.restore_in_flight = true;
+    char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+    bool refused = system_mode_gate_check(SYS_ACTION_RAW_RELAY_DEBUG_WRITE, &snap, reason, sizeof(reason));
+    TEST_CHECK(refused == true, "restore_in_flight=true alone refuses a manual relay-ON");
+    TEST_CHECK(strstr(reason, "backup restore") != NULL,
+               "the reason names a backup restore, not a generic refusal");
+    TEST_CHECK(strchr(reason, '"') == NULL && strchr(reason, '\\') == NULL,
+               "reason is JSON-safe (no quote or backslash)");
+
+    // restore_in_flight=false (the baseline) must still be allowed --
+    // proves this test isn't accidentally passing for an unrelated reason.
+    sys_mode_snapshot_t clean = good_snapshot();
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_RAW_RELAY_DEBUG_WRITE, &clean, NULL, 0) == false,
+               "restore_in_flight=false: manual relay-ON allowed");
+}
+
 static void test_reason_truncation_is_safe(void)
 {
     TEST_SECTION("system_mode_gate_check -- a too-small reason buffer truncates, never overflows");
@@ -305,6 +330,7 @@ int main(void)
     test_start_actions_refuse_only_on_recovery_mode();
     test_zones_config_write_refused_cross_product();
     test_factory_reset_and_cfgfs_format_refused_cross_product();
+    test_relay_write_refused_while_restore_in_flight();
     test_reason_truncation_is_safe();
 
     printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);

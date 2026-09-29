@@ -63,6 +63,20 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
             }
             return true;
         }
+        /* 2026-09-28, A4 review follow-up B: a backup restore's commit pass
+         * writes the same zone/relay state a manual relay-ON reads -- the
+         * same reasoning SYS_ACTION_START_PROFILE/START_AUTOTUNE already
+         * apply below. This is relay-ON only (kiln_io_owner.c's
+         * relay_on_blocked() is never on the relay-OFF path), so a restore
+         * in flight never blocks turning a relay off. */
+        if (snap->restore_in_flight) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- a backup restore is in progress; wait for it to finish before "
+                         "energizing a relay");
+            }
+            return true;
+        }
         return false;
 
     case SYS_ACTION_WRITE_ZONES_CONFIG:

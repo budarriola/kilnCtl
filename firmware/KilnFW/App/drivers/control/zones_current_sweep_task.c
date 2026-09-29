@@ -11,6 +11,9 @@
 
 #include "MAX31856.h"
 #include "autotune_engine.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28 A4 review
+                                    * follow-up B; see zones_current_sweep_start()'s commit-point
+                                    * check below */
 #include "kiln_io.h"
 #include "profile_executor.h"
 #include "safety_trip_words.h"
@@ -2352,6 +2355,27 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     if (heat_claim != RELAY_HEAT_SWEEP_CLAIM_OK) {
         return (heat_claim == RELAY_HEAT_SWEEP_CLAIM_REFUSE_PROFILE) ? ZONE_SWEEP_REFUSE_PROFILE_RUNNING
                                                                       : ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING;
+    }
+
+    /* Restore-in-flight, second look (2026-09-28, A4 review follow-up B):
+     * same shape as profile_executor_run()'s/autotune_begin_run_locked()'s
+     * re-read after their own heat claim -- the informational check that fed
+     * zone_sweep_check_refusal() above ran before this claim was published,
+     * so a restore could set the flag in the gap and still see no heat claim
+     * at backup_import_job()'s own re-check (relay_authority_heat_run_active(),
+     * which reports profile/autotune only -- a sweep claim is not one of the
+     * two facts it consults). Re-reading the flag here, after the claim is
+     * published, is this side's own half of the protection: a restore whose
+     * commit pass is already under way is always caught here, closing the
+     * same class of window profile/autotune start already closes for
+     * themselves. This does not by itself make a sweep-vs-restore race fully
+     * symmetric (backup_import.c's own preconditions, not this flag, are
+     * what would have to catch a sweep that starts after those preconditions
+     * were checked but before the flag is set) -- out of scope for this
+     * fix, which only closes the "restore already in flight" side. */
+    if (backup_import_restore_in_flight()) {
+        relay_authority_heat_sweep_claim_end();
+        return ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT;
     }
 
     s_sweep.active = true;

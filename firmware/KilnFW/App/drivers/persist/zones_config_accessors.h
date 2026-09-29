@@ -1785,6 +1785,14 @@ typedef enum {
      * silently measure and persist per-zone-shaped normals that are wrong
      * for its actual wiring. Refuse instead of guessing. */
     ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN,
+    /* 2026-09-28, A4 review follow-up B: a backup restore's commit pass
+     * writes the same zone/relay state a sweep start reads and energizes --
+     * same reasoning as ZONE_SWEEP_REFUSE_PROFILE_RUNNING/AUTOTUNE_RUNNING
+     * above and SYS_ACTION_START_PROFILE/START_AUTOTUNE's restore_in_flight
+     * rule (system_mode_gate.c). Checked at the same commit-point choke
+     * point as the profile/autotune claim race, in
+     * zones_current_sweep_task.c. */
+    ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT,
 } zone_sweep_refusal_t;
 
 /* Human-readable reason for a zone_sweep_refusal_t -- used by the HTTP

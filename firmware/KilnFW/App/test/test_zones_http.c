@@ -918,13 +918,17 @@ size_t safety_cfg_store_param_count(void)
 }
 // 2026-09-28: safety_ceiling_sync.c (linked for real, see above) now calls
 // backup_import_restore_in_flight() too, to skip enforce_ceiling_divergence()
-// mid backup-restore commit. This executable never links backup_import.c
-// (its real definition), so it needs its own stub -- always false (no
-// restore in flight) since none of this file's existing tests exercise a
-// backup restore.
+// mid backup-restore commit. zones_current_sweep_task.c (linked for real,
+// see zones_http_internal.h) also calls it now, at its own commit-point
+// re-check (2026-09-28, A4 review follow-up B). This executable never links
+// backup_import.c (its real definition), so it needs its own stub --
+// defaults false (no restore in flight); test_zones_current_sweep_start_
+// restore_in_flight_refused() below flips s_test_backup_restore_in_flight to
+// exercise the sweep's own refusal.
+static bool s_test_backup_restore_in_flight = false;
 bool backup_import_restore_in_flight(void)
 {
-    return false;
+    return s_test_backup_restore_in_flight;
 }
 // 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
 // MEDIUM 5): safety_ceiling_sync.c (linked for real, see above) now calls
@@ -10409,6 +10413,15 @@ static void test_zone_sweep_check_refusal_each_reason_fires(void)
     TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, false, true) ==
                   ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN,
               "unfetched CT topology cache is refused");
+    // 2026-09-28, A4 review follow-up B: zone_sweep_refusal_str() must have a
+    // real string for the new enumerator, not fall through to "unknown
+    // refusal" -- zone_sweep_check_refusal() itself never produces this
+    // value (it is only ever returned by the commit-point re-check in
+    // zones_current_sweep_task.c, exercised separately above), so this is
+    // the string-table coverage for it.
+    TEST_CHECK(strcmp(zone_sweep_refusal_str(ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT),
+                       "a backup restore is in progress; wait for it to finish before starting") == 0,
+              "ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT has its own reason string");
 }
 
 static void test_zone_sweep_ceiling_hit(void)
@@ -12785,6 +12798,7 @@ static void reset_sweep_state_for_test(void)
     s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_OK;
     s_test_heat_sweep_claim_begin_calls = 0;
     s_test_heat_sweep_claim_end_calls = 0;
+    s_test_backup_restore_in_flight = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -13163,6 +13177,53 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
     TEST_CHECK(s_sweep.active, "a started sweep is marked active");
     TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 1, "the gate is attempted exactly once per "
                                                          "zones_current_sweep_start() call");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
+// 2026-09-28, A4 review follow-up B: the sweep's own commit-point re-check
+// of backup_import_restore_in_flight(), right after the atomic heat claim
+// succeeds -- same shape as test_zones_current_sweep_start_atomic_gate_
+// closes_the_race() above, proving this is a SECOND, independently
+// load-bearing gate rather than a re-derivation of the early informational
+// checks (which never consult this flag at all).
+static void test_zones_current_sweep_start_restore_in_flight_refused(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    // RED: every other precondition clean, atomic heat claim succeeds --
+    // yet a restore flagged in flight must still refuse, with the claim
+    // handed back (never left dangling on a refused start).
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_backup_restore_in_flight = true;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT,
+              "a backup restore in flight refuses the sweep even when every other gate is clean");
+    TEST_CHECK(!s_sweep.active, "a run refused for a restore in flight must never mark the sweep active");
+    TEST_CHECK(s_sweep.task == NULL, "a refused start must never have spawned the sweep task");
+    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 1,
+              "the heat claim taken just before the refusal is given back, not leaked");
+
+    // GREEN: identical setup, flag now clear -- proves the RED result above
+    // was really this check, not some other stub failing closed.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK,
+              "with the flag clear, the identical setup starts cleanly");
+    TEST_CHECK(s_sweep.active, "a started sweep is marked active");
 
     reset_sweep_state_for_test();
     zones_http_set_hw(NULL, NULL, NULL);
@@ -15379,6 +15440,7 @@ void run_test_zones_http(void)
 
     test_zones_current_sweep_start_wired_refusals();
     test_zones_current_sweep_start_atomic_gate_closes_the_race();
+    test_zones_current_sweep_start_restore_in_flight_refused();
 
     test_reconcile_on_link_up_null_link_is_a_noop();
     test_reconcile_on_link_up_invalid_config_is_a_noop();

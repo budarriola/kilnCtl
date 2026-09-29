@@ -705,6 +705,8 @@ const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
     case ZONE_SWEEP_REFUSE_RELAYS_ON: return "a relay is already on -- turn it off before sweeping";
     case ZONE_SWEEP_REFUSE_CT_TOPOLOGY_UNKNOWN:
         return "CT topology has not been fetched from the safety processor yet -- retry once the link has synced";
+    case ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT:
+        return "a backup restore is in progress; wait for it to finish before starting";
     default: return "unknown refusal";
     }
 }
