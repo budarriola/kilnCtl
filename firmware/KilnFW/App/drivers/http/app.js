@@ -2356,16 +2356,47 @@
   var OPEN_WITHOUT_LOGIN_PATHS = {
     '/': true,
     '/login': true,
-    '/status': true,
-    '/scan': true,
-    '/networks': true,
-    '/wifi': true
+    '/status': true
   };
+  // Owner decision 2026-09-28: /wifi (and its own page's JSON fetches,
+  // /scan and /networks, though those are never top-level navigations this
+  // pathname check would see) stay open with no login ONLY while the board
+  // is unprovisioned -- matching the server-side ROUTE_TIER_WIFI_SETUP gate
+  // (route_tier_table.h). Checked separately from OPEN_WITHOUT_LOGIN_PATHS,
+  // which is unconditional, since this one depends on live board state read
+  // from GET /status (ROUTE_TIER_OPEN, unconditionally reachable, and the
+  // one route that already reports wifi_prov_get_state() as its "state"
+  // field) rather than the path alone.
+  var WIFI_SETUP_PATHS = { '/wifi': true, '/scan': true, '/networks': true };
   var pageGateChecked = false;
   function maybeGateThisPage(role) {
     if (pageGateChecked) return;
     pageGateChecked = true;
     if (OPEN_WITHOUT_LOGIN_PATHS[window.location.pathname]) return;
+    if (WIFI_SETUP_PATHS[window.location.pathname]) {
+      pageGateChecked = false; // let the async /status read decide, below
+      fetch('/status')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (st) {
+          if (pageGateChecked) return; // a second poll already resolved this
+          pageGateChecked = true;
+          if (st && st.state === 'unprovisioned') return; // captive-portal setup: no gate
+          maybeGateThisPageGated(role);
+        })
+        .catch(function () {
+          // Could not confirm unprovisioned -- fail closed, same as any
+          // other network error here: gate the page rather than assume the
+          // open case.
+          if (pageGateChecked) return;
+          pageGateChecked = true;
+          maybeGateThisPageGated(role);
+        });
+      return;
+    }
+    maybeGateThisPageGated(role);
+  }
+
+  function maybeGateThisPageGated(role) {
     // role === 'admin' covers both a real admin session and section 11's
     // auth-off collapse (role always reports 'admin' when web auth is
     // disabled) -- in either case the page needs no gate. A 'user' session

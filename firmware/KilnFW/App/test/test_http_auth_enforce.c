@@ -67,15 +67,15 @@ static void test_auth_disabled_inert_path(void) {
     // SCENARIO: the auth-disabled inert path (plan section 11: "a board
     // with auth off is exactly as open as the board is today"). Every tier,
     // with no session at all, must ALLOW.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_NONE, false, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_NONE, false, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth off + OPEN + no session -> ALLOW");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_NONE, false, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_NONE, false, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth off + USER + no session -> ALLOW (today's behaviour, unchanged)");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_NONE, false, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_NONE, false, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth off + ADMIN + no session -> ALLOW (today's behaviour, unchanged)");
     // Also true with a role present -- auth-off is not merely "a session
     // isn't required", it is "role is not even consulted".
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_USER, false, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_USER, false, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth off + ADMIN + a mere USER role -> still ALLOW");
 }
 
@@ -84,10 +84,10 @@ static void test_open_tier_no_credentials(void) {
 
     // SCENARIO: OPEN-tier access with no credentials. This is the Dashboard
     // guarantee: it stays viewable with auth ON and zero session.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth ON + OPEN + no session -> ALLOW");
     // And it does not matter what role (if any) is present either.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_USER, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth ON + OPEN + USER session -> still ALLOW");
 }
 
@@ -95,9 +95,9 @@ static void test_no_session_denied(void) {
     TEST_SECTION("http_auth_check -- no session on a gated route is denied, not allowed");
 
     // SCENARIO: denial with no session.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
                "auth ON + USER tier + no session -> DENY_NO_SESSION");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
                "auth ON + ADMIN tier + no session -> DENY_NO_SESSION");
 }
 
@@ -114,7 +114,7 @@ static void test_expired_session_denied(void) {
     // without updating this function would have to break this assertion to
     // do it.
     http_auth_role_t role_after_expiry = HTTP_AUTH_ROLE_NONE; // what a real resolver must report
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, role_after_expiry, true, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, role_after_expiry, true, false, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
                "an expired session (modelled here as the resolver's required HTTP_AUTH_ROLE_NONE "
                "output) denies exactly like no session at all -- 401, not 403");
 }
@@ -123,17 +123,17 @@ static void test_insufficient_tier_denied(void) {
     TEST_SECTION("http_auth_check -- a USER session on an ADMIN route is denied, not allowed");
 
     // SCENARIO: denial on insufficient tier.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_USER, true, false, false) == HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
                "auth ON + ADMIN tier + USER role -> DENY_INSUFFICIENT (403, not 401 -- the session "
                "IS valid, it just isn't the right role)");
 
     // The reverse must not also be denied: ADMIN role satisfies a USER-tier
     // route (an administrator is not locked OUT of USER-level routes).
-    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_ADMIN, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_ADMIN, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "ADMIN role on a USER-tier route -> ALLOW (administrator is a superset)");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_ADMIN, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_ADMIN, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "ADMIN role on an ADMIN-tier route -> ALLOW");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_USER, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "USER role on a USER-tier route -> ALLOW");
 }
 
@@ -147,20 +147,22 @@ static void test_safety_reduce_always_allowed(void) {
     // unresolvable session collapses to. As of the 2026-09-28 owner decision
     // ("stop needs login. there is an estop button."), POST
     // /api/profile_exec/stop is no longer one of these routes -- it is
-    // ROUTE_TIER_USER now (see test_web_auth_safety_interaction.c). The
-    // routes still carrying ROUTE_TIER_SAFETY_REDUCE are
-    // /api/zones/current_sweep/abort, /api/autotune/abort and
-    // /api/diagnostics/danger/stop; this test exercises the generic tier
-    // behavior directly rather than naming any one route.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    // ROUTE_TIER_USER now (see test_web_auth_safety_interaction.c). A
+    // 2026-09-28 follow-up owner decision moved the other three routes that
+    // used to carry this tier (current_sweep/abort, autotune/abort,
+    // danger/stop) to ROUTE_TIER_ADMIN, so as of that change NO route in
+    // route_tier_table.h carries ROUTE_TIER_SAFETY_REDUCE -- this test
+    // exercises the generic, still-live tier behavior directly (kept for a
+    // future route that needs this shape) rather than naming any one route.
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth ON + SAFETY_REDUCE + no session (or locked out) -> ALLOW, never DENY_NO_SESSION");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_USER, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth ON + SAFETY_REDUCE + USER session -> ALLOW");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_ADMIN, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_ADMIN, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth ON + SAFETY_REDUCE + ADMIN session -> ALLOW");
     // And with auth off it is unaffected too -- this tier is not a special
     // case of the auth-off collapse, it is unconditional.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, false, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, false, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "auth OFF + SAFETY_REDUCE + no session -> ALLOW");
 }
 
@@ -173,11 +175,11 @@ static void test_unresolvable_tier_end_to_end(void) {
     // denied (401) -- and hit with a mere USER session, must still be
     // denied (403), because the default is ADMIN, not USER.
     route_tier_t tier = http_auth_effective_tier("/api/some_new_route_nobody_classified", HTTP_POST);
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
                "unresolvable route, no session -> DENY_NO_SESSION");
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, false) == HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, false, false) == HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
                "unresolvable route, USER session -> DENY_INSUFFICIENT (default is ADMIN, not USER)");
-    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, false) == HTTP_AUTH_DECISION_ALLOW,
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, false, false) == HTTP_AUTH_DECISION_ALLOW,
                "unresolvable route, ADMIN session -> ALLOW (ADMIN satisfies the fail-closed default)");
 }
 
@@ -200,21 +202,21 @@ static void test_admin_bootstrap_tier_gated_on_bootstrap_needed(void) {
     // With no session at all, bootstrap_needed==true must ALLOW -- this is
     // the whole point: no session can exist yet before the first
     // administrator credential is set.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_NONE, true, true) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_NONE, true, true, false) ==
                    HTTP_AUTH_DECISION_ALLOW,
                "auth ON + ADMIN_BOOTSTRAP + no session + bootstrap_needed -> ALLOW");
     // A role present changes nothing -- still ALLOW.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_ADMIN, true, true) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_ADMIN, true, true, false) ==
                    HTTP_AUTH_DECISION_ALLOW,
                "auth ON + ADMIN_BOOTSTRAP + ADMIN session + bootstrap_needed -> still ALLOW");
 
     // Once bootstrap is no longer needed, this route must close -- even for
     // an administrator session, since /settings/security is the ordinary
     // path afterward and this one-shot route must not stay open forever.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_NONE, true, false) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_NONE, true, false, false) ==
                    HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
                "auth ON + ADMIN_BOOTSTRAP + no session + !bootstrap_needed -> DENY_INSUFFICIENT");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_ADMIN, true, false) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_ROLE_ADMIN, true, false, false) ==
                    HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
                "auth ON + ADMIN_BOOTSTRAP + ADMIN session + !bootstrap_needed -> "
                "DENY_INSUFFICIENT (closed even for an admin session)");
@@ -228,13 +230,13 @@ static void test_admin_tier_denied_while_bootstrap_needed(void) {
     // credential record but does not invalidate existing sessions -- a
     // stale pre-reset admin session must NOT satisfy ROUTE_TIER_ADMIN while
     // bootstrap is outstanding, or the bootstrap gate is meaningless.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_ADMIN, true, true) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_ADMIN, true, true, false) ==
                    HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
                "auth ON + ADMIN tier + ADMIN role + bootstrap_needed -> DENY_INSUFFICIENT "
                "(a stale admin session must not survive a physical credential reset)");
 
     // Once bootstrap is satisfied again, ordinary ADMIN-role access returns.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_ADMIN, true, false) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_ADMIN, HTTP_AUTH_ROLE_ADMIN, true, false, false) ==
                    HTTP_AUTH_DECISION_ALLOW,
                "auth ON + ADMIN tier + ADMIN role + !bootstrap_needed -> ALLOW (ordinary case, "
                "unaffected)");
@@ -243,18 +245,18 @@ static void test_admin_tier_denied_while_bootstrap_needed(void) {
     // bootstrap_needed -- bootstrap_needed only closes ADMIN-tier routes and
     // gates the ADMIN_BOOTSTRAP route, it must not collapse into a
     // web-enabled-off-style blanket allow/deny of every tier.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_USER, true, true) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_USER, HTTP_AUTH_ROLE_USER, true, true, false) ==
                    HTTP_AUTH_DECISION_ALLOW,
                "auth ON + USER tier + USER role + bootstrap_needed -> ALLOW (USER tier is "
                "unaffected by the administrator-bootstrap state)");
 
     // OPEN and SAFETY_REDUCE tiers must also remain unaffected by
     // bootstrap_needed -- the Dashboard must stay viewable throughout.
-    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_NONE, true, true) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_OPEN, HTTP_AUTH_ROLE_NONE, true, true, false) ==
                    HTTP_AUTH_DECISION_ALLOW,
                "auth ON + OPEN tier + no session + bootstrap_needed -> ALLOW (Dashboard stays "
                "viewable throughout bootstrap)");
-    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, true, true) ==
+    TEST_CHECK(http_auth_check(ROUTE_TIER_SAFETY_REDUCE, HTTP_AUTH_ROLE_NONE, true, true, false) ==
                    HTTP_AUTH_DECISION_ALLOW,
                "auth ON + SAFETY_REDUCE tier + no session + bootstrap_needed -> ALLOW "
                "(stopping a firing is unaffected by bootstrap state)");
@@ -278,7 +280,7 @@ static void test_full_matrix_every_tier_role_auth_bootstrap(void) {
 
     static const route_tier_t kTiers[] = {
         ROUTE_TIER_OPEN, ROUTE_TIER_USER, ROUTE_TIER_ADMIN, ROUTE_TIER_SAFETY_REDUCE,
-        ROUTE_TIER_ADMIN_BOOTSTRAP,
+        ROUTE_TIER_ADMIN_BOOTSTRAP, ROUTE_TIER_WIFI_SETUP,
     };
     static const http_auth_role_t kRoles[] = {
         HTTP_AUTH_ROLE_NONE, HTTP_AUTH_ROLE_USER, HTTP_AUTH_ROLE_ADMIN,
@@ -290,50 +292,75 @@ static void test_full_matrix_every_tier_role_auth_bootstrap(void) {
         for (size_t ri = 0; ri < sizeof(kRoles) / sizeof(kRoles[0]); ri++) {
             for (size_t wi = 0; wi < 2; wi++) {
                 for (size_t bi = 0; bi < 2; bi++) {
-                    route_tier_t tier = kTiers[ti];
-                    http_auth_role_t role = kRoles[ri];
-                    bool web_enabled = kBools[wi];
-                    bool bootstrap_needed = kBools[bi];
+                    for (size_t ui = 0; ui < 2; ui++) {
+                        route_tier_t tier = kTiers[ti];
+                        http_auth_role_t role = kRoles[ri];
+                        bool web_enabled = kBools[wi];
+                        bool bootstrap_needed = kBools[bi];
+                        bool wifi_unprovisioned = kBools[ui];
 
-                    http_auth_decision_t expect;
-                    if (!web_enabled) {
-                        // Section 11: auth off collapses everything to ALLOW,
-                        // unconditionally -- role/tier/bootstrap irrelevant.
-                        expect = HTTP_AUTH_DECISION_ALLOW;
-                    } else if (tier == ROUTE_TIER_OPEN || tier == ROUTE_TIER_SAFETY_REDUCE) {
-                        // Both unconditional ALLOW regardless of role/bootstrap.
-                        expect = HTTP_AUTH_DECISION_ALLOW;
-                    } else if (tier == ROUTE_TIER_ADMIN_BOOTSTRAP) {
-                        // Gated on bootstrap_needed alone, never role.
-                        expect = bootstrap_needed ? HTTP_AUTH_DECISION_ALLOW
-                                                   : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
-                    } else if (role == HTTP_AUTH_ROLE_NONE) {
-                        // USER/ADMIN tiers with no session -> 401, regardless
-                        // of bootstrap_needed (that gate only ever tightens
-                        // ADMIN further once a session exists).
-                        expect = HTTP_AUTH_DECISION_DENY_NO_SESSION;
-                    } else if (tier == ROUTE_TIER_USER) {
-                        // USER or ADMIN role both satisfy USER tier.
-                        expect = HTTP_AUTH_DECISION_ALLOW;
-                    } else { // ROUTE_TIER_ADMIN, role != NONE
-                        if (bootstrap_needed) {
-                            expect = HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
-                        } else {
-                            expect = (role == HTTP_AUTH_ROLE_ADMIN) ? HTTP_AUTH_DECISION_ALLOW
-                                                                     : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                        // ROUTE_TIER_WIFI_SETUP: ALLOW while unprovisioned,
+                        // else falls through and is gated exactly like
+                        // ROUTE_TIER_ADMIN (http_auth_check()'s own doc
+                        // comment) -- reassign the local `tier` used by the
+                        // rest of this expectation logic below, same as the
+                        // real function does.
+                        if (tier == ROUTE_TIER_WIFI_SETUP) {
+                            if (!web_enabled) {
+                                // still falls into the auth-off ALLOW below
+                            } else if (wifi_unprovisioned) {
+                                TEST_CHECK(http_auth_check(tier, role, web_enabled, bootstrap_needed,
+                                                            wifi_unprovisioned) == HTTP_AUTH_DECISION_ALLOW,
+                                           "matrix case: WIFI_SETUP + unprovisioned -> ALLOW");
+                                checked++;
+                                continue;
+                            } else {
+                                tier = ROUTE_TIER_ADMIN;
+                            }
                         }
-                    }
 
-                    http_auth_decision_t got = http_auth_check(tier, role, web_enabled, bootstrap_needed);
-                    TEST_CHECK(got == expect,
-                               "matrix case (see counter in section header on failure)");
-                    checked++;
+                        http_auth_decision_t expect;
+                        if (!web_enabled) {
+                            // Section 11: auth off collapses everything to ALLOW,
+                            // unconditionally -- role/tier/bootstrap irrelevant.
+                            expect = HTTP_AUTH_DECISION_ALLOW;
+                        } else if (tier == ROUTE_TIER_OPEN || tier == ROUTE_TIER_SAFETY_REDUCE) {
+                            // Both unconditional ALLOW regardless of role/bootstrap.
+                            expect = HTTP_AUTH_DECISION_ALLOW;
+                        } else if (tier == ROUTE_TIER_ADMIN_BOOTSTRAP) {
+                            // Gated on bootstrap_needed alone, never role.
+                            expect = bootstrap_needed ? HTTP_AUTH_DECISION_ALLOW
+                                                       : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                        } else if (role == HTTP_AUTH_ROLE_NONE) {
+                            // USER/ADMIN tiers with no session -> 401, regardless
+                            // of bootstrap_needed (that gate only ever tightens
+                            // ADMIN further once a session exists).
+                            expect = HTTP_AUTH_DECISION_DENY_NO_SESSION;
+                        } else if (tier == ROUTE_TIER_USER) {
+                            // USER or ADMIN role both satisfy USER tier.
+                            expect = HTTP_AUTH_DECISION_ALLOW;
+                        } else { // ROUTE_TIER_ADMIN, role != NONE
+                            if (bootstrap_needed) {
+                                expect = HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                            } else {
+                                expect = (role == HTTP_AUTH_ROLE_ADMIN) ? HTTP_AUTH_DECISION_ALLOW
+                                                                         : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+                            }
+                        }
+
+                        http_auth_decision_t got =
+                            http_auth_check(kTiers[ti], role, web_enabled, bootstrap_needed, wifi_unprovisioned);
+                        TEST_CHECK(got == expect,
+                                   "matrix case (see counter in section header on failure)");
+                        checked++;
+                    }
                 }
             }
         }
     }
-    TEST_CHECK(checked == 5 * 3 * 2 * 2, "matrix covered exactly 60 combinations (5 tiers x 3 roles x "
-                                          "2 auth states x 2 bootstrap states)");
+    TEST_CHECK(checked == 6 * 3 * 2 * 2 * 2,
+               "matrix covered exactly 144 combinations (6 tiers x 3 roles x "
+               "2 auth states x 2 bootstrap states x 2 wifi-unprovisioned states)");
 }
 
 // Plan section 12, point 5 (reachability half): every row actually present in
@@ -389,8 +416,8 @@ static void test_every_real_route_allows_with_auth_off(void) {
         // consulting either, so exercise the two extremes of each to prove
         // the table walk is not accidentally hiding behind one lucky
         // combination.
-        http_auth_decision_t d1 = http_auth_check(e->tier, HTTP_AUTH_ROLE_NONE, false, false);
-        http_auth_decision_t d2 = http_auth_check(e->tier, HTTP_AUTH_ROLE_ADMIN, false, true);
+        http_auth_decision_t d1 = http_auth_check(e->tier, HTTP_AUTH_ROLE_NONE, false, false, false);
+        http_auth_decision_t d2 = http_auth_check(e->tier, HTTP_AUTH_ROLE_ADMIN, false, true, false);
         TEST_CHECK(d1 == HTTP_AUTH_DECISION_ALLOW && d2 == HTTP_AUTH_DECISION_ALLOW,
                    "every real route_tier_table.h row ALLOWs with auth off, regardless of role/bootstrap");
     }
@@ -431,6 +458,14 @@ static void test_decision_counts_as_activity(void) {
                "SAFETY_REDUCE tier ALLOW is not activity (allowed even with no session)");
     TEST_CHECK(!http_auth_decision_counts_as_activity(ROUTE_TIER_ADMIN_BOOTSTRAP, HTTP_AUTH_DECISION_ALLOW),
                "ADMIN_BOOTSTRAP tier ALLOW is not activity (fires only before a credential exists)");
+
+    // ROUTE_TIER_WIFI_SETUP is the one exception among the state-keyed
+    // tiers: it DOES count, since once provisioned it is gated exactly like
+    // ROUTE_TIER_ADMIN -- see http_auth_decision_counts_as_activity()'s own
+    // comment for why this is still safe while unprovisioned (no session
+    // exists to extend in that case).
+    TEST_CHECK(http_auth_decision_counts_as_activity(ROUTE_TIER_WIFI_SETUP, HTTP_AUTH_DECISION_ALLOW),
+               "WIFI_SETUP tier ALLOW counts as activity (gated like ADMIN once provisioned)");
 }
 
 // Owner report 2026-09-24: page shells are served without a session so the
@@ -474,6 +509,73 @@ static void test_page_shell_allowlist(void) {
     TEST_CHECK(!http_auth_is_page_shell_get(NULL, HTTP_GET), "NULL uri is not a page shell");
 }
 
+// Owner decision 2026-09-28: /wifi, /networks and /scan open without a
+// session ONLY while the board is unprovisioned; once provisioned they must
+// require an administrator session, same as the sibling /provision,
+// /forget, /ip_config routes. Named routes, not just the abstract
+// ROUTE_TIER_WIFI_SETUP enum value, so a future accidental re-tiering of one
+// of these three specific URIs (e.g. back to ROUTE_TIER_OPEN) is caught here
+// even if the enum-level matrix test above stays green.
+static void check_wifi_setup_route_provisioned_gating(const char *uri, httpd_method_t method,
+                                                        const char *label) {
+    route_tier_t tier;
+    char msg[256];
+
+    TEST_CHECK(http_auth_lookup_tier(uri, method, &tier), label);
+    snprintf(msg, sizeof(msg), "%s: tier is ROUTE_TIER_WIFI_SETUP", label);
+    TEST_CHECK(tier == ROUTE_TIER_WIFI_SETUP, msg);
+
+    // Auth off: ALLOW regardless of provisioning state -- section 11's
+    // blanket rule, unaffected by this tier.
+    snprintf(msg, sizeof(msg), "%s: auth off -> ALLOW regardless of provisioning", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false, false, true) == HTTP_AUTH_DECISION_ALLOW, msg);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false, false, false) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    // Auth on + unprovisioned: ALLOW with no session at all -- the
+    // captive-portal first-time-setup flow must work end to end before any
+    // credential exists.
+    snprintf(msg, sizeof(msg), "%s: auth on + unprovisioned + no session -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false, true) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    // Auth on + PROVISIONED: falls through to ADMIN-tier gating.
+    snprintf(msg, sizeof(msg), "%s: auth on + provisioned + no session -> DENY_NO_SESSION", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
+               msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + provisioned + USER session -> DENY_INSUFFICIENT (ADMIN only)", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, false, false) == HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
+               msg);
+
+    snprintf(msg, sizeof(msg), "%s: auth on + provisioned + ADMIN session -> ALLOW", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, false, false) == HTTP_AUTH_DECISION_ALLOW, msg);
+
+    // A stale admin session while bootstrap_needed must not survive a
+    // physical credential reset, same as any other ADMIN-gated route --
+    // provisioning state does not override that.
+    snprintf(msg, sizeof(msg), "%s: provisioned + ADMIN session + bootstrap_needed -> DENY_INSUFFICIENT", label);
+    TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_ADMIN, true, true, false) == HTTP_AUTH_DECISION_DENY_INSUFFICIENT,
+               msg);
+}
+
+static void test_wifi_setup_tier_provisioned_gating(void) {
+    TEST_SECTION("http_auth_check -- ROUTE_TIER_WIFI_SETUP: open only while unprovisioned "
+                 "(owner decision 2026-09-28)");
+    check_wifi_setup_route_provisioned_gating("/wifi", HTTP_GET, "GET /wifi");
+    check_wifi_setup_route_provisioned_gating("/networks", HTTP_GET, "GET /networks");
+    check_wifi_setup_route_provisioned_gating("/scan", HTTP_GET, "GET /scan");
+
+    // The sibling mutation routes stay ordinary ROUTE_TIER_ADMIN,
+    // unconditional on provisioning state -- confirms this change did not
+    // accidentally widen them too.
+    route_tier_t tier;
+    TEST_CHECK(http_auth_lookup_tier("/provision", HTTP_POST, &tier) && tier == ROUTE_TIER_ADMIN,
+               "POST /provision stays ordinary ROUTE_TIER_ADMIN, not WIFI_SETUP");
+    TEST_CHECK(http_auth_lookup_tier("/forget", HTTP_POST, &tier) && tier == ROUTE_TIER_ADMIN,
+               "POST /forget stays ordinary ROUTE_TIER_ADMIN, not WIFI_SETUP");
+    TEST_CHECK(http_auth_lookup_tier("/ip_config", HTTP_POST, &tier) && tier == ROUTE_TIER_ADMIN,
+               "POST /ip_config stays ordinary ROUTE_TIER_ADMIN, not WIFI_SETUP");
+}
+
 void run_test_http_auth_enforce(void) {
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();
@@ -492,4 +594,5 @@ void run_test_http_auth_enforce(void) {
     test_every_table_row_reachable_via_lookup();
     test_every_real_route_allows_with_auth_off();
     test_decision_counts_as_activity();
+    test_wifi_setup_tier_provisioned_gating();
 }

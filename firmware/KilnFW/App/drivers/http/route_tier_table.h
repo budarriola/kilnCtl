@@ -85,6 +85,20 @@ typedef enum {
      * so http_auth_check() (the one place that interprets it) has a single
      * named case to key off, not a URI string match. */
     ROUTE_TIER_ADMIN_BOOTSTRAP,
+    /* Owner decision 2026-09-28: /wifi (the provisioning page) and its two
+     * JSON reads, /networks and /scan, stay reachable with NO session ONLY
+     * while the board is unprovisioned (no STA credentials saved / AP
+     * provisioning mode) -- the AP captive-portal first-time-setup flow must
+     * work end to end before any credential can exist. Once provisioned,
+     * these three routes require an administrator session, same as the rest
+     * of Wi-Fi management (/provision, /forget, /ip_config, all already
+     * ROUTE_TIER_ADMIN below). Same inverse-gating shape as
+     * ROUTE_TIER_ADMIN_BOOTSTRAP (state-keyed, not role-keyed) but a
+     * DIFFERENT predicate -- "unprovisioned" is not "bootstrap needed" -- so
+     * it is its own tier rather than reusing that one, again so
+     * http_auth_check() has a single named case to key off instead of a URI
+     * string match. */
+    ROUTE_TIER_WIFI_SETUP,
 } route_tier_t;
 
 typedef struct {
@@ -152,9 +166,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* NOTE: the plan also lists "GET /api/unit_pref" here -- that route
      * does not exist in the tree (see file header comment). No row for it. */
     ROUTE_TIER("/status", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/scan", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/networks", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/wifi", HTTP_GET, ROUTE_TIER_OPEN),
+    /* Owner decision 2026-09-28: open only while unprovisioned -- see
+     * ROUTE_TIER_WIFI_SETUP's own comment above. */
+    ROUTE_TIER("/scan", HTTP_GET, ROUTE_TIER_WIFI_SETUP),
+    ROUTE_TIER("/networks", HTTP_GET, ROUTE_TIER_WIFI_SETUP),
+    ROUTE_TIER("/wifi", HTTP_GET, ROUTE_TIER_WIFI_SETUP),
 
     /* ---- USER -- start and stop a firing, and nothing else (plan section
      * 1, "USER").
@@ -168,12 +184,22 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * POST /api/profile_exec/stop is ordinary ROUTE_TIER_USER, matching
      * /api/profile_exec/start below -- an operator who can start a firing
      * from this GUI can also stop it, and neither is reachable pre-login.
-     * ROUTE_TIER_SAFETY_REDUCE is left as-is for every OTHER route still
-     * using it below (current_sweep/abort, autotune/abort, danger/stop).
-     * The physical E-stop removes element power on its own for those too
-     * (firmware/SaftyFW/README.md, "Wiring the E-stop"), so whether they
-     * should also require login under the "dashboards only" decision is an
-     * open owner question, not something this change decided. */
+     * Owner decision, 2026-09-28 (follow-up): current_sweep/abort,
+     * autotune/abort and danger/stop now ALSO require login, same tightening
+     * as profile_exec/stop above and for the same reason -- the physical
+     * E-stop (SaftyFW, firmware-mediated) is the unauthenticated safety
+     * backstop for all of them, so none of these three needs to be reachable
+     * pre-login on safety grounds. Each moves to ROUTE_TIER_ADMIN, not
+     * ROUTE_TIER_USER, because each is the abort/stop counterpart of a
+     * START action that is already ADMIN on an ADMIN-tier page shell
+     * (current_sweep/start, autotune/start, diagnostics/danger/enable all
+     * ADMIN; zones_page.html/autotune settings/diagnostics_page.html are all
+     * ADMIN-tier pages) -- unlike profile_exec/{start,stop}, which are the
+     * USER-tier dashboard's own pair. ROUTE_TIER_SAFETY_REDUCE now has no
+     * user in this table; the enum itself is left in place, documented as
+     * unused, in case a future route needs the "always reachable, reduces
+     * risk only" shape again -- deleting it would just have to be re-added
+     * verbatim. */
     /* WEB_AUTH_PLAN.md section 8: the explicit "stay unlocked" action. USER
      * tier so the shared pre-handler's own activity-touch (see
      * http_auth_decision_counts_as_activity()) extends the session on this
@@ -208,13 +234,13 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/zones", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/zones/pid", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/zones/current_sweep/start", HTTP_POST, ROUTE_TIER_ADMIN),
-    /* SAFETY_REDUCE, not ADMIN: aborts the current-sweep task
+    /* ADMIN, not SAFETY_REDUCE: aborts the current-sweep task
      * (zones_current_sweep_abort(), zones_current_sweep_task.c), which drives
-     * relays to measure per-zone current -- an expired session must not be
-     * able to keep that running -- always reachable with no session.
-     * Not changed by /api/profile_exec/stop's 2026-09-28 move to
-     * ROUTE_TIER_USER above; see the note there. */
-    ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
+     * relays to measure per-zone current. Owner decision, 2026-09-28
+     * (follow-up to profile_exec/stop's move): now requires login, matching
+     * /api/zones/current_sweep/start above and zones_page.html's ADMIN-tier
+     * page -- see the note at the top of the USER section. */
+    ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/zones/current_sweep/status", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/settings/tz", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/settings/display_power", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -291,12 +317,13 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* Tuning */
     ROUTE_TIER("/api/autotune/start", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/autotune/accept", HTTP_POST, ROUTE_TIER_ADMIN),
-    /* SAFETY_REDUCE, not ADMIN: aborts a running autotune
+    /* ADMIN, not SAFETY_REDUCE: aborts a running autotune
      * (autotune_engine_abort() -> abort_locked() -> force_relays_off(),
-     * autotune_engine_guard.c), which drives relays for the relay-step test
-     * -- always reachable with no session, same as current_sweep/abort
-     * above. */
-    ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
+     * autotune_engine_guard.c), which drives relays for the relay-step test.
+     * Owner decision, 2026-09-28 (follow-up): now requires login, matching
+     * /api/autotune/start above -- see the note at the top of the USER
+     * section. */
+    ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/adaptive_tune/enable", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/adaptive_tune/revert", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/autotune", HTTP_GET, ROUTE_TIER_ADMIN),
@@ -311,13 +338,14 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/diagnostics/danger/enable", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/danger/relay", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/danger/start", HTTP_POST, ROUTE_TIER_ADMIN),
-    /* SAFETY_REDUCE, not ADMIN: exits the danger-mode relay window
+    /* ADMIN, not SAFETY_REDUCE: exits the danger-mode relay window
      * (danger_mode_stop() -> kiln_io_owner_command_all_relays_off() plus
      * releasing heat-enable, danger_mode.c), which is a window explicitly
-     * armed to drive relays outside the normal safety-gated path -- always
-     * reachable with no session, same reasoning as current_sweep/abort and
-     * autotune/abort above. */
-    ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_SAFETY_REDUCE),
+     * armed to drive relays outside the normal safety-gated path. Owner
+     * decision, 2026-09-28 (follow-up): now requires login, matching
+     * /api/diagnostics/danger/enable above -- see the note at the top of the
+     * USER section. */
+    ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/danger", HTTP_GET, ROUTE_TIER_ADMIN),
 
     /* OTA, reset, filesystem -- includes the nine routes that authenticate

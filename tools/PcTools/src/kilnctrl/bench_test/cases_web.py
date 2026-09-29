@@ -170,7 +170,21 @@ def _case_web_x01(ctx: dict) -> CaseResult:
 #: state (route_tier_table.h's own doc comment: OPEN "safe to reveal/costs
 #: nothing", SAFETY_REDUCE "can only make the kiln safer").
 _ALWAYS_OPEN_TIERS = frozenset({"ROUTE_TIER_OPEN", "ROUTE_TIER_SAFETY_REDUCE", "ROUTE_TIER_ADMIN_BOOTSTRAP"})
-_ADMIN_TIERS = frozenset({"ROUTE_TIER_ADMIN", "ROUTE_TIER_USER"})
+# ROUTE_TIER_WIFI_SETUP (owner decision 2026-09-28) graded here as an ADMIN
+# tier: without querying GET /status for the board's live provisioning state,
+# this sweep has no way to tell which of the tier's two behaviours to expect,
+# and every bench board this sweep runs against is provisioned (CLAUDE.md's
+# bench notes), so ADMIN-shaped grading (401/403/3xx once web_enabled, no
+# violation with auth off) is the correct expectation here today. A future
+# bench board captured mid first-time-setup would need this sweep to read
+# /status itself before grading this tier, same as _wifi_status() below
+# already does for WEB-WIFI-06 -- not done here since it would otherwise
+# always report 200 as a violation, and this suite has run against
+# unprovisioned boards. Falling through to the catch-all `else: ok = True`
+# below (this tier's previous, unclassified fate) silently never checks
+# /wifi/scan/networks at all, which is the vacuous-pass class CLAUDE.md's
+# "Negative-test every check" note warns about.
+_ADMIN_TIERS = frozenset({"ROUTE_TIER_ADMIN", "ROUTE_TIER_USER", "ROUTE_TIER_WIFI_SETUP"})
 
 #: GET routes that are read-only by tier but have a real side effect on the
 #: board, so the sweep must never invoke them even though their tier would

@@ -744,6 +744,11 @@ wifi_prov_mode_t wifi_prov_get_mode(void)
     return s_wifi.mode;
 }
 
+bool wifi_prov_is_unprovisioned(void)
+{
+    return s_wifi.state == WIFI_PROV_STATE_UNPROVISIONED;
+}
+
 const char *wifi_prov_get_saved_ssid(void)
 {
     if (s_wifi.active_ssid[0] != '\0') {

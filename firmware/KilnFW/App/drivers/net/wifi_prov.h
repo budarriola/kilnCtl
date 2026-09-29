@@ -163,6 +163,17 @@ wifi_prov_state_t wifi_prov_get_state(void);
  * RECONNECTING depending on what's happened since). */
 wifi_prov_mode_t wifi_prov_get_mode(void);
 
+/* True exactly when wifi_prov_get_state() == WIFI_PROV_STATE_UNPROVISIONED --
+ * home mode, AP-only, no STA credentials saved yet. Added 2026-09-28 for
+ * http_auth_policy_iface.h's ROUTE_TIER_WIFI_SETUP predicate (owner decision:
+ * /wifi, /networks and /scan stay open with no session ONLY during this
+ * state, so the AP captive-portal first-time-setup flow works before any
+ * credential exists). Deliberately narrower than "mode == WIFI_PROV_MODE_AP"
+ * -- a user who chose permanent AP mode (WIFI_PROV_STATE_AP_MODE) despite
+ * already having saved credentials is provisioned and must still require a
+ * session; only the true zero-credential state opens these routes. */
+bool wifi_prov_is_unprovisioned(void);
+
 /* NULL-terminated. There is no longer one canonical "the" saved network --
  * this now returns the active/most-recently-attempted SSID (the one
  * apply_sta_config() last configured for a join), or if nothing is currently

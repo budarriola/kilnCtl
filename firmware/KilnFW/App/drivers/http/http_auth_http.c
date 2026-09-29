@@ -289,12 +289,19 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     // comment (net/web_auth_session.h) naming this the one predicate for
     // this state.
     bool bootstrap_needed = http_auth_policy_admin_bootstrap_needed();
+    // Fed straight to http_auth_check() -- never re-derived there, same
+    // discipline as bootstrap_needed above. Only ROUTE_TIER_WIFI_SETUP
+    // (/wifi, /networks, /scan) consults this; every other tier ignores it.
+    bool wifi_unprovisioned = http_auth_policy_wifi_unprovisioned();
 
     http_auth_role_t role = HTTP_AUTH_ROLE_NONE;
     char token[128];
     token[0] = '\0';
     // Skip the session lookup entirely for OPEN and SAFETY_REDUCE routes
-    // (e.g. POST /api/autotune/abort) and whenever web auth is off --
+    // (SAFETY_REDUCE unused as of the 2026-09-28 owner-decision follow-up --
+    // see http_auth_check()'s doc comment), for ROUTE_TIER_WIFI_SETUP while
+    // the board is still unprovisioned (the captive-portal case -- no
+    // session can exist yet), and whenever web auth is off --
     // http_auth_check() would ALLOW all of those regardless of role, and
     // this also means the Dashboard's hot GET /api/status path never pays
     // for a session-table lookup it cannot need.
@@ -303,11 +310,15 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     // unconditionally still ALLOWs every one of those cases on its own, so
     // a future change here that always resolves the role first cannot make
     // this less safe, only slower.
-    if (web_enabled && ctx->tier != ROUTE_TIER_OPEN && ctx->tier != ROUTE_TIER_SAFETY_REDUCE) {
+    bool skip_session_lookup = !web_enabled || ctx->tier == ROUTE_TIER_OPEN ||
+                                ctx->tier == ROUTE_TIER_SAFETY_REDUCE ||
+                                (ctx->tier == ROUTE_TIER_WIFI_SETUP && wifi_unprovisioned);
+    if (!skip_session_lookup) {
         resolve_role_for_request(req, &role, token, sizeof(token));
     }
 
-    http_auth_decision_t decision = http_auth_check(ctx->tier, role, web_enabled, bootstrap_needed);
+    http_auth_decision_t decision =
+        http_auth_check(ctx->tier, role, web_enabled, bootstrap_needed, wifi_unprovisioned);
     // Section 8: any request actually ALLOWED against a real credential tier
     // (USER/ADMIN) is "activity" and extends the session -- the ONE place
     // this touch happens, so a route never has to remember to call it

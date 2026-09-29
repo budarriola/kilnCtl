@@ -327,6 +327,11 @@ try {
         (Join-Path $driversDir "http/http_auth_enforce.c"),
         (Join-Path $driversDir "http/http_auth_policy_iface.c"),
         (Join-Path $driversDir "http/http_session_iface.c"),
+        # NOTE: no wifi_prov_unprovisioned_stub.c here -- this executable's
+        # own $sources list already includes test_wifi_prov.c, which
+        # #includes the REAL wifi_prov.c and so already defines
+        # wifi_prov_is_unprovisioned(); linking the stub too would collide
+        # (LNK2005).
         # http_auth_http.c's resolve_role_for_request() calls
         # httpd_req_get_hdr_value_len/_str and ota_http_get_client_ip, real
         # esp_http_server.h symbols this executable has no other source for
@@ -572,6 +577,7 @@ try {
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             # http_auth_policy_iface.c/http_session_iface.c call into
             # web_auth_store.c (policy load) and web_auth_session.c (real
             # session table/role resolution) -- linked in for REAL, same
@@ -644,6 +650,7 @@ try {
             # directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             # http_auth_policy_iface.c/http_session_iface.c call into
             # web_auth_store.c (policy load) and web_auth_session.c (real
             # session table/role resolution) -- linked in for REAL, same
@@ -891,6 +898,7 @@ try {
             # directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             # http_auth_policy_iface.c/http_session_iface.c call into
             # web_auth_store.c (policy load) and web_auth_session.c (real
             # session table/role resolution) -- linked in for REAL, same
@@ -1020,6 +1028,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1100,6 +1109,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1497,6 +1507,7 @@ try {
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             # http_auth_policy_iface.c/http_session_iface.c call into
             # web_auth_store.c (policy load) and web_auth_session.c (real
             # session table/role resolution) -- linked in for REAL, same
@@ -1771,6 +1782,7 @@ try {
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             # http_auth_policy_iface.c/http_session_iface.c call into
             # web_auth_store.c (policy load) and web_auth_session.c (real
             # session table/role resolution) -- linked in for REAL, same
@@ -1957,6 +1969,7 @@ try {
             # httpd_register_uri_handler() directly.
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             # http_auth_policy_iface.c/http_session_iface.c call into
             # web_auth_store.c (policy load) and web_auth_session.c (real
             # session table/role resolution) -- linked in for REAL, same
@@ -2149,7 +2162,7 @@ try {
             "/Fo:`"$walhObjDir\\`" /Fe:`"$exe45`" `"$(Join-Path $testDir 'test_web_auth_login_http.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_session_iface.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
-            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'net/login_backoff.c')`" " +
             "`"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
@@ -2188,6 +2201,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_disclosure_gate.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
@@ -2214,6 +2228,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
             "`"$(Join-Path $driversDir 'http/http_auth_disclosure_gate.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +

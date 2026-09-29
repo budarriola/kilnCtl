@@ -55,8 +55,14 @@ function assert(cond, label) {
 }
 
 // Each openLoginModal() call returns a promise the test settles by hand.
-function makeContext(pathname) {
+// wifiStatusState, when non-null, stubs GET /status's reported
+// wifi_prov_get_state() value (owner decision 2026-09-28: the /wifi gate
+// reads this same OPEN route to decide "unprovisioned or not" -- see
+// app.js's WIFI_SETUP_PATHS block). null means the fetch itself fails,
+// exercising the fail-closed (gate) path.
+function makeContext(pathname, wifiStatusState) {
   const opens = [];
+  const fetchCalls = [];
   const ctx = {
     window: { location: { pathname: pathname, href: pathname } },
     openLoginModal: function (title) {
@@ -64,6 +70,16 @@ function makeContext(pathname) {
       const p = new Promise((resolve) => { settle = resolve; });
       opens.push({ title: title, settle: settle });
       return p;
+    },
+    fetch: function (url) {
+      fetchCalls.push(url);
+      if (wifiStatusState === undefined) {
+        return Promise.reject(new Error('unexpected fetch in this test: ' + url));
+      }
+      if (wifiStatusState === null) {
+        return Promise.reject(new Error('simulated network error'));
+      }
+      return Promise.resolve({ ok: true, json: function () { return Promise.resolve({ state: wifiStatusState }); } });
     },
     kcPageIsDashboard: function () { return pathname === '/'; },
     Promise: Promise,
@@ -73,7 +89,7 @@ function makeContext(pathname) {
     '\nthis.__gate = maybeGateThisPage;' +
     '\nthis.__ensure = ensureAdminLogin;' +
     '\nthis.__declined = function () { return authPromptDeclined; };', ctx);
-  return { ctx, opens };
+  return { ctx, opens, fetchCalls };
 }
 
 function flush() {
@@ -81,11 +97,50 @@ function flush() {
 }
 
 (async () => {
-  // Group 1: dashboard and the other allowlisted paths never gate.
-  for (const p of ['/', '/login', '/wifi']) {
+  // Group 1: dashboard and the other unconditionally allowlisted paths
+  // never gate, and never even touch fetch.
+  for (const p of ['/', '/login']) {
     const { ctx, opens } = makeContext(p);
     ctx.__gate('none');
     assert(opens.length === 0, 'allowlisted path ' + p + ': no modal for a logged-out viewer');
+  }
+
+  // Group 1b (owner decision 2026-09-28): /wifi is conditionally open --
+  // only while GET /status reports the board unprovisioned.
+  {
+    const { ctx, opens } = makeContext('/wifi', 'unprovisioned');
+    ctx.__gate('none');
+    await flush();
+    assert(opens.length === 0, '/wifi while unprovisioned: no modal for a logged-out viewer');
+  }
+  {
+    const { ctx, opens } = makeContext('/wifi', 'connected');
+    ctx.__gate('none');
+    await flush();
+    assert(opens.length === 1, '/wifi once provisioned: gates a logged-out viewer, same as any other page');
+  }
+  {
+    // A permanent-AP board (state "ap") already has saved credentials --
+    // provisioned, must still gate. See wifi_prov_is_unprovisioned()'s own
+    // comment in wifi_prov.h for why "ap" and "unprovisioned" are distinct.
+    const { ctx, opens } = makeContext('/wifi', 'ap');
+    ctx.__gate('none');
+    await flush();
+    assert(opens.length === 1, '/wifi in permanent AP mode (has credentials): still gates');
+  }
+  {
+    // /status unreachable: fail closed, same as any other error here.
+    const { ctx, opens } = makeContext('/wifi', null);
+    ctx.__gate('none');
+    await flush();
+    assert(opens.length === 1, '/wifi with /status unreachable: fails closed (gates)');
+  }
+  {
+    // A real session on /wifi never gates, provisioned or not.
+    const { ctx, opens } = makeContext('/wifi', 'connected');
+    ctx.__gate('admin');
+    await flush();
+    assert(opens.length === 0, '/wifi, admin session, provisioned: no modal');
   }
 
   // Group 2: a real session (or auth off, which reports admin) never gates.

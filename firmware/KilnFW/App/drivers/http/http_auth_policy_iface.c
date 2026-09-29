@@ -13,6 +13,8 @@
 // UNREADABLE must read as enabled (fail-closed), not disabled.
 #include "http_auth_policy_iface.h"
 
+#include "wifi_prov.h" // wifi_prov_is_unprovisioned() -- the one predicate
+                        // for ROUTE_TIER_WIFI_SETUP, never re-derived here
 #include "web_auth_store.h"
 #include "web_auth_session.h" // web_auth_admin_bootstrap_needed() -- the one
                                 // predicate for this state, never re-derived
@@ -31,4 +33,8 @@ bool http_auth_policy_admin_bootstrap_needed(void) {
     bool effective_enabled = http_auth_policy_web_enabled();
     bool admin_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
     return web_auth_admin_bootstrap_needed(effective_enabled, admin_configured);
+}
+
+bool http_auth_policy_wifi_unprovisioned(void) {
+    return wifi_prov_is_unprovisioned();
 }

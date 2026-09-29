@@ -107,15 +107,18 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 //
 //   web_enabled == true, tier == ROUTE_TIER_SAFETY_REDUCE:
 //     ALLOW, regardless of role -- including HTTP_AUTH_ROLE_NONE. Plan
-//     section 9: a route that can only ever reduce heat/risk (today the
-//     current-sweep/autotune/danger-mode aborts; POST /api/profile_exec/stop
-//     is USER since the 2026-09-28 owner decision) must never become harder
-//     to reach once auth is on than it was with auth off -- a locked-out owner watching a kiln
-//     climb is a worse failure mode than the one authentication protects
-//     against. This is decided from route_tier_table.h's own per-route
-//     classification, not a URI string match inside this function or the
-//     pre-handler -- a second, independently maintained match would be
-//     exactly the reset-one-side-of-a-pair shape CLAUDE.md documents.
+//     section 9: a route that can only ever reduce heat/risk must never
+//     become harder to reach once auth is on than it was with auth off -- a
+//     locked-out owner watching a kiln climb is a worse failure mode than
+//     the one authentication protects against. This is decided from
+//     route_tier_table.h's own per-route classification, not a URI string
+//     match inside this function or the pre-handler -- a second,
+//     independently maintained match would be exactly the
+//     reset-one-side-of-a-pair shape CLAUDE.md documents. UNUSED as of the
+//     2026-09-28 owner-decision follow-up: no route carries this tier today
+//     (the current-sweep/autotune/danger-mode aborts moved to
+//     ROUTE_TIER_ADMIN and POST /api/profile_exec/stop to ROUTE_TIER_USER,
+//     both the same day) -- kept for a future route that needs this shape.
 //
 //   web_enabled == true, tier != ROUTE_TIER_OPEN, tier != ROUTE_TIER_SAFETY_REDUCE,
 //   role == HTTP_AUTH_ROLE_NONE:
@@ -163,19 +166,37 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 //     a stale pre-reset admin session would still satisfy every ADMIN route
 //     while the board is waiting for a fresh credential, defeating the
 //     bootstrap gate entirely.
+//
+// `wifi_unprovisioned` is http_auth_policy_wifi_unprovisioned()'s
+// already-resolved result (http_auth_policy_iface.h, backed by
+// wifi_prov_is_unprovisioned()) -- never re-derived here from raw Wi-Fi
+// state, same discipline as `web_enabled`/`bootstrap_needed`. It changes one
+// thing, owner decision 2026-09-28:
+//
+//   tier == ROUTE_TIER_WIFI_SETUP:
+//     ALLOW iff wifi_unprovisioned, regardless of role -- the AP
+//     captive-portal first-time-setup flow (/wifi, /networks, /scan) must
+//     work before any credential exists. Once provisioned, this tier is
+//     treated exactly like ROUTE_TIER_ADMIN (an administrator session
+//     required) -- it is NOT its own independent role gate past that point.
 http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled,
-                                      bool bootstrap_needed);
+                                      bool bootstrap_needed, bool wifi_unprovisioned);
 
 // Section 8's "what counts as activity" predicate: true only for a request
 // that was actually ALLOWED against a real credential tier (USER or ADMIN).
 // A passive status poll classified ROUTE_TIER_OPEN (docs/WEB_AUTH_PLAN.md's
 // "GET /api/auth/session" keepalive) must NOT count as activity even though
 // it is ALLOWED -- that route is deliberately kept OPEN so it never reaches
-// this predicate's true branch. ROUTE_TIER_SAFETY_REDUCE and
+// this predicate's true branch. ROUTE_TIER_SAFETY_REDUCE (unused as of
+// 2026-09-28 -- see http_auth_check()'s doc comment above) and
 // ROUTE_TIER_ADMIN_BOOTSTRAP are excluded too: neither implies an
 // authenticated session worth extending (SAFETY_REDUCE allows even with no
 // session; ADMIN_BOOTSTRAP's ALLOW only ever fires before a credential
-// exists). Any non-ALLOW decision is never activity.
+// exists). ROUTE_TIER_WIFI_SETUP DOES count, since once provisioned it is
+// gated exactly like ROUTE_TIER_ADMIN -- an ALLOW there while still
+// unprovisioned has no session to extend anyway (the call site never has a
+// non-empty token in that case), so including this tier is safe in both
+// states. Any non-ALLOW decision is never activity.
 bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision_t decision);
 
 // True only for a GET whose uri is listed in route_tier_table.h's

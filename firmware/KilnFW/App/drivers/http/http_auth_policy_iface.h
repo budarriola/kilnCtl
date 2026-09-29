@@ -52,6 +52,13 @@ bool http_auth_policy_web_enabled(void);
 // itself toward web_auth_policy_effective_enabled().
 bool http_auth_policy_admin_bootstrap_needed(void);
 
+// True iff the board is currently unprovisioned for Wi-Fi (owner decision
+// 2026-09-28: ROUTE_TIER_WIFI_SETUP, route_tier_table.h). Calls
+// wifi_prov_is_unprovisioned() directly -- never re-derives "no STA
+// credentials saved" from wifi_prov_get_state()/wifi_prov_get_mode() inline
+// here, same discipline as this seam's other two predicates.
+bool http_auth_policy_wifi_unprovisioned(void);
+
 #ifdef __cplusplus
 }
 #endif

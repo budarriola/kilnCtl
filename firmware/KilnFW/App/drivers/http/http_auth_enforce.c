@@ -28,7 +28,7 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method) {
 }
 
 http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, bool web_enabled,
-                                      bool bootstrap_needed) {
+                                      bool bootstrap_needed, bool wifi_unprovisioned) {
     // Section 11: auth off collapses every tier to full access, checked
     // first and unconditionally so nothing below this line can veto it.
     if (!web_enabled) {
@@ -52,13 +52,34 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
         return bootstrap_needed ? HTTP_AUTH_DECISION_ALLOW : HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
     }
 
+    // Owner decision 2026-09-28: /wifi, /networks and /scan stay reachable
+    // with no session ONLY while the board is unprovisioned -- the AP
+    // captive-portal first-time-setup flow must work before any credential
+    // exists. Checked here, before the no-session denial below, since the
+    // true case has no session to deny. Once provisioned this falls through
+    // to the switch below, where it is treated exactly like ROUTE_TIER_ADMIN
+    // (an administrator session required, same as the sibling
+    // /provision//forget//ip_config routes) -- reassigning `tier` rather than
+    // duplicating ROUTE_TIER_ADMIN's case body keeps that single copy the
+    // only place "administrator required" is decided.
+    if (tier == ROUTE_TIER_WIFI_SETUP) {
+        if (wifi_unprovisioned) {
+            return HTTP_AUTH_DECISION_ALLOW;
+        }
+        tier = ROUTE_TIER_ADMIN;
+    }
+
     // Plan section 9: a route that can only ever reduce heat/risk
-    // (ROUTE_TIER_SAFETY_REDUCE -- today the current-sweep, autotune and
-    // danger-mode aborts; POST /api/profile_exec/stop moved to USER by the
-    // 2026-09-28 owner decision) must be reachable regardless of role or
+    // (ROUTE_TIER_SAFETY_REDUCE) must be reachable regardless of role or
     // session state -- including HTTP_AUTH_ROLE_NONE and a locked-out
     // client. Checked here, before the no-session denial below, so nothing
-    // past this line can veto it.
+    // past this line can veto it. UNUSED as of the 2026-09-28 owner-decision
+    // follow-up: the current-sweep/autotune/danger-mode aborts that used to
+    // carry this tier moved to ROUTE_TIER_ADMIN (route_tier_table.h), and
+    // POST /api/profile_exec/stop moved to ROUTE_TIER_USER the same day --
+    // no route uses ROUTE_TIER_SAFETY_REDUCE today. The tier and this
+    // handling are kept, not deleted, for a future route that needs the
+    // "always reachable, can only reduce risk" shape again.
     if (tier == ROUTE_TIER_SAFETY_REDUCE) {
         return HTTP_AUTH_DECISION_ALLOW;
     }
@@ -102,6 +123,13 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
             // explicit for the same exhaustiveness reason as the two cases
             // above.
             return HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
+        case ROUTE_TIER_WIFI_SETUP:
+            // Unreachable: handled above, where the true (unprovisioned)
+            // case returns ALLOW directly and the false case reassigns
+            // `tier` to ROUTE_TIER_ADMIN before this switch is ever reached.
+            // Kept explicit for the same exhaustiveness reason as the other
+            // cases here.
+            return HTTP_AUTH_DECISION_DENY_INSUFFICIENT;
         default:
             // A tier value route_tier_table.h did not define (e.g. a new
             // enumerator added there with no case added here). Fail closed:
@@ -115,7 +143,14 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
     if (decision != HTTP_AUTH_DECISION_ALLOW) {
         return false;
     }
-    return tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN;
+    // ROUTE_TIER_WIFI_SETUP counts too: once provisioned it is gated exactly
+    // like ROUTE_TIER_ADMIN (http_auth_check()'s own comment), so an ALLOW
+    // there is a real administrator session worth extending the same way. An
+    // ALLOW while still unprovisioned never reaches here with role != NONE
+    // in the shape that would extend anything -- there is no session yet to
+    // extend -- so including this tier is safe in both states, not just the
+    // provisioned one.
+    return tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN || tier == ROUTE_TIER_WIFI_SETUP;
 }
 
 bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
