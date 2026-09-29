@@ -2357,11 +2357,12 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
                                                                       : ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING;
     }
 
-    /* Restore-in-flight, second look (2026-09-28, A4 review follow-up B):
-     * same shape as profile_executor_run()'s/autotune_begin_run_locked()'s
-     * re-read after their own heat claim -- the informational check that fed
-     * zone_sweep_check_refusal() above ran before this claim was published,
-     * so a restore could set the flag in the gap and still see no heat claim
+    /* Restore-in-flight (2026-09-28, A4 review follow-up B): the only
+     * check of this flag on the sweep start path --
+     * zone_sweep_check_refusal() above does not consult it. Placed after the
+     * heat claim, same shape as profile_executor_run()'s/
+     * autotune_begin_run_locked()'s re-read after their own claim, so a
+     * restore could not set the flag in a gap and still see no heat claim
      * at backup_import_job()'s own re-check (relay_authority_heat_run_active(),
      * which reports profile/autotune only -- a sweep claim is not one of the
      * two facts it consults). Re-reading the flag here, after the claim is

@@ -249,9 +249,11 @@ static void io_bridge_task(void *arg)
                 if (rr == KILN_IO_OWNER_RELAY_ERR_RUNNING) {
                     /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25
                      * (Q1): distinct from ERR_SAFETY above -- a firing or
-                     * autotune run is active, not a live safety fault. */
-                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON: a firing or autotune "
-                                  "run is active", subcmd, msg.payload[1]);
+                     * autotune run (or, since 2026-09-28, a backup restore)
+                     * is active, not a live safety fault. The wire word stays
+                     * "running" for all three. */
+                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON: a firing, autotune "
+                                  "run, or backup restore is active", subcmd, msg.payload[1]);
                     bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "running");
                     rejected = true;
                     break;
@@ -324,8 +326,8 @@ static void io_bridge_task(void *arg)
                 }
                 if (rr == KILN_IO_OWNER_RELAY_ERR_RUNNING) {
                     /* Same distinction as IO_CMD_SET_RELAY above. */
-                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X/value 0x%02X: a firing "
-                                  "or autotune run is active", subcmd, msg.payload[1], msg.payload[2]);
+                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X/value 0x%02X: a firing, "
+                                  "autotune run, or backup restore is active", subcmd, msg.payload[1], msg.payload[2]);
                     bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "running");
                     rejected = true;
                     break;

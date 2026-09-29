@@ -1218,8 +1218,8 @@ static esp_err_t danger_relay_post_handler(httpd_req_t *req)
          * so a firing or autotune run really can reach here now. 409, the
          * owner's Q4 decision for every new gate refusal. */
         httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_sendstr(req, "a firing or autotune run is active -- manual relay control is not "
-                                 "available until it ends");
+        httpd_resp_sendstr(req, "a firing, autotune run, or backup restore is active -- manual relay "
+                                 "control is not available until it ends");
         return ESP_OK;
     }
     if (rr == DASHBOARD_RELAY_ERR_OWNED) {

@@ -1310,7 +1310,7 @@ void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t 
                  * "sources 0x00" for the same reason ERR_UPDATING/
                  * ERR_CRASH_UNACK do. */
                 snprintf(out->reason, sizeof(out->reason),
-                         "zone %u energize refused: firing or autotune run active", zi);
+                         "zone %u energize refused: firing/autotune/restore active", zi);
             } else {
                 char src_words[160];
                 safety_fault_source_words(refused_sources, src_words, sizeof(src_words));

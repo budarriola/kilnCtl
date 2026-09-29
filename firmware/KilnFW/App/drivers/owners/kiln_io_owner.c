@@ -266,8 +266,8 @@ static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *ou
             ESP_LOGW(TAG, "relay-on: danger mode bypassing a gate that would otherwise have blocked this");
         }
         if (system_mode_gate_blocks_relay()) {
-            ESP_LOGW(TAG, "relay-on refused even in danger mode: a firing or autotune run is active -- "
-                          "manual relay control is not available until it ends");
+            ESP_LOGW(TAG, "relay-on refused even in danger mode: a firing, autotune run, or backup restore "
+                          "is active -- manual relay control is not available until it ends");
             if (out_mode_blocked) {
                 *out_mode_blocked = true;
             }
@@ -295,8 +295,8 @@ static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating, bool *ou
         return true;
     }
     if (system_mode_gate_blocks_relay()) {
-        ESP_LOGW(TAG, "relay-on refused: a firing or autotune run is active -- manual relay control is "
-                      "not available until it ends");
+        ESP_LOGW(TAG, "relay-on refused: a firing, autotune run, or backup restore is active -- manual "
+                      "relay control is not available until it ends");
         if (out_mode_blocked) {
             *out_mode_blocked = true;
         }

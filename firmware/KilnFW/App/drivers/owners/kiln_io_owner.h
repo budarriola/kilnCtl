@@ -178,7 +178,10 @@ typedef enum {
      * is even reached) -- this fires even for a relay no run claims, which
      * ERR_OWNED never would. Appended, not inserted, for the same "plain
      * enum, no explicit values, crosses neither the UART wire nor NVS"
-     * reasoning as ERR_UPDATING/ERR_CRASH_UNACK's own comments above. */
+     * reasoning as ERR_UPDATING/ERR_CRASH_UNACK's own comments above.
+     * 2026-09-28 (A4 review follow-up B): also returned while a backup
+     * restore is in flight (system_mode_gate's restore_in_flight rule) --
+     * every surface's text names all three causes. */
     KILN_IO_OWNER_RELAY_ERR_RUNNING,
 } kiln_io_owner_relay_result_t;
 
