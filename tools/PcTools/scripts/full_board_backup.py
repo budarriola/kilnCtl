@@ -65,6 +65,7 @@ from pathlib import Path
 # tools/PcTools/scripts/full_board_backup.py` still works from any cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from kilnctrl.protocol import PROFILES_MAX_COUNT  # noqa: E402
+from kilnctrl import http_auth  # noqa: E402
 
 # Some endpoints (observed on /api/zones's safety_wiring.tc_temp_c) emit a
 # bare lowercase `nan` for an unread thermocouple channel -- valid as a
@@ -115,8 +116,17 @@ FIRING_HISTORY_PROFILE_IDS = range(PROFILES_MAX_COUNT)
 
 def _get_json(url: str, timeout: float):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with http_auth.urlopen(url, timeout=timeout) as resp:
             body = resp.read()
+    except http_auth.HttpAuthError as e:
+        # A 401 that persists after http_auth's own one-shot login attempt
+        # (missing credential, or a login the board itself refused) is
+        # reported as a failure like any other -- never silently swallowed,
+        # and never treated as a successful read. The caller (GET_ENDPOINTS
+        # loop / _capture_cfgfs_files) records this in archive["errors"] and
+        # never sets archive["endpoints"][path], so an auth failure can never
+        # end up saved as backup content.
+        return None, f"authentication failed: {e}"
     except (urllib.error.URLError, OSError) as e:
         return None, f"request failed: {e}"
     try:
@@ -146,8 +156,10 @@ def _get_bytes(url: str, timeout: float):
     pattern.
     """
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with http_auth.urlopen(url, timeout=timeout) as resp:
             return resp.read(), None
+    except http_auth.HttpAuthError as e:
+        return None, f"authentication failed: {e}"
     except (urllib.error.URLError, OSError) as e:
         return None, f"request failed: {e}"
 
@@ -216,8 +228,10 @@ def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry
         url = f"http://{host}/api/cfgfs/file?name={urllib.parse.quote(name)}"
         req = urllib.request.Request(url, data=raw, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with http_auth.urlopen(req, timeout=timeout) as resp:
                 resp.read()
+        except http_auth.HttpAuthError as e:
+            return False, f"cfg file '{name}': authentication failed after {list(decoded).index(name)} prior file(s) already written: {e}", decoded
         except (urllib.error.URLError, OSError) as e:
             return False, f"cfg file '{name}': POST failed after {list(decoded).index(name)} prior file(s) already written: {e}", decoded
     return True, f"restored {len(decoded)} cfg file(s)", decoded
@@ -431,8 +445,10 @@ def restore_full(host: str, archive: dict, timeout: float = 10.0, dry_run: bool 
         if content_type:
             req.add_header("Content-Type", content_type)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with http_auth.urlopen(req, timeout=timeout) as resp:
                 return True, resp.read().decode("utf-8", errors="replace")
+        except http_auth.HttpAuthError as e:
+            return False, f"authentication failed: {e}"
         except urllib.error.HTTPError as e:
             try:
                 body = e.read().decode("utf-8", errors="replace").strip()
@@ -777,8 +793,12 @@ def main() -> int:
     for slot_id in slot_ids:
         url = f"http://{args.host}/api/kiln_configs/export?id={slot_id}"
         try:
-            with urllib.request.urlopen(url, timeout=args.timeout) as resp:
+            with http_auth.urlopen(url, timeout=args.timeout) as resp:
                 text = resp.read().decode("utf-8")
+        except http_auth.HttpAuthError as e:
+            archive["errors"].append({"endpoint": url, "item": f"kiln config slot {slot_id} export", "required": False, "error": f"authentication failed: {e}"})
+            kiln_cfg_export_errors += 1
+            continue
         except (urllib.error.URLError, OSError) as e:
             archive["errors"].append({"endpoint": url, "item": f"kiln config slot {slot_id} export", "required": False, "error": str(e)})
             kiln_cfg_export_errors += 1
