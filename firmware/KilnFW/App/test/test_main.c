@@ -34,7 +34,9 @@ void run_test_thermo_combine(void);
 void run_test_cone_table(void);
 void run_test_profile_feasibility(void);
 void run_test_profile_plan_curve(void);
-void run_test_wifi_prov(void);
+// run_test_wifi_prov() moved to its own executable 2026-09-28 (see
+// build_host_tests.ps1's "exe51"/test_wifi_prov.c comments) -- not called
+// from this main().
 void run_test_backup_import(void);
 void run_test_ota_record(void);
 void run_test_uart_log_bridge(void);
@@ -154,7 +156,6 @@ int main(void)
     run_test_cone_table();
     run_test_profile_feasibility();
     run_test_profile_plan_curve();
-    run_test_wifi_prov();
     run_test_backup_import();
     run_test_ota_record();
     run_test_uart_log_bridge();

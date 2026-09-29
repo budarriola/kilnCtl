@@ -79,7 +79,14 @@ try {
         (Join-Path $testDir "test_thermo_combine.c"),
         (Join-Path $testDir "test_profile_feasibility.c"),
         (Join-Path $testDir "test_profile_plan_curve.c"),
-        (Join-Path $testDir "test_wifi_prov.c"),
+        # test_wifi_prov.c moved OUT of "main" 2026-09-28 (owner request: AP
+        # fallback teardown deferred while a user is logged in) -- its new
+        # fakes for http_auth_policy_web_enabled()/http_auth_any_session_active()
+        # (wifi_prov_link.c's new ap_teardown_should_defer() calls both) collide
+        # at link time with the REAL http_auth_policy_iface.c/http_session_iface.c
+        # this executable also links for test_web_auth_login_http.c and friends --
+        # same class of collision, and same fix (its own executable), as
+        # test_time_sync.c's move documented at that test's own block below.
         (Join-Path $testDir "test_backup_import.c"),
         (Join-Path $testDir "test_ota_record.c"),
         (Join-Path $testDir "test_uart_log_bridge.c"),
@@ -2298,6 +2305,34 @@ try {
 
     Invoke-HostTestExe -Name "system_mode_gate" -ExePath $exe50 -BuildCmd $cmd50
 
+    # ---- test_wifi_prov.c: its own FIFTY-FIRST, separate executable.
+    # 2026-09-28 owner request ("reconnect to wifi ... when there are no
+    # users logged in to the website"): wifi_prov_link.c's new
+    # ap_teardown_should_defer() calls http_auth_policy_web_enabled()/
+    # http_auth_any_session_active(), and this test file fakes both directly
+    # controllable (same "declared once, defined per test file" convention as
+    # test_ota_http.c/test_partition_info_http.c) rather than pulling in
+    # PSA crypto/hal_time/web_auth_store just to drive two booleans. That
+    # collides at link time with "main"'s own REAL http_auth_policy_iface.c/
+    # http_session_iface.c (needed there by test_web_auth_login_http.c and
+    # friends) -- same class of collision, same fix, as test_time_sync.c's
+    # move to its own executable above. test_wifi_prov.c #includes
+    # wifi_prov.c/wifi_prov_nvs.c/wifi_prov_link.c/wifi_prov_api.c directly
+    # (see that file's own header comment); wifi_prov_nvs.c calls hal_kv_*()/
+    # hal_status_to_*() (HW_ABSTRACTION.md Phase 3 item 3), so this executable
+    # also needs the host hal_kv backend (fake_kv.c) and hal_status.c, same as
+    # every other executable in this script that links wifi_prov_nvs.c's kind
+    # of persistence code.
+    $exe51 = Join-Path $outDir "kilnctl_host_tests_wifi_prov.exe"
+    $wifiProvObjDir = Join-Path $outDir "wp"
+    New-Item -ItemType Directory -Force -Path $wifiProvObjDir | Out-Null
+    $cmd51 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$wifiProvObjDir\\`" /Fe:`"$exe51`" `"$(Join-Path $testDir 'test_wifi_prov.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "wifi_prov" -ExePath $exe51 -BuildCmd $cmd51
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -2828,7 +2863,13 @@ try {
     # 64 -> 65: added test_ui_edit_firing_apply.c's own Invoke-HostTestExe
     # call -- the LCD Edit-firing page's Apply sequence and step clamps
     # (ui_edit_firing_apply.c), exercised against the real live_profile.c.
-    $totalExpected = 65
+    # 65 -> 66: added test_wifi_prov.c's own Invoke-HostTestExe call (exe51,
+    # "wifi_prov") -- moved OUT of "main" (2026-09-28 owner request, AP
+    # fallback teardown deferred while a user is logged in) because its new
+    # http_auth_policy_web_enabled()/http_auth_any_session_active() fakes
+    # collide at link time with "main"'s real copies of those two functions;
+    # see exe51's own block comment.
+    $totalExpected = 66
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

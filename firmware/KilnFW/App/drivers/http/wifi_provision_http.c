@@ -348,19 +348,30 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * join (unprovisioned/connecting/connected/reconnecting) -- both are
      * sent so the page can show one coherent switch plus a status line
      * without guessing at either from the other. */
-    /* +64 over the previous size for the two new booleans and their keys. */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64];
+    /* 2026-09-28 owner request follow-up: expose whether the fallback AP is
+     * being deliberately kept up (a logged-in user, or an AP client with
+     * auth off) instead of adding a new route -- reusing this existing GET
+     * per this file's near-full max_uri_handlers cap. Never redacted: it
+     * carries no home-network detail, just a fact about the board's own AP
+     * radio, same disclosure class as ap_clients just above it. */
+    bool ap_pending_teardown = wifi_prov_get_ap_pending_teardown();
+
+    /* +64 over the previous size for the two new booleans and their keys, +24
+     * more for ap_pending_teardown's own key+value. */
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
                      "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
                      "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
                      "\"static_netmask\":%s,\"static_gateway\":%s,"
-                     "\"ap_password_known\":%s,\"ap_password_set\":%s}",
+                     "\"ap_password_known\":%s,\"ap_password_set\":%s,"
+                     "\"ap_pending_teardown\":%s}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
                      sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
                      (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
                      static_gateway_field, on_ap ? "true" : "false",
-                     wifi_prov_get_ap_password()[0] ? "true" : "false");
+                     wifi_prov_get_ap_password()[0] ? "true" : "false",
+                     ap_pending_teardown ? "true" : "false");
     if (n < 0) {
         n = 0;
     }

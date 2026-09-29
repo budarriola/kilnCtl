@@ -29,6 +29,15 @@
 #include "settings.h"
 #include "time_sync.h"
 
+/* 2026-09-28 owner request: "reconnect to wifi ... when there are no users
+ * logged in to the website". Both http_session_iface.h and
+ * http_auth_policy_iface.h are flat INCLUDE_DIRS entries of the SAME
+ * `drivers` component as everything under net/, so this cross-subdirectory
+ * include needs no path tricks -- confirmed against
+ * firmware/KilnFW/App/drivers/CMakeLists.txt before adding it. */
+#include "http_auth_policy_iface.h"
+#include "http_session_iface.h"
+
 /* ---- Wi-Fi driver config helpers -------------------------------------- */
 
 void apply_ap_config(void)
@@ -238,6 +247,38 @@ static void select_and_apply_join_candidate(void)
     apply_sta_config();
 }
 
+/* 2026-09-28 owner request predicate: should the fallback AP's teardown be
+ * DEFERRED right now? Two signals, chosen for honesty over convenience (the
+ * owner's own wording: "pick the most honest signal"):
+ *
+ *   - Web auth ON: ask http_auth_any_session_active() -- the actual session
+ *     table, which already excludes expired/idle sessions
+ *     (web_auth_session_is_valid()). An idle-timed-out browser tab must NOT
+ *     hold the AP up forever; only a genuinely still-valid session defers.
+ *   - Web auth OFF: there is no session table to ask (nothing ever creates a
+ *     session when auth is off), so the honest signal is "is anything
+ *     actually associated to the AP radio right now" --
+ *     wifi_prov_get_ap_client_count() (esp_wifi_ap_get_sta_list(), already
+ *     used by /status's ap_clients field). HTTP-request-recency was
+ *     considered and rejected: a client can be mid-page-load or about to
+ *     poll again with no request in flight at the exact instant this runs,
+ *     whereas a station that is still associated to the radio is
+ *     unambiguous ground truth requiring no arbitrary "recent enough"
+ *     window.
+ *
+ * Runs on owner_task() only (called from do_ev_got_ip()/
+ * do_confirm_static_reachable()/do_rescan_tick(), same as every other
+ * function in this file) -- http_auth_any_session_active() and
+ * wifi_prov_get_ap_client_count() are both safe to call from any task
+ * (neither touches s_wifi), so this adds no new cross-task hazard. */
+static bool ap_teardown_should_defer(void)
+{
+    if (http_auth_policy_web_enabled()) {
+        return http_auth_any_session_active();
+    }
+    return wifi_prov_get_ap_client_count() > 0;
+}
+
 void cancel_ap_fallback_timer(void)
 {
     if (s_wifi.ap_fallback_timer) {
@@ -395,6 +436,28 @@ void ap_fallback_timer_cb(void *arg)
  * policy changed, only which task executes it. */
 void do_rescan_tick(void)
 {
+    /* 2026-09-28 owner request: home Wi-Fi already came back but the AP
+     * teardown was deferred (do_ev_got_ip()/do_confirm_static_reachable())
+     * because someone was logged in / a client was on the AP at that moment.
+     * Reuse this same 30s cadence to recheck rather than adding a second
+     * timer -- once nobody is logged in (or, with auth off, no client is
+     * associated to the AP), complete the teardown that was put off. This
+     * must run even though state == CONNECTED, which is why it is checked
+     * and returned from before the early-return below that skips everything
+     * else while connected. */
+    if (s_wifi.state == WIFI_PROV_STATE_CONNECTED && s_wifi.ap_pending_teardown) {
+        if (ap_teardown_should_defer()) {
+            return; /* still logged in / still a client on the AP -- try again next tick */
+        }
+        s_wifi.ap_pending_teardown = false;
+        ESP_LOGI(WIFI_PROV_TAG, "no user logged in (or no AP client) any more -- dropping deferred fallback AP");
+        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+        }
+        return;
+    }
+
     if (s_wifi.mode != WIFI_PROV_MODE_HOME || s_wifi.state == WIFI_PROV_STATE_CONNECTED ||
         s_wifi.saved_nets.count == 0) {
         return;
@@ -594,6 +657,19 @@ void do_ev_got_ip(void)
         return;
     }
 
+    /* 2026-09-28 owner request: never cut a logged-in operator off by
+     * dropping the AP out from under them the instant home Wi-Fi comes back.
+     * Deferred here means do_rescan_tick()'s existing 30s cadence retries
+     * the teardown -- no new timer, no new task. */
+    if (ap_teardown_should_defer()) {
+        s_wifi.ap_pending_teardown = true;
+        ESP_LOGI(WIFI_PROV_TAG,
+                 "station joined but a user is logged in (or a client is on the AP) -- "
+                 "keeping fallback AP up until they're gone");
+        return;
+    }
+    s_wifi.ap_pending_teardown = false;
+
     ESP_LOGI(WIFI_PROV_TAG, "station joined, dropping fallback AP");
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err != ESP_OK) {
@@ -616,6 +692,18 @@ void do_confirm_static_reachable(void)
     if (s_wifi.state != WIFI_PROV_STATE_CONNECTED) {
         return; /* nothing to tear down -- state changed again since GOT_IP */
     }
+    /* Same logged-in-user defer as do_ev_got_ip() above -- a static-IP join
+     * reaching this function has already proven L3 reachability, but that is
+     * an orthogonal condition to "is anyone logged in right now", and both
+     * must hold before the AP actually comes down. */
+    if (ap_teardown_should_defer()) {
+        s_wifi.ap_pending_teardown = true;
+        ESP_LOGI(WIFI_PROV_TAG,
+                 "static IP confirmed reachable but a user is logged in (or a client is on the AP) -- "
+                 "keeping fallback AP up until they're gone");
+        return;
+    }
+    s_wifi.ap_pending_teardown = false;
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));

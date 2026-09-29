@@ -1004,10 +1004,16 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_WIFI_STA_CONNECT_TIMEOUT_MS
             int "Station join timeout (ms)"
-            default 15000
+            default 60000
             help
                 How long to wait for a station join (association + DHCP)
                 before giving up and falling back to (or staying on) the AP.
+                Raised from 15000 to 60000 on 2026-09-28 per owner request
+                ("fall back to AP mode if connection to home wifi fails")
+                specifying roughly a minute of failed retries as the bound;
+                15s was tuned for a bench link that is either up or visibly
+                down, not for a real home AP needing a few DHCP/auth retries
+                before landing.
     endmenu
 
     config KILNCTL_LOG_TEE_CONSOLE

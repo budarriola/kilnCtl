@@ -316,6 +316,13 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len);
 /* True once the station interface has an IP (== WIFI_PROV_STATE_CONNECTED). */
 bool wifi_prov_is_sta_connected(void);
 
+/* 2026-09-28: true while home Wi-Fi is back up (CONNECTED) but the fallback
+ * AP is deliberately being kept alive because a user is logged in to the
+ * website (or, with web auth off, a client is still associated to the AP) --
+ * see ap_teardown_should_defer() in wifi_prov_link.c. Direct, non-blocking
+ * read, same convention as wifi_prov_is_sta_connected() above. */
+bool wifi_prov_get_ap_pending_teardown(void);
+
 /* Writes the station IP as dotted-quad text into out (out_cap must be at
  * least 16). Writes an empty string and returns ESP_ERR_INVALID_STATE if not
  * currently connected -- there is nothing to report, not a failure of this

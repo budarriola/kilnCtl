@@ -213,10 +213,15 @@ static inline esp_err_t esp_wifi_scan_get_ap_records(uint16_t *num, wifi_ap_reco
     return ESP_OK;
 }
 
+// 2026-09-28: controllable count (was hardcoded 0) so a host test can drive
+// wifi_prov_get_ap_client_count()'s "a client is on the AP" branch, needed by
+// wifi_prov_link.c's new ap_teardown_should_defer() (auth-off signal). See
+// test_wifi_prov.c's ap_pending_teardown tests.
+extern int g_stub_ap_sta_count;
 static inline esp_err_t esp_wifi_ap_get_sta_list(wifi_sta_list_t *list)
 {
     if (list) {
-        list->num = 0;
+        list->num = g_stub_ap_sta_count;
     }
     return ESP_OK;
 }

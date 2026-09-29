@@ -36,10 +36,17 @@ void wifi_status_ui_get_text(char *out, size_t out_cap)
             ip[0] = '\0';
         }
         char mdns_host[MDNS_NAME_BUF_LEN];
+        /* 2026-09-28 owner request follow-up: while the fallback AP is being
+         * kept up deliberately (a logged-in user, or an AP client with auth
+         * off), say so -- otherwise the LCD reads plain "connected" while a
+         * second radio interface a bench tech might not expect is still
+         * live. Cheap direct-read bool, checked last so the common case
+         * (no pending teardown) costs nothing extra. */
+        const char *ap_note = wifi_prov_get_ap_pending_teardown() ? " [AP kept up]" : "";
         if (mdns_hostname_get(mdns_host) == ESP_OK) {
-            snprintf(out, out_cap, "WiFi: %s (%s.local)", ip, mdns_host);
+            snprintf(out, out_cap, "WiFi: %s (%s.local)%s", ip, mdns_host, ap_note);
         } else {
-            snprintf(out, out_cap, "WiFi: %s", ip);
+            snprintf(out, out_cap, "WiFi: %s%s", ip, ap_note);
         }
         break;
     }

@@ -265,6 +265,27 @@ void http_auth_session_touch(const char *token, const char *client_ip) {
     web_auth_table_touch(t, (size_t)idx, now);
 }
 
+bool http_auth_any_session_active(void) {
+    // Fail closed toward TRUE on an unreadable policy record -- see this
+    // function's header comment for why that direction is deliberately the
+    // opposite of every other resolver here.
+    resolved_timeout_t timeout = resolve_timeout_s();
+    if (timeout.unreadable) {
+        return true;
+    }
+    web_auth_table_t *t = http_session_table();
+    uint32_t now = (uint32_t)hal_time_now_ms();
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        if (!t->slots[i].in_use) {
+            continue;
+        }
+        if (web_auth_session_is_valid(t->slots[i].last_seen_ms, timeout.timeout_s, now)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void http_auth_session_logout(const char *token) {
     if (!token || token[0] == '\0') {
         return;

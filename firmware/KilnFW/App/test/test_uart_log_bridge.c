@@ -57,9 +57,12 @@
 
 // ---- Stub globals the freertos/queue.h stub reads/writes (see that file's
 // 2026-08-21 comments) ----
-// g_stub_queue_send_calls itself is already defined once for the whole test
-// executable, in test_wifi_prov.c (extern-declared by the queue.h stub) --
-// reused here, not redefined, to avoid a duplicate-symbol link error.
+// g_stub_queue_send_calls itself used to be defined once for the whole test
+// executable, in test_wifi_prov.c -- that file moved to its own executable
+// 2026-09-28 (see build_host_tests.ps1's comment), so this is now the one
+// definition for the rest of "main" (extern-declared by the queue.h stub;
+// test_esp_spi_owner.c, also linked here, reuses it rather than redefining).
+int g_stub_queue_send_calls = 0;
 unsigned char g_stub_last_queue_item[256];
 
 #include "../drivers/bridge/uart_log_bridge.c"

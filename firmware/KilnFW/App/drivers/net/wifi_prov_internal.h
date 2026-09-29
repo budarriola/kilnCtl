@@ -116,6 +116,20 @@ struct wifi_prov_state {
 
     wifi_prov_state_t state;
     int8_t sta_rssi;
+
+    /* 2026-09-28 owner request: home Wi-Fi is back (GOT_IP, or the static-IP
+     * reachability confirmation) but the fallback AP teardown was DEFERRED
+     * because a user was logged in to the website at that moment -- see
+     * ap_teardown_should_defer() in wifi_prov_link.c. do_rescan_tick() (the
+     * same 30s timer that already retries a stuck join) re-checks this flag
+     * on every tick while it is set and completes the teardown once nobody
+     * is logged in, without needing a second timer or task. Same "defer,
+     * flag it, recheck on the next natural tick" shape as static_ip_confirmed
+     * just above -- deliberately NOT reusing that field, since the two
+     * conditions (static-IP reachability vs. no-logged-in-user) are
+     * independent and a static join can need BOTH satisfied before the AP
+     * actually comes down. */
+    bool ap_pending_teardown;
 };
 
 extern struct wifi_prov_state s_wifi;

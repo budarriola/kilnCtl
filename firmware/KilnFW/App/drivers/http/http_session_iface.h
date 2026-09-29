@@ -169,6 +169,35 @@ void http_auth_session_touch(const char *token, const char *client_ip);
 // oracle itself, because this function will not refuse anything.
 void http_auth_session_logout(const char *token);
 
+// AP-fallback teardown gate (2026-09-28, owner request: never cut off a
+// logged-in operator when Wi-Fi comes home while the fallback AP is up).
+// Reports whether ANY slot in http_session_table() currently holds a still-
+// VALID session (per web_auth_session_is_valid() against the live policy
+// timeout), scanning every slot rather than one token -- unlike every other
+// function in this file, this is not resolving one caller's identity, it is
+// answering "is anyone at all logged in right now" for wifi_prov_link.c's
+// do_ev_got_ip()/do_confirm_static_reachable() to defer an AP teardown on.
+// An expired-but-still-in_use slot does NOT count (that is the whole point:
+// an idle timed-out session must not hold the AP up forever), matching this
+// header's usual is_valid() gate elsewhere.
+//
+// Fails closed toward TRUE (assume a session might be active) on an
+// unreadable auth-policy record, the OPPOSITE direction from this file's
+// other resolvers, which fail closed toward DENYING access. The two
+// directions protect different things: http_auth_session_resolve() et al.
+// guard a capability grant, where "safe" means "assume no session"; this
+// function guards a physical action (dropping the fallback AP an operator's
+// browser or phone may be depending on right now), where "safe" means
+// "assume someone might still be connected" and defer the teardown one more
+// tick rather than strand them. Callers only use this when
+// http_auth_policy_web_enabled() has already reported auth ON -- with auth
+// off there are no sessions to scan and this always returns false.
+// Reads the clock itself (hal_time_now_ms(), same source every other
+// resolver in this file uses) -- no now_ms parameter, so a caller in another
+// module never has to reach into this file's clock source or risk passing a
+// stale/mismatched timestamp.
+bool http_auth_any_session_active(void);
+
 #ifdef __cplusplus
 }
 #endif

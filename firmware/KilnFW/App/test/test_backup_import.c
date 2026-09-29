@@ -380,8 +380,11 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
     return (int)n;
 }
 
-// wifi_provision_http_get_server() is already defined by test_wifi_prov.c
-// (also linked into this executable) -- do NOT redefine it here.
+// wifi_provision_http_get_server() used to be defined by test_wifi_prov.c
+// (also linked into this executable) -- that file moved to its own
+// executable 2026-09-28 (see build_host_tests.ps1's comment), so this
+// translation unit needs its own fake now.
+httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 
 // web_encoding.h's two functions -- only reached from backup_page_get_handler(),
 // never called by these tests, but must resolve.

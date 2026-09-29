@@ -663,6 +663,17 @@ bool wifi_prov_is_sta_connected(void)
     return s_wifi.state == WIFI_PROV_STATE_CONNECTED;
 }
 
+/* 2026-09-28: true while station is CONNECTED but the fallback AP teardown
+ * is deliberately deferred (a user is logged in, or a client is on the AP
+ * with auth off) -- see s_wifi.ap_pending_teardown's own doc comment and
+ * ap_teardown_should_defer() in wifi_prov_link.c. Same "direct read of one
+ * bool" convention as wifi_prov_is_sta_connected() just above -- this never
+ * blocks and is safe from lvgl_port_task or an HTTP worker. */
+bool wifi_prov_get_ap_pending_teardown(void)
+{
+    return s_wifi.ap_pending_teardown;
+}
+
 /* Cheap-read cache for the STA ip/netmask, consumed by
  * wifi_prov_get_cached_sta_ip_netmask() below. Review fix (2026-09-21,
  * finding 4 on the login backoff commit): wifi_prov_get_sta_ip_netmask()
