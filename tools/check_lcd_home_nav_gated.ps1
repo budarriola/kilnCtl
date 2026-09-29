@@ -119,6 +119,7 @@ function Invoke-HomeNavGateScan {
     $menuBody = Get-FunctionBody -Text $text -FunctionName "ui_home_menu_nav_cb"
     $profileBody = Get-FunctionBody -Text $text -FunctionName "ui_home_profile_btn_cb"
     $pauseBody = Get-FunctionBody -Text $text -FunctionName "ui_home_pause_resume_btn_cb"
+    $editBody = Get-FunctionBody -Text $text -FunctionName "ui_home_edit_btn_cb"
     $resetBody = Get-FunctionBody -Text $text -FunctionName "ui_home_auth_reset_corner_tap_cb"
 
     # Strict shape for the gated callbacks (2026-09-28 review of 3e7bb20b:
@@ -137,6 +138,7 @@ function Invoke-HomeNavGateScan {
         MenuNavGated     = Test-GatedOuter -Body $menuBody -GatedCb 'ui_home_menu_nav_gated_cb' -ForbiddenDirect '\bkiln_ui_show\s*\('
         ProfileBtnGated  = Test-GatedOuter -Body $profileBody -GatedCb 'ui_home_profile_btn_gated_cb' -ForbiddenDirect '\bkiln_ui_show\s*\('
         PauseResumeGated = Test-GatedOuter -Body $pauseBody -GatedCb 'ui_home_pause_resume_gated_cb' -ForbiddenDirect '\bprofile_executor_(pause|resume)\s*\('
+        EditBtnGated     = Test-GatedOuter -Body $editBody -GatedCb 'ui_home_edit_btn_gated_cb' -ForbiddenDirect '\bkiln_ui_show\s*\('
         AuthResetGated   = [regex]::IsMatch($resetBody, $gatePattern)
     }
 }
@@ -157,6 +159,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not $result.PauseResumeGated) {
         $failures += "ui_home_pause_resume_btn_cb() does not pass ui_home_pause_resume_gated_cb to ui_lcd_lock_run_gated(), or pauses/resumes directly -- owner decision 2026-09-28 requires the PIN for every LCD action other than viewing the dashboard."
     }
+    if (-not $result.EditBtnGated) {
+        $failures += "ui_home_edit_btn_cb() (-> edit_firing page) does not pass ui_home_edit_btn_gated_cb to ui_lcd_lock_run_gated(), or navigates directly -- owner decision 2026-09-28 requires the PIN for every LCD action other than viewing the dashboard."
+    }
     if ($result.AuthResetGated) {
         $failures += "ui_home_auth_reset_corner_tap_cb() (the physical credential-reset gesture) references a PIN gate -- this gesture must stay reachable WITHOUT a PIN, since it is the recovery path for a lost PIN. Gating it would make it useless."
     }
@@ -169,6 +174,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         throw "$($failures.Count) failure(s) above. Owner decision 2026-09-28: only the home/dashboard view itself stays reachable without a PIN."
     }
 
-    Write-Host "LCD home nav gated check passed: Config hub, profile picker and Pause/Resume are gated; the credential-reset gesture is not."
+    Write-Host "LCD home nav gated check passed: Config hub, profile picker, Pause/Resume and Edit are gated; the credential-reset gesture is not."
     exit 0
 }

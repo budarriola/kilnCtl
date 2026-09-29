@@ -432,6 +432,8 @@ lv_obj_t *s_ui_home_fire_btn;      /* merged Start/Stop button */
 lv_obj_t *s_ui_home_fire_btn_label;
 lv_obj_t *s_ui_home_pause_btn;      /* merged Pause/Resume button -- see ui_home_pause_resume_btn_cb() */
 lv_obj_t *s_ui_home_pause_btn_label;
+lv_obj_t *s_ui_home_edit_btn;       /* owner request 2026-09-28 -- see ui_home_edit_btn_cb() */
+lv_obj_t *s_ui_home_edit_btn_label;
 lv_obj_t *s_ui_home_profile_btn;    /* UI_PLAN.md 6.1 -- selected profile name, opens the picker */
 lv_obj_t *s_ui_home_profile_label;
 ui_topbar_t s_ui_home_topbar;       /* Menu gear icon, shared chrome -- see ui_topbar.h */
@@ -1302,6 +1304,18 @@ _Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
     s_ui_home_fire_btn = ui_home_build_button(action_row, "Start", UI_THEME_ACCENT_4, ui_home_fire_btn_cb, 36, &s_ui_home_fire_btn_label);
     lv_obj_set_flex_grow(s_ui_home_fire_btn, 0);
     lv_obj_set_width(s_ui_home_fire_btn, 96);
+
+    /* Owner request 2026-09-28 -- LCD equivalent of the web's "Edit firing"
+     * button (d484e51a), next to Start/Stop. Same hidden-outside-RUNNING/
+     * PAUSED discipline as Pause/Resume above -- ui_home_refresh_cb()
+     * un-hides it. Narrower (64px, not 96) since "Edit" is the shortest
+     * label on this row and action_row's profile-name button already
+     * absorbs whatever width is left. */
+    s_ui_home_edit_btn = ui_home_build_button(action_row, "Edit", UI_THEME_ACCENT_3, ui_home_edit_btn_cb, 36,
+                                &s_ui_home_edit_btn_label);
+    lv_obj_add_flag(s_ui_home_edit_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_flex_grow(s_ui_home_edit_btn, 0);
+    lv_obj_set_width(s_ui_home_edit_btn, 64);
 
     /* Pages are never torn down (kiln_ui.h's header comment), so a timer
      * created once here and never deleted matches that lifetime. */

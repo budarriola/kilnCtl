@@ -71,6 +71,13 @@ void ui_home_pause_resume_btn_cb(lv_event_t *e)
                            ui_home_pause_resume_gated_cb, NULL);
 }
 
+void ui_home_edit_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Enter PIN to edit firing", LCD_PIN_ROLE_USER,
+                           ui_home_edit_btn_gated_cb, NULL);
+}
+
 void ui_home_auth_reset_corner_tap_cb(lv_event_t *e)
 {
     auth_reset_gesture_corner_t corner = (auth_reset_gesture_corner_t)(intptr_t)lv_event_get_user_data(e);
@@ -85,8 +92,8 @@ try {
 $goodFile = Join-Path $scratchDir "good.c"
 Set-Content -Path $goodFile -Value $goodBody -Encoding utf8
 $r1 = Invoke-HomeNavGateScan -SourceFile $goodFile
-if ((-not $r1.MenuNavGated) -or (-not $r1.ProfileBtnGated) -or (-not $r1.PauseResumeGated) -or $r1.AuthResetGated) {
-    $failures += "Assertion 1 FAILED: correctly-shaped synthetic file scored MenuNavGated=$($r1.MenuNavGated) ProfileBtnGated=$($r1.ProfileBtnGated) AuthResetGated=$($r1.AuthResetGated), expected true/true/false."
+if ((-not $r1.MenuNavGated) -or (-not $r1.ProfileBtnGated) -or (-not $r1.PauseResumeGated) -or (-not $r1.EditBtnGated) -or $r1.AuthResetGated) {
+    $failures += "Assertion 1 FAILED: correctly-shaped synthetic file scored MenuNavGated=$($r1.MenuNavGated) ProfileBtnGated=$($r1.ProfileBtnGated) EditBtnGated=$($r1.EditBtnGated) AuthResetGated=$($r1.AuthResetGated), expected true/true/true/false."
 } else {
     Write-Host "Assertion 1 OK: correctly-shaped synthetic file passes."
 }
@@ -143,8 +150,8 @@ if (-not (Test-Path $realFile)) {
     $failures += "Assertion 5 FAILED: real file $realFile not found."
 } else {
     $r5 = Invoke-HomeNavGateScan -SourceFile $realFile
-    if ((-not $r5.MenuNavGated) -or (-not $r5.ProfileBtnGated) -or (-not $r5.PauseResumeGated) -or $r5.AuthResetGated) {
-        $failures += "Assertion 5 FAILED: the REAL production file scored MenuNavGated=$($r5.MenuNavGated) ProfileBtnGated=$($r5.ProfileBtnGated) AuthResetGated=$($r5.AuthResetGated), expected true/true/false -- today's real check is either vacuous or the real file regressed."
+    if ((-not $r5.MenuNavGated) -or (-not $r5.ProfileBtnGated) -or (-not $r5.PauseResumeGated) -or (-not $r5.EditBtnGated) -or $r5.AuthResetGated) {
+        $failures += "Assertion 5 FAILED: the REAL production file scored MenuNavGated=$($r5.MenuNavGated) ProfileBtnGated=$($r5.ProfileBtnGated) EditBtnGated=$($r5.EditBtnGated) AuthResetGated=$($r5.AuthResetGated), expected true/true/true/false -- today's real check is either vacuous or the real file regressed."
     } else {
         Write-Host "Assertion 5 OK: the REAL production file passes -- not vacuous on the actual tree."
     }
@@ -180,6 +187,21 @@ if ($r7.MenuNavGated) {
     Write-Host "Assertion 7 OK: a direct navigation beside a stray gate token is detected (MenuNavGated=false)."
 }
 
+# --- Assertion 8: remove the Edit button's PIN gate -> caught. ---
+$noEditGateBody = $goodBody -replace [regex]::Escape('ui_lcd_lock_run_gated("Enter PIN to edit firing", LCD_PIN_ROLE_USER,
+                           ui_home_edit_btn_gated_cb, NULL);'), "kiln_ui_show(`"edit_firing`");"
+if ($noEditGateBody -eq $goodBody) {
+    throw "test setup error: the replace for assertion 8 did not match anything in `$goodBody"
+}
+$noEditGateFile = Join-Path $scratchDir "no_edit_gate.c"
+Set-Content -Path $noEditGateFile -Value $noEditGateBody -Encoding utf8
+$r8 = Invoke-HomeNavGateScan -SourceFile $noEditGateFile
+if ($r8.EditBtnGated) {
+    $failures += "Assertion 8 FAILED: removing the Edit button's PIN gate was NOT detected (EditBtnGated=true)."
+} else {
+    Write-Host "Assertion 8 OK: removing the Edit button's PIN gate is detected (EditBtnGated=false)."
+}
+
 } finally {
     Remove-Item -Path $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -194,5 +216,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_lcd_home_nav_gated: all 7 assertions passed."
+Write-Host "test_check_lcd_home_nav_gated: all 8 assertions passed."
 exit 0

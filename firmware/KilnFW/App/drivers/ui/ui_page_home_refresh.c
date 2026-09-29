@@ -883,6 +883,14 @@ lag_notice_done:;
     } else {
         lv_obj_add_flag(s_ui_home_pause_btn, LV_OBJ_FLAG_HIDDEN);
     }
+
+    /* Owner request 2026-09-28 -- Edit visible exactly when there is a
+     * firing to edit, same RUNNING/PAUSED condition as Pause/Resume above. */
+    if (st->state == PROFILE_EXEC_RUNNING || st->state == PROFILE_EXEC_PAUSED) {
+        lv_obj_remove_flag(s_ui_home_edit_btn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_ui_home_edit_btn, LV_OBJ_FLAG_HIDDEN);
+    }
     free(st);
 }
 

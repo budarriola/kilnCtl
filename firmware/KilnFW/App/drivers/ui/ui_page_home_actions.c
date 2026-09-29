@@ -7,6 +7,7 @@
  * page's overall design history. */
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
+#include "ui_page_edit_firing.h" /* owner request 2026-09-28 -- Edit-firing button */
 #include "ui_page_profile_picker.h" /* ui_page_profile_picker_pick_refresh() -- UI_PLAN.md 6.1 */
 #include "profiles_builtin.h" /* profiles_builtin_get(), PROFILE_BUILTIN_ID_BASE -- UI_PLAN.md 6.1 */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
@@ -351,6 +352,25 @@ void ui_home_pause_resume_btn_cb(lv_event_t *e)
      * tools/check_lcd_home_nav_gated.ps1 enforces this mechanically. */
     ui_lcd_lock_run_gated("Enter PIN to pause/resume", LCD_PIN_ROLE_USER,
                            ui_home_pause_resume_gated_cb, NULL);
+}
+
+/* Owner request 2026-09-28: the LCD equivalent of the web's "Edit firing"
+ * button (d484e51a) next to Start/Stop -- see ui_page_edit_firing.c. */
+static void ui_home_edit_btn_gated_cb(void *user_data)
+{
+    (void)user_data;
+    ui_page_edit_firing_prepare();
+    kiln_ui_show("edit_firing");
+}
+
+void ui_home_edit_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Owner decision 2026-09-28: every LCD action other than viewing the
+     * dashboard needs the PIN. tools/check_lcd_home_nav_gated.ps1 enforces
+     * this mechanically. */
+    ui_lcd_lock_run_gated("Enter PIN to edit firing", LCD_PIN_ROLE_USER,
+                           ui_home_edit_btn_gated_cb, NULL);
 }
 
 static void ui_home_menu_nav_gated_cb(void *user_data)

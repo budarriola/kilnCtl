@@ -539,6 +539,78 @@ static void test_fork_then_load_working_and_record(void)
     TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
 }
 
+// ---------------------------------------------------------------------------
+// ui_page_edit_firing.c's apply_cb() sequence -- the LCD's Edit-firing page
+// (owner request 2026-09-28) calls fork (only when nothing is pending yet),
+// then live_edit_check_window() against the ORIGIN vs the edited candidate,
+// then live_profile_save_working() -- the exact same order
+// firmware/KilnFW/App/drivers/http/profiles_live_http.c's HTTP handlers use.
+// These tests exercise that order against the REAL live_profile.c (already
+// linked into this executable), proving the LCD's call sequence is correct
+// against the real backend rather than a copy of it -- ui_page_edit_firing.c
+// itself is LVGL UI code and is not linked here.
+static void test_lcd_edit_apply_sequence_forks_checks_window_then_saves(void)
+{
+    TEST_SECTION("LCD edit-firing apply sequence -- fork (no pending) -> check_window -> save_working succeeds "
+                 "end to end, matching apply_cb()'s order");
+    profile_t origin = make_test_profile();
+    char err[128];
+
+    // Step 1 (apply_cb): no pending record for this origin yet -> fork.
+    profile_t working;
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_fork(20, false, "Test", &origin, &working, &rec, err, sizeof(err)),
+               "fork succeeds when nothing is pending for this origin");
+
+    // Step 2: the LCD edits segment 1 (not yet run) in the working copy.
+    working.segments[1].target_c = 510.0f;
+
+    // Step 3 (apply_cb): check the edit window against the ORIGIN, segment
+    // index 0 currently running -- segment 1 is a future segment, unrestricted.
+    bool refused = live_edit_check_window(&origin, &working, 0, err, sizeof(err));
+    TEST_CHECK(!refused, "editing a future segment's target passes the window check");
+
+    // Step 4 (apply_cb): persist.
+    TEST_CHECK(live_profile_save_working(&working, err, sizeof(err)), "save_working succeeds after the window check passes");
+
+    profile_t loaded;
+    TEST_CHECK(live_profile_load_working(&loaded), "load_working succeeds after save");
+    TEST_CHECK(loaded.segments[1].target_c == 510.0f, "the saved working copy reflects the LCD's edit");
+
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds"); // leave state clean for later tests
+}
+
+static void test_lcd_edit_apply_sequence_refuses_on_window_violation_before_saving(void)
+{
+    TEST_SECTION("LCD edit-firing apply sequence -- a window violation refuses BEFORE save_working() runs, same "
+                 "as apply_cb()'s ordering");
+    profile_t origin = make_test_profile();
+    char err[128];
+
+    profile_t working;
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_fork(21, false, "Test", &origin, &working, &rec, err, sizeof(err)),
+               "fork succeeds when nothing is pending for this origin");
+
+    // The LCD (incorrectly, or via a stale UI) tries to change segment 0,
+    // which has ALREADY RUN (segment index 1 is the one currently running) --
+    // frozen segments before the running one may never change.
+    working.segments[0].target_c = 150.0f;
+
+    bool refused = live_edit_check_window(&origin, &working, 1, err, sizeof(err));
+    TEST_CHECK(refused, "changing an already-run (frozen) segment is refused by the window check");
+    TEST_CHECK(err[0] != '\0', "a refusal reason is reported, for the LCD to show on screen");
+
+    // apply_cb() must not call save_working() after a window refusal -- prove
+    // the working copy on disk is UNCHANGED from what fork() persisted.
+    profile_t loaded;
+    TEST_CHECK(live_profile_load_working(&loaded), "load_working still succeeds (fork's write stands)");
+    TEST_CHECK(loaded.segments[0].target_c == origin.segments[0].target_c,
+               "the persisted working copy still has the ORIGINAL target_c -- the rejected edit was never saved");
+
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
 static void test_fork_is_idempotent_when_already_pending(void)
 {
     TEST_SECTION("live_profile_fork -- a second fork for the SAME origin_id while one is pending returns the "
@@ -860,6 +932,8 @@ int main(void)
     test_pickup_refuses_on_hard_validate_failure();
     test_clear_is_idempotent(); // run before the fork tests so state starts clean
     test_fork_then_load_working_and_record();
+    test_lcd_edit_apply_sequence_forks_checks_window_then_saves();
+    test_lcd_edit_apply_sequence_refuses_on_window_violation_before_saving();
     test_fork_is_idempotent_when_already_pending();
     test_save_working_bumps_generation();
     test_fork_refuses_pending_for_different_origin();
