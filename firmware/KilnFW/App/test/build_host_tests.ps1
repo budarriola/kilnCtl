@@ -977,6 +977,23 @@ try {
 
     Invoke-HostTestExe -Name "profiles_live_http" -ExePath $exePlh -BuildCmd $cmdPlh
 
+    # ---- test_ui_edit_firing_apply.c: its own separate executable ------------
+    # The LCD "Edit firing" page's LVGL-free half (ui_edit_firing_apply.c):
+    # step clamps, relay/IO read-only, and the Apply sequence (range ->
+    # validate HARD -> window -> fork -> save) plus its stale-copy guards.
+    # Same shape as test_profiles_live_http.c above: #includes the REAL
+    # live_profile.c and ui_edit_firing_apply.c, links fake_kv.c, fakes the
+    # httpd-tier neighbours; same /experimental:c11atomics need.
+    $exeEfa = Join-Path $outDir "kilnctl_host_tests_ui_edit_firing_apply.exe"
+    $efaObjDir = Join-Path $outDir "ui_edit_firing_apply_obj"
+    New-Item -ItemType Directory -Force -Path $efaObjDir | Out-Null
+    $cmdEfa = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
+            "/Fo:`"$efaObjDir\\`" /Fe:`"$exeEfa`" `"$(Join-Path $testDir 'test_ui_edit_firing_apply.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "ui_edit_firing_apply" -ExePath $exeEfa -BuildCmd $cmdEfa
+
     # ---- test_ota_http.c: its own EIGHTH, separate executable -----------------
     # ota_http.c/factory_reset.c shipped their security fixes (empty-AP-password
     # refusal, per-context HMAC/lockout separation, auth-before-interlock on
@@ -2808,7 +2825,10 @@ try {
     # CONTROL_CMD_SET_ZONE_PID/SET_ZONE_MODEL system_mode_gate wiring, same
     # owner decision Q2 gap class as adaptive_tune_http_gate above, previously
     # untested at the UART bridge handler level.
-    $totalExpected = 64
+    # 64 -> 65: added test_ui_edit_firing_apply.c's own Invoke-HostTestExe
+    # call -- the LCD Edit-firing page's Apply sequence and step clamps
+    # (ui_edit_firing_apply.c), exercised against the real live_profile.c.
+    $totalExpected = 65
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

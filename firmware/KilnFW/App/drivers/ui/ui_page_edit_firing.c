@@ -5,16 +5,8 @@
 
 #include "esp_heap_caps.h"
 #include "kiln_ui.h"
-#include "live_profile.h"
-#include "profile_executor.h"
-#include "profiles_builtin.h"
-#include "profiles_http.h"
-#include "profiles_http_internal.h" /* profiles_validate_candidate()/PROFILE_VALIDATE_HARD --
-                                      * the SAME validator profiles_live_http.c's accept
-                                      * handler calls; this page must never re-implement a
-                                      * bound/window rule of its own. Cross-directory include
-                                      * is the existing convention here (profile_executor.c,
-                                      * live_profile.c already do this). */
+#include "ui_edit_firing_apply.h" /* every rule and the whole Apply sequence -- this
+                                   * file owns only widgets, paging and text */
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
@@ -23,75 +15,87 @@
  * discipline as ui_page_profile_builder_segment.c):
  *
  *     topbar (title + Back/Home/Prev/Next) .......... owned by ui_topbar.c
- *     note line ("Segment N of M -- running" etc) ...  18px
+ *     note line ("Running now -- editable" etc) ..... 18px
  *     three stepper rows, 46px each ................. 138px
- *     gap x4 ..........................................16px
  *     status/refusal line ............................ 18px
  *     Apply button row ............................... 44px
+ *     hint line ...................................... 18px
+ *     gap x6 ......................................... 24px
  *                                                      ------
- *                                                       234px <= 267px  OK
+ *                                                       260px
  *
  * One row per field (Target / Ramp / Dwell), each "- value +", rather than
  * builder_segment.c's tap-to-numpad cards: the owner's own wording for this
  * task was "+/- buttons," and a stepper is also the more forgiving control
- * for nudging a value on an ALREADY RUNNING firing (no chance of a fat-
- * fingered numpad entry putting a live zone target far out of range before
- * the validator ever sees it -- the step size itself is the guard rail). */
+ * for nudging a value on an ALREADY RUNNING firing -- the step size itself
+ * is a guard rail, and edit_firing_step() clamps to the same bounds the
+ * web's form parser enforces. */
 #define ROW_HEIGHT_PX 46
 #define STEP_BTN_W_PX 44
+#define REFRESH_MS 1000
 
-/* Sensible, unit-aware step sizes. Kept in Celsius/native units end to end
- * (never round-tripped through the display unit), same discipline and same
- * rationale as ui_page_profile_builder_segment.c's target/ramp cards: a
- * kiln setpoint that silently changed units would be a real hazard. Display
- * conversion (unit_pref_convert()) is applied ONLY to the rendered label. */
-#define TARGET_STEP_C   5.0f
-#define RAMP_STEP_C_HR  5.0f
-#define DWELL_STEP_MIN  5u
-
-/* note(18) + 3*row(46=138) + status(18) + bottom_row(44) + hint(18) = 236,
- * plus scr's pad_gap (UI_THEME_PADDING_PX/2 = 4px) between each of the 6
- * children = 24 -> 260px, against the 268px budget. */
 #define UI_PAGE_EDIT_FIRING_WORST_CASE_HEIGHT_PX (18 + 3 * ROW_HEIGHT_PX + 18 + 44 + 18 + 6 * (UI_THEME_PADDING_PX / 2))
 _Static_assert(UI_PAGE_EDIT_FIRING_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
                "ui_page_edit_firing.c: content exceeds UI_THEME_PAGE_CONTENT_BUDGET_PX -- split across "
                "more pages, don't scroll.");
 
-static profile_t *s_working;        /* heap, allocated once -- see build() */
-static bool s_have_working;         /* s_working holds a loaded profile */
-static bool s_active;               /* firing RUNNING/PAUSED/FAULTED right now */
-static uint8_t s_origin_id;
-static bool s_origin_is_builtin;
-static uint8_t s_running_segment_index;
-static uint8_t s_cur_seg;           /* segment currently selected for editing */
+/* All page state lives in ONE heap block (allocated on first prepare()/build(),
+ * kept for the page's lifetime since pages are never torn down) so this page
+ * costs .dram0.bss one pointer rather than ~112 B of widget pointers and a
+ * ui_topbar_t. The profile copy being edited (`working`) is a SEPARATE
+ * allocation that is freed every time the page is left (LV_EVENT_SCREEN_
+ * UNLOADED -- which also covers the relock-to-home path, since kiln_ui.c's
+ * handle_lcd_relock_to_home() leaves via kiln_ui_show("home")). */
+typedef struct {
+    profile_t *working;       /* heap; NULL while the page is not open */
+    bool active;              /* a firing is running and `working` belongs to it */
+    edit_firing_ctx_t ctx;
+    uint32_t applied_generation; /* last successful Apply's generation, 0 = none */
+    uint8_t cur_seg;
+    lv_timer_t *timer;        /* exists only while the page is the active screen */
 
-static lv_obj_t *s_note_label;
-static lv_obj_t *s_target_val_label;
-static lv_obj_t *s_ramp_val_label;
-static lv_obj_t *s_dwell_val_label;
-static lv_obj_t *s_target_minus, *s_target_plus;
-static lv_obj_t *s_ramp_minus, *s_ramp_plus;
-static lv_obj_t *s_dwell_minus, *s_dwell_plus;
-static lv_obj_t *s_status_label;
-static lv_obj_t *s_apply_btn;
-static ui_topbar_t s_tb;
+    lv_obj_t *note_label;
+    lv_obj_t *target_val_label, *ramp_val_label, *dwell_val_label;
+    lv_obj_t *target_minus, *target_plus;
+    lv_obj_t *ramp_minus, *ramp_plus;
+    lv_obj_t *dwell_minus, *dwell_plus;
+    lv_obj_t *status_label;
+    lv_obj_t *apply_btn;
+    ui_topbar_t tb;
+} edit_firing_page_t;
 
-/* True iff s_cur_seg's target_c/ramp_c_per_hr may be changed at all.
- * live_edit_check_window() is the sole AUTHORITATIVE rule (enforced again at
- * Apply time, server-identical) -- this is only a local, best-effort mirror
- * of that function's real behavior (confirmed against live_profile.c: segments
- * strictly before the running one must stay byte-identical; the running
- * segment itself may have target_c/ramp_c_per_hr/dwell_min changed -- only
- * its seg_kind/io_* fields are frozen; segments after are unconstrained), so
- * the UI does not invite an edit Apply will certainly refuse. */
-static bool target_ramp_editable(void)
+static edit_firing_page_t *s_pg;
+
+static bool ensure_pg(void)
 {
-    return s_active && s_cur_seg >= s_running_segment_index;
+    if (s_pg) {
+        return true;
+    }
+    s_pg = heap_caps_calloc(1, sizeof(*s_pg), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pg) {
+        s_pg = heap_caps_calloc(1, sizeof(*s_pg), MALLOC_CAP_8BIT);
+    }
+    return s_pg != NULL;
 }
 
-static bool dwell_editable(void)
+static void release_working(void)
 {
-    return s_active && s_cur_seg >= s_running_segment_index;
+    if (!s_pg) {
+        return;
+    }
+    if (s_pg->working) {
+        heap_caps_free(s_pg->working);
+        s_pg->working = NULL;
+    }
+    s_pg->active = false;
+    s_pg->applied_generation = 0;
+}
+
+static void set_status(const char *text)
+{
+    if (s_pg && s_pg->status_label) {
+        lv_label_set_text(s_pg->status_label, text);
+    }
 }
 
 static void set_stepper_enabled(lv_obj_t *btn, bool enabled)
@@ -106,121 +110,179 @@ static void set_stepper_enabled(lv_obj_t *btn, bool enabled)
     }
 }
 
+static void set_all_steppers(bool enabled)
+{
+    set_stepper_enabled(s_pg->target_minus, enabled);
+    set_stepper_enabled(s_pg->target_plus, enabled);
+    set_stepper_enabled(s_pg->ramp_minus, enabled);
+    set_stepper_enabled(s_pg->ramp_plus, enabled);
+    set_stepper_enabled(s_pg->dwell_minus, enabled);
+    set_stepper_enabled(s_pg->dwell_plus, enabled);
+}
+
 static void refresh(void)
 {
-    if (!s_target_val_label) {
+    if (!s_pg || !s_pg->target_val_label) {
         return; /* not built yet -- prepare() runs before the first build(),
                   * same guard idiom as every other page in this tree. */
     }
 
-    if (!s_active || !s_have_working) {
-        lv_label_set_text(s_note_label, "No firing is running.");
-        lv_label_set_text(s_target_val_label, "--");
-        lv_label_set_text(s_ramp_val_label, "--");
-        lv_label_set_text(s_dwell_val_label, "--");
-        lv_label_set_text(s_status_label, "");
-        set_stepper_enabled(s_target_minus, false);
-        set_stepper_enabled(s_target_plus, false);
-        set_stepper_enabled(s_ramp_minus, false);
-        set_stepper_enabled(s_ramp_plus, false);
-        set_stepper_enabled(s_dwell_minus, false);
-        set_stepper_enabled(s_dwell_plus, false);
-        lv_obj_add_flag(s_apply_btn, LV_OBJ_FLAG_HIDDEN);
-        ui_topbar_set_title(&s_tb, "Edit Firing");
-        ui_topbar_set_prev_enabled(&s_tb, false);
-        ui_topbar_set_next_enabled(&s_tb, false);
+    if (!s_pg->active || !s_pg->working) {
+        lv_label_set_text(s_pg->note_label, "No firing is running.");
+        lv_label_set_text(s_pg->target_val_label, "--");
+        lv_label_set_text(s_pg->ramp_val_label, "--");
+        lv_label_set_text(s_pg->dwell_val_label, "--");
+        set_all_steppers(false);
+        lv_obj_add_flag(s_pg->apply_btn, LV_OBJ_FLAG_HIDDEN);
+        ui_topbar_set_title(&s_pg->tb, "Edit Firing");
+        ui_topbar_set_prev_enabled(&s_pg->tb, false);
+        ui_topbar_set_next_enabled(&s_pg->tb, false);
         return;
     }
-    lv_obj_remove_flag(s_apply_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_pg->apply_btn, LV_OBJ_FLAG_HIDDEN);
 
-    if (s_cur_seg >= s_working->segment_count) {
-        s_cur_seg = (uint8_t)(s_working->segment_count > 0 ? s_working->segment_count - 1 : 0);
+    const profile_t *p = s_pg->working;
+    if (s_pg->cur_seg >= p->segment_count) {
+        s_pg->cur_seg = (uint8_t)(p->segment_count > 0 ? p->segment_count - 1 : 0);
     }
-    profile_segment_t *seg = &s_working->segments[s_cur_seg];
+    const profile_segment_t *seg = &p->segments[s_pg->cur_seg];
+    uint8_t running = s_pg->ctx.running_seg;
 
     char title_buf[32];
-    snprintf(title_buf, sizeof(title_buf), "Segment %u of %u", (unsigned)(s_cur_seg + 1),
-             (unsigned)s_working->segment_count);
-    ui_topbar_set_title(&s_tb, title_buf);
-    ui_topbar_set_prev_enabled(&s_tb, s_cur_seg > 0);
-    ui_topbar_set_next_enabled(&s_tb, (uint32_t)(s_cur_seg + 1) < s_working->segment_count);
+    snprintf(title_buf, sizeof(title_buf), "Segment %u of %u", (unsigned)(s_pg->cur_seg + 1),
+             (unsigned)p->segment_count);
+    ui_topbar_set_title(&s_pg->tb, title_buf);
+    ui_topbar_set_prev_enabled(&s_pg->tb, s_pg->cur_seg > 0);
+    ui_topbar_set_next_enabled(&s_pg->tb, (uint32_t)(s_pg->cur_seg + 1) < p->segment_count);
 
-    if (s_cur_seg < s_running_segment_index) {
-        lv_label_set_text(s_note_label, "Already finished -- not editable.");
-    } else if (s_cur_seg == s_running_segment_index) {
-        lv_label_set_text(s_note_label, "Running now -- editable.");
-    } else {
-        lv_label_set_text(s_note_label, "Upcoming -- fully editable.");
+    bool is_zone_ramp = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP);
+    switch (edit_firing_seg_phase(s_pg->cur_seg, running)) {
+    case EDIT_FIRING_SEG_FINISHED:
+        lv_label_set_text(s_pg->note_label, "Already run -- locked.");
+        break;
+    case EDIT_FIRING_SEG_RUNNING:
+        lv_label_set_text(s_pg->note_label,
+                          is_zone_ramp ? "Running now -- editable." : "Relay/IO step -- edit on the web.");
+        break;
+    default:
+        lv_label_set_text(s_pg->note_label,
+                          is_zone_ramp ? "Not started yet -- editable." : "Relay/IO step -- edit on the web.");
+        break;
     }
 
-    unit_pref_t pref = unit_pref_get();
     char buf[24];
-    snprintf(buf, sizeof(buf), "%.0f %s", (double)unit_pref_convert(seg->target_c, pref, UNIT_PREF_KIND_ABSOLUTE),
-             unit_pref_suffix(pref));
-    lv_label_set_text(s_target_val_label, buf);
-    snprintf(buf, sizeof(buf), "%.0f %s/hr", (double)unit_pref_convert(seg->ramp_c_per_hr, pref, UNIT_PREF_KIND_RATE),
-             unit_pref_suffix(pref));
-    lv_label_set_text(s_ramp_val_label, buf);
+    if (is_zone_ramp) {
+        unit_pref_t pref = unit_pref_get();
+        snprintf(buf, sizeof(buf), "%.0f %s",
+                 (double)unit_pref_convert(seg->target_c, pref, UNIT_PREF_KIND_ABSOLUTE), unit_pref_suffix(pref));
+        lv_label_set_text(s_pg->target_val_label, buf);
+        /* 0 = no ramp-rate constraint (profiles_types.h) -- the web labels the
+         * field "Ramp (0=none)"; show the meaning rather than "0 C/hr". */
+        if (seg->ramp_c_per_hr <= 0.0f) {
+            lv_label_set_text(s_pg->ramp_val_label, "none");
+        } else {
+            snprintf(buf, sizeof(buf), "%.0f %s/hr",
+                     (double)unit_pref_convert(seg->ramp_c_per_hr, pref, UNIT_PREF_KIND_RATE),
+                     unit_pref_suffix(pref));
+            lv_label_set_text(s_pg->ramp_val_label, buf);
+        }
+    } else {
+        lv_label_set_text(s_pg->target_val_label, "--");
+        lv_label_set_text(s_pg->ramp_val_label, "--");
+    }
     snprintf(buf, sizeof(buf), "%u min", (unsigned)seg->dwell_min);
-    lv_label_set_text(s_dwell_val_label, buf);
+    lv_label_set_text(s_pg->dwell_val_label, buf);
 
-    bool tr_editable = target_ramp_editable();
-    set_stepper_enabled(s_target_minus, tr_editable);
-    set_stepper_enabled(s_target_plus, tr_editable);
-    set_stepper_enabled(s_ramp_minus, tr_editable);
-    set_stepper_enabled(s_ramp_plus, tr_editable);
-    bool dw_editable = dwell_editable();
-    set_stepper_enabled(s_dwell_minus, dw_editable);
-    set_stepper_enabled(s_dwell_plus, dw_editable);
+    set_all_steppers(edit_firing_seg_editable(p, s_pg->cur_seg, running));
 }
 
 void ui_page_edit_firing_prepare(void)
 {
-    s_cur_seg = 0;
-    s_have_working = false;
+    if (!ensure_pg()) {
+        return; /* build() will fail the same way; kiln_ui_show() handles a NULL screen */
+    }
+    release_working();
+    s_pg->cur_seg = 0;
+    set_status("");
 
-    profile_executor_live_status_t st;
-    profile_executor_get_live_status(&st);
-    s_active = st.active;
-    if (!s_active) {
-        refresh();
-        return;
+    s_pg->working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pg->working) {
+        s_pg->working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_8BIT);
     }
-    s_origin_id = st.profile_id;
-    s_running_segment_index = st.segment_index;
-    s_origin_is_builtin = (st.profile_id >= PROFILES_MAX_COUNT);
-
-    if (!s_working) {
-        /* Allocated once, kept for the page's lifetime (pages are never torn
-         * down, kiln_ui.h's header comment) -- heap rather than a static
-         * profile_t so this page's slice of .dram0.bss is one pointer, not
-         * sizeof(profile_t), per this task's budget instruction. */
-        s_working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_pg->working && edit_firing_load(s_pg->working, &s_pg->ctx)) {
+        s_pg->active = true;
+        s_pg->cur_seg = s_pg->ctx.running_seg;
+    } else {
+        if (!s_pg->working) {
+            set_status("Out of memory");
+        }
+        release_working();
     }
-    if (!s_working) {
-        s_active = false; /* out of memory -- degrade to "no firing" view */
-        refresh();
-        return;
-    }
-
-    bool loaded = false;
-    if (live_profile_has_pending_for_origin(s_origin_id)) {
-        loaded = (live_profile_load_working_for_origin(s_origin_id, s_working) == LIVE_PROFILE_LOAD_OK);
-    }
-    if (!loaded) {
-        loaded = s_origin_is_builtin ? profiles_builtin_get(s_origin_id, s_working)
-                                      : profiles_http_get(s_origin_id, s_working);
-    }
-    s_have_working = loaded;
-    s_cur_seg = s_running_segment_index;
     refresh();
+}
+
+static void poll_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_pg || !s_pg->active) {
+        return;
+    }
+    edit_firing_poll_t pr;
+    edit_firing_poll(&s_pg->ctx, s_pg->applied_generation, &pr);
+    switch (pr.state) {
+    case EDIT_FIRING_POLL_ENDED:
+        release_working();
+        set_status("Firing ended.");
+        break;
+    case EDIT_FIRING_POLL_OTHER_FIRING:
+        release_working();
+        set_status("A different firing is running -- reopen.");
+        break;
+    case EDIT_FIRING_POLL_EDITED_ELSEWHERE:
+        s_pg->ctx.running_seg = pr.running_seg;
+        set_status("Edited elsewhere -- reopen to reload.");
+        break;
+    default:
+        s_pg->ctx.running_seg = pr.running_seg;
+        if (pr.refused) {
+            char msg[160];
+            snprintf(msg, sizeof(msg), "Firing refused edit: %s", pr.refusal_msg);
+            set_status(msg);
+            s_pg->applied_generation = 0; /* report it once */
+        }
+        break;
+    }
+    refresh();
+}
+
+static void screen_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (!s_pg) {
+        return;
+    }
+    if (code == LV_EVENT_SCREEN_LOADED) {
+        if (!s_pg->working) {
+            ui_page_edit_firing_prepare(); /* reached without the home button's prepare() */
+        }
+        if (!s_pg->timer) {
+            s_pg->timer = lv_timer_create(poll_timer_cb, REFRESH_MS, NULL);
+        }
+    } else if (code == LV_EVENT_SCREEN_UNLOADED) {
+        if (s_pg->timer) {
+            lv_timer_delete(s_pg->timer);
+            s_pg->timer = NULL;
+        }
+        release_working();
+        refresh();
+    }
 }
 
 static void prev_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_cur_seg > 0) {
-        s_cur_seg--;
+    if (s_pg && s_pg->cur_seg > 0) {
+        s_pg->cur_seg--;
         refresh();
     }
 }
@@ -228,144 +290,48 @@ static void prev_cb(lv_event_t *e)
 static void next_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_have_working && (uint32_t)(s_cur_seg + 1) < s_working->segment_count) {
-        s_cur_seg++;
+    if (s_pg && s_pg->working && (uint32_t)(s_pg->cur_seg + 1) < s_pg->working->segment_count) {
+        s_pg->cur_seg++;
         refresh();
     }
 }
 
-static void target_minus_cb(lv_event_t *e)
+static void step(edit_firing_field_t field, int dir)
 {
-    (void)e;
-    if (!s_have_working || !target_ramp_editable()) return;
-    s_working->segments[s_cur_seg].target_c -= TARGET_STEP_C;
-    lv_label_set_text(s_status_label, "");
+    if (!s_pg || !s_pg->active || !s_pg->working) return;
+    if (edit_firing_step(s_pg->working, s_pg->cur_seg, s_pg->ctx.running_seg, field, dir)) {
+        set_status("");
+    }
     refresh();
 }
 
-static void target_plus_cb(lv_event_t *e)
-{
-    (void)e;
-    if (!s_have_working || !target_ramp_editable()) return;
-    s_working->segments[s_cur_seg].target_c += TARGET_STEP_C;
-    lv_label_set_text(s_status_label, "");
-    refresh();
-}
+static void target_minus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_TARGET, -1); }
+static void target_plus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_TARGET, +1); }
+static void ramp_minus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_RAMP, -1); }
+static void ramp_plus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_RAMP, +1); }
+static void dwell_minus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_DWELL, -1); }
+static void dwell_plus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_DWELL, +1); }
 
-static void ramp_minus_cb(lv_event_t *e)
-{
-    (void)e;
-    if (!s_have_working || !target_ramp_editable()) return;
-    float v = s_working->segments[s_cur_seg].ramp_c_per_hr - RAMP_STEP_C_HR;
-    s_working->segments[s_cur_seg].ramp_c_per_hr = (v < 0.0f) ? 0.0f : v;
-    lv_label_set_text(s_status_label, "");
-    refresh();
-}
-
-static void ramp_plus_cb(lv_event_t *e)
-{
-    (void)e;
-    if (!s_have_working || !target_ramp_editable()) return;
-    s_working->segments[s_cur_seg].ramp_c_per_hr += RAMP_STEP_C_HR;
-    lv_label_set_text(s_status_label, "");
-    refresh();
-}
-
-static void dwell_minus_cb(lv_event_t *e)
-{
-    (void)e;
-    if (!s_have_working || !dwell_editable()) return;
-    uint32_t v = s_working->segments[s_cur_seg].dwell_min;
-    s_working->segments[s_cur_seg].dwell_min = (v > DWELL_STEP_MIN) ? (v - DWELL_STEP_MIN) : 0;
-    lv_label_set_text(s_status_label, "");
-    refresh();
-}
-
-static void dwell_plus_cb(lv_event_t *e)
-{
-    (void)e;
-    if (!s_have_working || !dwell_editable()) return;
-    s_working->segments[s_cur_seg].dwell_min += DWELL_STEP_MIN;
-    lv_label_set_text(s_status_label, "");
-    refresh();
-}
-
-/* Same three-call sequence api_profile_live_post_handler() in
- * profiles_live_http.c makes (fork-if-needed -> validate HARD -> window
- * check -> save), reusing the SAME functions, never a copy: this page has
- * no C API of its own for any of these rules. Runs on the LVGL task; the
- * LVGL task's own stack is a static internal-SRAM array (s_lvgl_task_stack,
- * lvgl_port.c), not PSRAM, so writing through to NVS from here is the same
- * established, precedented pattern ui_page_profile_builder_review.c's
- * do_save() already uses -- see that file's header comment. */
+/* Runs on the LVGL task. Its stack is a static internal-SRAM array
+ * (s_lvgl_task_stack, lvgl_port.c), not PSRAM, so the NVS write inside
+ * live_profile_save_working() is legal here -- the same precedent as
+ * ui_page_profile_builder_review.c's do_save(); live_profile.c refuses the
+ * write itself on an external-RAM stack anyway. */
 static void apply_cb(lv_event_t *e)
 {
     (void)e;
-    if (!s_have_working) return;
+    if (!s_pg || !s_pg->active || !s_pg->working) return;
 
-    profile_executor_live_status_t st;
-    profile_executor_get_live_status(&st);
-    if (!st.active) {
-        lv_label_set_text(s_status_label, "Refused: no active firing");
-        s_active = false;
-        refresh();
-        return;
+    char err[128];
+    if (!edit_firing_apply(s_pg->working, &s_pg->ctx, err, sizeof(err))) {
+        char msg[144];
+        snprintf(msg, sizeof(msg), "Refused: %s", err);
+        set_status(msg);
+    } else {
+        s_pg->applied_generation = s_pg->ctx.generation;
+        set_status("Applied.");
     }
-    bool origin_is_builtin = (st.profile_id >= PROFILES_MAX_COUNT);
-    char err[128] = {0};
-
-    if (!live_profile_has_pending_for_origin(st.profile_id)) {
-        profile_t *origin = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!origin) {
-            lv_label_set_text(s_status_label, "Refused: out of memory");
-            return;
-        }
-        bool have_origin = origin_is_builtin ? profiles_builtin_get(st.profile_id, origin)
-                                              : profiles_http_get(st.profile_id, origin);
-        if (!have_origin) {
-            heap_caps_free(origin);
-            lv_label_set_text(s_status_label, "Refused: origin profile not readable");
-            return;
-        }
-        char origin_name[PROFILE_NAME_MAX_LEN + 1];
-        snprintf(origin_name, sizeof(origin_name), "%s", origin->name);
-        profile_t *fork_out = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        live_edit_record_t rec;
-        bool forked = fork_out && live_profile_fork(st.profile_id, origin_is_builtin, origin_name, origin, fork_out,
-                                                     &rec, err, sizeof(err));
-        heap_caps_free(origin);
-        if (fork_out) heap_caps_free(fork_out);
-        if (!forked) {
-            lv_label_set_text(s_status_label, err[0] ? err : "Refused: fork failed");
-            return;
-        }
-    }
-
-    char warn_json[16] = {0}; /* discarded -- this page shows no warnings list, only refusals */
-    if (!profiles_validate_candidate(s_working, PROFILE_VALIDATE_HARD, warn_json, sizeof(warn_json), err,
-                                      sizeof(err))) {
-        lv_label_set_text(s_status_label, err[0] ? err : "Refused: invalid");
-        return;
-    }
-
-    profile_t *running = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (running) {
-        bool have_running =
-            origin_is_builtin ? profiles_builtin_get(st.profile_id, running) : profiles_http_get(st.profile_id, running);
-        if (have_running && live_edit_check_window(running, s_working, st.segment_index, err, sizeof(err))) {
-            heap_caps_free(running);
-            lv_label_set_text(s_status_label, err[0] ? err : "Refused: window violation");
-            return;
-        }
-        heap_caps_free(running);
-    }
-
-    if (!live_profile_save_working(s_working, err, sizeof(err))) {
-        lv_label_set_text(s_status_label, err[0] ? err : "Refused: save failed");
-        return;
-    }
-
-    lv_label_set_text(s_status_label, "Applied.");
+    refresh();
 }
 
 static lv_obj_t *build_step_row(lv_obj_t *parent, const char *caption, lv_obj_t **out_val_label,
@@ -421,6 +387,9 @@ static lv_obj_t *build_step_row(lv_obj_t *parent, const char *caption, lv_obj_t 
 
 lv_obj_t *ui_page_edit_firing_build(void)
 {
+    if (!ensure_pg()) {
+        return NULL;
+    }
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
@@ -428,6 +397,8 @@ lv_obj_t *ui_page_edit_firing_build(void)
     lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0);
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_SCREEN_LOADED, NULL);
+    lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
     ui_topbar_create(scr, &(ui_topbar_cfg_t){
         .title = "Edit Firing",
@@ -435,22 +406,24 @@ lv_obj_t *ui_page_edit_firing_build(void)
         .show_home = true,
         .prev_cb = prev_cb,
         .next_cb = next_cb,
-    }, &s_tb);
+    }, &s_pg->tb);
 
-    s_note_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_note_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_note_label, "");
+    s_pg->note_label = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_pg->note_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_pg->note_label, "");
 
-    build_step_row(scr, "Target", &s_target_val_label, &s_target_minus, &s_target_plus, target_minus_cb,
-                   target_plus_cb);
-    build_step_row(scr, "Ramp", &s_ramp_val_label, &s_ramp_minus, &s_ramp_plus, ramp_minus_cb, ramp_plus_cb);
-    build_step_row(scr, "Dwell", &s_dwell_val_label, &s_dwell_minus, &s_dwell_plus, dwell_minus_cb, dwell_plus_cb);
+    build_step_row(scr, "Target", &s_pg->target_val_label, &s_pg->target_minus, &s_pg->target_plus,
+                   target_minus_cb, target_plus_cb);
+    build_step_row(scr, "Ramp", &s_pg->ramp_val_label, &s_pg->ramp_minus, &s_pg->ramp_plus, ramp_minus_cb,
+                   ramp_plus_cb);
+    build_step_row(scr, "Dwell", &s_pg->dwell_val_label, &s_pg->dwell_minus, &s_pg->dwell_plus, dwell_minus_cb,
+                   dwell_plus_cb);
 
-    s_status_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_status_label, UI_THEME_ACCENT_5, 0);
-    lv_label_set_text(s_status_label, "");
-    lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_status_label, lv_pct(100));
+    s_pg->status_label = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_pg->status_label, UI_THEME_ACCENT_5, 0);
+    lv_label_set_text(s_pg->status_label, "");
+    lv_label_set_long_mode(s_pg->status_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(s_pg->status_label, lv_pct(100));
 
     lv_obj_t *bottom_row = lv_obj_create(scr);
     lv_obj_set_width(bottom_row, lv_pct(100));
@@ -461,25 +434,23 @@ lv_obj_t *ui_page_edit_firing_build(void)
     lv_obj_set_flex_flow(bottom_row, LV_FLEX_FLOW_ROW);
     lv_obj_remove_flag(bottom_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_apply_btn = lv_button_create(bottom_row);
-    lv_obj_set_flex_grow(s_apply_btn, 1);
-    lv_obj_set_height(s_apply_btn, 44);
-    lv_obj_set_style_bg_color(s_apply_btn, UI_THEME_ACCENT_4, 0);
-    lv_obj_set_style_radius(s_apply_btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(s_apply_btn, apply_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *apply_lbl = lv_label_create(s_apply_btn);
+    s_pg->apply_btn = lv_button_create(bottom_row);
+    lv_obj_set_flex_grow(s_pg->apply_btn, 1);
+    lv_obj_set_height(s_pg->apply_btn, 44);
+    lv_obj_set_style_bg_color(s_pg->apply_btn, UI_THEME_ACCENT_4, 0);
+    lv_obj_set_style_radius(s_pg->apply_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_pg->apply_btn, apply_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *apply_lbl = lv_label_create(s_pg->apply_btn);
     lv_label_set_text(apply_lbl, "Apply");
     lv_obj_center(apply_lbl);
-    ui_theme_apply_touch_area(s_apply_btn, false);
+    ui_theme_apply_touch_area(s_pg->apply_btn, false);
 
-    /* Owner: "leave the working copy's end-of-run decision to the web" --
-     * one short line only, and only if it fits (it does: this row is empty
-     * apart from the caption below, well under the 267px budget). */
+    /* Owner: "leave the working copy's end-of-run decision to the web". */
     lv_obj_t *hint = lv_label_create(scr);
     lv_obj_set_style_text_color(hint, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(hint, "Save/discard this edit on the web when the firing ends.");
 
-    ui_topbar_raise(&s_tb);
+    ui_topbar_raise(&s_pg->tb);
 
     refresh();
     return scr;
