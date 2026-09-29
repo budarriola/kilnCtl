@@ -54,6 +54,16 @@ if (LOGIN_SINGLETON.indexOf('lastKnownBootstrapNeeded') === -1) {
 if (GATE.indexOf('function maybeGateThisPage(') === -1) {
   throw new Error('sanity: gate range lacks maybeGateThisPage');
 }
+// The REAL pollSession() -- the only writer of lastKnownBootstrapNeeded and
+// the caller of the first-load-race redirect -- so groups 6/7 exercise the
+// actual poll -> flag -> redirect wiring, not a hand-set flag.
+const POLL = extractRange(
+  '  function pollSession() {',
+  '  function init() {'
+);
+if (POLL.indexOf('kcBootstrapRedirectIfPromptOpen()') === -1) {
+  throw new Error('sanity: pollSession range lacks kcBootstrapRedirectIfPromptOpen()');
+}
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -63,10 +73,17 @@ function assert(cond, label) {
 }
 
 // Each openLoginModal() call returns a promise the test settles by hand.
-function makeContext(pathname, search) {
+function makeContext(pathname, search, sessionJson) {
   const opens = [];
   const ctx = {
     window: { location: { pathname: pathname, search: search || '', href: pathname } },
+    document: { visibilityState: 'visible' },
+    // Only pollSession()'s GET /api/auth/session reaches this below (no /wifi
+    // page is exercised, so the gate's own /status read never runs).
+    fetch: function () {
+      return Promise.resolve({ ok: true, json: function () { return Promise.resolve(sessionJson || {}); } });
+    },
+    setTimeout: function () { return 0; },
     openLoginModal: function (title) {
       let settle;
       const p = new Promise((resolve) => { settle = resolve; });
@@ -77,7 +94,9 @@ function makeContext(pathname, search) {
     Promise: Promise,
   };
   vm.createContext(ctx);
-  vm.runInContext(LOGIN_SINGLETON + '\n' + GATE +
+  vm.runInContext('var lastKnownRole = null, lockPromptEl = null, sessionPollTimer = null, SESSION_POLL_MS = 1;\n' +
+    LOGIN_SINGLETON + '\n' + GATE + '\n' + POLL +
+    '\nthis.__poll = pollSession;' +
     '\nthis.__gate = maybeGateThisPage;' +
     '\nthis.__ensure = ensureAdminLogin;' +
     '\nthis.__setBootstrapNeeded = function (v) { lastKnownBootstrapNeeded = v; };', ctx);
@@ -151,6 +170,32 @@ function flush() {
     assert(ctx.window.location.href === 'unchanged-marker',
       'second concurrent call while bootstrap-redirecting: does not redirect a second time');
     void hrefAfterFirst;
+  }
+
+  // Group 6: first-load race. The page's own first data fetch 401s before
+  // the first pollSession() answer lands, so the login-only popup is already
+  // open (flag still false) -- the gate would then merely join it. The poll
+  // that reports bootstrap_needed must redirect away from that dead popup.
+  {
+    const { ctx, opens } = makeContext('/settings', '', { role: 'none', bootstrap_needed: true });
+    ctx.__ensure('Sign in required'); // the fetch wrapper's 401 path, flag not yet known
+    assert(opens.length === 1, 'race: popup opens before the first session poll answers');
+    ctx.__poll();
+    await flush();
+    assert(ctx.window.location.href === '/login?return=%2Fsettings',
+      'race: the first poll reporting bootstrap_needed redirects away from the open popup');
+    assert(opens.length === 1, 'race: the gate joins the pending prompt, no second popup');
+  }
+
+  // Group 7: regression -- a poll with bootstrap NOT needed leaves an open
+  // popup alone (no redirect away from an ordinary, completable login).
+  {
+    const { ctx, opens } = makeContext('/settings', '', { role: 'none', bootstrap_needed: false });
+    ctx.__ensure('Sign in required');
+    ctx.__poll();
+    await flush();
+    assert(opens.length === 1 && ctx.window.location.href === '/settings',
+      'poll without bootstrap_needed: open popup kept, no redirect');
   }
 
   console.log('');

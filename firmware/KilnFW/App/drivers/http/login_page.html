@@ -121,7 +121,12 @@ function submitBootstrap(evt) {
     body: body
   }).then(function (resp) {
     if (resp.ok) {
-      window.location.href = '/login';
+      // Keep this page's own query string (?return=<gated page>, from
+      // app.js's kcRedirectToBootstrap()) so the login that follows still
+      // lands back on that page. Not validated here: the reloaded page's
+      // loginReturnPath() is the one open-redirect guard and reads this same
+      // string back before anything navigates on it.
+      window.location.href = '/login' + (window.location.search || '');
       return;
     }
     return resp.text().then(function (text) {

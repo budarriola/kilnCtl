@@ -75,6 +75,7 @@ function makeContext(opts) {
         get href() { return navigatedTo; },
         set href(v) { navigatedTo = v; },
         reload: function () { reloaded = true; },
+        search: opts.search || '',
       },
     },
     fetch: function (url, init) {
@@ -130,6 +131,31 @@ function bootstrapCalls(fetchCalls) {
 }
 
 const asyncChecks = [];
+
+asyncChecks.push((function () {
+  // A bootstrap reached via app.js's gate redirect (/login?return=<page>)
+  // must keep return= on the reload to the login form, or the operator
+  // lands on the Dashboard instead of the page they were gated from.
+  const { ctx, getNavigatedTo } = makeContext({
+    search: '?return=%2Fsettings',
+    fetchQueue: [{ reject: new Error('page-load session check, not under test') }, { ok: true }],
+  });
+  vm.runInContext('submitBootstrap', ctx)(fakeEvt());
+  return flush().then(function () {
+    assert(getNavigatedTo() === '/login?return=%2Fsettings',
+      'bootstrap success keeps ?return= on the reload to the login form');
+  });
+})());
+
+asyncChecks.push((function () {
+  const { ctx, getNavigatedTo } = makeContext({
+    fetchQueue: [{ reject: new Error('page-load session check, not under test') }, { ok: true }],
+  });
+  vm.runInContext('submitBootstrap', ctx)(fakeEvt());
+  return flush().then(function () {
+    assert(getNavigatedTo() === '/login', 'bootstrap success with no query string reloads plain /login');
+  });
+})());
 
 asyncChecks.push((function () {
   // fetchQueue order: page-load session check (rejects, no entry queued for

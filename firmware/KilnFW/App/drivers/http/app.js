@@ -1087,11 +1087,27 @@
   // Sends the operator to the one page that can actually complete
   // first-run/lockout-recovery bootstrap, carrying the page they were on so
   // login_page.html's own loginReturnPath() can send them back after either
-  // form succeeds. Kept to the same "/..." shape that guard already accepts
-  // (never a scheme or a protocol-relative "//"/"\\" host).
+  // form succeeds. location.pathname always starts with "/", but can itself
+  // start with "//" (http://board//x) -- loginReturnPath() is the one
+  // open-redirect guard and rejects that shape back to "/", so nothing is
+  // re-validated here. One-shot: a second caller never re-navigates.
+  var kcBootstrapRedirected = false;
   function kcRedirectToBootstrap() {
+    if (kcBootstrapRedirected) return;
+    kcBootstrapRedirected = true;
     var ret = (window.location.pathname || '/') + (window.location.search || '');
     window.location.href = '/login?return=' + encodeURIComponent(ret);
+  }
+  // First-load race (review fix, 2026-09-28): lastKnownBootstrapNeeded
+  // starts false until the first pollSession() answer lands, and a page's
+  // own first data fetch usually 401s before that -- so the login-only
+  // popup is already open (pendingLogin set) by the time the poll learns
+  // bootstrap is needed, and maybeGateThisPageGated() then merely JOINS
+  // that dead popup. pollSession() calls this after every refresh of the
+  // flag: a login prompt still pending while bootstrap is needed can never
+  // succeed, so leave for the bootstrap form instead.
+  function kcBootstrapRedirectIfPromptOpen() {
+    if (lastKnownBootstrapNeeded && pendingLogin) kcRedirectToBootstrap();
   }
   function ensureAdminLogin(titleText) {
     if (!pendingLogin) {
@@ -2479,13 +2495,15 @@
         // fetch wrapper's 401/403 retry, not only the page gate) needs the
         // current answer whenever it next runs, not just at page load.
         lastKnownBootstrapNeeded = !!(st && st.bootstrap_needed);
+        kcBootstrapRedirectIfPromptOpen();
         maybeGateThisPage(role);
         // Transition from a real session to "none" -- the server has
         // actually expired it. Return to the Dashboard, per the plan's
         // wording ("the interface returns to the Dashboard"), not /login.
         if (lastKnownRole && lastKnownRole !== 'none' && role === 'none') {
           if (lockPromptEl) lockPromptEl.setAttribute('hidden', '');
-          if (window.location.pathname !== '/') {
+          // Not over a bootstrap redirect already issued above this tick.
+          if (window.location.pathname !== '/' && !kcBootstrapRedirected) {
             window.location.href = '/';
           }
         }
