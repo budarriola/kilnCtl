@@ -4233,8 +4233,25 @@ Owner instruction, 2026-09-21.
     Start/Stop on the web UI opens `/live_profile`, prompting for login
     first if not already signed in (backend: `profiles_live_http.c`,
     `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, the `profile_live_*` MCP
-    quartet). **In progress:** the LCD counterpart ("edit current firing"
-    screen) is in Opus review, not yet landed.
+    quartet). **LCD counterpart landed 2026-09-28** (`ebbbd34f`, review fixes
+    `1a40133a`, `e35e1aff`): a live-edit-current-firing LCD page (guarded
+    apply, refresh, heap state; `e35e1aff` clears a stale status line when
+    the idle poll picks up a new firing after the page was opened).
+  - **LCD relock on web credential change, landed 2026-09-28** (`33ecc6d5`,
+    review fix `7783066c`): `ui_lcd_lock_force_lock()` made safe to call from
+    the httpd task, firing a relock edge and gating a pending LCD request
+    when the web password changes underneath an unlocked panel.
+  - **Bootstrap-password gate redirect, landed 2026-09-28** (`da0accac`,
+    review fix `8e3762e0`): fixed bootstrap_password being unreachable on a
+    gated page (regression from `d25d5ccf`'s dashboards-only gate); review
+    fix covers a first-load race and a lost `return=` param.
+  - **`full_board_backup.py` now goes through web auth, landed 2026-09-28**
+    (`91ed5818`): fails the run on any 401 instead of silently continuing,
+    and reports a partial cfgfs restore rather than reporting success.
+  - **Backup-restore false ceiling-divergence trip, fixed 2026-09-28**
+    (`c35e2e8a`, review fix `8f777f1b`): a restore in flight now skips
+    ceiling-divergence enforcement only for the latch, not for heat-off
+    enforcement, which stays active throughout the restore.
   - (b) A confirm dialog before stopping a running profile, on both the web
     UI and the LCD — this already existed on both UIs before this round of
     requests (a prior status line here mistakenly listed it as still
@@ -4262,13 +4279,20 @@ Owner instruction, 2026-09-21.
     separate, narrower case: open only while the board is unprovisioned
     (`59e84b57`, `f3991c09`), ADMIN once provisioned, matching the
     captive-portal first-time-setup requirement.
-  - **In progress, not yet landed:** Wi-Fi AP fallback with auto-reconnect
-    to the home network when no web users are logged in.
+  - **Wi-Fi AP fallback with auto-reconnect, landed 2026-09-28** (`8746e02d`,
+    fixes `f4675a7e`/`ddebcf8c`, review fix `be7bcad4`): falls back to AP mode
+    on home-network loss, reconnects when no web user is logged in. Owner
+    decisions: keep the 30 s probe cadence while a user is logged in; with
+    auth off, the AP stays up while any station is connected to it, not just
+    while a user is logged in. `59e84b57`/`f3991c09`'s `/wifi` setup-tier gate
+    (open only while unprovisioned) landed the same day and is unaffected.
   - **Pending bench work (not yet done):** flash the landed firmware above
-    to the bench board; verify LCD-19 and the login gates on hardware;
-    bench-verify the live-edit feature end to end once its LCD half lands;
-    re-measure `backup_import` timing now that NVS-save batching has
-    landed; measure `crash_report/clear` latency.
+    to the bench board; hardware-verify the LCD edit-firing page, the login
+    gates, AP-fallback radio timing and the LCD's "[AP kept up]" render;
+    bench-verify the live-edit feature end to end; measure `wifi_prov_owner`
+    stack margin under the new fallback logic; re-measure `backup_import`
+    timing now that NVS-save batching has landed; measure
+    `crash_report/clear` latency.
 
 ---
 
