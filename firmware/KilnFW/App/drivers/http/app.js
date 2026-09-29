@@ -1059,13 +1059,51 @@
   // Escape, backdrop): from then on only an explicit action can raise it
   // again, so a background poll never re-nags. See kcRequestIsUserInitiated.
   var authPromptDeclined = false;
+  // Mirrors GET /api/auth/session's bootstrap_needed (web auth on, no
+  // administrator credential configured yet) -- refreshed by every
+  // pollSession() tick, same lifetime/reliability as lastKnownRole. Starts
+  // false (fail-safe: an unknown state never redirects away from whatever
+  // the operator is doing).
+  //
+  // Bug fixed here (2026-09-28, post d25d5ccf): buildLoginModal()'s popup
+  // has only username/password fields, the same POST /api/auth/login the
+  // board refuses outright with no credential configured -- it can never
+  // succeed while bootstrap_needed is true. Before the page-gate/dashboard-
+  // only change, an unauthenticated full navigation to a gated page was
+  // redirected server-side to /login?return=..., and THAT page (login_page.html)
+  // already knows how to show the bootstrap form instead of the login form.
+  // Losing that redirect (replaced by this popup) silently closed off
+  // first-run/lockout-recovery bootstrap on every page but '/' and '/login'
+  // themselves. ensureAdminLogin() is the single choke point every login
+  // prompt (page gate + the fetch wrapper's 401/403 retry) goes through, so
+  // fixing it here covers both without touching route_tier_table.h (no
+  // route gets looser) or the popup's own DOM.
+  var lastKnownBootstrapNeeded = false;
   function authPromptAllowed(userInitiated) {
     if (pendingLogin) return true;
     if (userInitiated) return true;
     return !authPromptDeclined && !kcPageIsDashboard();
   }
+  // Sends the operator to the one page that can actually complete
+  // first-run/lockout-recovery bootstrap, carrying the page they were on so
+  // login_page.html's own loginReturnPath() can send them back after either
+  // form succeeds. Kept to the same "/..." shape that guard already accepts
+  // (never a scheme or a protocol-relative "//"/"\\" host).
+  function kcRedirectToBootstrap() {
+    var ret = (window.location.pathname || '/') + (window.location.search || '');
+    window.location.href = '/login?return=' + encodeURIComponent(ret);
+  }
   function ensureAdminLogin(titleText) {
     if (!pendingLogin) {
+      if (lastKnownBootstrapNeeded) {
+        // The popup cannot bootstrap a credential; redirect instead of
+        // opening it. The page is about to navigate away, so this promise
+        // is never meant to resolve -- nothing left on this page depends on
+        // its outcome.
+        kcRedirectToBootstrap();
+        pendingLogin = new Promise(function () {});
+        return pendingLogin;
+      }
       pendingLogin = openLoginModal(titleText).then(function (ok) {
         pendingLogin = null;
         return ok;
@@ -2436,6 +2474,11 @@
       })
       .then(function (st) {
         var role = st && st.role;
+        // Refreshed on every tick, independent of maybeGateThisPage()'s
+        // once-per-load pageGateChecked latch -- ensureAdminLogin() (the
+        // fetch wrapper's 401/403 retry, not only the page gate) needs the
+        // current answer whenever it next runs, not just at page load.
+        lastKnownBootstrapNeeded = !!(st && st.bootstrap_needed);
         maybeGateThisPage(role);
         // Transition from a real session to "none" -- the server has
         // actually expired it. Return to the Dashboard, per the plan's
