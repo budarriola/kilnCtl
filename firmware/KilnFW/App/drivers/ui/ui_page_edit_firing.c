@@ -248,6 +248,11 @@ static void poll_timer_cb(lv_timer_t *t)
             s_pg->active = true;
             s_pg->cur_seg = s_pg->ctx.running_seg;
             s_pg->applied_generation = 0;
+            /* Clear a leftover "Firing ended." / "A different firing is
+             * running -- reopen." from the ENDED/OTHER_FIRING branches below:
+             * the page has just loaded the new firing itself, so either
+             * message would now be stale or flatly wrong. */
+            set_status("");
             refresh();
         }
         return;
