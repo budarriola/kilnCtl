@@ -173,6 +173,65 @@ def test_a_persisting_401_is_never_saved_as_backup_content(monkeypatch, tmp_path
     assert any("401" in e["error"] for e in archive["errors"])
 
 
+def test_persisting_401_on_optional_routes_only_still_fails_the_run(monkeypatch, tmp_path):
+    """Every REQUIRED endpoint answers, but the optional reads (kiln config
+    slot export, cfg file fetch, crash_report, ...) stay at 401 after login.
+    Before the review fix main() returned 0 here -- a backup silently missing
+    content because the board refused this session. It must return 1, and
+    no 401 body may land in the archive."""
+    _set_creds(monkeypatch)
+    required = {p for p, _i, req in fbb.GET_ENDPOINTS if req}
+    logins = []
+
+    def fake_urlopen(req_or_url, timeout=None):
+        url = req_or_url if isinstance(req_or_url, str) else req_or_url.full_url
+        path = url.split("10.0.0.5", 1)[1]
+        if path == "/api/auth/login":
+            logins.append(path)
+            return _FakeResponse(b"", cookie="sess-abc")
+        if path == "/api/kiln_configs":
+            return _FakeResponse(json.dumps({"configs": [{"id": 3, "name": "a"}]}).encode())
+        if path == "/api/profiles":
+            return _FakeResponse(b"[]")
+        if path in required:
+            return _FakeResponse(b"{}")
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b"denied"))
+
+    argv = ["full_board_backup.py", "--host", "10.0.0.5", "--out-dir", str(tmp_path)]
+    with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),          unittest.mock.patch.object(sys, "argv", argv):
+        rc = fbb.main()
+
+    assert logins, "a 401 must trigger http_auth's login attempt"
+    assert rc == 1, "an auth failure on an optional route must still fail the backup run"
+    archive = json.loads((tmp_path / "board_backup.json").read_text(encoding="utf-8"))
+    assert archive["kiln_config_exports"] == {}
+    assert any(e["item"] == "kiln config slot 3 export" and "401" in e["error"] for e in archive["errors"])
+    assert "denied" not in json.dumps(archive["endpoints"])
+
+
+def test_cfgfs_restore_auth_failure_reports_partial_write(monkeypatch):
+    """restore_cfgfs_files(): first file POSTs fine, second hits a 401 with
+    no credential. Must return ok=False naming the one file already written
+    -- a partial restore reported, never counted as success."""
+    _clear_creds(monkeypatch)
+    posted = []
+
+    def fake_urlopen(req_or_url, timeout=None):
+        url = req_or_url.full_url
+        if url.endswith("name=a"):
+            posted.append(url)
+            return _FakeResponse(b"ok")
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b""))
+
+    files = {"a": {"size_bytes": 1, "data_base64": "QQ=="}, "b": {"size_bytes": 1, "data_base64": "Qg=="}}
+    with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        ok, msg, _decoded = fbb.restore_cfgfs_files("10.0.0.5", files, timeout=5.0)
+
+    assert posted
+    assert ok is False
+    assert "authentication failed after 1 prior file(s) already written" in msg
+
+
 def test_missing_credentials_never_crashes_main_and_is_reported(monkeypatch, tmp_path):
     """No credential set at all: main() must still run to completion (never
     an uncaught HttpAuthError escaping to the top level), report every

@@ -114,6 +114,18 @@ GET_ENDPOINTS = [
 FIRING_HISTORY_PROFILE_IDS = range(PROFILES_MAX_COUNT)
 
 
+def _is_auth_failure(err) -> bool:
+    """True when a recorded error string is an authentication failure: either
+    http_auth.HttpAuthError (missing/refused credential, reported by the
+    helpers below as "authentication failed: ...") or a 401 that persisted
+    after http_auth's one login-and-retry (urllib's str(HTTPError) is
+    "HTTP Error 401: ..."). main() fails the whole backup run on any of
+    these, required endpoint or not -- an archive missing content because
+    the board refused this session is never a clean backup."""
+    text = str(err or "")
+    return "authentication failed" in text or "HTTP Error 401" in text
+
+
 def _get_json(url: str, timeout: float):
     try:
         with http_auth.urlopen(url, timeout=timeout) as resp:
@@ -713,7 +725,13 @@ def main() -> int:
         ok, message, decoded = restore_cfgfs_files(args.host, cfgfs_files, args.timeout, dry_run=args.dry_run)
         print(message)
         if not ok:
-            print(f"RESTORE REFUSED -- {len(decoded)} file(s) validated before the failing entry, nothing written")
+            if decoded and not args.dry_run:
+                # Every entry validated, so the failure was a POST: files
+                # before the failing one may already be on the board.
+                print("RESTORE FAILED PARTWAY -- see the message above for how many cfg file(s) were "
+                      "already written; board cfg filesystem state is now UNKNOWN, verify by hand")
+            else:
+                print("RESTORE REFUSED -- archive validation failed, nothing written")
             return 1
         return 0
 
@@ -862,10 +880,16 @@ def main() -> int:
 
     print(f"\nWrote {out_file}")
     print(f"{ok_count} endpoints ok, {fail_count} failed (see 'errors' in the JSON).")
+    rc = 0
     if fail_count and any(e for e in archive["errors"] if e["required"]):
         print("At least one REQUIRED endpoint failed -- this backup is INCOMPLETE.")
-        return 1
-    return 0
+        rc = 1
+    auth_failures = [e for e in archive["errors"] if _is_auth_failure(e.get("error"))]
+    if auth_failures:
+        print(f"{len(auth_failures)} request(s) failed web authentication (401) -- this backup is INCOMPLETE. "
+              f"Check {http_auth.USERNAME_ENV}/{http_auth.PASSWORD_ENV}.")
+        rc = 1
+    return rc
 
 
 if __name__ == "__main__":
