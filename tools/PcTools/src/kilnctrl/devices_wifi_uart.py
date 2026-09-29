@@ -25,6 +25,20 @@ class WifiUartResponseError(ValueError):
     """Raised when a WIFI (UART) response payload does not match its wire layout."""
 
 
+#: Mirrors wifi_prov.h's wifi_prov_state_t / wifi_provision_http.c's
+#: state_name() -- the raw byte GET_STATUS sends over the wire
+#: (wifi_prov_get_state() cast to uint8_t) is the enum ordinal, not a name.
+#: Kept in sync by hand since the UART wire format has no self-describing
+#: strings for this field, same convention as WIFI_MODE_AP/HOME above.
+WIFI_PROV_STATE_NAMES = {
+    0: "ap",
+    1: "unprovisioned",
+    2: "connecting",
+    3: "connected",
+    4: "reconnecting",
+}
+
+
 @dataclass(frozen=True)
 class UartWifiStatus:
     mode: int
@@ -40,6 +54,10 @@ class UartWifiStatus:
     @property
     def mode_name(self) -> str:
         return "ap" if self.mode == WIFI_MODE_AP else "home"
+
+    @property
+    def state_name(self) -> str:
+        return WIFI_PROV_STATE_NAMES.get(self.state, f"unknown(0x{self.state:02X})")
 
 
 @dataclass(frozen=True)

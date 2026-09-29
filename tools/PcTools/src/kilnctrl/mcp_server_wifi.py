@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, wifi_prov_http_client, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -72,24 +72,50 @@ from . import mcp_server as _srv
 # (gui.py); these tools close the matching MCP-side gap.
 # ---------------------------------------------------------------------------
 @_srv._tool()
-def wifi_get_status() -> str:
+def wifi_get_status(host: Optional[str] = None) -> str:
     """Report Wi-Fi mode (home/ap), connection state, SSID(s), IP and RSSI.
 
     The board's own AP password is never rendered here -- only whether one is
     set (2026-09-21 fix: the UART GET_STATUS reply carries it in plaintext,
     same as the wire always has, but no tool output should repeat the value).
+
+    `state` is printed by name (e.g. "connected"), not the raw wire enum
+    byte -- devices_wifi_uart.UartWifiStatus.state_name.
+
+    `ap_pending_teardown` (be7bcad4, 2026-09-28 -- true while home Wi-Fi is
+    back up but the fallback AP is deliberately being kept alive because a
+    session is logged in) is carried over the UART link this tool otherwise
+    uses at all -- only GET /status (wifi_provision_http.c) serializes it.
+    Pass `host` to also fetch that over HTTP, best-effort: unreachable, not
+    JSON, or missing the key (older firmware, or no `host` given) all print
+    "unknown (...)" rather than failing the whole call. As of be7bcad4, GET
+    /status does not separately expose an `ap_fallback_active` field either
+    (that flag is internal-only, never serialized) -- nothing else to add
+    here without a firmware change.
     """
     try:
         status = _srv._wifi.get_status()
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     ap_password_state = "[set]" if status.ap_password else "[unset]"
+    ap_pending_teardown = "unknown (no host given, or older firmware)"
+    if host:
+        try:
+            data = wifi_prov_http_client.get_status(host)
+        except wifi_prov_http_client.WifiProvHttpError:
+            ap_pending_teardown = "unknown (unreachable over HTTP)"
+        else:
+            if "ap_pending_teardown" in data:
+                ap_pending_teardown = str(bool(data["ap_pending_teardown"]))
+            else:
+                ap_pending_teardown = "unknown (older firmware)"
     return (
-        f"mode={status.mode_name} state={status.state} "
+        f"mode={status.mode_name} state={status.state_name} "
         f"sta_connected={status.sta_connected} ssid={status.ssid!r} "
         f"ap_ssid={status.ap_ssid!r} ap_password={ap_password_state} "
         f"sta_ip={status.sta_ip!r} "
-        f"sta_rssi={status.sta_rssi} ap_clients={status.ap_clients}"
+        f"sta_rssi={status.sta_rssi} ap_clients={status.ap_clients} "
+        f"ap_pending_teardown={ap_pending_teardown}"
     )
 
 
