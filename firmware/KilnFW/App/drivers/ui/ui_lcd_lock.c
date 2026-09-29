@@ -147,10 +147,16 @@ static void tick_timer_cb(lv_timer_t *t)
     // ever called from this one place. The actual close_prompt()/keypad
     // teardown for this transition happens below via the existing
     // "locked_now && !s_was_locked" edge detection -- no need to duplicate it
-    // here.
+    // here. s_was_locked is cleared on an actual transition because the
+    // session may have been granted (keypad PIN -> gated action already ran,
+    // e.g. the edit-firing page or a Confirm Stop dialog opened) AFTER the
+    // previous tick recorded s_was_locked = true; without this the edge
+    // below would see locked->locked and leave that page/dialog open with no
+    // session.
     if (atomic_exchange(&s_force_lock_requested, false)) {
         if (!lcd_lock_is_locked(&s_lock)) {
             lcd_lock_force_lock(&s_lock);
+            s_was_locked = false;
             ESP_LOGI(TAG, "LCD session force-locked (policy transition)");
         }
     }
@@ -260,7 +266,12 @@ bool ui_lcd_lock_has_role(lcd_pin_role_t role)
     if (!policy.enabled) {
         return true; // item 11: auth off collapses every tier to full access
     }
-    if (lcd_lock_is_locked(&s_lock)) {
+    // A ui_lcd_lock_force_lock() the tick has not consumed yet counts as
+    // locked here, so a gated tap in the <= one-tick gap after a web
+    // policy/credential change prompts for a PIN instead of running on the
+    // session that change just revoked. Read-only: the lock transition and
+    // its teardown stay in tick_timer_cb().
+    if (lcd_lock_is_locked(&s_lock) || atomic_load(&s_force_lock_requested)) {
         return false;
     }
     if (role == LCD_PIN_ROLE_ADMIN) {
