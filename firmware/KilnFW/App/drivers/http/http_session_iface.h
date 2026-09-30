@@ -220,7 +220,20 @@ bool http_auth_any_session_active(void);
 // http_auth_policy_web_enabled() has already reported auth ON -- with auth
 // off, wifi_prov_link.c's own auth-off branch (any AP station connected)
 // applies instead and this function is not consulted.
-bool http_auth_any_ap_session_active(void);
+//
+// Review fix (2026-09-29, round 2): a session whose configured timeout is
+// WEB_AUTH_TIMEOUT_NEVER_S is, by definition, always "still valid" --
+// web_auth_session_is_valid() short-circuits true for it regardless of
+// last_seen_ms. Without special-casing that, a single AP login under a
+// never-expire policy would pin the fallback AP up forever, even long after
+// the operator's device physically disconnected from it, since nothing ever
+// makes the session invalid again. `ap_station_present` (the caller's own
+// wifi_prov_get_ap_client_count() > 0, already computed at the one call
+// site) is consulted ONLY for a never-expire session: such a session defers
+// teardown while, and only while, a station is ALSO actually associated to
+// the AP radio -- an ordinary (non-never) session's own timeout is trusted
+// as before and this parameter plays no part in that case.
+bool http_auth_any_ap_session_active(bool ap_station_present);
 
 #ifdef __cplusplus
 }

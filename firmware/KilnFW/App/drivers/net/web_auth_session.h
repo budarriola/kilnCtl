@@ -100,23 +100,35 @@ typedef struct {
     bool     prompted; // true once the 10 s stay-unlocked prompt has been surfaced
                         // for this slot since its last touch -- lets a caller show
                         // the prompt exactly once per idle approach to expiry
-    bool     via_ap;    // 2026-09-29 owner decision: true iff this session was LAST
-                        // USED (not merely created) over the SoftAP interface --
-                        // see web_auth_table_set_via_ap() below. Defaults false at
-                        // creation (web_auth_table_create_session() zeroes the slot),
-                        // so a session must be explicitly tagged AP-origin at login
-                        // and re-tagged on every subsequent touch, matching whichever
-                        // interface actually carried that request. "Last used", not
-                        // "origin only", so a session that logged in over the AP and
-                        // then genuinely moved to the LAN stops holding the AP
-                        // fallback open, and one that logged in over the LAN but is
-                        // now being used over the AP (e.g. a client that roamed)
-                        // starts holding it open. Drives
+    bool     via_ap;    // 2026-09-29 owner decision: true iff this session was set
+                        // over the SoftAP interface -- see web_auth_table_set_via_ap()
+                        // below. Defaults false at creation (web_auth_table_create_session()
+                        // zeroes the slot), so a session must be explicitly tagged
+                        // AP-origin at login. It is also re-set on every successful
+                        // touch (http_auth_session_touch(), http_session_iface.c), so
+                        // in principle it tracks "last used interface", not merely
+                        // "origin" -- but review fix (2026-09-29, round 2): that same
+                        // touch path refuses to touch a session at all unless the
+                        // request's client_ip is an EXACT match for the IP recorded
+                        // at login (Finding 3's IP-binding rule), and a client cannot
+                        // present the SAME IP address from both the LAN and the AP
+                        // subnet at once. In practice, then, a real session's client_ip
+                        // -- and therefore its via_ap tag -- never actually changes
+                        // after login; a session that "roamed" would simply fail the
+                        // IP check and stop being touched at all, not get re-tagged.
+                        // The re-tag-on-touch code is kept as defence in depth (correct
+                        // if that invariant is ever loosened) rather than removed, but
+                        // it is not currently reachable with a changed value. Drives
                         // web_auth_table_any_ap_session_active() /
                         // http_auth_any_ap_session_active(), the signal
                         // wifi_prov_link.c's ap_teardown_should_defer() consults so a
                         // LAN-only admin session (e.g. the PC's MCP tools over the
-                        // home LAN) never defers AP teardown by itself.
+                        // home LAN) never defers AP teardown by itself. See
+                        // http_auth_any_ap_session_active()'s own header comment for
+                        // the separate WEB_AUTH_TIMEOUT_NEVER_S handling: an AP-tagged
+                        // session under a never-expire timeout defers only while an AP
+                        // station is ALSO actually associated, so one AP login can't
+                        // pin the AP up forever.
 } web_auth_slot_t;
 
 typedef struct {

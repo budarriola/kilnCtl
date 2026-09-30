@@ -4290,13 +4290,23 @@ Owner instruction, 2026-09-21.
     ANY active admin session, including a LAN-only one (e.g. the PC's own MCP
     tools reaching the board over the home LAN) -- so it stayed up with zero
     AP clients connected. Fixed by tagging each web session slot with
-    `via_ap` (set at login and re-set on every touch, so it reflects the
-    session's current interface, not just its origin) and checking a new
-    AP-scoped signal, `http_auth_any_ap_session_active()`, instead of "any
-    session anywhere". A LAN/STA session now never defers teardown by
-    itself. Owner-accepted judgment call: with auth on, a station physically
-    associated to the AP but not yet authenticated (mid-login) still defers
-    teardown, so a connecting operator is never stranded.
+    `via_ap` (set at login; re-set on every successful touch, though in
+    practice the login IP binding means a real session's tag never actually
+    changes after login -- see `web_auth_session.h`'s field comment) and
+    checking a new AP-scoped signal, `http_auth_any_ap_session_active()`,
+    instead of "any session anywhere". A LAN/STA session now never defers
+    teardown by itself. Owner-accepted judgment call: with auth on, a
+    station physically associated to the AP but not yet authenticated
+    (mid-login) still defers teardown, so a connecting operator is never
+    stranded. **Review-fix round 2, same day:** `wifi_prov_request_arrived_on_ap()`
+    always returned false on hardware (`CONFIG_LWIP_IPV6=y` means the httpd
+    socket is PF_INET6, so `getsockname()` hands back an IPv4-mapped
+    AF_INET6 address, not a plain AF_INET one) -- fixed to handle both
+    shapes, which also fixes the `/status` `ap_password` field that gates on
+    the same detector. Also: an AP-tagged session under a
+    `WEB_AUTH_TIMEOUT_NEVER_S` policy now defers teardown only while an AP
+    station is also actually associated, so one AP login under a never-expire
+    policy can't pin the AP up forever.
   - **Pending bench work (not yet done):** flash the landed firmware above
     to the bench board; hardware-verify the LCD edit-firing page, the login
     gates, AP-fallback radio timing and the LCD's "[AP kept up]" render;

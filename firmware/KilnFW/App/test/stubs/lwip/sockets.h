@@ -101,13 +101,33 @@ extern int g_stub_getsockname_result;
  * getsockname()+inet_ntop() in sequence. The test sets this directly; the
  * stub getsockname() below never actually touches the address it's asked to
  * fill in, since only the string inet_ntop() returns is ever compared. */
-extern char g_stub_local_ip[16];
+// 2026-09-29: widened 16 -> 48 (>= INET6_ADDRSTRLEN) so an IPv4-mapped
+// AF_INET6 string ("::ffff:192.168.4.1", 19 chars + NUL) fits -- see
+// test_wifi_prov.c's definition-site comment.
+extern char g_stub_local_ip[48];
+
+/* 2026-09-29, added for wifi_prov_request_arrived_on_ap()'s
+ * sockaddr_is_ap_default_ip(): that function branches on the address family
+ * getsockname() reports (plain AF_INET vs. an IPv4-mapped AF_INET6, the real
+ * shape on this board's CONFIG_LWIP_IPV6=y build -- see that function's own
+ * comment) before calling inet_ntop(), so the family word has to be
+ * test-controllable too, not just the resulting string. sin_family/
+ * sin6_family are both a uint16_t at offset 0 of their respective structs,
+ * so writing through a uint16_t* below is safe for either caller --
+ * wifi_prov_note_possible_static_reachability() also calls getsockname()
+ * with a plain sockaddr_in buffer and never reads the family word back, so
+ * this write is inert for it. Defaults to AF_INET6, the shape actually
+ * observed on hardware; a test wanting the plain-AF_INET branch sets this to
+ * AF_INET first. */
+extern int g_stub_getsockname_family;
 
 static inline int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)
 {
     (void)fd;
-    (void)addr;
     (void)addrlen;
+    if (g_stub_getsockname_result == 0 && addr) {
+        *(uint16_t *)(void *)addr = (uint16_t)g_stub_getsockname_family;
+    }
     return g_stub_getsockname_result;
 }
 

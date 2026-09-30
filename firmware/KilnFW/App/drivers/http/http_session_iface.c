@@ -290,7 +290,7 @@ bool http_auth_any_session_active(void) {
     return false;
 }
 
-bool http_auth_any_ap_session_active(void) {
+bool http_auth_any_ap_session_active(bool ap_station_present) {
     // Same fail-closed-toward-TRUE direction as http_auth_any_session_active()
     // above, for the identical reason -- see this function's header comment.
     resolved_timeout_t timeout = resolve_timeout_s();
@@ -299,7 +299,20 @@ bool http_auth_any_ap_session_active(void) {
     }
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
-    return web_auth_table_any_ap_session_active(t, timeout.timeout_s, now);
+    if (!web_auth_table_any_ap_session_active(t, timeout.timeout_s, now)) {
+        return false;
+    }
+    // Review fix (2026-09-29, round 2): a WEB_AUTH_TIMEOUT_NEVER_S session is
+    // always "valid" by definition (see web_auth_session_is_valid()), so on
+    // its own it would pin the AP up forever -- one login under a never-
+    // expire policy, no way for the table to age it back out. Require an
+    // actual AP station also associated in that one case; an ordinary
+    // (non-never) session's own timeout already does the aging and this
+    // extra check is skipped for it.
+    if (timeout.timeout_s == WEB_AUTH_TIMEOUT_NEVER_S) {
+        return ap_station_present;
+    }
+    return true;
 }
 
 void http_auth_session_logout(const char *token) {

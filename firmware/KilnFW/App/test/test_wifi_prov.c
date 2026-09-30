@@ -43,6 +43,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "esp_wifi.h"
+#include "lwip/sockets.h" // AF_INET6, for g_stub_getsockname_family's initializer below
 
 // ---- Stub globals wifi_prov.c's stand-in headers read/write ----
 // (extern-declared in the stub headers themselves; defined once here.)
@@ -62,7 +63,15 @@ int g_stub_wifi_restore_calls = 0;
 esp_err_t g_stub_ap_info_result = ESP_OK;
 int8_t g_stub_ap_info_rssi = -50;
 int g_stub_getsockname_result = 0;
-char g_stub_local_ip[16] = "0.0.0.0";
+// 2026-09-29 review-fix round 2: widened 16 -> 48 (>= INET6_ADDRSTRLEN, 46)
+// -- an IPv4-mapped AF_INET6 string like "::ffff:192.168.4.1" is 19 chars +
+// NUL, which silently overran the old 16-byte buffer (MSVC's own "array
+// bounds overflow" warning on the strcpy() call sites caught this).
+char g_stub_local_ip[48] = "0.0.0.0";
+// 2026-09-29, see stubs/lwip/sockets.h's own comment: the address family
+// getsockname() reports, needed now that wifi_prov_request_arrived_on_ap()
+// branches on plain AF_INET vs. IPv4-mapped AF_INET6.
+int g_stub_getsockname_family = AF_INET6;
 int g_stub_queue_send_calls = 0;
 unsigned char g_stub_last_queue_item[256];
 // esp_wifi_ap_get_sta_list()'s reported station count (2026-09-28) -- drives
@@ -105,21 +114,37 @@ void time_sync_notify_got_ip(void) { g_stub_time_sync_notify_got_ip_calls++; }
 // every branch of ap_teardown_should_defer().
 bool g_stub_web_auth_enabled = false;
 bool http_auth_policy_web_enabled(void) { return g_stub_web_auth_enabled; }
-// 2026-09-29: renamed from g_stub_any_session_active/http_auth_any_session_active()
-// -- the production signal ap_teardown_should_defer() consults is now the
-// AP-scoped one (a LAN-only session must never defer by itself; see the
-// header comment above). g_stub_any_session_active is deliberately NOT kept
-// as a second fake: nothing in this file's production call graph
-// (wifi_prov_link.c) calls http_auth_any_session_active() any more, so a
-// second fake for it would be untested dead weight here. From this layer's
-// vantage point, false covers BOTH "nobody has any session at all" and "a
-// session exists but has only ever been used over the LAN" -- the two are
-// indistinguishable here by design, since ap_teardown_should_defer() itself
-// only ever asks the AP-scoped question; the LAN-vs-AP distinction itself is
-// exercised at the lower layer, test_http_session_iface.c's
-// test_any_ap_session_active().
+// 2026-09-29: the production signal ap_teardown_should_defer() consults is
+// the AP-scoped one (a LAN-only session must never defer by itself; see the
+// header comment above).
 bool g_stub_any_ap_session_active = false;
-bool http_auth_any_ap_session_active(void) { return g_stub_any_ap_session_active; }
+// (void)ap_station_present -- the WEB_AUTH_TIMEOUT_NEVER_S handling that
+// parameter drives is exercised at the lower layer, test_http_session_iface.c's
+// own tests against the real http_auth_any_ap_session_active(); this fake
+// only needs to satisfy the (now two-argument) call site.
+bool http_auth_any_ap_session_active(bool ap_station_present) {
+    (void)ap_station_present;
+    return g_stub_any_ap_session_active;
+}
+// Review fix (2026-09-29, round 2): restored as a *fake*, not dropped --
+// the earlier version of this comment argued nothing calls
+// http_auth_any_session_active() from this file's production call graph any
+// more, so leaving it unfaked was fine. That made the LAN-only regression
+// test below vacuous: reverting ap_teardown_should_defer() to the old,
+// broader call would only produce a LINK ERROR against a host-test binary
+// that no longer defines this symbol, never a real, specific test FAILURE --
+// exactly the mistake the first negative-test attempt for this bug caught
+// and abandoned (see this file's own history) but which the test itself
+// didn't actually guard against. Restoring the fake, and setting it TRUE
+// (with g_stub_any_ap_session_active FALSE and zero AP clients) in
+// test_got_ip_drops_ap_for_lan_only_session_even_with_auth_on() below,
+// means a revert to the old call now fails that test's own assertions
+// (the old code would defer because *some* session is active) rather than
+// merely failing to link -- confirmed by deliberately reverting the
+// production call, rebuilding, and seeing that specific test fail (then
+// restoring by hand and rebuilding clean again).
+bool g_stub_any_session_active = false;
+bool http_auth_any_session_active(void) { return g_stub_any_session_active; }
 
 // stack_margin_register() is declared by the real stack_margin.h (safe to
 // include -- that header is deliberately FreeRTOS-free, see its own top
@@ -205,8 +230,10 @@ static void reset_state(void)
     // pre-existing test above that expects an immediate teardown.
     g_stub_web_auth_enabled = false;
     g_stub_any_ap_session_active = false;
+    g_stub_any_session_active = false;
     g_stub_ap_sta_count = 0;
     g_stub_netif_ip_addr = 0; // no lease by default -- sta_link_is_live() reads false unless a test opts in
+    g_stub_getsockname_family = AF_INET6; // matches this board's CONFIG_LWIP_IPV6=y shape by default
 }
 
 // ---- Tests -----------------------------------------------------------
@@ -746,7 +773,12 @@ static void test_got_ip_drops_ap_for_lan_only_session_even_with_auth_on(void)
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
     g_stub_web_auth_enabled = true;
-    g_stub_any_ap_session_active = false; // no session was ever used over the AP
+    g_stub_any_session_active = true;     // the LAN-only session itself IS active (review fix, round 2) --
+                                           // makes this a genuine regression test: a revert to the old,
+                                           // broader http_auth_any_session_active() call would defer here
+                                           // (some session is active) and fail this test's own assertions,
+                                           // not merely fail to link.
+    g_stub_any_ap_session_active = false; // but no session was ever used over the AP
     g_stub_ap_sta_count = 0;              // and nothing is physically associated to the AP radio
 
     do_ev_got_ip();
@@ -1078,6 +1110,65 @@ static void test_teardown_and_mode_changes_clear_fallback_active(void)
     memset(&s_wifi, 0, sizeof(s_wifi));
 }
 
+// Review fix (2026-09-29, round 2): wifi_prov_request_arrived_on_ap() itself
+// had no direct test coverage -- the do_ev_got_ip() tests above only ever
+// drive it indirectly via g_stub_any_ap_session_active, so its own AF_INET/
+// AF_INET6/failure branches were never exercised. These four cover the
+// detector directly: a plain-AF_INET socket (a non-IPv6 build config, kept
+// for robustness), an IPv4-mapped AF_INET6 socket reporting the AP's own
+// address (the real shape on this board's CONFIG_LWIP_IPV6=y build), the
+// same mapped shape for an ordinary LAN address, and a getsockname()
+// failure. See sockaddr_is_ap_default_ip()'s own comment in wifi_prov_link.c
+// and stubs/lwip/sockets.h's g_stub_getsockname_family comment.
+static void test_arrived_on_ap_plain_af_inet_not_matching(void)
+{
+    TEST_SECTION("wifi_prov_request_arrived_on_ap() -- plain AF_INET family, stub can't populate a real "
+                 "address behind it, so this covers the AF_INET branch reporting no match");
+
+    reset_state();
+    g_stub_getsockname_result = 0;
+    g_stub_getsockname_family = AF_INET;
+    strcpy(g_stub_local_ip, "0.0.0.0");
+
+    TEST_CHECK(!wifi_prov_request_arrived_on_ap(3), "AF_INET branch taken, zero address does not match the AP IP");
+}
+
+static void test_arrived_on_ap_v4_mapped_af_inet6_matches(void)
+{
+    TEST_SECTION("wifi_prov_request_arrived_on_ap() -- IPv4-mapped AF_INET6 reporting the AP's own address "
+                 "(::ffff:192.168.4.1, the real shape observed on hardware): true");
+
+    reset_state();
+    g_stub_getsockname_result = 0;
+    g_stub_getsockname_family = AF_INET6;
+    strcpy(g_stub_local_ip, "::ffff:192.168.4.1");
+
+    TEST_CHECK(wifi_prov_request_arrived_on_ap(3), "IPv4-mapped AF_INET6 AP address is recognized");
+}
+
+static void test_arrived_on_ap_v4_mapped_af_inet6_lan_address_no_match(void)
+{
+    TEST_SECTION("wifi_prov_request_arrived_on_ap() -- IPv4-mapped AF_INET6 reporting an ordinary LAN "
+                 "address: false");
+
+    reset_state();
+    g_stub_getsockname_result = 0;
+    g_stub_getsockname_family = AF_INET6;
+    strcpy(g_stub_local_ip, "::ffff:192.168.1.50");
+
+    TEST_CHECK(!wifi_prov_request_arrived_on_ap(3), "a LAN address, even IPv4-mapped, never reads as the AP");
+}
+
+static void test_arrived_on_ap_getsockname_failure_fails_closed(void)
+{
+    TEST_SECTION("wifi_prov_request_arrived_on_ap() -- getsockname() fails: reports 'not AP' (fail closed)");
+
+    reset_state();
+    g_stub_getsockname_result = -1;
+
+    TEST_CHECK(!wifi_prov_request_arrived_on_ap(3), "an uninspectable socket is never reported as the AP");
+}
+
 // OWN, SEPARATE executable (build_host_tests.ps1's exe51), not part of the
 // "main" combined executable this file used to live in: the fakes below for
 // http_auth_policy_web_enabled()/http_auth_any_session_active() (added
@@ -1126,6 +1217,10 @@ void run_test_wifi_prov(void)
     test_reconcile_sta_state_never_touches_operator_chosen_ap();
     test_got_ip_after_reconcile_dropped_ap_is_a_no_op();
     test_teardown_and_mode_changes_clear_fallback_active();
+    test_arrived_on_ap_plain_af_inet_not_matching();
+    test_arrived_on_ap_v4_mapped_af_inet6_matches();
+    test_arrived_on_ap_v4_mapped_af_inet6_lan_address_no_match();
+    test_arrived_on_ap_getsockname_failure_fails_closed();
 }
 
 int main(void)

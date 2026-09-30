@@ -219,7 +219,10 @@ int g_stub_wifi_restore_calls = 0;
 // any test in this file (get_client_ip()'s getpeername() always fails first).
 // ---------------------------------------------------------------------------
 int g_stub_getsockname_result = -1;
-char g_stub_local_ip[16] = "";
+// 2026-09-29: widened 16 -> 48 to match stubs/lwip/sockets.h's extern
+// declaration (bumped for wifi_prov_request_arrived_on_ap()'s IPv4-mapped
+// AF_INET6 strings) -- unused by this file's own tests either way.
+char g_stub_local_ip[48] = "";
 
 // ---------------------------------------------------------------------------
 // esp_system.h -- ota_recovery_exit_post_handler()'s reboot task calls this;

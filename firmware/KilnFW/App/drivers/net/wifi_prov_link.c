@@ -15,6 +15,7 @@
 
 #include "wifi_prov_internal.h"
 
+#include <ctype.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -260,17 +261,26 @@ static void select_and_apply_join_candidate(void)
  *
  *   - Web auth ON: ask http_auth_any_ap_session_active() -- the AP-scoped
  *     sibling of the old signal, true only for a still-valid session whose
- *     via_ap tag says it was LAST USED over the SoftAP interface (see
- *     web_auth_session.h's via_ap field comment: "last used", not "origin
- *     only", so a session that logged in over the AP and has since moved to
- *     the LAN stops deferring, and one used over the LAN that later roams
- *     onto the AP starts deferring). ALSO OR wifi_prov_get_ap_client_count()
- *     > 0 even with auth on: a station physically associated to the AP radio
- *     but with no session yet may be mid-login (typing a password on the
- *     captive page) -- judgment call, made deliberately in the direction of
- *     never stranding a connecting operator over the more convenient early
- *     teardown. A LAN-only admin session with zero AP clients now correctly
- *     does NOT defer -- the actual bug fix.
+ *     via_ap tag says it was set at login over the SoftAP interface. (The
+ *     via_ap field comment in web_auth_session.h used to describe this as
+ *     "last used, not origin only", implying a session could roam between
+ *     LAN and AP over its lifetime and have the tag track that -- review fix
+ *     2026-09-29 round 2: http_auth_session_touch() (http_session_iface.c)
+ *     refuses to touch a session at all when the request's client_ip doesn't
+ *     exactly match the IP recorded at login, so a real session's via_ap tag
+ *     in practice never actually changes after login; see that field's own,
+ *     corrected comment.) Also passes wifi_prov_get_ap_client_count() > 0 as
+ *     the `ap_station_present` argument -- consulted by that function only
+ *     for a WEB_AUTH_TIMEOUT_NEVER_S session, so a single AP login under a
+ *     never-expire policy can't pin the AP up forever after the device
+ *     disconnects (see that function's own header comment). ALSO OR
+ *     wifi_prov_get_ap_client_count() > 0 directly, even with auth on: a
+ *     station physically associated to the AP radio but with no session yet
+ *     may be mid-login (typing a password on the captive page) -- judgment
+ *     call, made deliberately in the direction of never stranding a
+ *     connecting operator over the more convenient early teardown. A
+ *     LAN-only admin session with zero AP clients now correctly does NOT
+ *     defer -- the actual bug fix.
  *   - Web auth OFF: unchanged from 2026-09-28 -- there is no session table to
  *     ask (nothing ever creates a session when auth is off), so the honest
  *     signal is still "is anything actually associated to the AP radio right
@@ -284,10 +294,11 @@ static void select_and_apply_join_candidate(void)
  * (neither touches s_wifi), so this adds no new cross-task hazard. */
 static bool ap_teardown_should_defer(void)
 {
+    int ap_client_count = wifi_prov_get_ap_client_count();
     if (http_auth_policy_web_enabled()) {
-        return http_auth_any_ap_session_active() || wifi_prov_get_ap_client_count() > 0;
+        return http_auth_any_ap_session_active(ap_client_count > 0) || ap_client_count > 0;
     }
-    return wifi_prov_get_ap_client_count() > 0;
+    return ap_client_count > 0;
 }
 
 /* Runs on owner_task(). Shared tail of "the station is confirmed joined (or
@@ -825,20 +836,59 @@ void do_confirm_static_reachable(void)
  *
  * Fails CLOSED -- a socket that cannot be inspected is reported as "not the
  * AP", so an unexpected error hides the password rather than leaking it. */
+// Review fix (2026-09-29): CONFIG_LWIP_IPV6=y makes the httpd listener
+// PF_INET6, so getsockname() on a request that actually arrived over IPv4
+// (every AP client, and any plain-IPv4 LAN client) hands back an
+// IPv4-mapped AF_INET6 address ("::ffff:192.168.4.1"), not a plain AF_INET
+// one -- login_ip_scope.c documents the identical shape for getpeername()
+// on this same listener. The original AF_INET-only check above therefore
+// always took the "not AF_INET" branch on hardware and always returned
+// false, silently no-opping both this function's caller
+// (ap_teardown_should_defer() via http_auth_any_ap_session_active()/
+// web_auth_table_set_via_ap()) and the `/status` `ap_password` field that
+// gates on the same detector. Fixed by reading into a sockaddr_in6 (wide
+// enough for either family, same pattern ota_http.c's
+// ota_http_get_client_ip_checked() already uses for getpeername()) and
+// handling both the plain-AF_INET case (a raw socket bound to an IPv4-only
+// interface, kept for robustness) and the IPv4-mapped-AF_INET6 case via
+// inet_ntop() plus a case-insensitive "::ffff:" prefix strip identical to
+// login_ip_scope.c's strip_ipv4_mapped_prefix(), rather than depending on
+// IN6_IS_ADDR_V4MAPPED (not confirmed available in this lwIP configuration,
+// and this file also builds as part of the host test executable).
+static bool sockaddr_is_ap_default_ip(const struct sockaddr_in6 *addr6)
+{
+    if (addr6->sin6_family == AF_INET) {
+        const struct sockaddr_in *addr4 = (const struct sockaddr_in *)addr6;
+        return addr4->sin_addr.s_addr == htonl(0xC0A80401u); /* 192.168.4.1 */
+    }
+    if (addr6->sin6_family != AF_INET6) {
+        return false;
+    }
+    char formatted[46]; // INET6_ADDRSTRLEN
+    if (!inet_ntop(AF_INET6, &addr6->sin6_addr, formatted, sizeof(formatted))) {
+        return false;
+    }
+    static const char prefix[] = "::ffff:";
+    size_t prefix_len = sizeof(prefix) - 1;
+    for (size_t i = 0; i < prefix_len; i++) {
+        if (!formatted[i] || tolower((unsigned char)formatted[i]) != prefix[i]) {
+            return false;
+        }
+    }
+    return strcmp(formatted + prefix_len, "192.168.4.1") == 0;
+}
+
 bool wifi_prov_request_arrived_on_ap(int sockfd)
 {
     if (sockfd < 0) {
         return false;
     }
-    struct sockaddr_in local_addr = { 0 };
+    struct sockaddr_in6 local_addr = { 0 };
     socklen_t addr_len = sizeof(local_addr);
     if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
         return false;
     }
-    if (local_addr.sin_family != AF_INET) {
-        return false;
-    }
-    return local_addr.sin_addr.s_addr == htonl(0xC0A80401u); /* 192.168.4.1 */
+    return sockaddr_is_ap_default_ip(&local_addr);
 }
 
 void wifi_prov_note_possible_static_reachability(int sockfd)

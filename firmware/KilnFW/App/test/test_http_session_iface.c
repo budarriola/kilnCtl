@@ -446,9 +446,22 @@ static void test_any_session_active(void)
 // 2026-09-29 owner decision: http_auth_any_ap_session_active() is the fix for
 // the bug ap_teardown_should_defer()'s old http_auth_any_session_active()
 // signal caused -- a LAN-only session (via_ap never set) must NOT count,
-// only one whose via_ap tag is true, and "last used" wins (a touch can flip
-// the tag either direction). Drives the REAL function against the REAL
-// table/policy, same idiom as test_any_session_active() above.
+// only one whose via_ap tag is true. Drives the REAL function against the
+// REAL table/policy, same idiom as test_any_session_active() above.
+//
+// Review fix (2026-09-29, round 2): the touch-flip scenario below drives
+// http_auth_session_touch() directly with the SAME client_ip both times and
+// only the via_ap ARGUMENT flipped -- this is a pure unit test of the
+// mechanism (via_ap really is just a caller-supplied bool the table stores),
+// not a claim that a real client can roam between the LAN and AP subnets
+// while keeping the same peer IP; it cannot, since those are different
+// subnets, so http_auth_session_touch()'s own exact-IP-match refusal would
+// stop touching (and therefore stop re-tagging) it well before that could
+// happen on real hardware -- see web_auth_session.h's via_ap field comment.
+// The `false` passed to every call below is `ap_station_present`, irrelevant
+// here since every scenario runs under a finite (non-never) timeout;
+// test_any_ap_session_active_never_timeout_requires_ap_station() below is
+// the one that exercises that argument.
 static void test_any_ap_session_active(void)
 {
     TEST_SECTION("http_auth_any_ap_session_active -- counts only still-valid, AP-tagged sessions; "
@@ -456,7 +469,7 @@ static void test_any_ap_session_active(void)
 
     reset_all();
     set_policy_timeout(60);
-    TEST_CHECK(!http_auth_any_ap_session_active(), "empty table -- nobody logged in");
+    TEST_CHECK(!http_auth_any_ap_session_active(false), "empty table -- nobody logged in");
 
     // A session created and touched only ever over the LAN (via_ap stays
     // false, its default at creation) must NOT count -- this is the actual
@@ -465,29 +478,27 @@ static void test_any_ap_session_active(void)
     make_session("tok-lan-only", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
     fake_time_advance_ms(1000);
     http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/false);
-    TEST_CHECK(!http_auth_any_ap_session_active(),
+    TEST_CHECK(!http_auth_any_ap_session_active(false),
                "a LAN-only session (via_ap never set) does not defer AP teardown");
     TEST_CHECK(http_auth_any_session_active(),
                "sanity: the same session DOES count toward the old, broader any-session signal -- "
                "proving these two are genuinely different predicates, not a rename");
 
-    // A session touched over the AP (via_ap=true) DOES count.
+    // Flipping the mechanism's own via_ap argument (not a simulated roam --
+    // see this test's header comment) DOES flip the AP-scoped signal.
     http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/true);
-    TEST_CHECK(http_auth_any_ap_session_active(), "a session last used over the AP defers AP teardown");
+    TEST_CHECK(http_auth_any_ap_session_active(false), "an AP-tagged session defers AP teardown");
 
-    // "Last used", not "origin only": touching it again over the LAN flips it
-    // back off.
     http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/false);
-    TEST_CHECK(!http_auth_any_ap_session_active(),
-               "touching the same session over the LAN again stops it deferring -- via_ap tracks "
-               "LAST use, not merely how the session was created");
+    TEST_CHECK(!http_auth_any_ap_session_active(false),
+               "re-tagging the same slot LAN-side again stops it deferring");
 
     // Expiry still applies exactly like the broader signal: an idle,
     // AP-tagged session must not hold the AP up forever.
     http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/true);
-    TEST_CHECK(http_auth_any_ap_session_active(), "setup: AP-tagged and fresh");
+    TEST_CHECK(http_auth_any_ap_session_active(false), "setup: AP-tagged and fresh");
     fake_time_advance_ms(61000); // past the 60s timeout
-    TEST_CHECK(!http_auth_any_ap_session_active(),
+    TEST_CHECK(!http_auth_any_ap_session_active(false),
                "an expired-but-still-in_use AP-tagged slot does NOT count");
 
     // UNREADABLE policy still fails closed toward TRUE, same direction as
@@ -502,8 +513,48 @@ static void test_any_ap_session_active(void)
     TEST_CHECK(hal_kv_set_blob(&h, "auth_policy", blob, blob_len) == HAL_OK, "setup: write corrupted blob");
     TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit corruption");
     hal_kv_close(&h);
-    TEST_CHECK(http_auth_any_ap_session_active(),
+    TEST_CHECK(http_auth_any_ap_session_active(false),
                "UNREADABLE policy reports TRUE (keep the AP up) even with every session expired");
+    set_policy_timeout(60); // repair for later tests
+}
+
+// Review fix (2026-09-29, round 2): a WEB_AUTH_TIMEOUT_NEVER_S session is
+// always "valid" by web_auth_session_is_valid()'s own short-circuit, so
+// without the ap_station_present gate a single AP login under a never-expire
+// policy would defer AP teardown forever, long after the device physically
+// disconnected. set_policy_timeout(0) configures WEB_AUTH_TIMEOUT_NEVER_S
+// (see set_policy_timeout()'s own header comment / WEB_AUTH_TIMEOUT_NEVER_S's
+// definition, 0).
+static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
+{
+    TEST_SECTION("http_auth_any_ap_session_active -- under a WEB_AUTH_TIMEOUT_NEVER_S policy, an "
+                 "AP-tagged session defers only while an AP station is ALSO actually associated");
+
+    reset_all();
+    set_policy_timeout(0); // WEB_AUTH_TIMEOUT_NEVER_S
+
+    // make_session() records the login IP as "10.0.0.5" (its own hardcoded
+    // value); http_auth_session_touch() refuses any touch whose client_ip
+    // doesn't exactly match the session's login-time IP (see
+    // web_auth_session.h's via_ap field comment), so the touch below must
+    // use that same address or it is silently a no-op and via_ap never
+    // actually flips -- caught by this test itself the first time it was
+    // written with a different (192.168.4.x, AP-looking) address here.
+    make_session("tok-ap-never", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    http_auth_session_touch("tok-ap-never", "10.0.0.5", /*via_ap=*/true);
+    TEST_CHECK(!http_auth_any_ap_session_active(false),
+               "never-expire AP session, no AP station present: does NOT defer -- the fix");
+    TEST_CHECK(http_auth_any_ap_session_active(true),
+               "same never-expire AP session, an AP station IS present: defers");
+
+    // Even long after any ordinary timeout would have expired it, the never
+    // policy alone never drops it -- only the presence argument does.
+    fake_time_advance_ms(365ULL * 24 * 3600 * 1000);
+    TEST_CHECK(http_auth_any_ap_session_active(true),
+               "a year later, still defers while a station is present -- never-expire really never expires");
+    TEST_CHECK(!http_auth_any_ap_session_active(false),
+               "a year later, does not defer once the station is gone -- never-expire alone can't pin the AP up");
+
     set_policy_timeout(60); // repair for later tests
 }
 
@@ -521,4 +572,5 @@ void run_test_http_session_iface(void) {
     test_logout_does_not_require_a_still_valid_session();
     test_any_session_active();
     test_any_ap_session_active();
+    test_any_ap_session_active_never_timeout_requires_ap_station();
 }
