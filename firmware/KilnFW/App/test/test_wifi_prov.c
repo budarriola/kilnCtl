@@ -1294,6 +1294,31 @@ static void test_static_reachability_v4_mapped_af_inet6_no_match(void)
     TEST_CHECK(!s_wifi.static_ip_confirmed, "still unconfirmed");
 }
 
+// Review fix (2026-09-29, round 3): a legacy 192.168.4.x static IP persisted
+// in NVS from before wifi_prov_set_static_ip() refused to write one -- the
+// setter guard can't protect a config that predates it, so
+// wifi_prov_note_possible_static_reachability() must refuse to CONFIRM one
+// too, even on an exact match. Without this guard an AP client's own request
+// would "confirm" the AP's own address as reachable and tear the AP down out
+// from under itself.
+static void test_static_reachability_refuses_legacy_ap_subnet_static_ip(void)
+{
+    TEST_SECTION("wifi_prov_note_possible_static_reachability() -- refuses to confirm a legacy "
+                 "192.168.4.x static IP already in NVS, even on an exact match");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "192.168.4.50"); // legacy value; the setter would refuse this today
+    s_wifi.static_ip_confirmed = false;
+    g_stub_getsockname_family = AF_INET;
+    strcpy(g_stub_local_ip, "192.168.4.50"); // exact match to static_ip
+
+    wifi_prov_note_possible_static_reachability(3);
+    TEST_CHECK(g_stub_queue_send_calls == 0,
+               "an exact match inside 192.168.4.0/24 must not post CMD_CONFIRM_STATIC_REACHABLE");
+    TEST_CHECK(!s_wifi.static_ip_confirmed, "still unconfirmed -- never treated as proof");
+}
+
 // OWN, SEPARATE executable (build_host_tests.ps1's exe51), not part of the
 // "main" combined executable this file used to live in: the fakes below for
 // http_auth_policy_web_enabled()/http_auth_any_session_active() (added
@@ -1352,6 +1377,7 @@ void run_test_wifi_prov(void)
     test_static_reachability_af_inet_matches();
     test_static_reachability_v4_mapped_af_inet6_matches();
     test_static_reachability_v4_mapped_af_inet6_no_match();
+    test_static_reachability_refuses_legacy_ap_subnet_static_ip();
 }
 
 int main(void)

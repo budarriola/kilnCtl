@@ -649,6 +649,19 @@ static esp_err_t ip_config_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (wifi_prov_ip_in_ap_subnet(ip)) {
+        /* Distinct from the generic dotted-quad message below: this ip DOES
+         * parse fine, it's just refused because it sits inside the fallback
+         * AP's own 192.168.4.0/24 subnet (see wifi_prov_ip_in_ap_subnet()'s
+         * comment in wifi_prov_link.c for why). Checked here, ahead of
+         * wifi_prov_set_static_ip(), purely so the HTTP layer can report
+         * the more specific reason -- the setter enforces the same rule on
+         * its own regardless of caller. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "ip must not be in 192.168.4.0/24 (the setup AP's subnet)");
+        return ESP_OK;
+    }
+
     esp_err_t err = wifi_prov_set_static_ip(ip, netmask, gateway);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_set_static_ip failed: %s", esp_err_to_name(err));

@@ -92,6 +92,30 @@ bool parse_ipv4(const char *s, esp_ip4_addr_t *out)
     return true;
 }
 
+/* Review fix (2026-09-29, round 3): single definition of "is this address in
+ * the fallback AP's own 192.168.4.0/24 subnet", shared by
+ * wifi_prov_set_static_ip() (refuses the write outright), the HTTP handler
+ * (wifi_provision_http.c's ip_config_post_handler(), for a distinct 400
+ * message instead of the generic "not a valid dotted-quad" one), and
+ * wifi_prov_note_possible_static_reachability() (refuses to CONFIRM one,
+ * covering a 192.168.4.x static IP already persisted in NVS from before this
+ * restriction existed -- the setter guard alone cannot protect a config that
+ * predates it). Returns false for a string that doesn't even parse as an
+ * IPv4 address; callers that need to distinguish "malformed" from
+ * "well-formed but in the AP subnet" call parse_ipv4() themselves first, same
+ * as wifi_prov_set_static_ip() already did before this fix. esp_ip4_addr_t's
+ * .addr is network byte order, so the first byte at this address is always
+ * the IP's first octet regardless of host endianness. */
+bool wifi_prov_ip_in_ap_subnet(const char *ip)
+{
+    esp_ip4_addr_t addr;
+    if (!parse_ipv4(ip, &addr)) {
+        return false;
+    }
+    const uint8_t *octets = (const uint8_t *)&addr.addr;
+    return octets[0] == 192 && octets[1] == 168 && octets[2] == 4;
+}
+
 /* Configures the STA driver for whatever is currently in s_wifi.active_ssid/
  * active_password -- callers are responsible for having set those first (see
  * select_and_apply_join_candidate() and the direct nets[0] assignment in
@@ -938,6 +962,16 @@ void wifi_prov_note_possible_static_reachability(int sockfd)
          * the fallback AP's own IP, which is still up precisely because
          * reachability isn't confirmed yet. That is not proof of anything
          * and must not be treated as confirmation. */
+        return;
+    }
+    if (wifi_prov_ip_in_ap_subnet(ip_str)) {
+        /* Review fix (2026-09-29, round 3): refuse to confirm a static IP
+         * inside the fallback AP's own 192.168.4.0/24 subnet, even though it
+         * matches s_wifi.static_ip exactly. wifi_prov_set_static_ip() now
+         * refuses to WRITE such a value, but this guard is still needed for
+         * one already sitting in NVS from before that refusal existed -- an
+         * AP client's own request would otherwise "confirm" the AP's own
+         * address as reachable and tear the AP down under itself. */
         return;
     }
     post_event(CMD_CONFIRM_STATIC_REACHABLE);

@@ -633,10 +633,11 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
     /* Validated here, on the CALLER's side of the queue -- a malformed
      * request never costs a queue slot or a task hop, same rule as every
      * other producer in this file. esp_ip4_addr_t values themselves are
-     * discarded; this call only needs to know whether each string parses. */
-    esp_ip4_addr_t ip_addr;
+     * discarded; this call only needs to know whether each string parses
+     * (wifi_prov_ip_in_ap_subnet() below does its own parse of `ip` for the
+     * AP-subnet check). */
     esp_ip4_addr_t tmp;
-    if (!parse_ipv4(ip, &ip_addr) || !parse_ipv4(netmask, &tmp) || !parse_ipv4(gateway, &tmp)) {
+    if (!parse_ipv4(ip, &tmp) || !parse_ipv4(netmask, &tmp) || !parse_ipv4(gateway, &tmp)) {
         return ESP_ERR_INVALID_ARG;
     }
     /* Review fix (2026-09-29): reject a static IP inside the fallback AP's
@@ -646,11 +647,11 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
      * as its "static" IP, get it applied to the STA interface, and have that
      * request itself -- served while still associated to the AP -- reported
      * as reachability confirmation, tearing the AP down out from under
-     * itself/every other AP client. esp_ip4_addr_t's .addr is network byte
-     * order, so the first byte at this address is always the IP's first
-     * octet regardless of host endianness. */
-    const uint8_t *ip_octets = (const uint8_t *)&ip_addr.addr;
-    if (ip_octets[0] == 192 && ip_octets[1] == 168 && ip_octets[2] == 4) {
+     * itself/every other AP client. Shares one definition with the HTTP
+     * handler's distinct 400 message and with
+     * wifi_prov_note_possible_static_reachability()'s own guard -- see
+     * wifi_prov_ip_in_ap_subnet()'s comment in wifi_prov_link.c. */
+    if (wifi_prov_ip_in_ap_subnet(ip)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (strlen(ip) >= WIFI_PROV_IPV4_STR_MAX || strlen(netmask) >= WIFI_PROV_IPV4_STR_MAX ||

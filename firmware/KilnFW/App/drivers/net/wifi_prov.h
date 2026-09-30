@@ -427,6 +427,15 @@ esp_err_t wifi_prov_set_dhcp(void);
  * next power cycle. */
 esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway);
 
+/* True when `ip` parses as IPv4 and falls inside 192.168.4.0/24, the fallback
+ * AP's own subnet -- an address there is never a legitimate static-IP choice
+ * (see wifi_prov_set_static_ip()'s own refusal of it). Returns false for a
+ * string that doesn't parse at all; callers needing to distinguish
+ * "malformed" from "in the AP subnet" run their own parse first. Exported so
+ * wifi_provision_http.c's /ip_config handler can report a distinct message
+ * for this specific refusal rather than the generic dotted-quad one. */
+bool wifi_prov_ip_in_ap_subnet(const char *ip);
+
 /* 2026-08-21: called by wifi_provision_http.c's handlers with the fd of the
  * socket that just served an HTTP request (httpd_req_to_sockfd(req)), so
  * this module can tell whether that request arrived on the STA static

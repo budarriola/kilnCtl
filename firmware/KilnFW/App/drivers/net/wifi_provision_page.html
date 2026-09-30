@@ -782,14 +782,21 @@ function submitIpConfig(mode) {
   rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Applying…</span></li>';
   fetch('/ip_config', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
     .then(function (r) {
-      if (!r.ok) throw new Error('rejected');
+      if (!r.ok) {
+        /* Show the server's own reason (e.g. the AP-subnet refusal) rather
+         * than a single generic line -- ip_config_post_handler() sends a
+         * distinct 400 body per failure kind (wifi_provision_http.c). */
+        return r.text().then(function (text) { throw new Error(text || 'rejected'); });
+      }
       lastIpMode = null; /* force the next poll() to re-render the toggle/fields */
       poll();
     })
     .catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      var reason = (authErr && authErr.message) ? authErr.message :
+        'Could not save IP configuration (check the address/netmask/gateway; it must not be in 192.168.4.0/24, the setup AP\'s own subnet)';
       rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">' +
-        'Could not save IP configuration (check the address/netmask/gateway)</span></li>';
+        reason + '</span></li>';
     });
 }
 
