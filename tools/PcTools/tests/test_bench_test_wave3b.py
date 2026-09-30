@@ -366,11 +366,6 @@ class Fl10Fl11OptInTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.SKIP)
         self.assertIn("allow_flash", result.reason)
 
-    def test_fl10_skips_without_ap_password_even_with_allow_flash(self):
-        result = CFL._case_fl10({"allow_flash": True})
-        self.assertEqual(result.verdict, Verdict.SKIP)
-        self.assertIn("ap_password", result.reason)
-
     def test_fl11_skips_without_allow_flash(self):
         result = CFL._case_fl11({})
         self.assertEqual(result.verdict, Verdict.SKIP)
@@ -381,7 +376,7 @@ class Fl10Fl11OptInTest(unittest.TestCase):
         opted in -- attended=False alone must never turn this into a SKIP
         for an attended-mechanism reason (only the allow_flash gate above
         applies)."""
-        result = CFL._case_fl10({"allow_flash": True, "ap_password": "x", "attended": False,
+        result = CFL._case_fl10({"allow_flash": True, "attended": False,
                                   "srv": _FakeFlashSrv(error="error: no board")})
         self.assertNotIn("--attended", result.reason)
 
@@ -404,7 +399,7 @@ class _FakeFlashSrv:
 class Fl10FlashOutcomeTest(unittest.TestCase):
     def test_success_text_passes(self):
         srv = _FakeFlashSrv(text="flashed and verified OK ..., and post-flash verification confirmed the board is running 'app' with the matching build")
-        ctx = {"allow_flash": True, "ap_password": "pw", "srv": srv}
+        ctx = {"allow_flash": True, "srv": srv}
         result = CFL._case_fl10(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
 
@@ -412,13 +407,13 @@ class Fl10FlashOutcomeTest(unittest.TestCase):
         """Negative test: a refusal from the flashing tool itself must never
         be treated as anything but FAIL (plan §6 rule 3)."""
         srv = _FakeFlashSrv(error="error: sensitive dirty files detected: zones_config_json.h")
-        ctx = {"allow_flash": True, "ap_password": "pw", "srv": srv}
+        ctx = {"allow_flash": True, "srv": srv}
         result = CFL._case_fl10(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_warning_text_fails(self):
         srv = _FakeFlashSrv(text="flashed OK\nWARNING: post-flash verification could not confirm the board")
-        ctx = {"allow_flash": True, "ap_password": "pw", "srv": srv}
+        ctx = {"allow_flash": True, "srv": srv}
         result = CFL._case_fl10(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 

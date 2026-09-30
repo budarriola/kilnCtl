@@ -54,7 +54,7 @@ class CaseSpec:
     """One row of the plan doc's case tables.
 
     ``judge`` is ``Callable[[dict], CaseResult]`` -- called with the run's
-    shared ``ctx`` dict (host, ap_password, previously-collected case
+    shared ``ctx`` dict (host, previously-collected case
     outputs, etc.) -- or ``None`` for a case this wave has not implemented
     yet (the runner reports ``NOT_RUN: not_implemented`` for those without
     ever calling anything).
@@ -224,8 +224,8 @@ _SP = [
 #: TOTP password-reset routes (docs/TOTP_PASSWORD_RESET_PLAN.md sections 4/
 #: 6a). Unit-tested against a fake board only -- see cases_totp.py's module
 #: docstring. TP-M01 is the one mutating case: it is opt-in the same way
-#: OT-E01's ap_password/image-path gate and WEB-SEC-03/04's credential-
-#: presence gate are opt-in -- it SKIPs unless KILNCTL_TOTP_CODE and
+#: OT-E01's image-path gate and WEB-SEC-03/04's credential-presence gate
+#: are opt-in -- it SKIPs unless KILNCTL_TOTP_CODE and
 #: KILNCTL_WEB_PASSWORD_NEW are both set in the environment, never a
 #: separate boolean flag.
 _TP = [

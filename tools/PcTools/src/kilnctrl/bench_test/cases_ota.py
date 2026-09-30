@@ -199,7 +199,6 @@ def _case_otb01(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     srv = _srv(ctx)
     ota = _ota_client(ctx)
 
@@ -209,10 +208,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
     if energized:
         return CaseResult(Verdict.SKIP, reason="refusing dual reset: a relay is still energized")
 
-    if not ap_password:
-        return CaseResult(Verdict.SKIP, reason="no ap_password credential available for sw_reset_esp")
-
-    sw_reset_fn = ctx.get("_sw_reset_fn", lambda: ota.sw_reset(host, ap_password))
+    sw_reset_fn = ctx.get("_sw_reset_fn", lambda: ota.sw_reset(host))
     get_status_fn = ctx.get("_get_safety_status_fn") or (lambda: srv._safety.get_status())
     get_diag_fn = ctx.get("_get_safety_diag_fn") or (lambda: srv._safety.get_diag())
     clear_trip_fn = ctx.get("_clear_trip_fn", lambda: _default_clear_trip_fn(ctx))
@@ -296,11 +292,10 @@ def _case_ote01(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_image_path")
     expected_build = ctx.get("ota_image_build")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_image_path/ap_password not provided for OT-E01")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E01")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -317,7 +312,7 @@ def _case_ote01(ctx: dict) -> CaseResult:
     ctx["_ote_pre_update"] = {"fw_build": fw_build_before, "zones": zones_before}
 
     try:
-        push = ota.push_esp_image(host, image_path, ap_password)
+        push = ota.push_esp_image(host, image_path)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"push_esp_image raised {type(exc).__name__}: {exc}")
     if not push.ok:
@@ -372,9 +367,6 @@ def _case_ote02(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
-    if not ap_password:
-        return CaseResult(Verdict.SKIP, reason="no ap_password credential available for ota_rollback_esp")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -387,7 +379,7 @@ def _case_ote02(ctx: dict) -> CaseResult:
     pid_gains_before = _pid_gains(pre.get("zones")) if pre.get("zones") else None
 
     try:
-        ota.rollback_esp(host, ap_password)
+        ota.rollback_esp(host)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"rollback_esp raised {type(exc).__name__}: {exc}")
 
@@ -433,10 +425,9 @@ def _case_ote03(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_corrupt_image_path")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_corrupt_image_path/ap_password not provided for OT-E03")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_corrupt_image_path not provided for OT-E03")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -448,10 +439,10 @@ def _case_ote03(ctx: dict) -> CaseResult:
 
     refused = None
     try:
-        push = ota.push_esp_image(host, image_path, ap_password)
+        push = ota.push_esp_image(host, image_path)
         refused = not push.ok
     except Exception:
-        refused = True  # a raised transport/HMAC error is also a refusal
+        refused = True  # a raised transport error is also a refusal
 
     running_after = _running_partition(ctx, host)
     fw_build_after = _fw_build(ctx, host)
@@ -468,10 +459,9 @@ def _case_ote04(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_truncated_image_path")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_truncated_image_path/ap_password not provided for OT-E04")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_truncated_image_path not provided for OT-E04")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -483,10 +473,10 @@ def _case_ote04(ctx: dict) -> CaseResult:
 
     refused = None
     try:
-        push = ota.push_esp_image(host, image_path, ap_password)
+        push = ota.push_esp_image(host, image_path)
         refused = not push.ok
     except Exception:
-        refused = True  # a raised transport/HMAC error is also a refusal
+        refused = True  # a raised transport error is also a refusal
 
     running_after = _running_partition(ctx, host)
     fw_build_after = _fw_build(ctx, host)
@@ -506,10 +496,9 @@ def _case_ote05(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_wrong_build_image_path")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_wrong_build_image_path/ap_password not provided for OT-E05")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_wrong_build_image_path not provided for OT-E05")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -521,7 +510,7 @@ def _case_ote05(ctx: dict) -> CaseResult:
 
     refused = None
     try:
-        push = ota.push_esp_image(host, image_path, ap_password)
+        push = ota.push_esp_image(host, image_path)
         refused = not push.ok
     except Exception:
         refused = True
@@ -560,10 +549,9 @@ def _case_ote06(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_image_path")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_image_path/ap_password not provided for OT-E06")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E06")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -590,7 +578,7 @@ def _case_ote06(ctx: dict) -> CaseResult:
     except Exception:
         zones_before = None
 
-    push_fn = ctx.get("_push_fn") or (lambda: ota.push_esp_image(host, image_path, ap_password))
+    push_fn = ctx.get("_push_fn") or (lambda: ota.push_esp_image(host, image_path))
     try:
         push_fn()
     except Exception:
@@ -647,10 +635,9 @@ def _case_update_refused_during_state(
     machinery already lives in cases_heat.py/the AT-* cases and is not
     duplicated here)."""
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get(image_ctx_key)
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason=f"{image_ctx_key}/ap_password not provided")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason=f"{image_ctx_key} not provided")
 
     start_fn = ctx.get("_start_state_fn")
     stop_fn = ctx.get("_stop_state_fn")
@@ -679,7 +666,7 @@ def _case_update_refused_during_state(
         interlock_ok, _ireason = _interlock_ok(ctx, host)
 
         ota = _ota_client(ctx)
-        push_fn = ctx.get("_push_fn") or (lambda: ota.push_esp_image(host, image_path, ap_password))
+        push_fn = ctx.get("_push_fn") or (lambda: ota.push_esp_image(host, image_path))
         push_refused = None
         try:
             push = push_fn()
@@ -756,10 +743,11 @@ def _case_ote08(ctx: dict) -> CaseResult:
 
 
 def _case_ote09(ctx: dict) -> CaseResult:
-    """OT-E09: POST /api/ota/esp with no credential at all (no
-    ``X-Ota-Mac`` header) -- 401/403, nothing written. Deliberately does
-    NOT require ``ap_password`` in ctx (there is none to use for this
-    case)."""
+    """OT-E09: POST /api/ota/esp with no admin session at all -- 401/403,
+    nothing written. The AP-password HMAC challenge/response scheme this
+    case used to also probe was retired 2026-09-29 (WEB_AUTH_PLAN.md item
+    2b); with web auth on, ROUTE_TIER_ADMIN alone is the gate this case now
+    exercises."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
@@ -996,11 +984,10 @@ def _case_otp01(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_pico_image_path")
     expected_commit = ctx.get("ota_pico_image_commit")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_pico_image_path/ap_password not provided for OT-P01")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_pico_image_path not provided for OT-P01")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -1017,7 +1004,7 @@ def _case_otp01(ctx: dict) -> CaseResult:
 
     ota = _ota_client(ctx)
     try:
-        push = ota.push_pico_image(host, image_path, ap_password)
+        push = ota.push_pico_image(host, image_path)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"push_pico_image raised {type(exc).__name__}: {exc}")
     if not push.ok:
@@ -1068,9 +1055,6 @@ def _case_otp02(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
-    if not ap_password:
-        return CaseResult(Verdict.SKIP, reason="no ap_password credential available for rollback_pico")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -1079,7 +1063,7 @@ def _case_otp02(ctx: dict) -> CaseResult:
     commissioning_before = _commissioning(ctx, host)
     ota = _ota_client(ctx)
     try:
-        ota.rollback_pico(host, ap_password)
+        ota.rollback_pico(host)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"rollback_pico raised {type(exc).__name__}: {exc}")
 
@@ -1122,10 +1106,9 @@ def _case_otp03(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_pico_corrupt_image_path")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_pico_corrupt_image_path/ap_password not provided for OT-P03")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_pico_corrupt_image_path not provided for OT-P03")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -1143,14 +1126,14 @@ def _case_otp03(ctx: dict) -> CaseResult:
     refused_or_failed = None
     last_error = None
     try:
-        push = ota.push_pico_image(host, image_path, ap_password)
+        push = ota.push_pico_image(host, image_path)
         if not push.ok:
             refused_or_failed = True
         else:
             phase, last_error = _poll_pico_phase(ctx, host)
             refused_or_failed = phase == "failed"
     except Exception:
-        refused_or_failed = True  # a raised transport/HMAC/CRC error is also a refusal
+        refused_or_failed = True  # a raised transport/CRC error is also a refusal
 
     commit_after, boot_reason = _pico_commit_and_boot_reason(ctx)
     return J.judge_ota_pico_bad_image_fallback(
@@ -1178,10 +1161,9 @@ def _case_otp05(ctx: dict) -> CaseResult:
     same clear-trip path SP-08/SP-09 use, injectable as
     ctx['_clear_trip_fn'] for testing."""
     host = ctx.get("host")
-    ap_password = ctx.get("ap_password")
     image_path = ctx.get("ota_pico_image_path")
-    if not ap_password or not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_pico_image_path/ap_password not provided for OT-P05")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_pico_image_path not provided for OT-P05")
 
     # Plan section 6 rule 1 applies here exactly as to every other OTA
     # action in this module: executor idle and GET /api/ota/interlock ok,
@@ -1204,7 +1186,7 @@ def _case_otp05(ctx: dict) -> CaseResult:
     if trip_pending:
         ota = _ota_client(ctx)
         try:
-            push = ota.push_pico_image(host, image_path, ap_password)
+            push = ota.push_pico_image(host, image_path)
             push_refused = not push.ok
         except Exception:
             push_refused = True

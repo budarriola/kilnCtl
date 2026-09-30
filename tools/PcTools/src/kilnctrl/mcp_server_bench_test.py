@@ -21,7 +21,7 @@ from .bench_test.runner import BenchTestRunner
 
 @_srv._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
-                    allow_heat: bool = True, ap_password: Optional[str] = None,
+                    allow_heat: bool = True,
                     tag: Optional[str] = None, host: Optional[str] = None,
                     attended: bool = False, allow_flash: bool = False) -> str:
     """Run a standardized bench-test suite against this board
@@ -34,9 +34,10 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     SKIPs any case marked as heat-originating (wave 0 has none in `smoke`,
     but later suites do).
 
-    `ap_password` is accepted for signature parity with the plan and is
-    never persisted to summary.json/transcript.md (redacted before write)
-    -- wave 0's read-only cases do not use it.
+    Every OTA/factory-reset/sw-reset route this can drive is ROUTE_TIER_ADMIN
+    only, on or off, since the AP-password HMAC challenge/response scheme
+    they used to also require was retired 2026-09-29 (WEB_AUTH_PLAN.md item
+    2b) -- no separate credential parameter is accepted here any more.
 
     Writes one run directory under `logs/bench_test/<UTC timestamp>_
     <suite>[_<tag>]/` (summary.json, transcript.md, board_before/after.json)
@@ -77,7 +78,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     if not resolved_host:
         return "error: could not resolve a board host (no explicit host, no STA IP, no AP default)"
     case_list = [c.strip() for c in cases.split(",") if c.strip()] if cases else None
-    ctx = {"host": resolved_host, "ap_password": ap_password, "tag": tag,
+    ctx = {"host": resolved_host, "tag": tag,
            "attended": attended, "allow_flash": allow_flash}
     runner = BenchTestRunner(ctx)
     try:

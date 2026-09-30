@@ -12,7 +12,6 @@ import glob
 import json
 import math
 import logging
-import os
 import subprocess
 import sys
 import threading
@@ -64,15 +63,21 @@ from . import mcp_server as _srv
 
 # ---------------------------------------------------------------------------
 # OTA (firmware/CommonFW/docs/UPDATE_PROTOCOL.md, KilnFW/TODO.md 9.5/9.6) --
-# HTTP, not the UART link. All four tools below drive ota_http.c's
-# /api/ota/{challenge,esp,pico} + /api/ota/pico/status endpoints over the
-# board's own web server -- request construction, HMAC signing, and response
+# HTTP, not the UART link. The tools below drive ota_http.c's
+# /api/ota/{esp,pico} + /api/ota/pico/status endpoints over the
+# board's own web server -- request construction and response
 # parsing live in ota_http_client.py (unit-tested there with mocked HTTP
 # responses; see tools/PcTools/tests/test_ota_http_client.py). NEVER
 # exercised against real hardware from here -- no board is attached in CI or
 # in this pass's dev environment. Live-board verification (does a real ESP
-# accept these bytes end to end, do the lockout/interlock paths behave as
+# accept these bytes end to end, do the interlock paths behave as
 # documented) is still outstanding.
+#
+# ROUTE_TIER_ADMIN (the admin session http_auth.urlopen() carries) is the
+# only gate on every route below, on or off. These routes used to ALSO
+# require an AP-password HMAC challenge/response handshake
+# (CommonFW/docs/UPDATE_PROTOCOL.md section 2) -- retired 2026-09-29
+# (WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open when login off").
 #
 # Host discovery mirrors gui.py's _wifi_default_host(): prefer the board's
 # current station IP (from the UART-side WIFI tools, which always work even
@@ -111,56 +116,8 @@ def _ota_resolve_host(host: Optional[str]) -> str:
     return _ota_resolve_host_with_source(host)[0]
 
 
-KILNCTL_AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"
-
-
-def _resolve_ap_password(password: Optional[str]) -> Optional[str]:
-    """Mirror mcp_server_flash.py's `_resolve_boot_guard_password()`: an
-    explicit `password` argument always wins; otherwise fall back to the
-    KILNCTL_AP_PASSWORD environment variable. Returns None (never the empty
-    string) when neither source has a value. Never logs, prints, or persists
-    the resolved value."""
-    if password:
-        return password
-    return os.environ.get(KILNCTL_AP_PASSWORD_ENV) or None
-
-
-def _require_ap_password(password: Optional[str]) -> str:
-    """Like `_resolve_ap_password()`, but raises with a caller-facing message
-    naming the environment variable when no credential is available from
-    either source."""
-    resolved = _resolve_ap_password(password)
-    if not resolved:
-        raise ValueError(
-            "no AP password available -- pass `password` explicitly or set "
-            f"the {KILNCTL_AP_PASSWORD_ENV} environment variable"
-        )
-    return resolved
-
-
 @_srv._tool()
-def ota_get_challenge(host: Optional[str] = None) -> str:
-    """GET /api/ota/challenge -- issue a fresh single-use OTA auth nonce.
-
-    Mostly a diagnostic/manual tool: ota_update_esp()/ota_update_pico() below
-    already fetch their own challenge internally, so this is not a required
-    first step for a normal push. Useful to confirm the board's OTA HTTP
-    surface is reachable at all, or to hand-verify the HMAC scheme.
-
-    `host`: board IP or hostname (e.g. "192.168.1.42" or "kilnctl.local").
-    Defaults to the board's current station IP (via wifi_get_status()'s UART
-    query) if connected, else the board's fallback-AP address 192.168.4.1.
-    """
-    resolved = _ota_resolve_host(host)
-    try:
-        nonce = ota_http.get_challenge(resolved)
-    except ota_http.OtaHttpError as exc:
-        return f"error: {exc} (host={resolved})"
-    return f"ok - nonce={nonce.hex()} host={resolved} (single-use, 30s expiry)"
-
-
-@_srv._tool()
-def ota_update_esp(image_path: str, password: Optional[str] = None, host: Optional[str] = None) -> str:
+def ota_update_esp(image_path: str, host: Optional[str] = None) -> str:
     """Push a new ESP32-S3 firmware image over Wi-Fi -- POST /api/ota/esp.
 
     DESTRUCTIVE-ADJACENT: this streams `image_path` (a raw ESP-IDF .bin,
@@ -171,12 +128,10 @@ def ota_update_esp(image_path: str, password: Optional[str] = None, host: Option
     ceiling) -- a refusal comes back here as a specific error naming the
     unmet precondition, not a generic failure.
 
-    `password`: the board's AP password (same one wifi_prov_get_ap_password()
-    returns) -- used only to derive the challenge-response HMAC per
-    CommonFW/docs/UPDATE_PROTOCOL.md section 2; the plaintext password is
-    never sent over the wire. Optional: falls back to the KILNCTL_AP_PASSWORD
-    environment variable when omitted, and raises naming that variable if
-    neither is set.
+    ROUTE_TIER_ADMIN (the admin session http_auth.urlopen() carries) is the
+    only auth this route requires -- the AP-password HMAC challenge/response
+    scheme this used to also perform was retired 2026-09-29
+    (WEB_AUTH_PLAN.md item 2b).
 
     On success the image is written and set as the boot partition, but stays
     PENDING_VERIFY until the board reboots AND main.c's
@@ -187,17 +142,13 @@ def ota_update_esp(image_path: str, password: Optional[str] = None, host: Option
     (ota_esp_do_transfer()'s single cleanup path aborts the OTA handle and
     releases the update mutex), and re-uploading is a fresh, separate call.
 
-    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/
     response-parsing are unit-tested with mocked HTTP only (see
     ota_http_client.py's module doc comment).
     """
     resolved = _ota_resolve_host(host)
     try:
-        resolved_password = _require_ap_password(password)
-    except ValueError as exc:
-        return f"error: {exc}"
-    try:
-        result = ota_http.push_esp_image(resolved, image_path, resolved_password)
+        result = ota_http.push_esp_image(resolved, image_path)
     except ota_http.OtaHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved})"
@@ -211,7 +162,7 @@ def ota_update_esp(image_path: str, password: Optional[str] = None, host: Option
 
 
 @_srv._tool()
-def ota_rollback_esp(password: Optional[str] = None, host: Optional[str] = None) -> str:
+def ota_rollback_esp(host: Optional[str] = None) -> str:
     """Explicitly revert the ESP32-S3 to its PREVIOUS firmware image, right
     now -- POST /api/ota/esp/rollback.
 
@@ -238,12 +189,9 @@ def ota_rollback_esp(password: Optional[str] = None, host: Optional[str] = None)
     before the reboot is attempted, not discovered by a blind call that
     fails partway.
 
-    `password`: the board's AP password, same HMAC scheme ota_update_esp()
-    uses -- but signed over a DIFFERENT context ("esp-rollback", not "esp"),
-    so a MAC captured for one action cannot be reused to authorize the
-    other. The plaintext password is never sent over the wire. Optional:
-    falls back to the KILNCTL_AP_PASSWORD environment variable when omitted,
-    and raises naming that variable if neither is set.
+    ROUTE_TIER_ADMIN is the only auth this route requires -- the
+    AP-password HMAC challenge/response scheme it used to also perform was
+    retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b).
 
     On success, the board has already persisted an ota_record (processor
     "esp", success=true, reason "rollback requested") and is rebooting into
@@ -253,18 +201,14 @@ def ota_rollback_esp(password: Optional[str] = None, host: Optional[str] = None)
     tool's caller's own version check (e.g. get_fw_version, once the board
     is back up) to confirm which image is actually running now.
 
-    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/
     response-parsing are unit-tested with mocked HTTP only (see
     ota_http_client.py's module doc comment); no ESP32-S3 was available in
     this environment to actually trigger a reboot/rollback.
     """
     resolved = _ota_resolve_host(host)
     try:
-        resolved_password = _require_ap_password(password)
-    except ValueError as exc:
-        return f"error: {exc}"
-    try:
-        body = ota_http.rollback_esp(resolved, resolved_password)
+        body = ota_http.rollback_esp(resolved)
     except ota_http.OtaHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved})"
@@ -276,7 +220,7 @@ def ota_rollback_esp(password: Optional[str] = None, host: Optional[str] = None)
 
 
 @_srv._tool()
-def ota_recovery_exit_esp(password: Optional[str] = None, host: Optional[str] = None) -> str:
+def ota_recovery_exit_esp(host: Optional[str] = None) -> str:
     """Ask the ESP32-S3 to reboot right now to exit boot_guard.h's recovery
     mode -- POST /api/ota/esp/recovery_exit.
 
@@ -287,34 +231,24 @@ def ota_recovery_exit_esp(password: Optional[str] = None, host: Optional[str] = 
     the impatient/uncertain case: reboot right now instead of waiting for
     that background self-clear (or a watchdog) to do it.
 
-    `password`: same AP-password-derived HMAC scheme as ota_update_esp()/
-    ota_rollback_esp() -- but signed over yet another distinct context
-    ("recovery", not "esp" or "esp-rollback"), so a MAC captured for one
-    action cannot be reused to authorize this one. Refused (403) on a wrong
-    password/lockout, same as the other OTA routes, and ALSO refused (403,
+    ROUTE_TIER_ADMIN is the only auth this route requires -- the
+    AP-password HMAC challenge/response scheme it used to also perform was
+    retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b). ALSO refused (403,
     "board is not in recovery mode") if the board is not currently in
-    recovery mode -- that check runs after auth specifically so a caller
-    who never proves they hold the AP password cannot use this to probe
-    whether the board is in recovery mode. Optional: falls back to the
-    KILNCTL_AP_PASSWORD environment variable when omitted, and raises naming
-    that variable if neither is set.
+    recovery mode.
 
     On success, the board is already rebooting from a short-lived
     background task -- this call returns as soon as the response arrives,
     it does NOT wait for the reboot to finish.
 
-    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/
     response-parsing are unit-tested with mocked HTTP only; no ESP32-S3 was
     available in this environment to actually trigger recovery mode and
     exit it.
     """
     resolved = _ota_resolve_host(host)
     try:
-        resolved_password = _require_ap_password(password)
-    except ValueError as exc:
-        return f"error: {exc}"
-    try:
-        body = ota_http.recovery_exit_esp(resolved, resolved_password)
+        body = ota_http.recovery_exit_esp(resolved)
     except ota_http.OtaHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved})"
@@ -325,7 +259,7 @@ def ota_recovery_exit_esp(password: Optional[str] = None, host: Optional[str] = 
 
 
 @_srv._tool()
-def sw_reset_esp(password: Optional[str] = None, confirm: bool = False, host: Optional[str] = None) -> str:
+def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     """Reboot BOTH processors right now -- this ESP32-S3, and (since
     8b0e799a) the RP2040 safety processor IN PLACE, same firmware slot --
     POST /api/sw_reset. This is the sanctioned, non-JTAG way to reopen the
@@ -364,18 +298,15 @@ def sw_reset_esp(password: Optional[str] = None, confirm: bool = False, host: Op
     SAFETY_TRIP_LINK_DEAD (S6b) -- decode any OTHER bit and stop, do not
     clear) and then call safety_clear_trip() explicitly.
 
-    `password`: same AP-password-derived HMAC scheme as
-    ota_recovery_exit_esp()/ota_rollback_esp() -- but signed over yet another
-    distinct context ("sw-reset"), so a MAC captured for one action cannot be
-    reused to authorize this one. Optional: falls back to the
-    KILNCTL_AP_PASSWORD environment variable when omitted, and raises naming
-    that variable if neither is set.
+    ROUTE_TIER_ADMIN is the only auth this route requires -- the
+    AP-password HMAC challenge/response scheme it used to also perform was
+    retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b).
 
     No configuration is erased or changed on either processor by this call
     -- contrast the danger-zone factory_reset scopes.
 
     NOT YET VERIFIED AGAINST REAL HARDWARE by this repo's own automated test
-    suite -- request construction/HMAC/response-parsing are unit-tested with
+    suite -- request construction/response-parsing are unit-tested with
     mocked HTTP only; see test_ota_http_client.py.
     """
     if not confirm:
@@ -385,11 +316,7 @@ def sw_reset_esp(password: Optional[str] = None, confirm: bool = False, host: Op
                 "to be exactly 0x0020). No request was sent to the board.")
     resolved = _ota_resolve_host(host)
     try:
-        resolved_password = _require_ap_password(password)
-    except ValueError as exc:
-        return f"error: {exc}"
-    try:
-        body = ota_http.sw_reset(resolved, resolved_password)
+        body = ota_http.sw_reset(resolved)
     except ota_http.OtaHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved})"
@@ -401,7 +328,7 @@ def sw_reset_esp(password: Optional[str] = None, confirm: bool = False, host: Op
 
 
 @_srv._tool()
-def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optional[str] = None,
+def ota_update_pico(image_path: str, host: Optional[str] = None,
                      force_version: bool = False) -> str:
     """Push a new RP2040 safety-processor firmware image -- POST
     /api/ota/pico. Stages `image_path` (a raw SaftyFW .bin) into the ESP's
@@ -416,10 +343,9 @@ def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optio
     refusal (wrong password, an interlock, or a concurrent update already
     in progress) comes back as a specific board-reported reason.
 
-    `password`: same AP-password-derived HMAC scheme as ota_update_esp() --
-    see that tool's doc comment. Optional: falls back to the
-    KILNCTL_AP_PASSWORD environment variable when omitted, and raises naming
-    that variable if neither is set.
+    ROUTE_TIER_ADMIN is the only auth this route requires -- the
+    AP-password HMAC challenge/response scheme it used to also perform was
+    retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b).
 
     TODO.md 9.4: if the staged image declares a link protocol version
     different from the one this ESP currently speaks, the board refuses
@@ -444,16 +370,12 @@ def ota_update_pico(image_path: str, password: Optional[str] = None, host: Optio
 
     NOT YET VERIFIED AGAINST REAL HARDWARE -- neither the ESP HTTP path nor
     the RP2040 relay has been exercised against physical boards from this
-    tool; only request construction/HMAC/response-parsing are unit-tested,
+    tool; only request construction/response-parsing are unit-tested,
     with mocked HTTP.
     """
     resolved = _ota_resolve_host(host)
     try:
-        resolved_password = _require_ap_password(password)
-    except ValueError as exc:
-        return f"error: {exc}"
-    try:
-        result = ota_http.push_pico_image(resolved, image_path, resolved_password,
+        result = ota_http.push_pico_image(resolved, image_path,
                                            force_version=force_version)
     except ota_http.OtaPicoProtocolVersionMismatch as exc:
         return (f"error: protocol version mismatch -- image declares link protocol "

@@ -1,35 +1,20 @@
-// Host tests for App/drivers/http/ota_http.c's security fixes shipped in commit
-// f58e040 with NO host-test coverage (ota_http.c needs real ESP-IDF headers
-// the host tree had no stubs for) -- verified only by code reading and on
-// real hardware until now. This file closes that gap for the three
-// decisions the commit made:
+// Host tests for App/drivers/http/ota_http.c and factory_reset.c.
 //
-//   1. ota_http_verify_request() REFUSES outright when the AP password is
-//      empty (an open AP makes the HMAC key zero-length, so anyone in range
-//      could compute a valid MAC from public information) -- checked AFTER
-//      the BOOT-button physical-recovery bypass (so an open-AP board is
-//      never unflashable) and BEFORE any HMAC math runs.
-//   2. Each ota_http_context_t has its own distinct HMAC context string and
-//      its own lockout state, so a MAC signed for one action cannot
-//      authorize another, and a wrong-password guess against one route
-//      cannot burn another route's 3-strikes budget.
-//   3. POST /api/factory_reset authenticates BEFORE its interlock check, so
-//      an unauthenticated caller cannot read the refusal text (which can
-//      name a live zone temperature) to learn kiln telemetry.
+// The AP-password HMAC scheme this file used to test (empty-password
+// refusal, per-context MAC/lockout isolation, auth-before-interlock via a
+// challenge nonce) was retired 2026-09-29 -- WEB_AUTH_PLAN.md item 2b, owner
+// decision "Retire; open when login off". route_tier_table.h's ADMIN tier is
+// now the sole gate on these routes, same as every other ADMIN route,
+// whether web auth is on or off. What remains here is the genuinely
+// unrelated coverage: the interlock/system-mode-gate/zone-sweep refusal
+// logic, factory-reset scope/credential-survival behavior, sw_reset's
+// firing/pause/autotune refusals, pico-rollback async status reporting, and
+// admin/user session-based redaction on GET /api/ota/esp/status.
 //
-// APPROACH: ota_http_verify_request()/ota_http_authenticate_request() are
-// PUBLIC (declared in ota_http.h), so in principle this file could just link
-// ota_http.c as an ordinary object and call them. It does not, for one
-// reason: exercising decision 2 needs a freshly issued, still-valid
-// challenge nonce, and the nonce lives in ota_http.c's own file-scope static
-// state (s_nonce) with no public "issue one for a test" entry point -- the
-// only way to reach it is to #include ota_http.c directly, same convention
-// test_zones_http.c/test_profiles_http.c already use for a `static`
-// function with no other seam. This file needs the same access for a
-// `static` file-scope VARIABLE instead of a function, but the reasoning and
-// the mechanism are identical. reset_post_handler() (factory_reset.c),
-// decision 3's target, is `static` for the ordinary reason -- #include'd for
-// the same reason as those two precedents.
+// APPROACH: this file #include's ota_http.c and factory_reset.c directly
+// (rather than linking them as objects) to reach their `static` internals
+// (reset_post_handler(), etc.) -- same convention test_zones_http.c/
+// test_profiles_http.c use.
 //
 // Both .c files are #include'd into this ONE translation unit (they do not
 // call each other's static internals, only the public ota_http.h surface --
@@ -41,22 +26,12 @@
 // read by any test here (nothing checks log output), so the label itself is
 // arbitrary.
 //
-// FAKE CRYPTO, ON PURPOSE: stubs/psa/crypto.h supplies a deterministic,
-// order-and-input-sensitive (but NOT cryptographically real) HMAC/hash
-// stand-in -- see that file's own header comment for why that is the right
-// choice here and how it is kept from being vacuous (changing the key,
-// message, or their order changes every output byte, so "wrong MAC rejected"
-// and "different context -> different digest" are still real properties
-// being checked, not tautologies of a stub that always says yes).
-//
-// NEGATIVE-TEST NOTE (repo rule: every check must be provable to fail): each
-// of the three decisions above was confirmed RED by temporarily editing
-// ota_http.c/factory_reset.c, rebuilding, and rerunning this file's
-// corresponding test, then restoring the file exactly and re-confirming
-// GREEN -- see this pass's report for the specific edit and red count used
-// for each. The edits are not left in this file (they were applied directly
-// to the driver files, run, and reverted); this comment records what was
-// done since the driver files themselves carry no trace of it.
+// NEGATIVE-TEST NOTE (repo rule: every check must be provable to fail): the
+// remaining interlock/mode-gate tests were previously confirmed RED by
+// temporarily editing ota_http.c/factory_reset.c, rebuilding, and rerunning
+// this file's corresponding test, then restoring the file exactly and
+// re-confirming GREEN -- see the commits that introduced each test for the
+// specific edit used. The edits are not left in this file.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -93,7 +68,7 @@ void esp_restart(void);
 // "deliberately always returns pdFALSE" -- every OTHER host test that
 // touches a mutex only exercises the NULL-handle pre-start guard, never the
 // locked/critical-section path itself, so that shared stub can afford to be
-// that blunt). This file is different: ota_http_verify_request()'s actual
+// that blunt). This file is different: ota_http.c's interlock/update-claim
 // decision logic runs INSIDE s_ota_lock, so a Take that never succeeds would
 // make every test here dead-end at "internal lock timeout, refused" instead
 // of reaching the code under test. Rather than change the shared stub (and
@@ -163,8 +138,9 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 // (build_host_tests.ps1's cmd8), not #include'd -- it has a public header
 // and no static internals this file needs to reach, unlike ota_http.c/
 // factory_reset.c above. g_stub_psa_import_key_result (just above) is the
-// one extern web_auth_store.c's psa/crypto.h stub needs; already defined
-// here for ota_http.c's own HMAC use.
+// one extern web_auth_store.c's psa/crypto.h stub needs (ota_http.c itself
+// no longer uses PSA crypto -- its AP-password HMAC scheme was retired
+// 2026-09-29).
 #include "web_auth_store.h"
 #include "fake_kv.h" // fake_kv_reset_all() -- the credential-survival tests below need a clean
                      // hal_kv state per scope, same convention as test_web_auth_store.c's reset_all()
@@ -294,18 +270,11 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 bool uart_bridge_ext_is_on_flash_worker(void) { return false; }
 
 // ---------------------------------------------------------------------------
-// esp_random.h migration (2026-09-06): ota_http.c now calls
-// hal_sysinfo_fill_random() instead of esp_fill_random() -- fake_sysinfo.c
-// (already linked into this executable, see build_host_tests.ps1's cmd8)
-// supplies it, so no stub definition is needed here any more.
-// Never actually reached by any test in this file
-// (ota_challenge_get_handler() is never called).
 // ---------------------------------------------------------------------------
 // esp_partition.h / esp_ota_ops.h -- declared in those stub headers, defined
-// here. None of these is ever invoked by this file's tests (only
-// ota_http_verify_request()/ota_http_authenticate_request()/
-// reset_post_handler() are exercised, never the transfer handlers), but the
-// whole translation unit must still link.
+// here. None of these is ever invoked by this file's tests (only the
+// interlock/mode-gate/reset_post_handler() paths are exercised, never the
+// transfer handlers), but the whole translation unit must still link.
 // ---------------------------------------------------------------------------
 esp_err_t esp_partition_write(const esp_partition_t *partition, size_t dst_offset, const void *src, size_t size)
 { (void)partition; (void)dst_offset; (void)src; (void)size; return ESP_OK; }
@@ -661,349 +630,20 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)b
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// Matches the switch in ota_http_verify_request() -- this is the test's own
-// oracle for "which context string goes with which context enum", kept
-// deliberately independent of ota_http.c's internal table so a bug that
-// changes one without the other is exactly what these tests would catch.
-static const char *ctx_str_for(ota_http_context_t ctx)
-{
-    switch (ctx) {
-        case OTA_HTTP_CONTEXT_ESP: return "esp";
-        case OTA_HTTP_CONTEXT_PICO: return "pico";
-        case OTA_HTTP_CONTEXT_ESP_ROLLBACK: return "esp-rollback";
-        case OTA_HTTP_CONTEXT_RECOVERY_EXIT: return "recovery";
-        case OTA_HTTP_CONTEXT_FACTORY_RESET: return "factory-reset";
-        case OTA_HTTP_CONTEXT_PICO_ROLLBACK: return "pico-rollback";
-        case OTA_HTTP_CONTEXT_SW_RESET: return "sw-reset";
-        case OTA_HTTP_CONTEXT_BOOT_GUARD_RESET: return "boot-guard-reset";
-        default: return "?";
-    }
-}
-
-// Guards against the exact drift class that shipped once already: the test's
-// own compute_mac() msg[] buffer used to be sized from a hand-copied literal
-// (16) that happened to be wider than ota_http.c's own literal (13) at the
-// time, so a 3-byte overflow in ota_http.c's buffer went uncaught. Now that
-// both sides size from the single OTA_HTTP_CONTEXT_STR_MAX constant
-// (ota_http.h), this test instead checks that constant itself stays a tight
-// bound on every real context string -- every one fits, and at least one
-// (the longest) actually reaches it, so a future context string could not
-// silently grow past the bound without either this assertion or the
-// _Static_assert table in ota_http.c catching it.
-static void test_context_str_max_is_a_tight_bound(void)
-{
-    static const ota_http_context_t all_ctx[] = {
-        OTA_HTTP_CONTEXT_ESP,           OTA_HTTP_CONTEXT_PICO,
-        OTA_HTTP_CONTEXT_ESP_ROLLBACK,  OTA_HTTP_CONTEXT_RECOVERY_EXIT,
-        OTA_HTTP_CONTEXT_FACTORY_RESET, OTA_HTTP_CONTEXT_PICO_ROLLBACK,
-        OTA_HTTP_CONTEXT_SW_RESET,      OTA_HTTP_CONTEXT_BOOT_GUARD_RESET,
-    };
-    size_t longest = 0;
-    for (size_t i = 0; i < sizeof(all_ctx) / sizeof(all_ctx[0]); i++) {
-        size_t len = strlen(ctx_str_for(all_ctx[i]));
-        TEST_CHECK(len <= OTA_HTTP_CONTEXT_STR_MAX,
-                  "every context string must fit within OTA_HTTP_CONTEXT_STR_MAX");
-        if (len > longest) {
-            longest = len;
-        }
-    }
-    TEST_CHECK(longest == OTA_HTTP_CONTEXT_STR_MAX,
-              "OTA_HTTP_CONTEXT_STR_MAX must equal the longest context string's length "
-              "(a looser bound would hide the next mirror-drift silently)");
-}
-
-// Issues a fresh, valid nonce directly into ota_http.c's file-scope s_nonce
-// -- the access this file #includes ota_http.c FOR (see header comment).
-static void issue_nonce(uint8_t nonce_out[OTA_AUTH_NONCE_LEN])
-{
-    for (int i = 0; i < (int)OTA_AUTH_NONCE_LEN; i++) {
-        nonce_out[i] = (uint8_t)(i * 7 + 3);
-    }
-    ota_auth_nonce_issue(&s_nonce, nonce_out, now_ms());
-}
-
-// Computes the MAC exactly the way ota_http.c's own ota_http_verify_request()
-// does: key = fake_hmac(password, KDF context), mac = fake_hmac(key, nonce||ctx_str).
-// Reuses ota_http.c's own static hmac_sha256() (accessible -- see header
-// comment) so this is a genuine end-to-end check of the wiring (which key,
-// which context string) rather than a reimplementation that could drift.
-static void compute_mac(const char *password, const uint8_t nonce[OTA_AUTH_NONCE_LEN], const char *ctx_str,
-                        uint8_t mac_out[32])
-{
-    uint8_t key[32];
-    hmac_sha256((const uint8_t *)password, strlen(password), (const uint8_t *)OTA_HTTP_KDF_CONTEXT,
-                strlen(OTA_HTTP_KDF_CONTEXT), key);
-    uint8_t msg[OTA_AUTH_NONCE_LEN + OTA_HTTP_CONTEXT_STR_MAX];
-    memcpy(msg, nonce, OTA_AUTH_NONCE_LEN);
-    size_t ctx_len = strlen(ctx_str);
-    memcpy(msg + OTA_AUTH_NONCE_LEN, ctx_str, ctx_len);
-    hmac_sha256(key, sizeof(key), msg, OTA_AUTH_NONCE_LEN + ctx_len, mac_out);
-}
-
-static void reset_all_lockouts(void)
-{
-    memset(&s_lockout_esp, 0, sizeof(s_lockout_esp));
-    memset(&s_lockout_pico, 0, sizeof(s_lockout_pico));
-    memset(&s_lockout_esp_rollback, 0, sizeof(s_lockout_esp_rollback));
-    memset(&s_lockout_recovery_exit, 0, sizeof(s_lockout_recovery_exit));
-    memset(&s_lockout_factory_reset, 0, sizeof(s_lockout_factory_reset));
-    memset(&s_lockout_pico_rollback, 0, sizeof(s_lockout_pico_rollback));
-    memset(&s_lockout_sw_reset, 0, sizeof(s_lockout_sw_reset));
-    memset(&s_lockout_boot_guard_reset, 0, sizeof(s_lockout_boot_guard_reset));
-}
-
-// ---------------------------------------------------------------------------
-// Decision 1 -- empty AP password is refused, AFTER the BOOT-button bypass,
-// BEFORE any HMAC math.
-// ---------------------------------------------------------------------------
-
-static void test_empty_password_refused_with_valid_nonce(void)
-{
-    TEST_SECTION("ota_http_verify_request -- empty AP password is refused (OTA_HTTP_VERIFY_NO_AP_PASSWORD)");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = ""; // open AP
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce); // must be valid -- proves the refusal isn't just "no nonce"
-
-    uint8_t mac[32] = { 0 }; // irrelevant -- must never be reached
-    ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, mac, "10.0.0.1");
-
-    TEST_CHECK(r == OTA_HTTP_VERIFY_NO_AP_PASSWORD,
-              "an empty AP password must be refused outright, distinctly from a bad MAC or a bad nonce");
-}
-
-static void test_boot_button_bypass_wins_even_with_empty_password(void)
-{
-    TEST_SECTION("ota_http_verify_request -- BOOT-button bypass is checked BEFORE the empty-password refusal");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = true;
-    g_stub_ap_password = ""; // open AP -- bypass must still work, this is the recovery path it exists for
-
-    // No nonce issued at all -- if the bypass check ran after the nonce/
-    // password checks, this would fail for a completely different reason
-    // (NO_VALID_NONCE), which would hide a reordering bug behind the wrong
-    // failure mode. Requiring OK here with no nonce is itself proof the
-    // bypass short-circuits everything below it.
-    uint8_t mac[32] = { 0 };
-    ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, mac, "10.0.0.1");
-
-    TEST_CHECK(r == OTA_HTTP_VERIFY_OK,
-              "the BOOT-button recovery bypass must keep working on an open-AP board -- an operator who "
-              "lost the AP password must still be able to recover it");
-    g_stub_boot_button_bypass = false;
-}
-
-static void test_nonempty_password_valid_mac_succeeds(void)
-{
-    TEST_SECTION("ota_http_verify_request -- positive control: a real password + correct MAC succeeds");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "correct horse battery staple";
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_ESP), mac);
-
-    ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, mac, "10.0.0.1");
-    TEST_CHECK(r == OTA_HTTP_VERIFY_OK, "a correctly computed MAC against a real password must succeed");
-}
-
-// ---------------------------------------------------------------------------
-// Decision 2 -- distinct context strings AND distinct lockout state.
-// ---------------------------------------------------------------------------
-
-static void test_mac_for_one_context_rejected_for_another(void)
-{
-    TEST_SECTION("ota_http_verify_request -- a MAC computed for one context is rejected under another");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "hunter2hunter2";
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    // Computed for "esp", presented against OTA_HTTP_CONTEXT_FACTORY_RESET.
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_ESP), mac);
-
-    ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_FACTORY_RESET, mac, "10.0.0.1");
-    TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
-              "a MAC signed for pushing an ESP image must not double as authorization to factory-reset "
-              "the board -- contexts must use distinct context strings");
-}
-
-// Rollback-of-the-Pico-specific isolation, both directions -- the task this
-// pass was built for ("add a rollback button for the SAFETY processor")
-// explicitly calls out this exact pair as security-critical: a MAC signed
-// for pushing a new Pico image must not authorize rolling it back, and a
-// MAC signed to roll the Pico back must not authorize pushing it a new
-// image either. test_mac_for_one_context_rejected_for_another() above
-// already proves the general property (esp vs factory-reset); this proves
-// it specifically for the pair this feature adds, in both directions.
-static void test_pico_and_pico_rollback_macs_are_not_interchangeable(void)
-{
-    TEST_SECTION("ota_http_verify_request -- a MAC signed for 'pico' is REJECTED for 'pico-rollback', and vice versa");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "hunter2hunter2";
-
-    // Direction 1: signed for PICO, presented against PICO_ROLLBACK.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO), mac);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
-                  "a MAC signed to push a new Pico IMAGE must not double as authorization to ROLL IT BACK");
-    }
-
-    // Direction 2: signed for PICO_ROLLBACK, presented against PICO.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO_ROLLBACK), mac);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO, mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
-                  "a MAC signed to ROLL BACK the Pico must not double as authorization to push it a new IMAGE");
-    }
-
-    // Also distinct from ESP_ROLLBACK's own context (rolling back the WRONG
-    // processor) -- same "different processor, different action, different
-    // context string" property PICO_ROLLBACK's own ota_http.h doc comment
-    // states.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_ESP_ROLLBACK), mac);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
-                  "a MAC signed to roll back the ESP must not double as authorization to roll back the Pico");
-    }
-
-    // A CORRECT PICO_ROLLBACK-signed MAC, presented against PICO_ROLLBACK,
-    // must still succeed -- proves the rejections above are about context
-    // mismatch, not a broken context string breaking the route entirely.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO_ROLLBACK), mac);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_OK, "a correctly-signed pico-rollback MAC against pico-rollback succeeds");
-    }
-}
-
-static void test_lockout_is_per_context_not_shared(void)
-{
-    TEST_SECTION("ota_http_verify_request -- 3 failures against one context lock only THAT context");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "another-real-password";
-
-    uint8_t wrong_mac[32];
-    memset(wrong_mac, 0xAB, sizeof(wrong_mac)); // never a valid MAC for anything staged here
-
-    for (int i = 0; i < 3; i++) {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, wrong_mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC, "each of the 3 setup failures must itself be a bad-MAC result");
-    }
-
-    // 4th attempt against ESP: must now be locked out, even with a fresh
-    // valid nonce -- proves the 3 failures above actually accumulated.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, wrong_mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_LOCKED_OUT, "the ESP context must now be locked out after 3 failures");
-    }
-
-    // A CORRECT attempt against the FACTORY_RESET context, right now, must
-    // still succeed -- its lockout budget must be untouched by ESP's 3
-    // failures above.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_FACTORY_RESET), mac);
-        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_FACTORY_RESET, mac, "10.0.0.1");
-        TEST_CHECK(r == OTA_HTTP_VERIFY_OK,
-                  "factory-reset's own lockout state must be untouched by ESP's 3 wrong-password guesses "
-                  "-- a wrong guess against one route must not burn through another route's budget");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Decision 3 -- POST /api/factory_reset authenticates BEFORE its interlock
-// check. Exercised through the real (static, #include'd) reset_post_handler().
-// ---------------------------------------------------------------------------
-
-static void test_missing_auth_header_never_reaches_interlock(void)
-{
-    TEST_SECTION("reset_post_handler -- a missing X-Ota-Mac header is refused BEFORE the interlock check runs");
-    reset_all_lockouts();
-    stub_headers_reset(); // no X-Ota-Mac header at all
-    g_probe_interlock_called = false;
-    s_last_err_code = 0;
-    s_last_err_msg[0] = '\0';
-
-    httpd_req_t req;
-    memset(&req, 0, sizeof(req));
-    esp_err_t err = reset_post_handler(&req);
-
-    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
-    TEST_CHECK(s_last_err_code == 400, "a missing X-Ota-Mac header must be refused with 400, from the auth step");
-    TEST_CHECK(strstr(s_last_err_msg, "X-Ota-Mac") != NULL, "the refusal must name the missing header");
-    TEST_CHECK(!g_probe_interlock_called,
-              "DECISION 3: the interlock check (which can leak a live zone temperature in its refusal "
-              "text) must NEVER run for an unauthenticated caller -- profile_executor_get_status() "
-              "(the first call once ota_http_check_interlocks() gets past its own zone-sweep-active "
-              "check, B2) must not have been reached");
-}
+// The AP-password HMAC scheme (context strings, nonce, per-context lockout,
+// ota_http_verify_request()) was retired 2026-09-29 -- WEB_AUTH_PLAN.md item
+// 2b, owner decision "Retire; open when login off". The tests that used to
+// live here (context-string-length bound, empty-password refusal, BOOT-
+// button bypass ordering, cross-context MAC rejection, per-context lockout
+// isolation) exercised exactly that removed mechanism and are gone with it.
+// route_tier_table.h's ADMIN tier is now the only gate on these routes, on
+// or off, same as every other ADMIN route -- covered by the existing ADMIN-
+// tier host tests (http_auth_http.c's own suite), not by this file.
 
 static void test_authenticated_request_does_reach_interlock(void)
 {
-    TEST_SECTION("reset_post_handler -- a correctly authenticated request DOES reach the interlock check");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "factory-reset-test-password";
-
-    // Belt-and-suspenders: confirm the MAC this test constructs is actually
-    // accepted by ota_http_authenticate_request() in isolation first (its
-    // own header/hex-decode/verify sequence), consuming its own nonce.
-    {
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_FACTORY_RESET), mac);
-        char hex[65];
-        hex_encode(mac, sizeof(mac), hex);
-        stub_headers_reset();
-        stub_header_set("X-Ota-Mac", hex);
-        httpd_req_t probe_req;
-        memset(&probe_req, 0, sizeof(probe_req));
-        char ip[46];
-        bool ok = ota_http_authenticate_request(&probe_req, OTA_HTTP_CONTEXT_FACTORY_RESET, ip);
-        TEST_CHECK(ok, "setup sanity: the constructed MAC must itself authenticate for OTA_HTTP_CONTEXT_FACTORY_RESET");
-    }
-
-    // Now the real call under test, with its own fresh nonce/MAC (the one
-    // above already consumed its nonce).
-    uint8_t nonce2[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce2);
-    uint8_t mac2[32];
-    compute_mac(g_stub_ap_password, nonce2, ctx_str_for(OTA_HTTP_CONTEXT_FACTORY_RESET), mac2);
-    char hex2[65];
-    hex_encode(mac2, sizeof(mac2), hex2);
-    stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex2);
-
+    TEST_SECTION("reset_post_handler -- a request reaches the interlock check (auth is ADMIN-tier only now)");
+    stub_headers_reset(); // no X-Ota-Mac header needed any more -- ADMIN tier is the only gate
     g_probe_interlock_called = false;
     s_last_err_code = 0;
     s_last_err_msg[0] = '\0';
@@ -1013,28 +653,17 @@ static void test_authenticated_request_does_reach_interlock(void)
     esp_err_t err = reset_post_handler(&req);
 
     TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
-    TEST_CHECK(s_last_err_code != 400, "a correctly authenticated request must not be refused at the auth step");
+    TEST_CHECK(s_last_err_code != 400, "no request here is refused at a (removed) auth-header step");
     TEST_CHECK(g_probe_interlock_called,
-              "DECISION 3 (positive half): once auth succeeds, the interlock check DOES run -- proving "
-              "the auth step is not a no-op ahead of an interlock check that runs unconditionally either way");
+              "the interlock check runs for an ordinary request -- proving reset_post_handler() still "
+              "reaches profile_executor_get_status() now that the auth-header step is gone");
 }
 
 static void test_factory_reset_refused_by_system_mode_gate_during_firing(void)
 {
     TEST_SECTION("reset_post_handler -- system_mode_gate refuses with a 409 while a firing is active (owner Q3, 2026-09-25)");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "factory-reset-test-password";
     g_stub_profile_state = PROFILE_EXEC_RUNNING;
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_FACTORY_RESET), mac);
-    char hex[65];
-    hex_encode(mac, sizeof(mac), hex);
     stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex);
 
     g_probe_interlock_called = false;
     s_last_resp_status[0] = '\0';
@@ -1107,19 +736,12 @@ static void test_check_interlocks_ok_when_no_sweep(void)
 
 static SafetyLinkClass s_rollback_test_safety;
 
-// Lets a test authenticate through ota_pico_rollback_post_handler()'s full
-// step 1-4 gate (mac/auth/interlock/mutex) with one call, same helper shape
-// test_authenticated_request_does_reach_interlock() above builds inline.
+// Lets a test reach ota_pico_rollback_post_handler()'s interlock/mutex gate
+// with one call (ADMIN tier is the only auth gate now -- no header to build).
 static void set_pico_rollback_headers_for(const char *password)
 {
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO_ROLLBACK), mac);
-    char hex[65];
-    hex_encode(mac, sizeof(mac), hex);
+    (void)password;
     stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex);
     // Bypasses the "safety link is down" interlock refusal (safety_link_
     // get_status() is stubbed to always fail/return link_up=false in this
     // file) -- an operator acknowledgement, not part of authentication; see
@@ -1131,9 +753,6 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
 {
     TEST_SECTION("ota_pico_rollback_post_handler -- opus-review finding 3: returns 202 'pending' "
                  "immediately, WITHOUT calling safety_link_send_rollback_ex() synchronously");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "rollback-async-test-password";
     s_test_sweep_active = false;
     s_update_claim = OTA_UPDATE_NONE; // ensure no earlier test left the mutex claimed
     memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
@@ -1273,18 +892,7 @@ static void test_pico_rollback_status_reports_all_four_outcomes_honestly(void)
 
 static bool sw_reset_authenticate(void)
 {
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "sw-reset-test-password";
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_SW_RESET), mac);
-    char hex[65];
-    hex_encode(mac, sizeof(mac), hex);
     stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex);
     stub_header_set("X-Ota-Ack-No-Safety", "1");
     return true;
 }
@@ -1458,27 +1066,6 @@ static void test_sw_reset_reports_task_creation_failure(void)
     TEST_CHECK(strstr(s_last_sendstr_body, "NEITHER processor was rebooted") != NULL,
                "the report must say neither processor rebooted -- the task is created before the "
                "safety processor is commanded precisely so that this is true");
-}
-
-// Auth-before-interlock, same property as decision 3's factory_reset test
-// above: an unauthenticated caller must never reach the interlock (or a
-// firing/temperature-naming refusal reason).
-static void test_sw_reset_missing_auth_never_reaches_interlock(void)
-{
-    TEST_SECTION("sw_reset_post_handler -- a missing X-Ota-Mac header is refused BEFORE the interlock check");
-    reset_all_lockouts();
-    stub_headers_reset(); // no X-Ota-Mac at all
-    g_probe_interlock_called = false;
-    s_last_err_code = 0;
-    s_last_err_msg[0] = '\0';
-
-    httpd_req_t req;
-    memset(&req, 0, sizeof(req));
-    esp_err_t err = sw_reset_post_handler(&req);
-
-    TEST_CHECK(err == ESP_OK, "sw_reset_post_handler must always return ESP_OK");
-    TEST_CHECK(s_last_err_code == 400, "a missing X-Ota-Mac header must be refused with 400");
-    TEST_CHECK(!g_probe_interlock_called, "the interlock check must never run for an unauthenticated caller");
 }
 
 // THE "does not touch configuration" property (task requirement 2): runs
@@ -1897,198 +1484,11 @@ static void test_sw_reset_pico_sentences_are_honest(void)
     TEST_CHECK(all_distinct, "all seven outcome sentences are distinct");
 }
 
-// ---------------------------------------------------------------------------
-// X-Ota-Mac header parse/length-check drift guard -- docs/audits/
-// web_code_duplication_drift_2026-09-18.md found the "header present ->
-// exactly 64 hex chars -> hex-decode -> ota_http_verify_request()" sequence
-// hand-copied at all six mutating OTA routes below, in addition to the
-// consolidated ota_http_authenticate_request() helper (ota_http.c) that
-// factory_reset.c already used. They agreed verbatim, which is exactly the
-// kind of latent drift that stays green until one copy is edited and the
-// others are not -- this file's own pre-existing coverage only exercised a
-// SUBSET of routes (boot_guard_reset, pico_rollback) and only a SUBSET of
-// malformed-header shapes (missing only), so a copy that quietly loosened,
-// say, the length check at one other route would not have been caught.
-//
-// All six routes now delegate steps 1-2 to that one helper (this pass's own
-// refactor), so this table drives every one of them, directly, through the
-// same four edge cases: missing header, too-short, too-long, and non-hex
-// content, plus a well-formed-but-wrong-context MAC to confirm the 403 path
-// still runs. Any future divergence -- a route accidentally reverting to an
-// inline copy, or the shared helper itself changing behavior for only one
-// caller -- fails every route it stops matching, not just the one someone
-// happened to hand-test.
-// ---------------------------------------------------------------------------
-
-typedef esp_err_t (*ota_mutating_handler_fn)(httpd_req_t *req);
-
-typedef struct {
-    const char *name;
-    ota_mutating_handler_fn fn;
-    ota_http_context_t ctx;
-} ota_mutating_route_t;
-
-static const ota_mutating_route_t OTA_MUTATING_ROUTES[] = {
-    { "ota_esp_post_handler",             ota_esp_post_handler,             OTA_HTTP_CONTEXT_ESP },
-    { "ota_esp_rollback_post_handler",    ota_esp_rollback_post_handler,    OTA_HTTP_CONTEXT_ESP_ROLLBACK },
-    { "ota_pico_post_handler",            ota_pico_post_handler,            OTA_HTTP_CONTEXT_PICO },
-    { "ota_pico_rollback_post_handler",   ota_pico_rollback_post_handler,   OTA_HTTP_CONTEXT_PICO_ROLLBACK },
-    { "ota_recovery_exit_post_handler",   ota_recovery_exit_post_handler,   OTA_HTTP_CONTEXT_RECOVERY_EXIT },
-    { "ota_boot_guard_reset_post_handler", ota_boot_guard_reset_post_handler, OTA_HTTP_CONTEXT_BOOT_GUARD_RESET },
-};
-#define OTA_MUTATING_ROUTE_COUNT (sizeof(OTA_MUTATING_ROUTES) / sizeof(OTA_MUTATING_ROUTES[0]))
-
-static void test_all_mutating_routes_reject_missing_header(void)
-{
-    TEST_SECTION("all six mutating OTA routes -- a MISSING X-Ota-Mac header is refused with 400 "
-                 "and the exact shared error string");
-    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
-        reset_all_lockouts();
-        stub_headers_reset(); // no X-Ota-Mac at all
-        s_last_err_code = 0;
-        s_last_err_msg[0] = '\0';
-        char msg[160];
-
-        httpd_req_t req;
-        memset(&req, 0, sizeof(req));
-        esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
-
-        snprintf(msg, sizeof(msg), "%s: handler must return ESP_OK", OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(err == ESP_OK, msg);
-        snprintf(msg, sizeof(msg), "%s: missing header must be refused with 400", OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(s_last_err_code == 400, msg);
-        snprintf(msg, sizeof(msg), "%s: must send the exact shared error string", OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(strcmp(s_last_err_msg, "missing or malformed X-Ota-Mac header (want 64 hex chars)") == 0, msg);
-    }
-}
-
-static void test_all_mutating_routes_reject_wrong_length_header(void)
-{
-    TEST_SECTION("all six mutating OTA routes -- a 63-char and a 65-char X-Ota-Mac are both refused "
-                 "with 400 and the exact shared error string");
-    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
-        const char *bad_lens[2] = {
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",  // 63 chars
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0", // 65 chars
-        };
-        for (int j = 0; j < 2; j++) {
-            reset_all_lockouts();
-            stub_headers_reset();
-            stub_header_set("X-Ota-Mac", bad_lens[j]);
-            s_last_err_code = 0;
-            s_last_err_msg[0] = '\0';
-            char msg[160];
-
-            httpd_req_t req;
-            memset(&req, 0, sizeof(req));
-            esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
-
-            snprintf(msg, sizeof(msg), "%s: %d-char header, handler must return ESP_OK",
-                     OTA_MUTATING_ROUTES[i].name, (int)strlen(bad_lens[j]));
-            TEST_CHECK(err == ESP_OK, msg);
-            snprintf(msg, sizeof(msg), "%s: %d-char header must be refused with 400",
-                     OTA_MUTATING_ROUTES[i].name, (int)strlen(bad_lens[j]));
-            TEST_CHECK(s_last_err_code == 400, msg);
-            snprintf(msg, sizeof(msg), "%s: %d-char header must send the exact shared error string",
-                     OTA_MUTATING_ROUTES[i].name, (int)strlen(bad_lens[j]));
-            TEST_CHECK(strcmp(s_last_err_msg, "missing or malformed X-Ota-Mac header (want 64 hex chars)") == 0, msg);
-        }
-    }
-}
-
-static void test_all_mutating_routes_reject_non_hex_header(void)
-{
-    TEST_SECTION("all six mutating OTA routes -- a 64-char header containing a non-hex byte ('g') "
-                 "is refused with 400 and the exact shared error string; uppercase HEX digits, by "
-                 "contrast, ARE accepted (ota_http_hex_decode() takes A-F same as a-f)");
-    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
-        // 64 chars, one of which ('g') is not a hex digit.
-        const char *bad_hex = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        TEST_CHECK(strlen(bad_hex) == 64, "test fixture sanity: bad_hex literal must itself be 64 chars");
-
-        reset_all_lockouts();
-        stub_headers_reset();
-        stub_header_set("X-Ota-Mac", bad_hex);
-        s_last_err_code = 0;
-        s_last_err_msg[0] = '\0';
-        char msg[160];
-
-        httpd_req_t req;
-        memset(&req, 0, sizeof(req));
-        esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
-
-        snprintf(msg, sizeof(msg), "%s: non-hex header, handler must return ESP_OK", OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(err == ESP_OK, msg);
-        snprintf(msg, sizeof(msg), "%s: non-hex header must be refused with 400", OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(s_last_err_code == 400, msg);
-        snprintf(msg, sizeof(msg), "%s: non-hex header must send the 'must be 64 hex characters' string",
-                 OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(strcmp(s_last_err_msg, "X-Ota-Mac must be 64 hex characters") == 0, msg);
-    }
-
-    // Positive control for the uppercase-hex claim above: an all-uppercase,
-    // well-formed-but-wrong MAC must NOT be refused for being "not hex" --
-    // it must reach ota_http_verify_request() and fail there (403), proving
-    // hex_decode()'s A-F acceptance rather than assuming it.
-    {
-        reset_all_lockouts();
-        g_stub_ap_password = "uppercase-hex-control-password";
-        stub_headers_reset();
-        stub_header_set("X-Ota-Mac", "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF");
-        s_last_err_code = 0;
-        s_last_err_msg[0] = '\0';
-
-        httpd_req_t req;
-        memset(&req, 0, sizeof(req));
-        esp_err_t err = ota_boot_guard_reset_post_handler(&req);
-
-        TEST_CHECK(err == ESP_OK, "uppercase-hex control: handler must return ESP_OK");
-        TEST_CHECK(s_last_err_code == 403,
-                  "uppercase-hex control: a well-formed uppercase-hex MAC must reach auth (403 on a "
-                  "wrong MAC), not be refused as non-hex (which would be 400)");
-    }
-}
-
-static void test_all_mutating_routes_reject_wrong_mac_via_403_not_400(void)
-{
-    TEST_SECTION("all six mutating OTA routes -- a well-formed but WRONG MAC is refused via the "
-                 "existing 403 auth path, not 400 (proves the header-shape checks and the MAC check "
-                 "are still ordered/routed exactly as before)");
-    for (size_t i = 0; i < OTA_MUTATING_ROUTE_COUNT; i++) {
-        reset_all_lockouts();
-        g_stub_boot_button_bypass = false;
-        g_stub_ap_password = "wrong-mac-drift-guard-password";
-
-        uint8_t nonce[OTA_AUTH_NONCE_LEN];
-        issue_nonce(nonce);
-        // Signed for a DIFFERENT context than the route under test (borrows
-        // test_mac_for_one_context_rejected_for_another()'s technique) --
-        // guaranteed wrong, well-formed, 64 hex chars.
-        ota_http_context_t wrong_ctx = (OTA_MUTATING_ROUTES[i].ctx == OTA_HTTP_CONTEXT_ESP)
-                                            ? OTA_HTTP_CONTEXT_PICO
-                                            : OTA_HTTP_CONTEXT_ESP;
-        uint8_t mac[32];
-        compute_mac(g_stub_ap_password, nonce, ctx_str_for(wrong_ctx), mac);
-        char hex[65];
-        hex_encode(mac, sizeof(mac), hex);
-        stub_headers_reset();
-        stub_header_set("X-Ota-Mac", hex);
-        s_last_err_code = 0;
-        s_last_err_msg[0] = '\0';
-        char msg[160];
-
-        httpd_req_t req;
-        memset(&req, 0, sizeof(req));
-        esp_err_t err = OTA_MUTATING_ROUTES[i].fn(&req);
-
-        snprintf(msg, sizeof(msg), "%s: handler must return ESP_OK", OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(err == ESP_OK, msg);
-        snprintf(msg, sizeof(msg),
-                 "%s: a well-formed but wrong-context MAC must be refused via 403, not 400",
-                 OTA_MUTATING_ROUTES[i].name);
-        TEST_CHECK(s_last_err_code == 403, msg);
-    }
-}
+// The X-Ota-Mac header parse/length-check drift guard (all six mutating OTA
+// routes vs. a shared helper) tested exactly the retired HMAC scheme and is
+// gone with it -- see the removal note near test_authenticated_request_does_
+// reach_interlock() above. Header shape no longer matters: ADMIN tier is the
+// only gate.
 
 // ---------------------------------------------------------------------------
 // POST /api/ota/esp/boot_guard_reset -- docs/audits/
@@ -2096,74 +1496,18 @@ static void test_all_mutating_routes_reject_wrong_mac_via_403_not_400(void)
 // boot_guard_reset_counter() itself (NVS write/verify/retry) is covered by
 // test_boot_guard.c against the real boot_guard.c; this file's stub
 // (s_stub_boot_guard_reset_verified) exists purely to exercise the HTTP
-// layer's own decisions: auth ordering and honest ok:true/false reporting.
+// layer's own honest ok:true/false reporting (its former auth-ordering
+// coverage is gone along with the AP-password HMAC scheme -- ADMIN tier is
+// the only gate now).
 // ---------------------------------------------------------------------------
-
-static void test_boot_guard_reset_missing_auth_refused(void)
-{
-    TEST_SECTION("ota_boot_guard_reset_post_handler -- a missing X-Ota-Mac header is refused (400) "
-                 "before boot_guard_reset_counter() is ever called");
-    reset_all_lockouts();
-    stub_headers_reset();
-    s_last_err_code = 0;
-    s_last_err_msg[0] = '\0';
-    s_stub_boot_guard_reset_verified = true; // if this got called anyway, it would look like success
-
-    httpd_req_t req;
-    memset(&req, 0, sizeof(req));
-    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
-
-    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK -- errors go through httpd_resp_send_err");
-    TEST_CHECK(s_last_err_code == 400, "a missing X-Ota-Mac header is refused with 400");
-    TEST_CHECK(strstr(s_last_err_msg, "X-Ota-Mac") != NULL, "the refusal names the missing header");
-}
-
-static void test_boot_guard_reset_wrong_context_mac_refused(void)
-{
-    TEST_SECTION("ota_boot_guard_reset_post_handler -- a MAC signed for a DIFFERENT context "
-                 "(recovery_exit's) is rejected -- its own context, not interchangeable");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "boot-guard-reset-test-password";
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_RECOVERY_EXIT), mac);
-    char hex[65];
-    hex_encode(mac, sizeof(mac), hex);
-    stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex);
-    s_last_err_code = 0;
-    s_last_err_msg[0] = '\0';
-
-    httpd_req_t req;
-    memset(&req, 0, sizeof(req));
-    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
-
-    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
-    TEST_CHECK(s_last_err_code == 403, "a recovery-exit-context MAC is refused (403) against "
-              "OTA_HTTP_CONTEXT_BOOT_GUARD_RESET");
-}
 
 static void test_boot_guard_reset_authenticated_reports_success(void)
 {
-    TEST_SECTION("ota_boot_guard_reset_post_handler -- a correctly authenticated request calls "
-                 "boot_guard_reset_counter() and reports ok:true when it verifies");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "boot-guard-reset-test-password";
+    TEST_SECTION("ota_boot_guard_reset_post_handler -- calls boot_guard_reset_counter() and reports "
+                 "ok:true when it verifies");
     s_stub_boot_guard_reset_verified = true;
     s_stub_boot_guard_count = 0;
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_BOOT_GUARD_RESET), mac);
-    char hex[65];
-    hex_encode(mac, sizeof(mac), hex);
     stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex);
     s_last_err_code = 0;
     s_last_err_msg[0] = '\0';
     s_last_resp_body[0] = '\0';
@@ -2173,7 +1517,7 @@ static void test_boot_guard_reset_authenticated_reports_success(void)
     esp_err_t err = ota_boot_guard_reset_post_handler(&req);
 
     TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
-    TEST_CHECK(s_last_err_code == 0, "a correctly authenticated request is not refused");
+    TEST_CHECK(s_last_err_code == 0, "an ordinary request is not refused");
     TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") != NULL,
               "reports ok:true when boot_guard_reset_counter() verifies its clear");
 }
@@ -2182,19 +1526,8 @@ static void test_boot_guard_reset_authenticated_reports_failure_honestly(void)
 {
     TEST_SECTION("ota_boot_guard_reset_post_handler -- reports ok:false, not a bare 200 that implies "
                  "success, when boot_guard_reset_counter() could NOT verify the clear");
-    reset_all_lockouts();
-    g_stub_boot_button_bypass = false;
-    g_stub_ap_password = "boot-guard-reset-test-password";
     s_stub_boot_guard_reset_verified = false; // the lying-write case, from the caller's side
-
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    issue_nonce(nonce);
-    uint8_t mac[32];
-    compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_BOOT_GUARD_RESET), mac);
-    char hex[65];
-    hex_encode(mac, sizeof(mac), hex);
     stub_headers_reset();
-    stub_header_set("X-Ota-Mac", hex);
     s_last_err_code = 0;
     s_last_err_msg[0] = '\0';
     s_last_resp_body[0] = '\0';
@@ -2205,7 +1538,7 @@ static void test_boot_guard_reset_authenticated_reports_failure_honestly(void)
 
     TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK -- it still responds 200 either way, "
               "the honesty is in the body, not the HTTP status");
-    TEST_CHECK(s_last_err_code == 0, "auth succeeded, so this is not an httpd_resp_send_err() path");
+    TEST_CHECK(s_last_err_code == 0, "an ordinary request is not refused at an auth step");
     TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL,
               "reports ok:false -- a caller (flash_firmware()) trusting a bare 200 as success would "
               "wrongly believe the recovery-mode counter was actually cleared");
@@ -2754,17 +2087,6 @@ void run_test_ota_http(void)
     TEST_CHECK(start_err == ESP_ERR_INVALID_STATE || start_err == ESP_OK,
               "ota_http_start setup must reach the point of initializing s_ota_lock");
 
-    test_context_str_max_is_a_tight_bound();
-
-    test_empty_password_refused_with_valid_nonce();
-    test_boot_button_bypass_wins_even_with_empty_password();
-    test_nonempty_password_valid_mac_succeeds();
-
-    test_mac_for_one_context_rejected_for_another();
-    test_pico_and_pico_rollback_macs_are_not_interchangeable();
-    test_lockout_is_per_context_not_shared();
-
-    test_missing_auth_header_never_reaches_interlock();
     test_authenticated_request_does_reach_interlock();
     test_factory_reset_refused_by_system_mode_gate_during_firing();
     test_factory_reset_execute_refused_by_mode_gate_during_firing();
@@ -2772,13 +2094,6 @@ void run_test_ota_http(void)
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
 
-    test_all_mutating_routes_reject_missing_header();
-    test_all_mutating_routes_reject_wrong_length_header();
-    test_all_mutating_routes_reject_non_hex_header();
-    test_all_mutating_routes_reject_wrong_mac_via_403_not_400();
-
-    test_boot_guard_reset_missing_auth_refused();
-    test_boot_guard_reset_wrong_context_mac_refused();
     test_boot_guard_reset_authenticated_reports_success();
     test_boot_guard_reset_authenticated_reports_failure_honestly();
     test_boot_guard_status_reports_count_and_recovery_mode();
@@ -2811,7 +2126,6 @@ void run_test_ota_http(void)
      * report success; test_sw_reset_reports_task_creation_failure() flips it
      * back to pdFAIL for its own duration. */
     g_stub_task_create_result = pdPASS;
-    test_sw_reset_missing_auth_never_reaches_interlock();
     test_sw_reset_refuses_during_firing();
     test_sw_reset_refuses_while_paused();
     test_sw_reset_refuses_during_autotune();

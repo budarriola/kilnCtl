@@ -123,8 +123,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * it. */
     ROUTE_TIER("/", HTTP_GET, ROUTE_TIER_OPEN),
     /* WEB_AUTH_PLAN.md section 6: the login page and the credential-check
-     * route it submits to. Both OPEN for the same reason
-     * GET /api/ota/challenge is OPEN -- a caller with no session yet must
+     * route it submits to. Both OPEN -- a caller with no session yet must
      * still be able to reach the login form and submit credentials; the
      * real gate is web_auth_store_verify_password() inside the handler
      * itself, not this classification. */
@@ -402,12 +401,9 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * (section 6b, WT-B's chosen shape) -- no separate tier row needed for
      * them, since that route is already ROUTE_TIER_ADMIN below. */
     ROUTE_TIER("/api/auth/totp_status", HTTP_GET, ROUTE_TIER_ADMIN),
-    /* GET /api/ota/challenge stays OPEN per the plan -- it issues a nonce
-     * plus the administrator record's salt/iteration count, neither usable
-     * without the administrator password itself (plan section 1, the
-     * paragraph right after the ADMIN list; item 2b). This is the one
-     * OTA-family route that is NOT one of the nine ADMIN routes above. */
-    ROUTE_TIER("/api/ota/challenge", HTTP_GET, ROUTE_TIER_OPEN),
+    /* GET /api/ota/challenge -- the nonce-issuing route this row used to
+     * classify OPEN -- no longer exists (removed with the AP-password HMAC
+     * scheme, 2026-09-29, WEB_AUTH_PLAN.md item 2b). */
     ROUTE_TIER("/api/ota/esp/status", HTTP_GET, ROUTE_TIER_OPEN),
 
     /* Network writes */

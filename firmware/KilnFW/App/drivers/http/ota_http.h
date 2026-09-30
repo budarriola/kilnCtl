@@ -1,12 +1,14 @@
-// ota_http.h -- CommonFW/docs/UPDATE_PROTOCOL.md section 2's challenge-
-// response authentication, wired to a real HTTP endpoint, PLUS TODO.md 9.4's
-// interlocks and the single cross-processor update mutex, PLUS TODO.md 9.5's
-// ESP self-update transfer. The pure state machines (nonce lifecycle/lockout
-// in ota_auth.h/.c, the interlock precondition check in ota_interlock.h/.c)
-// are already host-tested; this file is the ESP-IDF/mbedTLS/httpd/FreeRTOS
-// glue around all three.
+// ota_http.h -- TODO.md 9.4's interlocks and the single cross-processor
+// update mutex, PLUS TODO.md 9.5's ESP self-update transfer. The
+// AP-password HMAC challenge/response scheme this file used to also
+// implement (CommonFW/docs/UPDATE_PROTOCOL.md section 2) was retired
+// 2026-09-29 -- WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open when
+// login off": route_tier_table.h's ADMIN tier is now the sole gate on every
+// route below, on or off, same as every other ADMIN route. The interlock
+// precondition check (ota_interlock.h/.c) is still host-tested; this file
+// is the ESP-IDF/httpd/FreeRTOS glue around it and the transfer/mutex logic.
 //
-// Serves GET /api/ota/challenge, POST /api/ota/esp, POST /api/ota/pico, and
+// Serves POST /api/ota/esp, POST /api/ota/pico, and
 // GET /api/ota/pico/status. The Pico path stages the browser upload into
 // the `pico_img` partition here (streamed write + running CRC32), then
 // hands off to App/drivers/net/ota_pico_relay.c's background task, which speaks
@@ -45,11 +47,8 @@
 extern "C" {
 #endif
 
-// Registers GET /api/ota/challenge on the server wifi_provision_http.c
-// already started. Call after wifi_prov_start() (this endpoint reads
-// wifi_prov_get_ap_password() indirectly through ota_http_verify_request(),
-// so the AP password must already be loaded, though the challenge handler
-// itself does not need the password -- only verification does).
+// Registers the OTA/factory-reset/sw-reset routes on the server
+// wifi_provision_http.c already started.
 //
 // `io_or_null`/`thermo_bus_or_null`/`safety_or_null` are the same pointers
 // main.c already hands to dashboard_http_start() -- NULL-tolerant, same
@@ -65,150 +64,28 @@ extern "C" {
 esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
                           SafetyLinkClass *safety_or_null);
 
-// The context a client authenticates for -- CommonFW/docs/UPDATE_PROTOCOL.md
-// section 2 step 2's literal "esp"/"pico"/"esp-rollback"/"recovery" HMAC
-// context string, and also which of the four independent per-endpoint
-// lockout states applies.
-//
-// OTA_HTTP_CONTEXT_ESP_ROLLBACK is its own context, NOT a reuse of
-// OTA_HTTP_CONTEXT_ESP, even though both ultimately act on the ESP: a
-// signature over "esp" authorizes pushing a NEW image, a signature over
-// "esp-rollback" authorizes reverting to the PREVIOUS one -- deliberately
-// different actions, so a MAC computed for one must not double as
-// authorization for the other. The single-use nonce already prevents literal
-// replay, but binding the context string to the specific action is what
-// keeps a future client bug (or a proxy that reorders/misroutes requests)
-// from a signed-for-update MAC ever being accepted as a signed-for-rollback
-// one, or vice versa.
-//
-// OTA_HTTP_CONTEXT_RECOVERY_EXIT is the same story for POST
-// /api/ota/esp/recovery_exit: that route used to be deliberately
-// unauthenticated (see the doc comment that used to sit above
-// ota_recovery_exit_post_handler() in ota_http.c -- superseded, the owner
-// reviewed it and chose authentication like every other mutating OTA route).
-// It gets its own context string ("recovery") and its own lockout state for
-// the same reason rollback did: forcing a reboot out of recovery mode is a
-// different action from pushing an image or rolling one back, so a MAC
-// signed for one must not double as authorization for another, and repeated
-// wrong-password guesses against this endpoint must not be able to also burn
-// through (or benefit from) the esp/pico/esp-rollback lockout budgets.
-// OTA_HTTP_CONTEXT_FACTORY_RESET is the same story again, for POST
-// /api/factory_reset (factory_reset.c): TODO.md flagged that route as
-// "strictly more destructive than POST /api/ota/esp/rollback, which IS
-// challenge-response authenticated" -- it erases zone config / Wi-Fi
-// credentials / saved profiles and reboots, yet had no authentication of any
-// kind. It gets its own context string ("factory-reset") and its own lockout
-// state for the identical reason every other context above does: a MAC
-// signed for pushing an image, rolling one back, or forcing a recovery-mode
-// reboot must not double as authorization to wipe the board's configuration,
-// and repeated wrong-password guesses against this route must not share (or
-// burn through) any other route's 3-strikes budget.
-//
-// OTA_HTTP_CONTEXT_PICO_ROLLBACK is the same story again, for POST
-// /api/ota/pico/rollback: it is NOT a reuse of OTA_HTTP_CONTEXT_PICO (a MAC
-// signed to push a new Pico image must not double as authorization to roll
-// the safety processor's bootloader slot back) and NOT a reuse of
-// OTA_HTTP_CONTEXT_ESP_ROLLBACK either, even though both are "rollback" in
-// spirit -- they revert two DIFFERENT processors, and a MAC signed for one
-// must not double as authorization for the other, same reasoning as every
-// context above. It gets its own context string ("pico-rollback") and its
-// own lockout state.
-// ota_http_context_t itself moved to ota_state.h (docs/HW_ABSTRACTION.md
-// item 9) -- non-httpd callers (factory_reset.c and friends) need it for the
-// accessors that moved there too. Included above via ota_state.h.
+// The context tags which cross-processor "update in progress" this route
+// acts on -- ota_http_context_t itself lives in ota_state.h
+// (docs/HW_ABSTRACTION.md item 9), still used for the update-claim mutex
+// (ota_http_update_try_begin()/_end()) and by factory_reset.c and friends.
+// It USED to also select an HMAC context string and a per-endpoint lockout
+// state for the AP-password challenge/response scheme retired 2026-09-29
+// (see this file's top comment) -- that part of its job is gone.
 
-// Longest context string literal used by the switch in
-// ota_http_verify_request() (ota_http.c) -- "boot-guard-reset", 16 chars.
-// Sizes that function's msg[] HMAC buffer AND test_ota_http.c's own
-// compute_mac() msg[] buffer (which recomputes the same HMAC independently
-// as its test oracle) -- declared here, rather than privately in ota_http.c,
-// specifically so both call sites share one definition instead of two
-// hand-copied literals drifting apart (exactly what happened before: the
-// test used 16 while ota_http.c used 13, so the 3-byte overflow in
-// ota_http.c's own buffer went uncaught). ota_http.c's _Static_assert table
-// still keeps the switch's literals in sync with this constant by hand,
-// since the strings are case labels' RHS, not a table either file can
-// iterate at compile time. tools/check_ota_http_context_mirror.ps1 also
-// reads this constant (parsed straight out of this header) to check the
-// same bound against tools/PcTools/src/kilnctrl/ota_http_client.py's
-// derive_mac() allow-list.
-#define OTA_HTTP_CONTEXT_STR_MAX 16
-
-typedef enum {
-    OTA_HTTP_VERIFY_OK = 0,
-    OTA_HTTP_VERIFY_LOCKED_OUT,
-    OTA_HTTP_VERIFY_NO_VALID_NONCE, // never issued, expired, or already used --
-                                     // NOT counted as an auth failure, see .c
-    OTA_HTTP_VERIFY_BAD_MAC,
-    // The AP password (wifi_prov_get_ap_password()) is empty -- an open AP.
-    // HMAC-SHA256 with a zero-length key is well-defined and this codebase
-    // used to accept it silently, but a zero-length key is PUBLIC (anyone who
-    // can reach the board already knows it is empty), so the "prove you know
-    // the password" property the whole challenge/response scheme exists for
-    // collapses to nothing. Refused outright rather than treated as "any MAC
-    // matches" or "no MAC matches" -- see ota_http_verify_request()'s .c
-    // comment for why this is checked AFTER the BOOT-button bypass (which
-    // must keep working -- it is the only way to recover an open-AP board)
-    // and BEFORE the nonce/HMAC math runs at all.
-    OTA_HTTP_VERIFY_NO_AP_PASSWORD,
-} ota_http_verify_result_t;
-
-// Verifies a client's claimed MAC against the currently active challenge
-// nonce, for the given context. `mac` must be exactly 32 bytes (raw
-// HMAC-SHA256 output, not hex/base64 -- the caller decodes the
-// X-Ota-Mac request header before calling this, see ota_http.c's
-// challenge/verify handlers for the wire encoding this pairs with).
-//
-// Always invalidates the active nonce before returning (single-use, "the
-// nonce whether or not it matched" -- UPDATE_PROTOCOL.md section 2 step 4),
-// EXCEPT when the result is OTA_HTTP_VERIFY_NO_VALID_NONCE, since there is
-// then no valid nonce left to invalidate. Records a lockout failure only on
-// OTA_HTTP_VERIFY_BAD_MAC -- a stale/reused/never-issued nonce is the
-// client's timing, not a wrong-password guess, and must not count toward
-// the 3-strikes lockout (seeCommonFW/docs/UPDATE_PROTOCOL.md's actual "Rate
-// limiting" intent: throttle password guesses, not slow legitimate
-// clients). A future caller (the eventual POST /api/ota/esp or
-// /api/ota/pico handler) should refuse the request unless this returns
-// OTA_HTTP_VERIFY_OK.
-ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const uint8_t mac[32],
-                                                  const char *client_ip);
-
-// Exported so a caller OUTSIDE this file can run the exact same
-// "X-Ota-Mac header present and exactly 64 hex chars -> hex-decode ->
-// ota_http_verify_request()" sequence every mutating route in this file
-// already runs, without duplicating that header-parsing logic -- until now
-// it was private to ota_http.c (static hex_decode(), inline header reads
-// repeated in ota_esp_post_handler()/ota_pico_post_handler()/
-// ota_esp_rollback_post_handler()/ota_recovery_exit_post_handler()).
-// factory_reset.c's POST /api/factory_reset is the first such caller (TODO.md:
-// that route is "strictly more destructive than POST /api/ota/esp/rollback,
-// which IS challenge-response authenticated" and had no auth at all).
-//
-// On success (OTA_HTTP_VERIFY_OK), returns true, writes the client's IP into
-// ip_out (must be >= 46 bytes -- same buffer size every handler in this file
-// uses), and sends nothing -- the caller proceeds with its own logic (and can
-// reuse ip_out in its own log lines, matching this file's own convention).
-//
-// On any refusal -- malformed/missing header, bad hex, or any non-OK
-// ota_http_verify_request() result -- returns false, HAS ALREADY SENT the
-// appropriate error response (400 for a malformed header, 403 with
-// verify_result_str()'s message otherwise), and the caller's only remaining
-// job is to return ESP_OK without sending anything else.
-//
+// Runs the interlock/system-mode-gate checks for the given context and
+// writes the client's IP into ip_out (must be >= 46 bytes -- same buffer
+// size every handler in this file uses). Always returns true and sends
+// nothing itself -- route_tier_table.h's ADMIN tier is the only auth gate
+// on these routes now (AP-password HMAC retired 2026-09-29, see this file's
+// top comment); this function is kept as the one call site every mutating
+// handler in this split already goes through, so a future gate (if any) has
+// a single place to land.
 bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46]);
 
-// True when this board's OTA auth is currently a no-op: the AP password
-// (wifi_prov_get_ap_password()) is empty. Every ota_http_verify_request()
-// call already refuses outright in this state (OTA_HTTP_VERIFY_NO_AP_PASSWORD)
-// -- this accessor exists so the condition can also be surfaced somewhere an
-// operator will actually see it without triggering an OTA attempt first,
-// the same "this board has no OTA auth right now must be permanently
-// visible" reasoning dashboard_http.c's existing boot_button_bypass_active
-// field on GET /api/status already follows for the OTHER way auth can be
-// bypassed (the physical BOOT-button recovery window). dashboard_http.c is
-// out of scope for this pass -- the one line it needs to add is
-// `APPEND(",\"ota_auth_disabled\":%s", ota_http_auth_disabled() ? "true" : "false");`
-// alongside its existing boot_button_bypass_active APPEND() call.
+// Always false now that the AP-password HMAC scheme is retired (2026-09-29)
+// -- ADMIN tier is the only gate on these routes and is never "disabled".
+// Kept so dashboard_http.c's existing `ota_auth_disabled` status field keeps
+// compiling without an unrelated change to that file in this pass.
 bool ota_http_auth_disabled(void);
 
 // --- Single cross-processor update mutex (TODO.md 9.4/9.5) ---------------
@@ -268,12 +145,8 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // holds the claim -- see ota_interlock_snapshot_t::other_update_in_progress'
 // doc comment.)
 //
-// A future POST /api/ota/{esp,pico} handler should call this AFTER
-// ota_http_verify_request() succeeds, not before -- see ota_interlock.h's
-// header comment for why (an unauthenticated interlock check would leak
-// live kiln telemetry, e.g. "zone 2 is at 340 C", to anyone who can reach
-// the endpoint, which is a worse leak than this design already accepts for
-// a wrong password).
+// POST /api/ota/{esp,pico} call this after ota_http_authenticate_request()
+// (ADMIN tier only, since the AP-password HMAC was retired 2026-09-29).
 //
 // reason_out/reason_cap: same contract as ota_interlock_check() -- filled
 // with a specific, human-readable refusal reason on OTA_INTERLOCK_REFUSED,
@@ -337,29 +210,21 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 
 // --- POST /api/ota/esp (TODO.md 9.5) -- the ESP's own self-update ---------
 //
-// Wire contract: the client GETs a challenge, computes the MAC per
-// ota_http_verify_request()'s doc comment above (context "esp"), then POSTs
-// the raw ESP-IDF image bytes as the body with the MAC carried in a request
-// header rather than the URL or a form field:
+// ADMIN tier is the only auth gate (AP-password HMAC retired 2026-09-29).
+// The client POSTs the raw ESP-IDF image bytes as the body -- no
+// multipart/form parser standing between the socket and esp_ota_write(),
+// which matters because the body can be over a megabyte and is written to
+// flash as it arrives, never buffered whole (see ota_http.c's handler for
+// the streaming/verification details: image magic and chip ID are checked
+// from the first sizeof(esp_image_header_t) bytes BEFORE esp_ota_begin() is
+// called, per UPDATE_PROTOCOL.md section 3's "ESP image magic and chip ID
+// checked before esp_ota_begin()").
 //
-//   X-Ota-Mac: <64 hex chars -- the 32-byte HMAC-SHA256, hex-encoded>
-//
-// A header keeps the MAC out of the URL (proxy/browser-history exposure,
-// same reasoning UPDATE_PROTOCOL.md section 2 gives for not sending the
-// password itself in a form POST) and leaves the body a pure byte stream --
-// no multipart/form parser standing between the socket and
-// esp_ota_write(), which matters because the body can be over a megabyte
-// and is written to flash as it arrives, never buffered whole (see
-// ota_http.c's handler for the streaming/verification details: image magic
-// and chip ID are checked from the first sizeof(esp_image_header_t) bytes
-// BEFORE esp_ota_begin() is called, per UPDATE_PROTOCOL.md section 3's "ESP
-// image magic and chip ID checked before esp_ota_begin()").
-//
-// Registered by ota_http_start() alongside the challenge handler. No
+// Registered by ota_http_start() alongside the other OTA routes. No
 // separate public entry point is exposed here -- unlike
-// ota_http_verify_request()/ota_http_check_interlocks(), which future
-// handlers (POST /api/ota/pico) also need to call, this transfer logic is
-// specific to the ESP's own image and has no other caller.
+// ota_http_check_interlocks(), which POST /api/ota/pico also needs to call,
+// this transfer logic is specific to the ESP's own image and has no other
+// caller.
 
 // Phase of the most recent (or currently in-flight) POST /api/ota/esp
 // transfer. Not a push channel (WebSocket/SSE is out of scope this pass,
@@ -400,10 +265,9 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 
 // --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------
 //
-// Same auth wire contract as POST /api/ota/esp (X-Ota-Mac header, context
-// "pico"), same check order (header well-formed -> ota_http_verify_request()
-// -> ota_http_check_interlocks() -> ota_http_update_try_begin()), same raw
-// (non-multipart) byte-stream body. The difference is what happens to the
+// Same auth (ADMIN tier only) and check order (ota_http_authenticate_request()
+// -> ota_http_check_interlocks() -> ota_http_update_try_begin()) as POST
+// /api/ota/esp, same raw (non-multipart) byte-stream body. The difference is what happens to the
 // body and how the response is shaped:
 //
 //   1. The body streams into the `pico_img` partition (esp_partition_write(),
@@ -462,8 +326,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 // image deliberately (e.g. the new version is valid but behaves worse in
 // practice than the one it replaced).
 //
-// Same four-step order as POST /api/ota/esp (header well-formed ->
-// ota_http_verify_request() with context OTA_HTTP_CONTEXT_ESP_ROLLBACK ->
+// Same order as POST /api/ota/esp (ota_http_authenticate_request() ->
 // ota_http_check_interlocks() -> ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)
 // -- reusing the ESP claim slot, not a separate one, since a rollback is
 // exactly as disruptive to "another update in flight" as a push would be),

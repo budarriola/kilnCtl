@@ -1151,16 +1151,11 @@
     // dropped again immediately) is handed back raw instead of opening a
     // second modal and looping.
     var alreadyRetried = !!(init && init.__kcAuthRetried);
-    // Opt-out (2026-09-21, opus review A1): kcOtaAuthedFetch signs its
-    // request with a single-use nonce (X-Ota-Mac), so replaying the SAME
-    // signed request after this wrapper's own login modal -- as the retry
-    // below does for every other caller -- fails the board's nonce check
-    // once OTA_AUTH_NONCE_EXPIRY_MS (30 s) has passed, which a human typing
-    // a password routinely exceeds. kcOtaAuthedFetch instead owns its own
-    // login+re-sign retry (fetches a fresh challenge and re-derives the MAC
-    // before resending) and sets this marker on its first send so this
-    // generic wrapper stands down and hands the 403 straight back to it,
-    // rather than both layers opening a modal for the same failure.
+    // The AP-password HMAC scheme (X-Ota-Mac, single-use nonce) this used to
+    // special-case for kcOtaAuthedFetch was retired 2026-09-29 (WEB_AUTH_PLAN.md
+    // item 2b) -- an OTA-family request is now an ordinary ADMIN-tier request
+    // with no nonce to go stale, so it takes the same retry-on-403 path as
+    // everything else and no longer needs to opt out of it.
     var callerHandlesAuth = !!(init && init.__kcCallerHandlesAuth);
     // Decided NOW, at call time: the gesture flag only holds during the
     // event's synchronous dispatch, long gone by the time a response lands.
@@ -1236,20 +1231,11 @@
         // wrapper (they CALL fetch; this wrapper is the innermost layer),
         // so re-entering window.fetch cannot re-run either of them. The
         // retried request carries whatever headers the original init had --
-        // for an ordinary (non-OTA) caller that is fine, it is the same
-        // request, unsigned, and the board only cares about the session
-        // cookie. An OTA-family request signed by kcOtaAuthedFetch never
-        // reaches this branch at all any more (opus review A1, 2026-09-21):
-        // it sets __kcCallerHandlesAuth on its own first send, which the
-        // `callerHandlesAuth` check above hands straight back to it instead
-        // of retrying here, because replaying that same signed request
-        // would carry an already-sent X-Ota-Mac -- accepted by the board
-        // only because http_auth_http.c denies an insufficient_role request
-        // BEFORE the route handler runs (so ota_http_verify_request() never
-        // consumed the nonce), and only within OTA_AUTH_NONCE_EXPIRY_MS
-        // (30 s), which a human typing into this modal easily exceeds.
-        // kcOtaAuthedFetch's own retry (below, in this file) fetches a
-        // fresh challenge and re-derives the MAC instead of replaying.
+        // the board only cares about the session cookie, so replaying the
+        // same request unchanged is fine. Since the AP-password HMAC scheme
+        // was retired 2026-09-29, kcOtaAuthedFetch no longer sets
+        // __kcCallerHandlesAuth and an OTA-family request takes this same
+        // retry path as everything else.
         // The 428/no-safety-ack path is unaffected either way:
         // kcFetchWithSafetyAck inspects whatever response this wrapper's
         // promise resolves to, retry included.
@@ -1317,224 +1303,24 @@
     });
   };
 
-  // ---- OTA challenge/response handshake --------------------------------
+  // ---- OTA-family fetch -------------------------------------------------
   //
-  // Owner report, 2026-09-18: the Settings page's "Reboot both processors"
-  // button sent a bare, unauthenticated POST /api/sw_reset and always failed
-  // with "missing or malformed X-Ota-Mac header" -- the server route
-  // (sw_reset_http.c's sw_reset_post_handler()) requires the same
-  // challenge/HMAC handshake every OTA-family mutating route requires
-  // (ota_http.c's ota_http_authenticate_request()). The same defect affected
-  // the factory-reset buttons on that same page. Root cause: two pages
-  // needed this handshake and only one (net/ota_page.html) had it -- as an
-  // inline, page-local copy, so the other page silently shipped a dead
-  // button instead of sharing the working code.
-  //
-  // These functions are that handshake, moved here (out of ota_page.html's
-  // own inline <script>) so every page that needs it -- today ota_page.html
-  // and settings_page.html, potentially more later -- calls ONE
-  // implementation instead of risking a second copy drifting out of sync
-  // with CommonFW/docs/UPDATE_PROTOCOL.md section 2 step 2:
-  //   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
-  //   mac = HMAC-SHA256(key, nonce_bytes || context)
-  // ota_http.c's ota_http_verify_request() (see its own ctx_str switch) and
-  // PcTools' ota_http_client.py's derive_mac() both implement the same
-  // derivation; PcTools is a separate, legitimately independent
-  // implementation in a different language and is NOT part of this
-  // de-duplication.
-  //
-  // Valid context strings, read directly off ota_http.c's ctx_str switch
-  // (ota_http_verify_request()) rather than guessed or copied from an older
-  // comment that can go stale: "esp", "pico", "esp-rollback",
-  // "pico-rollback", "recovery" (exit-recovery-mode), "factory-reset",
-  // "sw-reset", and "boot-guard-reset" (PcTools-only today -- see
-  // tools/PcTools/src/kilnctrl/ota_http_client.py -- no web page sends this
-  // context yet, but the C side accepts it and a future page-side caller
-  // should just pass "boot-guard-reset" through kcOtaAuthedFetch below, not
-  // reimplement anything).
-  //
-  // Pure-JS SHA-256 / HMAC-SHA256: this page set is served over plain HTTP
-  // (the board has no TLS cert -- reachable from its own fallback AP at
-  // 192.168.4.1 during first-boot provisioning, and from the home LAN
-  // afterward, neither of which is a "secure context" per the Secure
-  // Contexts spec), so window.crypto.subtle (only exposed in a secure
-  // context) is not available here. Standard FIPS 180-4 SHA-256 / RFC 2104
-  // HMAC construction, byte arrays only (no external libs, no eval, no
-  // network fetch of code).
-  function sha256(bytes) {
-    var K = [
-      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
-    ];
-    var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-
-    var bitLen = bytes.length * 8;
-    var withOne = bytes.concat([0x80]);
-    while (withOne.length % 64 !== 56) withOne.push(0);
-    for (var s = 56; s >= 0; s -= 8) withOne.push(Math.floor(bitLen / Math.pow(2, s)) & 0xff);
-
-    function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
-
-    for (var chunk = 0; chunk < withOne.length; chunk += 64) {
-      var w = new Array(64);
-      for (var i = 0; i < 16; i++) {
-        var o = chunk + i * 4;
-        w[i] = ((withOne[o] << 24) | (withOne[o + 1] << 16) | (withOne[o + 2] << 8) | withOne[o + 3]) >>> 0;
-      }
-      for (i = 16; i < 64; i++) {
-        var s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-        var s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
-      }
-      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
-      for (i = 0; i < 64; i++) {
-        var S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        var ch = (e & f) ^ (~e & g);
-        var temp1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
-        var S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        var maj = (a & b) ^ (a & c) ^ (b & c);
-        var temp2 = (S0 + maj) >>> 0;
-        h = g; g = f; f = e; e = (d + temp1) >>> 0;
-        d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
-      }
-      H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
-      H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
-    }
-
-    var out = [];
-    for (i = 0; i < 8; i++) {
-      out.push((H[i] >>> 24) & 0xff, (H[i] >>> 16) & 0xff, (H[i] >>> 8) & 0xff, H[i] & 0xff);
-    }
-    return out;
-  }
-
-  function hmacSha256(keyBytes, msgBytes) {
-    var blockSize = 64;
-    if (keyBytes.length > blockSize) keyBytes = sha256(keyBytes);
-    var padded = keyBytes.concat(new Array(blockSize - keyBytes.length).fill(0));
-    var ipad = padded.map(function (b) { return b ^ 0x36; });
-    var opad = padded.map(function (b) { return b ^ 0x5c; });
-    var inner = sha256(ipad.concat(msgBytes));
-    return sha256(opad.concat(inner));
-  }
-
-  function strToBytes(s) {
-    var out = [];
-    for (var i = 0; i < s.length; i++) {
-      var c = s.charCodeAt(i);
-      if (c < 0x80) out.push(c);
-      else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-      else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-    }
-    return out;
-  }
-
-  function bytesToHex(bytes) {
-    return bytes.map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
-  }
-
-  function hexToBytes(hex) {
-    var out = [];
-    for (var i = 0; i < hex.length; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
-    return out;
-  }
-
-  // Namespaced (not bare globals) per the de-duplication plan, so a page
-  // that happens to define its own "sha256" or "hmacSha256" identifier
-  // (unlikely, but this is exactly the kind of collision a shared file must
-  // not risk) can never collide with these.
-  window.kcOtaCrypto = {
-    sha256: sha256,
-    hmacSha256: hmacSha256,
-    strToBytes: strToBytes,
-    bytesToHex: bytesToHex,
-    hexToBytes: hexToBytes,
-  };
-
-  var OTA_KDF_CONTEXT = 'kilnctl-ota-v1';
-
-  // GET /api/ota/challenge -> the nonce, decoded to a byte array. Every
-  // authenticated OTA-family request fetches a fresh one; the server enforces
-  // single-use/expiry server-side (ota_http.c), this is just the client half.
-  window.kcOtaGetChallenge = function () {
-    return fetch('/api/ota/challenge').then(function (r) {
-      if (!r.ok) throw new Error('challenge request failed: HTTP ' + r.status);
-      return r.json();
-    }).then(function (obj) {
-      return hexToBytes(obj.nonce);
-    });
-  };
-
-  window.kcOtaDeriveMac = function (apPassword, nonceBytes, context) {
-    var key = hmacSha256(strToBytes(apPassword), strToBytes(OTA_KDF_CONTEXT));
-    var msg = nonceBytes.concat(strToBytes(context));
-    return hmacSha256(key, msg);
-  };
-
-  // The one call every page should use: fetches a fresh challenge, derives
-  // the MAC for `context`, sets X-Ota-Mac, and dispatches through the
-  // EXISTING window.kcFetchWithSafetyAck so the 428-retry/no-safety-ack
-  // behaviour stays exactly what it always was -- this function adds
-  // authentication, it does not change what happens once the request is
-  // authenticated. Merges (never clobbers) any caller-supplied `init.headers`
-  // -- a caller setting Content-Type (pushImage's octet-stream upload,
-  // settings_page.html's form-encoded factory-reset body) keeps it.
-  //
-  // Own insufficient_role retry (opus review A1, 2026-09-21): a signed OTA
-  // request that comes back 403/insufficient_role cannot be handled by the
-  // generic window.fetch wrapper's replay-after-login the way every other
-  // caller's request is -- the prehandler denies before the route consumes
-  // the nonce, so a replayed X-Ota-Mac is only accepted within the 30 s
-  // OTA_AUTH_NONCE_EXPIRY_MS window, which a human typing a password into
-  // the login modal routinely exceeds (a stale-nonce 403 after a successful
-  // login, reported as a mysterious second failure). So this function marks
-  // its own request `__kcCallerHandlesAuth` (the wrapper stands down for
-  // that marker -- see window.fetch's own comment) and, on that specific
-  // 403, does its own single login-then-retry: `ensureAdminLogin` is the
-  // same modal/promise the wrapper uses (defined earlier in this closure),
-  // then a brand-new challenge is fetched and the MAC re-derived before
-  // resending -- a re-signing, not a replay. Exactly one retry: `attempt()`
-  // is called at most twice total, and a second insufficient_role 403 (the
-  // freshly-logged-in account still lacking the role) is handed back as-is.
-  window.kcOtaAuthedFetch = function (url, context, apPassword, init) {
-    init = init || {};
-    function attempt() {
-      return window.kcOtaGetChallenge().then(function (nonce) {
-        var mac = window.kcOtaDeriveMac(apPassword, nonce, context);
-        var merged = {};
-        for (var k in init) { if (Object.prototype.hasOwnProperty.call(init, k)) merged[k] = init[k]; }
-        merged.headers = {};
-        var src = init.headers || {};
-        // Same Headers-instance-or-plain-object normalisation as
-        // kcFetchWithSafetyAck's own retry path above.
-        if (typeof src.forEach === 'function' && !(src instanceof Array)) {
-          src.forEach(function (v, k2) { merged.headers[k2] = v; });
-        } else {
-          for (var k3 in src) {
-            if (Object.prototype.hasOwnProperty.call(src, k3)) merged.headers[k3] = src[k3];
-          }
-        }
-        merged.headers['X-Ota-Mac'] = bytesToHex(mac);
-        merged.__kcCallerHandlesAuth = true;
-        return window.kcFetchWithSafetyAck(url, merged);
-      });
-    }
-    return attempt().then(function (resp) {
-      if (resp.status === 403 &&
-          resp.headers.get('X-Kiln-Auth-Reason') === 'insufficient_role') {
-        return ensureAdminLogin('Administrator login required').then(function (ok) {
-          if (!ok) return resp;
-          return attempt();
-        });
-      }
-      return resp;
-    });
+  // Every OTA-family mutating route (push, rollback, recovery-exit,
+  // boot_guard_reset, factory_reset, cfgfs_format_confirm, sw_reset) used to
+  // also require an AP-password HMAC challenge/response handshake on top of
+  // ROUTE_TIER_ADMIN (CommonFW/docs/UPDATE_PROTOCOL.md section 2). That
+  // scheme was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b, owner decision
+  // "Retire; open when login off") -- route_tier_table.h's ADMIN tier is now
+  // the only gate, the same as every other admin route, so signing a request
+  // client-side no longer does anything the session cookie doesn't already
+  // do. window.kcOtaAuthedFetch is kept as a thin, named call site (rather
+  // than deleting it and inlining kcFetchWithSafetyAck everywhere) so a
+  // future auth requirement for this route family has exactly one place to
+  // land again, and so ota_page.html/settings_page.html's existing call
+  // sites did not all need to change shape in the same pass that retired the
+  // handshake.
+  window.kcOtaAuthedFetch = function (url, init) {
+    return window.kcFetchWithSafetyAck(url, init || {});
   };
 
   // ---- Unit preference (°C/°F) --------------------------------------

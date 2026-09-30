@@ -12,9 +12,7 @@
 // one pure question: does this snapshot permit starting an update, and if
 // not, which specific precondition is unmet. The snapshot-taking itself (the
 // ESP-IDF glue that calls profile_executor_get_status() etc. and populates
-// an ota_interlock_snapshot_t) lives in ota_http.c, mirroring exactly how
-// ota_http.c's hmac_sha256()/ota_challenge_get_handler() are the ESP-IDF
-// glue around ota_auth.c's pure nonce/lockout state machine.
+// an ota_interlock_snapshot_t) lives in ota_http.c.
 //
 // UPDATE_PROTOCOL.md section 1's precondition table, and where each one is
 // checked in this function:
@@ -32,18 +30,14 @@
 // runs before EITHER a POST /api/ota/esp or a POST /api/ota/pico is allowed
 // to proceed -- there is no per-path variant of the precondition list.
 //
-// Ordering versus authentication (ota_http_verify_request()): this file's
-// header comment for ota_http_verify_request() and UPDATE_PROTOCOL.md
-// section 2 do not specify whether interlocks or auth run first. This module
-// is written so a future POST handler can call it either way, but the
-// intended order, once that handler exists, is AUTH FIRST, THEN INTERLOCKS:
-// revealing "zone 2 is at 340 C" to an unauthenticated caller leaks live
-// kiln telemetry (temperatures, run state) to anyone on the LAN who can
-// reach the endpoint, whereas the auth challenge/response reveals nothing
-// about kiln state on failure. Checking interlocks first would make this
-// endpoint an unauthenticated temperature-and-status oracle, which is a
-// worse leak than the "wrong password" case UPDATE_PROTOCOL.md section 2
-// already accepts as this design's known limit.
+// Ordering versus authentication (ota_http_authenticate_request(),
+// ota_http.h): AUTH FIRST, THEN INTERLOCKS -- revealing "zone 2 is at 340 C"
+// to an unauthenticated caller leaks live kiln telemetry (temperatures, run
+// state) to anyone on the LAN who can reach the endpoint. This held even
+// before the AP-password HMAC scheme was retired 2026-09-29 (WEB_AUTH_PLAN.md
+// item 2b): ROUTE_TIER_ADMIN alone is what an unauthenticated caller must
+// fail before ever reaching this check, so checking interlocks first would
+// make this endpoint an unauthenticated temperature-and-status oracle.
 #ifndef KILNCTL_OTA_INTERLOCK_H
 #define KILNCTL_OTA_INTERLOCK_H
 

@@ -4,8 +4,7 @@ Each `_case_XXX(ctx)` function does the fetching (calling the Python
 functions the sibling kilnctrl MCP tools wrap -- never a second MCP server,
 never hardware directly, per the plan doc §2.2) and hands the result to a
 pure judge function from judgments.py. `ctx` is the dict the runner builds
-per-run: `host` (board LAN/AP address), `ap_password` (optional, redacted
-before it is ever logged), and a `srv` module reference (kilnctrl.mcp_server,
+per-run: `host` (board LAN/AP address) and a `srv` module reference (kilnctrl.mcp_server,
 imported lazily so this module stays importable -- and unit-testable with
 srv mocked out -- with no board attached).
 

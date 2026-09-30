@@ -1,15 +1,18 @@
 // boot_button -- the "I lost the AP password" recovery hatch, requested by
 // the repo owner: a long press on the ESP32-S3's BOOT button (GPIO0) while
-// the firmware is RUNNING opens a short, auto-closing window during which
-// the OTA HTTP routes (ota_http.c's ota_http_verify_request()) skip their
-// HMAC-over-the-AP-password check, so an operator who no longer knows the
-// Wi-Fi AP password can still flash a fix.
+// the firmware is RUNNING opens a short, auto-closing window. This used to
+// make the OTA HTTP routes (ota_http.c's now-removed ota_http_verify_request())
+// skip their HMAC-over-the-AP-password check; that scheme was retired
+// 2026-09-29 (WEB_AUTH_PLAN.md item 2b) and route_tier_table.h's ADMIN tier
+// is now the only gate on those routes, so this bypass no longer has an
+// auth check left to suspend for the OTA routes specifically -- see below
+// for what still reads it.
 //
 // WHAT THIS DELIBERATELY DOES NOT DO -- read this before touching either
 // side of the OTA auth path
 // -----------------------------------------------------------------------
 //   - It changes NO stored secret. The AP password is untouched in NVS;
-//     this only suspends ota_http_verify_request()'s comparison for a
+//     this used to only suspend ota_http_verify_request()'s comparison for a
 //     bounded window, the same way watchdog_cfg.c suspends the task-
 //     watchdog PANIC action without touching CONFIG_ESP_TASK_WDT_EN.
 //   - It does not disable auth permanently. BOOT_BUTTON_WINDOW_MS below is
@@ -67,14 +70,14 @@
 //
 // HOW THIS FITS TOGETHER WITH ota_http.c
 // -----------------------------------------------------------------------
-// ota_http_verify_request() (ota_http.c) checks boot_button_ota_bypass_
-// active() first, before any lockout/nonce work, for ALL FOUR of its
-// contexts ("esp", "pico", "esp-rollback", "recovery") -- see that
-// function's own comment for why: the whole point of this hatch is "the
-// operator cannot produce a valid HMAC any more", and that is exactly as
-// true for a Pico update or a rollback as it is for a plain ESP update, so
-// scoping the bypass to only one context would leave the other three still
-// unreachable to the very operator this feature exists to unblock.
+// Used to be checked by ota_http_verify_request() (ota_http.c) before any
+// lockout/nonce work, for all four of the old HMAC contexts ("esp", "pico",
+// "esp-rollback", "recovery") -- removed with that function 2026-09-29.
+// boot_button_ota_bypass_active()/boot_button_bypass_remaining_ms() are kept
+// (dashboard_status_http.c's boot_button_bypass_active status field,
+// ui_page_home_refresh.c's LCD banner) so the physical-press recovery
+// window itself is still visible to an operator; nothing in ota_http.c
+// reads them any more.
 //
 // TASK / STACK PLACEMENT
 // -----------------------------------------------------------------------

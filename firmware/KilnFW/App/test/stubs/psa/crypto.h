@@ -115,7 +115,9 @@ static inline void psa_stub_fake_mac(const uint8_t *key, size_t key_len, const u
      * key of all-zero bytes of some other length could coincide for a
      * short message, which would make the "empty AP password" refusal test
      * meaningless (it must be refused OUTRIGHT before this function ever
-     * runs -- see ota_http.c's ota_http_verify_request()). */
+     * runs -- see net/ota_auth.c, the recovery-image AP-password HMAC path
+     * this stub still backs for test_ota_auth.c; ota_http.c's own copy of
+     * this scheme was retired 2026-09-29, WEB_AUTH_PLAN.md item 2b). */
     acc[0] ^= (uint32_t)key_len * 0x85EBCA6Bu;
     for (size_t i = 0; i < msg_len; i++) {
         acc[i % 8] = (acc[i % 8] * 33u) ^ (msg[i] + i * 7u);

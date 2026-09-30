@@ -2,12 +2,12 @@
 """ota_http_client.py -- pure HTTP client for the ESP's OTA update endpoints
 (firmware/KilnFW/App/drivers/http/ota_http.c), used by mcp_server.py's ota_* tools.
 
-Talks straight HTTP to /api/ota/{challenge,esp,pico} and GET
+Talks straight HTTP to /api/ota/{esp,pico} and GET
 /api/ota/pico/status -- same "stdlib urllib.request, no framework" convention
 gui.py already uses for this board's other HTTP surfaces (Wi-Fi settings
 popup, Rules editor -- see gui.py's _wifi_default_host()/
 _wifi_http_error_text()). Kept in its own module, separate from
-mcp_server.py, specifically so the request-construction / HMAC-signing /
+mcp_server.py, specifically so the request-construction /
 response-parsing logic here can be unit-tested with mocked HTTP responses
 (tools/PcTools/tests/test_ota_http_client.py) with no real socket and no
 live board required.
@@ -16,24 +16,24 @@ Wire contract source of truth: firmware/KilnFW/App/drivers/http/ota_http.h/.c an
 firmware/CommonFW/docs/UPDATE_PROTOCOL.md section 2 (auth) and section 3 (ESP
 transfer)/section 9.5-era pico staging. Mirrored here, not re-derived:
 
-  GET  /api/ota/challenge      -> 200 {"nonce": "<32 hex chars>"}  (16 raw bytes)
-  key  = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
-  mac  = HMAC-SHA256(key, nonce_bytes || b"esp"  )   for /api/ota/esp
-       = HMAC-SHA256(key, nonce_bytes || b"pico" )   for /api/ota/pico
-  POST /api/ota/esp,  header X-Ota-Mac: <64 hex chars>, raw .bin body
+  Every route below used to also require an AP-password HMAC challenge/
+  response handshake on top of ROUTE_TIER_ADMIN. Retired 2026-09-29
+  (WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open when login off"):
+  route_tier_table.h's ADMIN tier is now the sole gate, on or off, same as
+  every other admin route -- every call below goes through
+  http_auth.urlopen() (the ordinary admin session seam) with no nonce, no
+  MAC, no X-Ota-Mac header.
+
+  POST /api/ota/esp,  raw .bin body
        -> 200 {"ok":true,"bytes":N,"partition":"...","version":"..."}
-  POST /api/ota/pico, same header/body shape, image is SaftyFW's raw .bin
+  POST /api/ota/pico, same body shape, image is SaftyFW's raw .bin
        -> 202 {"ok":true,"status":"relay_started","bytes":N,"crc32":"0x..."}
   GET  /api/ota/pico/status    -> 200 {"phase":"...","percent":N,"last_error":"..."}
   GET  /api/ota/esp/status     -> 200 {"phase":"...","percent":N,"last_update":null|{...}}
-  POST /api/ota/esp/rollback, header X-Ota-Mac: <64 hex chars> over context
-       "esp-rollback" (NOT the same MAC as /api/ota/esp -- distinct context
-       string), empty body -> 200 {"ok":true,"status":"rebooting",
+  POST /api/ota/esp/rollback, empty body -> 200 {"ok":true,"status":"rebooting",
        "version_before":"..."}. Explicit revert to the previous OTA image;
        reboots the board shortly after responding.
-  POST /api/ota/esp/recovery_exit, header X-Ota-Mac: <64 hex chars> over
-       context "recovery" (its own context, distinct from "esp"/
-       "esp-rollback"/"pico"), empty body -> 200 {"ok":true,
+  POST /api/ota/esp/recovery_exit, empty body -> 200 {"ok":true,
        "status":"rebooting"}, or 403 "board is not in recovery mode" if the
        board is not currently in boot_guard.h's recovery mode. Reboots the
        board shortly after responding, same as rollback above.
@@ -62,7 +62,6 @@ module already carries.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -74,18 +73,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 #: Every push/rollback/recovery call is logged here -- image SHA-256 and
-#: outcome on success, the board's refusal reason on failure. NEVER the
-#: password: nothing below ever passes `ap_password` (or the derived MAC key)
-#: to a log call, only the derived MAC hex (which is not the secret -- it's
-#: HMAC output over a single-use nonce) when useful for correlating with the
-#: board's own logs. See test_ota_http_client.py's LoggingTest for the
-#: negative proof.
+#: outcome on success, the board's refusal reason on failure. NEVER a
+#: credential: nothing below ever logs a password or session cookie. See
+#: test_ota_http_client.py's LoggingTest for the negative proof.
 log = logging.getLogger(__name__)
 
-#: UPDATE_PROTOCOL.md section 2 step 2's literal KDF context string.
-OTA_KDF_CONTEXT = b"kilnctl-ota-v1"
-
-#: Short requests: challenge issue, pico status poll.
+#: Short requests: pico status poll.
 OTA_HTTP_TIMEOUT_S = 8.0
 #: The ESP path holds the HTTP connection open for the whole streamed write
 #: (ota_http.c streams straight to flash, no staging) -- a ~1.1-2 MB image
@@ -151,71 +144,6 @@ def _http_error_detail(exc: Exception) -> tuple[Optional[int], str]:
     return None, str(exc)
 
 
-def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
-    """HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"), nonce || context)
-    -- CommonFW/docs/UPDATE_PROTOCOL.md section 2 step 2, byte-for-byte what
-    ota_http.c's ota_http_verify_request() recomputes server-side (see that
-    function: "key = HMAC-SHA256(ap_password, ...)" is the ap_password as
-    the HMAC KEY and the context string as the message -- this derivation is
-    what keeps the literal Wi-Fi/AP password out of the value that's ever
-    compared or sent). `context` must be exactly "esp", "pico",
-    "esp-rollback", "pico-rollback", "recovery", "boot-guard-reset",
-    "sw-reset", or "factory-reset" (each is its own context, not a reuse of
-    "esp" -- see ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK
-    for why a plain-update MAC must not double as a rollback authorization,
-    and ota_state.h's doc comment on OTA_HTTP_CONTEXT_BOOT_GUARD_RESET for
-    the same reasoning applied there; "sw-reset" is OTA_HTTP_CONTEXT_SW_RESET,
-    POST /api/sw_reset -- see sw_reset() below. "factory-reset" is
-    OTA_HTTP_CONTEXT_FACTORY_RESET (ota_state.h/ota_http.c's context table),
-    used by BOTH POST /api/factory_reset (factory_reset.c) and POST
-    /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
-    handler() deliberately reuses this context rather than minting its own
-    -- see that file's own header comment: "a MAC signed for 'factory-reset'
-    already applies here just as directly"). "pico-rollback" is
-    OTA_HTTP_CONTEXT_PICO_ROLLBACK, POST /api/ota/pico/rollback
-    (ota_http.h's doc comment: NOT a reuse of "pico" or "esp-rollback" --
-    the same allow-list-omission tooling gap CLAUDE.md documents for
-    OTA_HTTP_CONTEXT_FACTORY_RESET, found here while wiring up
-    rollback_pico() below rather than on the bench).
-    """
-    if context not in ("esp", "pico", "esp-rollback", "pico-rollback", "recovery",
-                        "boot-guard-reset", "sw-reset", "factory-reset"):
-        raise ValueError(
-            f"context must be 'esp', 'pico', 'esp-rollback', 'pico-rollback', "
-            f"'recovery', 'boot-guard-reset', 'sw-reset', or 'factory-reset', got {context!r}")
-    key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
-    msg = nonce + context.encode("ascii")
-    return hmac.new(key, msg, hashlib.sha256).digest()
-
-
-def get_challenge(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> bytes:
-    """GET /api/ota/challenge -> the 16-byte nonce, decoded from hex.
-    Single-use, 30 s expiry server-side (ota_auth.h) -- a caller must derive
-    the MAC and POST within that window; a stale/reused nonce comes back as
-    a 403 ("no valid challenge...") from the push call, not from here."""
-    req = urllib.request.Request(_url(host, "/api/ota/challenge"), method="GET")
-    try:
-        with http_auth.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except Exception as exc:  # noqa: BLE001 - normalized into OtaHttpError below
-        status, detail = _http_error_detail(exc)
-        raise OtaHttpError(f"challenge request failed: {detail}", status, detail) from exc
-
-    try:
-        obj = json.loads(body)
-        nonce_hex = obj["nonce"]
-    except Exception as exc:
-        raise OtaHttpError(f"challenge response was not the expected JSON: {body!r}") from exc
-
-    try:
-        nonce = bytes.fromhex(nonce_hex)
-    except (TypeError, ValueError) as exc:
-        raise OtaHttpError(f"challenge nonce was not valid hex: {nonce_hex!r}") from exc
-    if len(nonce) != 16:
-        raise OtaHttpError(f"challenge nonce was {len(nonce)} bytes, expected 16")
-    return nonce
-
-
 @dataclass
 class OtaPushResult:
     ok: bool
@@ -223,23 +151,17 @@ class OtaPushResult:
     body: dict = field(default_factory=dict)
 
 
-def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: str,
+def _push_image(host: str, path: str, endpoint: str,
                  timeout: float, extra_headers: Optional[dict] = None) -> OtaPushResult:
     """Shared body of push_esp_image()/push_pico_image(): validate the local
-    file, fetch a fresh challenge, sign it, and POST the raw bytes with the
-    X-Ota-Mac header -- the exact order ota_esp_post_handler()/
-    ota_pico_post_handler() check in (header well-formed -> auth -> ...), so
-    a malformed local request never reaches the board's interlock/mutex
-    checks at all. Nothing here retries a partial write: any exception
-    anywhere in this function propagates as-is, and a caller must treat that
-    as "unknown whether the board received anything usable" -- re-uploading
-    is a fresh, explicit action, never something this function does on its
-    own behalf.
-
-    `extra_headers` (e.g. push_pico_image()'s X-Ota-Force-Version) are NOT
-    covered by X-Ota-Mac -- see that header's own doc comment for why a
-    local operator-policy relaxation is deliberately outside the request
-    HMAC.
+    file and POST the raw bytes. ROUTE_TIER_ADMIN (the admin session
+    http_auth.urlopen() already carries) is the only gate on this route --
+    the AP-password HMAC challenge/response scheme this used to also perform
+    was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b). Nothing here retries a
+    partial write: any exception anywhere in this function propagates as-is,
+    and a caller must treat that as "unknown whether the board received
+    anything usable" -- re-uploading is a fresh, explicit action, never
+    something this function does on its own behalf.
     """
     if not os.path.isfile(path):
         raise OtaHttpError(f"no such file: {path}")
@@ -247,15 +169,11 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
     if size == 0:
         raise OtaHttpError(f"image file is empty: {path}")
 
-    nonce = get_challenge(host)
-    mac_hex = derive_mac(ap_password, nonce, context).hex()
-
     with open(path, "rb") as f:
         data = f.read()
 
-    #: Identifies exactly what image was pushed without ever touching the
-    #: password. Logged before the request so a failed/hung transfer still
-    #: leaves a record of what was attempted.
+    #: Identifies exactly what image was pushed. Logged before the request
+    #: so a failed/hung transfer still leaves a record of what was attempted.
     image_sha256 = hashlib.sha256(data).hexdigest()
     log.info("OTA push starting: endpoint=%s host=%s path=%s size=%d sha256=%s",
               endpoint, host, path, size, image_sha256)
@@ -263,7 +181,6 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
     headers = {
         "Content-Type": "application/octet-stream",
         "Content-Length": str(len(data)),
-        "X-Ota-Mac": mac_hex,
     }
     if extra_headers:
         headers.update(extra_headers)
@@ -327,7 +244,7 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
     return result
 
 
-def push_esp_image(host: str, path: str, ap_password: str,
+def push_esp_image(host: str, path: str,
                     timeout: float = OTA_ESP_UPLOAD_TIMEOUT_S) -> OtaPushResult:
     """POST /api/ota/esp -- streams the raw ESP-IDF .bin, holding the HTTP
     connection open for the whole transfer (ota_esp_do_transfer() streams
@@ -342,10 +259,10 @@ def push_esp_image(host: str, path: str, ap_password: str,
     A caller still needs to reboot the board and re-check its version
     afterward.
     """
-    return _push_image(host, path, "/api/ota/esp", "esp", ap_password, timeout)
+    return _push_image(host, path, "/api/ota/esp", timeout)
 
 
-def push_pico_image(host: str, path: str, ap_password: str,
+def push_pico_image(host: str, path: str,
                      timeout: float = OTA_PICO_STAGE_TIMEOUT_S,
                      force_version: bool = False) -> OtaPushResult:
     """POST /api/ota/pico -- streams the raw SaftyFW .bin into the `pico_img`
@@ -368,7 +285,7 @@ def push_pico_image(host: str, path: str, ap_password: str,
     confirmation is the entire point of this gate.
     """
     extra_headers = {"X-Ota-Force-Version": "1"} if force_version else None
-    return _push_image(host, path, "/api/ota/pico", "pico", ap_password, timeout,
+    return _push_image(host, path, "/api/ota/pico", timeout,
                         extra_headers=extra_headers)
 
 
@@ -391,7 +308,7 @@ def get_pico_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
         raise OtaHttpError(f"pico status response was not valid JSON: {body_text!r}") from exc
 
 
-def rollback_pico(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def rollback_pico(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/pico/rollback -- explicit "revert the safety
     processor's bootloader to its previous slot right now"
     (App/drivers/http/ota_http_pico.c's ota_pico_rollback_post_handler()).
@@ -402,21 +319,14 @@ def rollback_pico(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT
     launched -- it does NOT wait for the relay to the RP2040 to finish.
     Poll get_pico_rollback_status() afterward for the real outcome.
 
-    Refused the same way a Pico push is: wrong/missing auth (403), an
-    unmet interlock (409 -- not idle, a trip pending, a concurrent
-    update/rollback already holding the mutex), all raised as OtaHttpError
-    with the board's plain-text reason in `.detail`.
-
-    `ap_password`: same AP-password-derived HMAC scheme as rollback_esp()/
-    push_pico_image() -- see derive_mac()'s doc comment. Uses the
-    "pico-rollback" context, a distinct signature from both the plain
-    "pico" push MAC and the ESP's own "esp-rollback" MAC (ota_http.h's
-    OTA_HTTP_CONTEXT_PICO_ROLLBACK doc comment: reverting one processor
-    must not double as authorization to revert the other).
+    Refused the same way a Pico push is: no/insufficient admin session
+    (401/403), an unmet interlock (409 -- not idle, a trip pending, a
+    concurrent update/rollback already holding the mutex), all raised as
+    OtaHttpError with the board's plain-text reason in `.detail`. The
+    AP-password HMAC challenge/response this used to also require was
+    retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b) -- ROUTE_TIER_ADMIN (the
+    admin session http_auth.urlopen() carries) is the only gate now.
     """
-    nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, "pico-rollback").hex()
-
     req = urllib.request.Request(
         _url(host, "/api/ota/pico/rollback"),
         data=b"",
@@ -424,7 +334,6 @@ def rollback_pico(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": "0",
-            "X-Ota-Mac": mac_hex,
         },
     )
     log.info("Pico OTA rollback requested: host=%s", host)
@@ -503,15 +412,17 @@ def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
         raise OtaHttpError(f"esp status response was not valid JSON: {body_text!r}") from exc
 
 
-def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def rollback_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/rollback -- explicit "revert to the previous image
     right now" (App/drivers/http/ota_http.c's ota_esp_rollback_post_handler()).
     Unlike push_esp_image()/push_pico_image(), there is no file to send --
-    the body is empty, only the challenge/MAC dance and the X-Ota-Mac header
-    are needed.
+    the body is empty. ROUTE_TIER_ADMIN (the admin session
+    http_auth.urlopen() carries) is the only gate; the AP-password HMAC
+    challenge/response this route used to also require was retired
+    2026-09-29 (WEB_AUTH_PLAN.md item 2b).
 
-    Refused the same way an update push is: wrong/missing auth (403), an
-    unmet interlock (409, kiln not idle/cool or similar -- see
+    Refused the same way an update push is: no/insufficient admin session
+    (401/403), an unmet interlock (409, kiln not idle/cool or similar -- see
     ota_http_check_interlocks()), a concurrent update/rollback already
     holding the mutex (409), or -- specific to this route -- no previous
     valid image to roll back to (409, "no previous valid image to roll back
@@ -524,15 +435,7 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
     response is received, it does NOT wait for the reboot or for the board
     to come back up running the older version. Returns the parsed JSON body,
     {"ok": true, "status": "rebooting", "version_before": "<version>"}.
-
-    `ap_password`: same AP-password-derived HMAC scheme as push_esp_image()/
-    push_pico_image() -- see derive_mac()'s doc comment. Uses the
-    "esp-rollback" context, a distinct signature from a plain "esp" update
-    MAC (ota_http.h's OTA_HTTP_CONTEXT_ESP_ROLLBACK doc comment).
     """
-    nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, "esp-rollback").hex()
-
     req = urllib.request.Request(
         _url(host, "/api/ota/esp/rollback"),
         data=b"",
@@ -540,7 +443,6 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": "0",
-            "X-Ota-Mac": mac_hex,
         },
     )
     log.info("OTA rollback requested: host=%s", host)
@@ -569,34 +471,28 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
     return body
 
 
-def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def recovery_exit_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/recovery_exit -- ask the board to reboot right now
     to exit boot_guard.h's recovery mode, rather than waiting for it to
     self-clear (App/drivers/http/ota_http.c's ota_recovery_exit_post_handler()).
 
-    Same challenge/MAC dance as rollback_esp(), signed over its own
-    "recovery" context (ota_http.h's OTA_HTTP_CONTEXT_RECOVERY_EXIT) -- NOT
-    interchangeable with an "esp"/"pico"/"esp-rollback" MAC. Refused (403)
-    the same way a wrong password is if auth fails, and ALSO refused (403,
+    ROUTE_TIER_ADMIN (the admin session http_auth.urlopen() carries) is the
+    only gate; the AP-password HMAC challenge/response this route used to
+    also require was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b). Refused
+    (401/403) for no/insufficient admin session, and ALSO refused (403,
     "board is not in recovery mode") if the board is not currently in
-    recovery mode -- that check runs AFTER auth on the board side
-    specifically so a caller who never proves they hold the AP password
-    cannot use this call to probe whether the board is in recovery mode (see
-    ota_recovery_exit_post_handler()'s doc comment for the full reasoning).
+    recovery mode (ota_recovery_exit_post_handler()'s doc comment).
 
     On success (200), the board is already rebooting from a short-lived
     background task -- this call returns as soon as the response arrives,
     it does NOT wait for the reboot to finish. Returns the parsed JSON body,
     {"ok": true, "status": "rebooting"}.
 
-    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/
     response-parsing are unit-tested with mocked HTTP only (see
     ota_http_client.py's module doc comment); no ESP32-S3 was available in
     this environment to actually trigger recovery mode and exit it.
     """
-    nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, "recovery").hex()
-
     req = urllib.request.Request(
         _url(host, "/api/ota/esp/recovery_exit"),
         data=b"",
@@ -604,7 +500,6 @@ def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIM
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": "0",
-            "X-Ota-Mac": mac_hex,
         },
     )
     log.info("OTA recovery-exit requested: host=%s", host)
@@ -635,7 +530,7 @@ def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIM
     return body
 
 
-def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def boot_guard_reset_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/boot_guard_reset -- the tool-driven half of
     docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's fix
     (App/drivers/http/ota_http_recovery.c's ota_boot_guard_reset_post_handler()).
@@ -653,14 +548,13 @@ def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_
     warned-about flash. A board that was just flashed with something broken
     must still be free to walk into recovery mode on its own.
 
-    Same challenge/MAC dance as recovery_exit_esp()/rollback_esp(), signed
-    over its own "boot-guard-reset" context (ota_state.h's
-    OTA_HTTP_CONTEXT_BOOT_GUARD_RESET) -- NOT interchangeable with any other
-    route's MAC. Unlike recovery_exit_esp(), the board does NOT need to be
-    in recovery mode for this to succeed (see that context's own doc
-    comment for why: the common case here is an ORDINARY, non-recovery-mode
-    board, specifically so it never has to reach recovery mode at all), and
-    the board does NOT reboot afterward -- its only effect is the NVS clear.
+    ROUTE_TIER_ADMIN (the admin session http_auth.urlopen() carries) is the
+    only gate; the AP-password HMAC challenge/response this route used to
+    also require was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b). Unlike
+    recovery_exit_esp(), the board does NOT need to be in recovery mode for
+    this to succeed (the common case here is an ORDINARY, non-recovery-mode
+    board), and the board does NOT reboot afterward -- its only effect is
+    the NVS clear.
 
     Returns the parsed JSON body, {"ok": bool, "boot_count": int}. `ok` is
     true only once the board's own read-back confirmed the clear actually
@@ -671,9 +565,6 @@ def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_
     return code of alone. A caller MUST check `ok`, not just that this call
     did not raise: a 200 with ok:false is not success.
     """
-    nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, "boot-guard-reset").hex()
-
     req = urllib.request.Request(
         _url(host, "/api/ota/esp/boot_guard_reset"),
         data=b"",
@@ -681,7 +572,6 @@ def boot_guard_reset_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": "0",
-            "X-Ota-Mac": mac_hex,
         },
     )
     log.info("OTA boot_guard_reset requested: host=%s", host)
@@ -740,7 +630,7 @@ def get_boot_guard_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dic
         raise OtaHttpError(f"/api/boot_guard response was not valid JSON: {body_text!r}") from exc
 
 
-def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def sw_reset(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/sw_reset -- reboot BOTH processors: this ESP32-S3, and (since
     8b0e799a) the RP2040 safety processor IN PLACE, same firmware slot, via
     the wire command SAFETY_CMD_REBOOT (0x29) relayed over the isolated UART
@@ -757,9 +647,9 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
     SAFETY_CMD_ROLLBACK must never be used for this: it boots the OTHER,
     possibly-refused bootloader slot, not the running one.
 
-    Same challenge/MAC dance as recovery_exit_esp()/rollback_esp(), signed
-    over its own "sw-reset" context (ota_http.h's OTA_HTTP_CONTEXT_SW_RESET)
-    -- NOT interchangeable with any other route's MAC.
+    ROUTE_TIER_ADMIN (the admin session http_auth.urlopen() carries) is the
+    only gate; the AP-password HMAC challenge/response this route used to
+    also require was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b).
 
     IMPORTANT -- this call reliably LATCHES an S6a (SAFETY_TRIP_MAIN_FAULT)
     trip on the safety processor: this ESP's isolated fault line to it goes
@@ -789,12 +679,9 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
     poll safety_get_diag()/get_fw_version() (boot_id) once the ESP is back up.
 
     NOT YET VERIFIED AGAINST REAL HARDWARE by this module's own test suite --
-    request construction/HMAC/response-parsing are unit-tested with mocked
-    HTTP only; see test_ota_http_client.py.
+    request construction/response-parsing are unit-tested with mocked HTTP
+    only; see test_ota_http_client.py.
     """
-    nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, "sw-reset").hex()
-
     req = urllib.request.Request(
         _url(host, "/api/sw_reset"),
         data=b"",
@@ -802,7 +689,6 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": "0",
-            "X-Ota-Mac": mac_hex,
         },
     )
     log.info("sw_reset requested: host=%s", host)
@@ -824,7 +710,7 @@ def sw_reset(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -
     return {"ok": True, "status_code": status_code, "detail": body_text}
 
 
-def format_cfgfs(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def format_cfgfs(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/cfgfs/format_confirm -- the operator confirmation that lets
     cfg_fs_mount.c actually erase and reformat the `cfg` LittleFS partition
     after it detected (at boot) that auto-formatting would silently discard
@@ -835,13 +721,12 @@ def format_cfgfs(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
     here, since it needs no auth and dashboard_http_client.get_cfgfs_status()
     already surfaces the same partition state).
 
-    Same challenge/MAC dance as sw_reset()/rollback_esp(), but signed over
-    the "factory-reset" context (OTA_HTTP_CONTEXT_FACTORY_RESET,
-    ota_state.h/ota_http.c) -- cfg_fs_format_http.c's format_confirm_post_
-    handler() deliberately reuses this context rather than minting its own
-    (see that file's own header comment), so a MAC already valid for POST
-    /api/factory_reset is also valid here, and vice versa; this is NOT a
-    reuse bug, it is the documented design.
+    ROUTE_TIER_ADMIN (the admin session http_auth.urlopen() carries) is the
+    only gate; the AP-password HMAC challenge/response this route used to
+    also require was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b) -- it
+    used to be signed over the same "factory-reset" context as POST
+    /api/factory_reset (cfg_fs_format_http.c's format_confirm_post_handler()
+    deliberately reused rather than minting its own), which is now moot.
 
     DESTRUCTIVE: on success this erases every file cfg_fs holds and remounts
     an empty filesystem. The response body is plain text (not JSON, same
@@ -852,12 +737,9 @@ def format_cfgfs(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
     call in this module.
 
     NOT YET VERIFIED AGAINST REAL HARDWARE by this module's own test suite
-    -- request construction/HMAC/response-parsing are unit-tested with
-    mocked HTTP only; see test_ota_http_client.py.
+    -- request construction/response-parsing are unit-tested with mocked
+    HTTP only; see test_ota_http_client.py.
     """
-    nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, "factory-reset").hex()
-
     req = urllib.request.Request(
         _url(host, "/api/cfgfs/format_confirm"),
         data=b"",
@@ -865,7 +747,6 @@ def format_cfgfs(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": "0",
-            "X-Ota-Mac": mac_hex,
         },
     )
     log.info("cfgfs format_confirm requested: host=%s", host)
@@ -928,13 +809,14 @@ def get_interlock(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
 
 def push_esp_image_unauthenticated(host: str, path: str,
                                     timeout: float = OTA_ESP_UPLOAD_TIMEOUT_S) -> OtaPushResult:
-    """OT-E09: POST /api/ota/esp with NO ``X-Ota-Mac`` header at all --
+    """OT-E09: POST /api/ota/esp with NO admin session cookie at all --
     confirms the board refuses an update pushed with no credential rather
     than silently accepting one because some other check (interlock, size)
     happened to be satisfied. Deliberately bypasses ``_push_image()``'s
-    challenge/HMAC dance entirely rather than sending a wrong MAC, since
-    the plan's own wording is "no credential" (a wrong-but-present MAC is
-    a different, already-covered code path in ota_http.c's authenticate()).
+    ``http_auth.urlopen()`` admin-session seam entirely rather than routing
+    through it, since a caller with that wrapper's environment credentials
+    set would otherwise auto-login and defeat the case (see the comment
+    below).
 
     A non-2xx response is reported the same way ``_push_image()`` does
     (`OtaPushResult(ok=False, ...)`) rather than raising, so callers can
@@ -982,13 +864,10 @@ def push_esp_image_unauthenticated(host: str, path: str,
 def push_esp_image_with_session(host: str, path: str, session_cookie: str,
                                  timeout: float = OTA_ESP_UPLOAD_TIMEOUT_S) -> OtaPushResult:
     """OT-E10: POST /api/ota/esp authenticated by a ``kiln_sid`` web-auth
-    session cookie instead of the AP-password challenge/HMAC -- per
-    ota_http.c's ``ota_http_check_auth()`` comment (around its
-    ``http_auth_policy_web_enabled()`` branch): once web auth is on,
-    ``kiln_http_register()``'s enforcement pre-handler has already required
-    a valid ADMIN session before this handler is ever reached, so the
-    AP-password challenge is retired for that request entirely -- no nonce
-    fetch, no ``X-Ota-Mac`` header, just the session cookie. A non-admin
+    session cookie -- the only auth this route has now that the AP-password
+    HMAC challenge/response scheme was retired 2026-09-29 (WEB_AUTH_PLAN.md
+    item 2b): ``kiln_http_register()``'s enforcement pre-handler requires a
+    valid ADMIN session before this handler is ever reached. A non-admin
     (``user``-tier) session is expected to be refused by that same
     pre-handler (403) before ever reaching ota_http.c's own logic, which is
     exactly what OT-E10 exercises by calling this twice, once per tier.

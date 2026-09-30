@@ -105,17 +105,20 @@
      shows this page's name ("Firmware Update", from <title> above) in the
      brand's old spot, so the heading was pure duplication. -->
 <p>Push a new image to the ESP32-S3 main controller or relay one to the RP2040
-safety processor over the isolated UART link. Both require the Wi-Fi AP
-password (Settings &rarr; Network) as the update key -- it is never sent to
-the board, only used locally in this page to sign each request.</p>
+safety processor over the isolated UART link. Every action below requires an
+administrator session (Settings &rarr; Security), the same as any other admin
+route.</p>
 
 <!-- boot_button.h: a long-press on the ESP32-S3's BOOT button, WHILE THE
-     BOARD IS RUNNING, opens a ~5 minute window that bypasses the AP-password
-     check on every route below -- see GET /api/status's boot_button_bypass_
-     active/boot_button_bypass_remaining_s fields (dashboard_http.c) and
-     boot_button.h's own header comment. This is the single most important
-     place in the whole web UI to show it: it directly changes what this
-     page's own auth is doing. Hidden (empty) when not active. -->
+     BOARD IS RUNNING, opens a ~5 minute window -- see GET /api/status's
+     boot_button_bypass_active/boot_button_bypass_remaining_s fields
+     (dashboard_http.c) and boot_button.h's own header comment. It used to
+     directly change what this page's own auth was doing (it suspended the
+     AP-password HMAC check); that scheme was retired 2026-09-29 and
+     ROUTE_TIER_ADMIN is now the only gate here, which the button press does
+     not affect -- this box is kept only so the physical-press recovery
+     window itself stays visible to an operator. Hidden (empty) when not
+     active. -->
 <div id="bootButtonBypassBox" class="blocker" style="display:none"></div>
 
 <h2>Kiln state</h2>
@@ -128,15 +131,7 @@ the board, only used locally in this page to sign each request.</p>
 <!-- TODO.md 9.6: "reachable only when the kiln is idle" -- the file
      picker/upload controls for BOTH processors are hidden entirely (not
      merely disabled) until loadInterlock() confirms idle, and re-hidden the
-     moment a later poll finds the kiln no longer idle. The password field
-     lives outside either picker since it's shared by both processors. -->
-<label for="apPassword">Wi-Fi AP password (update key)</label>
-<input type="password" id="apPassword" autocomplete="off">
-<p class="note">This proves you're on the network with the AP password --
-it does not stop anyone else who also knows it, and it can't stop a
-compromised ESP from pushing anything it likes to the safety processor
-(the ESP is the only thing authorising a Pico update): this password limits
-who can trigger an update, not what an already-authorized update can do.</p>
+     moment a later poll finds the kiln no longer idle. -->
 
 <!-- UPDATE_PROTOCOL.md sec 6a: "GUI states the order -- ESP first -- when
      both need updating." Both processors have no shared queue this page can
@@ -164,8 +159,8 @@ who can trigger an update, not what an already-authorized update can do.</p>
 </div>
 <!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
      see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
-     authenticated the same way as every other mutating OTA route (challenge
-     + HMAC over its own "recovery" context) -- App/drivers/http/ota_http.c's
+     authenticated the same way as every other mutating OTA route
+     (ROUTE_TIER_ADMIN) -- App/drivers/http/ota_http.c's
      ota_recovery_exit_post_handler() doc comment has the full reasoning. -->
 <div id="recoveryExitBox" class="blocker" style="display:none">
   This board is running in RECOVERY MODE (a recent update did not
@@ -195,29 +190,21 @@ who can trigger an update, not what an already-authorized update can do.</p>
 <p id="picoMsg" class="msg"></p>
 
 <script>
-/* ---- OTA challenge/response handshake ------------------------------------
- * Used to be a from-scratch, page-local pure-JS SHA-256/HMAC-SHA256
- * implementation (this page is served over plain HTTP -- no TLS cert, and
- * reachable from the fallback AP at 192.168.4.1 during first-boot
- * provisioning -- neither a "secure context" per spec, so window.crypto.subtle
- * is not available here). Moved to /app.js 2026-09-18 (owner report: the
- * Settings page's Reboot/factory-reset buttons needed the exact same
- * handshake and had no copy of it at all, so they always failed with
- * "missing or malformed X-Ota-Mac header") -- see app.js's own header
- * comment on kcOtaAuthedFetch for the full rationale and the derivation
- * (CommonFW/docs/UPDATE_PROTOCOL.md section 2 step 2). Valid context
- * strings, read off ota_http.c's ctx_str switch (ota_http_verify_request()):
- * "esp", "pico", "esp-rollback", "pico-rollback", "recovery"
- * (exit-recovery-mode), "factory-reset", "sw-reset" (no button on this page
- * sends it), and "boot-guard-reset" (PcTools-only, no web page sends it). */
+/* ---- OTA-family fetch -----------------------------------------------------
+ * This page used to sign every mutating request with an AP-password HMAC
+ * challenge/response handshake (CommonFW/docs/UPDATE_PROTOCOL.md section 2
+ * step 2, shared with app.js's kcOtaAuthedFetch, since 2026-09-18). That
+ * scheme was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b, owner decision
+ * "Retire; open when login off") -- ROUTE_TIER_ADMIN (the session cookie) is
+ * now the only gate on every route below, same as any other admin route. */
 
 /* ---- Fetch helpers ------------------------------------------------------ */
-function pushImage(endpoint, context, apPassword, fileBytes, extraHeaders) {
+function pushImage(endpoint, fileBytes, extraHeaders) {
   var headers = { 'Content-Type': 'application/octet-stream' };
   if (extraHeaders) {
     for (var k in extraHeaders) { if (extraHeaders.hasOwnProperty(k)) { headers[k] = extraHeaders[k]; } }
   }
-  return window.kcOtaAuthedFetch(endpoint, context, apPassword, {
+  return window.kcOtaAuthedFetch(endpoint, {
     method: 'POST',
     headers: headers,
     body: fileBytes,
@@ -437,12 +424,10 @@ function pollPicoStatus() {
 /* ---- Button wiring -------------------------------------------------------- */
 document.getElementById('espUpdateBtn').addEventListener('click', function () {
   var msg = document.getElementById('espMsg');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
   msg.textContent = 'Reading file…';
   readFileBytes(document.getElementById('espFile')).then(function (bytes) {
     msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
-    return pushImage('/api/ota/esp', 'esp', pw, bytes);
+    return pushImage('/api/ota/esp', bytes);
   }).then(function (body) {
     msg.textContent = 'ESP update accepted: ' + body.bytes + ' bytes written to ' + body.partition +
       ', version ' + body.version + '. Reboot the board to run it (stays PENDING_VERIFY until confirmed).';
@@ -455,12 +440,10 @@ document.getElementById('espUpdateBtn').addEventListener('click', function () {
 
 document.getElementById('espRollbackBtn').addEventListener('click', function () {
   var msg = document.getElementById('espMsg');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
   window.kcConfirm('Roll back the ESP to its previous image and reboot now?').then(function (ok) {
     if (!ok) throw { __kcHandled: true };
     msg.textContent = 'Requesting rollback…';
-    return window.kcOtaAuthedFetch('/api/ota/esp/rollback', 'esp-rollback', pw, {
+    return window.kcOtaAuthedFetch('/api/ota/esp/rollback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: new Uint8Array(0),
@@ -515,13 +498,11 @@ function pollPicoRollbackStatus() {
 
 document.getElementById('picoRollbackBtn').addEventListener('click', function () {
   var msg = document.getElementById('picoMsg');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
   window.kcConfirm('Roll back the SAFETY PROCESSOR (Pico) to its previous image and reboot it now? ' +
                'This reboots the safety processor mid-session.').then(function (ok) {
     if (!ok) throw { __kcHandled: true };
     msg.textContent = 'Requesting rollback…';
-    return window.kcOtaAuthedFetch('/api/ota/pico/rollback', 'pico-rollback', pw, {
+    return window.kcOtaAuthedFetch('/api/ota/pico/rollback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: new Uint8Array(0),
@@ -547,12 +528,10 @@ document.getElementById('picoRollbackBtn').addEventListener('click', function ()
 
 document.getElementById('recoveryExitBtn').addEventListener('click', function () {
   var msg = document.getElementById('espMsg');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
   window.kcConfirm('Reboot the board now to exit recovery mode?').then(function (ok) {
     if (!ok) throw { __kcHandled: true };
     msg.textContent = 'Requesting recovery-mode exit…';
-    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_exit', 'recovery', pw, {
+    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_exit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: new Uint8Array(0),
@@ -580,12 +559,10 @@ document.getElementById('recoveryExitBtn').addEventListener('click', function ()
 // side half: catch that specific refusal, show an in-page, theme-following
 // confirmation (#forceProtoModal, confirmForceProtocol() below) naming both
 // protocol versions, and only on an explicit "Relay anyway" retry the SAME
-// upload with the force header set. The retry goes through pushImage() ->
-// kcOtaAuthedFetch() again, so it fetches a fresh challenge and re-derives
-// X-Ota-Mac rather than replaying the first request's spent nonce. Any OTHER failure (wrong password, staging error,
-// a plain non-JSON body) falls through to the ordinary catch below
-// unchanged -- this only special-cases the one 409 shape this route emits
-// for a protocol mismatch specifically.
+// upload with the force header set. Any OTHER failure (staging error, a
+// plain non-JSON body) falls through to the ordinary catch below unchanged
+// -- this only special-cases the one 409 shape this route emits for a
+// protocol mismatch specifically.
 function isProtocolMismatch(e) {
   return e && e.status === 409 && e.body && e.body.error === 'protocol_version_mismatch';
 }
@@ -603,14 +580,12 @@ function confirmForceProtocol(paragraphs) {
 
 document.getElementById('picoUpdateBtn').addEventListener('click', function () {
   var msg = document.getElementById('picoMsg');
-  var pw = document.getElementById('apPassword').value;
-  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
   msg.textContent = 'Reading file…';
   var fileBytes;
   readFileBytes(document.getElementById('picoFile')).then(function (bytes) {
     fileBytes = bytes;
     msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
-    return pushImage('/api/ota/pico', 'pico', pw, bytes);
+    return pushImage('/api/ota/pico', bytes);
   }).catch(function (e) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) throw e;
     if (!isProtocolMismatch(e)) throw e;
@@ -629,7 +604,7 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
         throw { __kcHandled: true };
       }
       msg.textContent = 'Confirmed -- retrying with the protocol mismatch forced…';
-      return pushImage('/api/ota/pico', 'pico', pw, fileBytes, { 'X-Ota-Force-Version': '1' });
+      return pushImage('/api/ota/pico', fileBytes, { 'X-Ota-Force-Version': '1' });
     });
   }).then(function (body) {
     msg.textContent = 'Pico image staged (' + body.bytes + ' bytes, crc32 ' + body.crc32 +

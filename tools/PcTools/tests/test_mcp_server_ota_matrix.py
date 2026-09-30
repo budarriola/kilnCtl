@@ -201,9 +201,12 @@ class OtaMatrixRunConfirmGateTest(unittest.TestCase):
 
 
 class OtaMatrixRunConfirmedPassthroughTest(unittest.TestCase):
-    """confirm=True must reach `_run_ota_matrix` with host/ap_password/the
-    new image parameters threaded through, and allow_flash must no longer
-    exist at all (suite ota has no case that reads it)."""
+    """confirm=True must reach `_run_ota_matrix` with host/the image
+    parameters threaded through, and allow_flash must no longer exist at all
+    (suite ota has no case that reads it). 2026-09-29: every route this
+    matrix drives is ROUTE_TIER_ADMIN only -- the AP-password HMAC these
+    routes used to ALSO require was retired, so there is no `ap_password`
+    parameter or ctx key any more."""
 
     def test_context_passthrough(self):
         captured = {}
@@ -217,14 +220,14 @@ class OtaMatrixRunConfirmedPassthroughTest(unittest.TestCase):
 
         with mock.patch.object(M, "_run_ota_matrix", side_effect=fake_run):
             result = M.ota_matrix_run(
-                confirm=True, host="10.0.0.5", ap_password="secret", tag="mytag",
+                confirm=True, host="10.0.0.5", tag="mytag",
                 cases="OT-B01", allow_heat=True, ota_image_path="/tmp/x.bin",
                 ota_pico_image_path="/tmp/y.bin", ota_pico_image_commit="abc123",
             )
         self.assertEqual(result, "ok")
         ctx = captured["ctx"]
         self.assertEqual(ctx["host"], "10.0.0.5")
-        self.assertEqual(ctx["ap_password"], "secret")
+        self.assertNotIn("ap_password", ctx)
         self.assertEqual(ctx["ota_image_path"], "/tmp/x.bin")
         self.assertEqual(ctx["ota_pico_image_path"], "/tmp/y.bin")
         self.assertEqual(ctx["ota_pico_image_commit"], "abc123")
@@ -238,19 +241,26 @@ class OtaMatrixRunConfirmedPassthroughTest(unittest.TestCase):
         sig = inspect.signature(M.ota_matrix_run)
         self.assertNotIn("allow_flash", sig.parameters)
 
-    def test_ap_password_falls_back_to_env_and_is_never_echoed(self):
+    def test_no_ap_password_parameter(self):
+        import inspect
+        sig = inspect.signature(M.ota_matrix_run)
+        self.assertNotIn("ap_password", sig.parameters)
+
+    def test_host_falls_back_to_resolver_when_omitted(self):
         captured = {}
 
         def fake_run(ctx, cases, tag, allow_heat, logs_root=None):
             captured["ctx"] = ctx
             return "ok"
 
-        with mock.patch.dict(os.environ, {"KILNCTL_AP_PASSWORD": "env-secret"}):
+        with mock.patch.object(M._ota_tool, "_ota_resolve_host_with_source",
+                                return_value=("192.168.4.1", "default")):
             with mock.patch.object(M, "_run_ota_matrix", side_effect=fake_run):
                 result = M.ota_matrix_run(confirm=True)
-        self.assertEqual(captured["ctx"]["ap_password"], "env-secret")
-        self.assertTrue(captured["ctx"]["ap_password_available"])
-        self.assertNotIn("env-secret", result)
+        self.assertEqual(captured["ctx"]["host"], "192.168.4.1")
+        self.assertEqual(captured["ctx"]["host_source"], "default")
+        self.assertNotIn("ap_password", captured["ctx"])
+        self.assertEqual(result, "ok")
 
 
 class RunLevelPreflightTest(unittest.TestCase):
@@ -353,7 +363,7 @@ class RunOtaMatrixTest(unittest.TestCase):
         self.fake_srv = _FakeSrv()
         self.cp_report = _FakeCapabilityPreflightReport(ok=True)
         self.ctx = {
-            "srv": self.fake_srv, "host": None, "ap_password": None,
+            "srv": self.fake_srv, "host": None,
             "gpio_test_preflight_fn": _ok_gpio_preflight,
             "resolve_host_fn": lambda host: host,
             "capability_preflight_run": lambda preset, host: self.cp_report,

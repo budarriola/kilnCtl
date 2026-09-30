@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Unit tests for kilnctrl.ota_http_client -- request construction, HMAC
-signing, and response parsing, all against MOCKED urllib responses. No real
-socket and no live board is used or required.
+"""Unit tests for kilnctrl.ota_http_client -- request construction and
+response parsing, all against MOCKED urllib responses. No real socket and no
+live board is used or required.
+
+Every route in this module used to also require an AP-password HMAC
+challenge/response handshake on top of ROUTE_TIER_ADMIN; that scheme was
+retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open
+when login off"). These tests confirm the CURRENT contract: every write
+route posts through ``http_auth.urlopen()`` (mocked here the same as a plain
+``urllib.request.urlopen`` call, since these tests never exercise
+http_auth's own login/retry logic) with no nonce, no MAC, no X-Ota-Mac
+header -- and that no credential parameter is accepted any more.
 
 These tests do NOT exercise ota_http.c on real hardware -- they only check
 that this PC-side client builds the request the firmware documents
 (ota_http.h/.c) and parses the firmware's documented response shapes
-correctly. Live-board verification (does the real ESP actually accept these
-bytes, does the challenge/lockout/interlock state machine behave as
-expected end to end) is still outstanding -- see ROADMAP.md M8 / TODO.md 9.6.
+correctly. Live-board verification is still outstanding -- see ROADMAP.md
+M8 / TODO.md 9.6.
 
 Run with: python -m unittest discover -s tools/PcTools/tests
 """
 from __future__ import annotations
 
 import hashlib
-import hmac
 import io
 import json
 import os
@@ -44,56 +51,6 @@ def _fake_response(body: bytes, status: int = 200):
     return _Ctx()
 
 
-class DeriveMacTest(unittest.TestCase):
-    def test_matches_manual_double_hmac(self):
-        nonce = bytes(range(16))
-        expected_key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
-        expected = hmac.new(expected_key, nonce + b"esp", hashlib.sha256).digest()
-        self.assertEqual(ota.derive_mac("hunter2", nonce, "esp"), expected)
-
-    def test_esp_and_pico_contexts_diverge(self):
-        nonce = bytes(range(16))
-        mac_esp = ota.derive_mac("pw", nonce, "esp")
-        mac_pico = ota.derive_mac("pw", nonce, "pico")
-        self.assertNotEqual(mac_esp, mac_pico)
-
-    def test_rejects_bad_context(self):
-        with self.assertRaises(ValueError):
-            ota.derive_mac("pw", bytes(16), "esp32")
-
-
-class GetChallengeTest(unittest.TestCase):
-    def test_parses_nonce_hex(self):
-        nonce_hex = "00" * 16
-        body = json.dumps({"nonce": nonce_hex}).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
-                                         return_value=_fake_response(body)):
-            nonce = ota.get_challenge("192.168.4.1")
-        self.assertEqual(nonce, bytes(16))
-
-    def test_rejects_wrong_length_nonce(self):
-        body = json.dumps({"nonce": "aa"}).encode()  # 1 byte, not 16
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
-                                         return_value=_fake_response(body)):
-            with self.assertRaises(ota.OtaHttpError):
-                ota.get_challenge("192.168.4.1")
-
-    def test_rejects_non_json_body(self):
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
-                                         return_value=_fake_response(b"not json")):
-            with self.assertRaises(ota.OtaHttpError):
-                ota.get_challenge("192.168.4.1")
-
-    def test_http_error_surfaces_status_and_detail(self):
-        err = urllib.error.HTTPError("http://x/api/ota/challenge", 500, "boom",
-                                      hdrs=None, fp=io.BytesIO(b"internal error"))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
-            with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.get_challenge("192.168.4.1")
-        self.assertEqual(ctx.exception.status, 500)
-        self.assertIn("internal error", ctx.exception.detail)
-
-
 class PushImageTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
@@ -101,70 +58,45 @@ class PushImageTest(unittest.TestCase):
         self.tmp.close()
         self.addCleanup(os.unlink, self.tmp.name)
 
-    def _mock_challenge_then(self, post_response, post_side_effect=None):
-        challenge_body = json.dumps({"nonce": "11" * 16}).encode()
-
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            if post_side_effect is not None:
-                raise post_side_effect
-            return post_response
-
-        return fake_urlopen, calls
-
-    def test_push_esp_image_sends_mac_header_and_parses_result(self):
+    def test_push_esp_image_sends_no_credential_and_parses_result(self):
         ok_body = json.dumps({"ok": True, "bytes": 17, "partition": "ota_0",
                                "version": "1.2.3"}).encode()
-        challenge_body = json.dumps({"nonce": "11" * 16}).encode()
-
-        calls = {"n": 0}
         captured_req = {}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
             captured_req["req"] = req
             return _fake_response(ok_body)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.push_esp_image("kiln.local", self.tmp.name, "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.push_esp_image("kiln.local", self.tmp.name)
 
         self.assertTrue(result.ok)
         self.assertEqual(result.body["version"], "1.2.3")
         req = captured_req["req"]
         self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp")
-        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
-        self.assertIsNotNone(mac_header)
-        self.assertEqual(len(mac_header), 64)
-        # Must match a manually-derived MAC over the same nonce/context.
-        expected = ota.derive_mac("hunter2", bytes.fromhex("11" * 16), "esp").hex()
-        self.assertEqual(mac_header, expected)
+        self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
+        self.assertIsNone(req.headers.get("X-ota-nonce") or req.headers.get("X-Ota-nonce"))
 
     def test_push_pico_image_reports_202_relay_started(self):
         accepted_body = json.dumps({"ok": True, "status": "relay_started", "bytes": 17,
                                      "crc32": "0xdeadbeef"}).encode()
-        fake_urlopen, _ = self._mock_challenge_then(_fake_response(accepted_body, status=202))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
-            result = ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
+                                         return_value=_fake_response(accepted_body, status=202)):
+            result = ota.push_pico_image("kiln.local", self.tmp.name)
         self.assertTrue(result.ok)
         self.assertEqual(result.status_code, 202)
         self.assertEqual(result.body["status"], "relay_started")
 
     def test_push_refuses_missing_file(self):
         with self.assertRaises(ota.OtaHttpError):
-            ota.push_esp_image("kiln.local", "/no/such/file.bin", "hunter2")
+            ota.push_esp_image("kiln.local", "/no/such/file.bin")
 
     def test_push_refuses_empty_file(self):
         empty = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
         empty.close()
         self.addCleanup(os.unlink, empty.name)
         with self.assertRaises(ota.OtaHttpError):
-            ota.push_esp_image("kiln.local", empty.name, "hunter2")
+            ota.push_esp_image("kiln.local", empty.name)
 
     def test_push_surfaces_409_interlock_refusal_as_plain_text(self):
         """ota_http.c sends 409 Conflict as PLAIN TEXT (httpd_resp_send),
@@ -173,22 +105,20 @@ class PushImageTest(unittest.TestCase):
         err = urllib.error.HTTPError(
             "http://x/api/ota/esp", 409, "Conflict", hdrs=None,
             fp=io.BytesIO(b"zone 2 is at 340 C"))
-        fake_urlopen, _ = self._mock_challenge_then(None, post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.push_esp_image("kiln.local", self.tmp.name, "hunter2")
+                ota.push_esp_image("kiln.local", self.tmp.name)
         self.assertEqual(ctx.exception.status, 409)
         self.assertIn("zone 2 is at 340 C", ctx.exception.detail)
 
-    def test_push_surfaces_403_wrong_password(self):
+    def test_push_surfaces_401_no_session(self):
         err = urllib.error.HTTPError(
-            "http://x/api/ota/esp", 403, "Forbidden", hdrs=None,
-            fp=io.BytesIO(b"wrong password"))
-        fake_urlopen, _ = self._mock_challenge_then(None, post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            "http://x/api/ota/esp", 401, "Unauthorized", hdrs=None,
+            fp=io.BytesIO(b"admin session required"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
-        self.assertEqual(ctx.exception.status, 403)
+                ota.push_pico_image("kiln.local", self.tmp.name)
+        self.assertEqual(ctx.exception.status, 401)
 
     def test_push_pico_image_raises_typed_error_on_protocol_version_mismatch(self):
         """TODO.md 9.4: ota_http_pico.c refuses with 409 JSON, not the plain
@@ -200,10 +130,9 @@ class PushImageTest(unittest.TestCase):
         err = urllib.error.HTTPError(
             "http://x/api/ota/pico", 409, "Conflict", hdrs=None,
             fp=io.BytesIO(detail.encode()))
-        fake_urlopen, _ = self._mock_challenge_then(None, post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaPicoProtocolVersionMismatch) as ctx:
-                ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
+                ota.push_pico_image("kiln.local", self.tmp.name)
         self.assertEqual(ctx.exception.status, 409)
         self.assertEqual(ctx.exception.image_protocol_version, 11)
         self.assertEqual(ctx.exception.esp_protocol_version, 16)
@@ -212,17 +141,13 @@ class PushImageTest(unittest.TestCase):
         accepted_body = json.dumps({"ok": True, "status": "relay_started", "bytes": 17,
                                      "crc32": "0xdeadbeef"}).encode()
         captured_req = {}
-        calls = {"n": 0}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(json.dumps({"nonce": "11" * 16}).encode())
             captured_req["req"] = req
             return _fake_response(accepted_body, status=202)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            ota.push_pico_image("kiln.local", self.tmp.name, "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            ota.push_pico_image("kiln.local", self.tmp.name)
         req = captured_req["req"]
         self.assertIsNone(req.headers.get("X-ota-force-version") or req.headers.get("X-Ota-force-version"))
 
@@ -230,17 +155,13 @@ class PushImageTest(unittest.TestCase):
         accepted_body = json.dumps({"ok": True, "status": "relay_started", "bytes": 17,
                                      "crc32": "0xdeadbeef"}).encode()
         captured_req = {}
-        calls = {"n": 0}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(json.dumps({"nonce": "11" * 16}).encode())
             captured_req["req"] = req
             return _fake_response(accepted_body, status=202)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.push_pico_image("kiln.local", self.tmp.name, "hunter2", force_version=True)
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.push_pico_image("kiln.local", self.tmp.name, force_version=True)
         self.assertTrue(result.ok)
         req = captured_req["req"]
         header = req.headers.get("X-ota-force-version") or req.headers.get("X-Ota-force-version")
@@ -251,7 +172,7 @@ class GetPicoStatusTest(unittest.TestCase):
     def test_parses_status_json(self):
         body = json.dumps({"phase": "sending", "percent": 42,
                             "last_error": ""}).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
                                          return_value=_fake_response(body)):
             status = ota.get_pico_status("kiln.local")
         self.assertEqual(status["phase"], "sending")
@@ -259,7 +180,7 @@ class GetPicoStatusTest(unittest.TestCase):
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
                 ota.get_pico_status("192.0.2.1")
 
@@ -267,7 +188,7 @@ class GetPicoStatusTest(unittest.TestCase):
 class GetEspStatusTest(unittest.TestCase):
     def test_parses_status_json_with_no_last_update(self):
         body = json.dumps({"phase": "idle", "percent": 0, "last_update": None}).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
                                          return_value=_fake_response(body)):
             status = ota.get_esp_status("kiln.local")
         self.assertEqual(status["phase"], "idle")
@@ -286,7 +207,7 @@ class GetEspStatusTest(unittest.TestCase):
                 "uptime_s": 1234,
             },
         }).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
                                          return_value=_fake_response(body)):
             status = ota.get_esp_status("kiln.local")
         self.assertEqual(status["phase"], "done")
@@ -295,341 +216,196 @@ class GetEspStatusTest(unittest.TestCase):
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
                 ota.get_esp_status("192.0.2.1")
 
     def test_rejects_non_json_body(self):
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
                                          return_value=_fake_response(b"not json")):
             with self.assertRaises(ota.OtaHttpError):
                 ota.get_esp_status("kiln.local")
 
 
 class RollbackEspTest(unittest.TestCase):
-    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
-        challenge_body = json.dumps({"nonce": "22" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            if post_side_effect is not None:
-                raise post_side_effect
-            return post_response
-
-        return fake_urlopen, calls
-
-    def test_sends_rollback_context_mac_and_empty_body(self):
+    def test_sends_empty_body_no_credential(self):
         ok_body = json.dumps({"ok": True, "status": "rebooting",
                                "version_before": "1.2.3"}).encode()
-        challenge_body = json.dumps({"nonce": "22" * 16}).encode()
-
-        calls = {"n": 0}
         captured_req = {}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
             captured_req["req"] = req
             return _fake_response(ok_body)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.rollback_esp("kiln.local", "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.rollback_esp("kiln.local")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["version_before"], "1.2.3")
         req = captured_req["req"]
         self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp/rollback")
         self.assertEqual(req.data, b"")
-        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
-        self.assertIsNotNone(mac_header)
-        self.assertEqual(len(mac_header), 64)
-        # Must be signed over the "esp-rollback" context, NOT "esp" -- a
-        # plain update MAC must not double as rollback authorization.
-        expected = ota.derive_mac("hunter2", bytes.fromhex("22" * 16), "esp-rollback").hex()
-        self.assertEqual(mac_header, expected)
-        not_esp_context = ota.derive_mac("hunter2", bytes.fromhex("22" * 16), "esp").hex()
-        self.assertNotEqual(mac_header, not_esp_context)
+        self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
 
     def test_surfaces_409_no_previous_image_refusal(self):
         err = urllib.error.HTTPError(
             "http://x/api/ota/esp/rollback", 409, "Conflict", hdrs=None,
             fp=io.BytesIO(b"no previous valid image to roll back to"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.rollback_esp("kiln.local", "hunter2")
+                ota.rollback_esp("kiln.local")
         self.assertEqual(ctx.exception.status, 409)
         self.assertIn("no previous valid image to roll back to", ctx.exception.detail)
 
-    def test_surfaces_403_wrong_password(self):
+    def test_surfaces_401_no_session(self):
         err = urllib.error.HTTPError(
-            "http://x/api/ota/esp/rollback", 403, "Forbidden", hdrs=None,
-            fp=io.BytesIO(b"wrong password"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            "http://x/api/ota/esp/rollback", 401, "Unauthorized", hdrs=None,
+            fp=io.BytesIO(b"admin session required"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.rollback_esp("kiln.local", "hunter2")
-        self.assertEqual(ctx.exception.status, 403)
+                ota.rollback_esp("kiln.local")
+        self.assertEqual(ctx.exception.status, 401)
 
     def test_surfaces_409_interlock_refusal(self):
         err = urllib.error.HTTPError(
             "http://x/api/ota/esp/rollback", 409, "Conflict", hdrs=None,
             fp=io.BytesIO(b"zone 2 is at 340 C"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.rollback_esp("kiln.local", "hunter2")
+                ota.rollback_esp("kiln.local")
         self.assertEqual(ctx.exception.status, 409)
         self.assertIn("zone 2 is at 340 C", ctx.exception.detail)
 
     def test_rejects_non_json_response(self):
-        fake_urlopen, _ = self._mock_challenge_then(_fake_response(b"not json"))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
+                                         return_value=_fake_response(b"not json")):
             with self.assertRaises(ota.OtaHttpError):
-                ota.rollback_esp("kiln.local", "hunter2")
+                ota.rollback_esp("kiln.local")
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
-                ota.rollback_esp("192.0.2.1", "hunter2")
-
-
-class DeriveMacRollbackContextTest(unittest.TestCase):
-    def test_matches_manual_double_hmac(self):
-        nonce = bytes(range(16))
-        expected_key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
-        expected = hmac.new(expected_key, nonce + b"esp-rollback", hashlib.sha256).digest()
-        self.assertEqual(ota.derive_mac("hunter2", nonce, "esp-rollback"), expected)
-
-    def test_three_contexts_all_diverge(self):
-        nonce = bytes(range(16))
-        mac_esp = ota.derive_mac("pw", nonce, "esp")
-        mac_pico = ota.derive_mac("pw", nonce, "pico")
-        mac_rollback = ota.derive_mac("pw", nonce, "esp-rollback")
-        self.assertEqual(len({mac_esp, mac_pico, mac_rollback}), 3)
-
-
-class DeriveMacRecoveryContextTest(unittest.TestCase):
-    def test_matches_manual_double_hmac(self):
-        nonce = bytes(range(16))
-        expected_key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
-        expected = hmac.new(expected_key, nonce + b"recovery", hashlib.sha256).digest()
-        self.assertEqual(ota.derive_mac("hunter2", nonce, "recovery"), expected)
-
-    def test_all_four_contexts_diverge(self):
-        # The whole point of a per-action HMAC context is that a MAC
-        # computed for one action must never be accepted for another --
-        # this is what would silently break if recovery_exit's handler ever
-        # reused (say) the "esp" context string instead of its own
-        # "recovery" one. len(set(...)) == 4 fails immediately if any two
-        # collide.
-        nonce = bytes(range(16))
-        mac_esp = ota.derive_mac("pw", nonce, "esp")
-        mac_pico = ota.derive_mac("pw", nonce, "pico")
-        mac_rollback = ota.derive_mac("pw", nonce, "esp-rollback")
-        mac_recovery = ota.derive_mac("pw", nonce, "recovery")
-        self.assertEqual(len({mac_esp, mac_pico, mac_rollback, mac_recovery}), 4)
-
-    def test_recovery_mac_not_accepted_as_rollback_mac(self):
-        """The specific negative case ROADMAP/CLAUDE.md's 'prove it can
-        fail' rule asks for: a MAC signed over 'recovery' must not equal one
-        signed over 'esp-rollback' for the same nonce/password -- if
-        recovery_exit's context string were ever accidentally set to
-        'esp-rollback' (reusing OTA_HTTP_CONTEXT_ESP_ROLLBACK instead of its
-        own context), this assertion is what would catch it."""
-        nonce = bytes(range(16))
-        mac_recovery = ota.derive_mac("pw", nonce, "recovery")
-        mac_rollback = ota.derive_mac("pw", nonce, "esp-rollback")
-        self.assertNotEqual(mac_recovery, mac_rollback)
-
-    def test_rejects_old_three_context_only_error_message(self):
-        with self.assertRaises(ValueError):
-            ota.derive_mac("pw", bytes(16), "not-a-real-context")
+                ota.rollback_esp("192.0.2.1")
 
 
 class RecoveryExitEspTest(unittest.TestCase):
-    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
-        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            if post_side_effect is not None:
-                raise post_side_effect
-            return post_response
-
-        return fake_urlopen, calls
-
-    def test_sends_recovery_context_mac_and_empty_body(self):
+    def test_sends_empty_body_no_credential(self):
         ok_body = json.dumps({"ok": True, "status": "rebooting"}).encode()
-        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
-
-        calls = {"n": 0}
         captured_req = {}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
             captured_req["req"] = req
             return _fake_response(ok_body)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.recovery_exit_esp("kiln.local", "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.recovery_exit_esp("kiln.local")
 
         self.assertTrue(result["ok"])
         req = captured_req["req"]
         self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp/recovery_exit")
         self.assertEqual(req.data, b"")
-        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
-        self.assertIsNotNone(mac_header)
-        self.assertEqual(len(mac_header), 64)
-        # Must be signed over the "recovery" context, NOT "esp"/"esp-rollback"/
-        # "pico" -- a MAC for any of those other actions must not double as
-        # authorization for recovery-mode exit.
-        expected = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "recovery").hex()
-        self.assertEqual(mac_header, expected)
-        not_rollback_context = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "esp-rollback").hex()
-        self.assertNotEqual(mac_header, not_rollback_context)
+        self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
 
     def test_surfaces_403_not_in_recovery_mode(self):
         err = urllib.error.HTTPError(
             "http://x/api/ota/esp/recovery_exit", 403, "Forbidden", hdrs=None,
             fp=io.BytesIO(b"board is not in recovery mode"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.recovery_exit_esp("kiln.local", "hunter2")
+                ota.recovery_exit_esp("kiln.local")
         self.assertEqual(ctx.exception.status, 403)
         self.assertIn("board is not in recovery mode", ctx.exception.detail)
 
-    def test_surfaces_403_wrong_password(self):
+    def test_surfaces_401_no_session(self):
         err = urllib.error.HTTPError(
-            "http://x/api/ota/esp/recovery_exit", 403, "Forbidden", hdrs=None,
-            fp=io.BytesIO(b"wrong password"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            "http://x/api/ota/esp/recovery_exit", 401, "Unauthorized", hdrs=None,
+            fp=io.BytesIO(b"admin session required"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.recovery_exit_esp("kiln.local", "hunter2")
-        self.assertEqual(ctx.exception.status, 403)
+                ota.recovery_exit_esp("kiln.local")
+        self.assertEqual(ctx.exception.status, 401)
 
     def test_rejects_non_json_response(self):
-        fake_urlopen, _ = self._mock_challenge_then(_fake_response(b"not json"))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
+                                         return_value=_fake_response(b"not json")):
             with self.assertRaises(ota.OtaHttpError):
-                ota.recovery_exit_esp("kiln.local", "hunter2")
+                ota.recovery_exit_esp("kiln.local")
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
-                ota.recovery_exit_esp("192.0.2.1", "hunter2")
+                ota.recovery_exit_esp("192.0.2.1")
 
 
 class BootGuardResetEspTest(unittest.TestCase):
     """docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's
     tool-driven trigger -- POST /api/ota/esp/boot_guard_reset."""
 
-    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
-        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            if post_side_effect is not None:
-                raise post_side_effect
-            return post_response
-
-        return fake_urlopen, calls
-
-    def test_sends_boot_guard_reset_context_mac_and_empty_body(self):
+    def test_sends_empty_body_no_credential(self):
         ok_body = json.dumps({"ok": True, "boot_count": 0}).encode()
-        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
-
-        calls = {"n": 0}
         captured_req = {}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
             captured_req["req"] = req
             return _fake_response(ok_body)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.boot_guard_reset_esp("kiln.local", "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.boot_guard_reset_esp("kiln.local")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["boot_count"], 0)
         req = captured_req["req"]
         self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp/boot_guard_reset")
         self.assertEqual(req.data, b"")
-        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
-        self.assertIsNotNone(mac_header)
-        self.assertEqual(len(mac_header), 64)
-        # Signed over its own "boot-guard-reset" context -- NOT interchangeable
-        # with "recovery"/"esp-rollback"/"sw-reset"/any other route's MAC.
-        expected = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "boot-guard-reset").hex()
-        self.assertEqual(mac_header, expected)
-        not_recovery_context = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "recovery").hex()
-        self.assertNotEqual(mac_header, not_recovery_context)
+        self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
 
     def test_reports_ok_false_without_raising(self):
         """A lying-write on the board (verified=false) is a normal 200
         response, not an HTTP error -- the caller must check `ok` in the
         body, and this client must not swallow or misreport it."""
         unverified_body = json.dumps({"ok": False, "boot_count": 2}).encode()
-        fake_urlopen, _ = self._mock_challenge_then(_fake_response(unverified_body))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
-            result = ota.boot_guard_reset_esp("kiln.local", "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
+                                         return_value=_fake_response(unverified_body)):
+            result = ota.boot_guard_reset_esp("kiln.local")
         self.assertFalse(result["ok"])
         self.assertEqual(result["boot_count"], 2)
 
-    def test_surfaces_403_wrong_password(self):
+    def test_surfaces_401_no_session(self):
         err = urllib.error.HTTPError(
-            "http://x/api/ota/esp/boot_guard_reset", 403, "Forbidden", hdrs=None,
-            fp=io.BytesIO(b"wrong password"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            "http://x/api/ota/esp/boot_guard_reset", 401, "Unauthorized", hdrs=None,
+            fp=io.BytesIO(b"admin session required"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.boot_guard_reset_esp("kiln.local", "hunter2")
-        self.assertEqual(ctx.exception.status, 403)
+                ota.boot_guard_reset_esp("kiln.local")
+        self.assertEqual(ctx.exception.status, 401)
 
     def test_rejects_non_json_response(self):
-        fake_urlopen, _ = self._mock_challenge_then(_fake_response(b"not json"))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
+                                         return_value=_fake_response(b"not json")):
             with self.assertRaises(ota.OtaHttpError):
-                ota.boot_guard_reset_esp("kiln.local", "hunter2")
+                ota.boot_guard_reset_esp("kiln.local")
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
-                ota.boot_guard_reset_esp("192.0.2.1", "hunter2")
+                ota.boot_guard_reset_esp("192.0.2.1")
 
 
 class GetBootGuardStatusTest(unittest.TestCase):
-    """GET /api/boot_guard -- unauthenticated diagnostics follow-up."""
+    """GET /api/boot_guard -- admin-session-authenticated diagnostics."""
 
     def test_parses_count_and_recovery_mode(self):
         body = json.dumps({"boot_count": 3, "recovery_mode": True}).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(body)):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", return_value=_fake_response(body)):
             result = ota.get_boot_guard_status("kiln.local")
         self.assertEqual(result["boot_count"], 3)
         self.assertTrue(result["recovery_mode"])
 
-    def test_no_challenge_fetched_first(self):
-        """Unlike the mutating routes, this is a plain unauthenticated GET
-        -- no nonce/HMAC dance, so exactly one urlopen call."""
+    def test_single_call_no_challenge(self):
+        """No nonce/HMAC dance any more -- exactly one urlopen call."""
         body = json.dumps({"boot_count": 0, "recovery_mode": False}).encode()
         calls = {"n": 0}
 
@@ -637,22 +413,20 @@ class GetBootGuardStatusTest(unittest.TestCase):
             calls["n"] += 1
             return _fake_response(body)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
             ota.get_boot_guard_status("kiln.local")
         self.assertEqual(calls["n"], 1)
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
                 ota.get_boot_guard_status("192.0.2.1")
 
 
 class PushImageLoggingTest(unittest.TestCase):
     """TODO.md: 'Every call logged with the image's SHA-256, and refusals
-    logged too' / 'The password is never written to the log'."""
-
-    SECRET = "correct-horse-battery-staple"
+    logged too'."""
 
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
@@ -662,64 +436,47 @@ class PushImageLoggingTest(unittest.TestCase):
         self.addCleanup(os.unlink, self.tmp.name)
         self.expected_sha256 = hashlib.sha256(self.image_bytes).hexdigest()
 
-    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
-        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            if post_side_effect is not None:
-                raise post_side_effect
-            return post_response
-
-        return fake_urlopen
-
-    def test_successful_push_logs_sha256_and_never_the_password(self):
+    def test_successful_push_logs_sha256(self):
         ok_body = json.dumps({"ok": True, "bytes": 29, "partition": "ota_0",
                                "version": "1.2.3"}).encode()
-        fake_urlopen = self._mock_challenge_then(_fake_response(ok_body))
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen",
+                                         return_value=_fake_response(ok_body)):
             with self.assertLogs(ota.log, level="INFO") as cm:
-                ota.push_esp_image("kiln.local", self.tmp.name, self.SECRET)
+                ota.push_esp_image("kiln.local", self.tmp.name)
         all_output = "\n".join(cm.output)
         self.assertIn(self.expected_sha256, all_output)
-        self.assertNotIn(self.SECRET, all_output)
 
-    def test_refusal_is_logged_with_sha256_and_never_the_password(self):
+    def test_refusal_is_logged_with_sha256(self):
         """A refused push must leave a record too -- not just successes."""
         err = urllib.error.HTTPError(
             "http://x/api/ota/esp", 409, "Conflict", hdrs=None,
             fp=io.BytesIO(b"zone 2 is at 340 C"))
-        fake_urlopen = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertLogs(ota.log, level="WARNING") as cm:
                 with self.assertRaises(ota.OtaHttpError):
-                    ota.push_esp_image("kiln.local", self.tmp.name, self.SECRET)
+                    ota.push_esp_image("kiln.local", self.tmp.name)
         all_output = "\n".join(cm.output)
         self.assertIn(self.expected_sha256, all_output)
         self.assertIn("zone 2 is at 340 C", all_output)
-        self.assertNotIn(self.SECRET, all_output)
 
 
 class GetInterlockTest(unittest.TestCase):
-    """GET /api/ota/interlock -- unauthenticated, no challenge/HMAC dance."""
+    """GET /api/ota/interlock -- reads through http_auth.urlopen()."""
 
     def test_parses_ok_true(self):
         body = json.dumps({"ok": True}).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(body)):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", return_value=_fake_response(body)):
             result = ota.get_interlock("kiln.local")
         self.assertTrue(result["ok"])
 
     def test_parses_ok_false_with_reason(self):
         body = json.dumps({"ok": False, "reason": "an update is already in progress"}).encode()
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(body)):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", return_value=_fake_response(body)):
             result = ota.get_interlock("kiln.local")
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "an update is already in progress")
 
-    def test_no_challenge_fetched_first(self):
+    def test_single_call(self):
         body = json.dumps({"ok": True}).encode()
         calls = {"n": 0}
 
@@ -727,24 +484,26 @@ class GetInterlockTest(unittest.TestCase):
             calls["n"] += 1
             return _fake_response(body)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
             ota.get_interlock("kiln.local")
         self.assertEqual(calls["n"], 1)
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
                 ota.get_interlock("192.0.2.1")
 
     def test_bad_json_raises(self):
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", return_value=_fake_response(b"not json")):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", return_value=_fake_response(b"not json")):
             with self.assertRaises(ota.OtaHttpError):
                 ota.get_interlock("kiln.local")
 
 
 class PushImageUnauthenticatedTest(unittest.TestCase):
-    """OT-E09: no X-Ota-Mac header at all -- plain unauthenticated POST."""
+    """OT-E09: no admin session cookie at all -- plain unauthenticated POST,
+    bypassing http_auth.urlopen() on purpose (see this function's own
+    docstring for why)."""
 
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
@@ -765,6 +524,7 @@ class PushImageUnauthenticatedTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIsNone(captured["req"].get_header("X-ota-mac"))
         self.assertIsNone(captured["req"].get_header("X-ota-nonce"))
+        self.assertIsNone(captured["req"].get_header("Cookie"))
 
     def test_refused_returns_not_ok(self):
         err = urllib.error.HTTPError("http://x/api/ota/esp", 401, "Unauthorized", hdrs=None,
@@ -780,8 +540,7 @@ class PushImageUnauthenticatedTest(unittest.TestCase):
 
 
 class PushImageWithSessionTest(unittest.TestCase):
-    """OT-E10: a kiln_sid web-auth session cookie in place of the AP-password
-    challenge/HMAC dance."""
+    """OT-E10: a kiln_sid web-auth session cookie, admin vs. user tier."""
 
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
@@ -789,7 +548,7 @@ class PushImageWithSessionTest(unittest.TestCase):
         self.tmp.close()
         self.addCleanup(os.unlink, self.tmp.name)
 
-    def test_sends_cookie_header_no_challenge(self):
+    def test_sends_cookie_header(self):
         ok_body = json.dumps({"ok": True}).encode()
         captured = {}
 
@@ -815,217 +574,102 @@ class PushImageWithSessionTest(unittest.TestCase):
             ota.push_esp_image_with_session("kiln.local", "/no/such/file.bin", "abc")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SwResetTest(unittest.TestCase):
-    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
-        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            if post_side_effect is not None:
-                raise post_side_effect
-            return post_response
-
-        return fake_urlopen, calls
-
-    def test_sends_sw_reset_context_mac_and_empty_body(self):
+    def test_sends_empty_body_no_credential(self):
         ok_text = b"ok -- rebooting this controller now"
-        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
-
-        calls = {"n": 0}
         captured_req = {}
 
         def wrapper(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
             captured_req["req"] = req
             return _fake_response(ok_text)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.sw_reset("kiln.local", "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.sw_reset("kiln.local")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["detail"], ok_text.decode())
         req = captured_req["req"]
         self.assertEqual(req.full_url, "http://kiln.local/api/sw_reset")
         self.assertEqual(req.data, b"")
-        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
-        self.assertIsNotNone(mac_header)
-        self.assertEqual(len(mac_header), 64)
-        # Must be signed over the "sw-reset" context, NOT "esp"/"esp-rollback"/
-        # "pico"/"recovery"/"boot-guard-reset" -- a MAC for any of those other
-        # actions must not double as authorization for this one.
-        expected = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "sw-reset").hex()
-        self.assertEqual(mac_header, expected)
-        not_recovery_context = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "recovery").hex()
-        self.assertNotEqual(mac_header, not_recovery_context)
+        self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
 
     def test_surfaces_409_interlock_refusal(self):
         err = urllib.error.HTTPError(
             "http://x/api/sw_reset", 409, "Conflict", hdrs=None,
             fp=io.BytesIO(b"refused: a firing is in progress"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.sw_reset("kiln.local", "hunter2")
+                ota.sw_reset("kiln.local")
         self.assertEqual(ctx.exception.status, 409)
         self.assertIn("a firing is in progress", ctx.exception.detail)
 
-    def test_surfaces_403_wrong_password(self):
+    def test_surfaces_401_no_session(self):
         err = urllib.error.HTTPError(
-            "http://x/api/sw_reset", 403, "Forbidden", hdrs=None,
-            fp=io.BytesIO(b"wrong password"))
-        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            "http://x/api/sw_reset", 401, "Unauthorized", hdrs=None,
+            fp=io.BytesIO(b"admin session required"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.sw_reset("kiln.local", "hunter2")
-        self.assertEqual(ctx.exception.status, 403)
+                ota.sw_reset("kiln.local")
+        self.assertEqual(ctx.exception.status, 401)
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
-                ota.sw_reset("192.0.2.1", "hunter2")
-
-
-class DeriveMacSwResetContextTest(unittest.TestCase):
-    def test_matches_manual_double_hmac(self):
-        nonce = bytes(range(16))
-        got = ota.derive_mac("hunter2", nonce, "sw-reset")
-        key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
-        want = hmac.new(key, nonce + b"sw-reset", hashlib.sha256).digest()
-        self.assertEqual(got, want)
-
-    def test_diverges_from_every_other_context(self):
-        nonce = bytes(range(16))
-        sw_reset_mac = ota.derive_mac("hunter2", nonce, "sw-reset")
-        for other in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset"):
-            self.assertNotEqual(sw_reset_mac, ota.derive_mac("hunter2", nonce, other),
-                                 f"sw-reset MAC must differ from {other!r}'s MAC")
-
-
-class DeriveMacFactoryResetContextTest(unittest.TestCase):
-    """Tooling-gap fix: firmware defines OTA_HTTP_CONTEXT_FACTORY_RESET
-    ("factory-reset", ota_http.c/ota_state.h) and uses it for BOTH
-    POST /api/factory_reset (factory_reset.c) and POST
-    /api/cfgfs/format_confirm (cfg_fs_format_http.c, which deliberately
-    reuses this context rather than minting its own -- see that file's own
-    header comment) -- but derive_mac()'s allow-list omitted it until this
-    change. Before the fix, `ota.derive_mac("pw", nonce, "factory-reset")`
-    raised ValueError, which is exactly the regression this class pins."""
-
-    def test_matches_manual_double_hmac(self):
-        nonce = bytes(range(16))
-        got = ota.derive_mac("hunter2", nonce, "factory-reset")
-        key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
-        want = hmac.new(key, nonce + b"factory-reset", hashlib.sha256).digest()
-        self.assertEqual(got, want)
-
-    def test_diverges_from_every_other_context(self):
-        nonce = bytes(range(16))
-        mac_factory_reset = ota.derive_mac("pw", nonce, "factory-reset")
-        for other in ("esp", "pico", "esp-rollback", "recovery", "boot-guard-reset", "sw-reset"):
-            self.assertNotEqual(mac_factory_reset, ota.derive_mac("pw", nonce, other),
-                                 f"factory-reset MAC must not equal the {other!r} MAC")
-
-    def test_now_accepted_by_the_allow_list(self):
-        # Regression pin for the exact bug this change fixes: this call used
-        # to raise ValueError("context must be 'esp', 'pico', ... 'sw-reset'")
-        # because "factory-reset" was missing from derive_mac()'s allow-list,
-        # even though ota_http.c has authenticated requests against it since
-        # OTA_HTTP_CONTEXT_FACTORY_RESET was added.
-        try:
-            ota.derive_mac("pw", bytes(16), "factory-reset")
-        except ValueError:
-            self.fail("derive_mac() must accept the 'factory-reset' context "
-                      "(OTA_HTTP_CONTEXT_FACTORY_RESET) -- see ota_http.c/cfg_fs_format_http.c")
+                ota.sw_reset("192.0.2.1")
 
 
 class FormatCfgfsTest(unittest.TestCase):
     """Unit tests for ota_http_client.format_cfgfs() -- POST
-    /api/cfgfs/format_confirm, signed over the "factory-reset" context."""
+    /api/cfgfs/format_confirm."""
 
-    def test_sends_factory_reset_context_mac_and_empty_body(self):
+    def test_sends_empty_body_no_credential(self):
         ok_text = b"ok -- cfg partition formatted and mounted"
-        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
-
-        calls = {"n": 0}
         captured_req = {}
+        calls = {"n": 0}
 
         def wrapper(req, timeout=None):
             calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
             captured_req["req"] = req
             return _fake_response(ok_text)
 
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
-            result = ota.format_cfgfs("kiln.local", "hunter2")
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            result = ota.format_cfgfs("kiln.local")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["detail"], ok_text.decode())
         req = captured_req["req"]
         self.assertEqual(req.full_url, "http://kiln.local/api/cfgfs/format_confirm")
         self.assertEqual(req.data, b"")
-        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
-        self.assertIsNotNone(mac_header)
-        self.assertEqual(len(mac_header), 64)
-        expected = ota.derive_mac("hunter2", bytes.fromhex("44" * 16), "factory-reset").hex()
-        self.assertEqual(mac_header, expected)
-        # Must NOT be signed over "sw-reset" or any of the other contexts --
-        # only "esp"'s sibling context "factory-reset" is valid here.
-        not_sw_reset = ota.derive_mac("hunter2", bytes.fromhex("44" * 16), "sw-reset").hex()
-        self.assertNotEqual(mac_header, not_sw_reset)
-        # This call is posted exactly once (plus the one challenge fetch) --
-        # never retried on its own behalf.
-        self.assertEqual(calls["n"], 2)
+        self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
+        # Posted exactly once -- never retried on its own behalf.
+        self.assertEqual(calls["n"], 1)
 
     def test_surfaces_500_format_failed(self):
         err = urllib.error.HTTPError(
             "http://x/api/cfgfs/format_confirm", 500, "Internal Server Error", hdrs=None,
             fp=io.BytesIO(b"format failed: ESP_ERR_INVALID_STATE"))
-        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            raise err
-
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.format_cfgfs("kiln.local", "hunter2")
+                ota.format_cfgfs("kiln.local")
         self.assertEqual(ctx.exception.status, 500)
         self.assertIn("format failed", ctx.exception.detail)
 
-    def test_surfaces_403_wrong_password(self):
+    def test_surfaces_401_no_session(self):
         err = urllib.error.HTTPError(
-            "http://x/api/cfgfs/format_confirm", 403, "Forbidden", hdrs=None,
-            fp=io.BytesIO(b"wrong password"))
-        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
-        calls = {"n": 0}
-
-        def fake_urlopen(req, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _fake_response(challenge_body)
-            raise err
-
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            "http://x/api/cfgfs/format_confirm", 401, "Unauthorized", hdrs=None,
+            fp=io.BytesIO(b"admin session required"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError) as ctx:
-                ota.format_cfgfs("kiln.local", "hunter2")
-        self.assertEqual(ctx.exception.status, 403)
+                ota.format_cfgfs("kiln.local")
+        self.assertEqual(ctx.exception.status, 401)
 
     def test_unreachable_host_raises(self):
         err = urllib.error.URLError("no route to host")
-        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
             with self.assertRaises(ota.OtaHttpError):
-                ota.format_cfgfs("192.0.2.1", "hunter2")
+                ota.format_cfgfs("192.0.2.1")
+
+
+if __name__ == "__main__":
+    unittest.main()

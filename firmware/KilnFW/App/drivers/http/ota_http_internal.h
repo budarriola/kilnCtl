@@ -23,9 +23,7 @@
 // THIS IS A MOVE-ONLY REFACTOR: no logic, ordering, naming (beyond the
 // widening rename above) or visibility change beyond what moving requires.
 //
-//   ota_http.c       -- includes, HMAC/KDF helper, nonce+lockout state,
-//                        challenge issue/verify (ota_http_verify_request()),
-//                        the update-claim mutex (try_begin/end/in_progress),
+//   ota_http.c       -- includes, the update-claim mutex (try_begin/end/in_progress),
 //                        the interlock snapshot/refusal glue, auth-disabled
 //                        check, ota_http_authenticate_request(), the shared
 //                        get_client_ip/send_json_clamped/set_fail_reason
@@ -57,7 +55,7 @@
 #include "freertos/semphr.h"
 
 #include "ota_http.h"
-#include "ota_http_util.h" /* ota_http_hex_encode/_hex_decode/_verify_result_str */
+#include "ota_http_util.h" /* ota_http_hex_encode */
 #include "safety_link.h"
 
 // Shared log tag. Defined (non-static) in ota_http.c; every split file logs
@@ -68,12 +66,11 @@
 // end up in the same link.
 extern const char *OTA_HTTP_TAG;
 
-// hex_encode()/hex_decode()/verify_result_str() aliases -- the same local
-// spelling ota_http.c used before the split, now centralized here so every
-// split file's call sites read identically to the original single file.
+// hex_encode() alias -- the same local spelling ota_http.c used before the
+// split, now centralized here so every split file's call sites read
+// identically to the original single file. (hex_decode()/verify_result_str()
+// aliases were removed with the AP-password HMAC scheme, retired 2026-09-29.)
 #define hex_encode ota_http_hex_encode
-#define hex_decode ota_http_hex_decode
-#define verify_result_str ota_http_verify_result_str
 // String form of ota_http_esp_phase_t (ota_http_util.c's
 // ota_http_esp_phase_str()) -- only ota_http_esp.c's status handler uses
 // it, but centralized here with the other two aliases rather than left as
@@ -108,11 +105,6 @@ esp_err_t ota_http_send_json_clamped(httpd_req_t *req, const char *buf, int n, s
 // destination -- see ota_http.c's definition for the -Werror=format-
 // truncation rationale. Used by both the ESP and Pico transfer paths.
 void ota_http_set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...);
-
-// X-Ota-Mac header name, shared by every mutating handler (esp update,
-// pico update, esp rollback, pico rollback, recovery exit) across all
-// three handler files.
-extern const char *OTA_MAC_HEADER;
 
 // --- Single cross-processor safety-link pointer ----------------------------
 // Read-only after ota_http_start() (App/drivers/http/ota_http.c), same

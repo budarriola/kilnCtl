@@ -1,28 +1,45 @@
 #!/usr/bin/env python3
-"""recovery_ota_auth_mirror_drift_check.py -- guards against the drift found
-and fixed by docs/audits/web_code_duplication_drift_2026-09-18.md: the
+"""recovery_ota_auth_mirror_drift_check.py -- originally guarded the drift
+found and fixed by docs/audits/web_code_duplication_drift_2026-09-18.md: the
 recovery image's independent copy of the X-Ota-Mac hex-decode/length/
-ordering contract silently disagreeing with the main app's consolidated
-ota_http_authenticate_request() (firmware/KilnFW/App/drivers/http/ota_http.c)
-and its ota_http_hex_decode() helper (ota_http_util.c). The recovery image
-cannot call into ota_http.c directly (it would pull the whole main-app httpd
-stack into a strict-size recovery image -- see recovery_http.c's own header
-comment on why ota_auth.c is copied in verbatim instead of shared as a
-library), so the fix keeps a second, textually-mirrored copy and this check
-diffs the two, the same extract-normalize-diff technique as
-approach_rate_cap_mirror_drift_check.py (read that one first).
+ordering contract silently disagreeing with the main app's (then-)
+consolidated ota_http_authenticate_request()
+(firmware/KilnFW/App/drivers/http/ota_http.c) and its ota_http_hex_decode()
+helper (ota_http_util.c).
+
+**2026-09-29 update:** the main app's AP-password HMAC scheme (X-Ota-Mac,
+the challenge/nonce/lockout dance, ota_http_hex_decode(),
+ota_http_verify_request()) was retired outright for the 9 main-app admin OTA
+routes (WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open when login
+off") -- ROUTE_TIER_ADMIN is now their only gate, on or off.
+ota_http_hex_decode() no longer exists in ota_http_util.c, so there is
+nothing left in the main app to diff the recovery image's hex_decode()
+against; the cross-file hex-decode comparison (formerly item 1 below) has
+been removed for that reason, not because the recovery-side contract itself
+stopped mattering.
+
+The recovery image (firmware/KilnFW_recovery/) is a genuinely separate,
+standalone firmware image with its own independent auth code and is
+UNCHANGED by the above -- it still requires the AP-password HMAC on its own
+mutating routes, and recovery_http.c's own ota_auth.c copy (still mirrored
+verbatim against firmware/KilnFW/App/drivers/net/ota_auth.c, now unused by
+any main-app HTTP route but kept in place rather than deleted, precisely so
+a check like this one still has a byte-identical mirror to point at if this
+check or a future one needs it again) is untouched. What this check still
+enforces below (ordering/wire-strings, route coverage, per-route context
+strings) is entirely internal to recovery_http.c and remains meaningful on
+its own -- it no longer needs a live main-app counterpart to diff against
+for that guarantee.
 
 WHAT IS COMPARED, and why each normalization exists:
 
-1. Hex-nibble classification chain. recovery_http.c's hex_decode() loop body
-   (per-nibble classification of `hi`/`lo` against [0-9a-fA-F], two nibbles
-   per byte) must be byte-identical (modulo variable name and comments) to
-   ota_http_util.c's ota_http_hex_decode() loop body. The only structural
-   difference allowed is the source array name (recovery reads from `in`,
-   the main app from `hex`) and the loop bound expression (recovery derives
-   it from a fixed out_len*2 already validated by the caller; the main app
-   takes hex_len directly) -- both normalized to a single token before
-   comparing.
+1. (Retired 2026-09-29 -- see the module docstring update above.) This used
+   to diff recovery_http.c's hex_decode() loop body (per-nibble
+   classification of `hi`/`lo` against [0-9a-fA-F], two nibbles per byte)
+   against ota_http_util.c's ota_http_hex_decode() loop body; the latter no
+   longer exists in the main app, so there is nothing left to diff against.
+   recovery_http.c's own hex_decode() is untouched and still correct on its
+   own -- this item is simply gone, not failing.
 
 2. Ordering + wire strings in the shared auth helper
    (recovery_http.c's recovery_authenticate_request() -- factored out of
@@ -92,7 +109,8 @@ WHAT IS COMPARED, and why each normalization exists:
    empty, since every mutating route today is expected to authenticate.
 
 Usage: python recovery_ota_auth_mirror_drift_check.py [repo_root]
-Exit 0: all three comparisons pass.
+Exit 0: ordering/wire-strings, route coverage, and per-route context strings
+        all pass.
 Exit 1: a mismatch, or a fragment could not be located at all (fail
         closed, per this repo's standing rule for this class of check).
 """
@@ -101,25 +119,6 @@ import sys
 from pathlib import Path
 
 RECOVERY_REL = "firmware/KilnFW_recovery/main/recovery_http.c"
-MAIN_UTIL_REL = "firmware/KilnFW/App/drivers/http/ota_http_util.c"
-
-RECOVERY_HEX_DECODE_RE = re.compile(
-    r"static bool hex_decode\([^)]*\)\n\{\n(.*?)\n\}\n", re.DOTALL
-)
-MAIN_HEX_DECODE_RE = re.compile(
-    r"bool ota_http_hex_decode\([^)]*\)\n\{\n(.*?)\n\}\n", re.DOTALL
-)
-
-# Lines that exist on exactly one side for structural reasons unrelated to
-# the per-nibble classification arithmetic (see module docstring item 1).
-RECOVERY_ONLY_LINE_RES = [
-    re.compile(r"^\s*if \(strlen\(in\) != out_len \* 2\) \{\s*$"),
-    re.compile(r"^\s*for \(size_t i = 0; i < out_len; i\+\+\) \{\s*$"),
-]
-MAIN_ONLY_LINE_RES = [
-    re.compile(r"^\s*if \(hex_len % 2 != 0\) \{\s*$"),
-    re.compile(r"^\s*for \(size_t i = 0; i < hex_len / 2; i\+\+\) \{\s*$"),
-]
 
 
 def strip_comments(text: str) -> str:
@@ -127,40 +126,6 @@ def strip_comments(text: str) -> str:
     text = re.sub(r"//[^\n]*", "", text)
     return text
 
-
-def normalize(body: str, only_line_res: list) -> list:
-    body = strip_comments(body)
-    lines = []
-    for raw_line in body.splitlines():
-        if any(r.match(raw_line) for r in only_line_res):
-            continue
-        line = raw_line.strip()
-        if not line:
-            continue
-        # `return false;`/`return true;` are NOT skipped here -- an earlier
-        # version of this check dropped them as "structurally required on
-        # both sides, uninteresting", which let a flipped invalid-nibble
-        # guard (`return true;` instead of `return false;` when hi/lo < 0)
-        # pass silently, since both sides still had the same COUNT of
-        # return statements even though one now claims success on invalid
-        # input. Every return line is compared like any other.
-        line = line.replace("in[2 * i]", "SRC[IDX]")
-        line = line.replace("in[2 * i + 1]", "SRC[IDX+1]")
-        line = line.replace("hex[2 * i]", "SRC[IDX]")
-        line = line.replace("hex[2 * i + 1]", "SRC[IDX+1]")
-        line = re.sub(r"\s+", " ", line)
-        lines.append(line)
-    return lines
-
-
-def find_body(text: str, pattern: re.Pattern, label: str, path: Path):
-    m = pattern.search(text)
-    if not m:
-        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (extraction)")
-        print(f"  Could not locate {label} in {path} --")
-        print("  update this check's regex rather than letting it pass vacuously.")
-        return None
-    return m.group(1)
 
 
 # --- ordering/wire-string check -------------------------------------------
@@ -344,43 +309,15 @@ def main() -> int:
     repo_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[3]
 
     recovery_path = repo_root / RECOVERY_REL
-    main_util_path = repo_root / MAIN_UTIL_REL
 
-    for label, path in (("recovery", recovery_path), ("main-app util", main_util_path)):
-        if not path.is_file():
-            print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (setup)")
-            print(f"  {label} file not found: {path}")
-            return 1
+    if not recovery_path.is_file():
+        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (setup)")
+        print(f"  recovery file not found: {recovery_path}")
+        return 1
 
     recovery_text = recovery_path.read_text(encoding="utf-8")
-    main_text = main_util_path.read_text(encoding="utf-8")
-
-    recovery_body = find_body(recovery_text, RECOVERY_HEX_DECODE_RE, "hex_decode()", recovery_path)
-    main_body = find_body(main_text, MAIN_HEX_DECODE_RE, "ota_http_hex_decode()", main_util_path)
-    if recovery_body is None or main_body is None:
-        return 1
-
-    recovery_lines = normalize(recovery_body, RECOVERY_ONLY_LINE_RES)
-    main_lines = normalize(main_body, MAIN_ONLY_LINE_RES)
 
     failed = False
-    if not recovery_lines or not main_lines:
-        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (extraction)")
-        print("  Normalization left an empty fragment on one side -- fail closed rather")
-        print("  than compare against nothing.")
-        return 1
-
-    if recovery_lines != main_lines:
-        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (hex-decode nibble logic)")
-        print(f"  {RECOVERY_REL}'s hex_decode() no longer matches {MAIN_UTIL_REL}'s")
-        print("  ota_http_hex_decode() nibble classification -- update the mirror to match.")
-        print("  --- normalized recovery ---")
-        for line in recovery_lines:
-            print(f"    {line}")
-        print("  --- normalized main app ---")
-        for line in main_lines:
-            print(f"    {line}")
-        failed = True
 
     order_problems = check_ordering(recovery_text)
     if order_problems:
@@ -408,9 +345,9 @@ def main() -> int:
 
     mutating_count = len(discover_mutating_handlers(recovery_text))
     print(
-        f"RECOVERY OTA-AUTH MIRROR DRIFT CHECK: OK ({len(recovery_lines)} normalized "
-        "hex-decode lines match; header->hex->lockout ordering and wire strings confirmed; "
-        f"{mutating_count} mutating routes all call recovery_authenticate_request())"
+        "RECOVERY OTA-AUTH MIRROR DRIFT CHECK: OK (header->hex->lockout ordering and wire "
+        f"strings confirmed; {mutating_count} mutating routes all call "
+        "recovery_authenticate_request())"
     )
     return 0
 

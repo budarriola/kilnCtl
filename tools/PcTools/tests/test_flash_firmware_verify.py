@@ -273,17 +273,13 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self._archive_patch.start()
         self.addCleanup(self._archive_patch.stop)
 
-        # Owner decision 2026-09-19 made the post-flash boot_guard reset
-        # default-on whenever KILNCTL_AP_PASSWORD is set -- clear it here so
-        # this whole test class (most of which never mocks the boot_guard
-        # HTTP calls) can't accidentally make a real network call just
-        # because the machine running the suite happens to have it set.
-        # BootGuardResetWiringTest's own env tests set it back explicitly
-        # where they need to.
-        self._env_patch = unittest.mock.patch.dict(mf.os.environ, {}, clear=False)
-        self._env_patch.start()
-        self.addCleanup(self._env_patch.stop)
-        mf.os.environ.pop(mf.KILNCTL_AP_PASSWORD_ENV, None)
+        # 2026-09-29: the post-flash boot_guard reset no longer reads any
+        # credential from the environment (the AP-password HMAC it used to
+        # also require was retired) -- it goes through the same admin
+        # session (http_auth.urlopen()) every other route in this module
+        # uses, mocked out per-test below via ota_http.get_boot_guard_status/
+        # boot_guard_reset_esp. No environment isolation is needed here any
+        # more.
 
     def test_verify_false_skips_verification_entirely(self):
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
@@ -535,11 +531,20 @@ class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
 
 
 class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
-    """flash_firmware(ap_password=...) -- the tool-driven trigger for
-    docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's fix
-    (ota_http_client.boot_guard_reset_esp(), calling
+    """flash_firmware()'s post-flash boot_guard_reset step -- the tool-driven
+    trigger for docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's
+    fix (ota_http_client.boot_guard_reset_esp(), calling
     App/drivers/http/ota_http_recovery.c's
     ota_boot_guard_reset_post_handler()).
+
+    2026-09-29: the AP-password HMAC this route used to ALSO require was
+    retired (owner decision "Retire; open when login off") -- the route is
+    now gated by ROUTE_TIER_ADMIN alone, reached through the same
+    http_auth.urlopen() admin session every other admin route in this module
+    uses. There is no more `ap_password` parameter, no more
+    KILNCTL_AP_PASSWORD credential lookup, and no more "no credential
+    available" skip case or wifi_nvs-erase-invalidates-the-password special
+    case -- those only ever existed for the retired HMAC's signing key.
 
     THE gate this class exists to prove: the call must happen ONLY after
     _verify_flash_landed() returns "" (full, unambiguous success) -- never
@@ -559,9 +564,9 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": True, "boot_count": 0}) as reset_mock:
-            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+            result = mf.flash_firmware(verify=True)
         status_mock.assert_called_once_with("192.168.1.156")
-        reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
+        reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
         self.assertIn("boot_guard_reset", result)
         self.assertIn("cleared and verified", result)
@@ -584,121 +589,19 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": True, "boot_count": 0}) as reset_mock:
-            result = mf.flash_firmware(verify=True, ap_password="hunter2")
-        reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
+            result = mf.flash_firmware(verify=True)
+        reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
         self.assertIn("before=unknown", result)
         self.assertIn("after=0", result)
 
-    def _clear_ap_password_env(self):
-        """Isolate these tests from whatever KILNCTL_AP_PASSWORD happens to
-        be set in the actual environment this suite runs in -- owner
-        decision 2026-09-19 made the reset default-on whenever it's
-        present, so a real dev environment with it set would otherwise
-        make the "no credentials" tests flaky/order-dependent."""
-        patcher = unittest.mock.patch.dict(
-            mf.os.environ,
-            {mf.KILNCTL_AP_PASSWORD_ENV: ""},
-            clear=False,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        # patch.dict sets it to "" rather than removing it -- explicitly
-        # pop so os.environ.get(...) sees None, matching a genuinely unset var.
-        mf.os.environ.pop(mf.KILNCTL_AP_PASSWORD_ENV, None)
-        self.addCleanup(mf.os.environ.pop, mf.KILNCTL_AP_PASSWORD_ENV, None)
-
-    def test_skipped_without_ap_password_or_env_credentials(self):
-        """Owner decision 2026-09-19: with neither an explicit `ap_password`
-        nor KILNCTL_AP_PASSWORD set, the reset is a no-op (never
-        calls the HTTP endpoints) but the result must say so explicitly --
-        a caller must be able to tell a skip from a silent success."""
-        self._clear_ap_password_env()
+    def test_reset_boot_guard_false_opts_out(self):
+        """`reset_boot_guard=False` is an unconditional opt-out."""
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(verify=True)
-        status_mock.assert_not_called()
-        reset_mock.assert_not_called()
-        self.assertIn("boot_guard_reset", result)
-        self.assertIn("skipped", result)
-        self.assertIn("no credential available", result)
-
-    def test_web_password_alone_yields_skip_note_never_a_call(self):
-        """The old (wrong) fallback read KILNCTL_WEB_PASSWORD, which the
-        board's boot_guard_reset route rejects outright (it's keyed on the
-        AP Wi-Fi password, guaranteed distinct from the web admin password
-        by web_auth_store.c:157). Setting only KILNCTL_WEB_PASSWORD (and its
-        username companion) must still be treated as "no credential" -- it
-        must never be used as the boot_guard_reset password, and the HTTP
-        endpoints must never be called."""
-        self._clear_ap_password_env()
-        self.preflash_mock.return_value = "192.168.1.156"
-        env_patch = unittest.mock.patch.dict(
-            mf.os.environ,
-            {"KILNCTL_WEB_USERNAME": "admin", "KILNCTL_WEB_PASSWORD": "webpw123"},
-        )
-        env_patch.start()
-        self.addCleanup(env_patch.stop)
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
-             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(verify=True)
-        status_mock.assert_not_called()
-        reset_mock.assert_not_called()
-        self.assertIn("skipped", result)
-        self.assertIn("no credential available", result)
-
-    def test_env_credentials_used_when_ap_password_omitted(self):
-        """The new default-on path: KILNCTL_AP_PASSWORD alone
-        (no explicit `ap_password`) must trigger the same reset call, using
-        exactly the env value as the password."""
-        self.preflash_mock.return_value = "192.168.1.156"
-        env_patch = unittest.mock.patch.dict(
-            mf.os.environ,
-            {mf.KILNCTL_AP_PASSWORD_ENV: "envpw123"},
-        )
-        env_patch.start()
-        self.addCleanup(env_patch.stop)
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "get_boot_guard_status",
-                 return_value={"boot_count": 2, "recovery_mode": False}), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "boot_guard_reset_esp",
-                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
-            result = mf.flash_firmware(verify=True)
-        reset_mock.assert_called_once_with("192.168.1.156", "envpw123")
-        self.assertEqual(reset_mock.call_args.args[1], os.environ[mf.KILNCTL_AP_PASSWORD_ENV])
-        self.assertIn("cleared and verified", result)
-
-    def test_explicit_ap_password_wins_over_env(self):
-        self.preflash_mock.return_value = "192.168.1.156"
-        env_patch = unittest.mock.patch.dict(
-            mf.os.environ,
-            {mf.KILNCTL_AP_PASSWORD_ENV: "envpw123"},
-        )
-        env_patch.start()
-        self.addCleanup(env_patch.stop)
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "get_boot_guard_status",
-                 return_value={"boot_count": 2, "recovery_mode": False}), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "boot_guard_reset_esp",
-                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
-            mf.flash_firmware(verify=True, ap_password="explicit-pw")
-        reset_mock.assert_called_once_with("192.168.1.156", "explicit-pw")
-
-    def test_reset_boot_guard_false_opts_out_even_with_credentials(self):
-        """`reset_boot_guard=False` must override even a fully-populated
-        credential set -- it is an unconditional opt-out."""
-        self.preflash_mock.return_value = "192.168.1.156"
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
-             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(verify=True, ap_password="hunter2", reset_boot_guard=False)
+            result = mf.flash_firmware(verify=True, reset_boot_guard=False)
         status_mock.assert_not_called()
         reset_mock.assert_not_called()
         self.assertNotIn("boot_guard_reset", result)
@@ -715,7 +618,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                                          return_value="WARNING: board unreachable"), \
              unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            mf.flash_firmware(verify=True, ap_password="hunter2")
+            mf.flash_firmware(verify=True)
         status_mock.assert_not_called()
         reset_mock.assert_not_called()
 
@@ -728,7 +631,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                 mf, "_verify_flash_landed",
                 side_effect=RuntimeError("board is running partition 'ota_0', not 'factory'")), \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+            result = mf.flash_firmware(verify=True)
         reset_mock.assert_not_called()
         self.assertTrue(result.startswith("error:"))
 
@@ -739,7 +642,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         strength of NO evidence the new build is running at all."""
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            mf.flash_firmware(verify=False, ap_password="hunter2")
+            mf.flash_firmware(verify=False)
         verify_mock.assert_not_called()
         reset_mock.assert_not_called()
 
@@ -756,82 +659,16 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": False, "boot_count": 2}):
-            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+            result = mf.flash_firmware(verify=True)
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING", result)
         self.assertIn("NOT confirmed cleared", result)
 
-    def test_wifi_nvs_erase_skips_reset_without_attempting_the_call(self):
-        """D2 bench finding (2026-09-23): erasing `wifi_nvs` (the partition
-        `wifi_prov_get_ap_password()` actually reads -- a SEPARATE partition
-        from the default `nvs` one, see partitions.csv) resets the board's
-        AP password to its firmware default. Any credential this call
-        resolved beforehand can no longer be valid, so the POST must never
-        even be attempted -- it must not read as an ordinary wrong-password
-        403."""
-        self.preflash_mock.return_value = "192.168.1.156"
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "get_boot_guard_status",
-                 return_value={"boot_count": 1, "recovery_mode": False}) as status_mock, \
-             unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(
-                verify=True, ap_password="hunter2",
-                erase_partitions=["wifi_nvs"], confirm_erase=True,
-            )
-        status_mock.assert_called_once_with("192.168.1.156")
-        reset_mock.assert_not_called()
-        self.assertNotIn("error:", result)
-        self.assertIn("boot_guard_reset: skipped", result)
-        self.assertIn("wifi_nvs", result)
-        self.assertIn("before this attempt: 1", result)
-
-    def test_nvs_only_erase_does_not_skip_the_reset(self):
-        """Erasing the DEFAULT `nvs` partition alone (the ordinary
-        web-auth-reset commission case) does NOT touch `wifi_nvs`/the AP
-        password -- the reset must run exactly as it would with no erase at
-        all."""
-        self.preflash_mock.return_value = "192.168.1.156"
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "get_boot_guard_status",
-                 return_value={"boot_count": 2, "recovery_mode": False}), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "boot_guard_reset_esp",
-                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
-            result = mf.flash_firmware(
-                verify=True, ap_password="hunter2",
-                erase_partitions=["nvs"], confirm_erase=True,
-            )
-        reset_mock.assert_called_once_with("192.168.1.156", "hunter2")
-        self.assertNotIn("boot_guard_reset: skipped", result)
-        self.assertIn("cleared and verified", result)
-
-    def test_403_names_ap_password_not_web_password(self):
-        """A 403 outside the erase-skip case must not read like a generic
-        failure -- name which credential is actually being checked, since
-        KILNCTL_AP_PASSWORD/KILNCTL_WEB_PASSWORD confusion is the exact
-        mistake this wording exists to head off."""
-        self.preflash_mock.return_value = "192.168.1.156"
-        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "get_boot_guard_status",
-                 return_value={"boot_count": 2, "recovery_mode": False}), \
-             unittest.mock.patch.object(
-                 mf.ota_http, "boot_guard_reset_esp",
-                 side_effect=mf.ota_http.OtaHttpError(
-                     "/api/ota/esp/boot_guard_reset refused: HTTP 403: wrong password",
-                     403, "wrong password")):
-            result = mf.flash_firmware(verify=True, ap_password="wrong-one")
-        self.assertFalse(result.startswith("error:"))
-        self.assertIn("WARNING", result)
-        self.assertIn("wrong AP password", result)
-        self.assertIn("KILNCTL_AP_PASSWORD is the AP Wi-Fi password, not the web admin password", result)
-
     def test_unreachable_boot_guard_endpoint_reported_as_warning_not_error(self):
         """An OtaHttpError calling the endpoint (e.g. the board dropped off
-        Wi-Fi in the instant between verification and this call) is also a
-        WARNING, not a tool failure -- the flash already landed."""
+        Wi-Fi in the instant between verification and this call, or there is
+        no admin session and web auth is on) is also a WARNING, not a tool
+        failure -- the flash already landed."""
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(
@@ -840,7 +677,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  side_effect=mf.ota_http.OtaHttpError("unreachable")):
-            result = mf.flash_firmware(verify=True, ap_password="hunter2")
+            result = mf.flash_firmware(verify=True)
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING", result)
         self.assertIn("boot_guard_reset call failed", result)

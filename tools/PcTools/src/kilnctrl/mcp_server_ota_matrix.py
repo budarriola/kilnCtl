@@ -214,7 +214,7 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
                      allow_heat: bool, logs_root: Optional[str] = None) -> str:
     """The real, board-touching path -- only ever reached once the tool
     wrapper below has confirmed ``confirm is True``. ``ctx`` carries
-    ``host``/``ap_password``/the ``ota_*`` image keys plus whatever
+    ``host``/the ``ota_*`` image keys plus whatever
     test-only overrides (``srv``, ``capability_preflight_run``,
     ``gpio_test_preflight_fn``, ...) a caller wants
     ``BenchTestRunner``/the case bodies to see instead of the real board --
@@ -240,8 +240,7 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
         return f"error: refused -- {exc}"
 
     lines = [f"ota_matrix_run: suite=ota run_id={outcome.run_id} exit_code={outcome.exit_code}",
-             f"host: {ctx.get('host')} ({ctx.get('host_source', 'unknown')})",
-             f"ap_password: {'provided' if ctx.get('ap_password_available') else 'not provided'}"]
+             f"host: {ctx.get('host')} ({ctx.get('host_source', 'unknown')})"]
     if not outcome.preflight_ok:
         lines.append(f"PREFLIGHT FAILED: {outcome.preflight_reason}")
     for cid in outcome.requested:
@@ -256,7 +255,7 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
 
 @_srv._tool()
 def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional[str] = None,
-                    ap_password: Optional[str] = None, host: Optional[str] = None,
+                    host: Optional[str] = None,
                     tag: Optional[str] = None, allow_heat: bool = False,
                     ota_image_path: Optional[str] = None, ota_corrupt_image_path: Optional[str] = None,
                     ota_truncated_image_path: Optional[str] = None,
@@ -304,9 +303,10 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
     `cases` narrows to an explicit comma-separated subset of suite `ota`'s
     ids (e.g. `"OT-E01,OT-E02"`); an id outside that suite is refused, and a
     subset cannot be used to reach a case in another suite (e.g. `"FL-10"`).
-    `ap_password` falls back to the `KILNCTL_AP_PASSWORD` environment
-    variable when omitted, mirroring `flash_firmware()`; never logged, and
-    this tool's own report never echoes it, only whether one was available.
+    Every route this matrix drives is ROUTE_TIER_ADMIN only, on or off --
+    the AP-password HMAC challenge/response scheme they used to ALSO require
+    was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b), so no separate
+    credential is needed or accepted here any more.
     `host=None` (the default) is resolved before it ever reaches `ctx` --
     explicit host wins, else the board's STA IP, else the fallback-AP
     address (`mcp_server_ota._ota_resolve_host_with_source`), same as
@@ -339,15 +339,12 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
             "(exactly, not merely truthy) to run it. Pass dry_run=True first to see the "
             "case list and preconditions with no board access."
         )
-    resolved_ap_password = _ota_tool._resolve_ap_password(ap_password)
     resolved_host, host_source = _ota_tool._ota_resolve_host_with_source(host)
     if not resolved_host:
         return "error: could not resolve a board host (no explicit host, no STA IP, no AP default)"
     ctx = {
         "host": resolved_host,
         "host_source": host_source,
-        "ap_password": resolved_ap_password,
-        "ap_password_available": resolved_ap_password is not None,
         "ota_image_path": ota_image_path,
         "ota_corrupt_image_path": ota_corrupt_image_path,
         "ota_truncated_image_path": ota_truncated_image_path,

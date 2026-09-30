@@ -815,17 +815,22 @@ verified-clear-with-retry logic with `boot_guard_mark_healthy()` via one common 
 `0b5d9dad` write-lies fix covers both paths. It is meant to be called by a TOOL that knows it
 just performed a deliberate flash (`flash_firmware()`'s verify step — wired up in `b09294fb`,
 2026-09-09: a new authenticated `POST /api/ota/esp/boot_guard_reset` route
-(`ota_http_recovery.c`), plus an `ap_password` parameter on `flash_firmware()`
-(`tools/PcTools/src/kilnctrl/mcp_server_flash.py`) that calls it ONLY after post-flash
+(`ota_http_recovery.c`) that `flash_firmware()`
+(`tools/PcTools/src/kilnctrl/mcp_server_flash.py`) calls ONLY after post-flash
 verification confirms full, unambiguous success — never on a raise, a WARNING, or
-`verify=False`. **Owner decision 2026-09-19: this is now DEFAULT ON, not opt-in** — a
-caller who omits `ap_password` falls back to the `KILNCTL_AP_PASSWORD` environment
-variable, the board's **AP Wi-Fi password** — distinct from, and never equal to, the
-web admin password (`web_auth_store.c:157`), since the `boot_guard_reset` route verifies
-its HMAC keyed on the AP password specifically; a caller with no credential gets the
-pre-`b09294fb` behavior plus one line in the result noting the reset was skipped for lack
-of credentials. Pass `reset_boot_guard=False` to opt out unconditionally regardless of
-credentials. The password is never logged or echoed.
+`verify=False`. **Owner decision 2026-09-19: this is now DEFAULT ON, not opt-in.**
+**2026-09-29 update:** this route's AP-password HMAC was retired outright
+(owner decision "Retire; open when login off", `docs/WEB_AUTH_PLAN.md` item
+2b) — `flash_firmware()` no longer takes an `ap_password` parameter and
+`KILNCTL_AP_PASSWORD` is no longer read anywhere in this path; the call is
+attempted whenever an administrator web session is available (or web auth is
+off entirely), authenticating purely via `http_auth.urlopen()`. A caller
+with no session gets the pre-`b09294fb` behavior plus one line in the result
+noting the reset was skipped for lack of credentials. Pass
+`reset_boot_guard=False` to opt out unconditionally. No credential is ever
+logged or echoed. (The separate, standalone recovery firmware image,
+`firmware/KilnFW_recovery/`, is unaffected and still requires its own
+independent AP-password HMAC on its own routes.)
 `flash_firmware()`'s result reports the counter's before value, the clear result, and the
 verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
 also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so

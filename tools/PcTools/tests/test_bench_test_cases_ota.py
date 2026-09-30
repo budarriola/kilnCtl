@@ -107,8 +107,8 @@ class Otb01Test(unittest.TestCase):
             cleared["v"] = True
 
         ctx = {
-            "srv": srv, "host": "192.168.4.1", "ap_password": "secret",
-            "ota_http_client": type("O", (), {"sw_reset": staticmethod(lambda host, pw: {"ok": True})})(),
+            "srv": srv, "host": "192.168.4.1",
+            "ota_http_client": type("O", (), {"sw_reset": staticmethod(lambda host: {"ok": True})})(),
             "dashboard_http_client": _FakeDashboardClient(relay_energized=relay_energized),
             "_now": now, "_sleep": sleep,
             "_get_safety_status_fn": get_status_fn,
@@ -120,12 +120,6 @@ class Otb01Test(unittest.TestCase):
 
     def test_skips_when_not_idle(self):
         ctx = self._ctx(state_name="running")
-        result = C._case_otb01(ctx)
-        self.assertEqual(result.verdict, Verdict.SKIP)
-
-    def test_skips_without_ap_password(self):
-        ctx = self._ctx()
-        ctx["ap_password"] = None
         result = C._case_otb01(ctx)
         self.assertEqual(result.verdict, Verdict.SKIP)
 
@@ -246,7 +240,7 @@ class _FakeOtaClient:
         self.interlock_reason = interlock_reason
         self.pushed = []
 
-    def push_esp_image(self, host, path, ap_password, timeout=None):
+    def push_esp_image(self, host, path, timeout=None):
         self.pushed.append(path)
         return self.push_result
 
@@ -262,7 +256,7 @@ class _FakeOtaClient:
             return {"ok": True}
         return {"ok": False, "reason": self.interlock_reason}
 
-    def rollback_esp(self, host, ap_password):
+    def rollback_esp(self, host):
         return {"ok": True}
 
     def push_esp_image_unauthenticated(self, host, path, timeout=None):
@@ -843,7 +837,7 @@ class _FakePicoOtaClient(_FakeOtaClient):
         self._rollback_statuses = list(rollback_statuses or ["rebooting"])
         self.rollback_called = False
 
-    def push_pico_image(self, host, path, ap_password, timeout=None):
+    def push_pico_image(self, host, path, timeout=None):
         self.pushed.append(path)
         return self.push_result
 
@@ -851,7 +845,7 @@ class _FakePicoOtaClient(_FakeOtaClient):
         phase = self._phases.pop(0) if len(self._phases) > 1 else self._phases[0]
         return {"phase": phase, "last_error": self._last_error}
 
-    def rollback_pico(self, host, ap_password):
+    def rollback_pico(self, host):
         self.rollback_called = True
         return {"ok": True, "status": "rollback_started"}
 
@@ -1026,12 +1020,6 @@ class Otp02Test(unittest.TestCase):
         }
         result = C._case_otp02(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
-
-    def test_skips_without_ap_password(self):
-        ctx = {"_otp01": {"commit_before": "x", "phase": "done"}, "ap_password": None}
-        result = C._case_otp02(ctx)
-        self.assertEqual(result.verdict, Verdict.SKIP)
-
 
 class Otp03Test(unittest.TestCase):
     def _ctx(self, **overrides):

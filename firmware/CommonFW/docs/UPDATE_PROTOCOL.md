@@ -116,6 +116,21 @@ underneath stays exactly as strict. **Do not add an update-mode bypass to
 
 ## 2. Authentication
 
+**Retired 2026-09-29 for the main app** (owner decision "Retire; open when
+login off", `docs/WEB_AUTH_PLAN.md` item 2b): the AP-password challenge/HMAC
+scheme described in this section was removed outright from the nine
+main-app routes named below. `ROUTE_TIER_ADMIN` is now their only gate,
+unconditionally — including with web auth off, where they are exactly as
+open as every other ADMIN route. `GET /api/ota/challenge` and
+`ota_http_verify_request()` no longer exist in `ota_http.c`;
+`ota_http_authenticate_request()` is a no-op stub that always returns
+`true`. PcTools (`ota_http_client.py`) no longer sends or computes a MAC for
+these routes — it authenticates purely via the admin web session
+(`http_auth.urlopen()`), same as any other admin tool. This section is kept
+below for history; it describes the **separate, standalone recovery
+firmware image** (`firmware/KilnFW_recovery/`), which still implements this
+scheme unchanged on its own routes.
+
 The user's requirement: **the same password as the ESP's local access point**,
 for both update paths. `wifi_prov_get_ap_password()` already returns it.
 

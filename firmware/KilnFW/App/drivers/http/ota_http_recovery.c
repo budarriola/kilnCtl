@@ -81,15 +81,15 @@
 // rather than reusing OTA_HTTP_CONTEXT_ESP.
 //
 // Auth runs BEFORE the recovery-mode check, not after: ota_interlock.h's doc
-// comment on why POST /api/ota/esp's real ordering is (once it exists) "auth
-// first, then interlocks" applies here too -- letting an unauthenticated
-// caller learn whether this board is currently in recovery mode (via the 403
-// "board is not in recovery mode" vs. proceeding past that check) is the
-// same class of live-state leak as revealing a zone temperature to someone
-// who hasn't proven they hold the AP password. Checking auth first means a
-// caller who fails the challenge/HMAC/lockout gate learns nothing about
-// recovery-mode state at all -- same verify_result_str() 403 shape as every
-// other route in this file, before any board-state check runs.
+// comment on why POST /api/ota/esp's real ordering is "auth first, then
+// interlocks" applies here too -- letting an unauthenticated caller learn
+// whether this board is currently in recovery mode (via the 403 "board is
+// not in recovery mode" vs. proceeding past that check) is the same class of
+// live-state leak as revealing a zone temperature to someone with no admin
+// session. Checking auth first (route_tier_table.h's ADMIN tier -- the
+// AP-password HMAC this used to also require was retired 2026-09-29) means
+// an unauthenticated caller learns nothing about recovery-mode state at all,
+// before any board-state check runs.
 
 // File-scope (not handler-local) so ota_recovery_exit_reboot_task() below
 // can null it itself right before deleting -- see that task's own comment
@@ -121,10 +121,9 @@ static void ota_recovery_exit_reboot_task(void *arg)
 
 esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 {
-    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_RECOVERY_EXIT) --
-    // consolidated in ota_http_authenticate_request(); see its doc comment
-    // in ota_http.h. Auth still runs before the recovery-mode check below,
-    // not after -- see the doc comment above this handler for why.
+    // 1-2. Auth (ADMIN tier only, since 2026-09-29). Still runs before the
+    // recovery-mode check below, not after -- see the doc comment above this
+    // handler for why.
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_RECOVERY_EXIT, ip)) {
         return ESP_OK;
@@ -207,11 +206,9 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 // therefore this call) runs.
 esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req)
 {
-    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_BOOT_GUARD_RESET,
-    // not interchangeable with any other route's MAC) -- consolidated in
-    // ota_http_authenticate_request(); see its doc comment in ota_http.h.
-    // No recovery-mode check after this, unlike recovery_exit -- see this
-    // handler's own doc comment above for why.
+    // 1-2. Auth (ADMIN tier only, since 2026-09-29). No recovery-mode check
+    // after this, unlike recovery_exit -- see this handler's own doc comment
+    // above for why.
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_BOOT_GUARD_RESET, ip)) {
         return ESP_OK;

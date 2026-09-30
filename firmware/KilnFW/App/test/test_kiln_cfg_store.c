@@ -31,10 +31,9 @@
 // surface (driver/i2c_master.h, driver/spi_master.h, esp_spi_owner.h,
 // freertos/*, i2c_owner.h) test_backup_import.c already proved compiles --
 // see that file's header comment for the full list. Nothing here calls any
-// of the OTHER ota_http.h functions (ota_http_start(),
-// ota_http_verify_request(), the update-mutex functions), so only
-// ota_http_check_interlocks() needs a body -- the rest are declarations
-// only, never referenced, and need none.
+// of the OTHER ota_http.h functions (ota_http_start(), the update-mutex
+// functions), so only ota_http_check_interlocks() needs a body -- the rest
+// are declarations only, never referenced, and need none.
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>

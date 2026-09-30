@@ -34,7 +34,7 @@ whether ``forgot``/``reset`` refuse an unauthenticated caller, never
 following through with a real token.
 
 TP-M01 is the one mutating case, and it is opt-in the same way
-``cases_ota.py``'s OT-E01 SKIPs without an ``ap_password``/image path and
+``cases_ota.py``'s OT-E01 SKIPs without an image path and
 ``cases_web_rw.py``'s WEB-SEC-03/04 SKIP without their required env vars --
 never a separate boolean flag. It SKIPs unless BOTH ``KILNCTL_TOTP_CODE``
 and ``KILNCTL_WEB_PASSWORD_NEW`` are set in the environment. Neither value

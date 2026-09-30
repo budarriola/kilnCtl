@@ -36,21 +36,9 @@ class DryRunTest(_Base):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
              unittest.mock.patch.object(ota_http, "format_cfgfs") as format_mock:
-            result = msi.cfgfs_format(confirm=False, password="hunter2")
-        self.assertIn("DRY RUN", result)
-        self.assertIn("7", result)
-        format_mock.assert_not_called()
-
-    def test_dry_run_never_reads_ap_password(self):
-        """A dry run must not even try to resolve a credential -- omitting
-        both `password` and KILNCTL_AP_PASSWORD must not raise."""
-        with self._resolve_host_patch(), \
-             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
-             unittest.mock.patch.object(ota_http, "format_cfgfs") as format_mock, \
-             unittest.mock.patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("KILNCTL_AP_PASSWORD", None)
             result = msi.cfgfs_format(confirm=False)
         self.assertIn("DRY RUN", result)
+        self.assertIn("7", result)
         format_mock.assert_not_called()
 
 
@@ -63,29 +51,18 @@ class ConfirmedFormatTest(_Base):
                  ota_http, "format_cfgfs",
                  return_value={"ok": True, "status_code": 200,
                                "detail": "ok -- cfg partition formatted and mounted"}) as format_mock:
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
-        format_mock.assert_called_once_with("10.0.0.5", "hunter2")
+            result = msi.cfgfs_format(confirm=True)
+        format_mock.assert_called_once_with("10.0.0.5")
         self.assertIn("ok - cfg partition formatted", result)
         self.assertIn("before file_count=7", result)
         self.assertIn("after file_count=0", result)
-
-    def test_no_password_available_errors_before_any_post(self):
-        with self._resolve_host_patch(), \
-             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
-             unittest.mock.patch.object(ota_http, "format_cfgfs") as format_mock, \
-             unittest.mock.patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("KILNCTL_AP_PASSWORD", None)
-            result = msi.cfgfs_format(confirm=True)
-        self.assertIn("error", result.lower())
-        self.assertIn("KILNCTL_AP_PASSWORD", result)
-        format_mock.assert_not_called()
 
     def test_500_format_failed_is_surfaced(self):
         err = ota_http.OtaHttpError("refused", status=500, detail="format failed: ESP_ERR_INVALID_STATE")
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
              unittest.mock.patch.object(ota_http, "format_cfgfs", side_effect=err):
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
+            result = msi.cfgfs_format(confirm=True)
         self.assertIn("error", result.lower())
         self.assertNotIn("ok - cfg partition formatted", result)
 
@@ -100,7 +77,7 @@ class ConfirmedFormatTest(_Base):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
              unittest.mock.patch.object(ota_http, "format_cfgfs", side_effect=err):
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
+            result = msi.cfgfs_format(confirm=True)
         self.assertIn("refused", result.lower())
         self.assertIn("system_mode_gate", result)
         self.assertIn("409", result)
@@ -116,7 +93,7 @@ class ConfirmedFormatTest(_Base):
              unittest.mock.patch.object(
                  ota_http, "format_cfgfs",
                  return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
+            result = msi.cfgfs_format(confirm=True)
         self.assertIn("re-read failed", result)
         self.assertIn("UNKNOWN", result)
         self.assertTrue(result.startswith("WARNING:"))
@@ -133,7 +110,7 @@ class ConfirmedFormatTest(_Base):
              unittest.mock.patch.object(
                  ota_http, "format_cfgfs",
                  return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
+            result = msi.cfgfs_format(confirm=True)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("file_count=3", result)
         self.assertNotIn("ok - cfg partition formatted", result)
@@ -149,7 +126,7 @@ class ConfirmedFormatTest(_Base):
              unittest.mock.patch.object(
                  ota_http, "format_cfgfs",
                  return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
+            result = msi.cfgfs_format(confirm=True)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("mounted=False", result)
         self.assertNotIn("ok - cfg partition formatted", result)
@@ -162,7 +139,7 @@ class UnreadableInitialFetchTest(_Base):
                  dashboard_http_client, "get_cfgfs_status",
                  side_effect=dashboard_http_client.DashboardHttpError("unreachable")), \
              unittest.mock.patch.object(ota_http, "format_cfgfs") as format_mock:
-            result = msi.cfgfs_format(confirm=True, password="hunter2")
+            result = msi.cfgfs_format(confirm=True)
         self.assertIn("error", result.lower())
         format_mock.assert_not_called()
 

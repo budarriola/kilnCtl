@@ -515,10 +515,8 @@ static void ota_pico_rollback_task(void *arg)
 // defined right after this handler) for the eventual outcome.
 esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
 {
-    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_PICO_ROLLBACK,
-    // not interchangeable with a plain-pico-update or an esp-rollback MAC)
-    // -- consolidated in ota_http_authenticate_request(); see its doc
-    // comment in ota_http.h.
+    // 1-2. Auth (ADMIN tier only, since 2026-09-29 -- see
+    // ota_http_esp.c's ota_esp_post_handler() for the retirement note).
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_PICO_ROLLBACK, ip)) {
         return ESP_OK;

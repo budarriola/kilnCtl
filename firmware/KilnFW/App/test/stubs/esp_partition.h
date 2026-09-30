@@ -3,8 +3,8 @@
 // here is declared only, defined per-executable (same "declared once,
 // defined per test file" split stubs/esp_http_server.h already uses) --
 // none of these is ever invoked by test_ota_http.c's tests (only
-// ota_http_verify_request()/ota_http_authenticate_request() are called
-// directly), but the whole translation unit must still link.
+// ota_http_authenticate_request() is called directly), but the whole
+// translation unit must still link.
 #ifndef TEST_STUB_ESP_PARTITION_H
 #define TEST_STUB_ESP_PARTITION_H
 

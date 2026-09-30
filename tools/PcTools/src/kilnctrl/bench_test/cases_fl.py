@@ -269,20 +269,19 @@ _FL11_EXPECTED_TRIP_REASON = 6
 
 
 def _case_fl10(ctx: dict) -> CaseResult:
-    """FL-10: ESP JTAG flash round trip. Opt-in via `ctx["allow_flash"]`;
-    also needs `ctx["ap_password"]` (flash_firmware()'s boot_guard_reset and
-    verification path use it -- see mcp_server_flash.py). A refusal or
-    exception from the flashing tool itself is always a FAIL, never a
-    lesser verdict (plan §6 rule 3) -- `judgments.judge_flash_round_trip`
-    treats any `error:`-prefixed reply that way."""
+    """FL-10: ESP JTAG flash round trip. Opt-in via `ctx["allow_flash"]`.
+    `flash_firmware()`'s `POST /api/ota/esp/boot_guard_reset` step is
+    ROUTE_TIER_ADMIN only now (no separate AP-password credential --
+    retired 2026-09-29, WEB_AUTH_PLAN.md item 2b), so this case no longer
+    needs or accepts one. A refusal or exception from the flashing tool
+    itself is always a FAIL, never a lesser verdict (plan §6 rule 3) --
+    `judgments.judge_flash_round_trip` treats any `error:`-prefixed reply
+    that way."""
     if not ctx.get("allow_flash"):
         return CaseResult(Verdict.SKIP, reason="opt-in: pass allow_flash=True to run FL-10")
-    ap_password = ctx.get("ap_password")
-    if not ap_password:
-        return CaseResult(Verdict.SKIP, reason="opt-in: FL-10 requires ap_password")
 
     srv = _srv(ctx)
-    kwargs = {"verify": True, "ap_password": ap_password}
+    kwargs = {"verify": True}
     kiln_fw_root = ctx.get("kiln_fw_root")
     if kiln_fw_root:
         kwargs["kiln_fw_root"] = kiln_fw_root

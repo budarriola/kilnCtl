@@ -30,13 +30,13 @@
 extern "C" {
 #endif
 
-// The context a client authenticates for -- CommonFW/docs/UPDATE_PROTOCOL.md
-// section 2 step 2's literal "esp"/"pico"/"esp-rollback"/"recovery" HMAC
-// context string, and also which of the four independent per-endpoint
-// lockout states applies. See ota_http.c for the full per-value rationale
-// (this type moved here from ota_http.h per item 9 above; the doc comment
-// stayed there since it also documents ota_http_verify_request(), which is
-// httpd-only and did not move).
+// Which cross-processor "update in progress" this route acts on -- see
+// ota_http.h's own comment on ota_http_context_t for the full rationale.
+// This type moved here from ota_http.h (item 9 above) since ota_state.h,
+// unlike ota_http.h, is reachable from the pure/host-testable side. It used
+// to also select an HMAC context string and a per-endpoint lockout state for
+// the AP-password challenge/response scheme retired 2026-09-29
+// (WEB_AUTH_PLAN.md item 2b) -- that part of its job is gone.
 typedef enum {
     OTA_HTTP_CONTEXT_ESP = 0,
     OTA_HTTP_CONTEXT_PICO,

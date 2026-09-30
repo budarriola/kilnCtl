@@ -644,25 +644,22 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                       "/api/auth/session route this boot", esp_err_to_name(web_auth_session_status_err));
     }
 
-    // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:
-    // GET /api/ota/challenge, plus the interlock check and update mutex
-    // (ota_interlock.{h,c}, ota_http_check_interlocks()/_update_try_begin()/
-    // _update_end()). Auth logic (nonce lifecycle, lockout) and the
-    // interlock precondition logic are both real and host-tested
-    // (App/test/test_ota_auth.c, App/test/test_ota_interlock.c); the
-    // streamed OTA upload handlers themselves (POST /api/ota/esp,
-    // POST /api/ota/pico) are not built yet -- ota_http_verify_request()
-    // and ota_http_check_interlocks() are exposed for whichever future pass
-    // adds them. Same io/thermo_bus/safety pointers as
-    // dashboard_http_start() just above, for the same reason: the
-    // interlock's per-zone checks read hardware state directly rather than
-    // through profile_executor, so they see the truth whether or not a
-    // profile happens to be running.
+    // CommonFW/docs/UPDATE_PROTOCOL.md section 1 / TODO.md 9.4: the OTA/
+    // factory-reset/sw-reset routes, plus the interlock check and update
+    // mutex (ota_interlock.{h,c}, ota_http_check_interlocks()/
+    // _update_try_begin()/_update_end()). Auth is ROUTE_TIER_ADMIN alone
+    // (the AP-password HMAC scheme this comment used to describe was
+    // retired 2026-09-29, WEB_AUTH_PLAN.md item 2b); the interlock
+    // precondition logic is host-tested (App/test/test_ota_interlock.c).
+    // Same io/thermo_bus/safety pointers as dashboard_http_start() just
+    // above, for the same reason: the interlock's per-zone checks read
+    // hardware state directly rather than through profile_executor, so they
+    // see the truth whether or not a profile happens to be running.
     esp_err_t ota_http_err = ota_http_start(ctx->io_ready ? &ctx->kio : NULL,
                                             ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
                                             ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
     if (ota_http_err != ESP_OK) {
-        ESP_LOGW(MAIN_TAG, "ota_http_start failed: %s -- no /api/ota/challenge this boot",
+        ESP_LOGW(MAIN_TAG, "ota_http_start failed: %s -- OTA/factory-reset/sw-reset routes not registered this boot",
                  esp_err_to_name(ota_http_err));
     }
 

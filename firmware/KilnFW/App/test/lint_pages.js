@@ -326,42 +326,12 @@ function extract_js_var_string(src, varName) {
   }
 }
 
-{
-  // Guard against re-introducing the exact bug this de-duplication pass
-  // fixed (2026-09-18): net/ota_page.html used to carry its own inline
-  // sha256()/hmacSha256() and set 'X-Ota-Mac' by hand; settings_page.html
-  // needed the identical handshake and had NO copy at all, so its
-  // Reboot/factory-reset buttons always failed with "missing or malformed
-  // X-Ota-Mac header". The fix moved the one true implementation into
-  // app.js (window.kcOtaAuthedFetch et al.) -- this check is what stops a
-  // future page from quietly growing a second copy instead of calling it.
-  //
-  // Mechanical and narrow, same shape as the two string-drift checks above:
-  // any page/script under `dir` other than app.js itself that (a) defines
-  // its own sha256/hmacSha256 function, or (b) references the literal
-  // header name 'X-Ota-Mac' (case-insensitive, either quote style) is
-  // failing, full stop -- the only sanctioned place either of those may
-  // appear is inside app.js's kcOta* helpers.
-  const appJsPath = find_file(dir, 'app.js');
-  const reOwnCrypto = /\bfunction\s+(sha256|hmacSha256)\s*\(/;
-  const reOtaMacHeader = /['"]x-ota-mac['"]/i;
-  for (const fullPath of walk_files(dir).filter(p => /\.(html|js)$/.test(p))) {
-    if (appJsPath && path.resolve(fullPath) === path.resolve(appJsPath)) continue;
-    checked++;
-    const src = fs.readFileSync(fullPath, 'utf8');
-    const f = path.relative(dir, fullPath).split(path.sep).join('/');
-    if (reOwnCrypto.test(src)) {
-      bad++;
-      console.log(`${f}: defines its own sha256/hmacSha256 instead of using ` +
-                   `window.kcOtaCrypto (app.js) -- the OTA handshake must have exactly one implementation.`);
-    }
-    if (reOtaMacHeader.test(src)) {
-      bad++;
-      console.log(`${f}: sets the X-Ota-Mac header directly instead of going through ` +
-                   `window.kcOtaAuthedFetch (app.js) -- that is exactly the duplication this check exists to catch.`);
-    }
-  }
-}
+// The X-Ota-Mac/sha256-duplication guard that used to live here (guarding
+// app.js's now-removed AP-password HMAC handshake, kcOtaGetChallenge/
+// kcOtaDeriveMac/kcOtaCrypto) was retired 2026-09-29 along with that
+// handshake (WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open when
+// login off") -- there is no longer a second implementation to guard
+// against re-introducing, since the first one is gone too.
 
 {
   // The global 401/403 login-escalation wrapper in app.js (owner report,
@@ -521,59 +491,12 @@ function extract_js_var_string(src, varName) {
   }
 }
 
-{
-  // kcOtaAuthedFetch's own insufficient_role retry (opus review A1,
-  // 2026-09-21): the generic window.fetch wrapper above cannot safely
-  // replay a signed OTA request after its login modal -- the prehandler
-  // denies before the route consumes the single-use nonce, so a replayed
-  // X-Ota-Mac is only accepted inside the 30 s OTA_AUTH_NONCE_EXPIRY_MS
-  // window, which a human typing a password routinely exceeds. So
-  // kcOtaAuthedFetch (a) opts its own request out of the wrapper's retry
-  // via the `__kcCallerHandlesAuth` marker, and (b) owns a single
-  // login-then-RE-SIGN retry of its own (a fresh challenge + a freshly
-  // derived MAC, not a replay of the old one).
-  //
-  // Scoped to just the kcOtaAuthedFetch function body (from its own
-  // assignment to the next top-level section header) so these patterns
-  // cannot accidentally match the unrelated window.fetch wrapper above,
-  // which has its own, differently-shaped retry.
-  const appJsPath = find_file(dir, 'app.js');
-  if (appJsPath) {
-    checked++;
-    const src = fs.readFileSync(appJsPath, 'utf8');
-    const startIdx = src.indexOf('window.kcOtaAuthedFetch = function');
-    const endIdx = startIdx >= 0 ? src.indexOf('\n  // ----', startIdx) : -1;
-    if (startIdx < 0 || endIdx < 0) {
-      bad++;
-      console.log(`app.js: could not locate window.kcOtaAuthedFetch's function body to check its ` +
-                   `insufficient_role retry.`);
-    } else {
-      const body = src.slice(startIdx, endIdx);
-      if (!/__kcCallerHandlesAuth\s*=\s*true\s*;/.test(body)) {
-        bad++;
-        console.log(`app.js: kcOtaAuthedFetch no longer sets __kcCallerHandlesAuth -- the generic ` +
-                     `window.fetch wrapper would try to replay its signed request after login, which ` +
-                     `fails once the OTA nonce has expired.`);
-      }
-      if (!/ensureAdminLogin\(/.test(body)) {
-        bad++;
-        console.log(`app.js: kcOtaAuthedFetch no longer calls ensureAdminLogin -- a signed OTA request ` +
-                     `denied for insufficient_role would surface the stale 403 with no way to elevate.`);
-      }
-      // "attempt()" is the re-signing call (fetches a fresh challenge, derives
-      // a fresh MAC); it must be CALLED exactly twice -- the first send and
-      // the one retry -- never looped and never dropped. The negative
-      // lookbehind excludes the "function attempt() {" declaration itself,
-      // which also matches a bare /attempt\(\)/ substring test.
-      const attemptCallCount = (body.match(/(?<!function )attempt\(\)/g) || []).length;
-      if (attemptCallCount !== 2) {
-        bad++;
-        console.log(`app.js: expected kcOtaAuthedFetch to call its re-signing attempt() exactly twice ` +
-                     `(the first send and the one retry), found ${attemptCallCount}.`);
-      }
-    }
-  }
-}
+// kcOtaAuthedFetch's own insufficient_role retry (__kcCallerHandlesAuth,
+// ensureAdminLogin, the two-call attempt() re-signing loop) was guarding the
+// AP-password HMAC scheme retired 2026-09-29 -- kcOtaAuthedFetch is now a
+// thin passthrough to kcFetchWithSafetyAck and takes the generic
+// window.fetch wrapper's own 401/403 retry path like everything else, so
+// this check's premise is gone along with what it was guarding.
 
 {
   // Logout control: nav.js must build a Log out button that starts hidden

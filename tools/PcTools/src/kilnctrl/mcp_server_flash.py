@@ -348,20 +348,6 @@ def _check_app_flash_offset_matches_chip(
 # ---------------------------------------------------------------------------
 ERASABLE_DATA_PARTITIONS = frozenset({"nvs", "kiln_nvs", "wifi_nvs", "profiles_nvs", "cfg"})
 
-#: The partition that actually holds the AP Wi-Fi password
-#: (`wifi_prov_get_ap_password()` / `nvs_save_ap_password()`, both keyed on
-#: `WIFI_NVS_PARTITION` in wifi_prov_nvs.c / wifi_prov_internal.h) -- a
-#: SEPARATE partition from the default `nvs` one (`partitions.csv`: `nvs` is
-#: 0x9000/0x6000, `wifi_nvs` is 0x187000/0x6000; see that file's own "Why
-#: `wifi_nvs` is a separate partition" comment). Erasing `nvs` alone -- the
-#: commission-reflash case this module's own header comment above describes
-#: -- does NOT touch this partition or the AP password; only an explicit
-#: `erase_partitions=["wifi_nvs", ...]` does. `_maybe_reset_boot_guard()`
-#: below keys its skip decision on this partition specifically, not on `nvs`,
-#: for exactly that reason: a caller who only erased `nvs` still has a valid
-#: AP password to sign the boot_guard_reset HMAC with.
-AP_PASSWORD_NVS_PARTITION = "wifi_nvs"
-
 
 def _resolve_erase_targets(kiln_fw_root: str, names: "list[str]") -> "list[partition_table.PartitionEntry]":
     """Resolves each requested partition `names` entry against
@@ -759,57 +745,28 @@ def _verify_flash_landed(
     return ""
 
 
-KILNCTL_AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"
-
-
-def _resolve_boot_guard_password(ap_password: Optional[str]) -> Optional[str]:
-    """Owner decision 2026-09-19: the post-flash boot_guard counter reset is
-    DEFAULT ON whenever credentials are available, not opt-in per call. If
-    the caller passes `ap_password` explicitly, that value wins (unchanged
-    behavior). Otherwise, falls back to the KILNCTL_AP_PASSWORD environment
-    variable.
-
-    This must be the board's AP Wi-Fi password, NOT the web admin password:
-    `POST /api/ota/esp/boot_guard_reset` verifies its HMAC keyed on the
-    board's AP Wi-Fi password (`wifi_prov_get_ap_password()`, ota_http.c:498-503
-    via ota_http_recovery.c:203), and `web_auth_store.c:157` guarantees the
-    web admin password is NEVER equal to the AP password -- so falling back
-    to KILNCTL_WEB_PASSWORD (the earlier, incorrect behavior) made this call
-    403 every single time it ran on its default-on fallback path. There is
-    no companion username variable: the AP password alone is the credential,
-    unlike the web admin username/password pair. Returns None (never the
-    empty string) when no source has a value, so callers can treat "None"
-    uniformly as "no credential available" regardless of which source was
-    tried. Never logs, prints, or persists the resolved value."""
-    if ap_password:
-        return ap_password
-    return os.environ.get(KILNCTL_AP_PASSWORD_ENV) or None
-
-
 def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
-                             ap_password: Optional[str], reset_boot_guard: bool = True,
-                             erased_partition_names: "frozenset[str]" = frozenset()) -> str:
+                             reset_boot_guard: bool = True) -> str:
     """Called from flash_firmware()'s _post_flash() ONLY after
     _verify_flash_landed() returned "" -- i.e. full, unambiguous, verified
     success (running partition is 'factory' AND its build timestamp matches
     the .bin just flashed). Never called on a raise, a WARNING, or
-    verify=False -- see flash_firmware()'s own `ap_password` doc comment and
-    boot_guard_reset_counter()'s header comment (firmware/KilnFW/App/
-    drivers/persist/boot_guard.h) for why: a board just flashed with
-    something broken, or whose landing was never actually confirmed, must
-    still be free to walk into recovery mode on its own.
+    verify=False -- see boot_guard_reset_counter()'s header comment
+    (firmware/KilnFW/App/drivers/persist/boot_guard.h) for why: a board just
+    flashed with something broken, or whose landing was never actually
+    confirmed, must still be free to walk into recovery mode on its own.
 
-    Owner decision 2026-09-19: this is now DEFAULT ON whenever a credential
-    is available, not opt-in. Resolution order: `ap_password` if the caller
-    passed one explicitly, else the KILNCTL_AP_PASSWORD environment variable
-    (the board's AP Wi-Fi password, NOT the web admin password -- see
-    `_resolve_boot_guard_password()`'s header comment) via
-    `_resolve_boot_guard_password()`. Pass `reset_boot_guard=False` to opt
-    out entirely regardless of credential availability. If no credential is
-    available from either source, this is still a no-op -- but reports a
-    one-line "skipped for lack of credentials" note instead of returning ""
-    silently, so a caller who expected the reset to run can tell it didn't
-    happen and why.
+    `POST /api/ota/esp/boot_guard_reset` is ROUTE_TIER_ADMIN like the other 8
+    routes named in WEB_AUTH_PLAN.md item 2b -- the AP-password HMAC
+    challenge/response scheme it used to ALSO require was retired 2026-09-29
+    (owner decision "Retire; open when login off"). This call therefore now
+    goes through the same admin session (`http_auth.urlopen()`) every other
+    admin route in this module already uses: it is default-on whenever an
+    admin session is available (or web auth is off entirely), needs no
+    separate credential, and there is no longer an "AP password erased by
+    this same flash" skip case -- that only ever applied to the retired
+    HMAC's signing key. Pass `reset_boot_guard=False` to opt out
+    unconditionally.
 
     Resolves the board address the SAME way _verify_flash_landed() just
     confirmed one was reachable at (via _preflash_board_address(), which
@@ -830,30 +787,9 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     "unknown" rather than silently dropped) alongside the reset call's own
     verified-or-not after value -- RELEASE_HARDENING_PLAN.md blocker 6 calls
     for both, since a silent clear is not acceptable and a failed clear must
-    be visible with enough context to judge it.
-
-    `erased_partition_names`: the (possibly empty) set of partitions this
-    same flash actually erased (`erase_partitions`/`confirm_erase`; see
-    `AP_PASSWORD_NVS_PARTITION`'s own comment above). If it contains
-    `AP_PASSWORD_NVS_PARTITION` ("wifi_nvs" -- the partition
-    `wifi_prov_get_ap_password()` actually reads, a SEPARATE partition from
-    the default `nvs` one erasing `nvs` alone does not touch), the erase just
-    reset the board's AP Wi-Fi password to its firmware default while this
-    call is still signing with whatever credential it resolved beforehand --
-    that credential can never verify against the board's new password, so
-    the POST is never attempted at all (a 403 in that case would read like
-    an ordinary wrong-password mistake rather than a known, unavoidable
-    consequence of the erase just performed). A caller who erases ONLY
-    `nvs` (the ordinary web-auth-reset commission case) is unaffected: the
-    AP password is untouched, so this function's ordinary attempt-and-report
-    behavior below runs exactly as before."""
+    be visible with enough context to judge it."""
     if not reset_boot_guard:
         return ""
-    resolved_password = _resolve_boot_guard_password(ap_password)
-    if not resolved_password:
-        return ("boot_guard_reset: skipped -- no credential available (neither `ap_password` "
-                "nor KILNCTL_AP_PASSWORD were set); the recovery-mode "
-                "counter was NOT cleared by this flash.")
     resolved = _preflash_board_address(host) or pre_flash_host
     if not resolved:
         return ("WARNING: boot_guard_reset skipped -- could not resolve a board address to call "
@@ -873,31 +809,10 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
         _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
                                    "only, does not block the reset call): %s", exc)
     before_str = "unknown" if before_count is None else str(before_count)
-    if AP_PASSWORD_NVS_PARTITION in erased_partition_names:
-        # This flash erased the partition the AP password actually lives in
-        # -- see AP_PASSWORD_NVS_PARTITION's and this function's own doc
-        # comments. Never attempt to sign a POST with a credential that
-        # cannot possibly still be valid; that would just produce a 403 that
-        # reads like an ordinary wrong-password mistake.
-        return (
-            f"boot_guard_reset: skipped -- this flash erased the {AP_PASSWORD_NVS_PARTITION!r} "
-            "partition, which reset the board's AP Wi-Fi password to its firmware default, so "
-            "the credential this call resolved is no longer valid for it; the recovery-mode "
-            f"counter was NOT cleared by this flash (boot_count before this attempt: {before_str}). "
-            "Clear it later via boot_guard_reset once the AP password has been re-provisioned to "
-            "match the credential in use, or disregard this if boot_count is already 1 (harmless)."
-        )
     try:
-        body = ota_http.boot_guard_reset_esp(resolved, resolved_password)
+        body = ota_http.boot_guard_reset_esp(resolved)
     except ota_http.OtaHttpError as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
-        if getattr(exc, "status", None) == 403:
-            return (
-                f"WARNING: boot_guard_reset call failed (wrong AP password -- KILNCTL_AP_PASSWORD "
-                "is the AP Wi-Fi password, not the web admin password; board said: "
-                f"{exc.detail or exc}) -- the flash itself landed fine, but the recovery-mode "
-                f"counter was NOT cleared by this flash (boot_count before this attempt: {before_str})."
-            )
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
                 f"but the recovery-mode counter was NOT cleared by this flash (boot_count before "
                 f"this attempt: {before_str}).")
@@ -982,7 +897,6 @@ def flash_firmware(
     host: Optional[str] = None,
     allow_sensitive_dirty: bool = False,
     kiln_fw_root: Optional[str] = None,
-    ap_password: Optional[str] = None,
     reset_boot_guard: bool = True,
     allow_partition_offset_mismatch: bool = False,
     erase_partitions: Optional["list[str]"] = None,
@@ -1121,13 +1035,12 @@ def flash_firmware(
     (`verify=True`) compares against THAT tree's `.bin`, unchanged
     otherwise.
 
-    `ap_password` / `reset_boot_guard`: Owner decision 2026-09-19 -- the
-    post-flash boot_guard counter reset is DEFAULT ON whenever credentials
-    are available, not opt-in per call. When `verify=True` and
-    `reset_boot_guard=True` (the default), and ONLY once post-flash
-    verification confirms full success (the board is running `factory` with
-    the exact build just flashed -- `_verify_flash_landed()` returned "",
-    not a WARNING and not a raise), this calls
+    `reset_boot_guard`: Owner decision 2026-09-19 -- the post-flash
+    boot_guard counter reset is DEFAULT ON, not opt-in per call. When
+    `verify=True` and `reset_boot_guard=True` (the default), and ONLY once
+    post-flash verification confirms full success (the board is running
+    `factory` with the exact build just flashed -- `_verify_flash_landed()`
+    returned "", not a WARNING and not a raise), this calls
     `POST /api/ota/esp/boot_guard_reset` (ota_http_client.boot_guard_reset_esp())
     to clear `boot_guard`'s recovery-mode counter directly -- the tool-driven
     fix for docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md:
@@ -1137,19 +1050,14 @@ def flash_firmware(
     perfectly healthy board into recovery mode for a reason that has nothing
     to do with whether the firmware can boot.
 
-    The credential used is resolved by `_resolve_boot_guard_password()`: an
-    explicit `ap_password` wins if given; otherwise it falls back to the
-    KILNCTL_AP_PASSWORD environment variable -- the board's AP Wi-Fi
-    password, NOT the web admin password (`KILNCTL_WEB_PASSWORD`); the two
-    are guaranteed distinct (`web_auth_store.c:157`) and the boot_guard_reset
-    route verifies its HMAC against the AP password specifically. If no
-    credential is available, this is a no-op, but the result gets one line
-    saying the reset was skipped for lack of credentials rather than
-    silently doing nothing.
-    Passing `reset_boot_guard=False` opts out unconditionally, regardless of
-    what credentials are available -- use this for a deliberate flash of
-    something you expect might NOT boot cleanly and want free to walk into
-    recovery mode on its own.
+    `POST /api/ota/esp/boot_guard_reset` is ROUTE_TIER_ADMIN, like the other
+    8 routes named in WEB_AUTH_PLAN.md item 2b -- the AP-password HMAC
+    challenge/response scheme it used to ALSO require was retired 2026-09-29
+    (owner decision "Retire; open when login off"). This call needs no
+    separate credential any more: it goes through the same admin session
+    every other admin route this module calls already uses, and runs
+    whenever that session is available (or web auth is off entirely).
+    Passing `reset_boot_guard=False` opts out unconditionally.
 
     Deliberately gated on FULL verified success, never on a failed,
     unverified, or merely-warned-about flash (`verify=False`, an unreachable
@@ -1162,19 +1070,7 @@ def flash_firmware(
     verify this call is reported as a WARNING appended to the result, never
     raised -- the flash itself already succeeded and landed by this point.
     The result always reports the counter's before and after values (or the
-    skip reason), never a silent clear. The password itself is never logged
-    or echoed.
-
-    If this same call's `erase_partitions` includes `wifi_nvs` -- the
-    partition `wifi_prov_get_ap_password()` actually reads, a SEPARATE
-    partition from the default `nvs` one (see partitions.csv) -- the erase
-    just reset the board's AP Wi-Fi password to its firmware default, so the
-    resolved credential above can no longer be valid for it: the POST is
-    never attempted (never signed with a credential known to be stale), and
-    the result reports a skip line naming the reason instead. Erasing `nvs`
-    alone (the ordinary web-auth-reset commission case) does NOT touch the
-    AP password, so this reset runs exactly as documented above in that
-    case.
+    skip reason), never a silent clear.
 
     `allow_partition_offset_mismatch`: before touching OpenOCD, this tool
     parses `<kiln_fw_root>/partitions.csv` to find the partition named
@@ -1494,10 +1390,7 @@ def flash_firmware(
         # _maybe_reset_boot_guard()'s own doc comment for why this must
         # never run on a raise (handled above, already returned), a WARNING
         # (handled just above), or verify=False (already returned earlier).
-        boot_guard_note = _maybe_reset_boot_guard(
-            host, pre_flash_host, ap_password, reset_boot_guard,
-            erased_partition_names=frozenset(e.name for e in erase_targets),
-        )
+        boot_guard_note = _maybe_reset_boot_guard(host, pre_flash_host, reset_boot_guard)
         suffix = f"\n{boot_guard_note}" if boot_guard_note else ""
         return (f"{base_msg}, and post-flash verification confirmed the board is running "
                 f"{app_target.name!r} with the matching build{suffix}")

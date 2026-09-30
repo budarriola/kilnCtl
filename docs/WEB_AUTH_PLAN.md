@@ -499,7 +499,29 @@ confirm GREEN.
 
 ---
 
-## 2b. OTA and the other eight authenticated routes use the administrator credential
+## 2b. OTA and the other eight authenticated routes use the administrator credential (Retired 2026-09-29)
+
+**Retired 2026-09-29, owner decision "Retire; open when login off":** the
+AP-password HMAC (`X-Ota-Mac`, the challenge/nonce/lockout dance, `ota_auth.c`
+in the main app) was removed outright from all nine routes named below.
+ROUTE_TIER_ADMIN is now their only gate, unconditionally — including the
+"auth disabled" case this item used to treat as a **named exception**
+("with web auth disabled, the nine routes fall back to today's AP-password
+challenge, unchanged"). That exception is deleted: with web auth off, these
+nine routes are exactly as open as every other ADMIN route, same as the rest
+of this plan's auth-off collapse (item 11). This is an intentional loosening,
+authorized by the owner and not a violation of "tier changes only tighten".
+`GET /api/ota/challenge` and `ota_http_verify_request()` were deleted from
+`ota_http.c`; `ota_http_authenticate_request()` is now a no-op stub that
+always returns `true`, logging the caller's IP for visibility.
+`net/ota_auth.c`/`.h` in the main app is unused by any HTTP route now but was
+kept in place rather than deleted (see
+`firmware/KilnFW_recovery/main/recovery_ota_auth_mirror_drift_check.py`'s
+2026-09-29 update). The **separate, standalone recovery firmware image**
+(`firmware/KilnFW_recovery/`) is unaffected — it keeps its own independent
+AP-password HMAC on its own routes, unchanged. The rest of this item below is
+kept as written for history; it no longer describes the main app's live
+behavior.
 
 Owner requirement: **OTA must not require a password of its own.** The nine
 routes that authenticate today — `POST /api/ota/esp`, `/api/ota/esp/rollback`,

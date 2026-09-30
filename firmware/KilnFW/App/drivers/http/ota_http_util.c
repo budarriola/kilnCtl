@@ -18,29 +18,6 @@ void ota_http_hex_encode(const uint8_t *in, size_t len, char *out /* 2*len + 1 b
     out[2 * len] = '\0';
 }
 
-bool ota_http_hex_decode(const char *hex, size_t hex_len, uint8_t *out)
-{
-    if (hex_len % 2 != 0) {
-        return false;
-    }
-    for (size_t i = 0; i < hex_len / 2; i++) {
-        int hi = -1, lo = -1;
-        char ch = hex[2 * i];
-        if (ch >= '0' && ch <= '9') hi = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') hi = ch - 'a' + 10;
-        else if (ch >= 'A' && ch <= 'F') hi = ch - 'A' + 10;
-        ch = hex[2 * i + 1];
-        if (ch >= '0' && ch <= '9') lo = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') lo = ch - 'a' + 10;
-        else if (ch >= 'A' && ch <= 'F') lo = ch - 'A' + 10;
-        if (hi < 0 || lo < 0) {
-            return false;
-        }
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return true;
-}
-
 const char *ota_http_esp_phase_str(ota_http_esp_phase_t phase)
 {
     switch (phase) {
@@ -51,21 +28,6 @@ const char *ota_http_esp_phase_str(ota_http_esp_phase_t phase)
         case OTA_HTTP_ESP_PHASE_DONE:       return "done";
         case OTA_HTTP_ESP_PHASE_FAILED:     return "failed";
         default:                            return "unknown";
-    }
-}
-
-const char *ota_http_verify_result_str(ota_http_verify_result_t r)
-{
-    switch (r) {
-        case OTA_HTTP_VERIFY_OK: return "ok";
-        case OTA_HTTP_VERIFY_LOCKED_OUT: return "locked out -- too many recent wrong-password attempts";
-        case OTA_HTTP_VERIFY_NO_VALID_NONCE:
-            return "no valid challenge -- GET /api/ota/challenge first, then POST within 30 s";
-        case OTA_HTTP_VERIFY_BAD_MAC: return "wrong password";
-        case OTA_HTTP_VERIFY_NO_AP_PASSWORD:
-            return "this board's AP password is empty -- set an AP password to update it over HTTP, "
-                   "or use the physical BOOT-button recovery window (hold BOOT during boot)";
-        default: return "authentication failed";
     }
 }
 

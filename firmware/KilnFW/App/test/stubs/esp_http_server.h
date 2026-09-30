@@ -95,8 +95,10 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s);
 
 /* Added 2026-08-27 for ota_http.c's host tests (test_ota_http.c) -- that
  * file's get_client_ip()/ota_http_authenticate_request()/ota_esp_post_handler()
- * etc. read the X-Ota-Mac header and the socket fd. Same "declared once
- * here, defined once per test file" split as the rest of this header. */
+ * etc. read request headers and the socket fd (the X-Ota-Mac header these
+ * used to read for the AP-password HMAC scheme is gone -- retired
+ * 2026-09-29, WEB_AUTH_PLAN.md item 2b). Same "declared once here, defined
+ * once per test file" split as the rest of this header. */
 size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field);
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size);
 int httpd_req_to_sockfd(httpd_req_t *r);

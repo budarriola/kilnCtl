@@ -1341,7 +1341,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
-def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Optional[str] = None) -> str:
+def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
     """Confirm-and-format the `cfg` LittleFS partition -- POST
     /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
     handler(), ROUTE_TIER_ADMIN). This is the operator confirmation
@@ -1365,15 +1365,11 @@ def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Op
     quarantine_clear()/safety_set_rate_guard() already use.
 
     With ``confirm=True``, POSTs through the sanctioned ota_http_client/
-    http_auth seam (same "esp"-family challenge/HMAC dance every other
-    admin-tier write tool here uses), signed over the "factory-reset"
-    context -- cfg_fs_format_http.c deliberately reuses
-    OTA_HTTP_CONTEXT_FACTORY_RESET rather than minting its own context, so a
-    credential valid for POST /api/factory_reset is also valid here (see
-    ota_http_client.derive_mac()'s doc comment). `password` falls back to the
-    KILNCTL_AP_PASSWORD environment variable when omitted, and this refuses
-    with an error naming that variable if neither is set -- NEVER printed,
-    logged, or echoed either way.
+    http_auth seam -- ROUTE_TIER_ADMIN (the admin session) is now the only
+    auth this route requires, same as POST /api/factory_reset, which used to
+    share its "factory-reset" HMAC context with this route before the
+    AP-password HMAC challenge/response scheme was retired 2026-09-29
+    (WEB_AUTH_PLAN.md item 2b).
 
     After the POST, re-reads GET /api/cfgfs and reports the after-state file
     count (should read 0, an empty freshly-formatted filesystem) so a caller
@@ -1384,7 +1380,7 @@ def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Op
     from a different network than this link's serial port.
     """
     from . import ota_http_client as ota_http
-    from .mcp_server_ota import _ota_resolve_host, _require_ap_password  # local imports: avoid circular imports, same convention as kiln_configs_quarantine_clear()
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoid circular imports, same convention as kiln_configs_quarantine_clear()
 
     resolved = _ota_resolve_host(host)
     try:
@@ -1398,12 +1394,7 @@ def cfgfs_format(confirm: bool = False, password: Optional[str] = None, host: Op
                 f"{before_count} file(s) (host={resolved}); formatting would erase all of them")
 
     try:
-        resolved_password = _require_ap_password(password)
-    except ValueError as exc:
-        return f"error: {exc}"
-
-    try:
-        result = ota_http.format_cfgfs(resolved, resolved_password)
+        result = ota_http.format_cfgfs(resolved)
     except ota_http.OtaHttpError as exc:
         from . import zones_http_client  # local import: avoid a module-load-order cycle, same convention as the other local imports in this function
         if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):

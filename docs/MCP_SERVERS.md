@@ -227,7 +227,7 @@ KiCad server has no equivalent -- there is nothing to compile there:
 | `build_saftyfw(jobs, saftyfw_root)` | kilnctrl | ninja in `firmware/SaftyFW/build` (or `<saftyfw_root>/build`); auto-configures from scratch via `mcpkit.pico_sdk.resolve_pico_sdk_path()` if no `CMakeCache.txt` exists yet -- see "Building from a clean worktree" below |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
 | `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
-| `bench_test_run(suite, cases, dry_run, allow_heat, ap_password, tag, host)` | kilnctrl | standardized bench regression testing (docs/BENCH_TEST_SYSTEM_PLAN.md); Wave 0 only runs read-only cases -- calls existing tool functions in-process, never a second MCP server or hardware directly |
+| `bench_test_run(suite, cases, dry_run, allow_heat, tag, host, attended, allow_flash)` | kilnctrl | standardized bench regression testing (docs/BENCH_TEST_SYSTEM_PLAN.md); Wave 0 only runs read-only cases -- calls existing tool functions in-process, never a second MCP server or hardware directly. No `ap_password` parameter -- the AP-password HMAC it used to need for the nine OTA/reset routes was retired 2026-09-29 |
 | `bench_test_list(suite)` | kilnctrl | lists known suites, or one suite's case ids/descriptions and whether each has a judge function implemented yet |
 | `bench_test_last(n)` | kilnctrl | the most recent run(s)' `summary.json`, read back from `logs/bench_test/` |
 
@@ -377,35 +377,31 @@ misdirects UART traffic just as badly as an unpinned JTAG flash.
 2026-09-19).** `flash_firmware()` calls `POST /api/ota/esp/boot_guard_reset`
 after post-flash verification confirms full, unambiguous success (never on a
 raise, a WARNING, or `verify=False`) -- see
-`docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`. This used
-to require an explicit `ap_password` argument; it is now attempted whenever a
-credential is available at all: an explicit `ap_password` still wins if
-passed, otherwise it falls back to the `KILNCTL_AP_PASSWORD` environment
-variable -- the board's **AP Wi-Fi password**, distinct from and never equal
-to the web admin password (`web_auth_store.c:157`), since
-`POST /api/ota/esp/boot_guard_reset` verifies its HMAC keyed on the AP
-password specifically. If it is not set, the tool result reports the
-reset was skipped for lack of credentials rather than saying nothing. Pass
-`reset_boot_guard=False` to opt out unconditionally. The password is never
-logged or echoed, and the result always names the counter's before/after
-values (or the skip reason).
+`docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`. It is
+attempted whenever an administrator web session is available (or web auth is
+off entirely); `reset_boot_guard=False` still opts out unconditionally. The
+result always names the counter's before/after values (or, if no session
+could be established, the skip reason). No credential of any kind is logged
+or echoed.
 
-**Owner decision 2026-09-29: this route, and the other eight routes whose
-auth is keyed on the AP-password HMAC, now also require an administrator web
-session -- tightening only, the HMAC is unchanged.** `boot_guard_reset_esp()`
-(and `format_cfgfs()`, `sw_reset()`, `rollback_esp()`, `rollback_pico()`,
-`recovery_exit_esp()`, `push_esp_image()`, `push_pico_image()`) all call
-through `http_auth.urlopen()`, which logs in with
-`KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` on a 401 and resends -- so every
-one of these calls already presents both the administrator session AND the
-AP-password MAC. On the firmware side this was already wired: all nine
-routes are `ROUTE_TIER_ADMIN` in `route_tier_table.h`
-(`docs/WEB_AUTH_PLAN.md` item 2b), so `kiln_http_register()`'s pre-handler
-refuses a request with no administrator session (401/403) before the HMAC
-check in `ota_http.c` is ever reached, whenever web auth is on. With web auth
-OFF, per that same plan item, these nine routes deliberately keep the legacy
-AP-password-only gate rather than becoming unauthenticated -- that is the one
-named exception to "auth off is exactly as open as today," not an oversight.
+**Owner decision 2026-09-29, "Retire; open when login off": the AP-password
+HMAC on this route and the other eight is retired outright, not merely
+supplemented.** `boot_guard_reset_esp()` (and `format_cfgfs()`, `sw_reset()`,
+`rollback_esp()`, `rollback_pico()`, `recovery_exit_esp()`,
+`push_esp_image()`, `push_pico_image()`) call only `http_auth.urlopen()`,
+which logs in with `KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` on a 401 and
+resends. None of these functions takes an `ap_password` argument any more,
+and `KILNCTL_AP_PASSWORD` is no longer read anywhere in this path. On the
+firmware side, all nine routes are still `ROUTE_TIER_ADMIN` in
+`route_tier_table.h`, but `ota_http_authenticate_request()` (`ota_http.c`)
+is now a no-op stub that always returns `true` -- `GET /api/ota/challenge`
+and the HMAC verify path were deleted. **This supersedes the "named
+exception" text in `docs/WEB_AUTH_PLAN.md` item 2b** ("with web auth off,
+these nine routes keep the legacy AP-password-only gate"): with web auth
+off, these nine routes are now exactly as open as every other ADMIN route,
+same as the rest of the auth-off collapse. The separate, standalone recovery
+firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
+implements the AP-password HMAC on its own routes.
 
 **Data-partition erase during a commission reflash (owner decision
 2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`

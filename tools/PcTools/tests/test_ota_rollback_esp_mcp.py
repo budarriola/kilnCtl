@@ -6,6 +6,11 @@ reboots into different code) and, per its own docstring, has never been
 exercised against real hardware -- so the string-formatting/error-path
 logic exercised here is the only test coverage this tool has at all.
 
+2026-09-29: this route's AP-password HMAC (WEB_AUTH_PLAN.md item 2b) was
+retired -- ROUTE_TIER_ADMIN (the ordinary admin session) is the only gate
+now, on or off. `ota_rollback_esp()` and `sw_reset_esp()` no longer take a
+`password` argument and no longer read any KILNCTL_AP_PASSWORD fallback.
+
 Same convention as test_ota_status_protocol_version.py: mcp_server_ota's
 imported `ota_http` module is mocked directly, no real socket, no live
 board. Also proves the "no previous valid image" and "wrong host resolution
@@ -34,11 +39,11 @@ class OtaRollbackEspHappyPathTests(unittest.TestCase):
             mo.ota_http, "rollback_esp",
             return_value={"ok": True, "version_before": "1.4.2"},
         ) as mock_rollback:
-            result = mo.ota_rollback_esp("hunter2", host="10.0.0.5")
+            result = mo.ota_rollback_esp(host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
         self.assertIn("1.4.2", result)
         self.assertIn("rebooting", result)
-        mock_rollback.assert_called_once_with("10.0.0.5", "hunter2")
+        mock_rollback.assert_called_once_with("10.0.0.5")
 
 
 class OtaRollbackEspRefusalTests(unittest.TestCase):
@@ -47,7 +52,7 @@ class OtaRollbackEspRefusalTests(unittest.TestCase):
             mo.ota_http, "rollback_esp",
             return_value={"ok": False, "reason": "no previous valid image to roll back to"},
         ):
-            result = mo.ota_rollback_esp("hunter2", host="10.0.0.5")
+            result = mo.ota_rollback_esp(host="10.0.0.5")
         self.assertTrue(result.startswith("error"))
         self.assertIn("no previous valid image to roll back to", result)
 
@@ -58,9 +63,9 @@ class OtaRollbackEspHostResolutionTests(unittest.TestCase):
              unittest.mock.patch.object(
                  mo.ota_http, "rollback_esp", return_value={"ok": True, "version_before": "1.0.0"}
              ) as mock_rollback:
-            mo.ota_rollback_esp("pw", host="kilnctl.local")
+            mo.ota_rollback_esp(host="kilnctl.local")
         mock_wifi.get_status.assert_not_called()
-        mock_rollback.assert_called_once_with("kilnctl.local", "pw")
+        mock_rollback.assert_called_once_with("kilnctl.local")
 
     def test_no_host_falls_back_to_ap_default_when_sta_unreachable(self):
         with unittest.mock.patch.object(
@@ -69,85 +74,45 @@ class OtaRollbackEspHostResolutionTests(unittest.TestCase):
         ), unittest.mock.patch.object(
             mo.ota_http, "rollback_esp", return_value={"ok": True, "version_before": "1.0.0"}
         ) as mock_rollback:
-            mo.ota_rollback_esp("pw")
-        mock_rollback.assert_called_once_with(mo.ota_http.OTA_AP_DEFAULT_HOST, "pw")
+            mo.ota_rollback_esp()
+        mock_rollback.assert_called_once_with(mo.ota_http.OTA_AP_DEFAULT_HOST)
 
 
 class OtaRollbackEspErrorPathTests(unittest.TestCase):
     def test_http_error_surfaces_as_error_string_not_exception(self):
         with unittest.mock.patch.object(
             mo.ota_http, "rollback_esp",
-            side_effect=mo.ota_http.OtaHttpError("wrong password", status=403, detail="forbidden"),
+            side_effect=mo.ota_http.OtaHttpError("admin session required", status=401, detail="unauthorized"),
         ):
-            result = mo.ota_rollback_esp("wrong", host="10.0.0.5")
+            result = mo.ota_rollback_esp(host="10.0.0.5")
         self.assertTrue(result.startswith("error"))
-        self.assertIn("wrong password", result)
-        self.assertIn("403", result)
+        self.assertIn("admin session required", result)
+        self.assertIn("401", result)
 
 
-class ApPasswordEnvFallbackTests(unittest.TestCase):
-    """Covers the KILNCTL_AP_PASSWORD fallback added to mirror
-    mcp_server_flash.py's ap_password handling: an omitted `password`
-    argument should fall back to the env var, the resolved secret must
-    never appear in the tool's returned text, and a caller with neither
-    source gets a clear error naming the env var."""
+class NoPasswordParameterTests(unittest.TestCase):
+    """The retired AP-password HMAC leaves no trace on these tools' own
+    signatures -- neither takes a `password` argument, and no
+    KILNCTL_AP_PASSWORD lookup happens anywhere in this module any more."""
 
-    def setUp(self):
-        self._old = os.environ.pop(mo.KILNCTL_AP_PASSWORD_ENV, None)
-        self.addCleanup(self._restore)
+    def test_ota_rollback_esp_has_no_password_parameter(self):
+        import inspect
+        sig = inspect.signature(mo.ota_rollback_esp)
+        self.assertNotIn("password", sig.parameters)
 
-    def _restore(self):
-        if self._old is None:
-            os.environ.pop(mo.KILNCTL_AP_PASSWORD_ENV, None)
-        else:
-            os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = self._old
+    def test_sw_reset_esp_has_no_password_parameter(self):
+        import inspect
+        sig = inspect.signature(mo.sw_reset_esp)
+        self.assertNotIn("password", sig.parameters)
 
-    def test_sw_reset_esp_uses_env_var_when_password_omitted(self):
-        os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = "s3cr3t-env-pw"
+    def test_sw_reset_esp_calls_through_with_no_credential(self):
         with unittest.mock.patch.object(
             mo.ota_http, "sw_reset",
             return_value={"ok": True, "detail": "resetting"},
         ) as mock_reset:
             result = mo.sw_reset_esp(confirm=True, host="10.0.0.5")
-        mock_reset.assert_called_once_with("10.0.0.5", "s3cr3t-env-pw")
+        mock_reset.assert_called_once_with("10.0.0.5")
         self.assertTrue(result.startswith("ok"))
-        self.assertNotIn("s3cr3t-env-pw", result)
-
-    def test_sw_reset_esp_explicit_password_wins_over_env(self):
-        os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = "env-pw"
-        with unittest.mock.patch.object(
-            mo.ota_http, "sw_reset",
-            return_value={"ok": True, "detail": "resetting"},
-        ) as mock_reset:
-            result = mo.sw_reset_esp("explicit-pw", confirm=True, host="10.0.0.5")
-        mock_reset.assert_called_once_with("10.0.0.5", "explicit-pw")
-        self.assertNotIn("explicit-pw", result)
-        self.assertNotIn("env-pw", result)
-
-    def test_sw_reset_esp_missing_credential_names_env_var(self):
-        # KILNCTL_AP_PASSWORD is unset (removed in setUp).
-        with unittest.mock.patch.object(mo.ota_http, "sw_reset") as mock_reset:
-            result = mo.sw_reset_esp(confirm=True, host="10.0.0.5")
-        mock_reset.assert_not_called()
-        self.assertTrue(result.startswith("error"))
-        self.assertIn(mo.KILNCTL_AP_PASSWORD_ENV, result)
-
-    def test_ota_rollback_esp_uses_env_var_when_password_omitted(self):
-        os.environ[mo.KILNCTL_AP_PASSWORD_ENV] = "rollback-env-pw"
-        with unittest.mock.patch.object(
-            mo.ota_http, "rollback_esp",
-            return_value={"ok": True, "version_before": "1.0.0"},
-        ) as mock_rollback:
-            result = mo.ota_rollback_esp(host="10.0.0.5")
-        mock_rollback.assert_called_once_with("10.0.0.5", "rollback-env-pw")
-        self.assertNotIn("rollback-env-pw", result)
-
-    def test_ota_rollback_esp_missing_credential_names_env_var(self):
-        with unittest.mock.patch.object(mo.ota_http, "rollback_esp") as mock_rollback:
-            result = mo.ota_rollback_esp(host="10.0.0.5")
-        mock_rollback.assert_not_called()
-        self.assertTrue(result.startswith("error"))
-        self.assertIn(mo.KILNCTL_AP_PASSWORD_ENV, result)
 
 
 if __name__ == "__main__":

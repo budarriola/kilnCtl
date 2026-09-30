@@ -17,7 +17,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "ota_http.h" /* ota_http_esp_phase_t, ota_http_verify_result_t */
+#include "ota_http.h" /* ota_http_esp_phase_t */
 #include "safety_link.h" /* safety_link_rollback_outcome_t */
 
 #ifdef __cplusplus
@@ -28,17 +28,8 @@ extern "C" {
  * must be at least 2*len + 1 bytes (NUL-terminated). */
 void ota_http_hex_encode(const uint8_t *in, size_t len, char *out);
 
-/* Inverse of ota_http_hex_encode(): decodes exactly `hex_len` hex characters
- * (must be even) into hex_len/2 bytes. Returns false on any non-hex
- * character or odd length, leaving `out` in an unspecified state (callers
- * must check the return value before trusting `out`). */
-bool ota_http_hex_decode(const char *hex, size_t hex_len, uint8_t *out);
-
 /* Human-readable string for an ota_http_esp_phase_t. */
 const char *ota_http_esp_phase_str(ota_http_esp_phase_t phase);
-
-/* Human-readable string for an ota_http_verify_result_t. */
-const char *ota_http_verify_result_str(ota_http_verify_result_t r);
 
 /* Human-readable string for kilnlink_rollback_result_reason_t (wire-carried
  * as a plain uint8_t -- see caller's own doc comment for why). Any value

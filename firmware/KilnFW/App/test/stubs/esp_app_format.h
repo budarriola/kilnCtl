@@ -2,8 +2,8 @@
 // 2026-08-27 for ota_http.c's host tests (test_ota_http.c). Only the two
 // fields ota_esp_do_transfer() actually reads (magic, chip_id) are modeled --
 // never exercised by test_ota_http.c's tests (they call
-// ota_http_verify_request()/ota_http_authenticate_request() directly, never
-// the transfer handlers), but the whole translation unit must still link.
+// ota_http_authenticate_request() directly, never the transfer handlers),
+// but the whole translation unit must still link.
 #ifndef TEST_STUB_ESP_APP_FORMAT_H
 #define TEST_STUB_ESP_APP_FORMAT_H
 

@@ -391,10 +391,9 @@ cleanup:
 
 esp_err_t ota_esp_post_handler(httpd_req_t *req)
 {
-    // 1-2. X-Ota-Mac header parse + auth -- consolidated in
-    // ota_http_authenticate_request() (ota_http.c); see its doc comment in
-    // ota_http.h for the exact 400/403 contract this used to duplicate
-    // inline. On refusal it has already sent the response.
+    // 1-2. Auth (route_tier_table.h's ADMIN tier -- the AP-password HMAC
+    // this used to also require was retired 2026-09-29) -- always succeeds;
+    // ota_http_authenticate_request() (ota_http.c) also fills `ip`.
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_ESP, ip)) {
         return ESP_OK;
@@ -672,9 +671,8 @@ static void ota_rollback_reboot_task(void *arg)
 }
 esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 {
-    // 1-2. X-Ota-Mac header parse + auth (OTA_HTTP_CONTEXT_ESP_ROLLBACK, not
-    // interchangeable with a plain-update MAC) -- consolidated in
-    // ota_http_authenticate_request(); see its doc comment in ota_http.h.
+    // 1-2. Auth (ADMIN tier only, since 2026-09-29 -- see
+    // ota_esp_post_handler() above).
     char ip[46];
     if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_ESP_ROLLBACK, ip)) {
         return ESP_OK;
