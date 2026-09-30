@@ -2006,6 +2006,27 @@ or crashed the board; readiness after both was 17 ok / 1 not_done
 
 No crash report touched, no `estop_verify` called.
 
+## 2026-09-30: boot_guard persisted_count fix landed and bench-verified
+
+The `persisted_count` fix noted above as in-progress landed on
+`origin/main` as `9fc8b589`, `ee6a3809`, `9b77e2b2` (Opus-reviewed across
+three rounds). `GET /api/boot_guard` and `POST /api/ota/esp/boot_guard_reset`
+now report a separate `persisted_count`, the NVS-persisted counter, read by
+a strict reader that omits the field on any read or CRC failure rather than
+fabricating 0 -- `boot_count` stays this boot's fixed value.
+`flash_firmware()`'s result labels now distinguish "unknown (GET failed)"
+from "not reported (older firmware or read failure)".
+
+Flashed to the bench board at `9b77e2b2` via `flash_firmware(kiln_fw_root=
+<clean worktree>)`: verified OK, bootloader + partition table + app. After
+the flash, `boot_guard_get` showed `boot_count=1`, `persisted_count=0`,
+`recovery_mode=False`; the reset line read "persisted before=0, after=0".
+Safety link up, armed, no trip. No unacknowledged crash.
+
+**Limitation:** the persisted count was already 0 before this reset, so the
+flash did not demonstrate a nonzero count actually dropping to 0 -- a read
+of 0 still merges "cleared" with "never written".
+
 ## 2026-09-30: LCD suite rerun against harness `7550fdf6` -- LCD-19 new failure shape
 
 Two LCD-suite runs against harness code at `7550fdf6` (the LCD-19 follow-up

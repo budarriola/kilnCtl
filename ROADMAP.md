@@ -4395,11 +4395,22 @@ Owner instruction, 2026-09-21.
     with corrected no-response wording). Flashed to the bench; **not yet
     bench-verified end to end** -- setting a static IP was deliberately
     not exercised this sweep.
-  - **New finding, fix in progress, not yet pushed:** `boot_guard_reset`
-    and `GET /api/boot_guard` report the in-RAM `boot_count` for the
-    current boot, not the persisted NVS counter, so `flash_firmware()`
-    prints `after=1` even when the persisted clear itself succeeded. A fix
-    adding a separate `persisted_count` field is in progress.
+  - **`persisted_count` fix landed on `origin/main`, 2026-09-30**
+    (`9fc8b589`, `ee6a3809`, `9b77e2b2`, Opus-reviewed across three
+    rounds): `GET /api/boot_guard` and `POST /api/ota/esp/boot_guard_reset`
+    now report a separate `persisted_count`, the NVS-persisted counter,
+    read by a strict reader that omits the field on any read or CRC
+    failure rather than fabricating 0 -- `boot_count` stays this boot's
+    fixed value. `flash_firmware()`'s result labels now distinguish
+    "unknown (GET failed)" from "not reported (older firmware or read
+    failure)". Flashed to the bench board at `9b77e2b2` (clean worktree,
+    `flash_firmware()` verify OK: bootloader + partition table + app);
+    afterward `boot_guard_get` showed `boot_count=1`, `persisted_count=0`,
+    `recovery_mode=False`, and the reset line read "persisted before=0,
+    after=0"; safety link up/armed/no trip, no unacknowledged crash.
+    **Limitation:** the persisted count was already 0 before this reset,
+    so the flash did not demonstrate a nonzero count dropping to 0 -- 0
+    still merges "cleared" with "never written".
   - **Bench board flashed twice, 2026-09-30, both from clean worktrees via
     `flash_firmware()`:** first to `d5d6d64a` (`KilnCtrl-1ba4582e3e35`),
     then to `50edd830` (`KilnCtrl-6c9152cebb9d`); the Pico was untouched
