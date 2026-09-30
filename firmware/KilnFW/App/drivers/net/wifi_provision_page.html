@@ -779,24 +779,50 @@ function submitIpConfig(mode) {
       '&netmask=' + encodeURIComponent(document.getElementById('staticNetmask').value) +
       '&gateway=' + encodeURIComponent(document.getElementById('staticGateway').value);
   }
-  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Applying…</span></li>';
+  rows.innerHTML = '';
+  var applyingLi = document.createElement('li');
+  var applyingLabel = document.createElement('span');
+  applyingLabel.className = 'status-label'; applyingLabel.textContent = 'Status';
+  var applyingValue = document.createElement('span');
+  applyingValue.className = 'status-value'; applyingValue.textContent = 'Applying…';
+  applyingLi.appendChild(applyingLabel); applyingLi.appendChild(applyingValue);
+  rows.appendChild(applyingLi);
   fetch('/ip_config', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
     .then(function (r) {
       if (!r.ok) {
         /* Show the server's own reason (e.g. the AP-subnet refusal) rather
          * than a single generic line -- ip_config_post_handler() sends a
-         * distinct 400 body per failure kind (wifi_provision_http.c). */
-        return r.text().then(function (text) { throw new Error(text || 'rejected'); });
+         * distinct 400 body per failure kind (wifi_provision_http.c). Marked
+         * isHttpBody so the catch below can tell "we have real server text"
+         * apart from a network-level failure (TypeError etc, which also
+         * carries a non-empty .message -- without this marker that generic
+         * fallback text below would never actually be reached). */
+        return r.text().then(function (text) {
+          var e = new Error(text || 'rejected');
+          e.isHttpBody = true;
+          throw e;
+        });
       }
       lastIpMode = null; /* force the next poll() to re-render the toggle/fields */
       poll();
     })
     .catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-      var reason = (authErr && authErr.message) ? authErr.message :
+      /* Review fix (2026-09-30, round 4): an HTTP-body error carries the
+       * server's own real reason text (never put into innerHTML -- built as
+       * text nodes below, same as addRow() above). Anything else (a network
+       * TypeError, an abort, ...) has no server text to show, so give the
+       * 192.168.4.x hint instead of that error's own generic message. */
+      var reason = (authErr && authErr.isHttpBody && authErr.message) ? authErr.message :
         'Could not save IP configuration (check the address/netmask/gateway; it must not be in 192.168.4.0/24, the setup AP\'s own subnet)';
-      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">' +
-        reason + '</span></li>';
+      rows.innerHTML = '';
+      var errLi = document.createElement('li');
+      var errLabel = document.createElement('span');
+      errLabel.className = 'status-label'; errLabel.textContent = 'Error';
+      var errValue = document.createElement('span');
+      errValue.className = 'status-value'; errValue.textContent = reason;
+      errLi.appendChild(errLabel); errLi.appendChild(errValue);
+      rows.appendChild(errLi);
     });
 }
 
