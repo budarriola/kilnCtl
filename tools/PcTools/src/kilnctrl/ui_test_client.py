@@ -40,22 +40,32 @@ log = logging.getLogger(__name__)
 #: timeout is fine, same reasoning as touch.py's DEFAULT_REPLY_TIMEOUT_S.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
 
-#: enter_pin()'s first-digit retry poll, 2026-09-25 (LCD-19 bench root
-#: cause, 20260925T170357Z_full/summary.json): the keypad overlay was
-#: confirmed raised (list_tap_targets showed every digit plus OK/Cancel)
-#: immediately before enter_pin() ran, yet its very first click_by_name()
-#: call still came back "not_found" -- the overlay's tap-target registry and
-#: its actual clickable widgets were not yet in sync on that exact frame,
-#: the same class of race bench_test/cases_lcd.py's other click_by_name()
-#: callers poll-and-retry around (ui_test_client.py:208-232 module comment;
-#: cases_lcd.py's _click_resolving_swallow()/_click_then_page()). Every
-#: later digit and OK in that same run succeeded first try, so this is a
-#: narrow one-shot startup race, not a systemic keypad flake -- a short poll
-#: then a single retry is enough, same bounded-retry discipline as the rest
-#: of this module (never a bare re-click ). Kept tiny relative to
-#: DEFAULT_REPLY_TIMEOUT_S so a genuinely absent target still reports
-#: not_found promptly.
-_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S = 0.1
+#: enter_pin()'s per-click not_found retry poll (any digit, or "OK").
+#: 2026-09-25 (LCD-19 bench root cause, 20260925T170357Z_full/summary.json):
+#: the keypad overlay was confirmed raised (list_tap_targets showed every
+#: digit plus OK/Cancel) immediately before enter_pin() ran, yet its very
+#: first click_by_name() call still came back "not_found". 2026-09-30
+#: (20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a/summary.json): the same
+#: "not_found" landed on an interior digit (digit 6 of 6) instead, proving
+#: this isn't specific to the first click -- see enter_pin()'s own docstring.
+#: The actual mechanism (kiln_ui.c / lvgl_port.c, not a registry/widget
+#: desync as originally guessed here): CLICK_BY_NAME walks the current LVGL
+#: tree on the lvgl_port_task and reports NOT_FOUND when either (a) the
+#: name genuinely isn't present in that walk, or (b) the walk request timed
+#: out before lvgl_port_task could service it -- the UI_TEST requester holds
+#: a lock for up to UI_WALK_LOCK_TIMEOUT_MS (1000 ms) waiting for the task to
+#: pick the request up, then the walk itself is bounded to
+#: UI_WALK_WAIT_TIMEOUT_MS (300 ms) once picked up (lvgl_port.c). A busy
+#: lvgl_port_task (mid-frame, mid-transition) can burn either window and
+#: produce a NOT_FOUND indistinguishable from the name truly being absent --
+#: this is what actually made an already-rendered, already-tapped-before
+#: digit read back "not_found" once. Retry poll bumped 0.1s -> 0.15s so a
+#: single retry has a real chance of landing after the 300 ms dispatch
+#: window has cleared, while staying well under DEFAULT_REPLY_TIMEOUT_S so a
+#: genuinely absent target still reports not_found promptly. Same
+#: bounded-retry discipline as the rest of this module (never a bare
+#: re-click).
+_ENTER_PIN_RETRY_POLL_S = 0.15
 
 _CLICK_RESULT_NAMES = {
     UI_TEST_CLICK_OK: "ok",
@@ -247,12 +257,19 @@ class UiTestClient:
 
         Any digit click, and the trailing "OK" click, is retried once, after
         a short poll, if it comes back "not_found" -- see
-        ``_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S``'s comment for the observed
-        race (a widget reads as raised/present a moment before it is
-        actually clickable). This never re-clicks a digit that was already
-        reported clicked ("ok"/"swallowed"/"verdict_unknown"/anything but
-        "not_found") -- doing so on a digit that actually landed would type
-        it twice and corrupt the PIN. 2026-09-25 bench evidence
+        ``_ENTER_PIN_RETRY_POLL_S``'s comment for the actual mechanism.
+        "not_found" here does not mean the key is genuinely absent from the
+        keypad; CLICK_BY_NAME reports it whenever (a) the name truly isn't
+        in that walk's tap-target list, or (b) the walk itself didn't
+        complete in time -- either the UI_TEST requester's
+        UI_WALK_LOCK_TIMEOUT_MS (1 s) wait to get lvgl_port_task's attention,
+        or that task's own UI_WALK_WAIT_TIMEOUT_MS (300 ms) walk budget once
+        it picks the request up -- expired while lvgl_port_task was busy
+        elsewhere (rendering a frame, mid-transition). This retry only
+        covers (b): a click already reported clicked
+        ("ok"/"swallowed"/"verdict_unknown"/anything but "not_found") is
+        never re-sent, since doing so on a digit that actually landed would
+        type it twice and corrupt the PIN. 2026-09-25 bench evidence
         (20260925T191709Z_lcd/summary.json): all 6 wrong-PIN digit clicks
         reported "ok", yet the trailing "OK" click reported "not_found".
         2026-09-30 bench evidence (20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a/
@@ -283,12 +300,12 @@ class UiTestClient:
                 # first. This never re-clicks a digit already reported
                 # clicked (anything but "not_found"), for the same
                 # corrupt-the-PIN reason given above for "OK".
-                time.sleep(_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S)
+                time.sleep(_ENTER_PIN_RETRY_POLL_S)
                 click = self.click_by_name(ch, timeout=timeout)
             digit_results.append(click)
         ok_result = self.click_by_name("OK", timeout=timeout)
         if ok_result.get("result") == "not_found":
-            time.sleep(_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S)
+            time.sleep(_ENTER_PIN_RETRY_POLL_S)
             ok_result = self.click_by_name("OK", timeout=timeout)
         return {"digit_results": digit_results, "ok_result": ok_result}
 

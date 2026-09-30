@@ -257,7 +257,7 @@ class EnterPinTest(unittest.TestCase):
         self.client = UiTestClient(self.link)
         # Never actually sleep for the first-digit retry poll in tests.
         self._retry_poll_patcher = mock.patch(
-            "kilnctrl.ui_test_client._ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S", 0.0
+            "kilnctrl.ui_test_client._ENTER_PIN_RETRY_POLL_S", 0.0
         )
         self._retry_poll_patcher.start()
 
@@ -325,6 +325,24 @@ class EnterPinTest(unittest.TestCase):
         self.assertEqual(len(result["digit_results"]), 4)
         # 2 (digits 1,2) + 2 (digit 3: first + retry) + 1 (digit 4) + 1 (OK)
         self.assertEqual(len(self.link.sent), 6)
+
+    def test_interior_digit_swallowed_or_verdict_unknown_is_not_retried(self):
+        # The retry is gated strictly on "not_found" -- it must never fire
+        # for "swallowed" or "verdict_unknown", since either means the click
+        # was already sent and possibly landed; a blind re-click would type
+        # the digit twice and corrupt the PIN. This is the negative case for
+        # test_interior_digit_not_found_retries_once_after_a_short_poll above.
+        self._reply(UI_TEST_CLICK_OK)  # digit "1"
+        self._reply(UI_TEST_CLICK_SWALLOWED)  # digit "2" -- not retried
+        self._reply(UI_TEST_CLICK_VERDICT_UNKNOWN)  # digit "3" -- not retried
+        self._reply(UI_TEST_CLICK_OK)  # digit "4"
+        self._reply(UI_TEST_CLICK_OK)  # OK
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][1]["result"], "swallowed")
+        self.assertEqual(result["digit_results"][2]["result"], "verdict_unknown")
+        # Exactly one send per digit/OK -- no extra retry click for either
+        # the "swallowed" or the "verdict_unknown" digit.
+        self.assertEqual(len(self.link.sent), 5)
 
     def test_first_digit_not_found_retries_once_after_a_short_poll(self):
         # 2026-09-25 (LCD-19 bench root cause, 20260925T170357Z_full/

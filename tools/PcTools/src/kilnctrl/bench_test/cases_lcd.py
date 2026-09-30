@@ -14,10 +14,13 @@ degrades, to INCONCLUSIVE, when no frame could be captured.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import time
 from typing import Any, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 from . import judgments as J
 from . import lcd_sampler
@@ -204,7 +207,14 @@ def _wake_and_home(ctx: dict) -> Optional[Dict[str, Any]]:
                             break
                     time.sleep(_WAKE_SCREEN_ON_POLL_S)
     ui = srv._ui_test
-    _navigate_home(ui)
+    # 2026-09-30: stashed on ctx (rather than folded into this function's own
+    # return, which callers already rely on for stray-overlay detection --
+    # see _case_lcd01's `stray.get("present")` check) so a caller can pull
+    # this into its own `observed` on any failure, per _navigate_home()'s
+    # docstring. Also logged as a warning by _navigate_home() itself on
+    # failure, so a failure here is visible even to a caller that never
+    # inspects ctx.
+    ctx["_navigate_home_last"] = _navigate_home(ui)
     return _lcd19_clear_stray_overlay(ctx, ui)
 
 
@@ -996,6 +1006,7 @@ def _case_lcd08(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
+    outcome: Optional[CaseResult] = None
     try:
         # 2026-09-24 bench root cause: this case used to call
         # click_by_name("settings") directly with no retry, so a swallowed
@@ -1004,7 +1015,8 @@ def _case_lcd08(ctx: dict) -> CaseResult:
         # chance. Migrated to the shared retry helper.
         fail, page, waited_s, swallow_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         tap = ui.list_tap_targets()
         _remember_page_targets(ctx, "config", tap)
         result = J.judge_lcd_config_hub(page, tap.get("targets", []))
@@ -1015,9 +1027,17 @@ def _case_lcd08(ctx: dict) -> CaseResult:
         image_path = _capture(ctx, "lcd08_config_hub.jpg")
         if image_path:
             result.evidence = list(result.evidence or []) + [image_path]
-        return result
+        outcome = result
+        return outcome
     finally:
-        _navigate_home(ui)
+        # 2026-09-30: fold _navigate_home()'s own success/failure into this
+        # case's `observed` -- see _navigate_home()'s docstring. Only added
+        # when it actually failed, so a normal PASS/FAIL's observed dict
+        # isn't padded with a redundant "ok": True on every run.
+        nav = _navigate_home(ui)
+        if outcome is not None and not nav["ok"]:
+            outcome.observed = dict(outcome.observed or {})
+            outcome.observed["navigate_home"] = nav
 
 
 # ---------------------------------------------------------------------------
@@ -1148,10 +1168,26 @@ def _capture(ctx: dict, name: str) -> Optional[str]:
     return image_path
 
 
-def _navigate_home(ui) -> None:
+def _navigate_home(ui) -> "Dict[str, Any]":
     """Best-effort restore to the home page -- used in `finally` blocks so a
     case that navigates away never leaves the board parked on a config/
-    profiles/diagnostics sub-page for whatever runs next."""
+    profiles/diagnostics sub-page for whatever runs next.
+
+    2026-09-30 (LCD-16 bench investigation, 20260930T043143Z_lcd_lcd19_
+    rerun_0929_59c9306a/summary.json): this used to be a bare
+    ``try/except Exception: pass`` with no return value -- a failure to
+    actually land back on "home" (e.g. a page read timing out, or the
+    fallback "back" click itself not_found) was completely invisible to
+    whatever case ran next, which could then fail a totally unrelated click
+    against a target that only exists on "home" (see _click_then_page's own
+    'settings' click and LCD-16). Returns a small status dict instead of
+    None so a call site can fold it into its own `observed` for exactly
+    this kind of diagnosis: ``{"page": <final page or None if unreadable>,
+    "ok": <bool, True iff page == "home">, "exception": <exception class
+    name, or None>}``. A failure is also logged as a warning here so it is
+    visible even from a call site that doesn't inspect the returned dict.
+    """
+    exception_name = None
     try:
         if ui.get_current_page() != "home":
             # These strings must match kUiTopbarBackTapName/kUiTopbarHomeTapName
@@ -1185,9 +1221,21 @@ def _navigate_home(ui) -> None:
                 page, _ = _wait_for_page(ui, "home")
             if page != "home":
                 ui.click_by_name("back")
-                _wait_for_page(ui, "home")
+                page, _ = _wait_for_page(ui, "home")
+    except Exception as exc:
+        exception_name = type(exc).__name__
+
+    try:
+        final_page = ui.get_current_page()
     except Exception:
-        pass
+        final_page = None
+    ok = final_page == "home"
+    if not ok:
+        log.warning(
+            "_navigate_home: failed to reach 'home' (ended on %r, exception=%s)",
+            final_page, exception_name,
+        )
+    return {"page": final_page, "ok": ok, "exception": exception_name}
 
 
 # ---------------------------------------------------------------------------
@@ -1418,13 +1466,16 @@ def _case_lcd09(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
+    outcome: Optional[CaseResult] = None
     try:
         fail, _config_page, _, config_swallow_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         fail, page, waited_s, swallow_retries = _click_then_page(ui, "Profiles", "profiles")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         swallow_retries += config_swallow_retries
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
@@ -1463,7 +1514,8 @@ def _case_lcd09(ctx: dict) -> CaseResult:
             if row_fail is not None:
                 row_fail.observed = dict(row_fail.observed or {})
                 row_fail.observed["page_wait_s"] = round(waited_s + row_waited_s, 3)
-                return row_fail
+                outcome = row_fail
+                return outcome
         # profiles_count is a best-effort cross-check only: when the board
         # reports at least one profile over the wire but the list area
         # shows no rows at all, that is a real defect (a stuck/empty list),
@@ -1481,9 +1533,13 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         result.observed["page_wait_s"] = round(waited_s, 3)
         if swallow_retries:
             result.observed["swallow_retries"] = swallow_retries
-        return result
+        outcome = result
+        return outcome
     finally:
-        _navigate_home(ui)
+        nav = _navigate_home(ui)
+        if outcome is not None and not nav["ok"]:
+            outcome.observed = dict(outcome.observed or {})
+            outcome.observed["navigate_home"] = nav
 
 
 # ---------------------------------------------------------------------------
@@ -1598,13 +1654,16 @@ def _case_lcd14(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
     ui = srv._ui_test
+    outcome: Optional[CaseResult] = None
     try:
         fail, _config_page, _, config_swallow_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         fail, page, waited_s, swallow_retries = _click_then_page(ui, "Temperature", "temperature")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         swallow_retries += config_swallow_retries
         tap = ui.list_tap_targets()
         _remember_page_targets(ctx, "temperature", tap)
@@ -1692,9 +1751,13 @@ def _case_lcd14(ctx: dict) -> CaseResult:
             result.observed["zones_count_error"] = zones_count_error
         if image_path:
             result.evidence = list(result.evidence or []) + [image_path]
-        return _downgrade_if_corners_stale(ctx, result, image_path)
+        outcome = _downgrade_if_corners_stale(ctx, result, image_path)
+        return outcome
     finally:
-        _navigate_home(ui)
+        nav = _navigate_home(ui)
+        if outcome is not None and not nav["ok"]:
+            outcome.observed = dict(outcome.observed or {})
+            outcome.observed["navigate_home"] = nav
 
 
 # ---------------------------------------------------------------------------
@@ -1923,10 +1986,12 @@ def _case_lcd16(ctx: dict) -> CaseResult:
     next_disabled_at_end: Optional[bool] = None
     expected_hops = J.DIAGNOSTICS_PAGE_COUNT - 1
     retried_hops: list = []
+    outcome: Optional[CaseResult] = None
     try:
         fail, _config_page, _, config_swallow_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         # The config -> diagnostics hop IS a real top-level page switch
         # (kiln_ui's own page registry), so it gets the same checked
         # click-then-page-wait as every other hop; sub-page transitions
@@ -1936,7 +2001,8 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         # richer tap-target signature instead.
         fail, _diag_page, _, diag_swallow_retries = _click_then_page(ui, "Diagnostics", "diagnostics")
         if fail is not None:
-            return fail
+            outcome = fail
+            return outcome
         swallow_retries = config_swallow_retries + diag_swallow_retries
         first_tap = ui.list_tap_targets()
         targets = first_tap.get("targets", [])
@@ -1972,7 +2038,8 @@ def _case_lcd16(ctx: dict) -> CaseResult:
             fail, tap, _, changed, found_next, retried = _tap_next_then_targets_change(
                 ctx, ui, prev_sig, confirm=is_boundary_hop)
             if fail is not None:
-                return fail
+                outcome = fail
+                return outcome
             if tap and tap.get("truncated"):
                 # With found_next False the returned read is the CURRENT
                 # sub-page's (Next could not be located on it); otherwise it
@@ -2011,9 +2078,13 @@ def _case_lcd16(ctx: dict) -> CaseResult:
                 f"{truncated_steps} -- the topbar icons may have been cut from the list, "
                 f"not missing from the screen)"
             )
-        return result
+        outcome = result
+        return outcome
     finally:
-        _navigate_home(ui)
+        nav = _navigate_home(ui)
+        if outcome is not None and not nav["ok"]:
+            outcome.observed = dict(outcome.observed or {})
+            outcome.observed["navigate_home"] = nav
 
 
 # ---------------------------------------------------------------------------
@@ -2576,7 +2647,9 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             # lcd_enabled changed from what this run found.
             result.verdict = Verdict.FAIL
             result.reason = "lcd_enabled policy restore did not round-trip after LCD-19 -- board may be left with lcd_enabled changed"
-        _navigate_home(ui)
+        nav = _navigate_home(ui)
+        if not nav["ok"]:
+            result.observed["navigate_home"] = nav
     return result
 
 
