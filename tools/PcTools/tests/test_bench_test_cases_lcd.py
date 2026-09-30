@@ -1977,7 +1977,15 @@ class PinKeypadUiTest(FakeUiTest):
 
     def list_tap_targets(self):
         if self._state == "keypad":
-            names = [str(d) for d in range(10)] + ["OK", "Cancel"]
+            # Real shape (logs/bench_test/20260930T090222Z_lcd/summary.json):
+            # empty-named backdrop/msgbox, the borrowed-container dots name,
+            # digit/OK/Cancel keys, and the prompt -- no firmware tag.
+            names = (
+                ["", ""]
+                + ["*" * len(self._entry)]
+                + [str(d) for d in range(10)]
+                + ["Cancel", "Enter PIN to start firing", "OK"]
+            )
         elif self._state == "confirm":
             names = ["Start", "Cancel"]
         else:
@@ -2024,6 +2032,49 @@ class PinKeypadUiTest(FakeUiTest):
         digit_results = [self.click_by_name(ch) for ch in pin]
         ok_result = self.click_by_name("OK")
         return {"digit_results": digit_results, "ok_result": ok_result}
+
+    def enter_pin_verified(self, pin):
+        # Models UiTestClient.enter_pin_verified() against this fake's own
+        # real self._entry state: a click that reports "ok" here always DID
+        # apply (this fixture has no silent-loss bug to model), so the dot
+        # count -- len(self._entry) -- always matches immediately. Subclasses
+        # that override click_by_name to return "ok" without actually
+        # updating self._entry (modeling a real silent loss) will correctly
+        # produce entry_incomplete=True here, same as the real client would.
+        digit_results = []
+        dot_wait_s = []
+        for i, ch in enumerate(pin):
+            click = self.click_by_name(ch)
+            digit_results.append(click)
+            if click.get("result") != "ok":
+                # A click that isn't "ok" stops entry immediately -- OK must
+                # never be pressed on a PIN known to be incomplete.
+                dot_wait_s.append(0.0)
+                return {
+                    "digit_results": digit_results,
+                    "ok_result": None,
+                    "entry_incomplete": True,
+                    "expected_dot_count": i + 1,
+                    "observed_dot_count": None,
+                    "dot_wait_s": dot_wait_s,
+                }
+            dot_wait_s.append(0.0)
+            if len(self._entry) != i + 1:
+                return {
+                    "digit_results": digit_results,
+                    "ok_result": None,
+                    "entry_incomplete": True,
+                    "expected_dot_count": i + 1,
+                    "observed_dot_count": len(self._entry),
+                    "dot_wait_s": dot_wait_s,
+                }
+        ok_result = self.click_by_name("OK")
+        return {
+            "digit_results": digit_results,
+            "ok_result": ok_result,
+            "entry_incomplete": False,
+            "dot_wait_s": dot_wait_s,
+        }
 
 
 class FakeLcd19SecClient:
@@ -2449,7 +2500,9 @@ class Lcd19Test(unittest.TestCase):
         # reporting "swallowed" instead of "ok") and asserts the redacted
         # entry summary now lands in `observed` -- result codes and a count
         # only, never the digit identities/order/coordinates that would
-        # reconstruct the PIN.
+        # reconstruct the PIN. 2026-09-30 review fix: enter_pin_verified()
+        # now stops entry on the FIRST non-"ok" click, so only that one
+        # click is attempted/recorded (digit_count 1), not all 4.
         ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
         real_click = ui.click_by_name
         call_count = {"n": 0}
@@ -2471,7 +2524,7 @@ class Lcd19Test(unittest.TestCase):
         entry_summary = result.observed.get("wrong_pin_entry")
         self.assertIsNotNone(entry_summary, "the dropped-click entry must be recorded even when no verdict follows")
         self.assertEqual(entry_summary["present"], True)
-        self.assertEqual(entry_summary["digit_count"], 4)
+        self.assertEqual(entry_summary["digit_count"], 1)
         self.assertEqual(entry_summary["digit_results"][0], "swallowed")
         self.assertNotIn("cx", entry_summary)
         self.assertNotIn("cy", entry_summary)
@@ -2644,8 +2697,12 @@ class Lcd19Test(unittest.TestCase):
         # but every digit click AND the trailing "OK" click still came back
         # "not_found" -- consistent with each click's own 300ms
         # UI_WALK_WAIT_TIMEOUT_MS busy window, distinct from a genuinely
-        # absent target. This must set the `entry_all_not_found` marker and
-        # stay INCONCLUSIVE, never FAIL.
+        # absent target. enter_pin_verified() (2026-09-30 review fix)
+        # now stops entry on the FIRST non-"ok" click rather than
+        # attempting every digit -- so this reports `entry_incomplete`
+        # after just one click, not the older `entry_all_not_found`
+        # all-clicks-attempted marker. Either way this must stay
+        # INCONCLUSIVE, never FAIL.
         class AllNotFoundKeypadUiTest(PinKeypadUiTest):
             def click_by_name(self, name):
                 if self._state == "keypad" and (name in "0123456789" or name == "OK"):
@@ -2658,7 +2715,10 @@ class Lcd19Test(unittest.TestCase):
                "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
         result = C._case_lcd19(ctx)
         self.assertEqual(result.observed.get("before_entry_stabilized"), True)
-        self.assertEqual(result.observed.get("entry_all_not_found"), True)
+        wrong_entry = result.observed.get("wrong_pin_entry") or {}
+        self.assertTrue(wrong_entry.get("entry_incomplete"))
+        self.assertIsNone(wrong_entry.get("ok_result"))
+        self.assertEqual(len(wrong_entry.get("digit_results") or []), 1)
         self.assertIsNone(result.observed.get("wrong_pin_refused"))
         self.assertIsNone(result.observed.get("right_pin_started"))
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
@@ -2705,6 +2765,155 @@ class Lcd19Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("Stop", result.reason)
         self.assertTrue(result.observed["overlay_dismiss"]["dismissed"])
+
+    def test_dot_count_advances_normally_flow_proceeds(self):
+        # LCD-19 (2026-09-30): the happy path for enter_pin_verified() --
+        # every digit's dot count advances exactly as expected, so both
+        # entries complete and the boolean pair gets a real verdict rather
+        # than an INCONCLUSIVE from an incomplete entry.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertFalse((result.observed.get("wrong_pin_entry") or {}).get("entry_incomplete", False))
+        self.assertFalse((result.observed.get("right_pin_entry") or {}).get("entry_incomplete", False))
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), True)
+
+    def test_wrong_pin_refused_stays_none_when_dots_dont_clear(self):
+        # Review advisory (2026-09-30, after 72bbd810): "OK"+"Cancel" still
+        # present after a wrong-PIN OK is not by itself proof the entry was
+        # reset -- the masked-PIN-dots count must also have cleared to 0.
+        # Models a stuck-dots defect: the wrong PIN is refused (keypad
+        # stays open, doesn't advance to Confirm Start) but the dots label
+        # never resets to "" the way ui_lcd_keypad.c's real reset does.
+        # wrong_pin_refused must stay None (INCONCLUSIVE), never a
+        # fabricated True.
+        class StuckDotsKeypadUiTest(PinKeypadUiTest):
+            def click_by_name(self, name):
+                if self._state == "keypad" and name == "OK" and self._entry != self._right_pin:
+                    # Real reset (base class) sets self._entry = "" here --
+                    # this fixture deliberately does not, modeling the dots
+                    # label failing to clear.
+                    return {"result": "ok"}
+                return super().click_by_name(name)
+
+        ui = StuckDotsKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertFalse((result.observed.get("wrong_pin_entry") or {}).get("entry_incomplete", False))
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_lost_digit_stops_entry_ok_never_pressed_inconclusive(self):
+        # LCD-19 real bench root cause (20260930T090222Z_lcd): a digit click
+        # reported "ok" but bm_value_changed_cb() never applied it (the dot
+        # count never advanced). enter_pin_verified() must stop right there
+        # -- never press "OK", never re-tap -- and the case must land on
+        # INCONCLUSIVE with `entry_incomplete` recorded, never FAIL.
+        class SilentLossKeypadUiTest(PinKeypadUiTest):
+            """Digit at `drop_index` (0-based, among digit clicks only)
+            reports "ok" without actually appending to self._entry --
+            models the real silent-loss bug without touching the harness
+            itself."""
+
+            def __init__(self, *a, drop_index=2, **kw):
+                super().__init__(*a, **kw)
+                self._digit_click_n = -1
+                self._drop_index = drop_index
+
+            def click_by_name(self, name):
+                if self._state == "keypad" and name in "0123456789":
+                    self._digit_click_n += 1
+                    if self._digit_click_n == self._drop_index:
+                        return {"result": "ok"}  # claimed ok, never applied
+                return super().click_by_name(name)
+
+        ui = SilentLossKeypadUiTest(right_pin="1234", wrong_pin="0125", drop_index=2)
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0125"}}
+        result = C._case_lcd19(ctx)
+        wrong_entry = result.observed.get("wrong_pin_entry") or {}
+        self.assertTrue(wrong_entry.get("entry_incomplete"))
+        self.assertIsNone(wrong_entry.get("ok_result"))
+        self.assertEqual(wrong_entry.get("expected_dot_count"), 3)
+        self.assertEqual(wrong_entry.get("observed_dot_count"), 2)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_keypad_closed_before_entry_is_recorded(self):
+        # LCD-19 run-1 shape (20260930T090130Z_lcd): the keypad was seen
+        # right after the Start click, but had already closed on its own
+        # (display timeout) by the time the debounced pre-entry read ran.
+        # Must record `keypad_closed_before_entry` and stay INCONCLUSIVE --
+        # entry must never even be attempted.
+        class ClosesBeforeEntryKeypadUiTest(PinKeypadUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._keypad_reads = 0
+
+            def list_tap_targets(self):
+                if self._state == "keypad":
+                    self._keypad_reads += 1
+                    if self._keypad_reads <= 1:
+                        # The one read right after the Start click
+                        # (`after_start_click_names`) -- still shows the
+                        # full keypad.
+                        return super().list_tap_targets()
+                    # Every read after that (the debounced pre-entry wait)
+                    # shows the keypad already gone -- back to home.
+                    return {"targets": [{"name": "Start", "hidden": False}], "truncated": False}
+                return super().list_tap_targets()
+
+        ui = ClosesBeforeEntryKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        with mock.patch.object(ui, "enter_pin_verified", wraps=ui.enter_pin_verified) as spy:
+            ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+                   "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+            result = C._case_lcd19(ctx)
+        spy.assert_not_called()
+        self.assertEqual(result.observed.get("keypad_closed_before_entry"), True)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_verified_complete_entry_keypad_stays_open_after_ok_is_fail(self):
+        # Requirement 2: `right_pin_started` may only be judged False (and
+        # so FAIL) once entry was verified complete (every digit's dot count
+        # confirmed) AND "OK" was applied. Model a right PIN whose digits are
+        # all genuinely applied (dot count tracks correctly) but the keypad
+        # never actually closes after "OK" -- a real firmware regression
+        # shape, distinct from every "entry never verified" INCONCLUSIVE
+        # case above -- and confirm this one still reaches a hard FAIL.
+        class StaysOpenAfterOkKeypadUiTest(PinKeypadUiTest):
+            def click_by_name(self, name):
+                if self._state == "keypad" and name == "OK":
+                    # Same bookkeeping as the real state machine (reset
+                    # entry on a wrong PIN) EXCEPT the transition to Confirm
+                    # Start on a right PIN is suppressed -- the press lands
+                    # (so entry_incomplete is never set) but the keypad never
+                    # actually closes, same as a stuck
+                    # lcd_keypad_state_submit() would look like.
+                    if self._entry != self._right_pin:
+                        self._entry = ""
+                    return {"result": "ok"}
+                return super().click_by_name(name)
+
+        ui = StaysOpenAfterOkKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        right_entry = result.observed.get("right_pin_entry") or {}
+        self.assertFalse(right_entry.get("entry_incomplete", False))
+        self.assertEqual(result.observed.get("right_pin_started"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_dismiss_overlay_not_needed_when_nothing_open(self):
         ui = PopupUiTest(trigger_name="Start", overlay_names=[])

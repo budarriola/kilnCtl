@@ -73,6 +73,14 @@ DEFAULT_REPLY_TIMEOUT_S = 2.0
 #: re-click).
 _ENTER_PIN_RETRY_POLL_S = 0.15
 
+#: enter_pin_verified()'s per-digit dot-count confirmation poll (LCD-19,
+#: 2026-09-30): how long to wait for the masked-PIN-dots read-only label
+#: (see UiTestClient._dots_text) to advance to the expected count after a
+#: digit click, and how often to re-read it while waiting. Bounded, never a
+#: blind re-click -- see enter_pin_verified()'s own docstring.
+_DOT_POLL_TIMEOUT_S = 1.5
+_DOT_POLL_INTERVAL_S = 0.05
+
 _CLICK_RESULT_NAMES = {
     UI_TEST_CLICK_OK: "ok",
     UI_TEST_CLICK_NOT_FOUND: "not_found",
@@ -325,6 +333,167 @@ class UiTestClient:
         ok_result = dict(ok_result)
         ok_result["elapsed_s"] = time.monotonic() - ok_start
         return {"digit_results": digit_results, "ok_result": ok_result}
+
+    def _dots_text(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> Optional[str]:
+        """Current text of the masked-PIN-dots read-only label, or ``None``
+        if it can't be determined right now (a query failure, or the current
+        tap-target listing has no such entry -- e.g. no keypad is open).
+
+        This label (``ui_lcd_keypad.c``'s ``s_info_label``, shown via
+        ``refresh_dots()``) needs no firmware tag: ``kiln_ui.c``'s existing
+        generic grandchild-label walk (~line 556) already lets a clickable
+        container (the keypad msgbox's content area) "borrow" a descendant
+        label's live text into its own tap-target entry, so the dots text
+        (a run of ``'*'``, one per digit typed) shows up under that
+        container's name with no firmware change at all. Several OTHER tap
+        targets legitimately report an empty name too (the fullscreen
+        backdrop, the msgbox root) -- an empty string trivially satisfies
+        "every character is '*'", so those must be excluded explicitly
+        rather than relying on the character-set check alone. Real bench
+        evidence (logs/bench_test/20260930T090222Z_lcd/summary.json)
+        confirmed both the false-positive empty names AND -- separately --
+        that a genuinely lost digit/OK click can leave the dots count short
+        of what was clicked (the bug this whole verified-entry path exists
+        to catch).
+
+        Zero non-empty all-``'*'`` names means "no keypad open" (or the
+        borrowed name isn't in this reply for some other reason) and reads
+        as ``""`` -- a definite, trustworthy answer of "0 digits shown", not
+        an unknown. Two or more DISTINCT non-empty all-``'*'`` names is the
+        only genuinely ambiguous case, and reads as ``None``."""
+        try:
+            tap = self.list_tap_targets(timeout=timeout)
+        except Exception:
+            return None
+        candidates = {
+            t.get("name", "")
+            for t in tap.get("targets", [])
+            if not t.get("hidden")
+            and isinstance(t.get("name"), str)
+            and t.get("name")
+            and set(t.get("name")) == {"*"}
+        }
+        if not candidates:
+            # No non-empty all-'*' name anywhere: no keypad open, or 0
+            # digits typed so far -- either way, trustworthy as "0".
+            return ""
+        if len(candidates) > 1:
+            # Two or more DISTINCT '*'-only texts: genuinely ambiguous.
+            return None
+        return next(iter(candidates))
+
+    def _wait_for_dot_count(
+        self,
+        expected_count: int,
+        timeout: float = _DOT_POLL_TIMEOUT_S,
+        interval: float = _DOT_POLL_INTERVAL_S,
+    ) -> "tuple[bool, Optional[str], float]":
+        """Poll :meth:`_dots_text` until it reads exactly ``expected_count``
+        ``'*'`` characters, or `timeout` elapses. Returns ``(reached,
+        last_text, elapsed_s)`` -- `last_text` is whatever the last read was
+        (possibly ``None``), kept only so a caller can report an observed
+        count for diagnostics, never the PIN itself (a run of ``'*'``
+        carries no digit information)."""
+        start = time.monotonic()
+        last: Optional[str] = None
+        while True:
+            read = self._dots_text(timeout=DEFAULT_REPLY_TIMEOUT_S)
+            if read is not None:
+                last = read
+            if last is not None and len(last) == expected_count and set(last) <= {"*"}:
+                return True, last, time.monotonic() - start
+            if time.monotonic() - start >= timeout:
+                return False, last, time.monotonic() - start
+            time.sleep(interval)
+
+    def enter_pin_verified(self, pin: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
+        """LCD-19's entry path: like :meth:`enter_pin`, but confirms each
+        digit was actually APPLIED by ``bm_value_changed_cb()``
+        (``ui_lcd_keypad.c``) before typing the next one or pressing "OK".
+
+        :meth:`click_by_name`'s "ok" result only confirms a press was
+        injected -- not that firmware's buttonmatrix handler ran and
+        incremented ``s_ks.entry.len``. 2026-09-30 bench evidence
+        (logs/bench_test/20260930T090222Z_lcd) saw all 6 digit clicks and
+        the trailing "OK" click report "ok", yet the stabilized read
+        afterward still showed the keypad open with a 5-``'*'`` dots label
+        -- a click (a digit, or OK itself) was silently lost. This method
+        polls the masked-PIN-dots read-only label (see :meth:`_dots_text`)
+        after each digit click and requires the count to reach ``i + 1``
+        before continuing.
+
+        Never re-taps a digit -- a duplicate digit corrupts the PIN more
+        than a missing one does, so a stalled dot count stops entry
+        immediately rather than retrying the click. "OK" is pressed only
+        when every digit's dot count was confirmed, which by construction
+        already means the final count equals ``len(pin)`` -- no separate
+        pre-OK count check is needed.
+
+        Returns a dict shaped like :meth:`enter_pin`'s
+        (``{"digit_results": [...], "ok_result": {...} | None}``), plus:
+
+        - ``"entry_incomplete"``: ``True`` only when entry stopped early
+          (a digit's dot count never advanced in time). "OK" is never
+          pressed when this is ``True``, and ``"ok_result"`` is ``None``.
+        - ``"expected_dot_count"`` / ``"observed_dot_count"``: counts only
+          (never which digit, never the PIN) -- present only when
+          `entry_incomplete` is ``True``.
+        - ``"dot_wait_s"``: the wait time for each digit's dot-count
+          confirmation, one entry per digit attempted (timings only, safe
+          to log same as `elapsed_s` elsewhere in this module).
+        """
+        digit_results = []
+        dot_wait_s = []
+        for i, ch in enumerate(pin):
+            click_start = time.monotonic()
+            click = self.click_by_name(ch, timeout=timeout)
+            if click.get("result") == "not_found":
+                time.sleep(_ENTER_PIN_RETRY_POLL_S)
+                click = self.click_by_name(ch, timeout=timeout)
+            click = dict(click)
+            click["elapsed_s"] = time.monotonic() - click_start
+            digit_results.append(click)
+
+            # A click that does not itself report "ok" stops entry
+            # immediately: OK must never be pressed on a PIN we know is
+            # incomplete, and typing further digits after a known-bad click
+            # only corrupts the PIN further.
+            if click.get("result") != "ok":
+                dot_wait_s.append(0.0)
+                return {
+                    "digit_results": digit_results,
+                    "ok_result": None,
+                    "entry_incomplete": True,
+                    "expected_dot_count": i + 1,
+                    "observed_dot_count": None,
+                    "dot_wait_s": dot_wait_s,
+                }
+
+            reached, observed, waited = self._wait_for_dot_count(i + 1)
+            dot_wait_s.append(waited)
+            if not reached:
+                return {
+                    "digit_results": digit_results,
+                    "ok_result": None,
+                    "entry_incomplete": True,
+                    "expected_dot_count": i + 1,
+                    "observed_dot_count": len(observed) if observed is not None else None,
+                    "dot_wait_s": dot_wait_s,
+                }
+
+        ok_start = time.monotonic()
+        ok_result = self.click_by_name("OK", timeout=timeout)
+        if ok_result.get("result") == "not_found":
+            time.sleep(_ENTER_PIN_RETRY_POLL_S)
+            ok_result = self.click_by_name("OK", timeout=timeout)
+        ok_result = dict(ok_result)
+        ok_result["elapsed_s"] = time.monotonic() - ok_start
+        return {
+            "digit_results": digit_results,
+            "ok_result": ok_result,
+            "entry_incomplete": False,
+            "dot_wait_s": dot_wait_s,
+        }
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> bytes:
         with self._query_lock:

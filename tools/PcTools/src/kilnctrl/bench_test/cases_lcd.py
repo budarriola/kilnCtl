@@ -2381,11 +2381,23 @@ def _entry_result_summary(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     digit_elapsed_s = [d.get("elapsed_s") for d in raw_digits]
     ok_result_entry = entry.get("ok_result") or {}
     ok_result = ok_result_entry.get("result")
-    return {
+    summary = {
         "present": True, "digit_count": len(digit_results),
         "digit_results": digit_results, "digit_elapsed_s": digit_elapsed_s,
         "ok_result": ok_result, "ok_elapsed_s": ok_result_entry.get("elapsed_s"),
     }
+    # entry_incomplete()/dot_wait_s (2026-09-30, LCD-19, enter_pin_verified())
+    # -- counts and timings only, never which digit stalled or the PIN
+    # itself, same redaction discipline as the rest of this summary.
+    if "entry_incomplete" in entry:
+        summary["entry_incomplete"] = entry.get("entry_incomplete")
+    if "expected_dot_count" in entry:
+        summary["expected_dot_count"] = entry.get("expected_dot_count")
+    if "observed_dot_count" in entry:
+        summary["observed_dot_count"] = entry.get("observed_dot_count")
+    if "dot_wait_s" in entry:
+        summary["dot_wait_s"] = entry.get("dot_wait_s")
+    return summary
 
 
 #: The PIN keypad's digit buttonmatrix keys, by their literal text
@@ -2412,6 +2424,20 @@ def _entry_all_digits_not_found(entry: Optional[Dict[str, Any]]) -> bool:
         return False
     ok_result = entry.get("ok_result") or {}
     return ok_result.get("result") == "not_found"
+
+
+def _dots_have_cleared(names: Optional[set]) -> bool:
+    """True only when `names` (a stabilized tap-target name set, as
+    :func:`_wait_stable_names` returns) shows NO non-empty all-'*' name --
+    i.e. the masked-PIN-dots label (borrowed into the walk by kiln_ui.c's
+    generic grandchild-label path, see UiTestClient._dots_text's docstring)
+    reads as 0 digits. Mirrors :meth:`UiTestClient._dots_text`'s own
+    filtering (non-empty, every character '*') so an empty backdrop/msgbox
+    name is never mistaken for a cleared dots count. `names is None` is
+    never "cleared" -- an unreadable set proves nothing."""
+    if names is None:
+        return False
+    return not any(n for n in names if n and set(n) == {"*"})
 
 
 def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
@@ -2650,17 +2676,49 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             _KEYPAD_DIGIT_NAMES <= pre_names and "OK" in pre_names
                         )
                         if not digits_present:
+                            # 2026-09-30 (LCD-19 run-1 shape, 20260930T090130Z_lcd):
+                            # the keypad was seen right after the Start click
+                            # (`after_start_click_names`) but was already gone
+                            # by this debounced pre-entry read -- it closed on
+                            # its own before entry could start (a display
+                            # timeout, most likely). Recorded explicitly so
+                            # this shape is distinguishable from "the keypad
+                            # never stabilized"/"a read failure" without
+                            # re-running against the board; either way this
+                            # case stays INCONCLUSIVE (wrong_pin left None).
+                            if pre_names is not None and "Cancel" not in pre_names:
+                                state["keypad_closed_before_entry"] = True
                             wrong_pin = None  # skip entry -- leave wrong_pin_refused at None (INCONCLUSIVE)
                     if wrong_pin:
-                        entry = ui.enter_pin(wrong_pin)
+                        # enter_pin_verified() (2026-09-30, LCD-19), not the
+                        # older enter_pin(): confirms each digit's tap was
+                        # actually APPLIED by bm_value_changed_cb() via the
+                        # masked-PIN-dots read-only label before typing the
+                        # next digit or pressing "OK" -- click_by_name()'s own
+                        # "ok" only proves a press was injected, not that it
+                        # landed (20260930T090222Z_lcd bench evidence: all 6
+                        # digit clicks and the trailing OK click reported
+                        # "ok", yet the keypad was still open with only 5
+                        # dots afterward -- a click was silently lost).
+                        entry = ui.enter_pin_verified(wrong_pin)
                         state["wrong_pin_entry"] = _entry_result_summary(entry)
-                        if entry is not None and _entry_all_digits_not_found(entry):
+                        if entry is not None and entry.get("entry_incomplete"):
+                            # A digit's dot count never advanced -- entry was
+                            # abandoned before "OK" was ever pressed (never
+                            # re-tapped: a duplicate digit is worse than a
+                            # missing one). Nothing downstream of a PIN that
+                            # was never actually typed can be judged, so
+                            # wrong_pin_refused stays at its initial None
+                            # (INCONCLUSIVE) and the right-PIN entry below is
+                            # skipped by wrong_pin_refused's own falsy value.
+                            pass
+                        elif entry is not None and _entry_all_digits_not_found(entry):
                             # Distinguish "every click missed" from a
                             # partial/mixed result so a future INCONCLUSIVE
                             # can be told apart without re-running against
                             # the board -- see module note above.
                             state["entry_all_not_found"] = True
-                        if _entry_all_clicked_ok(entry):
+                        if entry is not None and not entry.get("entry_incomplete") and _entry_all_clicked_ok(entry):
                             # A wrong PIN resets digit entry but the keypad's
                             # own button set never changes -- debounce two
                             # stable reads rather than trusting one
@@ -2686,7 +2744,21 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # still-changing case; gating on `stabilized`
                             # (2026-09-30 review fix) covers both.
                             if stabilized:
-                                wrong_pin_refused = "OK" in names and "Cancel" in names
+                                if "OK" in names and "Cancel" in names:
+                                    # "OK"+"Cancel" present alone doesn't
+                                    # prove the wrong PIN was refused and
+                                    # its entry reset -- the dots (masked
+                                    # count) must have also cleared to 0.
+                                    # If they haven't, this is genuinely
+                                    # ambiguous (a stale/incompletely-reset
+                                    # entry, or a dots-read glitch) and
+                                    # wrong_pin_refused stays at its initial
+                                    # None (INCONCLUSIVE) rather than a
+                                    # fabricated True.
+                                    if _dots_have_cleared(names):
+                                        wrong_pin_refused = True
+                                else:
+                                    wrong_pin_refused = False
                         # else: leave wrong_pin_refused at None -- the PIN
                         # typed on the board wasn't actually the intended
                         # one, so no conclusion can be drawn from what
@@ -2698,11 +2770,16 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # `_wait_stable_names` above) showing "OK"+"Cancel"
                         # -- the same keypad, still open, not re-raised --
                         # immediately before this entry starts.
-                        entry = ui.enter_pin(right_pin)
+                        entry = ui.enter_pin_verified(right_pin)
                         state["right_pin_entry"] = _entry_result_summary(entry)
-                        if entry is not None and _entry_all_digits_not_found(entry):
+                        if entry is not None and entry.get("entry_incomplete"):
+                            # Same "never re-tap, never guess" rule as the
+                            # wrong-PIN entry above: right_pin_started stays
+                            # at its initial None (INCONCLUSIVE).
+                            pass
+                        elif entry is not None and _entry_all_digits_not_found(entry):
                             state["entry_all_not_found"] = True
-                        if _entry_all_clicked_ok(entry):
+                        if entry is not None and not entry.get("entry_incomplete") and _entry_all_clicked_ok(entry):
                             # A correct PIN closes the keypad in favour of
                             # the Confirm Start dialog -- "OK" disappears.
                             # 2026-09-30 bench evidence (two runs): the

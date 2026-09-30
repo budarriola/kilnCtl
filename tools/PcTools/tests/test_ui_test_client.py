@@ -439,5 +439,185 @@ class EnterPinTest(unittest.TestCase):
         self.assertEqual(len(self.link.sent), 5)  # exactly one click per digit + one OK
 
 
+class EnterPinVerifiedTest(unittest.TestCase):
+    """LCD-19 (2026-09-30): UiTestClient.enter_pin_verified() confirms each
+    digit was actually applied (via the masked-PIN-dots read-only label,
+    surfaced by list_tap_targets()) instead of trusting click_by_name()
+    alone. See cases_lcd.py's _case_lcd19 for the bench context."""
+
+    def setUp(self):
+        self.link = _ReplyPerSendLink()
+        self.client = UiTestClient(self.link)
+        self._interval_patcher = mock.patch(
+            "kilnctrl.ui_test_client._DOT_POLL_INTERVAL_S", 0.0
+        )
+        self._interval_patcher.start()
+        self._retry_poll_patcher = mock.patch(
+            "kilnctrl.ui_test_client._ENTER_PIN_RETRY_POLL_S", 0.0
+        )
+        self._retry_poll_patcher.start()
+
+    def tearDown(self):
+        self._retry_poll_patcher.stop()
+        self._interval_patcher.stop()
+        self.client.close()
+
+    def _click_reply(self, code: int = UI_TEST_CLICK_OK, cx: int = 1, cy: int = 1) -> bytes:
+        return struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + struct.pack("<Bhh", code, cx, cy)
+
+    def _dots_reply(self, dots: str) -> bytes:
+        """Builds a realistic multi-target LIST_TAP_TARGETS reply modeled on
+        real bench data (logs/bench_test/20260930T090222Z_lcd/summary.json):
+        an empty-named fullscreen backdrop, an empty-named msgbox root, the
+        digit/OK/Cancel keys, the prompt label, and the dots count exposed
+        under a borrowed container name -- never via any firmware tag (see
+        _dots_text's docstring). `dots` is that borrowed name's text ("" for
+        no digits typed, a run of '*' otherwise)."""
+        names = [
+            "",  # fullscreen backdrop
+            "",  # msgbox root
+            dots,  # borrowed content-container name -- carries the dots
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+            "Cancel",
+            "Enter PIN to start firing",
+            "OK",
+            "WiFi: 192.168.1.156 (kilnctl.lo",
+            "settings",
+        ]
+        body = bytearray()
+        body += struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS)
+        body += struct.pack("<B", len(names))
+        body += struct.pack("<B", 0)  # truncated=False
+        for i, name in enumerate(names):
+            raw = name.encode("ascii")
+            body += struct.pack("<B", len(raw)) + raw + struct.pack("<hhB", i + 1, i + 1, 0)
+        return bytes(body)
+
+    def _queue(self, *replies: bytes) -> None:
+        self.link.replies.extend(replies)
+
+    def test_dot_count_advances_normally_flow_proceeds(self):
+        # digit "1" click, then dots reads "*" -- repeat for "2","3","4", then OK.
+        self._queue(
+            self._click_reply(),
+            self._dots_reply("*"),
+            self._click_reply(),
+            self._dots_reply("**"),
+            self._click_reply(),
+            self._dots_reply("***"),
+            self._click_reply(),
+            self._dots_reply("****"),
+            self._click_reply(),  # OK
+        )
+        result = self.client.enter_pin_verified("1234", timeout=1.0)
+        self.assertFalse(result["entry_incomplete"])
+        self.assertEqual(len(result["digit_results"]), 4)
+        self.assertEqual(result["ok_result"]["result"], "ok")
+        self.assertEqual(len(result["dot_wait_s"]), 4)
+
+    def test_lost_digit_stalls_dot_count_ok_never_pressed(self):
+        # Digit "1" applies (dots -> "*"), digit "2" click reports ok but the
+        # dot count never advances past "*" -- entry must stop here, never
+        # tap OK, never re-click "2".
+        self._queue(
+            self._click_reply(),
+            self._dots_reply("*"),
+            self._click_reply(),
+            self._dots_reply("*"),  # stalled -- still one dot after digit 2
+        )
+        result = self.client.enter_pin_verified("1234", timeout=0.05)
+        self.assertTrue(result["entry_incomplete"])
+        self.assertIsNone(result["ok_result"])
+        self.assertEqual(result["expected_dot_count"], 2)
+        self.assertEqual(result["observed_dot_count"], 1)
+        # Exactly 2 clicks sent (digits "1","2") -- no OK, no re-click of "2".
+        click_sends = [
+            s for s in self.link.sent
+            if s.startswith(struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME))
+        ]
+        self.assertEqual(len(click_sends), 2)
+
+    def test_dots_text_none_when_ambiguous_candidates(self):
+        # Two DISTINCT non-empty '*'-only names -- _dots_text can't
+        # disambiguate, so it reports None rather than guessing. Also
+        # carries the real shape's empty-named backdrop/msgbox to prove
+        # those don't count as a third candidate.
+        body = bytearray()
+        body += struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS)
+        body += struct.pack("<B", 4)
+        body += struct.pack("<B", 0)
+        body += struct.pack("<B", 0) + b"" + struct.pack("<hhB", 1, 1, 0)
+        body += struct.pack("<B", 0) + b"" + struct.pack("<hhB", 2, 2, 0)
+        body += struct.pack("<B", 1) + b"*" + struct.pack("<hhB", 3, 3, 0)
+        body += struct.pack("<B", 2) + b"**" + struct.pack("<hhB", 4, 4, 0)
+        self._queue(bytes(body))
+        self.assertIsNone(self.client._dots_text(timeout=1.0))
+
+    def test_dots_text_zero_when_only_empty_names_present(self):
+        # Real bench shape (logs/bench_test/20260930T090222Z_lcd): the
+        # fullscreen backdrop and msgbox root both report "" as their name.
+        # set("") <= {"*"} used to be vacuously True, making these wrongly
+        # count as dots candidates and pushing len(candidates) to 2+ on
+        # every real read (the bug this fix addresses). Zero non-empty
+        # all-'*' names must read as "" (0 digits), not None/ambiguous.
+        self._queue(self._dots_reply(""))
+        self.assertEqual(self.client._dots_text(timeout=1.0), "")
+
+    def test_dots_text_reads_borrowed_container_name_no_firmware_tag(self):
+        # The dots text is exposed purely via the pre-existing
+        # borrowed-grandchild-label path in kiln_ui.c -- no firmware tag
+        # needed. Confirms the harness-only fix works against the real
+        # multi-target shape.
+        self._queue(self._dots_reply("*****"))
+        self.assertEqual(self.client._dots_text(timeout=1.0), "*****")
+
+    def test_verified_complete_entry_reports_ok_result(self):
+        # Sanity: once every digit is confirmed applied, OK's own result is
+        # still surfaced normally (a case's judge_lcd_pin_lock() decides FAIL
+        # vs pass from the overlay staying open afterward, not from here).
+        self._queue(
+            self._click_reply(),
+            self._dots_reply("*"),
+            self._click_reply(),  # OK
+        )
+        result = self.client.enter_pin_verified("1", timeout=1.0)
+        self.assertFalse(result["entry_incomplete"])
+        self.assertEqual(result["ok_result"]["result"], "ok")
+
+    def test_stops_immediately_on_non_ok_digit_click(self):
+        # A digit click that itself does not report "ok" (not_found,
+        # swallowed, verdict_unknown) must stop entry right there:
+        # entry_incomplete=True, no further digit click sent, "OK" never
+        # pressed. "not_found" is retried once (enter_pin_verified's own
+        # retry, distinct from click_by_name's lack of internal retry) --
+        # still not_found on the retry stops entry the same way.
+        cases = [
+            ("not_found", [self._click_reply(UI_TEST_CLICK_NOT_FOUND),
+                            self._click_reply(UI_TEST_CLICK_NOT_FOUND)]),
+            ("swallowed", [self._click_reply(UI_TEST_CLICK_SWALLOWED)]),
+            ("verdict_unknown", [self._click_reply(UI_TEST_CLICK_VERDICT_UNKNOWN)]),
+        ]
+        for label, replies in cases:
+            with self.subTest(label):
+                self.link = _ReplyPerSendLink()
+                self.client = UiTestClient(self.link)
+                self._queue(*replies)
+                result = self.client.enter_pin_verified("1234", timeout=1.0)
+                self.assertTrue(result["entry_incomplete"])
+                self.assertIsNone(result["ok_result"])
+                self.assertEqual(len(result["digit_results"]), 1)
+                self.assertEqual(result["digit_results"][0]["result"], label)
+                click_sends = [
+                    s for s in self.link.sent
+                    if s.startswith(struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME))
+                ]
+                # not_found retries once (2 clicks sent); swallowed/
+                # verdict_unknown are never retried (1 click sent). Either
+                # way, never more than the one digit -- no "2","3","4", no
+                # "OK".
+                self.assertEqual(len(click_sends), 2 if label == "not_found" else 1)
+                self.client.close()
+
+
 if __name__ == "__main__":
     unittest.main()
