@@ -212,7 +212,8 @@ class BenchTestRunner:
     # -- run ----------------------------------------------------------------
 
     def run(self, suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
-             allow_heat: bool = True, tag: Optional[str] = None) -> RunOutcome:
+             allow_heat: bool = True, lcd_stop_heat: bool = False,
+             tag: Optional[str] = None) -> RunOutcome:
         requested = suite_case_ids(suite)
         if cases:
             unknown = [c for c in cases if c not in REGISTRY]
@@ -236,6 +237,21 @@ class BenchTestRunner:
         # and again below in report_mod.run_dir_path() for `outcome.run_dir`
         # always agrees.
         self.ctx["run_dir"] = report_mod.run_dir_path(self.logs_root, run_id)
+        # Made available to case functions via ctx["allow_heat"] --
+        # `spec.heat` gates a whole case (skipped outright above when
+        # False), but LCD-19 is not `heat`-flagged (its other sub-checks --
+        # keypad raise, wrong/right PIN -- never touch the board's heaters)
+        # and must stay runnable without `allow_heat`. `allow_heat` defaults
+        # True (an ordinary run may exercise other, spec.heat-marked cases),
+        # so it is NOT by itself a safe gate for LCD-19's stop_gated
+        # sub-check, which starts an unsolicited firing of its own. That
+        # sub-check instead requires a second, independently-defaulted-False
+        # opt-in, ctx["lcd19_allow_heat"] (`lcd_stop_heat` here) -- the case
+        # body only starts its bench firing when BOTH flags are true, so
+        # heat stays opt-in for LCD-19 even though allow_heat=True is the
+        # default for everything else.
+        self.ctx["allow_heat"] = allow_heat
+        self.ctx["lcd19_allow_heat"] = lcd_stop_heat
 
         # Board lock (docs/audits/profile_executor_panic_2026-09-24.md
         # HP-02/HP-05): acquired here, before preflight even runs, for any
@@ -366,7 +382,7 @@ class BenchTestRunner:
 
 
 def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
-              allow_heat: bool = True,
+              allow_heat: bool = True, lcd_stop_heat: bool = False,
               tag: Optional[str] = None, host: Optional[str] = None,
               logs_root: Optional[str] = None) -> RunOutcome:
     """Convenience entry point -- NOT what mcp_server_bench_test.py's
@@ -382,4 +398,5 @@ def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = Fal
     2b), so no credential parameter is needed here."""
     ctx: Dict[str, Any] = {"host": host, "tag": tag}
     runner = BenchTestRunner(ctx, logs_root=logs_root)
-    return runner.run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat, tag=tag)
+    return runner.run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
+                       lcd_stop_heat=lcd_stop_heat, tag=tag)

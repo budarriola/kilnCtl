@@ -222,6 +222,23 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertEqual(outcome.results["ST-05"].verdict, R.Verdict.SKIP)
         self.assertEqual(calls, [])
 
+    def test_lcd_stop_heat_defaults_false_at_runner_and_mcp_layer(self):
+        # 2026-09-30 review advisory: pin lcd_stop_heat's default at both
+        # the layer that actually gates LCD-19's bench firing (run(), which
+        # writes ctx["lcd19_allow_heat"]) and the MCP tool surface
+        # (bench_test_run()) an ordinary caller goes through -- an
+        # unnoticed default flip at either would silently make an ordinary
+        # bench run start a real firing.
+        import inspect
+        from kilnctrl import mcp_server_bench_test as MT
+        run_default = inspect.signature(BenchTestRunner.run).parameters["lcd_stop_heat"].default
+        self.assertIs(run_default, False)
+        tool_default = inspect.signature(MT.bench_test_run.__wrapped__ if hasattr(MT.bench_test_run, "__wrapped__") else MT.bench_test_run).parameters["lcd_stop_heat"].default
+        self.assertIs(tool_default, False)
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        runner.run(suite="smoke", dry_run=True)
+        self.assertIs(runner.ctx.get("lcd19_allow_heat"), False)
+
     def test_heat_case_skipped_when_allow_heat_false(self):
         heat_ids = [c for c in R.SUITES["heat"] if R.get_case(c).heat]
         self.assertTrue(heat_ids)

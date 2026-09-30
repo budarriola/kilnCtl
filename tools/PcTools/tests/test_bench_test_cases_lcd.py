@@ -9,6 +9,7 @@ Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_lcd.py -q
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 import time
@@ -17,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from kilnctrl.bench_test import cases_heat as CH  # noqa: E402
 from kilnctrl.bench_test import cases_lcd as C  # noqa: E402
 from kilnctrl.bench_test import cases_web_rw as CW  # noqa: E402
 from kilnctrl.bench_test import judgments as J  # noqa: E402
@@ -2110,6 +2112,27 @@ class FakeLcd19SecClient:
         return 200, {"ok": True}
 
 
+class _MismatchAfterRestoreSecClient(FakeLcd19SecClient):
+    """Like FakeLcd19SecClient, but the SECOND get_config() call (the
+    post-restore readback at cases_lcd.py's ``readback_status, cfg_after =
+    client.get_config()``) reports lcd_enabled flipped from what was just
+    written -- restore's own set_policy POST reports 200/ok (restore_post_ok
+    True) while the readback still disagrees (restore_matches False), the
+    other half of the ``not restore_post_ok or not restore_matches`` OR."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._get_config_calls = 0
+
+    def get_config(self):
+        self._get_config_calls += 1
+        status, cfg = super().get_config()
+        if self._get_config_calls >= 2:
+            cfg = dict(cfg)
+            cfg["lcd_enabled"] = not cfg["lcd_enabled"]
+        return status, cfg
+
+
 class DelayedOverlayUiTest(FakeUiTest):
     """``list_tap_targets`` returns ``pre`` for the first ``stale_reads``
     reads, then ``post`` -- models the real LCD-19 click-then-read race:
@@ -2275,6 +2298,80 @@ class Lcd19SelfSeedTest(unittest.TestCase):
 
 
 class Lcd19Test(unittest.TestCase):
+    def setUp(self):
+        # 2026-09-30 review scope-addition: _wait_for_home_settled (the
+        # Start-click settle-wait, added alongside the pre-existing Stop-
+        # click one) does a real `time.sleep(2.5)` per call by default --
+        # every Start-driving test in this class now goes through it, so a
+        # fake, instantly-advancing monotonic clock keeps this test file
+        # fast and deterministic rather than adding 2.5s+ of real wall time
+        # per test. ctx["_now"]/ctx["_sleep"] are not used here (most tests
+        # build ctx by hand without them); patching the module's own `time`
+        # functions is the one change that reaches every call site
+        # (_wait_for_home_settled's `time.monotonic` default AND
+        # _wait_for_keypad_raise's direct use of `time.monotonic`/
+        # `time.sleep`) without touching 28 separate ctx literals.
+        fake_time = [0.0]
+        self.sleep_calls = []
+
+        def fake_monotonic():
+            return fake_time[0]
+
+        def fake_sleep(seconds):
+            fake_time[0] += seconds
+            self.sleep_calls.append(seconds)
+
+        patcher = mock.patch.multiple(C.time, monotonic=fake_monotonic, sleep=fake_sleep)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_start_click_waits_for_settle_after_enabling_lcd(self):
+        # 2026-09-30 review scope-addition: the `set_policy(lcd_enabled=True)`
+        # enable at case entry trips the same tick_timer_cb self-close race
+        # `_wait_for_home_settled` exists for -- clicking "Start" right after
+        # that POST with no wait can lose the race. Proves the settle-wait is
+        # actually invoked (set_policy recorded) and completes strictly
+        # before the Start click.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        sec = FakeLcd19SecClient()
+        events = []
+        real_set_policy = sec.set_policy
+
+        def recording_set_policy(*a, **kw):
+            events.append(("set_policy", a, kw))
+            return real_set_policy(*a, **kw)
+
+        sec.set_policy = recording_set_policy
+        real_click = ui.click_by_name
+
+        def recording_click(name):
+            if name == "Start":
+                events.append(("click_start",))
+            return real_click(name)
+
+        ui.click_by_name = recording_click
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": sec,
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        set_policy_events = [i for i, e in enumerate(events) if e[0] == "set_policy"]
+        click_events = [i for i, e in enumerate(events) if e[0] == "click_start"]
+        self.assertTrue(set_policy_events, "expected the enabling set_policy call")
+        self.assertTrue(click_events, "Start was never clicked")
+        # set_policy_events[0] is the entry-point enable call; a later
+        # set_policy (if any) is the unrelated end-of-case policy restore in
+        # `finally`, not part of this ordering check.
+        self.assertLess(set_policy_events[0], click_events[0],
+                         "the settle-wait (after set_policy) must complete before the Start click")
+        self.assertTrue(result.observed.get("start_settle_ok"))
+        # Proves the wait itself actually ran (>= the 2.5s / 2-tick-period
+        # minimum), not merely that set_policy happens to precede the click
+        # for unrelated reasons -- removing the wait call entirely would
+        # still leave that ordering intact, so this is the assertion that
+        # actually catches that mutation.
+        self.assertTrue(self.sleep_calls, "the settle-wait's minimum sleep was never called")
+        self.assertGreaterEqual(self.sleep_calls[0], 2.5)
+
     def test_not_run_when_no_pin_configured(self):
         # This test must never reach the real board: on a machine where the
         # owner's KILNCTL_LCD_PIN is genuinely set (User scope), an
@@ -2922,6 +3019,610 @@ class Lcd19Test(unittest.TestCase):
         ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
         result = C._case_lcd19(ctx)
         self.assertEqual(result.observed["overlay_dismiss"], {"checked": True, "present": False})
+
+
+class _StopGatedUiTest(PinKeypadUiTest):
+    """Extends PinKeypadUiTest with a "Stop" widget for the allow_heat
+    stop_gated sub-check (owner decision 2026-09-30). The allow_heat path
+    starts its firing directly over the mocked UART profiles client, never
+    through this UI's own Confirm-Start button, so the UI is left sitting
+    in whatever state block A's PIN entry produced ("confirm", after a
+    correct PIN) when Stop is tapped. `stop_mode` controls what tapping
+    "Stop" reveals: "gated" (Cancel+OK, i.e. a PIN keypad), "ungated"
+    (Cancel only, i.e. Confirm Stop shown directly), or "none" (neither --
+    stop_gated stays None)."""
+
+    def __init__(self, *a, stop_mode="gated", stop_result="ok", **kw):
+        super().__init__(*a, **kw)
+        self._stop_mode = stop_mode
+        self._stop_result = stop_result
+        self._stop_tapped = False
+        # Flip True only once a test's mocked exec-status poll confirms the
+        # allow_heat firing reached "running" -- distinct from self._state
+        # == "confirm", which block A's own right-PIN Confirm-Start dialog
+        # read also uses (2026-09-30 review fix, item 3): without this
+        # separate flag, the settled-home "Stop"-only reading below would
+        # also intercept block A's own Start/Cancel confirm-dialog read and
+        # break right_pin_started detection.
+        self._firing_settled = False
+
+    def list_tap_targets(self):
+        if self._stop_tapped:
+            if self._stop_mode == "gated":
+                names = ["Cancel", "OK"] + [str(d) for d in range(10)]
+            elif self._stop_mode == "ungated":
+                # The real Confirm Stop dialog is a "Stop"/"Cancel" pair
+                # (advisory C, 2026-09-30 review) -- "Cancel" alone
+                # undersold what an ungated tap actually shows.
+                names = ["Stop", "Cancel"]
+            else:
+                names = ["SomethingElse"]
+            return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
+        if self._firing_settled:
+            # Pre-tap (settle-wait poll, 2026-09-30 review fix): models the
+            # real home page settled with the fire button reading "Stop"
+            # once a firing is confirmed running -- the allow_heat firing
+            # here is started directly over the mocked UART profiles client,
+            # never through this UI's own Confirm-Start button, so nothing
+            # else in this fixture drives that transition.
+            return {"targets": [{"name": "Stop", "hidden": False}], "truncated": False}
+        return super().list_tap_targets()
+
+    def click_by_name(self, name):
+        if name == "Stop":
+            self._stop_tapped = True
+            return {"result": self._stop_result}
+        return super().click_by_name(name)
+
+
+class Lcd19AllowHeatStopGatedTest(unittest.TestCase):
+    """LCD-19's allow_heat opt-in (owner decision 2026-09-30): makes
+    stop_gated reachable via a real, short bench firing started over the
+    same hidden BENCH_HP UART path every HP-* case uses
+    (cases_heat._start_bench_profile/_cleanup_bench_profile/_read_energized
+    -- mocked here, never reimplemented). ctx["allow_heat"] defaults to
+    falsy, so an ordinary run's behavior (block A only, stop_gated always
+    None) must be provably unchanged."""
+
+    def _ctx(self, ui, allow_heat=True, lcd19_allow_heat=None, **extra):
+        srv = FakeSrvFull(ui, profiles=extra.pop("profiles", None))
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+            # Advisory A (2026-09-30 review): the allow_heat start refuses
+            # up front without ctx["host"] (_read_energized needs it) --
+            # give these tests a fake host so that new guard doesn't mask
+            # what each test is actually exercising.
+            "host": "10.0.0.99",
+            # Fast, deterministic clock for _wait_for_stop_home_settled's
+            # min-wait/poll loop -- both flags must be true (2026-09-30
+            # review fix) for the case to ever reach it, so every test that
+            # wants to reach the Stop-tap branch needs this regardless of
+            # whether it separately patches C.time for the cleanup-
+            # verification poll (a different, non-ctx-injectable loop).
+            "_now": (lambda c=itertools.count(0.0, 0.1): next(c)),
+            "_sleep": lambda s: None,
+        }
+        if allow_heat:
+            ctx["allow_heat"] = True
+        # Default: whatever allow_heat is, unless caller overrides -- lets
+        # existing "allow_heat=True" callers keep meaning "the firing
+        # starts" without every call site naming both flags explicitly.
+        if lcd19_allow_heat is None:
+            lcd19_allow_heat = allow_heat
+        if lcd19_allow_heat:
+            ctx["lcd19_allow_heat"] = True
+        ctx.update(extra)
+        return ctx, srv
+
+    def test_happy_path_passes_and_cleanup_runs_once(self):
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        running_status = FakeExecStatus(state_name="running")
+        idle_status = FakeExecStatus(state_name="idle")
+        profiles = FakeProfiles(status=idle_status)
+        # get_exec_status is polled: idle before start, then running once
+        # confirming the start, then idle again during the cleanup poll.
+        calls = {"n": 0}
+        real_get = profiles.get_exec_status
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)) as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        start_mock.assert_called_once()
+        cleanup_mock.assert_called_once()
+        self.assertEqual(result.observed.get("stop_gated"), True)
+        self.assertTrue(result.observed["bench_cleanup"]["verified"])
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_stop_not_gated_fails_and_cleanup_still_runs(self):
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="ungated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        cleanup_mock.assert_called_once()
+        self.assertEqual(result.observed.get("stop_gated"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("Stop", result.reason)
+
+    def test_start_refused_stays_inconclusive_and_never_starts_a_firing(self):
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        profiles = FakeProfiles(status=idle_status)
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(False, "refused: zone ceiling", None)) as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock:
+            result = C._case_lcd19(ctx)
+        start_mock.assert_called_once()
+        cleanup_mock.assert_not_called()
+        self.assertIsNone(result.observed.get("stop_gated"))
+        self.assertFalse(ui._stop_tapped, "Stop must never be tapped when no firing was actually started")
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_cleanup_verification_failure_fails_loud_naming_estop(self):
+        # _cleanup_bench_profile itself never raises (best-effort by
+        # design) but the bounded post-cleanup verification poll can still
+        # never observe a de-energized relay -- that must be a hard FAIL
+        # naming the hardware E-stop, never merely reported alongside a
+        # PASS/other verdict.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status  # cleanup poll: exec goes idle, but relay never clears (see _read_energized below)
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        # Drive the 15s bounded cleanup-verification poll without a real
+        # 15-second wait: fake monotonic() advances 2.0s on every call
+        # (regardless of caller) and sleep() is a no-op, so the deadline
+        # trips after a handful of fast iterations instead of real time.
+        counter = itertools.count(0.0, 2.0)
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=True),              mock.patch.object(C.time, "monotonic", side_effect=counter.__next__),              mock.patch.object(C.time, "sleep", return_value=None):
+            result = C._case_lcd19(ctx)
+        cleanup_mock.assert_called_once()
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("E-stop", result.reason)
+        self.assertFalse(result.observed["bench_cleanup"]["verified"])
+
+    def test_estop_reason_survives_a_failed_policy_restore(self):
+        # 2026-09-30 review fix: when the bench-firing cleanup verification
+        # above already set the E-stop-naming FAIL reason AND the policy
+        # restore below also fails, the E-stop reason must survive (it is
+        # the more safety-relevant of the two) with the restore failure
+        # appended, never clobbered outright by the restore's own reason.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status  # cleanup poll: exec idle, but relay never clears
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        ctx["sec_client"] = FakeLcd19SecClient(restore_ok=False)
+        srv._profiles = profiles
+        counter = itertools.count(0.0, 2.0)
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=True),              mock.patch.object(C.time, "monotonic", side_effect=counter.__next__),              mock.patch.object(C.time, "sleep", return_value=None):
+            result = C._case_lcd19(ctx)
+        cleanup_mock.assert_called_once()
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertTrue(
+            result.reason.startswith("allow_heat bench firing could not be confirmed stopped"),
+            result.reason,
+        )
+        self.assertIn("E-stop", result.reason)
+        self.assertIn("policy restore did not round-trip", result.reason)
+
+    def test_estop_reason_survives_a_restore_readback_mismatch(self):
+        # Same as above, but restore's set_policy POST itself reports
+        # 200/ok (restore_post_ok True) while the post-restore readback
+        # still disagrees (restore_matches False) -- the other half of the
+        # "not restore_post_ok or not restore_matches" OR that triggers the
+        # append-not-clobber path.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        ctx["sec_client"] = _MismatchAfterRestoreSecClient()
+        srv._profiles = profiles
+        counter = itertools.count(0.0, 2.0)
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=True),              mock.patch.object(C.time, "monotonic", side_effect=counter.__next__),              mock.patch.object(C.time, "sleep", return_value=None):
+            result = C._case_lcd19(ctx)
+        cleanup_mock.assert_called_once()
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertTrue(
+            result.reason.startswith("allow_heat bench firing could not be confirmed stopped"),
+            result.reason,
+        )
+        self.assertIn("E-stop", result.reason)
+        self.assertIn("policy restore did not round-trip", result.reason)
+
+    def test_exception_mid_stop_branch_still_runs_cleanup(self):
+        # A raise inside the Stop-tap branch (e.g. a lost UART reply on the
+        # overlay read) must not skip the bench-firing teardown in
+        # `finally` -- cleanup is safety-relevant and must run regardless.
+        class RaisingStopUiTest(_StopGatedUiTest):
+            def click_by_name(self, name):
+                if name == "Stop":
+                    raise RuntimeError("simulated UI_TEST reply lost")
+                return super().click_by_name(name)
+
+        ui = RaisingStopUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)) as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=False):
+            with self.assertRaises(RuntimeError):
+                C._case_lcd19(ctx)
+        start_mock.assert_called_once()
+        cleanup_mock.assert_called_once()
+
+    def test_allow_heat_false_never_starts_a_firing_and_is_unchanged(self):
+        # Default (no ctx["allow_heat"]) behavior must be provably
+        # identical to before this feature: block A only, stop_gated stays
+        # None, no bench profile touched at all.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        ctx, srv = self._ctx(ui, allow_heat=False)
+        with mock.patch.object(CH, "_start_bench_profile") as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock:
+            result = C._case_lcd19(ctx)
+        start_mock.assert_not_called()
+        cleanup_mock.assert_not_called()
+        self.assertFalse(ui._stop_tapped)
+        self.assertIsNone(result.observed.get("stop_gated"))
+        self.assertNotIn("bench_cleanup", result.observed)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_lcd19_allow_heat_false_never_starts_even_with_suite_allow_heat_true(self):
+        # 2026-09-30 review fix, item 1: ctx["allow_heat"]=True alone (the
+        # suite-wide default) must NOT start LCD-19's firing -- only the
+        # separate ctx["lcd19_allow_heat"] opt-in does, and that flag
+        # defaults False at the runner/MCP/CLI layer.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        ctx, srv = self._ctx(ui, allow_heat=True, lcd19_allow_heat=False)
+        with mock.patch.object(CH, "_start_bench_profile") as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock:
+            result = C._case_lcd19(ctx)
+        start_mock.assert_not_called()
+        cleanup_mock.assert_not_called()
+        self.assertFalse(ui._stop_tapped)
+        self.assertIsNone(result.observed.get("stop_gated"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_relock_happens_before_stop_click_ordering_checked(self):
+        # 2026-09-30 review fix, item 5 mutation (a): proves the relock
+        # (set_policy off-then-on) is actually attempted, and that it
+        # completes before Stop is ever tapped -- catches `if
+        # started_firing_here:` being replaced with `if False:` in the
+        # relock block, which would skip the relock (and, under the
+        # not-relock_ok branch added by this same fix, would then also skip
+        # the Stop tap entirely).
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        sec_client = ctx["sec_client"]
+        events = []
+        real_set_policy = sec_client.set_policy
+
+        def recording_set_policy(*a, **kw):
+            events.append(("set_policy", a, kw))
+            return real_set_policy(*a, **kw)
+
+        sec_client.set_policy = recording_set_policy
+        real_click = ui.click_by_name
+
+        def recording_click(name):
+            if name == "Stop":
+                events.append(("click_stop",))
+            return real_click(name)
+
+        ui.click_by_name = recording_click
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile"),              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        # At least one relock set_policy pair (off, then on) happened, and
+        # the Stop click came strictly after both.
+        set_policy_events = [e for e in events if e[0] == "set_policy"]
+        click_events = [i for i, e in enumerate(events) if e[0] == "click_stop"]
+        self.assertGreaterEqual(len(set_policy_events), 2, "expected an off-then-on relock pair")
+        self.assertTrue(click_events, "Stop was never clicked")
+        # The relock pair (off, then on) is the first two set_policy calls --
+        # a further set_policy after the Stop click is the unrelated
+        # end-of-case policy *restore* (the finally block), not the relock,
+        # so only the relock pair's own index is checked against the tap.
+        relock_indices = [i for i, e in enumerate(events) if e[0] == "set_policy"][:2]
+        self.assertLess(max(relock_indices), click_events[0],
+                         "relock must complete before the Stop click")
+        self.assertTrue(result.observed.get("allow_heat_relock_ok"))
+
+    def test_cleanup_runs_even_when_start_confirmation_never_observes_running(self):
+        # 2026-09-30 review fix, item 5 mutation (b): proves the teardown
+        # gate stays on `bench_profile_started` (set as soon as
+        # _start_bench_profile itself reports ok) rather than the narrower
+        # `started_firing_here` (only set once the running-confirmation poll
+        # succeeds) -- catches `if bench_profile_started:` at the teardown
+        # being narrowed to `if started_firing_here:`, which would skip
+        # cleanup/verification here even though a real firing may still be
+        # running on the board.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        profiles = FakeProfiles(status=idle_status)
+        # get_exec_status never reports "running" -- the start-confirmation
+        # poll times out, so started_firing_here stays False even though
+        # _start_bench_profile itself reported ok (bench_profile_started
+        # stays True).
+        profiles.get_exec_status = lambda: idle_status
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        counter = itertools.count(0.0, 20.0)  # trips the 10s confirmation poll deadline on the 2nd read
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)) as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=False),              mock.patch.object(C.time, "monotonic", side_effect=counter.__next__),              mock.patch.object(C.time, "sleep", return_value=None):
+            result = C._case_lcd19(ctx)
+        start_mock.assert_called_once()
+        cleanup_mock.assert_called_once()
+        self.assertTrue(result.observed["bench_cleanup"]["verified"])
+        # The Stop-tap branch never ran (firing_active never went True since
+        # started_firing_here never got set), so stop_gated stays None and
+        # the case is INCONCLUSIVE -- but cleanup still ran and verified.
+        self.assertIsNone(result.observed.get("stop_gated"))
+        self.assertFalse(ui._stop_tapped)
+
+    def test_relock_failure_leaves_stop_gated_none_and_never_taps_stop(self):
+        # 2026-09-30 review fix, item 2: a relock that does not confirm ok
+        # must not be treated as "Stop still produces real evidence either
+        # way" -- Stop must never be tapped, and stop_gated must stay None
+        # (INCONCLUSIVE), not False.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        sec_client = ctx["sec_client"]
+        real_set_policy = sec_client.set_policy
+        relock_calls = {"n": 0}
+
+        def failing_relock(*a, **kw):
+            relock_calls["n"] += 1
+            if relock_calls["n"] == 1:
+                # The initial enable-lcd_enabled-before-driving-the-keypad
+                # call (block entry) must still succeed.
+                return real_set_policy(*a, **kw)
+            # Every relock attempt after that (the off/on pair) fails.
+            return 500, None
+
+        sec_client.set_policy = failing_relock
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile"),              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        self.assertFalse(ui._stop_tapped, "Stop must never be tapped after a relock that did not confirm ok")
+        self.assertIsNone(result.observed.get("stop_gated"))
+        self.assertFalse(result.observed.get("allow_heat_relock_ok"))
+        self.assertIn("relock", result.observed.get("allow_heat_stop_skip_reason", ""))
+
+    def test_set_policy_raises_during_relock_cleanup_still_runs(self):
+        # 2026-09-30 review fix, item 5: an exception raised by set_policy
+        # itself during the relock attempt must not skip the bench-firing
+        # teardown -- cleanup is safety-relevant and must run regardless of
+        # what raised inside the try block.
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        sec_client = ctx["sec_client"]
+        real_set_policy = sec_client.set_policy
+        relock_calls = {"n": 0}
+
+        def raising_relock(*a, **kw):
+            relock_calls["n"] += 1
+            if relock_calls["n"] == 1:
+                return real_set_policy(*a, **kw)
+            raise RuntimeError("simulated HTTP failure during relock")
+
+        sec_client.set_policy = raising_relock
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)) as start_mock,              mock.patch.object(CH, "_cleanup_bench_profile") as cleanup_mock,              mock.patch.object(CH, "_read_energized", return_value=False):
+            with self.assertRaises(RuntimeError):
+                C._case_lcd19(ctx)
+        start_mock.assert_called_once()
+        cleanup_mock.assert_called_once()
+
+    def test_stop_tap_waits_for_settled_home_before_tapping(self):
+        # 2026-09-30 review fix, item 3: the Stop tap must wait for a
+        # STABLE settled read ("Stop" present, "Cancel" absent) -- a UI
+        # still mid-transition (e.g. still showing the Confirm Start dialog
+        # from block A, or flapping) must not be tapped yet. This fixture
+        # reports unsettled for the first two polls, then settles.
+        class SlowSettleUiTest(_StopGatedUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._settle_polls = 0
+
+            def list_tap_targets(self):
+                if self._stop_tapped or not self._firing_settled:
+                    # Before the firing is confirmed running, defer to block
+                    # A's own PIN/confirm-dialog state machine untouched.
+                    return super().list_tap_targets()
+                self._settle_polls += 1
+                if self._settle_polls <= 2:
+                    # Still showing the Confirm Start dialog -- not settled.
+                    return {"targets": [{"name": "Start", "hidden": False},
+                                         {"name": "Cancel", "hidden": False}],
+                            "truncated": False}
+                return {"targets": [{"name": "Stop", "hidden": False}], "truncated": False}
+
+        ui = SlowSettleUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile"),              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        self.assertTrue(ui._stop_tapped, "Stop should still be tapped once the read settles")
+        self.assertTrue(result.observed.get("allow_heat_settle_ok"))
+        self.assertEqual(result.observed.get("stop_gated"), True)
+
+    def test_stop_tap_skipped_when_never_settles(self):
+        # 2026-09-30 review fix, item 3: if the settle-wait never stabilizes
+        # within its bounded window, the result must be INCONCLUSIVE and
+        # Stop must never be tapped -- not a FAIL, and not a guess.
+        class NeverSettleUiTest(_StopGatedUiTest):
+            def list_tap_targets(self):
+                if self._stop_tapped or not self._firing_settled:
+                    # Before the firing is confirmed running, defer to block
+                    # A's own PIN/confirm-dialog state machine untouched.
+                    return super().list_tap_targets()
+                # Always mid-transition: alternates so it's never stable.
+                import random
+                name = "Start" if random.random() < 0.5 else "Stop"
+                return {"targets": [{"name": name, "hidden": False},
+                                     {"name": "Cancel", "hidden": False}],
+                        "truncated": False}
+
+        ui = NeverSettleUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile"),              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        self.assertFalse(ui._stop_tapped, "Stop must never be tapped when the home page never settles")
+        self.assertFalse(result.observed.get("allow_heat_settle_ok"))
+        self.assertIsNone(result.observed.get("stop_gated"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
 
 class _SharedBoardSecClient:

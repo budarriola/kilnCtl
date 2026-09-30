@@ -21,7 +21,7 @@ from .bench_test.runner import BenchTestRunner
 
 @_srv._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
-                    allow_heat: bool = True,
+                    allow_heat: bool = True, lcd_stop_heat: bool = False,
                     tag: Optional[str] = None, host: Optional[str] = None,
                     attended: bool = False, allow_flash: bool = False) -> str:
     """Run a standardized bench-test suite against this board
@@ -32,7 +32,11 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     narrow to. `dry_run=True` runs preflight and reports every requested
     case as SKIP without touching the board further. `allow_heat=False`
     SKIPs any case marked as heat-originating (wave 0 has none in `smoke`,
-    but later suites do).
+    but later suites do). `lcd_stop_heat=True` is a separate, default-False
+    opt-in that lets LCD-19's stop_gated sub-check start a real bench firing
+    to probe whether Stop is PIN-gated while heating (owner decision
+    2026-09-30) -- LCD-19 is not spec.heat-marked, so `allow_heat` alone
+    never gates it; both flags must be true for that firing to start.
 
     Every OTA/factory-reset/sw-reset route this can drive is ROUTE_TIER_ADMIN
     only, on or off, since the AP-password HMAC challenge/response scheme
@@ -83,7 +87,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     runner = BenchTestRunner(ctx)
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
-                              allow_heat=allow_heat, tag=tag)
+                              allow_heat=allow_heat, lcd_stop_heat=lcd_stop_heat, tag=tag)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
     except bt_board_lock.BoardLockHeld as exc:

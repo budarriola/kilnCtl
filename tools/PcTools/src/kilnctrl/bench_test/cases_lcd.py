@@ -2731,8 +2731,63 @@ def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
     return result
 
 
+def _wait_for_home_settled(ctx: dict, ui, target_name: str, min_wait_s: float = 2.5,
+                            timeout_s: float = 10.0, poll_interval_s: float = 0.5,
+                            stable_reads: int = 2) -> bool:
+    """Shared settle-wait for the keypad/confirm-popup self-close race
+    (2026-09-30 review, scope-addition item): `set_policy(lcd_enabled=True)`
+    (`cases_lcd.py`'s entry, before the Start click) and the allow_heat
+    relock (before the Stop click) both make firmware set a pending
+    force-lock flag that the 1Hz `tick_timer_cb` (`ui_lcd_lock.c:141-162,
+    229-240`) consumes on its own cadence -- the tick's unlocked-to-locked
+    edge closes any keypad/popup opened in the meantime, win-or-lose
+    depending on exactly where in the current tick the `set_policy` POST
+    landed. Wait at least 2.5s (more than two 1s ticks, `min_wait_s`) before
+    even looking, then require `stable_reads` (default 2) consecutive
+    identical polls showing `target_name` present and `"Cancel"` absent --
+    not merely non-empty, which the page already was before the wait --
+    before calling it genuinely settled. Never raises; returns False (caller
+    stays INCONCLUSIVE, never taps `target_name`) if it never stabilizes
+    within `timeout_s`.
+
+    `ctx["_now"]`/`ctx["_sleep"]` are injectable for tests, same pattern as
+    `cases_heat._rest_gate`; default to real wall-clock time."""
+    now = ctx.get("_now", time.monotonic)
+    sleep = ctx.get("_sleep", time.sleep)
+    sleep(min_wait_s)
+    deadline = now() + timeout_s
+    last_names: Optional[frozenset] = None
+    stable_count = 0
+    while True:
+        names: Optional[frozenset] = None
+        try:
+            resp = ui.list_tap_targets()
+            targets = resp.get("targets") or []
+            names = frozenset(t.get("name") for t in targets if not t.get("hidden"))
+        except Exception:  # noqa: BLE001
+            names = None
+        if names is not None and target_name in names and "Cancel" not in names:
+            if names == last_names:
+                stable_count += 1
+            else:
+                stable_count = 1
+                last_names = names
+            if stable_count >= stable_reads:
+                return True
+        else:
+            stable_count = 0
+            last_names = names
+        if now() >= deadline:
+            return False
+        sleep(poll_interval_s)
+
+
 def _case_lcd19(ctx: dict) -> CaseResult:
     from . import cases_web_rw as _web  # local import: avoids a module-load cycle with cases_web_rw
+    from . import cases_heat as _heat  # local import: same cycle-avoidance; reused only for the
+    # allow_heat stop_gated sub-check below (_capability_preflight_ok,
+    # _start_bench_profile, _cleanup_bench_profile, _read_energized) --
+    # never reimplemented here.
 
     pin_seed_state: Optional[Dict[str, Any]] = None
     pin_cfg = ctx.get("_lcd_pin")
@@ -2789,6 +2844,21 @@ def _case_lcd19(ctx: dict) -> CaseResult:
 
     keypad_raised = wrong_pin_refused = right_pin_started = stop_gated = None
     result: Optional[CaseResult] = None
+    # Owner decision 2026-09-30: stop_gated is only reachable at all when a
+    # real firing is running (see the allow_heat block below) -- unlike the
+    # config-only `firing_active_with_lock` flag this case has always
+    # accepted (never set by anything in this tree), `started_firing_here`
+    # tracks whether THIS run started that firing itself, so `finally` knows
+    # whether it owns tearing it back down. Set True only once a real
+    # `running` exec-status read confirms the start actually took.
+    started_firing_here = False
+    # Set True as soon as `_start_bench_profile` itself reports ok -- BEFORE
+    # `started_firing_here`'s own bounded confirmation poll -- so `finally`
+    # still tears down (and verifies) the hidden bench profile even in the
+    # narrow window where the save/start succeeded but the poll below never
+    # observed a `running` read in time (a real firing may still be running
+    # on the board in that case; `started_firing_here` alone would miss it).
+    bench_profile_started = False
     state: Dict[str, Any] = {"orig": orig}
     if pin_seed_state is not None:
         state["pin_seed"] = pin_seed_state
@@ -2811,8 +2881,29 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             # label text is exactly "Start" when idle/done/faulted or "Stop"
             # while RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c).
             firing_active = bool(pin_cfg.get("firing_active_with_lock"))
+            # Both flags must be true (2026-09-30 review fix): ctx["allow_heat"]
+            # defaults True (an ordinary run may exercise other, spec.heat
+            # cases) and is NOT by itself a safe gate for starting an
+            # unsolicited firing here; ctx["lcd19_allow_heat"] is the
+            # separate, default-False opt-in specific to this sub-check.
+            allow_heat = bool(ctx.get("allow_heat")) and bool(ctx.get("lcd19_allow_heat"))
             if not firing_active:
-                click = ui.click_by_name("Start")
+                # Scope-addition, 2026-09-30 review: the `set_policy`
+                # enable above (line ~2866) trips the same tick_timer_cb
+                # self-close race `_wait_for_home_settled` was built for
+                # (see its docstring) -- clicking "Start" right after that
+                # POST with no wait can race the tick that force-closes
+                # whatever popup was open. Settle first.
+                start_settled = _wait_for_home_settled(ctx, ui, "Start")
+                state["start_settle_ok"] = start_settled
+                if not start_settled:
+                    state["start_click_skip_reason"] = (
+                        "home page never settled (stable 'Start' present / 'Cancel' absent read) "
+                        "after enabling lcd_enabled -- Start was not tapped"
+                    )
+                    click = {"result": "skipped_unsettled"}
+                else:
+                    click = ui.click_by_name("Start")
                 state["start_click_result"] = click.get("result")
                 if click.get("result") == "ok":
                     raise_poll = _wait_for_keypad_raise(ui)
@@ -3039,33 +3130,267 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # review fix) covers that case too.
                             if stabilized:
                                 right_pin_started = "OK" not in names and "Cancel" in names
-            else:
-                baseline = _lcd19_overlay_names(ui)
-                stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
-                state["stop_click_result"] = stop_click.get("result")
-                if stop_click.get("result") == "ok":
-                    names, _, empty_polls, truncated_seen = _wait_for_overlay_names(
-                        ui, present=True, baseline=baseline)
-                    state["after_stop_click_names"] = sorted(names) if names is not None else None
-                    if empty_polls:
-                        state["after_stop_click_empty_polls"] = empty_polls
-                    if truncated_seen:
-                        state["after_stop_click_truncated"] = truncated_seen
-                    if names is not None:
-                        has_cancel = "Cancel" in names
-                        has_ok = "OK" in names
-                        # Owner decision 2026-09-28 ("stop needs login.
-                        # there is an estop button"): with the session
-                        # locked, Stop must raise the PIN keypad first.
-                        if has_cancel and has_ok:
-                            stop_gated = True  # PIN keypad appeared -- Stop is gated
-                        elif has_cancel and not has_ok:
-                            stop_gated = False  # Confirm Stop shown directly, no PIN keypad
-                        # else: neither popup present -- leave None (INCONCLUSIVE)
+
+                # Owner decision 2026-09-30: stop_gated has never been
+                # reachable in practice -- `firing_active_with_lock` is not
+                # set anywhere in this tree, so the Stop-tap branch below
+                # never ran. `allow_heat` here requires BOTH ctx["allow_heat"]
+                # (the suite-wide "heat-marked cases may run at all" flag,
+                # defaults True) AND ctx["lcd19_allow_heat"] (a second,
+                # independently-defaulted-False opt-in, `lcd_stop_heat` at
+                # the runner/MCP/CLI layer -- 2026-09-30 review fix) to be
+                # true, since LCD-19 is not itself `spec.heat`-marked and
+                # `allow_heat` alone defaulting True would otherwise start an
+                # unsolicited firing on an ordinary `bench_test_run(suite=
+                # "lcd")` call. When true, this opts into making stop_gated
+                # reachable via a real, short bench firing, the same hidden
+                # BENCH_HP slot every HP-* case uses
+                # (`cases_heat._start_bench_profile`, never reimplemented
+                # here). This never touches `firing_active_with_lock` itself
+                # -- that config key stays dead/unused -- it only starts a
+                # real firing and flips the LOCAL `firing_active` so the
+                # Stop-tap block below runs.
+                if allow_heat:
+                    # Advisory (2026-09-30 review): `_read_energized` (used
+                    # by the teardown verification below) needs `ctx["host"]`
+                    # to resolve anything -- without it, it can only ever
+                    # return None, so the bench-firing cleanup could never be
+                    # verified stopped. Refuse the start up front rather than
+                    # starting a firing this case could never confirm it
+                    # tore down.
+                    if not ctx.get("host"):
+                        state["allow_heat_start_reason"] = (
+                            "ctx['host'] is not set -- refusing to start the allow_heat bench "
+                            "firing, since _read_energized could never verify it stopped"
+                        )
+                        allow_heat = False
+                if allow_heat:
+                    # No _rest_gate() call here (contrast every HP-* case in
+                    # cases_heat.py, which all call it before starting):
+                    # this firing exists only to probe the LCD's PIN-gating
+                    # UI behavior while *something* is running, never to
+                    # measure a thermal response -- the ambient-rest
+                    # precondition `_rest_gate` enforces (plan rule 7, zones
+                    # within REST_BAND_C of ambient before a heat case may
+                    # start) has no bearing on whether Stop raises a keypad,
+                    # so it is deliberately skipped rather than an oversight.
+                    #
+                    # Fail-closed: any exception reading exec status counts
+                    # as "not confirmed idle", same shape every other
+                    # preflight probe in this codebase uses (see runner.py's
+                    # `_safe_call`, not reused here to avoid a second import
+                    # just for one call).
+                    exec_idle = False
+                    try:
+                        exec_status = srv._profiles.get_exec_status()
+                        exec_idle = exec_status.state_name in ("idle", "done", "faulted")
+                        state["allow_heat_pre_exec_state"] = exec_status.state_name
+                    except Exception as exc:  # noqa: BLE001
+                        state["allow_heat_pre_exec_error"] = type(exc).__name__
+                    if not exec_idle:
+                        state["allow_heat_start_reason"] = (
+                            "executor not idle before the allow_heat start attempt "
+                            f"(state={state.get('allow_heat_pre_exec_state', 'unknown')})"
+                        )
+                    else:
+                        ok, reason, _ambient = _heat._start_bench_profile(ctx, zone_mask=0b001)
+                        state["allow_heat_start_attempted"] = True
+                        if not ok:
+                            state["allow_heat_start_reason"] = reason
+                        else:
+                            bench_profile_started = True
+                            # Bounded poll (~10s) for the executor to actually
+                            # report `running` -- `profiles.start()` reporting
+                            # `ok` is not itself proof the executor state
+                            # machine has advanced yet.
+                            deadline = time.monotonic() + 10.0
+                            confirmed = False
+                            while True:
+                                try:
+                                    st = srv._profiles.get_exec_status()
+                                    if st.state_name == "running":
+                                        confirmed = True
+                                        break
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                if time.monotonic() >= deadline:
+                                    break
+                                time.sleep(0.5)
+                            if confirmed:
+                                started_firing_here = True
+                                firing_active = True
+                                state["allow_heat_started"] = True
+                            else:
+                                # _start_bench_profile reported ok but the
+                                # executor never reached `running` within the
+                                # poll window -- the profile it saved/started
+                                # is still torn down by `finally` below via
+                                # `_cleanup_bench_profile`, gated on
+                                # `bench_profile_started` (not
+                                # `started_firing_here`, which stays False
+                                # here), so nothing is left dangling.
+                                state["allow_heat_start_reason"] = (
+                                    "profiles.start() reported ok but exec_status never read "
+                                    "'running' within the poll window"
+                                )
+            if firing_active:
+                relock_ok = True  # nothing to relock unless this run itself started the firing (below)
+                if started_firing_here:
+                    # The PIN-accepted Start above (block A) may have left
+                    # the LCD session unlocked/granted (ui_lcd_lock.c's
+                    # `gate_keypad_done_cb` calls `lcd_lock_grant`, and
+                    # nothing re-locks it until inactivity timeout or another
+                    # policy/credential change) -- but this run never
+                    # actually reaches block A when `allow_heat` first tries
+                    # a firing while idle (firing_active starts False, so
+                    # block A always ran first). Force a relock the same way
+                    # the case's own entry already does once (`set_policy`
+                    # off->on flips `lcd_enabled`, which
+                    # `web_auth_policy_check_transition`'s edge-triggered
+                    # `clear_lcd` calls `ui_lcd_lock_force_lock()` for --
+                    # security_backend_web_auth.c) so the Stop tap below is
+                    # guaranteed to run against a locked session regardless
+                    # of what block A left behind.
+                    off_status, _off_resp = client.set_policy(
+                        orig["web_enabled"], False, orig["web_timeout_min"], orig["lcd_timeout_min"])
+                    on_status, on_resp = client.set_policy(
+                        orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
+                    relock_ok = (
+                        off_status == 200 and on_status == 200
+                        and bool(on_resp) and on_resp.get("ok") is True
+                    )
+                    state["allow_heat_relock_ok"] = relock_ok
+                    if not relock_ok:
+                        state["allow_heat_relock_status"] = (off_status, on_status)
+                if not relock_ok:
+                    # 2026-09-30 review fix: a relock that failed to confirm
+                    # must NOT be treated as "the Stop tap still produces
+                    # real evidence either way" -- the whole point of the
+                    # relock is to guarantee the precondition (a genuinely
+                    # locked session) a meaningful stop_gated read depends
+                    # on. Tapping Stop here would read as stop_gated=False
+                    # on nothing more than an unconfirmed lock state, which
+                    # is not evidence Stop itself is ungated. Stay
+                    # INCONCLUSIVE instead: `stop_gated` is left at its
+                    # initial None, and Stop is never tapped.
+                    state["allow_heat_stop_skip_reason"] = (
+                        "lcd_enabled relock after the allow_heat firing did not confirm ok -- "
+                        "Stop was not tapped, since a meaningful stop_gated read depends on a "
+                        "confirmed-locked session"
+                    )
+                else:
+                    settled = True
+                    if started_firing_here:
+                        # 2026-09-30 review fix: firmware's `tick_timer_cb`
+                        # (1s period) detects the unlocked->locked edge the
+                        # relock above just caused and force-closes any open
+                        # keypad/confirm popup (`ui_lcd_keypad_force_close`/
+                        # `ui_confirm_close_open`) -- tapping Stop
+                        # immediately after the relock POST races that same
+                        # tick and can observe a popup the tick is about to
+                        # close out from under it. Wait at least two tick
+                        # periods and poll until a STABLE read shows the
+                        # home page genuinely settled (`"Stop"` present,
+                        # `"Cancel"` absent) before tapping -- not merely
+                        # non-empty, which the pre-relock home screen
+                        # already was. This race only exists on the path
+                        # that just forced a relock itself (the allow_heat
+                        # firing this run started); the legacy
+                        # `firing_active_with_lock` config-flag path never
+                        # relocks here and never races this tick.
+                        settled = _wait_for_home_settled(ctx, ui, "Stop")
+                        state["allow_heat_settle_ok"] = settled
+                        if not settled:
+                            state["allow_heat_stop_skip_reason"] = (
+                                "home page never settled (stable 'Stop' present / 'Cancel' absent read) "
+                                "after the allow_heat relock -- Stop was not tapped"
+                            )
+                    if settled:
+                        baseline = _lcd19_overlay_names(ui)
+                        stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
+                        state["stop_click_result"] = stop_click.get("result")
+                        if stop_click.get("result") == "ok":
+                            names, _, empty_polls, truncated_seen = _wait_for_overlay_names(
+                                ui, present=True, baseline=baseline)
+                            state["after_stop_click_names"] = sorted(names) if names is not None else None
+                            if empty_polls:
+                                state["after_stop_click_empty_polls"] = empty_polls
+                            if truncated_seen:
+                                state["after_stop_click_truncated"] = truncated_seen
+                            if names is not None:
+                                has_cancel = "Cancel" in names
+                                has_ok = "OK" in names
+                                # Owner decision 2026-09-28 ("stop needs
+                                # login. there is an estop button"): with the
+                                # session locked, Stop must raise the PIN
+                                # keypad first.
+                                if has_cancel and has_ok:
+                                    stop_gated = True  # PIN keypad appeared -- Stop is gated
+                                elif has_cancel and not has_ok:
+                                    stop_gated = False  # Confirm Stop shown directly, no PIN keypad
+                                # else: neither popup present -- leave None (INCONCLUSIVE)
             result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_gated)
             result.observed = dict(result.observed or {})
             result.observed.update(state)
     finally:
+        if result is None:
+            result = CaseResult(Verdict.FAIL, reason="LCD-19 aborted before a verdict was reached", observed=dict(state))
+        result.observed = dict(result.observed or {})
+
+        # Bench-firing teardown (allow_heat path only) -- its own try, run
+        # BEFORE the overlay dismiss below: this stops a REAL firing over
+        # the UART profiles path regardless of what happened on the LCD
+        # (whether Stop was tapped, whether a popup ever appeared), and must
+        # not be skipped just because the overlay dismiss below raises, nor
+        # skip the overlay dismiss or policy restore itself if IT raises.
+        if bench_profile_started:
+            bench_cleanup: Dict[str, Any] = {}
+            try:
+                _heat._cleanup_bench_profile(ctx)
+            except Exception as exc:  # noqa: BLE001
+                bench_cleanup["cleanup_error"] = type(exc).__name__
+            # Bounded verification: the executor must read a non-running
+            # state AND the safety relay must read de-energized before this
+            # case can call the fixture actually stopped -- never trust
+            # `_cleanup_bench_profile`'s own best-effort, never-raises stop
+            # call alone (see its docstring: it swallows every exception by
+            # design).
+            verified = False
+            last_state = None
+            last_energized: Optional[bool] = None
+            deadline = time.monotonic() + 15.0
+            while True:
+                try:
+                    st = srv._profiles.get_exec_status()
+                    last_state = st.state_name
+                except Exception:  # noqa: BLE001
+                    last_state = None
+                if last_state in ("idle", "done", "faulted"):
+                    last_energized = _heat._read_energized(ctx)
+                    if last_energized is False:
+                        verified = True
+                        break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
+            bench_cleanup["final_exec_state"] = last_state
+            bench_cleanup["final_energized"] = last_energized
+            bench_cleanup["verified"] = verified
+            result.observed["bench_cleanup"] = bench_cleanup
+            if not verified:
+                # Hard FAIL, distinct from (and reported alongside) whatever
+                # stop_gated verdict was reached above -- an unconfirmed
+                # bench-firing stop is a safety-relevant harness failure,
+                # not merely an inconclusive LCD reading. Named per the
+                # task: the hardware E-stop is the operator's actual
+                # backstop if the fixture is still heating.
+                result.verdict = Verdict.FAIL
+                result.reason = (
+                    "allow_heat bench firing could not be confirmed stopped after LCD-19 "
+                    f"(exec_state={last_state}, safety_relay_energized={last_energized}) -- "
+                    "use the hardware E-stop if the fixture is still heating"
+                )
+
         # The overlay dismiss goes over the UART UI_TEST link and can raise
         # (UiTestQueryError on a lost reply); the policy restore below is
         # HTTP and must run regardless, so never let the dismiss abort it.
@@ -3085,9 +3410,6 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             "post_status": restore_status, "post_ok": restore_post_ok,
             "readback_status": readback_status, "readback_matches": restore_matches,
         }
-        if result is None:
-            result = CaseResult(Verdict.FAIL, reason="LCD-19 aborted before a verdict was reached", observed=dict(state))
-        result.observed = dict(result.observed or {})
         result.observed["overlay_dismiss"] = overlay
         result.observed["restore"] = restore_state
         if not restore_post_ok or not restore_matches:
@@ -3095,8 +3417,21 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             # a failed policy restore is a hard FAIL regardless of what the
             # keypad verdict above found -- the board may be left with
             # lcd_enabled changed from what this run found.
+            #
+            # 2026-09-30 review fix: append rather than clobber -- when the
+            # bench-firing cleanup verification above already set an
+            # E-stop-naming FAIL reason (result.verdict is already FAIL at
+            # this point in that case), that message must survive: it is the
+            # more safety-relevant of the two ("the fixture may still be
+            # heating" beats "a config value didn't round-trip"), so it goes
+            # first, with the restore failure appended rather than replacing
+            # it outright.
+            restore_reason = "lcd_enabled policy restore did not round-trip after LCD-19 -- board may be left with lcd_enabled changed"
+            if result.verdict == Verdict.FAIL and result.reason:
+                result.reason = f"{result.reason}; also: {restore_reason}"
+            else:
+                result.reason = restore_reason
             result.verdict = Verdict.FAIL
-            result.reason = "lcd_enabled policy restore did not round-trip after LCD-19 -- board may be left with lcd_enabled changed"
         nav = _navigate_home(ui)
         if not nav["ok"]:
             result.observed["navigate_home"] = nav

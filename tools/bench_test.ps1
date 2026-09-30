@@ -33,6 +33,12 @@ param(
     [string[]]$Cases,
     [switch]$DryRun,
     [switch]$NoHeat,
+    # Opt-in only: lets LCD-19's stop_gated sub-check start a real bench
+    # firing to probe whether Stop is PIN-gated while heating (owner
+    # decision 2026-09-30). Independent of -NoHeat/allow_heat -- LCD-19 is
+    # not spec.heat-marked, so allow_heat alone never gates it; this is the
+    # separate, default-off flag that does.
+    [switch]$LcdStopHeat,
     [string]$Tag,
     [string]$ApPassword,
     [string]$HostAddr,
@@ -60,6 +66,7 @@ $toolArgs = @{
     suite      = $Suite
     dry_run    = [bool]$DryRun
     allow_heat = -not [bool]$NoHeat
+    lcd_stop_heat = [bool]$LcdStopHeat
 }
 if ($Cases) { $toolArgs["cases"] = ($Cases -join ",") }
 if ($Tag) { $toolArgs["tag"] = $Tag }
