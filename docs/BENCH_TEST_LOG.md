@@ -1910,3 +1910,63 @@ separately tracked issue per CLAUDE.md).
 
 No board files touched, no firmware flashed, no crash acknowledged/cleared,
 no `estop_verify` called. Worktree: `C:\wt\benchlog0929_47349k`.
+
+## 2026-09-30 rerun sweep of ROADMAP "Still pending: rerun" items, no flash
+
+Board confirmed running ESP `8ed37d8d` (clean tree, built 2026-09-29
+15:56:10Z; 3 commits behind `origin/main`'s `e3ab1475` -- the gap is
+docs/AP-HMAC-tier commits only, unrelated to any fix below) and Pico
+`405d3c54`. Verified every fix commit named by the four pending reruns
+(`59c9306a`, `0df96d5d`, `d4e7ff29`, `f40e8d37`, `0ef18917`, `466b29b2`,
+`540b2d72`, `773ec669`, `002e71bd`, `4012f8c7`, `fe938ef3`, `c22ff081`,
+`5d0a2756`, `7b107411`) is an ancestor of the running commit `8ed37d8d`
+(`git merge-base --is-ancestor`) before running anything -- no flash needed
+or performed.
+
+- **LCD-19 rerun** (post `59c9306a` baseline-wait fix) and **LCD suite
+  rerun**: `bench_test_run(suite="lcd", tag="lcd19_rerun_0929_59c9306a")` ->
+  run `20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`, exit_code=1.
+  LCD-19: INCONCLUSIVE -- "could not exercise: wrong_pin_refused,
+  right_pin_started, stop_gated (missing UI_TEST API or camera, or a
+  click/entry step did not complete)" -- `KILNCTL_LCD_PIN` was set, so this
+  is not the previous NOT_RUN/missing-PIN case, but the case still could not
+  complete; not re-investigated further per scope (rerun executed and
+  recorded, not a new root-cause pass). LCD-08/09/14/21 PASS. LCD-01
+  INCONCLUSIVE on camera exposure/cast (documented pre-existing limitation,
+  not a firmware defect). LCD-16 FAIL: `click_by_name('settings')` returned
+  `not_found` -- new anomaly, not one of the fixes under test; flagged for a
+  follow-up, not chased here. LCD-02/03/04 NOT_RUN (no preceding HP-01/HP-04
+  context, no latched trip, expected for a standalone lcd-suite run).
+  LCD-05/06/07/10/11/12/13/15/17/18/20 NOT_RUN -- not_implemented (expected).
+- **Heat suite rerun** (post `773ec669` dwell-fault-panic fix and `540b2d72`
+  same-zone start-race fix): `bench_test_run(suite="heat",
+  tag="heat_rerun_0929_773ec669_540b2d72")` -> run
+  `20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72`, exit_code=0.
+  **HP-01 through HP-08 all PASS.** No panic, no reboot, no trip during the
+  run (confirmed via `safety_get_status` polled throughout: link up, armed,
+  never tripped; `get_heap_status` uptime continuous afterward with no
+  unacknowledged-crash banner). This is the first clean 8/8 heat-suite PASS
+  recorded in this log for this fix pair. The client-side MCP call itself
+  timed out once at 300s while the run was still executing server-side (the
+  suite runs long); confirmed via the board temperature actively
+  rising/cycling and the `.board_lock` file still held by the same pid
+  before retrying -- did not start a second concurrent run, per the board
+  lock rule; waited for the original run to finish and read its result via
+  `bench_test_last`.
+- **Backup-import timing** (post `c22ff081`/`5d0a2756`/`7b107411` batched-
+  NVS-save fix): sanctioned precondition met -- exported a fresh backup from
+  this board immediately beforehand. `backup_export()` -> 16418 bytes
+  (`kind='kilnctl_backup' version=5`, 1 profile, 3 zones, 2 kiln_configs, no
+  wifi/password-shaped fields). `backup_import(confirm=True, mode="merge",
+  ack_no_safety=True)` of that same unmodified file -> **POST elapsed
+  0.80 s** (synchronous route, so total job time == 0.80 s). Readiness
+  identical before and after: 17 ok / 1 not_done / 3 other (21 total). This
+  is a large improvement over the previously-reported ~61 s pre-fix import
+  time.
+
+Post-run board state: `profiles_stop()` called (`ok - stopped`),
+`profiles_get_exec_status` reads `state=0` idle, no dwell, no fault_guard;
+`safety_get_status` link up, armed, not tripped, thermocouple valid
+(residual ~50C from the heat run, cooling, no relay energized). No firmware
+flashed, no crash report touched, no `estop_verify` called, board lock never
+held past each run's own completion.
