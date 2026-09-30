@@ -1844,3 +1844,69 @@ neither sanctioned precondition was met.
   was restored, and the board was left idle with no trip. Supersedes the
   2026-09-25 HP-07 FAIL above (`trip_reason=0 != expected 6`) for this
   configuration.
+
+## 2026-09-29 Bench Test A (live profile edit) + Test B (Wi-Fi AP fallback), COM14, host 192.168.1.156
+
+Two owner-authorized bench tests, run sequentially, via `kiln_call`/`kiln_batch`
+(kilnctrl MCP, UART-backed). No board files touched; credentials read only from
+`KILNCTL_STA_SSID`/`KILNCTL_STA_PASSWORD`/`KILNCTL_AP_PASSWORD` env vars, never
+printed (a scratchpad-only Python script outside the repo called the running
+MCP server directly for the one step needing a literal credential value).
+
+**Test A -- live profile edit, PASS all steps.**
+Precheck: link up, no trip, no running profile, no unacknowledged crash
+(`get_readiness`, `safety_get_status`, `get_heap_status`). Created scratch
+user profile `BENCH_A_0929` (2 segments, 45C/48C targets, well under the 80C
+zone ceiling -- ambient+15-20C guidance). Started firing; while segment 0 ran:
+`profile_live_fork(confirm=True)` ok; `profile_live_get` read working copy;
+in-bounds edit to the future segment accepted; out-of-bounds edit correctly
+refused 400 (80C ceiling violation named); a `zone_mask` change on the running
+segment correctly refused 409 ("zone_mask cannot change while a firing is
+running"); `profile_live_get(content=True)` confirmed the in-bounds edit
+applied; `profile_live_decide(decision="discard", confirm=True)` ok. Stopped
+with `profiles_stop()`; relays off, no trip (`safety_get_status`); no reboot
+(`get_heap_status` uptime_s 35330 -> 35467, same reset_reason). Deleted scratch
+profile `BENCH_A_0929`.
+
+**Test B -- Wi-Fi AP fallback (be7bcad4/5cd11231), PASS all steps.**
+Restore-path confirmed BEFORE any mutation: all `wifi_*` MCP tools run over
+UART (COM14), independent of LAN/Wi-Fi state, and home STA credentials were
+present in env (`KILNCTL_STA_SSID`/`KILNCTL_STA_PASSWORD`, lengths only
+checked, values never displayed) so the real network could be re-added
+without needing the LAN.
+Baseline: mode=home, connected, ssid='ATTFqf9g79', sta_ip='192.168.1.156',
+only that network saved.
+Made home unreachable: `wifi_add_network` a bogus SSID, `wifi_forget`'d the
+real one (left 0 saved networks); the board stayed associated to the real AP
+(`wifi_forget` does not force a disconnect -- confirmed via firmware source
+comment and observed behaviour), so forced a genuine re-join attempt via
+`wifi_set_mode("ap")` (confirmed disconnect: sta_connected=False, sta_ip='')
+then `wifi_set_mode("home")` (join attempt against only the bogus saved
+network). LAN became unreachable (direct HTTP timeout to .156); UART status
+showed mode=home state=reconnecting past the firmware's 15s
+`WIFI_STA_CONNECT_TIMEOUT_MS`; the board's own `kilnCtl` SoftAP became visible
+again from the PC's Wi-Fi adapter (`netsh wlan show networks`), confirming
+genuine fallback (not just a dropped association). An LCD capture during this
+window came back unreadable/black -- not used as evidence.
+Restored home network via the scratchpad script (`wifi_add_network` with env
+credentials, output redacted/never printed). Board rejoined: `wifi_get_status`
+mode=home state=connected sta_connected=True ssid='ATTFqf9g79'
+sta_ip='192.168.1.156' (matches baseline exactly); `get_heap_status` reachable
+again at the same host, uptime_s continuous (36598, no reboot, same
+reset_reason). `ap_pending_teardown=True` at last check -- consistent with
+design (deferred while this session's admin/API activity looks like a live
+client) rather than a defect. `wifi_get_networks` shows only `'ATTFqf9g79'`
+saved (matches baseline); no other saved network left over. `safety_get_status`
+clean throughout: link up, armed, no trip.
+
+**Anomalies:** `wifi_forget` on the currently-associated SSID does not itself
+force a disconnect (firmware comment: "this function doesn't force a
+disconnect itself"; also see `do_ev_sta_disconnected()`'s stale-disconnect
+reconciliation) -- a bench script exercising fallback via forget+add needs an
+explicit mode-cycle to force re-association, or it will silently stay
+connected. LCD capture during the fallback window was unreadable/black, not
+pursued further (not required for a PASS here; camera-aim drift is a known,
+separately tracked issue per CLAUDE.md).
+
+No board files touched, no firmware flashed, no crash acknowledged/cleared,
+no `estop_verify` called. Worktree: `C:\wt\benchlog0929_47349k`.
