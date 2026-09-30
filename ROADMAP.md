@@ -4151,7 +4151,7 @@ Owner instruction, 2026-09-21.
   allocated dynamically by `xTaskCreatePinnedToCore`, not a static array) --
   `check_kilnfw_dram_bss_budget.ps1` still passes at the same static `.bss`
   figure (97256 B of a 101000 B ceiling).
-- [ ] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
+- [x] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
   timeout did not raise the PIN keypad", `keypad_raised=false`) root-caused
   2026-09-24 as a runner defect, not firmware: `_wait_for_overlay_names(present=True)`
   in `cases_lcd.py` exits on any non-empty tap-target set, and the home
@@ -4247,7 +4247,32 @@ Owner instruction, 2026-09-21.
   tapped; the ~13.7 s firing ended clean, teardown verified idle/relays off,
   no trip, no reboot. Full detail: `docs/BENCH_TEST_LOG.md`'s 2026-09-30
   section. Still open: why the post-heat home page shows `Plan` instead of
-  `Stop`, diagnosis in progress.
+  `Stop`, diagnosis in progress. **Root-caused and fixed 2026-09-30**
+  (`e388752c`, Opus-reviewed): `UI_TEST LIST_TAP_TARGETS`'s ~253-byte reply
+  truncated all 20 `allow_heat_settle_reads` polls before reaching the home
+  page's merged Start/Stop button -- the walk order put the WiFi label,
+  temperature readings, and the chart legend (`Plan`, not a button) first.
+  The confirm dialog the relock closed was a stale Confirm Start from the
+  earlier right-PIN sub-check (intended relock behavior, not a bug). Fix:
+  `log_all_tap_targets` (`kiln_ui.c`) now walks each group twice, actionable
+  targets (`lv_button` and its subclasses, including list rows and msgbox
+  footer/header buttons) before non-actionable ones, overlay-first group
+  order unchanged; the harness also dismisses a stale Confirm Start via
+  Cancel before the API-started firing (`allow_heat_pre_start_dismiss`).
+  Flashed to the bench from a clean worktree at `e388752c` (an earlier
+  worktree's `build/` lacked `build_info.h` and was correctly refused as
+  stale; rebuilding and reflashing verified OK), ELF
+  `KilnCtrl-5384de5815b4.elf`, boot_guard persisted 0/0, no trip. Bench runs:
+  `20260930T212112Z_lcd` (`allow_heat=False`) INCONCLUSIVE by design
+  (`stop_gated` needs heat), wrong PIN refused, right PIN started, settle
+  reads OK; `20260930T212155Z_lcd` (`allow_heat=True`, `lcd_stop_heat=True`)
+  **PASS, exit 0** -- `stop_gated=true`, settle reads now contain
+  `Stop`/`Pause`/`Edit`, Stop click `ok`, `bench_cleanup` verified idle and
+  relays de-energized, no reboot/crash/trip. Known remaining gap:
+  `lv_keyboard` is still reported as one rectangle rather than per key
+  (pre-existing). LCD-19 is now closed/passing. Full detail:
+  `docs/BENCH_TEST_LOG.md`'s 2026-09-30 "LCD-19 root-caused and fixed"
+  section.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,

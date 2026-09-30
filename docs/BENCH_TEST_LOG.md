@@ -2217,3 +2217,48 @@ Board healthy throughout all three runs.
 
 **Still open:** the post-heat home page shows `Plan` rather than `Stop`;
 diagnosis in progress.
+
+## 2026-09-30: LCD-19 root-caused and fixed -- allow_heat Stop tap now reached, PASS
+
+Root cause of the "`Plan` instead of `Stop`" gap above: `UI_TEST
+LIST_TAP_TARGETS`'s reply is capped at roughly 253 bytes, so all 20
+`allow_heat_settle_reads` polls truncated before reaching the home page's
+merged Start/Stop button in the walk order -- the WiFi label, temperature
+readings, and the chart legend were emitted first, and `Plan` is that chart
+legend, not a button, so it was never a candidate Stop target. The confirm
+dialog the relock closed in the `20260930T203243Z_lcd` run was a stale
+Confirm Start left over from the earlier wrong-PIN/right-PIN sub-check, not
+a new dialog from this run's own Start tap -- correct relock behavior, not a
+bug.
+
+Fix `e388752c` (Opus-reviewed): `kiln_ui.c`'s `log_all_tap_targets` now walks
+each group twice -- actionable targets (`lv_button` and its subclasses,
+including list rows and msgbox footer/header buttons) before non-actionable
+ones -- with overlay-first group ordering unchanged, so a truncated reply
+still surfaces the buttons that matter first. The harness also now dismisses
+a stale Confirm Start via Cancel before the API-started firing begins
+(`allow_heat_pre_start_dismiss`).
+
+Flashed to the bench from a clean worktree at `e388752c`: an earlier
+worktree's `build/` had come from an isolated check path and lacked
+`build_info.h`, so `flash_firmware()` correctly refused it as stale;
+rebuilding fresh and reflashing verified OK on retry (the known benign
+verify quirk on the first attempt). ELF archived `KilnCtrl-5384de5815b4.elf`;
+boot_guard persisted count 0/0; no trip.
+
+Two bench runs on the fixed firmware/harness:
+
+- `20260930T212112Z_lcd` (`allow_heat=False`) -- INCONCLUSIVE by design
+  (`stop_gated` needs heat): wrong PIN correctly refused, right PIN started,
+  settle reads OK.
+- `20260930T212155Z_lcd` (`allow_heat=True`, `lcd_stop_heat=True`) --
+  **PASS, exit 0.** `stop_gated=true`; the settle reads now contain
+  `Stop`/`Pause`/`Edit`; the Stop click reported `ok`; `bench_cleanup`
+  verified the executor idle and relays de-energized; no reboot, no crash,
+  no trip.
+
+**Known remaining gap:** `lv_keyboard` (a buttonmatrix subclass) is still
+reported as one rectangle rather than per key -- pre-existing, not part of
+this fix.
+
+LCD-19 is now closed/passing; see the ROADMAP.md bullet.
