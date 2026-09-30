@@ -896,6 +896,17 @@ TASKS = [
          stack=lambda: extract_local_macro("drivers/persist/kiln_cfg_swap_worker.c",
              r'#define SWAP_WORKER_STACK_BYTES\s+(\d+)',
              r'xTaskCreate\(swap_worker_task,\s*"kiln_cfg_swap",\s*SWAP_WORKER_STACK_BYTES')),
+    dict(name="wifi_prov_owner", root="owner_task", expect_path="wifi_prov.c",
+         # Registered 5cd11231 (2026-09-28): the ONE task that ever writes
+         # s_wifi, created once in wifi_prov_start() and never torn down (a
+         # stale check_stack_margin_registration.ps1 exemption -- "provisioning
+         # -only command owner, torn down with the provisioning session" --
+         # predated that; the task is actually long-lived). `root="owner_task"`
+         # collides with kiln_io_owner.c/thermo_owner.c's own `owner_task`
+         # symbol, so `expect_path` disambiguates the same way those two rows
+         # do.
+         stack=lambda: extract_int_literal("drivers/net/wifi_prov.c",
+             r'xTaskCreatePinnedToCore\(owner_task,\s*"wifi_prov_owner",\s*(\d+)')),
 ]
 
 # Measured 2026-09-09 against KilnCtrl.elf as built that day (the run that
@@ -1135,6 +1146,15 @@ CEILING_BYTES = {
     # thin margin, same class flagged (not bumped) for lvgl above; worth a
     # real hardware high-water-mark measurement before ruling this settled.
     "zone_sweep": 2896,
+    # Measured 2026-09-29 against a KilnCtrl.elf freshly built by build_kilnfw
+    # in a clean worktree (C:\wt\stacktbl_4yfec2) minted at origin/main, right
+    # after adding this task's TASKS row (5cd11231 registered
+    # stack_margin_register() for wifi_prov_owner but left it out of this
+    # table -- see check_stack_task_table_consistency.ps1's finding). This
+    # walk's own measured total, not headroom-padded: 1184 B of the declared
+    # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
+    # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
+    "wifi_prov_owner": 1184,
 }
 
 
