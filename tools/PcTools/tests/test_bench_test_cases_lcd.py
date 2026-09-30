@@ -2424,9 +2424,7 @@ class Lcd19Test(unittest.TestCase):
         ui.click_by_name = lambda name: {"result": "ok"} if name == "Start" else real_click(name)
         srv = FakeSrvFull(ui)
         ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(), "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
-        with mock.patch.object(C._wait_for_overlay_names, "__defaults__",
-                               tuple(0.05 if d == C._PAGE_POLL_TIMEOUT_S else d
-                                     for d in C._wait_for_overlay_names.__defaults__)):
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.05):
             result = C._case_lcd19(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIs(result.observed.get("keypad_raised"), False)
@@ -2861,10 +2859,11 @@ class Lcd19Test(unittest.TestCase):
             def list_tap_targets(self):
                 if self._state == "keypad":
                     self._keypad_reads += 1
-                    if self._keypad_reads <= 1:
-                        # The one read right after the Start click
-                        # (`after_start_click_names`) -- still shows the
-                        # full keypad.
+                    if self._keypad_reads <= 2:
+                        # The reads right after the Start click
+                        # (`_wait_for_keypad_raise`'s own two-consecutive-
+                        # reads debounce, satisfied here since both show the
+                        # full keypad) -- `keypad_raised` is confirmed True.
                         return super().list_tap_targets()
                     # Every read after that (the debounced pre-entry wait)
                     # shows the keypad already gone -- back to home.
@@ -3591,6 +3590,258 @@ class Lcd19OverlayFixesTest(unittest.TestCase):
             result = C._case_lcd19(ctx)
         self.assertIsNone(result.observed.get("keypad_raised"))
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_keypad_raised_then_auto_dismissed_is_inconclusive_not_fail(self):
+        # Hypothesis under test, not a claim about any specific bench run:
+        # ui_lcd_lock.c's tick_timer_cb inactivity expiry or its unlocked->
+        # locked edge (firmware/KilnFW/App/drivers/ui/ui_lcd_lock.c L181-239)
+        # can dismiss the keypad with no PC-side click in between. (Bench
+        # run 20260930T103536Z_lcd, which first prompted this fix, does NOT
+        # itself demonstrate this shape -- its summary.json shows a single
+        # empty/truncated read after the Start click and no keypad signature
+        # ever read at all, i.e. the "never raised, ambiguous evidence"
+        # shape covered by the truncated-read test below, not this one.) If
+        # the keypad is raised and then closes again before the poll ends,
+        # that must still read INCONCLUSIVE ("raised then closed"), never
+        # FAIL, since a raise-then-close race is not evidence the keypad
+        # never appeared.
+        class _RaiseThenCloseUiTest(PopupUiTest):
+            def __init__(self, reads_before_close=1):
+                super().__init__(
+                    trigger_name="Start",
+                    overlay_names=["OK", "Cancel"] + [str(d) for d in range(10)],
+                )
+                self._reads_since_open = 0
+                self._reads_before_close = reads_before_close
+
+            def list_tap_targets(self):
+                if self._overlay_open:
+                    self._reads_since_open += 1
+                    if self._reads_since_open > self._reads_before_close:
+                        self._overlay_open = False
+                return super().list_tap_targets()
+
+        ui = _RaiseThenCloseUiTest()
+        srv = FakeSrvFull(ui)
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+        }
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.05):
+            result = C._case_lcd19(ctx)
+        self.assertIsNone(result.observed.get("keypad_raised"))
+        self.assertTrue(result.observed.get("keypad_raised_then_closed"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        # PIN entry must never be attempted against a keypad that already
+        # closed -- wrong_pin_refused/right_pin_started stay unresolved.
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+
+    def test_never_raised_with_truncated_read_stays_inconclusive(self):
+        # The keypad never actually raises (Start is acknowledged but the
+        # overlay never opens). The very FIRST read in the poll window comes
+        # back truncated -- an ambiguous, possibly-partial read, never proof
+        # the keypad is absent -- and the window then ends before two clean,
+        # stable reads can follow it (a timeout only slightly larger than
+        # one poll interval allows just one more read in). With no clean
+        # stable tail behind the truncated read, this must stay
+        # INCONCLUSIVE, never collapse to the FAIL a genuinely clean,
+        # stable "never raised" tail gets (see the empty-then-clean-tail
+        # FAIL test below, which contrasts this by giving the tail enough
+        # room to stabilize).
+        class _NeverRaisesButTruncatedUiTest(PopupUiTest):
+            def __init__(self):
+                super().__init__(trigger_name="Start", overlay_names=["OK", "Cancel"])
+                self._click_happened = False
+                self._post_click_reads = 0
+
+            def click_by_name(self, name):
+                # Acknowledge the Start tap but never actually open the
+                # overlay -- the keypad genuinely never raises here.
+                if name == self._trigger_name:
+                    self._click_happened = True
+                    return {"result": "ok"}
+                return super().click_by_name(name)
+
+            def list_tap_targets(self):
+                if self._click_happened:
+                    self._post_click_reads += 1
+                    if self._post_click_reads == 1:
+                        # A single ambiguous, possibly-partial read right
+                        # after the click -- never proof of "no keypad
+                        # here" the way a clean full read is (see the
+                        # sibling FAIL test above). The pre-click baseline
+                        # read is left untouched (real, non-truncated).
+                        return {"targets": [{"name": "Start", "hidden": False}], "truncated": True}
+                return super().list_tap_targets()
+
+        ui = _NeverRaisesButTruncatedUiTest()
+        srv = FakeSrvFull(ui)
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+        }
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.005):
+            result = C._case_lcd19(ctx)
+        self.assertIsNone(result.observed.get("keypad_raised"))
+        self.assertFalse(result.observed.get("keypad_raised_then_closed", False))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_delayed_raise_after_baseline_repeats_is_not_a_false_fail(self):
+        # 2026-09-30 review of fa028826: the first version of
+        # _wait_for_keypad_raise stopped its poll on ANY two consecutive
+        # equal *real* reads, including two equal pre-raise baseline reads
+        # -- the same "0.92s FAIL" shape _wait_for_overlay_names's docstring
+        # records, reproduced here with a keypad that genuinely raises, just
+        # a couple of reads later than the first. Must still resolve
+        # keypad_raised=True, not a false FAIL from stopping early on the
+        # repeated baseline.
+        class _DelayedRaiseUiTest(PinKeypadUiTest):
+            # Subclasses the full idle->keypad->confirm state machine (so
+            # enter_pin_verified() and friends still work once the keypad
+            # is confirmed raised) but delays what list_tap_targets()
+            # REPORTS after the Start click without delaying the
+            # underlying state transition itself -- click_by_name() still
+            # flips self._state to "keypad" immediately, the same race the
+            # real board's async LVGL popup has.
+            def __init__(self, reads_before_raise=2):
+                super().__init__(right_pin="1234", wrong_pin="0000")
+                self._reads_since_click = 0
+                self._reads_before_raise = reads_before_raise
+                self._click_happened = False
+
+            def click_by_name(self, name):
+                if name == "Start" and self._state == "idle":
+                    self._click_happened = True
+                return super().click_by_name(name)
+
+            def list_tap_targets(self):
+                if self._click_happened and self._state == "keypad":
+                    self._reads_since_click += 1
+                    if self._reads_since_click <= self._reads_before_raise:
+                        return {"targets": [{"name": "Start", "hidden": False}], "truncated": False}
+                return super().list_tap_targets()
+
+        ui = _DelayedRaiseUiTest()
+        srv = FakeSrvFull(ui)
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+        }
+        # A larger timeout than the usual 0.05s test default: at the 0.1s
+        # poll interval, the window needs enough iterations to reach the
+        # delayed (3rd) read before giving up.
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.5):
+            result = C._case_lcd19(ctx)
+        self.assertIs(result.observed.get("keypad_raised"), True)
+        self.assertNotEqual(result.verdict, Verdict.FAIL)
+
+    def test_empty_read_then_clean_stable_tail_is_fail(self):
+        # 2026-09-30 review: FAIL used to require zero empty/truncated reads
+        # ANYWHERE in the poll window -- 6 of 12 historical bench runs had
+        # 1-2 empty polls right after the Start click, so a genuine
+        # never-raises regression would read INCONCLUSIVE about half the
+        # time instead of FAIL. One empty read followed by a clean, stable,
+        # non-keypad tail must still FAIL: the tail is unambiguous negative
+        # evidence even though the window's first read was not.
+        class _EmptyThenCleanTailUiTest(PopupUiTest):
+            def __init__(self):
+                super().__init__(trigger_name="Start", overlay_names=["OK", "Cancel"])
+                self._click_happened = False
+                self._post_click_reads = 0
+
+            def click_by_name(self, name):
+                if name == self._trigger_name:
+                    self._click_happened = True
+                    return {"result": "ok"}
+                return super().click_by_name(name)
+
+            def list_tap_targets(self):
+                if self._click_happened:
+                    self._post_click_reads += 1
+                    if self._post_click_reads == 1:
+                        # The pre-click baseline read is left untouched
+                        # (real, non-truncated); only the first read of
+                        # the raise poll itself is the empty/truncated one.
+                        return {"targets": [], "truncated": True}
+                # Every read after that is a clean, stable, non-keypad
+                # home read -- the tap-target set never left home.
+                return {"targets": [{"name": "Start", "hidden": False}], "truncated": False}
+
+        ui = _EmptyThenCleanTailUiTest()
+        srv = FakeSrvFull(ui)
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+        }
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.5):
+            result = C._case_lcd19(ctx)
+        self.assertIs(result.observed.get("keypad_raised"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_is_keypad_names_requires_digits_not_just_ok_and_cancel(self):
+        # 2026-09-30 review (round 1) added the ten digit keys to
+        # _is_keypad_names's signature specifically so it can never alias a
+        # Confirm Start/Stop dialog (which also carries "Cancel", but never
+        # "OK"). Pin that the digit requirement actually matters: an
+        # "OK"+"Cancel" set with NO digit keys must not read as the keypad.
+        self.assertFalse(C._is_keypad_names({"OK", "Cancel"}))
+        self.assertTrue(
+            C._is_keypad_names({"OK", "Cancel"} | {str(d) for d in range(10)}))
+
+    def test_never_raised_clean_tail_tolerates_a_changing_earlier_tail_read(self):
+        # 2026-09-30 review (round 2): the home screen carries a live
+        # temperature label that can legitimately change value between
+        # reads with no keypad ever appearing. never_raised_clean_tail used
+        # to require the WHOLE tail (every read after the last bad one) to
+        # be byte-identical, which would read this ordinary case as
+        # INCONCLUSIVE instead of FAIL. Only the LAST 2 reads need to agree
+        # now: an earlier tail read differing (simulating the temperature
+        # label ticking over) must not prevent FAIL as long as the tail
+        # settles on 2 matching, non-keypad reads by the end of the poll.
+        class _ChangingTailUiTest(PopupUiTest):
+            def __init__(self):
+                super().__init__(trigger_name="Start", overlay_names=["OK", "Cancel"])
+                self._click_happened = False
+                self._post_click_reads = 0
+
+            def click_by_name(self, name):
+                if name == self._trigger_name:
+                    self._click_happened = True
+                    return {"result": "ok"}
+                return super().click_by_name(name)
+
+            def list_tap_targets(self):
+                if self._click_happened:
+                    self._post_click_reads += 1
+                    if self._post_click_reads == 1:
+                        # One bad (truncated) read right after the click,
+                        # same shape as the sibling empty-then-clean-tail
+                        # FAIL test above.
+                        return {"targets": [], "truncated": True}
+                    if self._post_click_reads == 2:
+                        # An earlier tail read showing a different (but
+                        # still non-keypad) reading -- e.g. "14C" ticking to
+                        # "15C" on the home screen's live temperature label.
+                        return {"targets": [{"name": "Start", "hidden": False},
+                                             {"name": "14C", "hidden": False}],
+                                "truncated": False}
+                # The last 2+ reads settle on an identical, non-keypad
+                # reading and stay there.
+                return {"targets": [{"name": "Start", "hidden": False},
+                                     {"name": "15C", "hidden": False}],
+                        "truncated": False}
+
+        ui = _ChangingTailUiTest()
+        srv = FakeSrvFull(ui)
+        ctx = {
+            "srv": srv, "sec_client": FakeLcd19SecClient(),
+            "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"},
+        }
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.5):
+            result = C._case_lcd19(ctx)
+        self.assertIs(result.observed.get("keypad_raised"), False)
+        self.assertEqual(result.verdict, Verdict.FAIL)
 
 
 class Lcd21Test(unittest.TestCase):

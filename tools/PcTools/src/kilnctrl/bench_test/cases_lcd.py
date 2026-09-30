@@ -2303,6 +2303,191 @@ def _wait_for_overlay_names(ui, present: bool, timeout_s: Optional[float] = None
     return _lcd19_poll_overlay(ui, _satisfied, timeout_s, interval_s)
 
 
+def _is_keypad_names(names: Optional[set]) -> bool:
+    """True when a tap-target read shows the PIN keypad's own signature:
+    ``"OK"`` + ``"Cancel"`` plus all ten digit keys. The digits were added
+    2026-09-30 (review of fa028826) so this can never alias a Confirm
+    Start/Stop dialog, which also carries ``"Cancel"`` but never ``"OK"``
+    -- belt-and-suspenders alongside that existing distinction. Never
+    raises on ``None``."""
+    return (names is not None and "OK" in names and "Cancel" in names
+            and _KEYPAD_DIGIT_NAMES <= names)
+
+
+_TAIL_STABLE_WINDOW = 2
+
+
+def _wait_for_keypad_raise(ui, timeout_s: Optional[float] = None,
+                            interval_s: Optional[float] = None) -> Dict[str, Any]:
+    """Poll for the PIN keypad appearing after a Start/Stop tap, but --
+    unlike a plain :func:`_wait_for_overlay_names` call -- watch the WHOLE
+    read history for the keypad's own signature, not merely whatever the
+    last read happened to be.
+
+    ui_lcd_lock.c's `tick_timer_cb` inactivity expiry (L206-213) and its
+    unlocked->locked edge (`ui_lcd_lock_force_lock`, L228-239) can both
+    legitimately dismiss the keypad with no PC-side action in between --
+    a keypad seen mid-poll and gone again by the last read is evidence of a
+    raise/close race, not evidence the keypad never raised, and must read
+    INCONCLUSIVE, never FAIL. (This is a documented firmware capability,
+    not something confirmed by any one bench run's data -- see the
+    `_case_lcd19` comment at the `keypad_raised_then_closed` site.)
+
+    This function does its own read loop directly over
+    :func:`_lcd19_overlay_raw` (rather than delegating to
+    :func:`_lcd19_poll_overlay`) for two reasons, both from 2026-09-30
+    review of the first version of this function:
+
+    1. Stopping early on "two consecutive equal *real* reads" -- with no
+       regard for whether that pair is `baseline` repeating itself before
+       the keypad has actually appeared -- reproduces the exact "0.92s
+       FAIL" bug :func:`_wait_for_overlay_names`'s docstring records: two
+       identical pre-raise home reads (LVGL hasn't processed the tap yet)
+       stabilize the debounce and end the poll with `raised_ever=False`,
+       before a real, merely-delayed raise ever gets a chance to happen.
+       Early stopping is therefore now gated on `raised_ever`: a stable
+       repeat of the keypad's own signature still stops early (there is
+       nothing further to learn), and a stable repeat *after* a confirmed
+       raise stops early too (the close has settled) -- but a stable
+       repeat of anything else, before any raise has been seen, is NOT a
+       stop signal and the poll keeps running to `timeout_s`.
+    2. Judging "never raised" as FAIL requires distinguishing a poll window
+       with clean evidence throughout from one with an empty/timeout or
+       truncated read (see :func:`_lcd19_overlay_raw`) anywhere in it --
+       :func:`_lcd19_poll_overlay` only reports whether such a read
+       happened ANYWHERE in the window (`empty_polls`/`truncated_seen`),
+       not where, which forced the original whole-window "zero empty or
+       truncated reads at all" gate. That gate is too strict: ordinary
+       bench runs commonly see one empty/truncated read right after a
+       click before the display catches up, so a real never-raises
+       regression would read INCONCLUSIVE about as often as FAIL. Keeping
+       each read's own `(names, truncated)` here instead supports a
+       tail-based judgment (`never_raised_clean_tail`, see below).
+
+    Returns a dict:
+      ``names``            -- the last read seen (may be None if the
+                               window ended on an empty/timeout read)
+      ``last_real_names``  -- the last non-None read seen anywhere in the
+                               poll, or None if every read in the window was
+                               empty/timeout
+      ``raised_ever``      -- True if any read in the window showed the
+                               keypad's signature
+      ``raised_now``       -- True if the LAST real read still shows it
+      ``closed_after_raise`` -- raised_ever and not raised_now: the keypad
+                               was seen, then was gone again before this
+                               poll gave up
+      ``never_raised_clean_tail`` -- True only when `raised_ever` is False
+                               AND the LAST `_TAIL_STABLE_WINDOW` (2) reads
+                               after the last empty/timeout/truncated read
+                               in the window are real, identical to each
+                               other, and none show the keypad -- i.e.
+                               unambiguous negative evidence that survived
+                               to the end of the poll. 2026-09-30 review
+                               (round 2): this used to require the WHOLE
+                               tail (every read after the last bad one) to
+                               be identical, which is wrong for a home
+                               screen carrying a live temperature label --
+                               an earlier tail read can legitimately differ
+                               from the last one with no keypad ever having
+                               appeared. Only the last 2 reads need to agree
+                               now. False whenever fewer than 2 clean reads
+                               remain after the last bad one, the last 2
+                               disagree, or the window ended on an empty/
+                               truncated read.
+      ``empty_polls`` / ``truncated_seen`` -- as :func:`_lcd19_poll_overlay`
+      ``reads_log`` -- one entry per read made during the WHOLE poll
+                               (oldest first), each
+                               ``{"truncated": bool, "n_names": int|None}``
+                               (``n_names`` is None for an empty/timeout
+                               read) -- so a bench run's `summary.json` can
+                               show whether home-only reads are routinely
+                               truncated. If they are, `never_raised_clean_tail`
+                               (and therefore FAIL) would be unreachable in
+                               practice, and that has to be visible rather
+                               than silently inferred from `truncated_seen`
+                               alone.
+
+    Never raises; a keypad that never appears at all is still reported
+    honestly via `raised_ever=False`."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    if interval_s is None:
+        interval_s = _PAGE_POLL_INTERVAL_S
+    start = time.monotonic()
+    reads: "list[tuple[Optional[set], bool]]" = []  # (names, truncated), oldest first
+    empty_polls = 0
+    truncated_seen = False
+    raised_ever = False
+
+    def _read() -> Optional[set]:
+        nonlocal empty_polls, truncated_seen
+        n, truncated = _lcd19_overlay_raw(ui)
+        if truncated:
+            truncated_seen = True
+        if n is None:
+            empty_polls += 1
+        reads.append((n, truncated))
+        return n
+
+    def _satisfied() -> bool:
+        nonlocal raised_ever
+        real = [nm for nm, _ in reads if nm is not None]
+        if real and _is_keypad_names(real[-1]):
+            raised_ever = True
+        if len(real) < 2 or real[-1] != real[-2]:
+            return False
+        # A stable repeat only ends the poll early when it is either the
+        # keypad itself, or a post-raise close (raised_ever already True)
+        # -- a stable repeat of `baseline` (or anything else) before any
+        # raise has been observed must not stop the poll (see docstring
+        # point 1 above).
+        return _is_keypad_names(real[-1]) or raised_ever
+
+    names = _read()
+    while not _satisfied():
+        if time.monotonic() - start >= timeout_s:
+            break
+        time.sleep(interval_s)
+        names = _read()
+
+    real_all = [nm for nm, _ in reads if nm is not None]
+    last_real = real_all[-1] if real_all else None
+    if not raised_ever:
+        raised_ever = any(_is_keypad_names(nm) for nm in real_all)
+    raised_now = _is_keypad_names(last_real)
+    closed_after_raise = raised_ever and not raised_now
+
+    last_bad_idx = -1
+    for i, (nm, trunc) in enumerate(reads):
+        if nm is None or trunc:
+            last_bad_idx = i
+    tail_names = [nm for nm, _ in reads[last_bad_idx + 1:]]
+    tail_window = tail_names[-_TAIL_STABLE_WINDOW:]
+    never_raised_clean_tail = (
+        not raised_ever
+        and len(tail_window) >= _TAIL_STABLE_WINDOW
+        and all(nm == tail_window[0] for nm in tail_window)
+        and not _is_keypad_names(tail_window[0])
+    )
+
+    reads_log = [
+        {"truncated": trunc, "n_names": (len(nm) if nm is not None else None)}
+        for nm, trunc in reads
+    ]
+
+    return {
+        "names": names,
+        "last_real_names": last_real,
+        "raised_ever": raised_ever,
+        "raised_now": raised_now,
+        "closed_after_raise": closed_after_raise,
+        "never_raised_clean_tail": never_raised_clean_tail,
+        "empty_polls": empty_polls,
+        "truncated_seen": truncated_seen,
+        "reads_log": reads_log,
+    }
+
+
 def _wait_stable_names(ui, timeout_s: Optional[float] = None,
                         interval_s: Optional[float] = None,
                         stable_reads: int = 2
@@ -2627,32 +2812,75 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             # while RUNNING/PAUSED (ui_page_home.c / ui_page_home_refresh.c).
             firing_active = bool(pin_cfg.get("firing_active_with_lock"))
             if not firing_active:
-                baseline = _lcd19_overlay_names(ui)
                 click = ui.click_by_name("Start")
                 state["start_click_result"] = click.get("result")
                 if click.get("result") == "ok":
-                    names, _, empty_polls, truncated_seen = _wait_for_overlay_names(
-                        ui, present=True, baseline=baseline)
+                    raise_poll = _wait_for_keypad_raise(ui)
+                    names = raise_poll["names"]
                     state["after_start_click_names"] = sorted(names) if names is not None else None
-                    if empty_polls:
-                        state["after_start_click_empty_polls"] = empty_polls
-                    if truncated_seen:
-                        state["after_start_click_truncated"] = truncated_seen
-                    # `names is None` (every read within the poll window came
-                    # back empty/timeout) is left at `keypad_raised`'s
-                    # initial `None` -- INCONCLUSIVE, not a fabricated
-                    # "keypad didn't raise" False the same read failure would
-                    # otherwise have produced.
-                    if names is not None:
-                        keypad_raised = "OK" in names and "Cancel" in names
+                    if raise_poll["empty_polls"]:
+                        state["after_start_click_empty_polls"] = raise_poll["empty_polls"]
+                    if raise_poll["truncated_seen"]:
+                        state["after_start_click_truncated"] = raise_poll["truncated_seen"]
+                    # Per-read truncated flag + name count for the WHOLE
+                    # raise window, not merely whether one bad read happened
+                    # ANYWHERE (`truncated_seen`) -- so a bench summary.json
+                    # can show whether home-only reads are routinely
+                    # truncated, which would otherwise make
+                    # `never_raised_clean_tail` (and therefore FAIL)
+                    # unreachable in practice without this being visible.
+                    state["after_start_click_reads_log"] = raise_poll["reads_log"]
+                    if raise_poll["closed_after_raise"]:
+                        # The keypad WAS seen (raised_ever) but is gone again
+                        # by the last read -- ui_lcd_lock.c can auto-dismiss
+                        # it (inactivity timeout / unlocked->locked edge, see
+                        # _wait_for_keypad_raise's docstring) with no PC-side
+                        # action in between. This is evidence of a raise/close
+                        # race, not evidence the keypad never raised --
+                        # `keypad_raised` stays at its initial None
+                        # (INCONCLUSIVE), never a fabricated False.
+                        state["keypad_raised_then_closed"] = True
+                        state["after_start_click_last_real_names"] = (
+                            sorted(raise_poll["last_real_names"])
+                            if raise_poll["last_real_names"] is not None else None
+                        )
+                    elif raise_poll["raised_ever"]:
+                        keypad_raised = True
+                    elif raise_poll["never_raised_clean_tail"]:
+                        # Unambiguous negative evidence: the LAST 2 reads
+                        # after the last empty/timeout/truncated read in the
+                        # window (or the whole window if there was none) are
+                        # identical, real, non-keypad reads -- e.g. the
+                        # Start click was acknowledged but the tap-target
+                        # set never left home. 2026-09-30 review (round 1):
+                        # judging on the whole window (requiring zero empty/
+                        # truncated reads anywhere) made a genuine
+                        # never-raises regression read INCONCLUSIVE about as
+                        # often as FAIL, since ordinary bench runs commonly
+                        # see one empty/truncated read right after a click
+                        # before the display catches up -- an empty/
+                        # truncated read earlier in the window no longer
+                        # prevents FAIL as long as the reads after it are
+                        # clean. 2026-09-30 review (round 2): requiring the
+                        # WHOLE tail to be identical was also wrong -- the
+                        # home screen carries a live temperature label that
+                        # can legitimately change mid-poll with no keypad
+                        # ever appearing, so only the LAST 2 reads need to
+                        # agree now, not every read since the last bad one.
+                        keypad_raised = False
+                    # Any other shape (raised_ever False with at least one
+                    # empty/timeout or truncated read, or no real read at
+                    # all) is genuinely ambiguous -- `keypad_raised` is left
+                    # at its initial None (INCONCLUSIVE), not a fabricated
+                    # False the same read failure would otherwise produce.
                 if keypad_raised:
                     wrong_pin = pin_cfg.get("wrong_pin")
                     right_pin = pin_cfg.get("right_pin")
                     if wrong_pin:
                         # 2026-09-30 (20260930T082643Z_lcd/082657Z_lcd):
-                        # `keypad_raised` only proves the post-click read
-                        # DIFFERED from the pre-click baseline -- it says
-                        # nothing about whether lvgl_port_task has finished
+                        # `keypad_raised` only proves the keypad's own
+                        # signature was read somewhere in the raise poll --
+                        # it says nothing about whether lvgl_port_task has finished
                         # the raise transition. Both runs then saw EVERY
                         # wrong-PIN digit click and the trailing "OK" click
                         # come back "not_found" -- consistent with every
