@@ -798,7 +798,7 @@ function submitIpConfig(mode) {
          * carries a non-empty .message -- without this marker that generic
          * fallback text below would never actually be reached). */
         return r.text().then(function (text) {
-          var e = new Error(text || 'rejected');
+          var e = new Error(text || 'The board rejected the IP configuration.');
           e.isHttpBody = true;
           throw e;
         });
@@ -810,11 +810,21 @@ function submitIpConfig(mode) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       /* Review fix (2026-09-30, round 4): an HTTP-body error carries the
        * server's own real reason text (never put into innerHTML -- built as
-       * text nodes below, same as addRow() above). Anything else (a network
-       * TypeError, an abort, ...) has no server text to show, so give the
-       * 192.168.4.x hint instead of that error's own generic message. */
+       * text nodes below, same as addRow() above). Review fix (round 5): a
+       * non-HTTP-body failure here (network TypeError, abort, ...) is very
+       * often actually a SUCCESSFUL save -- reapply_sta_if_active() has the
+       * board disconnect and reconnect its STA interface to apply the new
+       * setting before the handler ever replies, which routinely drops this
+       * page's own connection out from under the fetch. The old "could not
+       * save, check address/subnet" wording was actively misleading in that
+       * common case (and shown for a plain DHCP switch too, where there's no
+       * address to check), so this fallback now says the save may well have
+       * gone through and points at reconnecting rather than treating it as
+       * a rejection. */
       var reason = (authErr && authErr.isHttpBody && authErr.message) ? authErr.message :
-        'Could not save IP configuration (check the address/netmask/gateway; it must not be in 192.168.4.0/24, the setup AP\'s own subnet)';
+        'No response from the board. The new IP setting may already have been saved: the board ' +
+        'reconnects Wi-Fi to apply it, which can drop this page\'s connection. Reconnect (at the ' +
+        'new static address, or via the setup AP at 192.168.4.1) and check Status before trying again.';
       rows.innerHTML = '';
       var errLi = document.createElement('li');
       var errLabel = document.createElement('span');
