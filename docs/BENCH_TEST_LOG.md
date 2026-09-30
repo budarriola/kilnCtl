@@ -2262,3 +2262,62 @@ reported as one rectangle rather than per key -- pre-existing, not part of
 this fix.
 
 LCD-19 is now closed/passing; see the ROADMAP.md bullet.
+
+## 2026-09-30: full LCD suite run after the LCD-19 fix -- LCD-09/LCD-16 regression found
+
+Run `20260930T215921Z_lcd` (`allow_heat=False`, exit 1) exercised the whole
+LCD suite (not just LCD-19) against the `e388752c` firmware/harness for the
+first time. Board before/after: `reset_reason='software (esp_restart)'`
+unchanged, uptime 2333s -> 2385s, `link_up=True` throughout -- no reboot, no
+trip.
+
+Results: **LCD-09 FAIL and LCD-16 FAIL**, both with
+`click_by_name('settings') returned 'not_found'` -- a regression, since both
+PASSed in the 2026-09-25 baseline
+(`20260925T053101Z_lcd_post_flash_2e1c1c9e`). Suspected cause: `e388752c`'s
+two-pass actionable-first tap-target walk in `log_all_tap_targets`
+(`kiln_ui.c`, the same `LIST_TAP_TARGETS` 32-entry collection LCD-19's fix
+touched) reordering enumeration on the pages these two cases exercise;
+diagnosis in progress, not yet root-caused.
+
+Other cases in the same run: LCD-01 INCONCLUSIVE (Start button region does
+not read as ACCENT_4 -- camera exposure/color cast suspect, not treated as a
+firmware defect); LCD-14 INCONCLUSIVE (frame corners stale or panel dark);
+LCD-08 PASS; LCD-21 PASS; LCD-19 INCONCLUSIVE (`allow_heat=False`, so
+`stop_gated` could not be exercised -- by design, matching the earlier
+`20260930T212112Z_lcd` run); LCD-02/LCD-03 NOT_RUN (their heat-suite
+prerequisites did not run this session); LCD-04 NOT_RUN (no safety trip
+currently latched); LCD-05/06/07/10/11/12/13/15/17/18/20 not_implemented.
+
+Board healthy afterward: no reboot, no crash, no trip.
+
+## 2026-09-30: cfg LittleFS partition backed up and reformatted (owner-approved)
+
+Preconditions checked clean before starting: no board lock held, executor
+idle, safety link up, no trip latched, no unacknowledged crash report.
+
+`backup_export` -> `logs/backup_export/kilnctl_backup_20260930T231159Z.json`
+(16,418 B; `kiln_configs` 2, `profiles` 1, `zones` 3, `timing_profiles` 1).
+
+`cfgfs_format(confirm=True)` reported ok, `file_count` 9 -> 0. The 9 files
+present before the format: `display_power.dat`, `ki_base.dat`,
+`kiln_configs.json`, `ramp_assist.dat`, `relay_cycles.dat`,
+`relay_names.dat`, `tz.dat`, `unit_pref.dat`, `zones.json`. Files stay at 0
+until each store's next save -- the dual-write bridge is write-through
+only, with no seed-from-NVS on boot (`cfg_fs_mount.c`); NVS stays
+authoritative throughout, so this is not a data-loss event (see
+`docs/CONFIG_FILESYSTEM.md`, dated note added the same day).
+
+Verification: `control_get_zones` read identical before and after the
+format. A second `backup_export`
+(`kilnctl_backup_20260930T231321Z.json`) came back byte-identical to the
+first in its `kiln_configs` and `profiles` sections. `nvs_list_keys`
+against `kiln_nvs`/`kiln_cfg` showed all 33 expected keys present,
+including every `*_rev` key. `GET /api/cfgfs` afterward carried no
+`diverged`/`migration_deferred` flags. No reboot (uptime 6686s -> 6720s),
+no trip.
+
+Tooling gap noted: no value-readback MCP tool exists yet for
+`relay_names`/`unit_pref`/`display_power`/`relay_cycles`/`tz` -- their
+correctness after the format was inferred from the file-count/NVS-key
+checks above, not read back directly.

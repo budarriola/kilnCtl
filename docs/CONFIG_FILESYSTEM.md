@@ -72,8 +72,19 @@ has been seen actually happen. **Superseded 2026-09-21:** the bench board,
 now running `8ab3b81a`, has `cfg` mounted and populated with 7 files
 (including `zones.json`, 900 B), confirmed via `GET /api/cfgfs` on
 hardware, not inferred from source; NVS remains authoritative and the
-rollback hazard described elsewhere in this repo is unchanged. The bench
-board's `cfg` partition reads
+rollback hazard described elsewhere in this repo is unchanged.
+**Stale as of 2026-09-30:** by then the count had grown to 9 files
+(`display_power.dat`, `ki_base.dat`, `kiln_configs.json`,
+`ramp_assist.dat`, `relay_cycles.dat`, `relay_names.dat`, `tz.dat`,
+`unit_pref.dat`, `zones.json`) as later work migrated more items to
+dual-write, and that same day an owner-approved `backup_export` +
+`cfgfs_format(confirm=True)` reformatted the partition, taking the count
+to 0 -- see `docs/BENCH_TEST_LOG.md`'s "cfg LittleFS partition backed up
+and reformatted" entry. Files stay at 0 until each store's next save,
+since the dual-write bridge is write-through only with no seed-from-NVS
+on boot (`cfg_fs_mount.c`); NVS remains authoritative throughout, so this
+is not a data-loss event. Do not read "7 files" (here or below) as the
+current live count. The bench board's `cfg` partition reads
 86.6% non-erased (residual bytes left over from before the `cfg` partition
 existed in `partitions.csv`, not a filesystem — the density-based gate this
 section originally shipped with wrongly treated that as evidence of content
@@ -259,7 +270,10 @@ count.
   board (`8ab3b81a`) now has `cfg` mounted with 7 files present, per
   `GET /api/cfgfs`. The LCD/`/api/status` banner for the ask-first
   refusal path is still not wired in — only the boot log and the Settings
-  page know about it today.
+  page know about it today. **Stale as of 2026-09-30:** the file count had
+  grown to 9 and was then reset to 0 by an owner-approved backup/reformat
+  (`backup_export` + `cfgfs_format(confirm=True)`); see the note above and
+  `docs/BENCH_TEST_LOG.md`.
 - **RP2040 `config_store`'s zero-valid-copies erase window — fixed.** The
   endurance review found that the old single-sector, 8-slot round-robin
   erased the *entire* 4 KiB sector before reprogramming slot 0, leaving
