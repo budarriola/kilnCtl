@@ -2481,6 +2481,67 @@ class Lcd19Test(unittest.TestCase):
         self.assertNotIn("0000", blob)
         self.assertNotIn("1234", blob)
 
+    def test_wrong_pin_refused_stays_none_when_post_submit_reads_are_empty(self):
+        # 2026-09-30 bench regression: `wrong_pin_refused = names is not
+        # None and "OK" in names and "Cancel" in names` collapsed a
+        # read-timeout (names is None) straight to False, which
+        # judge_lcd_pin_lock then reported as a hard FAIL ("a wrong PIN was
+        # not refused") even though no real read was ever obtained. A read
+        # that never recovers within the poll window must leave
+        # wrong_pin_refused at its initial None (INCONCLUSIVE) instead.
+        class _EmptyAfterWrongPinUiTest(PinKeypadUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._wrong_pin_submitted = False
+
+            def click_by_name(self, name):
+                result = super().click_by_name(name)
+                if name == "OK" and self._state == "keypad" and self._entry == "":
+                    # A submit that left us back in "keypad" state with a
+                    # cleared entry is exactly the wrong-PIN-refused signal
+                    # -- mark it so subsequent reads can be stalled.
+                    self._wrong_pin_submitted = True
+                return result
+
+            def list_tap_targets(self):
+                if self._wrong_pin_submitted:
+                    # Model a stalled board that never answers again.
+                    return {"targets": [], "truncated": True}
+                return super().list_tap_targets()
+
+        ui = _EmptyAfterWrongPinUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C, "_PIN_SUBMIT_POLL_TIMEOUT_S", 0.05):
+            result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("keypad_raised"), True)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_right_pin_started_stays_none_when_post_submit_reads_are_empty(self):
+        # Same collapse-to-False bug, for the correct-PIN submit: the
+        # keypad-to-Confirm-Start handoff stalling must never read as
+        # right_pin_started=False ("the correct PIN did not start the
+        # firing") -- only as INCONCLUSIVE.
+        class _EmptyAfterRightPinUiTest(PinKeypadUiTest):
+            def list_tap_targets(self):
+                if self._state == "confirm":
+                    return {"targets": [], "truncated": True}
+                return super().list_tap_targets()
+
+        ui = _EmptyAfterRightPinUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C, "_PIN_SUBMIT_POLL_TIMEOUT_S", 0.05):
+            result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("keypad_raised"), True)
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
     def test_stop_raises_keypad_is_gated(self):
         # Owner decision 2026-09-28 ("stop needs login. there is an estop
         # button"): with the session locked, a Stop tap must raise the PIN

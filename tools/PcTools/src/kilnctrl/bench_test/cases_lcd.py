@@ -2153,6 +2153,16 @@ def _case_lcd16(ctx: dict) -> CaseResult:
 # own confirm button.
 # ---------------------------------------------------------------------------
 
+#: 2026-09-30 bench evidence (two runs): the post-submit poll after a PIN's
+#: trailing "OK" click (both the wrong-PIN reset and the right-PIN
+#: keypad-to-Confirm-Start handoff) saw roughly 14 non-repeating reads
+#: followed by an empty one at the default `_PAGE_POLL_TIMEOUT_S` (2.0s) --
+#: the screen is still mid-transition after submit at that point, not
+#: actually stalled. A longer, named timeout for just these two polls avoids
+#: racing that transition without changing any other case's timing (this
+#: constant is LCD-19-specific and nothing else in this module reads it).
+_PIN_SUBMIT_POLL_TIMEOUT_S = 6.0
+
 #: uart_bridge_ui_test.c's walk-timeout sentinel (count 0, truncated True --
 #: lvgl_port.c's 300ms window) is not the only shape a stalled read comes
 #: back as on this bench: a bare empty (untruncated) listing has been seen
@@ -2562,13 +2572,22 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # own button set never changes -- debounce two
                             # stable reads rather than trusting one
                             # immediate (tautologically "OK present") read.
-                            names, _, empty_polls, truncated_seen = _wait_stable_names(ui)
+                            names, _, empty_polls, truncated_seen = _wait_stable_names(
+                                ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
                             state["after_wrong_pin_names"] = sorted(names) if names is not None else None
                             if empty_polls:
                                 state["after_wrong_pin_empty_polls"] = empty_polls
                             if truncated_seen:
                                 state["after_wrong_pin_truncated"] = truncated_seen
-                            wrong_pin_refused = names is not None and "OK" in names and "Cancel" in names
+                            # `names is None` (every read within the poll
+                            # window came back empty/timeout) must leave
+                            # `wrong_pin_refused` at its initial `None` --
+                            # INCONCLUSIVE, never a fabricated "not refused"
+                            # False. `names is not None and ...` would
+                            # short-circuit straight to `False` here, which
+                            # is exactly the 2026-09-30 bug this guard fixes.
+                            if names is not None:
+                                wrong_pin_refused = "OK" in names and "Cancel" in names
                         # else: leave wrong_pin_refused at None -- the PIN
                         # typed on the board wasn't actually the intended
                         # one, so no conclusion can be drawn from what
@@ -2579,15 +2598,30 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         if _entry_all_clicked_ok(entry):
                             # A correct PIN closes the keypad in favour of
                             # the Confirm Start dialog -- "OK" disappears.
-                            names, _, empty_polls, truncated_seen = _wait_stable_names(ui)
+                            # 2026-09-30 bench evidence (two runs): the
+                            # screen is still mid-transition after submit --
+                            # ~14 non-repeating reads then an empty one at
+                            # the default 2.0s timeout -- so this poll gets
+                            # its own longer, named timeout rather than
+                            # racing the transition.
+                            names, _, empty_polls, truncated_seen = _wait_stable_names(
+                                ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
                             state["after_right_pin_names"] = sorted(names) if names is not None else None
                             if empty_polls:
                                 state["after_right_pin_empty_polls"] = empty_polls
                             if truncated_seen:
                                 state["after_right_pin_truncated"] = truncated_seen
-                            right_pin_started = (
-                                names is not None and "OK" not in names and "Cancel" in names
-                            )
+                            # `names is None` must leave `right_pin_started`
+                            # at its initial `None` -- INCONCLUSIVE, never a
+                            # fabricated "did not start" False. See the
+                            # `wrong_pin_refused` comment above for why the
+                            # old `names is not None and ...` one-liner was
+                            # wrong: it collapsed a read timeout straight to
+                            # `False`, producing the false FAIL
+                            # ("the correct PIN did not start the firing")
+                            # seen in both 2026-09-30 bench runs.
+                            if names is not None:
+                                right_pin_started = "OK" not in names and "Cancel" in names
             else:
                 baseline = _lcd19_overlay_names(ui)
                 stop_click = ui.click_by_name("Stop")  # widget reads "Stop" while firing
