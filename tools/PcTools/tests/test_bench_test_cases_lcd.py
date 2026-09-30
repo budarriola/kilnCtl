@@ -425,6 +425,45 @@ class Lcd08Test(unittest.TestCase):
         self.assertTrue(captured["path"].endswith("lcd08_config_hub.jpg"))
 
 
+class StuckOnConfigUi(FakeUiTest):
+    """A double whose 'settings' click reaches 'config' normally, but whose
+    'home'/'back' clicks always report 'ok' without ever actually moving the
+    page -- the finally block's _navigate_home() call is left stuck on
+    'config', exactly the failed-restore case this class's tests exist to
+    prove is harmless to the case's own verdict."""
+
+    def click_by_name(self, name):
+        if name == "settings":
+            self._page = "config"
+        return {"result": "ok", "cx": 0, "cy": 0}
+
+
+class Lcd08NavigateHomeFoldTest(unittest.TestCase):
+    """A failed best-effort _navigate_home() in _case_lcd08's finally block
+    must be recorded (observed["navigate_home"]) but must never itself
+    change the verdict or reason a PASS or a FAIL already settled on before
+    the finally block ran."""
+
+    def test_pass_stays_pass_when_navigate_home_fails(self):
+        srv = FakeSrv(StuckOnConfigUi(page="home", targets=_CONFIG_TARGETS))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd08({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertIn("navigate_home", result.observed)
+        self.assertFalse(result.observed["navigate_home"]["ok"])
+        self.assertEqual(result.observed["navigate_home"]["page"], "config")
+
+    def test_fail_stays_fail_when_navigate_home_fails(self):
+        missing_diagnostics = [t for t in _CONFIG_TARGETS if t["name"] != "Diagnostics"]
+        srv = FakeSrv(StuckOnConfigUi(page="home", targets=missing_diagnostics))
+        with mock.patch.object(lcd_sampler, "capture_full_frame", side_effect=lcd_sampler.LcdCaptureError("busy")):
+            result = C._case_lcd08({"srv": srv})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("Diagnostics", result.reason)
+        self.assertIn("navigate_home", result.observed)
+        self.assertFalse(result.observed["navigate_home"]["ok"])
+
+
 class FakeSafetyDiag:
     def __init__(self, trip_reason=0, trip_mask=None):
         self.trip_reason = trip_reason

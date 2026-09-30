@@ -1383,7 +1383,7 @@ def judge_lcd_pin_lock(keypad_raised: Optional[bool], wrong_pin_refused: Optiona
         # tell from this reason alone which downstream stage produced the
         # unresolved None (a first-digit click race, since fixed in
         # ui_test_client.enter_pin() -- see its
-        # _ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S comment -- rather than a
+        # _ENTER_PIN_RETRY_POLL_S comment -- rather than a
         # missing API or camera at all).
         stage_names = {
             "keypad_raised": keypad_raised,

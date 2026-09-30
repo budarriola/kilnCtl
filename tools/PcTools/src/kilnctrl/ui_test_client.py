@@ -51,15 +51,20 @@ DEFAULT_REPLY_TIMEOUT_S = 2.0
 #: The actual mechanism (kiln_ui.c / lvgl_port.c, not a registry/widget
 #: desync as originally guessed here): CLICK_BY_NAME walks the current LVGL
 #: tree on the lvgl_port_task and reports NOT_FOUND when either (a) the
-#: name genuinely isn't present in that walk, or (b) the walk request timed
-#: out before lvgl_port_task could service it -- the UI_TEST requester holds
-#: a lock for up to UI_WALK_LOCK_TIMEOUT_MS (1000 ms) waiting for the task to
-#: pick the request up, then the walk itself is bounded to
-#: UI_WALK_WAIT_TIMEOUT_MS (300 ms) once picked up (lvgl_port.c). A busy
-#: lvgl_port_task (mid-frame, mid-transition) can burn either window and
-#: produce a NOT_FOUND indistinguishable from the name truly being absent --
-#: this is what actually made an already-rendered, already-tapped-before
-#: digit read back "not_found" once. Retry poll bumped 0.1s -> 0.15s so a
+#: name genuinely isn't present in that walk, or (b) the 300 ms
+#: request-to-completion window (UI_WALK_WAIT_TIMEOUT_MS) expired while
+#: lvgl_port_task was busy elsewhere (rendering a frame, mid-transition), or
+#: (c), practically never, the 1 s requester-serializing lock
+#: (UI_WALK_LOCK_TIMEOUT_MS, `s_ui_walk.lock`) wait expired -- that lock is
+#: never taken by lvgl_port_task, only by UI_TEST requesters against each
+#: other, so it is not a wait for lvgl_port_task to pick the request up and
+#: in practice is never contended. The 300 ms window starts when the request
+#: is issued (right after the lock is acquired) and covers both dispatch and
+#: the walk itself, not a budget that only starts once lvgl_port_task picks
+#: the request up. Nothing is injected in either case, so a NOT_FOUND from
+#: (a) and (b) is indistinguishable to this client -- this is what actually
+#: made an already-rendered, already-tapped-before digit read back
+#: "not_found" once. Retry poll bumped 0.1s -> 0.15s so a
 #: single retry has a real chance of landing after the 300 ms dispatch
 #: window has cleared, while staying well under DEFAULT_REPLY_TIMEOUT_S so a
 #: genuinely absent target still reports not_found promptly. Same
@@ -259,14 +264,19 @@ class UiTestClient:
         a short poll, if it comes back "not_found" -- see
         ``_ENTER_PIN_RETRY_POLL_S``'s comment for the actual mechanism.
         "not_found" here does not mean the key is genuinely absent from the
-        keypad; CLICK_BY_NAME reports it whenever (a) the name truly isn't
-        in that walk's tap-target list, or (b) the walk itself didn't
-        complete in time -- either the UI_TEST requester's
-        UI_WALK_LOCK_TIMEOUT_MS (1 s) wait to get lvgl_port_task's attention,
-        or that task's own UI_WALK_WAIT_TIMEOUT_MS (300 ms) walk budget once
-        it picks the request up -- expired while lvgl_port_task was busy
-        elsewhere (rendering a frame, mid-transition). This retry only
-        covers (b): a click already reported clicked
+        keypad. CLICK_BY_NAME reports NOT_FOUND when either the name is
+        absent from the walk, OR the 300 ms request-to-completion window
+        (UI_WALK_WAIT_TIMEOUT_MS) expired while lvgl_port_task was busy (or,
+        practically never, the 1 s requester-lock wait
+        (UI_WALK_LOCK_TIMEOUT_MS, `s_ui_walk.lock`) expired -- that lock only
+        serializes UI_TEST requesters against each other, is never taken by
+        lvgl_port_task, and in practice is never contended). The 300 ms
+        window starts when the request is issued and covers both pickup and
+        the walk itself, not a budget that starts only after pickup. Nothing
+        is injected in either case, so one retry after a short pause is
+        safe; it cannot distinguish the two -- the pause only gives
+        lvgl_port_task time to finish whatever it was busy with, and the
+        retry gets its own fresh 300 ms window. A click already reported clicked
         ("ok"/"swallowed"/"verdict_unknown"/anything but "not_found") is
         never re-sent, since doing so on a digit that actually landed would
         type it twice and corrupt the PIN. 2026-09-25 bench evidence

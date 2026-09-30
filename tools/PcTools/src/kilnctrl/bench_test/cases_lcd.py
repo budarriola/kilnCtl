@@ -14,19 +14,20 @@ degrades, to INCONCLUSIVE, when no frame could be captured.
 """
 from __future__ import annotations
 
-import logging
 import os
 import tempfile
 import time
 from typing import Any, Dict, Optional
-
-log = logging.getLogger(__name__)
 
 from . import judgments as J
 from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
 from ..protocol import THERMO_CHANNEL_ALL
 from ..devices_touch import TOUCH_POWER_STATE_ERROR_HOLD, TOUCH_POWER_STATE_ON
+
+import logging
+
+log = logging.getLogger(__name__)
 
 #: click_by_name() (uart_bridge_ui_test.c -> kiln_ui_click_by_name(),
 #: firmware/KilnFW/App/drivers/ui/kiln_ui.c) injects the synthetic touch
@@ -207,14 +208,12 @@ def _wake_and_home(ctx: dict) -> Optional[Dict[str, Any]]:
                             break
                     time.sleep(_WAKE_SCREEN_ON_POLL_S)
     ui = srv._ui_test
-    # 2026-09-30: stashed on ctx (rather than folded into this function's own
-    # return, which callers already rely on for stray-overlay detection --
-    # see _case_lcd01's `stray.get("present")` check) so a caller can pull
-    # this into its own `observed` on any failure, per _navigate_home()'s
-    # docstring. Also logged as a warning by _navigate_home() itself on
-    # failure, so a failure here is visible even to a caller that never
-    # inspects ctx.
-    ctx["_navigate_home_last"] = _navigate_home(ui)
+    # 2026-09-30: no longer stashed on ctx -- nothing read it, and ctx
+    # persists across cases so a stashed value could go stale by the time a
+    # later case's failure looked at it. _navigate_home() itself already
+    # logs a warning on failure, so a failure here stays visible without
+    # needing to be threaded through ctx.
+    _navigate_home(ui)
     return _lcd19_clear_stray_overlay(ctx, ui)
 
 
