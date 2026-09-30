@@ -368,14 +368,21 @@ class WebX03Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
     def test_side_effect_routes_are_excluded_and_never_fetched(self):
-        """/scan, /networks and /api/ota/challenge are read-only by tier but
-        have real side effects (Wi-Fi scan, nonce mint) -- the sweep must
-        record them as excluded and never fetch them, even though their
-        OPEN tier would otherwise mark them safe to exercise."""
+        """/scan and /networks are read-only by tier but have real side
+        effects (Wi-Fi scan) -- the sweep must record them as excluded and
+        never fetch them, even though their OPEN tier would otherwise mark
+        them safe to exercise.
+
+        `/api/ota/challenge` used to be a third member of this list (nonce-
+        mint side effect) until 2026-09-29, when the route -- and the whole
+        AP-password HMAC scheme it served -- was removed from the main app
+        (cases_web.py's `_SIDE_EFFECT_EXCLUDE` docstring); it no longer
+        appears in any real route table, so it is dropped from this test's
+        fake one too rather than asserting an exclusion for a route that no
+        longer exists."""
         text = "\n".join([
             'ROUTE_TIER("/scan", HTTP_GET, ROUTE_TIER_OPEN),',
             'ROUTE_TIER("/networks", HTTP_GET, ROUTE_TIER_OPEN),',
-            'ROUTE_TIER("/api/ota/challenge", HTTP_GET, ROUTE_TIER_OPEN),',
             'ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),',
         ])
         ctx = {"host": "1.2.3.4"}
@@ -390,11 +397,11 @@ class WebX03Test(unittest.TestCase):
             with mock.patch.object(C, "_http_get_raw", side_effect=_get):
                 result = REGISTRY["WEB-X-03"].judge(ctx)
 
-        for excluded in ("/scan", "/networks", "/api/ota/challenge"):
+        for excluded in ("/scan", "/networks"):
             self.assertNotIn(excluded, calls)
 
         rows_by_uri = {r["uri"]: r for r in result.observed["rows"]}
-        for excluded in ("/scan", "/networks", "/api/ota/challenge"):
+        for excluded in ("/scan", "/networks"):
             row = rows_by_uri[excluded]
             self.assertFalse(row["exercised"])
             self.assertEqual(row["detail"], "excluded: side effect")
