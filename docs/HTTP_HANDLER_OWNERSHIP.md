@@ -61,7 +61,7 @@ needed editing.
 |---|---|---|---|
 | `drivers/http/dashboard_http.c:201` (`dashboard_get_status` readings block) | `MAX31856_read_all(s_dash.thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
 | `drivers/http/dashboard_http.c:618` (autotune/status refresh path) | `MAX31856_read_all(s_dash.thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
-| `drivers/http/ota_http.c:814` (pre-OTA snapshot) | `MAX31856_read_all(s_thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
+| `drivers/http/ota_http.c:493` (pre-OTA snapshot) | `MAX31856_read_all(s_thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
 | `drivers/http/ota_http.c:500` (pre-OTA snapshot) | `kiln_io_read(s_io, &io_state)` | `kiln_io_owner` | YES -- `kiln_io_owner_command_read()` |
 | `drivers/http/diagnostics_http.c:104`-area (per its own header comment: "calls `MAX31856_read_all()` directly, ONE call covering every channel") | `MAX31856_read_all(...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
 
