@@ -2170,3 +2170,50 @@ Board healthy before and after both runs: armed, not tripped, no reboot
    1 s lock tick's unlocked->locked edge closes the keypad silently.
 2. `stop_gated` via an opt-in firing (owner decision 2026-09-30);
    implementation in review.
+
+## 2026-09-30: keypad self-close fixed, `lcd_stop_heat` opt-in firing added, home-settle judgment loosened
+
+Three commits landed against the two open items above. `7a71229b` fixed the
+keypad self-close root cause: while the lock policy was disabled,
+`tick_timer_cb` (`ui_lcd_lock.c`) force-locked every tick and set
+`s_was_locked=false`, so the first tick after the policy was re-enabled saw a
+spurious unlocked->locked (relock) edge and closed the keypad the tap had
+just raised as its own PIN gate. The relock edge no longer closes a keypad it
+raised itself; prompts and confirm dialogs still close on relock (owner
+2026-09-28 decision, unchanged), and every lock-driven close now logs its
+reason. Flashed to the bench from a clean worktree, post-flash verification
+passed, ELF archived `KilnCtrl-95f9e0e194e1.elf`, boot_guard persisted count
+0/0, no trip.
+
+`aaae0a23` made `stop_gated` reachable via a new opt-in `lcd_stop_heat` mode
+(runner/MCP param, `tools/bench_test.ps1 -LcdStopHeat`): the case can now
+start a short API-started BENCH_HP firing so the `firing_active_with_lock`
+precondition is actually set. Teardown verifies the executor is idle and
+relays are off, and failure reasons are no longer clobbered by later steps.
+
+`4ecadec6` fixed `_wait_for_home_settled` to judge on target-present/
+Cancel-absent over consecutive reads (minimum 2.5 s) instead of full name
+identity, since the home page's Elapsed label changes every second and broke
+identity comparison; a truncated read containing the target is now accepted,
+and every read is logged.
+
+Three bench runs followed:
+
+- `20260930T200715Z_lcd` (old firmware, harness `aaae0a23`) --
+  INCONCLUSIVE: the post-heat home page never settled. Cleanup verified.
+- `20260930T203132Z_lcd` (firmware `7a71229b`, harness `4ecadec6`,
+  `allow_heat=False`) -- INCONCLUSIVE by design (`stop_gated` needs heat);
+  wrong PIN correctly refused, right PIN started the firing, and the keypad
+  no longer self-closed.
+- `20260930T203243Z_lcd` (`allow_heat=True`, `lcd_stop_heat=True`) --
+  INCONCLUSIVE. PIN flow correct, the firing started, and relock behaved
+  correctly (device log: "LCD relock edge: closed open confirm dialog"). All
+  20 post-relock home reads were `['', '25C', 'Plan', 'Relays', 'WiFi...',
+  'settings', zone0-2]` -- no `Stop` target appeared, so Stop was never
+  tapped. The firing ran about 13.7 s; cleanup verified idle and relays off,
+  no trip, no reboot.
+
+Board healthy throughout all three runs.
+
+**Still open:** the post-heat home page shows `Plan` rather than `Stop`;
+diagnosis in progress.
