@@ -4162,7 +4162,20 @@ Owner instruction, 2026-09-21.
   case is ruled out but the case still can't complete; under investigation, not
   chased further in that run. Same rerun also surfaced a new LCD-16 FAIL
   (`click_by_name('settings')` -> `not_found`), unrelated to any fix under test
-  here; also under investigation.
+  here; also under investigation. **Reran again 2026-09-30** against harness
+  `7550fdf6` (LCD-19 follow-up fixes `1ae70883`/`fab4f456`/`7550fdf6`) on the
+  bench board at ESP `50edd830` (`KilnCtrl-6c9152cebb9d`), Pico `405d3c54`:
+  `20260930T073410Z_lcd_lcd_rerun_0930_7550fdf6` and a same-day
+  `20260930T073503Z_lcd_lcd_rerun_0930_7550fdf6_r2` -- LCD-16 now PASS (7
+  pages, no retries; the prior `settings` not-found FAIL did not recur) and
+  LCD-14 PASS, but **LCD-19 FAILed both runs with a new failure shape**: every
+  PIN digit tap returned `ok` for both the wrong PIN and the correct PIN,
+  `wrong_pin_refused=true` (correctly refused), `start_click_result=ok`, but
+  `right_pin_started=false` -- the firing never actually started after the
+  correct PIN was accepted. No `page_before`/`navigate_home` evidence was
+  recorded either run. This is a different failure shape from both the prior
+  `keypad_raised=false` FAIL and the `59c9306a` INCONCLUSIVE -- root cause not
+  yet found; board was left idle both runs, no trip, no crash.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,

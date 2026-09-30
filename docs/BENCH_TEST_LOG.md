@@ -2005,3 +2005,30 @@ or crashed the board; readiness after both was 17 ok / 1 not_done
   progress, not yet pushed.
 
 No crash report touched, no `estop_verify` called.
+
+## 2026-09-30: LCD suite rerun against harness `7550fdf6` -- LCD-19 new failure shape
+
+Two LCD-suite runs against harness code at `7550fdf6` (the LCD-19 follow-up
+fixes `1ae70883`/`fab4f456`/`7550fdf6`), bench board at ESP `50edd830`
+(`KilnCtrl-6c9152cebb9d`), Pico `405d3c54`:
+`logs/bench_test/20260930T073410Z_lcd_lcd_rerun_0930_7550fdf6` and a same-day
+rerun `logs/bench_test/20260930T073503Z_lcd_lcd_rerun_0930_7550fdf6_r2`.
+
+- **LCD-14 PASS.** All three configured zones rendered a header and a
+  reading (temperature page).
+- **LCD-16 PASS.** All 7 pages paged with no retried hops -- the
+  `click_by_name('settings')` -> `not_found` FAIL seen on the earlier
+  `20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a` run did not recur.
+- **LCD-19 FAIL, both runs, a new failure shape.** Every PIN digit tap
+  returned `ok` for both the wrong PIN and the correct PIN;
+  `wrong_pin_refused=true` (the wrong PIN was correctly refused);
+  `start_click_result=ok`; but `right_pin_started=false` -- the firing never
+  actually started after the correct PIN was entered and accepted. No
+  `page_before`/`navigate_home` evidence was recorded in either run's
+  summary. This differs from both the original `keypad_raised=false` FAIL
+  (`20260924T180332Z_full`) and the `59c9306a` rerun's INCONCLUSIVE
+  ("could not exercise: wrong_pin_refused, right_pin_started, stop_gated").
+  Root cause not yet found.
+
+Board left idle after both runs, no trip, no crash. No firmware flashed, no
+crash report touched, no `estop_verify` called.
