@@ -308,8 +308,8 @@ static void test_relock_edge_keypad_decision(void)
 // gate, not leftover UI from a still-active session. A `!s_was_locked`-only
 // stamp was considered and rejected (see lcd_auth_state.h's header comment):
 // it would also read true for an ordinary role-upgrade keypad opened while a
-// session is genuinely unlocked and idle, wrongly exempting it from a LATER,
-// unrelated revoke.
+// session is genuinely unlocked and idle, wrongly exempting it from a revoke
+// landing before the next tick.
 static void test_keypad_raise_is_lock_gate_decision(void)
 {
     TEST_SECTION("lcd_lock_keypad_raise_is_lock_gate -- LCD-19 stamp-time fix");

@@ -391,10 +391,10 @@ typedef struct {
      * temperature readout, chart legend swatches and zone rows all precede
      * action_row's Start/Stop button) can fill the 253 B LIST_TAP_TARGETS
      * reply before the walk ever reaches the one button a test harness
-     * actually needs -- confirmed on the bench: 20 of 20 allow_heat_settle_reads polls in the
-     * allow_heat Stop wait truncated with "Stop" entirely absent from the
-     * emitted names, even though the button existed and was reachable by
-     * tree walk, just past the truncation point. */
+     * actually needs -- confirmed on the bench: 20 of 20
+     * allow_heat_settle_reads polls truncated with "Stop" entirely absent
+     * from the emitted names, even though the button existed and was
+     * reachable by tree walk, just past the truncation point. */
     uint8_t actionable_filter;
 } tap_walk_ctx_t;
 
@@ -566,8 +566,9 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
              * Opus review, 2026-09-30: lv_button_class alone is not the full
              * "actionable" line. Real home-page buttons (ui_home_build_button())
              * are lv_button_class, but a msgbox's OWN buttons -- ui_confirm.c's
-             * Confirm/Cancel, ui_page_network's connect-manage Yes/No, and the
-             * PIN keypad's Cancel (ui_lcd_keypad.c) -- are built via
+             * Confirm/Cancel, the forget-confirm dialog's Forget/Cancel
+             * (ui_page_network_manage.c:416,418), and the PIN keypad's
+             * Cancel (ui_lcd_keypad.c) -- are built via
              * lv_msgbox_add_footer_button(), which is lv_msgbox_footer_button_class
              * (a base lv_obj_class subclass, NOT lv_button; see
              * lv_msgbox.c:77-78,234), and likewise lv_msgbox_add_header_button()
@@ -718,13 +719,14 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
      * the zone rows) -- sit earlier in tree order than action_row's real
      * Start/Stop button, so a truncated reply can fill up on those
      * decorative entries and never reach the one button a harness actually
-     * needs; 20 of 20 allow_heat_settle_reads polls in that bench run did exactly this, with "Stop"
-     * entirely absent from the reply. Each of the three groups above is
-     * therefore now itself walked in TWO passes -- actionable targets (real
-     * lv_button_class buttons, and every buttonmatrix key, which is always a
-     * real key) first, then everything else CLICKABLE second -- so a
-     * truncated reply drops decorative entries before it ever drops a real
-     * button, within whichever group it's cut short in. Group order itself
+     * needs; 20 of 20 allow_heat_settle_reads polls in that bench run did
+     * exactly this, with "Stop" entirely absent from the reply. Each of the
+     * three groups above is therefore now itself walked in TWO passes --
+     * actionable targets (real lv_button_class buttons and its subclasses,
+     * every msgbox footer/header button, and every buttonmatrix key, which
+     * is always a real key) first, then everything else CLICKABLE second --
+     * so a truncated reply drops decorative entries before it ever drops a
+     * real button, within whichever group it's cut short in. Group order itself
      * (overlay, then floating, then normal) is unchanged, so an open modal's
      * "Cancel" is still always emitted ahead of anything on the page
      * beneath it. */
