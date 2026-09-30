@@ -64,9 +64,10 @@ DEFAULT_REPLY_TIMEOUT_S = 2.0
 #: the request up. Nothing is injected in either case, so a NOT_FOUND from
 #: (a) and (b) is indistinguishable to this client -- this is what actually
 #: made an already-rendered, already-tapped-before digit read back
-#: "not_found" once. Retry poll bumped 0.1s -> 0.15s so a
-#: single retry has a real chance of landing after the 300 ms dispatch
-#: window has cleared, while staying well under DEFAULT_REPLY_TIMEOUT_S so a
+#: "not_found" once. Retry poll bumped 0.1s -> 0.15s: the pause only
+#: gives lvgl_port_task time to finish whatever it was busy with (the retry
+#: gets its own fresh 300 ms window), while staying well under
+#: DEFAULT_REPLY_TIMEOUT_S so a
 #: genuinely absent target still reports not_found promptly. Same
 #: bounded-retry discipline as the rest of this module (never a bare
 #: re-click).
