@@ -24,6 +24,7 @@ from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
 from ..protocol import THERMO_CHANNEL_ALL
 from ..devices_touch import TOUCH_POWER_STATE_ERROR_HOLD, TOUCH_POWER_STATE_ON
+from ..ui_test_client import _ENTER_PIN_RETRY_POLL_S
 
 import logging
 
@@ -373,13 +374,62 @@ _CLICK_THEN_PAGE_MAX_RETRIES = 2
 #: ambiguity the page-poll retries exist for.
 _CLICK_THEN_PAGE_SWALLOW_RETRIES = 2
 
+#: 2026-09-30 (LCD-09/LCD-16 bench investigation, run 20260930T215921Z_lcd,
+#: both FAILing with `click_by_name('settings') returned 'not_found'` on the
+#: very FIRST click of the case, `page_before == "home"` -- not the
+#: page-didn't-change ambiguity `_CLICK_THEN_PAGE_MAX_RETRIES` exists for,
+#: and not a "swallowed" race either, since a swallow is a distinct,
+#: directly-reported result). Root cause is on the firmware side, not in
+#: kiln_ui.c's tap-walk ordering (e388752c's actionable-pass split, which
+#: this run was meant to be validating): `kiln_ui_click_by_name()`
+#: (firmware/KilnFW/App/drivers/ui/kiln_ui.c) dispatches its tap-target walk
+#: onto lvgl_port_task, and that function's OWN doc comment says so
+#: explicitly -- "a dispatch timeout here ... surfaces as n == 0, i.e. no
+#: targets found ... which the match loop below already treats as
+#: KILN_UI_CLICK_NOT_FOUND -- indistinguishable from a genuinely absent
+#: name". The dispatch window is `UI_WALK_WAIT_TIMEOUT_MS = 300` ms
+#: (lvgl_port.c); a busy lvgl_port_task -- e.g. still flushing the page that
+#: was just loaded, or servicing the home page's 1 Hz refresh tick, which
+#: CLAUDE.md's stack/DRAM notes already document as doing three MAX31856
+#: SPI reads, a 200 ms-capable queue wait and four interrupts-disabled heap
+#: walks -- can blow past that window and empty the walk for a target that
+#: is genuinely on screen. `docs/BENCH_TEST_LOG.md`'s
+#: `20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a` entry recorded this
+#: exact `click_by_name('settings')` -> `not_found` shape on a board
+#: running a commit from BEFORE e388752c existed, confirming this race
+#: predates and is independent of that commit's actionable-tap-target-
+#: ordering fix.
+#:
+#: A bounded retry here cannot make a genuinely-absent target start
+#: existing, so it costs nothing on a real absence (still fails, just one
+#: extra round trip later) while resolving the transient-dispatch-timeout
+#: shape above. Retrying blind is safe, unlike a swallow:
+#: kiln_ui_click_by_name() only injects a press AFTER finding a match in
+#: the walk, so a `not_found` result never sent a press this retry could
+#: double up on.
+_CLICK_THEN_PAGE_NOT_FOUND_RETRIES = 2
 
-def _click_resolving_swallow(ui, name: str, max_swallow_retries: "Optional[int]" = None) -> "tuple[dict, int]":
+
+def _click_resolving_swallow(ui, name: str, max_swallow_retries: "Optional[int]" = None,
+                              max_not_found_retries: "Optional[int]" = None) -> "tuple[dict, int, int]":
     """click_by_name(), re-clicking immediately while the result reads
     'swallowed' (bounded by `max_swallow_retries`) -- a swallow is a
     directly observable, expected race (screen_idle ate the wake/dismiss
     tap), not the "maybe stuck" ambiguity the caller's own page-poll retry
     budget exists for, so it must not consume that separate budget.
+
+    Also retries a 'not_found' result, on its own separate bounded budget
+    (`max_not_found_retries` / `_CLICK_THEN_PAGE_NOT_FOUND_RETRIES`) -- see
+    that constant's comment for why this is a transient lvgl_port_task
+    dispatch-timeout race indistinguishable, at the firmware level, from a
+    genuine absence, and why retrying it blind is safe (no press was ever
+    sent). Unlike the swallow retry (a directly observed race with nothing
+    left to wait out), a not_found retry pauses `_ENTER_PIN_RETRY_POLL_S`
+    (0.15 s, the same poll period `ui_test_client.py`'s own bounded retries
+    already use for an analogous "give the board a moment" wait) before
+    re-clicking, since the dispatch-timeout theory only makes sense if
+    lvgl_port_task gets a moment to drain before the retry lands in the same
+    busy window.
 
     'verdict_unknown' (kiln_ui_click_by_name()'s own bounded wait for the
     swallow verdict timed out) is deliberately NOT re-clicked here: unlike a
@@ -388,24 +438,41 @@ def _click_resolving_swallow(ui, name: str, max_swallow_retries: "Optional[int]"
     an immediate blind re-click could land on the page that press already
     opened. It is returned as-is for the caller to resolve against the
     observable page/target change, whose own retry is guarded by an
-    unchanged page. Returns ``(final_click, swallow_retries_used)``.
+    unchanged page. Returns ``(final_click, swallow_retries_used,
+    not_found_retries_used)`` as two SEPARATE counters (2026-09-30 -- they
+    used to be folded into one combined count, which misattributed a
+    not_found recovery as a swallow recovery in a caller's `observed` dict)
+    so a caller's `observed` data records which race actually happened.
 
-    `max_swallow_retries` is resolved at call time against
-    `_CLICK_THEN_PAGE_SWALLOW_RETRIES` -- see :func:`_wait_for_page`'s
+    `max_swallow_retries`/`max_not_found_retries` are resolved at call time
+    against `_CLICK_THEN_PAGE_SWALLOW_RETRIES`/
+    `_CLICK_THEN_PAGE_NOT_FOUND_RETRIES` -- see :func:`_wait_for_page`'s
     docstring for why a bare default would defeat a test's patch."""
     if max_swallow_retries is None:
         max_swallow_retries = _CLICK_THEN_PAGE_SWALLOW_RETRIES
+    if max_not_found_retries is None:
+        max_not_found_retries = _CLICK_THEN_PAGE_NOT_FOUND_RETRIES
     click = ui.click_by_name(name)
-    retries = 0
-    while click.get("result") == "swallowed" and retries < max_swallow_retries:
-        retries += 1
-        click = ui.click_by_name(name)
-    return click, retries
+    swallow_retries = 0
+    not_found_retries = 0
+    while True:
+        result = click.get("result")
+        if result == "swallowed" and swallow_retries < max_swallow_retries:
+            swallow_retries += 1
+            click = ui.click_by_name(name)
+            continue
+        if result == "not_found" and not_found_retries < max_not_found_retries:
+            not_found_retries += 1
+            time.sleep(_ENTER_PIN_RETRY_POLL_S)
+            click = ui.click_by_name(name)
+            continue
+        break
+    return click, swallow_retries, not_found_retries
 
 
 def _click_then_page(ui, name: str, expected_page: str,
                       timeout_s: "Optional[float]" = None,
-                      max_retries: "Optional[int]" = None) -> "tuple[Optional[CaseResult], str, float, int]":
+                      max_retries: "Optional[int]" = None) -> "tuple[Optional[CaseResult], str, float, int, int]":
     """Click a tap target by name, then wait for the page to become
     `expected_page`, and -- unlike a bare ``ui.click_by_name()`` +
     ``_wait_for_page()`` with the wait's return value left unchecked --
@@ -421,26 +488,34 @@ def _click_then_page(ui, name: str, expected_page: str,
     click's "not_found" was a symptom of the FIRST hop never being
     confirmed, not a defect in the second click's own target name.
 
-    Returns ``(None, page, waited_s, swallow_retries)`` on success (click
-    replied 'ok' AND the page arrived within `timeout_s`) -- `swallow_retries`
-    is the number of 'swallowed' re-clicks it took to reach that passing
-    click (0 when the very first click was not swallowed), so a swallow
-    resolved on the way to a PASS is recorded rather than discarded once the
-    hop succeeds. A 'verdict_unknown' click is never itself a pass: it is
-    judged only by whether the expected page then arrives (the same
-    evidence an 'ok' click is judged by), and is never blind re-clicked
-    unless the page provably stayed where it was. On any failure, the first
-    element is a ready-to-return FAIL :class:`CaseResult` -- naming the
-    click's own result when the click itself failed, or the page the board
-    is actually on (plus the blanked-screen hint, since a swallowed wake tap
-    reads identically to this) when the click said 'ok' but the page never
-    changed; `swallow_retries` is 0 in every failure case (the FAIL's own
-    ``observed`` dict already carries whatever retry count applies).
+    Returns ``(None, page, waited_s, swallow_retries, not_found_retries)`` on
+    success (click replied 'ok' AND the page arrived within `timeout_s`) --
+    `swallow_retries`/`not_found_retries` are the number of 'swallowed'/
+    'not_found' re-clicks it took to reach that passing click (0 when the
+    very first click needed neither), kept as two SEPARATE counters
+    (2026-09-30 -- previously folded into one, which misattributed a
+    not_found recovery as a swallow in a caller's `observed` dict) so a
+    swallow or a not_found resolved on the way to a PASS is recorded, and
+    correctly labelled, rather than discarded once the hop succeeds. A
+    'verdict_unknown' click is never itself a pass: it is judged only by
+    whether the expected page then arrives (the same evidence an 'ok' click
+    is judged by), and is never blind re-clicked unless the page provably
+    stayed where it was. On any failure, the first element is a
+    ready-to-return FAIL :class:`CaseResult` -- naming the click's own
+    result when the click itself failed, or the page the board is actually
+    on (plus the blanked-screen hint, since a swallowed wake tap reads
+    identically to this) when the click said 'ok' but the page never
+    changed; both retry counters are 0 in every failure case (the FAIL's
+    own ``observed`` dict already carries whatever retry counts apply).
 
-    Worst case: ``(1 + max_retries) * (1 + _CLICK_THEN_PAGE_SWALLOW_RETRIES)``
-    clicks (9 at the defaults, only when every click is 'swallowed') plus
+    Worst case: ``(1 + max_retries) * (1 + _CLICK_THEN_PAGE_SWALLOW_RETRIES
+    + _CLICK_THEN_PAGE_NOT_FOUND_RETRIES)`` clicks (15 at the defaults, only
+    when every click is either 'swallowed' or 'not_found') plus
     ``1 + max_retries`` full `timeout_s` page waits (~6 s at the 2 s
-    default); a not_found click fails immediately with no wait at all.
+    default); a 'not_found' that persists through
+    `_CLICK_THEN_PAGE_NOT_FOUND_RETRIES` retries (see that constant's
+    comment) fails immediately with no page wait at all -- there is no page
+    to wait for when the click never even injected a press.
 
     `timeout_s`/`max_retries` are resolved at call time against
     `_PAGE_POLL_TIMEOUT_S`/`_CLICK_THEN_PAGE_MAX_RETRIES` -- see
@@ -454,15 +529,20 @@ def _click_then_page(ui, name: str, expected_page: str,
         page_before = ui.get_current_page()
     except Exception:
         page_before = None
-    click, swallow_retries = _click_resolving_swallow(ui, name)
+    click, swallow_retries, not_found_retries = _click_resolving_swallow(ui, name)
     if click.get("result") not in ("ok", "verdict_unknown"):
         # A swallow that outlasted _click_resolving_swallow()'s own budget is
-        # attributed as such, never as "not_found" (the target WAS found).
-        # 'inject_failed' (2026-09-24) is attributed distinctly too: no press
-        # was ever sent (lvgl_port_inject_touch() itself refused), so this is
-        # neither a missing/ambiguous/hidden target nor a swallow -- never a
-        # pass, and never grounds to wait for a page change this click could
-        # not have caused.
+        # attributed as such, never as "not_found" (the target WAS found). A
+        # 'not_found' reaching here has likewise already outlasted that
+        # helper's own _CLICK_THEN_PAGE_NOT_FOUND_RETRIES budget (2026-09-30
+        # -- see that constant's comment), so it is no longer attributable to
+        # the transient lvgl_port_task dispatch-timeout race it exists to
+        # absorb; a genuine, reproducible absence is the remaining
+        # explanation. 'inject_failed' (2026-09-24) is attributed distinctly
+        # too: no press was ever sent (lvgl_port_inject_touch() itself
+        # refused), so this is neither a missing/ambiguous/hidden target nor
+        # a swallow -- never a pass, and never grounds to wait for a page
+        # change this click could not have caused.
         if click.get("result") == "swallowed":
             immediate_attribution = "swallowed"
         elif click.get("result") == "inject_failed":
@@ -496,10 +576,12 @@ def _click_then_page(ui, name: str, expected_page: str,
                     # each time it recurs.
                     "page_before": page_before,
                     **({"swallow_retries": swallow_retries} if swallow_retries else {}),
+                    **({"not_found_retries": not_found_retries} if not_found_retries else {}),
                 },
             ),
             "",
             0.0,
+            0,
             0,
         )
     page, waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
@@ -532,6 +614,7 @@ def _click_then_page(ui, name: str, expected_page: str,
         retries_done = 0
         last_click = click
         total_swallow_retries = swallow_retries
+        total_not_found_retries = not_found_retries
         # Clicks confirmed delivered un-swallowed ('ok'); a 'verdict_unknown'
         # click is never counted here, so it can never supply the evidence
         # "genuine_defect" rests on.
@@ -542,8 +625,9 @@ def _click_then_page(ui, name: str, expected_page: str,
             and page == page_before
         ):
             retries_done += 1
-            last_click, retry_swallow_retries = _click_resolving_swallow(ui, name)
+            last_click, retry_swallow_retries, retry_not_found_retries = _click_resolving_swallow(ui, name)
             total_swallow_retries += retry_swallow_retries
+            total_not_found_retries += retry_not_found_retries
             if last_click.get("result") not in ("ok", "verdict_unknown"):
                 break
             if last_click.get("result") == "ok":
@@ -551,7 +635,7 @@ def _click_then_page(ui, name: str, expected_page: str,
             retry_page, retry_waited_s = _wait_for_page(ui, expected_page, timeout_s=timeout_s)
             page, waited_s = retry_page, waited_s + retry_waited_s
             if page == expected_page:
-                return None, page, waited_s, total_swallow_retries
+                return None, page, waited_s, total_swallow_retries, total_not_found_retries
         # Attribution now that a swallow is directly observable
         # (click_by_name() returns "swallowed", resolved by
         # _click_resolving_swallow()'s immediate re-click) rather than only
@@ -604,6 +688,8 @@ def _click_then_page(ui, name: str, expected_page: str,
             observed["retries"] = retries_done
         if total_swallow_retries:
             observed["swallow_retries"] = total_swallow_retries
+        if total_not_found_retries:
+            observed["not_found_retries"] = total_not_found_retries
         retried = f"retried {retries_done} time{'s' if retries_done != 1 else ''}"
         if attribution == "swallowed":
             reason = (
@@ -644,8 +730,9 @@ def _click_then_page(ui, name: str, expected_page: str,
             page,
             waited_s,
             0,
+            0,
         )
-    return None, page, waited_s, swallow_retries
+    return None, page, waited_s, swallow_retries, not_found_retries
 
 def _click_then_targets_change(ui, name: str, prev_names: "set",
                                 timeout_s: "Optional[float]" = None) -> "tuple[Optional[CaseResult], Optional[dict], float, bool]":
@@ -1012,7 +1099,7 @@ def _case_lcd08(ctx: dict) -> CaseResult:
         # wake tap (screen_idle's touch-swallow race, same shape as every
         # other _click_then_page() caller) failed here with no second
         # chance. Migrated to the shared retry helper.
-        fail, page, waited_s, swallow_retries = _click_then_page(ui, "settings", "config")
+        fail, page, waited_s, swallow_retries, not_found_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
             outcome = fail
             return outcome
@@ -1023,6 +1110,8 @@ def _case_lcd08(ctx: dict) -> CaseResult:
         result.observed["page_wait_s"] = round(waited_s, 3)
         if swallow_retries:
             result.observed["swallow_retries"] = swallow_retries
+        if not_found_retries:
+            result.observed["not_found_retries"] = not_found_retries
         image_path = _capture(ctx, "lcd08_config_hub.jpg")
         if image_path:
             result.evidence = list(result.evidence or []) + [image_path]
@@ -1467,15 +1556,16 @@ def _case_lcd09(ctx: dict) -> CaseResult:
     ui = srv._ui_test
     outcome: Optional[CaseResult] = None
     try:
-        fail, _config_page, _, config_swallow_retries = _click_then_page(ui, "settings", "config")
+        fail, _config_page, _, config_swallow_retries, config_not_found_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
             outcome = fail
             return outcome
-        fail, page, waited_s, swallow_retries = _click_then_page(ui, "Profiles", "profiles")
+        fail, page, waited_s, swallow_retries, not_found_retries = _click_then_page(ui, "Profiles", "profiles")
         if fail is not None:
             outcome = fail
             return outcome
         swallow_retries += config_swallow_retries
+        not_found_retries += config_not_found_retries
         tap = ui.list_tap_targets()
         targets = tap.get("targets", [])
         _remember_page_targets(ctx, "profiles", tap)
@@ -1507,9 +1597,10 @@ def _case_lcd09(ctx: dict) -> CaseResult:
             # as every other _click_then_page() caller in this module. A
             # double tap here is harmless: the row is a pure navigation
             # target, not a Start/Stop/Confirm/PIN-digit/toggle.
-            row_fail, detail_page, row_waited_s, row_swallow_retries = _click_then_page(
+            row_fail, detail_page, row_waited_s, row_swallow_retries, row_not_found_retries = _click_then_page(
                 ui, rows[0]["name"], "profile_detail")
             swallow_retries += row_swallow_retries
+            not_found_retries += row_not_found_retries
             if row_fail is not None:
                 row_fail.observed = dict(row_fail.observed or {})
                 row_fail.observed["page_wait_s"] = round(waited_s + row_waited_s, 3)
@@ -1532,6 +1623,8 @@ def _case_lcd09(ctx: dict) -> CaseResult:
         result.observed["page_wait_s"] = round(waited_s, 3)
         if swallow_retries:
             result.observed["swallow_retries"] = swallow_retries
+        if not_found_retries:
+            result.observed["not_found_retries"] = not_found_retries
         outcome = result
         return outcome
     finally:
@@ -1655,15 +1748,16 @@ def _case_lcd14(ctx: dict) -> CaseResult:
     ui = srv._ui_test
     outcome: Optional[CaseResult] = None
     try:
-        fail, _config_page, _, config_swallow_retries = _click_then_page(ui, "settings", "config")
+        fail, _config_page, _, config_swallow_retries, config_not_found_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
             outcome = fail
             return outcome
-        fail, page, waited_s, swallow_retries = _click_then_page(ui, "Temperature", "temperature")
+        fail, page, waited_s, swallow_retries, not_found_retries = _click_then_page(ui, "Temperature", "temperature")
         if fail is not None:
             outcome = fail
             return outcome
         swallow_retries += config_swallow_retries
+        not_found_retries += config_not_found_retries
         tap = ui.list_tap_targets()
         _remember_page_targets(ctx, "temperature", tap)
         thermo_error: Optional[str] = None
@@ -1744,6 +1838,8 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         result.observed["page_wait_s"] = round(waited_s, 3)
         if swallow_retries:
             result.observed["swallow_retries"] = swallow_retries
+        if not_found_retries:
+            result.observed["not_found_retries"] = not_found_retries
         if thermo_error is not None:
             result.observed["thermo_error"] = thermo_error
         if zones_count_error is not None:
@@ -1987,7 +2083,7 @@ def _case_lcd16(ctx: dict) -> CaseResult:
     retried_hops: list = []
     outcome: Optional[CaseResult] = None
     try:
-        fail, _config_page, _, config_swallow_retries = _click_then_page(ui, "settings", "config")
+        fail, _config_page, _, config_swallow_retries, config_not_found_retries = _click_then_page(ui, "settings", "config")
         if fail is not None:
             outcome = fail
             return outcome
@@ -1998,11 +2094,12 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         # sub-tabs are its own internal s_pages[], see
         # _targets_signature's docstring), so those are tracked by a
         # richer tap-target signature instead.
-        fail, _diag_page, _, diag_swallow_retries = _click_then_page(ui, "Diagnostics", "diagnostics")
+        fail, _diag_page, _, diag_swallow_retries, diag_not_found_retries = _click_then_page(ui, "Diagnostics", "diagnostics")
         if fail is not None:
             outcome = fail
             return outcome
         swallow_retries = config_swallow_retries + diag_swallow_retries
+        not_found_retries = config_not_found_retries + diag_not_found_retries
         first_tap = ui.list_tap_targets()
         targets = first_tap.get("targets", [])
         # The LIST_TAP_TARGETS reply carries a `truncated` flag (253 B wire
@@ -2070,6 +2167,8 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         observed["tap_list_truncated_steps"] = list(truncated_steps)
         if swallow_retries:
             observed["swallow_retries"] = swallow_retries
+        if not_found_retries:
+            observed["not_found_retries"] = not_found_retries
         result.observed = observed
         if truncated_steps and pages_paged < expected_hops and result.verdict != Verdict.PASS:
             result.reason = (
