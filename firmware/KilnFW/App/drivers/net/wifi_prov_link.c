@@ -855,30 +855,20 @@ void do_confirm_static_reachable(void)
 // login_ip_scope.c's strip_ipv4_mapped_prefix(), rather than depending on
 // IN6_IS_ADDR_V4MAPPED (not confirmed available in this lwIP configuration,
 // and this file also builds as part of the host test executable).
-static bool sockaddr_is_ap_default_ip(const struct sockaddr_in6 *addr6)
-{
-    if (addr6->sin6_family == AF_INET) {
-        const struct sockaddr_in *addr4 = (const struct sockaddr_in *)addr6;
-        return addr4->sin_addr.s_addr == htonl(0xC0A80401u); /* 192.168.4.1 */
-    }
-    if (addr6->sin6_family != AF_INET6) {
-        return false;
-    }
-    char formatted[46]; // INET6_ADDRSTRLEN
-    if (!inet_ntop(AF_INET6, &addr6->sin6_addr, formatted, sizeof(formatted))) {
-        return false;
-    }
-    static const char prefix[] = "::ffff:";
-    size_t prefix_len = sizeof(prefix) - 1;
-    for (size_t i = 0; i < prefix_len; i++) {
-        if (!formatted[i] || tolower((unsigned char)formatted[i]) != prefix[i]) {
-            return false;
-        }
-    }
-    return strcmp(formatted + prefix_len, "192.168.4.1") == 0;
-}
-
-bool wifi_prov_request_arrived_on_ap(int sockfd)
+// Shared by wifi_prov_request_arrived_on_ap() and
+// wifi_prov_note_possible_static_reachability() (2026-09-29 review fix): both
+// need "what is sockfd's own local IPv4 address" and previously duplicated
+// the getsockname()/inet_ntop() dance, with the static-reachability copy
+// still reading into a plain sockaddr_in and so never seeing past the
+// IPv4-mapped-AF_INET6 case documented above -- on CONFIG_LWIP_IPV6=y
+// hardware that dropped the local address's family byte into what
+// getsockname() actually treats as an AF_INET6 buffer, truncating the
+// result to all-zero ("0.0.0.0") and permanently failing static_ip's
+// comparison. Extracts the dotted-quad string into out_ip regardless of
+// whether the socket is plain AF_INET or the mapped AF_INET6 shape, and
+// fails closed (returns false, leaves out_ip untouched) on any error so
+// every caller's existing fail-closed handling still applies unchanged.
+static bool get_local_ipv4_string(int sockfd, char *out_ip, size_t out_ip_len)
 {
     if (sockfd < 0) {
         return false;
@@ -888,7 +878,47 @@ bool wifi_prov_request_arrived_on_ap(int sockfd)
     if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
         return false;
     }
-    return sockaddr_is_ap_default_ip(&local_addr);
+    if (local_addr.sin6_family == AF_INET) {
+        const struct sockaddr_in *addr4 = (const struct sockaddr_in *)&local_addr;
+        return inet_ntop(AF_INET, &addr4->sin_addr, out_ip, out_ip_len) != NULL;
+    }
+    if (local_addr.sin6_family != AF_INET6) {
+        return false;
+    }
+    char formatted[46]; // INET6_ADDRSTRLEN
+    if (!inet_ntop(AF_INET6, &local_addr.sin6_addr, formatted, sizeof(formatted))) {
+        return false;
+    }
+    static const char prefix[] = "::ffff:";
+    size_t prefix_len = sizeof(prefix) - 1;
+    for (size_t i = 0; i < prefix_len; i++) {
+        if (!formatted[i] || tolower((unsigned char)formatted[i]) != prefix[i]) {
+            return false;
+        }
+    }
+    size_t remain_len = strlen(formatted + prefix_len) + 1; // include NUL
+    if (remain_len > out_ip_len) {
+        return false;
+    }
+    memcpy(out_ip, formatted + prefix_len, remain_len);
+    return true;
+}
+
+static bool sockaddr_is_ap_default_ip(int sockfd)
+{
+    char ip_str[16];
+    if (!get_local_ipv4_string(sockfd, ip_str, sizeof(ip_str))) {
+        return false;
+    }
+    return strcmp(ip_str, "192.168.4.1") == 0;
+}
+
+bool wifi_prov_request_arrived_on_ap(int sockfd)
+{
+    if (sockfd < 0) {
+        return false;
+    }
+    return sockaddr_is_ap_default_ip(sockfd);
 }
 
 void wifi_prov_note_possible_static_reachability(int sockfd)
@@ -899,13 +929,8 @@ void wifi_prov_note_possible_static_reachability(int sockfd)
     if (s_wifi.ip_mode != WIFI_PROV_IP_MODE_STATIC || s_wifi.static_ip_confirmed) {
         return; /* nothing to confirm -- DHCP mode, or already confirmed */
     }
-    struct sockaddr_in local_addr = { 0 };
-    socklen_t addr_len = sizeof(local_addr);
-    if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
-        return;
-    }
     char ip_str[16];
-    if (!inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, sizeof(ip_str))) {
+    if (!get_local_ipv4_string(sockfd, ip_str, sizeof(ip_str))) {
         return;
     }
     if (strcmp(ip_str, s_wifi.static_ip) != 0) {

@@ -127,18 +127,55 @@ static inline int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)
     (void)addrlen;
     if (g_stub_getsockname_result == 0 && addr) {
         *(uint16_t *)(void *)addr = (uint16_t)g_stub_getsockname_family;
+        // 2026-09-29: also drop the family as a marker at the two candidate
+        // address-field offsets a caller might read it from -- offset 4 is
+        // sockaddr_in's sin_addr, offset 8 is sockaddr_in6's sin6_addr (both
+        // structs agree on a 2-byte family word at offset 0, so these are
+        // the two shapes any real caller in this file uses). This lets
+        // inet_ntop() below detect a caller decoding the wrong shape (its
+        // `af` argument disagreeing with the marker sitting at the `src`
+        // address it was actually given) using only its own parameters --
+        // see inet_ntop()'s comment. Every caller's addr buffer in this file
+        // is at least 16 bytes (sockaddr_in) or sizeof(sockaddr_in6) (28),
+        // so offset 8+2 is always in-bounds.
+        *(uint16_t *)(void *)((char *)addr + 4) = (uint16_t)g_stub_getsockname_family;
+        *(uint16_t *)(void *)((char *)addr + 8) = (uint16_t)g_stub_getsockname_family;
     }
     return g_stub_getsockname_result;
 }
 
 static inline const char *inet_ntop(int af, const void *src, char *dst, socklen_t size)
 {
-    (void)af;
-    (void)src;
-    if (dst && size > 0) {
-        strncpy(dst, g_stub_local_ip, size - 1);
-        dst[size - 1] = '\0';
+    if (!dst || size == 0) {
+        return NULL;
     }
+    // 2026-09-29: honour af like the real inet_ntop would, rather than
+    // ignoring it. The real function decodes `size` bytes of `src` under the
+    // assumption that its shape matches `af`; a caller that asks for AF_INET
+    // while the actual local address getsockname() reported is AF_INET6
+    // (or vice versa) is reading the wrong number of bytes at the wrong
+    // offset, which on real hardware yields garbage -- typically all-zero
+    // for a not-yet-written tail of a wider struct. That mismatch is exactly
+    // wifi_prov_note_possible_static_reachability()'s pre-fix bug: it always
+    // called inet_ntop(AF_INET, ...) regardless of the httpd socket's actual
+    // (AF_INET6, on this board's CONFIG_LWIP_IPV6=y build) family, and so
+    // always read "0.0.0.0". Modelling the mismatch case as "0.0.0.0" here
+    // (rather than always honouring g_stub_local_ip regardless of af, as
+    // this stub used to) is what makes that regression fail a host test
+    // instead of passing one by accident. Deliberately reads the family
+    // marker getsockname() left at `src` itself (rather than comparing
+    // against g_stub_getsockname_family directly) so this function stays
+    // self-contained: it is shared by every host-test executable that links
+    // this header, and most of them (e.g. test_ota_http.c, which calls
+    // inet_ntop() via ota_http.c's getpeername() path) never call this
+    // file's getsockname() at all and so never define that extern.
+    if (src && (int)(*(const uint16_t *)src) != af) {
+        strncpy(dst, "0.0.0.0", size - 1);
+        dst[size - 1] = '\0';
+        return dst;
+    }
+    strncpy(dst, g_stub_local_ip, size - 1);
+    dst[size - 1] = '\0';
     return dst;
 }
 

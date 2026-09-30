@@ -243,6 +243,10 @@ static void test_static_wrong_address_keeps_ap_up(void)
     TEST_SECTION("do_ev_got_ip -- WRONG static IP reaches CONNECTED but AP stays up (the regression)");
 
     reset_state();
+    // Plain AF_INET shape -- see get_local_ipv4_string()'s two branches in
+    // wifi_prov_link.c. The mapped-AF_INET6 shape is covered separately by
+    // test_static_reachability_v4_mapped_af_inet6_*() below.
+    g_stub_getsockname_family = AF_INET;
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
     strcpy(s_wifi.static_ip, "192.168.1.50");
     s_wifi.static_ip_confirmed = false;
@@ -273,6 +277,8 @@ static void test_static_correct_address_would_confirm(void)
     TEST_SECTION("wifi_prov_note_possible_static_reachability -- a request on the STATIC address itself posts");
 
     reset_state();
+    // Plain AF_INET shape here too -- see the sibling test above.
+    g_stub_getsockname_family = AF_INET;
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
     strcpy(s_wifi.static_ip, "192.168.1.50");
     s_wifi.static_ip_confirmed = false;
@@ -1169,6 +1175,99 @@ static void test_arrived_on_ap_getsockname_failure_fails_closed(void)
     TEST_CHECK(!wifi_prov_request_arrived_on_ap(3), "an uninspectable socket is never reported as the AP");
 }
 
+// Review fix (2026-09-29, round 3): the four tests above never actually
+// exercised the AF_INET *positive*-match branch (stubs/lwip/sockets.h's
+// inet_ntop() used to ignore af entirely, so a plain-AF_INET call always got
+// back whatever string a mapped-AF_INET6 test happened to leave behind) and
+// never covered the uppercase "::FFFF:" prefix lwIP is documented to print.
+// Now that the stub's inet_ntop() strips a leading "::ffff:"/"::FFFF:" prefix
+// specifically for an AF_INET caller (see its own comment), the same
+// g_stub_local_ip value can be reused for both families.
+static void test_arrived_on_ap_plain_af_inet_matches(void)
+{
+    TEST_SECTION("wifi_prov_request_arrived_on_ap() -- plain AF_INET family reporting the AP's own address: true");
+
+    reset_state();
+    g_stub_getsockname_result = 0;
+    g_stub_getsockname_family = AF_INET;
+    strcpy(g_stub_local_ip, "192.168.4.1");
+
+    TEST_CHECK(wifi_prov_request_arrived_on_ap(3), "AF_INET branch taken, exact AP address matches");
+}
+
+static void test_arrived_on_ap_v4_mapped_af_inet6_uppercase_matches(void)
+{
+    TEST_SECTION("wifi_prov_request_arrived_on_ap() -- uppercase \"::FFFF:\" prefix (lwIP's own documented "
+                 "case) is still recognized");
+
+    reset_state();
+    g_stub_getsockname_result = 0;
+    g_stub_getsockname_family = AF_INET6;
+    strcpy(g_stub_local_ip, "::FFFF:192.168.4.1");
+
+    TEST_CHECK(wifi_prov_request_arrived_on_ap(3), "uppercase-prefixed IPv4-mapped AP address is recognized");
+}
+
+// Review fix (2026-09-29, round 3): wifi_prov_note_possible_static_reachability()'s
+// own MEDIUM bug -- it read getsockname() into a plain sockaddr_in and always
+// called inet_ntop(AF_INET, ...), so on this board's CONFIG_LWIP_IPV6=y
+// build (the httpd socket is PF_INET6, family AF_INET6) it always saw
+// "0.0.0.0" and never confirmed static-IP reachability. The existing
+// test_static_wrong_address_keeps_ap_up()/test_static_correct_address_would_confirm()
+// above pin g_stub_getsockname_family to AF_INET so their long-standing
+// plain-string assertions keep meaning what they always meant; these three
+// cover the fix itself, now that get_local_ipv4_string() (shared with
+// wifi_prov_request_arrived_on_ap()) handles both families.
+static void test_static_reachability_af_inet_matches(void)
+{
+    TEST_SECTION("wifi_prov_note_possible_static_reachability() -- plain AF_INET family, exact match posts");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "192.168.1.50");
+    s_wifi.static_ip_confirmed = false;
+    g_stub_getsockname_family = AF_INET;
+    strcpy(g_stub_local_ip, "192.168.1.50");
+
+    wifi_prov_note_possible_static_reachability(3);
+    TEST_CHECK(g_stub_queue_send_calls == 1, "AF_INET exact match posts CMD_CONFIRM_STATIC_REACHABLE");
+}
+
+static void test_static_reachability_v4_mapped_af_inet6_matches(void)
+{
+    TEST_SECTION("wifi_prov_note_possible_static_reachability() -- IPv4-mapped AF_INET6 (the real shape on "
+                 "hardware), exact match posts");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "192.168.1.50");
+    s_wifi.static_ip_confirmed = false;
+    g_stub_getsockname_family = AF_INET6;
+    strcpy(g_stub_local_ip, "::ffff:192.168.1.50");
+
+    wifi_prov_note_possible_static_reachability(3);
+    TEST_CHECK(g_stub_queue_send_calls == 1,
+               "mapped-AF_INET6 exact match posts CMD_CONFIRM_STATIC_REACHABLE -- this is the fix: before "
+               "it, this case always read as \"0.0.0.0\" and never posted");
+}
+
+static void test_static_reachability_v4_mapped_af_inet6_no_match(void)
+{
+    TEST_SECTION("wifi_prov_note_possible_static_reachability() -- IPv4-mapped AF_INET6, non-matching "
+                 "address does not post");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "192.168.1.50");
+    s_wifi.static_ip_confirmed = false;
+    g_stub_getsockname_family = AF_INET6;
+    strcpy(g_stub_local_ip, "::ffff:192.168.4.1"); // the fallback AP's own address, not the static one
+
+    wifi_prov_note_possible_static_reachability(3);
+    TEST_CHECK(g_stub_queue_send_calls == 0, "a mismatched mapped address must not post");
+    TEST_CHECK(!s_wifi.static_ip_confirmed, "still unconfirmed");
+}
+
 // OWN, SEPARATE executable (build_host_tests.ps1's exe51), not part of the
 // "main" combined executable this file used to live in: the fakes below for
 // http_auth_policy_web_enabled()/http_auth_any_session_active() (added
@@ -1218,9 +1317,14 @@ void run_test_wifi_prov(void)
     test_got_ip_after_reconcile_dropped_ap_is_a_no_op();
     test_teardown_and_mode_changes_clear_fallback_active();
     test_arrived_on_ap_plain_af_inet_not_matching();
+    test_arrived_on_ap_plain_af_inet_matches();
     test_arrived_on_ap_v4_mapped_af_inet6_matches();
+    test_arrived_on_ap_v4_mapped_af_inet6_uppercase_matches();
     test_arrived_on_ap_v4_mapped_af_inet6_lan_address_no_match();
     test_arrived_on_ap_getsockname_failure_fails_closed();
+    test_static_reachability_af_inet_matches();
+    test_static_reachability_v4_mapped_af_inet6_matches();
+    test_static_reachability_v4_mapped_af_inet6_no_match();
 }
 
 int main(void)
