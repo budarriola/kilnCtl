@@ -128,8 +128,13 @@ def signed_post(host: str, path: str, context: str, ap_password: str, *,
                  data: bytes = b"", timeout: float = DEFAULT_TIMEOUT_S) -> dict:
     """Fetches a fresh challenge from the recovery image, signs it for
     `context`, and POSTs `data` (default empty body) with the resulting
-    X-Ota-Mac header to `path` on that same host. Returns the parsed JSON
-    response body.
+    X-Ota-Mac header to `path` on that same host. Returns
+    ``{"status": int, "text": str}`` -- the recovery image's three mutating
+    routes answer a success with a PLAIN TEXT body
+    ("ok, rebooting into new application image" for /api/ota/esp,
+    "boot_guard counter cleared" for /api/ota/esp/boot_guard_reset,
+    "resetting" for /api/sw_reset -- recovery_http.c:377, :443, :454), never
+    JSON, so this never attempts to parse it as JSON.
 
     Every mutating recovery-image route needs its own fresh nonce -- the
     same one-shot-nonce contract the main app used to enforce, mirrored in
@@ -148,6 +153,7 @@ def signed_post(host: str, path: str, context: str, ap_password: str, *,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
+            status = resp.status
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
         log.warning("recovery-image signed POST refused: host=%s path=%s status=%s detail=%s",
@@ -156,10 +162,8 @@ def signed_post(host: str, path: str, context: str, ap_password: str, *,
             f"{path} refused by recovery image: HTTP {exc.code}: {detail}", exc.code, detail) from exc
     except urllib.error.URLError as exc:
         raise RecoveryOtaAuthError(f"{path} unreachable on recovery image: {exc}") from exc
-    try:
-        return json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise RecoveryOtaAuthError(f"{path} response was not valid JSON: {body!r}") from exc
+    text = body.decode("utf-8", "replace")
+    return {"status": status, "text": text}
 
 
 def recovery_push_esp_image(host: str, image_bytes: bytes, ap_password: str,

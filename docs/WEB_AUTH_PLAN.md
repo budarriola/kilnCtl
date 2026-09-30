@@ -515,9 +515,14 @@ challenge, unchanged"). That exception is deleted: with web auth off, these
 nine routes are exactly as open as every other ADMIN route, same as the rest
 of this plan's auth-off collapse (item 11). This is an intentional loosening,
 authorized by the owner and not a violation of "tier changes only tighten".
-`GET /api/ota/challenge` and `ota_http_verify_request()` were deleted from
-`ota_http.c`; `ota_http_authenticate_request()` is now a no-op stub that
-always returns `true`, logging the caller's IP for visibility.
+`GET /api/ota/challenge`, `ota_http_verify_request()`, and
+`ota_http_authenticate_request()` were all deleted outright from
+`ota_http.c` (`f0643c98`); each caller now logs the client IP for visibility
+via `ota_http_get_client_ip()` directly, with no auth check of its own left
+in this file -- `route_tier_table.h`'s ADMIN tier is the only gate.
+`kilnctrl.recovery_ota_auth_client` names the recovery-image path that still
+signs an X-Ota-Mac header (see `firmware/KilnFW_recovery/`, untouched by this
+retirement).
 `net/ota_auth.c`/`.h` in the main app is unused by any HTTP route now but was
 kept in place rather than deleted (see
 `firmware/KilnFW_recovery/main/recovery_ota_auth_mirror_drift_check.py`'s

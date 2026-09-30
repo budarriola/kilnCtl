@@ -62,7 +62,7 @@ needed editing.
 | `drivers/http/dashboard_http.c:201` (`dashboard_get_status` readings block) | `MAX31856_read_all(s_dash.thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
 | `drivers/http/dashboard_http.c:618` (autotune/status refresh path) | `MAX31856_read_all(s_dash.thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
 | `drivers/http/ota_http.c:814` (pre-OTA snapshot) | `MAX31856_read_all(s_thermo_bus, ...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
-| `drivers/http/ota_http.c:821` (pre-OTA snapshot) | `kiln_io_read(s_io, &io_state)` | `kiln_io_owner` | YES -- `kiln_io_owner_command_read()` |
+| `drivers/http/ota_http.c:500` (pre-OTA snapshot) | `kiln_io_read(s_io, &io_state)` | `kiln_io_owner` | YES -- `kiln_io_owner_command_read()` |
 | `drivers/http/diagnostics_http.c:104`-area (per its own header comment: "calls `MAX31856_read_all()` directly, ONE call covering every channel") | `MAX31856_read_all(...)` | `thermo_owner` | YES -- `thermo_owner_command_read_all()` |
 
 No genuine offenders found for `kiln_io` relay/GPIO **writes** (already
@@ -96,7 +96,7 @@ Total: **5 call sites in 3 files**, one batch, no new accessor needed.
   (signature-compatible per `thermo_owner.h:124`; drop the now-unused `bus`
   handle only if nothing else in the same file still needs it -- check before
   deleting the field).
-- Replace `kiln_io_read(s_io, &io_state)` in `ota_http.c:821` with
+- Replace `kiln_io_read(s_io, &io_state)` in `ota_http.c:500` with
   `kiln_io_owner_command_read(&io_state)` (`kiln_io_owner.h:220`).
 - These are reads on the `esp_http_server` worker task, not writes -- no lock
   ordering or race is fixed here (per the Phase 2 TODO note, `thermo_owner`

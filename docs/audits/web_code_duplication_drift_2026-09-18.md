@@ -103,8 +103,8 @@ the boot-button window and `http_auth_policy_web_enabled()` — lived *inside*
 after its unconditional header checks: a 64-character length test that ran first, in
 every auth mode, on every board. A request with no `X-Ota-Mac` header could not get
 past it. (**2026-09-29 update:** `ota_http_verify_request()` and this whole header
-check were deleted outright in the AP-password HMAC retirement --
-`ota_http_authenticate_request()` is now a no-op stub that always returns `true`; the
+check, and `ota_http_authenticate_request()` itself, were all deleted
+outright in the AP-password HMAC retirement (`f0643c98`); the
 specific line numbers this section originally cited no longer exist. See git history
 at or before commit `a1ca2b13` for the removed code this section describes.)
 
@@ -121,10 +121,14 @@ already gone wrong.
 
 ### 2.2 The X-Ota-Mac check is copied seven times, and the recovery copy disagrees on every axis
 
-`http/ota_http.c:929-957` provides `ota_http_authenticate_request()`, explicitly
-documented (`http/ota_http.h:160`) as consolidating the
-"header present and exactly 64 hex chars → hex-decode → verify" sequence. Six
-handlers in the same firmware image do not call it and hand-roll that sequence
+`ota_http_authenticate_request()` (formerly `http/ota_http.c:929-957`,
+documented at the former `http/ota_http.h:160`) used to consolidate the
+"header present and exactly 64 hex chars → hex-decode → verify" sequence; it
+was deleted outright by `f0643c98` (2026-09-29, "Retire the AP-password HMAC
+on the nine main-app admin OTA/reset routes") along with the whole main-app
+X-Ota-Mac scheme -- see this file's 2026-09-19 update below and CLAUDE.md's
+flash/OTA section. At the time of this finding, six
+handlers in the same firmware image did not call it and hand-rolled that sequence
 instead:
 
 - `http/ota_http_esp.c:397-415` (esp update)
@@ -197,8 +201,12 @@ have no `X-Ota-Mac` check at all -- any request to either route is accepted
 unauthenticated. The main app authenticates the equivalent operations: its
 boot_guard-reset path only runs after `flash_firmware()`'s own verified
 post-flash success calls it with an `ap_password` (see CLAUDE.md's flash section),
-and `sw_reset_http.c` claims `ota_http_verify_request(OTA_HTTP_CONTEXT_SW_RESET,
-...)` before acting, per `ota_http.c:402-417`'s context table. The recovery
+and, at the time of this finding, `sw_reset_http.c` claimed
+`ota_http_verify_request(OTA_HTTP_CONTEXT_SW_RESET, ...)` before acting, per
+`ota_http.c`'s context table -- that table (and the whole main-app X-Ota-Mac
+scheme it served) was removed outright by `f0643c98` (2026-09-29); the main
+app's `sw_reset_http.c` now gates on ADMIN-tier session auth alone
+(route_tier_table.h). The recovery
 image's two equivalents are reachable by anyone who can reach the board's
 recovery-mode AP with no password check at all. This is a real gap on the more
 privileged of the two images (recovery mode already implies OTA write access via

@@ -55,7 +55,8 @@ extern "C" {
  * previously-uninstrumented tasks that plan's section listed (kiln_io_owner,
  * thermo_owner, screen_idle, spi_owner, i2c_owner, autotune_engine,
  * telemetry_log, link_watchdog, info_uart_bridge, gpio_probe, the LVGL task,
- * boot_button, danger_mode, recovery_exit_reboot, ota_rollback_reboot,
+ * boot_button (deleted 2026-09-29 with the AP-password HMAC scheme;
+ * historical count only), danger_mode, recovery_exit_reboot, ota_rollback_reboot,
  * ota_pico_rollback -- 16 new registrations) on top of the 12 already
  * registered. Exact occupancy after this change: 28/28, no spare slots left
  * -- the next task added here needs another bump, not a silent overflow (see

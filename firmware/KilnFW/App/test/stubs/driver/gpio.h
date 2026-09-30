@@ -2,15 +2,14 @@
 // empty (added 2026-08-21 for wifi_prov.c's host tests, which only reach
 // this header through settings.h and never expand a GPIO-typed macro).
 //
-// Extended 2026-08-22 for boot_button.c's host tests (test_boot_button.c),
-// which #includes boot_button.c directly (same convention as
-// test_boot_guard.c/test_watchdog_cfg.c) -- the pure boot_button_step()/
-// state_refuses_bypass() logic under test never calls gpio_config()/
-// gpio_get_level() (only boot_button_start()/the poll task do, and the
-// tests never call either), but the whole translation unit still has to
-// compile and LINK, so these need real (if trivial) definitions, not just
-// declarations. Values/behavior here are never asserted against by any
-// test -- only "the identifiers exist and the call compiles" matters.
+// Extended 2026-08-22 for boot_button.c's host tests (test_boot_button.c,
+// same convention as test_boot_guard.c/test_watchdog_cfg.c) -- both
+// boot_button.c and its test were deleted 2026-09-29 along with the
+// AP-password HMAC scheme, but other stubs under drivers/ still need real
+// (if trivial) gpio_config()/gpio_get_level() definitions to compile and
+// LINK, so this stub is kept for them. Values/behavior here are never
+// asserted against by any test -- only "the identifiers exist and the call
+// compiles" matters.
 #ifndef TEST_STUB_DRIVER_GPIO_H
 #define TEST_STUB_DRIVER_GPIO_H
 

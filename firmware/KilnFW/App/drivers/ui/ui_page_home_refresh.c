@@ -244,9 +244,10 @@ void ui_home_refresh_cb(lv_timer_t *timer)
         } else if (auth_reset_gesture_is_armed_and_live(auth_reset_gesture_singleton(),
                                                           (uint32_t)(hal_time_now_us() / 1000))) {
             /* docs/WEB_AUTH_PLAN.md item 10 step 4's "AUTH RESET ARMED --
-             * confirm within 30 s" banner. Ranked below the OTA-bypass and
-             * live-safety-trip banners above (same "reads first if somehow
-             * both are live" ordering this strip already uses elsewhere),
+             * confirm within 30 s" banner. Ranked below the live-safety-trip
+             * banner above (the BOOT-button OTA-auth bypass banner that used
+             * to also rank above this was retired 2026-09-29, see the
+             * comment above the safety-trip branch),
              * above the config-quarantine branches below: this is a live,
              * time-boxed operator action in progress and deserves more
              * visibility than an informational config warning. Reused
@@ -259,8 +260,9 @@ void ui_home_refresh_cb(lv_timer_t *timer)
              * e.g. after an OTA rollback past a schema bump, or older than
              * its migration chain can consume) and is running/would run on
              * firmware-default PID gains -- profile_executor_run.c refuses
-             * to start a firing in this state. Below OTA bypass (a live
-             * network exposure) and a live safety trip on purpose, same
+             * to start a firing in this state. Below a live safety trip on
+             * purpose (the OTA-bypass banner once ranked here too, retired
+             * 2026-09-29 -- see the comment above the safety-trip branch), same
              * ordering as main_page.html's renderZonesConfigLoadFault().
              * Short by necessity: 96-char strip, 480x320, no scrolling. No
              * "fire anyway" affordance here either -- see
@@ -286,8 +288,9 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                  * own hooks into the divergence/ceiling gates it reuses).
                  * Ranked above the migration-persist warning below (that one
                  * is informational only; this one means heat is actively
-                 * refused right now), below a live safety trip and the OTA
-                 * bypass banner. Same 96-char/no-scroll strip; the full
+                 * refused right now), below a live safety trip (the
+                 * OTA-bypass banner once ranked here too, retired
+                 * 2026-09-29). Same 96-char/no-scroll strip; the full
                  * reason (names the remedy) is on the web dashboard only --
                  * this literal is the short form that fits here. */
                 lv_label_set_text(s_ui_home_trip_strip,

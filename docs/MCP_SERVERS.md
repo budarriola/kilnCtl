@@ -396,8 +396,8 @@ resends. None of these functions takes an `ap_password` argument any more,
 and `KILNCTL_AP_PASSWORD` is no longer read anywhere in this path. On the
 firmware side, all nine routes are still `ROUTE_TIER_ADMIN` in
 `route_tier_table.h`, but `ota_http_authenticate_request()` (`ota_http.c`)
-is now a no-op stub that always returns `true` -- `GET /api/ota/challenge`
-and the HMAC verify path were deleted. **This supersedes the "named
+was deleted outright (`f0643c98`), along with `GET /api/ota/challenge`
+and the HMAC verify path. **This supersedes the "named
 exception" text in `docs/WEB_AUTH_PLAN.md` item 2b** ("with web auth off,
 these nine routes keep the legacy AP-password-only gate"): with web auth
 off, these nine routes are now exactly as open as every other ADMIN route,

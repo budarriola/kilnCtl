@@ -39,7 +39,7 @@ hash the client computes is a SHA-256 for logging (`:220`), which is never
 compared against the ESP's CRC. Item 1: clean. Item 4: definitively **not**
 multipart, on the client side by construction and on the ESP side by the
 handler reading the body as an opaque stream with no boundary parsing at all
-(`ota_http_pico.c:169-217`); `ota_http.h:269-270` states the same ("same raw
+(`ota_http_pico.c:169-217`); `ota_http.h:261` states the same ("same raw
 (non-multipart) byte-stream body").
 
 **`written` and the CRC are computed over exactly the same bytes.** This was the
@@ -117,7 +117,7 @@ across chunks then a final XOR, per esp_rom_crc.h's own 'add ~ at the beginning
 and the end' chaining recipe". That is a misreading of the header. The header's
 "add ~" note describes what the ROM function does *for* the caller; the comment
 took it as an instruction *to* the caller and applied the inversions a second
-time. `ota_http.h:277-282` repeats the same false claim, stating the value is
+time. `ota_http.h:269-270` repeats the same false claim, stating the value is
 "byte-for-byte what the Pico's own read-back CRC will compute" — it never is.
 
 The Pico side is correct and is not implicated. `bootloader_crc32()`
@@ -208,7 +208,7 @@ call site into line with every other CRC call site in the repo:
 2. `:206` — delete the `crc ^= 0xFFFFFFFFu;` final-XOR line entirely.
 3. `:58-65` — correct the doc comment, which currently asserts the wrong recipe
    and would otherwise re-teach the same error. Correct the matching claim at
-   `ota_http.h:277-282` too.
+   `ota_http.h:269-270` too.
 
 The chaining at `:193` is already right and needs no change.
 

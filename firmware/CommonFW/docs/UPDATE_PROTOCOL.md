@@ -121,12 +121,14 @@ login off", `docs/WEB_AUTH_PLAN.md` item 2b): the AP-password challenge/HMAC
 scheme described in this section was removed outright from the nine
 main-app routes named below. `ROUTE_TIER_ADMIN` is now their only gate,
 unconditionally — including with web auth off, where they are exactly as
-open as every other ADMIN route. `GET /api/ota/challenge` and
-`ota_http_verify_request()` no longer exist in `ota_http.c`;
-`ota_http_authenticate_request()` is a no-op stub that always returns
-`true`. PcTools (`ota_http_client.py`) no longer sends or computes a MAC for
-these routes — it authenticates purely via the admin web session
-(`http_auth.urlopen()`), same as any other admin tool. This section is kept
+open as every other ADMIN route. `GET /api/ota/challenge`,
+`ota_http_verify_request()`, and `ota_http_authenticate_request()` were all
+deleted outright from `ota_http.c` (`f0643c98`). PcTools (`ota_http_client.py`)
+no longer sends or computes a MAC for these routes — it authenticates purely
+via the admin web session (`http_auth.urlopen()`), same as any other admin
+tool. `kilnctrl.recovery_ota_auth_client` is the still-live counterpart for
+`firmware/KilnFW_recovery/`'s own, untouched copy of this scheme (see that
+module's own header comment). This section is kept
 below for history; it describes the **separate, standalone recovery
 firmware image** (`firmware/KilnFW_recovery/`), which still implements this
 scheme unchanged on its own routes.

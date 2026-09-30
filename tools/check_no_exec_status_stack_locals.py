@@ -18,8 +18,8 @@ broadened to the whole drivers/ tree after that scan proved the pattern
 recurs across module boundaries, which then surfaced four more), spread
 across drivers/http (dashboard_exec_http.c x3, ota_http.c,
 profiles_edit_http.c), drivers/persist (telemetry_log.c), drivers/bridge
-(uart_bridge_ext_control.c, boot_button.c -- the latter list-only, see
-below), drivers/safety (danger_mode.c, safety_link_frames.c -- the latter
+(uart_bridge_ext_control.c, and formerly boot_button.c -- list-only, see
+below -- deleted 2026-09-29 along with the AP-password HMAC scheme), drivers/safety (danger_mode.c, safety_link_frames.c -- the latter
 on safety_poll_task's own PSRAM-backed 8192 B stack) and drivers/ui
 (ui_page_home_actions.c x2, ui_page_home_refresh.c, ui_page_profile_detail.c,
 screen_idle.c) -- every one on a tight-stack task (httpd 8 KB,

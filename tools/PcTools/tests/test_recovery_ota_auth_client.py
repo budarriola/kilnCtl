@@ -106,12 +106,13 @@ class SignedPostTest(unittest.TestCase):
                 return _fake_response(json.dumps({"nonce": "22" * 16}).encode("utf-8"))
             captured["url"] = req.full_url
             captured["mac"] = req.get_header("X-ota-mac")
-            return _fake_response(json.dumps({"ok": True, "boot_count": 0}).encode("utf-8"))
+            return _fake_response(b"boot_guard counter cleared")
 
         with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
             result = rec.recovery_boot_guard_reset("10.0.0.5", "the-ap-password")
 
-        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["text"], "boot_guard counter cleared")
         self.assertIn("/api/ota/esp/boot_guard_reset", captured["url"])
         expected_mac = rec.derive_mac("the-ap-password", bytes.fromhex("22" * 16),
                                        "boot-guard-reset").hex()
@@ -125,11 +126,13 @@ class SignedPostTest(unittest.TestCase):
                 return _fake_response(json.dumps({"nonce": "33" * 16}).encode("utf-8"))
             captured["url"] = req.full_url
             captured["mac"] = req.get_header("X-ota-mac")
-            return _fake_response(b'{"ok": true}')
+            return _fake_response(b"resetting")
 
         with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            rec.recovery_sw_reset("10.0.0.5", "pw")
+            result = rec.recovery_sw_reset("10.0.0.5", "pw")
 
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["text"], "resetting")
         self.assertIn("/api/sw_reset", captured["url"])
         expected_mac = rec.derive_mac("pw", bytes.fromhex("33" * 16), "sw-reset").hex()
         self.assertEqual(captured["mac"], expected_mac)
@@ -143,11 +146,13 @@ class SignedPostTest(unittest.TestCase):
             captured["url"] = req.full_url
             captured["mac"] = req.get_header("X-ota-mac")
             captured["data"] = req.data
-            return _fake_response(b'{"ok": true}')
+            return _fake_response(b"ok, rebooting into new application image")
 
         with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            rec.recovery_push_esp_image("10.0.0.5", b"fake-image-bytes", "pw")
+            result = rec.recovery_push_esp_image("10.0.0.5", b"fake-image-bytes", "pw")
 
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["text"], "ok, rebooting into new application image")
         self.assertIn("/api/ota/esp", captured["url"])
         self.assertNotIn("boot_guard", captured["url"])
         self.assertEqual(captured["data"], b"fake-image-bytes")
