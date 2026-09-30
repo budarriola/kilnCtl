@@ -472,6 +472,20 @@ def _click_then_page(ui, name: str, expected_page: str,
                 observed={
                     "click": click,
                     "attribution": immediate_attribution,
+                    # 2026-09-30 (LCD-16 bench root cause investigation,
+                    # 20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a): the page
+                    # the board was actually on right before this click is
+                    # captured above (`page_before`) for the swallow-retry
+                    # loop's own use below, but was previously discarded on
+                    # this immediate-failure path -- the one place it matters
+                    # most, since a "not_found" here is equally explained by
+                    # a genuinely absent target OR by the board never having
+                    # actually reached the page this click assumed it was on
+                    # (e.g. a prior case's best-effort navigate-home silently
+                    # failing). Recording it turns that ambiguity into
+                    # evidence instead of requiring a fresh investigation
+                    # each time it recurs.
+                    "page_before": page_before,
                     **({"swallow_retries": swallow_retries} if swallow_retries else {}),
                 },
             ),

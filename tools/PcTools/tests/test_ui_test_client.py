@@ -289,21 +289,42 @@ class EnterPinTest(unittest.TestCase):
         self.assertTrue(all(r["result"] == "ok" for r in result["digit_results"]))
         self.assertEqual(result["ok_result"]["result"], "ok")
 
-    def test_a_not_found_digit_click_does_not_raise_and_still_presses_ok(self):
+    def test_a_persistently_not_found_digit_click_does_not_raise(self):
         # A stale/closed keypad or a mistyped digit name must surface as
         # data (not_found), not an exception -- callers detect wrong-PIN vs.
         # no-keypad by polling tap-target names afterward, not by exception.
-        # The FIRST digit's not_found is retried once (2026-09-25 fix, see
-        # below); a not_found on a LATER digit is not, so this uses digit
-        # index 1 (the "2") to keep exercising the plain not-retried path.
+        # Every digit's not_found is retried once (see the interior-digit
+        # test below); this exercises the "still not_found after the retry"
+        # path for a non-first digit (index 1, the "2").
         self._reply(UI_TEST_CLICK_OK)  # digit "1"
-        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "2"
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "2", first attempt
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "2", retry -- still not_found
         for _ in range(2):
             self._reply(UI_TEST_CLICK_OK)  # digits "3", "4"
         self._reply(UI_TEST_CLICK_OK)  # OK
         result = self.client.enter_pin("1234", timeout=1.0)
         self.assertEqual(result["digit_results"][1]["result"], "not_found")
-        self.assertEqual(len(self.link.sent), 5)  # all 4 digits + OK still sent, no retry
+        self.assertEqual(len(self.link.sent), 6)  # digit "1" + 2 for "2" + "3"+"4" + OK
+
+    def test_interior_digit_not_found_retries_once_after_a_short_poll(self):
+        # 2026-09-30 (LCD-19 bench root cause, 20260930T043143Z_lcd_lcd19_
+        # rerun_0929_59c9306a/summary.json): a 6-digit wrong-PIN entry saw
+        # digits 1-5 report "ok" and digit 6 itself (an interior/last digit,
+        # not "OK") report "not_found" -- the same click-then-read race
+        # class already handled for the first digit and for "OK", just
+        # landing on a different click. One retry, after a short poll,
+        # recovers it, same as the first-digit/OK cases below.
+        for _ in range(2):
+            self._reply(UI_TEST_CLICK_OK)  # digits "1", "2"
+        self._reply(UI_TEST_CLICK_NOT_FOUND)  # digit "3", first attempt
+        self._reply(UI_TEST_CLICK_OK)  # digit "3", retry
+        self._reply(UI_TEST_CLICK_OK)  # digit "4"
+        self._reply(UI_TEST_CLICK_OK)  # OK
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][2]["result"], "ok")
+        self.assertEqual(len(result["digit_results"]), 4)
+        # 2 (digits 1,2) + 2 (digit 3: first + retry) + 1 (digit 4) + 1 (OK)
+        self.assertEqual(len(self.link.sent), 6)
 
     def test_first_digit_not_found_retries_once_after_a_short_poll(self):
         # 2026-09-25 (LCD-19 bench root cause, 20260925T170357Z_full/

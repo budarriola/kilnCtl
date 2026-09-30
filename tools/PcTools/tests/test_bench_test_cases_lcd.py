@@ -838,6 +838,24 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("not_found", fail.reason)
 
+    def test_click_itself_not_found_records_page_before_for_diagnosis(self):
+        # 2026-09-30 (LCD-16 bench investigation, 20260930T043143Z_lcd_lcd19_
+        # rerun_0929_59c9306a/summary.json): a "not_found" on 'settings'
+        # (home-only per firmware) is equally explained by a genuinely
+        # absent target OR by the board never actually having reached
+        # "home" (e.g. a prior case's best-effort navigate-home silently
+        # failing) -- the two are indistinguishable without knowing which
+        # page the board was actually on right before the click. The helper
+        # already queries get_current_page() for its own swallow-retry loop;
+        # this asserts that value is also surfaced in the FAIL's `observed`
+        # dict on the immediate-failure path, not just used internally and
+        # discarded.
+        ui = PageNavUiTest(page="temperature", page_targets={"temperature": []},
+                            nav_map={}, click_result="not_found")
+        fail, page, waited_s, _ = C._click_then_page(ui, "settings", "config")
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.observed.get("page_before"), "temperature")
+
     def test_click_inject_failed_fails_without_polling(self):
         # 2026-09-24 follow-up: lvgl_port_inject_touch() itself refused (no
         # press ever sent) -- attributed distinctly from "not_found" and,

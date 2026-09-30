@@ -245,35 +245,44 @@ class UiTestClient:
         the keypad closed mid-entry) without this method itself raising or
         guessing what that means for the case's verdict.
 
-        The FIRST digit only is retried once, after a short poll, if its
-        click comes back "not_found" -- see
+        Any digit click, and the trailing "OK" click, is retried once, after
+        a short poll, if it comes back "not_found" -- see
         ``_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S``'s comment for the observed
-        race (the keypad overlay reads as raised a moment before its
-        widgets are actually clickable). This never re-clicks a digit that
-        was already reported clicked ("ok"/"swallowed"/"verdict_unknown"/
-        anything but "not_found") -- doing so on a digit that actually
-        landed would type it twice and corrupt the PIN -- and applies to the
-        first digit and the trailing "OK" click, the two clicks in this
-        sequence not immediately preceded by another click that already
-        proved the keypad clickable: the first digit follows only the
-        keypad-raised poll (a widget-appears-but-not-yet-clickable race, per
-        the comment above), and "OK" is the first click after `pin`'s LAST
-        digit -- one click removed from the last CONFIRMED-landed one, on a
-        run of clicks with no inter-click poll. 2026-09-25 bench evidence
+        race (a widget reads as raised/present a moment before it is
+        actually clickable). This never re-clicks a digit that was already
+        reported clicked ("ok"/"swallowed"/"verdict_unknown"/anything but
+        "not_found") -- doing so on a digit that actually landed would type
+        it twice and corrupt the PIN. 2026-09-25 bench evidence
         (20260925T191709Z_lcd/summary.json): all 6 wrong-PIN digit clicks
-        reported "ok", yet the trailing "OK" click reported "not_found" --
-        the same class of race as the first digit, just on the closing click
-        instead of the opening one, so it gets the same one-shot retry
-        rather than a new mechanism. This never re-clicks an "OK" that was
-        already reported clicked ("ok"/"swallowed"/"verdict_unknown"/
-        anything but "not_found"), for the same reason the first-digit retry
-        doesn't: re-clicking a landed OK submits/resubmits, corrupting the
-        wrong-PIN-reset or granted-PIN path it just triggered.
+        reported "ok", yet the trailing "OK" click reported "not_found".
+        2026-09-30 bench evidence (20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a/
+        summary.json): digits 1-5 of a 6-digit wrong-PIN entry reported "ok",
+        and digit 6 itself (not "OK") reported "not_found" -- the same race,
+        just landing on an interior digit instead of the first one or the
+        trailing "OK", proving the race is not specific to either endpoint of
+        the sequence. The retry therefore now applies to every digit click,
+        not only the first -- always gated on "not_found" so a click already
+        confirmed to have landed is never re-sent, since re-clicking a
+        landed "OK" would submit/resubmit and corrupt the wrong-PIN-reset or
+        granted-PIN path it just triggered.
         """
         digit_results = []
-        for index, ch in enumerate(pin):
+        for ch in pin:
             click = self.click_by_name(ch, timeout=timeout)
-            if index == 0 and click.get("result") == "not_found":
+            if click.get("result") == "not_found":
+                # 2026-09-30 (LCD-19 bench evidence, 20260930T043143Z_lcd_lcd19_rerun):
+                # a 6-digit wrong-PIN entry saw digits 1-5 all report "ok" and
+                # digit 6 (the LAST digit, not "OK") report "not_found" --
+                # the same "widget momentarily not clickable" race this
+                # method already retried for the first digit (keypad just
+                # raised) and for "OK" (post-last-digit transition), just
+                # landing on a different digit this time. There is nothing
+                # about the race that is actually specific to index 0 -- any
+                # digit click can land in the same momentary window -- so the
+                # one-shot retry now applies to every digit, not only the
+                # first. This never re-clicks a digit already reported
+                # clicked (anything but "not_found"), for the same
+                # corrupt-the-PIN reason given above for "OK".
                 time.sleep(_ENTER_PIN_FIRST_DIGIT_RETRY_POLL_S)
                 click = self.click_by_name(ch, timeout=timeout)
             digit_results.append(click)
