@@ -2542,6 +2542,49 @@ class Lcd19Test(unittest.TestCase):
         self.assertIsNone(result.observed.get("right_pin_started"))
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
+    def test_right_pin_started_stays_none_when_post_submit_reads_never_stabilize(self):
+        # 2026-09-30 review finding: `names is not None` alone is not
+        # enough -- `_wait_stable_names` can time out on a real, non-empty
+        # read that never repeated (e.g. the confirm dialog's own tap-target
+        # set still changing between polls), which is exactly as
+        # inconclusive as an empty/timeout read. Model that by alternating
+        # between two different non-empty, "Cancel"-only (no "OK") sets
+        # forever after the right PIN is submitted -- never a stable
+        # 2-in-a-row repeat -- and confirm right_pin_started stays None
+        # (INCONCLUSIVE), not a fabricated False from trusting the last,
+        # never-repeated read.
+        class _AlternatingAfterRightPinUiTest(PinKeypadUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._confirm_read_n = 0
+
+            def list_tap_targets(self):
+                if self._state == "confirm":
+                    self._confirm_read_n += 1
+                    # Two different non-empty sets, alternating every read --
+                    # both lack "OK" and contain "Cancel" (a naive
+                    # `names is not None` check would happily accept
+                    # either), but neither ever repeats back-to-back.
+                    if self._confirm_read_n % 2 == 1:
+                        names = ["Start", "Cancel"]
+                    else:
+                        names = ["Start", "Cancel", "Extra"]
+                    return {"targets": [{"name": n, "hidden": False} for n in names], "truncated": False}
+                return super().list_tap_targets()
+
+        ui = _AlternatingAfterRightPinUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C, "_PIN_SUBMIT_POLL_TIMEOUT_S", 0.05):
+            result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("keypad_raised"), True)
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertIsNotNone(result.observed.get("after_right_pin_names"))  # last read kept for diagnostics
+        self.assertEqual(result.observed.get("after_right_pin_stabilized"), False)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
     def test_stop_raises_keypad_is_gated(self):
         # Owner decision 2026-09-28 ("stop needs login. there is an estop
         # button"): with the session locked, a Stop tap must raise the PIN
@@ -3060,10 +3103,31 @@ class Lcd19OverlayFixesTest(unittest.TestCase):
 
     def test_wait_stable_names_discards_empty_reads_from_the_streak(self):
         ui = _EmptyThenRealUiTest(real_names=["1", "2", "OK", "Cancel"], empty_reads=2)
-        names, _elapsed, empty_polls, _trunc = C._wait_stable_names(
+        names, _elapsed, empty_polls, _trunc, stabilized = C._wait_stable_names(
             ui, timeout_s=1.0, interval_s=0.01, stable_reads=2)
         self.assertEqual(names, {"1", "2", "OK", "Cancel"})
         self.assertEqual(empty_polls, 2)
+        self.assertTrue(stabilized)
+
+    def test_wait_stable_names_reports_unstabilized_when_reads_never_repeat(self):
+        # A real (non-empty) read every poll, but it keeps changing right up
+        # to the timeout -- never repeating `stable_reads` times in a row.
+        # `stabilized` must come back False so a caller doesn't mistake the
+        # last-seen read for a settled answer.
+        class _AlwaysDifferentUiTest(FakeUiTest):
+            def __init__(self):
+                super().__init__(page="home", targets=[])
+                self._n = 0
+
+            def list_tap_targets(self):
+                self._n += 1
+                return {"targets": [{"name": f"x{self._n}", "hidden": False}], "truncated": False}
+
+        ui = _AlwaysDifferentUiTest()
+        names, _elapsed, empty_polls, _trunc, stabilized = C._wait_stable_names(
+            ui, timeout_s=0.1, interval_s=0.01, stable_reads=2)
+        self.assertIsNotNone(names)  # last read is still recorded for diagnostics
+        self.assertFalse(stabilized)
 
     # -- Fix 2: dismiss requires real evidence, never a bare "ok" click --
 

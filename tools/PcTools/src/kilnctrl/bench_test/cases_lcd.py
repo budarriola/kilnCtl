@@ -2305,7 +2305,8 @@ def _wait_for_overlay_names(ui, present: bool, timeout_s: Optional[float] = None
 
 def _wait_stable_names(ui, timeout_s: Optional[float] = None,
                         interval_s: Optional[float] = None,
-                        stable_reads: int = 2) -> "tuple[Optional[set], float, int, bool]":
+                        stable_reads: int = 2
+                        ) -> "tuple[Optional[set], float, int, bool, bool]":
     """Poll :func:`_lcd19_overlay_raw` until the same real (non-empty)
     listing is read ``stable_reads`` times in a row, or `timeout_s`
     elapses. Unlike :func:`_wait_for_overlay_names`, this does not wait for
@@ -2322,19 +2323,38 @@ def _wait_stable_names(ui, timeout_s: Optional[float] = None,
     real reads spaced by `interval_s` at least rule out catching a
     genuinely in-flight LVGL transition. Never raises; a set that never
     stabilizes within `timeout_s` is still returned honestly (whatever the
-    last read was, even a non-None one that never repeated).
+    last read was, even a non-None one that never repeated) -- see the
+    `stabilized` return value below for telling that case apart from a real
+    stable read.
 
-    Returns ``(names, elapsed_s, empty_polls, truncated_seen)`` -- see
-    :func:`_lcd19_poll_overlay`."""
+    Returns ``(names, elapsed_s, empty_polls, truncated_seen, stabilized)``.
+    The first four are as :func:`_lcd19_poll_overlay`; `names` is still the
+    LAST read even when it never stabilized (kept for diagnostics -- see
+    `_entry_result_summary`'s docstring on root-causing an INCONCLUSIVE from
+    `observed` alone). `stabilized` is True only when that last read was
+    actually the `stable_reads`-th repeat in a row; a caller must gate any
+    refused/started verdict on `stabilized`, not merely on `names is not
+    None` -- a read that changed right up to the timeout (e.g. two
+    different non-empty, still-transitioning sets) is exactly as
+    inconclusive as an empty/timeout read, and treating it as a real
+    answer produced a false FAIL (2026-09-30 bench review)."""
+    stabilized_holder = [False]
+
     def _satisfied(n: Optional[set], history: "list[Optional[set]]") -> bool:
         if n is None:
+            stabilized_holder[0] = False
             return False
         real = [x for x in history if x is not None]
         if len(real) < stable_reads:
+            stabilized_holder[0] = False
             return False
-        return all(x == real[-1] for x in real[-stable_reads:])
+        stable = all(x == real[-1] for x in real[-stable_reads:])
+        stabilized_holder[0] = stable
+        return stable
 
-    return _lcd19_poll_overlay(ui, _satisfied, timeout_s, interval_s)
+    names, elapsed_s, empty_polls, truncated_seen = _lcd19_poll_overlay(
+        ui, _satisfied, timeout_s, interval_s)
+    return names, elapsed_s, empty_polls, truncated_seen, stabilized_holder[0]
 
 
 def _entry_result_summary(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2572,21 +2592,27 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # own button set never changes -- debounce two
                             # stable reads rather than trusting one
                             # immediate (tautologically "OK present") read.
-                            names, _, empty_polls, truncated_seen = _wait_stable_names(
+                            names, _, empty_polls, truncated_seen, stabilized = _wait_stable_names(
                                 ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
                             state["after_wrong_pin_names"] = sorted(names) if names is not None else None
                             if empty_polls:
                                 state["after_wrong_pin_empty_polls"] = empty_polls
                             if truncated_seen:
                                 state["after_wrong_pin_truncated"] = truncated_seen
-                            # `names is None` (every read within the poll
-                            # window came back empty/timeout) must leave
-                            # `wrong_pin_refused` at its initial `None` --
-                            # INCONCLUSIVE, never a fabricated "not refused"
-                            # False. `names is not None and ...` would
-                            # short-circuit straight to `False` here, which
-                            # is exactly the 2026-09-30 bug this guard fixes.
-                            if names is not None:
+                            if not stabilized:
+                                state["after_wrong_pin_stabilized"] = False
+                            # A non-stabilized last read -- whether `None`
+                            # (every read within the poll window came back
+                            # empty/timeout) OR a real, non-empty read that
+                            # was still changing at the timeout (e.g. two
+                            # different non-empty sets, never repeating) --
+                            # must leave `wrong_pin_refused` at its initial
+                            # `None`, never a fabricated "not refused"
+                            # False. Gating on `names is not None` alone
+                            # (2026-09-30 fix) still missed the
+                            # still-changing case; gating on `stabilized`
+                            # (2026-09-30 review fix) covers both.
+                            if stabilized:
                                 wrong_pin_refused = "OK" in names and "Cancel" in names
                         # else: leave wrong_pin_refused at None -- the PIN
                         # typed on the board wasn't actually the intended
@@ -2604,23 +2630,28 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # the default 2.0s timeout -- so this poll gets
                             # its own longer, named timeout rather than
                             # racing the transition.
-                            names, _, empty_polls, truncated_seen = _wait_stable_names(
+                            names, _, empty_polls, truncated_seen, stabilized = _wait_stable_names(
                                 ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
                             state["after_right_pin_names"] = sorted(names) if names is not None else None
                             if empty_polls:
                                 state["after_right_pin_empty_polls"] = empty_polls
                             if truncated_seen:
                                 state["after_right_pin_truncated"] = truncated_seen
-                            # `names is None` must leave `right_pin_started`
-                            # at its initial `None` -- INCONCLUSIVE, never a
-                            # fabricated "did not start" False. See the
-                            # `wrong_pin_refused` comment above for why the
-                            # old `names is not None and ...` one-liner was
-                            # wrong: it collapsed a read timeout straight to
-                            # `False`, producing the false FAIL
-                            # ("the correct PIN did not start the firing")
-                            # seen in both 2026-09-30 bench runs.
-                            if names is not None:
+                            if not stabilized:
+                                state["after_right_pin_stabilized"] = False
+                            # A non-stabilized last read -- `None` (every
+                            # read empty/timeout) OR a real, still-changing
+                            # read that never repeated -- must leave
+                            # `right_pin_started` at its initial `None`,
+                            # never a fabricated "did not start" False. See
+                            # the `wrong_pin_refused` comment above: gating
+                            # on `names is not None` alone (2026-09-30 fix)
+                            # still let a still-transitioning, never-
+                            # repeating non-empty read at timeout produce a
+                            # false FAIL ("the correct PIN did not start the
+                            # firing"); gating on `stabilized` (2026-09-30
+                            # review fix) covers that case too.
+                            if stabilized:
                                 right_pin_started = "OK" not in names and "Cancel" in names
             else:
                 baseline = _lcd19_overlay_names(ui)
