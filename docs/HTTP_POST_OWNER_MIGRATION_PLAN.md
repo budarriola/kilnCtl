@@ -295,6 +295,12 @@ per import using the existing `_no_save` setter pattern (e.g.
 `zones_config_accessors.c:818`) to cut the ~61 s further. This closes the "remains open for a future bench session" note
 from the original slice.
 
+**NVS-save batching landed and bench-measured (2026-09-30).** The backlog item
+above landed as `c22ff081`/`5d0a2756`/`7b107411` (single trailing save per
+store, RAM rollback on a mid-batch setter failure, Pico ceiling tracked
+post-import). A fresh-export/import round trip on the bench measured 0.80 s,
+down from the ~61 s figure above.
+
 ## Not worth doing, with reasons
 
 | Routes | Reason |

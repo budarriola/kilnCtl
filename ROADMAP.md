@@ -34,10 +34,15 @@
 > after import/rollback. **In progress:** the LCD "edit current firing"
 > screen is in Opus review; Wi-Fi AP fallback with auto-reconnect to the
 > home network when no web users are logged in is being implemented.
-> **Pending bench work:** flash the landed firmware above; verify LCD-19
-> and the login gates on real hardware; bench-verify the live-edit feature
-> end to end; re-measure `backup_import` timing after the NVS-save
-> batching.
+> **Pending bench work:** flash the landed firmware above; verify the login
+> gates on real hardware; bench-verify the live-edit feature end to end.
+> **Bench rerun sweep, 2026-09-30 (`4de7b489`):** heat suite HP-01..08 reran
+> clean 8/8 PASS on the dwell-fault-panic and same-zone start-race fixes
+> (`773ec669`, `540b2d72`); `backup_import` round trip re-measured at 0.80 s
+> post the NVS-save batching fix (`c22ff081`/`5d0a2756`/`7b107411`), down
+> from ~61 s. LCD-19 reran still INCONCLUSIVE and a new LCD-16 nav anomaly
+> (`click_by_name('settings')` -> `not_found`) was flagged; both under
+> investigation, not yet root-caused.
 > **2026-09-27:** the system-mode gate's last deferred slice (2, "recovery
 > wording") landed: `system_mode_
 > gate_check()` now runs inside `profile_executor_run()`'s and
@@ -4151,16 +4156,25 @@ Owner instruction, 2026-09-21.
   (`ui_lcd_lock.c`, `security_backend_web_auth.c`) is correct. Fix (a
   baseline-then-changed wait) has landed: `_wait_for_overlay_names()` in
   `cases_lcd.py` takes a `baseline` and waits for the set to change (on main at
-  59c9306a). Only the bench rerun remains.
+  59c9306a). **Bench rerun 2026-09-30** (`20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`):
+  still INCONCLUSIVE -- "could not exercise: wrong_pin_refused, right_pin_started,
+  stop_gated" even with `KILNCTL_LCD_PIN` set, so the original NOT_RUN/missing-PIN
+  case is ruled out but the case still can't complete; under investigation, not
+  chased further in that run. Same rerun also surfaced a new LCD-16 FAIL
+  (`click_by_name('settings')` -> `not_found`), unrelated to any fix under test
+  here; also under investigation.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,
-  `test_autotune_engine_prestart.c`, `test_link_watchdog.c`). **Not yet
-  flashed to the bench** -- ESP is still `111b1b6f`; add to the next reflash.
+  `test_autotune_engine_prestart.c`, `test_link_watchdog.c`). Confirmed flashed
+  to the bench and reran clean 2026-09-30 (`20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72`,
+  HP-01..08 all PASS) -- see the top-of-file entry above.
 - [x] Root-cause and fix the `profile_executor` dwell-fault panic hit by heat
   run `20260924T085059Z_heat` — done, 2026-09-24 (`3ce065ca` audit, `773ec669`
   fix, `adc7f65c` comment correction; see the top-of-file entry above).
-  **Still pending: rerun** the heat suite against this fix — no rerun yet.
+  **Rerun done 2026-09-30, PASS:** heat suite `20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72`
+  ran HP-01 through HP-08 all PASS, no panic/reboot/trip during the run --
+  first clean 8/8 heat-suite PASS recorded for this fix pair.
 - [x] Add a bench board lock so concurrent heat/mutating runs cannot share one
   board — done, 2026-09-24 (`d5bfac19`, `759660c2`; see the top-of-file entry
   above).
@@ -4177,8 +4191,11 @@ Owner instruction, 2026-09-21.
   reclaimers on an O_EXCL mutex file, publish-then-check ordering on both
   reader and mutating sides. See the top-of-file entry above.
 - [x] Fix the LCD bench runner click-then-read race and per-frame capture
-  naming -- done, 2026-09-24 (`93355ee9`). **Still pending: rerun** the LCD
-  suite against this fix -- no rerun yet.
+  naming -- done, 2026-09-24 (`93355ee9`). **Reran 2026-09-30**
+  (`20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`): LCD-08/09/14/21 PASS,
+  LCD-01 INCONCLUSIVE on camera exposure/cast (pre-existing limitation, not
+  a firmware defect); no recurrence of the click-then-read FAIL shape this
+  fix targeted.
 - [x] Replace the email forgot-password design with TOTP -- done, 2026-09-24
   (`84fa2e7b`, owner change); WT-C and WT-D landed; **WT-B landed**
   (`62f8bd4e`, gesture follow-up `cafc80f3`); WT-A (firmware routes) landed
@@ -4224,8 +4241,10 @@ Owner instruction, 2026-09-21.
   restored each store; it now uses `_no_save` setter variants for the hot
   paths with one trailing save per store, a RAM rollback if a mid-batch
   setter fails partway through, and tracks the Pico's `abs_max_temp_c`
-  ceiling down after import/rollback. Still pending: re-measure the actual
-  timing win on the bench.
+  ceiling down after import/rollback. **Bench-measured 2026-09-30:** a
+  fresh-export/import round trip (`backup_export()` -> `backup_import()`)
+  completed in 0.80 s (synchronous route), down from the ~61 s pre-fix
+  measurement; readiness unchanged before/after.
 - [x] **Web dashboard: drop the "Previous firing ended" card after a normal
   or deliberate stop, landed (`fd792793`).** The card now shows only for an
   *unexpected* end (fault/trip/crash) — a normal Stop or a profile reaching
@@ -4325,9 +4344,8 @@ Owner instruction, 2026-09-21.
     gates, AP-fallback radio timing and the LCD's "[AP kept up]" render;
     measure `wifi_prov_owner` stack margin under the new fallback logic
     (its stack-budget table entry landed 2026-09-29, `0de1a334`, but the
-    live bench measurement is still open); re-measure `backup_import`
-    timing now that NVS-save batching has landed; measure
-    `crash_report/clear` latency; verify the `d3c4c826` AP-teardown fix on
+    live bench measurement is still open); measure `crash_report/clear`
+    latency; verify the `d3c4c826` AP-teardown fix on
     hardware -- the AP tears down after rejoin even while a LAN admin
     session stays active, and an AP client sees `ap_password` in `/status`
     while a LAN client does not.

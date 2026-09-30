@@ -403,10 +403,15 @@ FAILed LCD-19 ("Start tap after the LCD timeout did not raise the PIN keypad",
 in `cases_lcd.py` exiting on any non-empty tap-target set — the home page's
 own buttons satisfy it before LVGL processes the click (the case ran 0.92 s
 against its 2.0 s timeout). Firmware force-lock-on-enable (`ui_lcd_lock.c`,
-`security_backend_web_auth.c`) is correct; no firmware defect. A fix (wait for
+`security_backend_web_auth.c`) is correct; no firmware defect. Fix (wait for
 the tap-target set to change from its pre-tap baseline, not merely be
-non-empty) is in flight in the LCD runner round 3 commit. Runner fix pending,
-rerun required.
+non-empty) landed as `59c9306a`. **Bench rerun 2026-09-30**
+(`20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`): still INCONCLUSIVE --
+"could not exercise: wrong_pin_refused, right_pin_started, stop_gated" even
+with `KILNCTL_LCD_PIN` set, so the runner fix ruled out the missing-PIN case
+but the case still cannot complete; under investigation. The same rerun also
+surfaced a new LCD-16 FAIL (`click_by_name('settings')` -> `not_found`),
+unrelated to this fix; also under investigation.
 
 **Wave 3 â€” full (after 2).** AT-01..05 with rest gates, HP-03/HP-07, OT-E04..E10, FL-10/11 opt-in, WEB-SEC-05 last, `--attended` operator prompts for SP-08/09, WEB-WIFI-06, OT-E06. Touches the new package only. **AT/HP part DONE (2026-09-19):** `cases_autotune.py` (AT-01..05) and `cases_heat.py`'s `_case_hp03`/`_case_hp07` added, judges in `judgments.py`, unit-tested only (bench board still blocked by the unacknowledged crash report). **OT part DONE (2026-09-19):** OT-E04..E10 in `cases_ota.py`, with the Â§6 rule 1 live-interlock gate wired into every OTA action and OT-B01's dual reset additionally gated on relays de-energized. **FL/SEC/attended part DONE (2026-09-19):** FL-10/FL-11 (opt-in `allow_flash`), WEB-SEC-05 (ordered dead last), WEB-WIFI-06, SP-08/SP-09 via the new `--attended` operator-prompt mechanism (`operator.py`).
 
