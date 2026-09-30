@@ -3176,11 +3176,14 @@ because it changes what a bare main board will do.
       three current channels read 0.00 A because no CT is fitted. Both are
       honest reporting of absent hardware, not a code gap and no longer an
       M0 consequence
-- [ ] **AP-fallback fix unverified end to end** — needs a router with both
-      correct and deliberately-wrong static config; the bench hotspot
-      (`docs/BENCH_HOTSPOT.md`, 2026-09-24) now supplies the second AP, so
-      this is no longer blocked on that piece — the test itself is still not
-      run; see `KilnFW/TODO.md` Wi-Fi
+- [x] **AP-fallback end to end, PASSED 2026-09-29** (`docs/BENCH_TEST_LOG.md`
+      Test B): home network made unreachable (forget + forced mode-cycle —
+      `wifi_forget` on the associated SSID does not itself force a
+      disconnect), the board's own SoftAP came back up, home was restored via
+      `wifi_add_network`, and the board rejoined with the saved-network list
+      matching baseline. Still open: a router with deliberately-wrong static
+      config was not part of this run — that specific scenario is untested;
+      see `KilnFW/TODO.md` Wi-Fi
 
 **2026-08-20: a large batch of UI, Wi-Fi, and boot-stability bugs were found
 and fixed during a full hardware test pass** — profile/readiness reporting,
@@ -3723,7 +3726,10 @@ Owner instruction, 2026-09-21.
    `estop_verified` as `not_done` (board-state fact, no commit).
 3. Live-edit bench exercise: kilnctrl MCP tools landed (`bb61aac9`, fixes
    `c7d57ecc`/`75641b82`) — `profile_live_get`/`fork`/`edit`/`decide` for
-   `/api/profile/live`'s five routes. Bench exercise itself still pending.
+   `/api/profile/live`'s five routes. **Bench exercise PASSED, 2026-09-29**
+   (`docs/BENCH_TEST_LOG.md` Test A): short 45/48C firing, fork, in-bounds
+   edit accepted, out-of-bounds edit refused 400, `zone_mask` change on the
+   running segment refused 409, discard, stop — no trip, no reboot.
 4. LCD blue profile button: CLOSED by owner decision, 2026-09-21 — code
    review of `UI_THEME_ACCENT_BLUE` accepted as sufficient given the
    camera's specular-glare limit on this region. **Addendum, 2026-09-23:**
@@ -4307,13 +4313,24 @@ Owner instruction, 2026-09-21.
     `WEB_AUTH_TIMEOUT_NEVER_S` policy now defers teardown only while an AP
     station is also actually associated, so one AP login under a never-expire
     policy can't pin the AP up forever.
+  - **Live-edit feature bench-verified end to end, 2026-09-29 PASS** — see
+    M18 item 3 above and `docs/BENCH_TEST_LOG.md` Test A.
+  - **AP fallback/restore cycle bench-verified, 2026-09-29 PASS**
+    (`docs/BENCH_TEST_LOG.md` Test B: home lost, board's own SoftAP came up,
+    home restored, saved-network list matched baseline, no reboot). Still
+    open: AP-fallback radio timing and the LCD's "[AP kept up]" render were
+    not confirmed this run (LCD capture came back unreadable/black).
   - **Pending bench work (not yet done):** flash the landed firmware above
     to the bench board; hardware-verify the LCD edit-firing page, the login
     gates, AP-fallback radio timing and the LCD's "[AP kept up]" render;
-    bench-verify the live-edit feature end to end; measure `wifi_prov_owner`
-    stack margin under the new fallback logic; re-measure `backup_import`
+    measure `wifi_prov_owner` stack margin under the new fallback logic
+    (its stack-budget table entry landed 2026-09-29, `0de1a334`, but the
+    live bench measurement is still open); re-measure `backup_import`
     timing now that NVS-save batching has landed; measure
-    `crash_report/clear` latency.
+    `crash_report/clear` latency; verify the `d3c4c826` AP-teardown fix on
+    hardware -- the AP tears down after rejoin even while a LAN admin
+    session stays active, and an AP client sees `ap_password` in `/status`
+    while a LAN client does not.
 
 ---
 
