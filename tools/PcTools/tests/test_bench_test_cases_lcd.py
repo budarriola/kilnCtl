@@ -2585,6 +2585,84 @@ class Lcd19Test(unittest.TestCase):
         self.assertEqual(result.observed.get("after_right_pin_stabilized"), False)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
+    def test_entry_waits_for_a_stable_keypad_read_before_typing(self):
+        # 2026-09-30 fix: `keypad_raised` only proves the post-click read
+        # differed from the pre-click baseline -- it says nothing about
+        # whether the overlay-raise transition has actually settled. The
+        # normal PinKeypadUiTest fixture already reads stable immediately,
+        # so this pins that the new before-entry wait runs and passes (and
+        # is visible in `observed`) on the ordinary happy path, without
+        # changing that path's outcome.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("before_entry_stabilized"), True)
+        self.assertIn("0", result.observed.get("before_entry_names") or [])
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), True)
+
+    def test_entry_skipped_and_inconclusive_when_keypad_never_stabilizes(self):
+        # 2026-09-30 bench evidence (20260930T082643Z_lcd/082657Z_lcd): the
+        # overlay-raise transition was still settling when digit entry
+        # began, and every wrong-PIN digit click plus the trailing "OK"
+        # click came back "not_found". Model a keypad read that never
+        # settles (alternates forever) so the new before-entry stabilization
+        # wait times out honestly -- entry must never be attempted, and the
+        # case must land on INCONCLUSIVE, never FAIL.
+        class NeverStableKeypadUiTest(PinKeypadUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._keypad_read_n = 0
+
+            def list_tap_targets(self):
+                if self._state == "keypad":
+                    self._keypad_read_n += 1
+                    base = [str(d) for d in range(10)] + ["OK", "Cancel"]
+                    if self._keypad_read_n % 2 == 0:
+                        base = base + ["Extra"]
+                    return {"targets": [{"name": n, "hidden": False} for n in base], "truncated": False}
+                return super().list_tap_targets()
+
+        ui = NeverStableKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        with mock.patch.object(C, "_PIN_SUBMIT_POLL_TIMEOUT_S", 0.05):
+            with mock.patch.object(ui, "enter_pin", wraps=ui.enter_pin) as spy:
+                result = C._case_lcd19(ctx)
+        spy.assert_not_called()
+        self.assertEqual(result.observed.get("before_entry_stabilized"), False)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_all_digit_and_ok_clicks_not_found_is_inconclusive_with_marker(self):
+        # 2026-09-30 bench shape: the keypad's tap-target *reads* were
+        # stable and digit-bearing (so the new before-entry wait passes),
+        # but every digit click AND the trailing "OK" click still came back
+        # "not_found" -- consistent with each click's own 300ms
+        # UI_WALK_WAIT_TIMEOUT_MS busy window, distinct from a genuinely
+        # absent target. This must set the `entry_all_not_found` marker and
+        # stay INCONCLUSIVE, never FAIL.
+        class AllNotFoundKeypadUiTest(PinKeypadUiTest):
+            def click_by_name(self, name):
+                if self._state == "keypad" and (name in "0123456789" or name == "OK"):
+                    return {"result": "not_found"}
+                return super().click_by_name(name)
+
+        ui = AllNotFoundKeypadUiTest(right_pin="1234", wrong_pin="0000")
+        srv = FakeSrvFull(ui)
+        ctx = {"srv": srv, "sec_client": FakeLcd19SecClient(),
+               "_lcd_pin": {"right_pin": "1234", "wrong_pin": "0000"}}
+        result = C._case_lcd19(ctx)
+        self.assertEqual(result.observed.get("before_entry_stabilized"), True)
+        self.assertEqual(result.observed.get("entry_all_not_found"), True)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertIsNone(result.observed.get("right_pin_started"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
     def test_stop_raises_keypad_is_gated(self):
         # Owner decision 2026-09-28 ("stop needs login. there is an estop
         # button"): with the session locked, a Stop tap must raise the PIN

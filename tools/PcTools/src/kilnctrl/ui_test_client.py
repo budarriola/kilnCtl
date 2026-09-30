@@ -296,6 +296,7 @@ class UiTestClient:
         """
         digit_results = []
         for ch in pin:
+            click_start = time.monotonic()
             click = self.click_by_name(ch, timeout=timeout)
             if click.get("result") == "not_found":
                 # 2026-09-30 (LCD-19 bench evidence, 20260930T043143Z_lcd_lcd19_rerun):
@@ -313,11 +314,16 @@ class UiTestClient:
                 # corrupt-the-PIN reason given above for "OK".
                 time.sleep(_ENTER_PIN_RETRY_POLL_S)
                 click = self.click_by_name(ch, timeout=timeout)
+            click = dict(click)
+            click["elapsed_s"] = time.monotonic() - click_start
             digit_results.append(click)
+        ok_start = time.monotonic()
         ok_result = self.click_by_name("OK", timeout=timeout)
         if ok_result.get("result") == "not_found":
             time.sleep(_ENTER_PIN_RETRY_POLL_S)
             ok_result = self.click_by_name("OK", timeout=timeout)
+        ok_result = dict(ok_result)
+        ok_result["elapsed_s"] = time.monotonic() - ok_start
         return {"digit_results": digit_results, "ok_result": ok_result}
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> bytes:

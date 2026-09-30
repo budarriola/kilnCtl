@@ -2371,9 +2371,47 @@ def _entry_result_summary(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     without re-running against the board."""
     if not entry:
         return {"present": False}
-    digit_results = [d.get("result") for d in (entry.get("digit_results") or [])]
-    ok_result = (entry.get("ok_result") or {}).get("result")
-    return {"present": True, "digit_count": len(digit_results), "digit_results": digit_results, "ok_result": ok_result}
+    raw_digits = entry.get("digit_results") or []
+    digit_results = [d.get("result") for d in raw_digits]
+    # `elapsed_s` (2026-09-30, LCD-19 busy-timeout investigation) never
+    # identifies which digit was pressed -- unlike cx/cy it carries no
+    # positional information -- so it is safe to echo per click, and
+    # distinguishes a genuine 300ms UI_WALK_WAIT_TIMEOUT_MS busy timeout
+    # from a name that was truly never found (near-instant "not_found").
+    digit_elapsed_s = [d.get("elapsed_s") for d in raw_digits]
+    ok_result_entry = entry.get("ok_result") or {}
+    ok_result = ok_result_entry.get("result")
+    return {
+        "present": True, "digit_count": len(digit_results),
+        "digit_results": digit_results, "digit_elapsed_s": digit_elapsed_s,
+        "ok_result": ok_result, "ok_elapsed_s": ok_result_entry.get("elapsed_s"),
+    }
+
+
+#: The PIN keypad's digit buttonmatrix keys, by their literal text
+#: (ui_lcd_keypad.c's s_bm_map) -- used to confirm a stable pre-entry read
+#: actually shows the keypad's digits (not merely "OK"+"Cancel", which a
+#: Confirm dialog also has) before typing anything into it.
+_KEYPAD_DIGIT_NAMES = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
+
+
+def _entry_all_digits_not_found(entry: Optional[Dict[str, Any]]) -> bool:
+    """True only when every digit click AND the trailing "OK" click from
+    :meth:`UiTestClient.enter_pin` reported "not_found" -- the shape seen on
+    2026-09-30 (20260930T082643Z_lcd/082657Z_lcd) when every click landed
+    inside the 300ms UI_WALK_WAIT_TIMEOUT_MS busy window. Recorded as its
+    own `observed` marker so this specific "every click missed" shape is
+    distinguishable from a partial/mixed not_found without re-running
+    against the board -- see :func:`_entry_result_summary`."""
+    if not entry:
+        return False
+    digit_results = entry.get("digit_results") or []
+    if not digit_results:
+        return False
+    if not all(d.get("result") == "not_found" for d in digit_results):
+        return False
+    ok_result = entry.get("ok_result") or {}
+    return ok_result.get("result") == "not_found"
 
 
 def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
@@ -2585,8 +2623,43 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                     wrong_pin = pin_cfg.get("wrong_pin")
                     right_pin = pin_cfg.get("right_pin")
                     if wrong_pin:
+                        # 2026-09-30 (20260930T082643Z_lcd/082657Z_lcd):
+                        # `keypad_raised` only proves the post-click read
+                        # DIFFERED from the pre-click baseline -- it says
+                        # nothing about whether lvgl_port_task has finished
+                        # the raise transition. Both runs then saw EVERY
+                        # wrong-PIN digit click and the trailing "OK" click
+                        # come back "not_found" -- consistent with every
+                        # click's 300ms UI_WALK_WAIT_TIMEOUT_MS window (see
+                        # UiTestClient.click_by_name's docstring) expiring
+                        # while the overlay-raise transition was still
+                        # settling, not with the digits genuinely being
+                        # absent. Debounce a stable, digit-bearing read
+                        # before typing anything, the same way the
+                        # post-submit polls already debounce below.
+                        pre_names, _, pre_empty, pre_trunc, pre_stabilized = _wait_stable_names(
+                            ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
+                        state["before_entry_stabilized"] = pre_stabilized
+                        state["before_entry_names"] = sorted(pre_names) if pre_names is not None else None
+                        if pre_empty:
+                            state["before_entry_empty_polls"] = pre_empty
+                        if pre_trunc:
+                            state["before_entry_truncated"] = pre_trunc
+                        digits_present = (
+                            pre_stabilized and pre_names is not None and
+                            _KEYPAD_DIGIT_NAMES <= pre_names and "OK" in pre_names
+                        )
+                        if not digits_present:
+                            wrong_pin = None  # skip entry -- leave wrong_pin_refused at None (INCONCLUSIVE)
+                    if wrong_pin:
                         entry = ui.enter_pin(wrong_pin)
                         state["wrong_pin_entry"] = _entry_result_summary(entry)
+                        if entry is not None and _entry_all_digits_not_found(entry):
+                            # Distinguish "every click missed" from a
+                            # partial/mixed result so a future INCONCLUSIVE
+                            # can be told apart without re-running against
+                            # the board -- see module note above.
+                            state["entry_all_not_found"] = True
                         if _entry_all_clicked_ok(entry):
                             # A wrong PIN resets digit entry but the keypad's
                             # own button set never changes -- debounce two
@@ -2619,8 +2692,16 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # one, so no conclusion can be drawn from what
                         # follows.
                     if wrong_pin_refused and right_pin:
+                        # No separate before-entry stabilization wait here:
+                        # `wrong_pin_refused` being True already required a
+                        # STABILIZED read (`after_wrong_pin_names`, via
+                        # `_wait_stable_names` above) showing "OK"+"Cancel"
+                        # -- the same keypad, still open, not re-raised --
+                        # immediately before this entry starts.
                         entry = ui.enter_pin(right_pin)
                         state["right_pin_entry"] = _entry_result_summary(entry)
+                        if entry is not None and _entry_all_digits_not_found(entry):
+                            state["entry_all_not_found"] = True
                         if _entry_all_clicked_ok(entry):
                             # A correct PIN closes the keypad in favour of
                             # the Confirm Start dialog -- "OK" disappears.
