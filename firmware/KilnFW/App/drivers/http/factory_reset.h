@@ -1,8 +1,9 @@
 // factory_reset -- TODO.md 8.1's "decide what 'reset kiln config' means":
 // a per-partition, explicit-scope wipe, plus a factory-default option that
 // wipes all three. See factory_reset.c for the endpoint and the reboot-after-
-// erase rationale. POST /api/factory_reset is challenge-response
-// authenticated (OTA_HTTP_CONTEXT_FACTORY_RESET, ota_http.h) and interlocked
+// erase rationale. POST /api/factory_reset is ROUTE_TIER_ADMIN (the
+// challenge-response AP-password MAC it used to also require under
+// OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29) and interlocked
 // the same way every other destructive OTA route is -- see reset_post_
 // handler()'s own doc comment for why both gates run, and in that order.
 #ifndef FACTORY_RESET_H

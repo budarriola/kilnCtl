@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from .. import web_auth_setup_http_client as _wac
 from . import judgments as J
 from .registry import CaseResult, Verdict, get_case
 
@@ -747,7 +748,11 @@ def _case_ote09(ctx: dict) -> CaseResult:
     nothing written. The AP-password HMAC challenge/response scheme this
     case used to also probe was retired 2026-09-29 (WEB_AUTH_PLAN.md item
     2b); with web auth on, ROUTE_TIER_ADMIN alone is the gate this case now
-    exercises."""
+    exercises. **With web auth OFF, this route is unauthenticated by design
+    (same as every other ADMIN route once auth is off) -- an unauthenticated
+    push would then actually flash the board instead of being refused, which
+    is not what this case is testing.** So this case only runs with web auth
+    confirmed on; it SKIPs otherwise rather than risk a real flash."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
@@ -756,6 +761,19 @@ def _case_ote09(ctx: dict) -> CaseResult:
     image_path = ctx.get("ota_image_path")
     if not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E09")
+
+    web_enabled_fn = ctx.get("_web_auth_enabled_fn")
+    if web_enabled_fn is None:
+        def web_enabled_fn():
+            cfg = _wac.get_auth_config(host)
+            return bool(cfg.get("web_enabled"))
+    try:
+        web_enabled = web_enabled_fn()
+    except Exception as exc:
+        return CaseResult(Verdict.SKIP, reason=f"could not read GET /api/auth/config to confirm web auth is on: {exc}")
+    if not web_enabled:
+        return CaseResult(Verdict.SKIP, reason="web auth is off -- an unauthenticated push would really flash the "
+                                                "board instead of being refused, so OT-E09 does not run")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -781,9 +799,12 @@ def _case_ote09(ctx: dict) -> CaseResult:
 
 def _case_ote10(ctx: dict) -> CaseResult:
     """OT-E10: with web auth on (WEB-SEC-03 turned it on earlier in this
-    run), OT-E01 repeated with an ADMIN session cookie instead of the
-    AP-password HMAC must succeed, and again with a ``user``-tier session
-    must be refused. Credentials come only from ctx overrides or the
+    run), OT-E01 repeated with an ADMIN session cookie must succeed, and
+    again with a ``user``-tier session must be refused -- ROUTE_TIER_ADMIN is
+    this route's only gate now that the AP-password HMAC has been retired
+    (2026-09-29, WEB_AUTH_PLAN.md item 2b), so this case exercises that tier
+    check directly rather than a scheme replacement. Credentials come only
+    from ctx overrides or the
     ``KILNCTL_WEB_*`` environment variables (same discipline as
     cases_web_rw.py's WEB-SEC-03: never hardcoded, never logged) -- SKIP
     if either the admin or the user-tier credential pair is missing,

@@ -122,7 +122,6 @@ try {
         # under test (see that header's own doc comment for the split from
         # the EMBED_FILES-symbol wrapper, which is not host-testable).
         (Join-Path $testDir "test_pico_image_embedded.c"),
-        (Join-Path $testDir "test_boot_button.c"),
         (Join-Path $testDir "test_backlight_pwm.c"),
         (Join-Path $testDir "test_display_power_policy.c"),
         (Join-Path $testDir "test_display_power_cfg.c"),

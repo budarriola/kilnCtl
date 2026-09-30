@@ -52,6 +52,7 @@ from .protocol import (
     MsgType,
     unstuff,
 )
+from . import http_auth
 from . import ota_http_client as ota_http
 from . import probe
 from .probe import ProbeClient, ProbeQueryError
@@ -805,12 +806,20 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     before_count: Optional[int] = None
     try:
         before_count = ota_http.get_boot_guard_status(resolved).get("boot_count")
-    except ota_http.OtaHttpError as exc:
+    except (ota_http.OtaHttpError, http_auth.HttpAuthError) as exc:
         _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
                                    "only, does not block the reset call): %s", exc)
     before_str = "unknown" if before_count is None else str(before_count)
     try:
         body = ota_http.boot_guard_reset_esp(resolved)
+    except http_auth.HttpAuthError as exc:
+        # No admin session could be established (web auth is on and
+        # KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD are unset, or the login
+        # was refused) -- this is not a route failure, just "cannot try".
+        # The flash itself already landed and verified by this point, so
+        # this is reported as a skip, never as a lost flash result.
+        _srv._session_log.warning("flash_firmware: boot_guard_reset skipped, no admin session: %s", exc)
+        return "boot_guard reset skipped: no admin session"
     except ota_http.OtaHttpError as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "

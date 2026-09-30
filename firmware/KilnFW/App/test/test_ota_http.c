@@ -317,12 +317,6 @@ esp_err_t esp_ota_mark_app_invalid_rollback_and_reboot(void) { return ESP_FAIL; 
 static const char *g_stub_ap_password = "";
 const char *wifi_prov_get_ap_password(void) { return g_stub_ap_password; }
 
-// boot_button.h -- the physical-recovery bypass decision 1's ordering is
-// checked against.
-static bool g_stub_boot_button_bypass = false;
-bool boot_button_ota_bypass_active(void) { return g_stub_boot_button_bypass; }
-uint32_t boot_button_bypass_remaining_ms(void) { return g_stub_boot_button_bypass ? 5000u : 0u; }
-
 // profile_executor.h -- instrumented: ota_http_check_interlocks() calls this
 // FIRST, unconditionally, every time it runs -- used as decision 3's "did
 // the interlock check actually run" probe.

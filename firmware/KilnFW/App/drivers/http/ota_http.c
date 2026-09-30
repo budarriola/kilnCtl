@@ -29,7 +29,6 @@
 #include <math.h>
 
 #include "autotune_engine.h"
-#include "boot_button.h"
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kiln_io.h"
@@ -606,27 +605,6 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
-// See ota_http.h's doc comment above this function's declaration for the
-// full contract. Used to also require and verify an X-Ota-Mac header
-// (AP-password HMAC) -- retired 2026-09-29, WEB_AUTH_PLAN.md item 2b, owner
-// decision "Retire; open when login off": this route's ADMIN tier
-// (route_tier_table.h) is now the only gate, on or off, same as every other
-// ADMIN route. A caller that still sends an X-Ota-Mac header is not
-// refused for it -- the header is simply never read.
-bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46])
-{
-    ota_http_get_client_ip(req, ip_out, 46);
-    ESP_LOGI(OTA_HTTP_TAG, "OTA route(ctx=%d) from %s: ADMIN tier is the only gate (AP-password HMAC "
-                  "retired 2026-09-29)", (int)ctx, ip_out);
-    return true;
-}
-
-// See ota_http.h's doc comment above this function's declaration.
-bool ota_http_auth_disabled(void)
-{
-    const char *ap_password = wifi_prov_get_ap_password();
-    return !ap_password || ap_password[0] == '\0';
-}
 
 // Formats into a comfortably large scratch buffer, then copies (truncating
 // if needed, never overflowing) into the caller's smaller `dst`. Used for

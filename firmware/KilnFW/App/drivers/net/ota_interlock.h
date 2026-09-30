@@ -30,8 +30,9 @@
 // runs before EITHER a POST /api/ota/esp or a POST /api/ota/pico is allowed
 // to proceed -- there is no per-path variant of the precondition list.
 //
-// Ordering versus authentication (ota_http_authenticate_request(),
-// ota_http.h): AUTH FIRST, THEN INTERLOCKS -- revealing "zone 2 is at 340 C"
+// Ordering versus authentication (route_tier_table.h's ADMIN tier,
+// enforced by the dispatcher before any handler in ota_http.h runs): AUTH
+// FIRST, THEN INTERLOCKS -- revealing "zone 2 is at 340 C"
 // to an unauthenticated caller leaks live kiln telemetry (temperatures, run
 // state) to anyone on the LAN who can reach the endpoint. This held even
 // before the AP-password HMAC scheme was retired 2026-09-29 (WEB_AUTH_PLAN.md

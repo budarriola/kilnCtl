@@ -37,7 +37,6 @@
 #include <math.h>
 
 #include "autotune_engine.h"
-#include "boot_button.h"
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kiln_io.h"
@@ -391,13 +390,12 @@ cleanup:
 
 esp_err_t ota_esp_post_handler(httpd_req_t *req)
 {
-    // 1-2. Auth (route_tier_table.h's ADMIN tier -- the AP-password HMAC
-    // this used to also require was retired 2026-09-29) -- always succeeds;
-    // ota_http_authenticate_request() (ota_http.c) also fills `ip`.
+    // 1-2. Auth: route_tier_table.h's ADMIN tier, enforced by the dispatcher
+    // before this handler runs (the AP-password HMAC this used to also
+    // require was retired 2026-09-29). ota_http_get_client_ip() below fills
+    // `ip` for logging only.
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_ESP, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     // 3. Interlocks -- run AFTER auth (see ota_http_check_interlocks()'s own
     // doc comment for why: an unauthenticated interlock check would leak
@@ -674,9 +672,7 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // 1-2. Auth (ADMIN tier only, since 2026-09-29 -- see
     // ota_esp_post_handler() above).
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_ESP_ROLLBACK, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     // 3. Interlocks -- identical gate to POST /api/ota/esp: a rollback
     // reboots into different code just like an update does, so it is

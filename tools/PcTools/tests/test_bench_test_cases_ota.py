@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -719,6 +720,11 @@ class Ote09Test(unittest.TestCase):
             "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 401)),
             "partition_http_client": _FakePartitionClient(running="app"),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
+            # OT-E09 only runs with web auth confirmed on (an unauthenticated
+            # push with auth off would really flash the board); default the
+            # fake probe to "on" so the existing behavior-under-test tests
+            # below don't need to know about this gate.
+            "_web_auth_enabled_fn": lambda: True,
         }
         ctx.update(overrides)
         return ctx
@@ -734,6 +740,23 @@ class Ote09Test(unittest.TestCase):
 
     def test_skips_without_image_path(self):
         result = C._case_ote09(self._ctx(ota_image_path=None))
+        self.assertEqual(result.verdict, Verdict.SKIP)
+
+    def test_skips_when_web_auth_is_off(self):
+        """With web auth off, POST /api/ota/esp is unauthenticated by design
+        (ROUTE_TIER_ADMIN alone, same as every other ADMIN route once auth is
+        off) -- pushing here would really flash the board instead of
+        demonstrating a refusal, so this case must SKIP rather than push."""
+        push_fn = unittest.mock.Mock()
+        ctx = self._ctx(_web_auth_enabled_fn=lambda: False, _push_no_credential_fn=push_fn)
+        result = C._case_ote09(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        push_fn.assert_not_called()
+
+    def test_skips_when_auth_status_unreadable(self):
+        def raising():
+            raise RuntimeError("unreachable")
+        result = C._case_ote09(self._ctx(_web_auth_enabled_fn=raising))
         self.assertEqual(result.verdict, Verdict.SKIP)
 
 

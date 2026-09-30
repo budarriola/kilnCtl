@@ -31,7 +31,7 @@
 // test_ota_http.c/test_zones_http.c/test_profiles_http.c already use for a
 // `static` handler with no other seam. dashboard_status_http.c pulls in a
 // large dependency surface (kiln_io_owner, safety_ceiling_sync, sim_backend,
-// nvs_report, boot_button, lvgl_port, watchdog_cfg, ...) through
+// nvs_report, lvgl_port, watchdog_cfg, ...) through
 // dashboard_http_internal.h/dashboard_http.h; every function it actually
 // CALLS (not just names in a comment -- checked line by line) beyond
 // dashboard_get_status() itself is a thin, independent accessor with no
@@ -109,8 +109,6 @@ void dashboard_get_status(dashboard_status_t *out)
 // ---- trivial fakes for every OTHER real function dashboard_status_get_
 // handler() actually calls (verified line by line against the handler body,
 // not against comment text naming these functions) -----------------------
-uint32_t boot_button_bypass_remaining_ms(void) { return 0; }
-bool boot_button_ota_bypass_active(void) { return false; }
 bool lvgl_port_touch_is_calibrated(void) { return false; }
 /* Test-settable, because the whole point of touch_cal_supported is that its
  * three values render differently on the web Diagnostics page -- a fixed
@@ -127,7 +125,6 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
     return false;
 }
 bool watchdog_cfg_panic_disabled(void) { return false; }
-bool ota_http_auth_disabled(void) { return false; }
 const char *unit_pref_suffix(unit_pref_t pref) { (void)pref; return "C"; }
 size_t safety_cfg_store_param_count(void) { return 0; }
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)

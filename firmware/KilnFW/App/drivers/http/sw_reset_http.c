@@ -13,9 +13,9 @@
 
 #include "hal_esp_common.h"
 #include "hal_wdt.h"
-#include "ota_http.h" /* interlocks + challenge/response auth -- same idiom as
-                        * factory_reset.c's reset_post_handler(), see there for
-                        * the full rationale on auth-before-interlock ordering */
+#include "ota_http.h" /* interlocks -- same idiom as factory_reset.c's
+                        * reset_post_handler(); the challenge/response auth
+                        * this used to also require was retired 2026-09-29 */
 #include "kilnlink/kilnlink_reboot_result.h" /* kilnlink_reboot_result_reason_t --
                                                 * decoding the Pico's REFUSED reason so
                                                 * the operator-facing sentence names the
@@ -363,9 +363,7 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     // means a MAC signed for this route cannot double as authorization for
     // any other destructive or update route, and vice versa.
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_SW_RESET, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     // Refuse while a firing/autotune is running or any zone's heater is
     // commanded on -- the SAME gate factory_reset.c and kiln_cfg_http.c's

@@ -144,7 +144,7 @@ function Get-CodeOnlyLines {
 # top comment for why this is a named list rather than a blind create-vs-
 # register count.
 $requiredNames = @(
-    "autotune_engine", "boot_button", "danger_mode", "spi_owner",
+    "autotune_engine", "danger_mode", "spi_owner",
     "i2c_owner_sx1509",
     "i2c_owner_ns2009",  # liveness: config -- only created if a runtime i2c probe finds an NS2009 (NS2009.c); this bench has an FT6336U instead
     "kiln_io_owner", "lvgl",

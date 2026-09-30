@@ -95,11 +95,11 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 //     the board is today" -- and it is deliberately checked FIRST, before
 //     role or tier are even inspected, so a bug in role resolution can
 //     never accidentally deny access on a board that has never had auth
-//     turned on. (The one named exception, the nine OTA-family routes'
-//     own AP-password fallback, lives entirely inside ota_http.c/
-//     ota_auth.c's independent in-handler check -- see this file's own
-//     "Known integration point" note below -- and is untouched by this
-//     function returning ALLOW here.)
+//     turned on. (The nine OTA-family routes' own AP-password fallback that
+//     used to be a named exception here was retired 2026-09-29 -- see this
+//     file's own note below -- so this function's ALLOW/DENY verdict is now
+//     the ONLY gate on those routes too, same as every other
+//     ROUTE_TIER_ADMIN route.)
 //
 //   web_enabled == true, tier == ROUTE_TIER_OPEN:
 //     ALLOW, regardless of role -- including HTTP_AUTH_ROLE_NONE. The
@@ -136,17 +136,13 @@ route_tier_t http_auth_effective_tier(const char *uri, httpd_method_t method);
 //   web_enabled == true, tier == ROUTE_TIER_ADMIN, role == USER:
 //     DENY_INSUFFICIENT.
 //
-// KNOWN INTEGRATION POINT for whoever implements section 2b: an
-// administrator WEB SESSION is supposed to satisfy the nine OTA-family
-// routes with no MAC at all. That is not decided here -- ota_http.c's own
-// ota_http_authenticate_request() call inside each of those nine handlers
-// runs independently of this pre-handler and, until section 2b wires it to
-// consult a resolved role, still demands the legacy AP-password MAC even
-// when this function has already returned ALLOW for an admin session. That
-// is not a security hole (the two checks compose as AND, so the OTA route
-// stays at least as strict as either check alone) but it does mean OTA
-// currently requires BOTH an admin session AND a MAC until section 2b lands
-// -- tracked there, not fixed here.
+// 2026-09-29: the nine OTA-family routes' own AP-password MAC check
+// (section 2b's "known integration point") was retired along with the
+// whole AP-password HMAC scheme -- WEB_AUTH_PLAN.md item 2b, owner decision
+// "Retire; open when login off". An administrator WEB SESSION now
+// satisfies those routes on its own: this function's ALLOW/DENY verdict for
+// ROUTE_TIER_ADMIN is the only gate, exactly like every other admin route,
+// and ota_http.c no longer runs any independent in-handler check.
 //
 // `bootstrap_needed` is the caller's already-resolved
 // web_auth_admin_bootstrap_needed() result (net/web_auth_session.h) -- never

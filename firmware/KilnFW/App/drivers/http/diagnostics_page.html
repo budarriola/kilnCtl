@@ -435,8 +435,9 @@ survives a reboot; it is shown here and in the dashboard status so it is never s
   <div class="row"><span class="label">Safety link</span><span class="value" id="safetyReady">--</span></div>
   <div class="row"><span class="label">Zone config</span><span class="value" id="zonesValid">--</span></div>
   <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
-  <!-- 2026-08-27: touch_calibrated mirrors watchdog_panic_disabled/
-       ota_auth_disabled/boot_button_bypass_active above -- a degraded state
+  <!-- 2026-08-27: touch_calibrated mirrors watchdog_panic_disabled above
+       (ota_auth_disabled/boot_button_bypass_active were retired 2026-09-29
+       along with the AP-password HMAC scheme) -- a degraded state
        that must be visible here, not only in a boot log, because an
        operator hitting dead LCD buttons goes to Diagnostics, not to curl.
        false means this board is still running the known-inaccurate Kconfig

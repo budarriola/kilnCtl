@@ -153,7 +153,9 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 196 tools and `kicad` 86. Published as MCP
+`kilnctrl` registers 195 tools (196 before `ota_get_challenge` was deleted
+2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
+retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
@@ -402,6 +404,18 @@ off, these nine routes are now exactly as open as every other ADMIN route,
 same as the rest of the auth-off collapse. The separate, standalone recovery
 firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
 implements the AP-password HMAC on its own routes.
+
+**RECOVERY-IMAGE-ONLY signer kept in PcTools, unwired to any MCP tool today:**
+`tools/PcTools/src/kilnctrl/recovery_ota_auth_client.py` restores exactly the
+narrow capability the above retirement removed, scoped ONLY to
+`firmware/KilnFW_recovery/` -- `derive_mac()`/`get_challenge()`/
+`signed_post()` plus `recovery_push_esp_image()`/`recovery_boot_guard_reset()`/
+`recovery_sw_reset()`, for a board that has fallen back to the recovery image
+and cannot be reached through the main app's (now-unauthenticated) routes at
+all. It reads no environment variable itself -- a future MCP-level caller is
+expected to read `KILNCTL_AP_PASSWORD` and pass it through, never logging or
+echoing it, same discipline as every other credential-reading tool in this
+file. Full rationale: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` section 2.
 
 **Data-partition erase during a commission reflash (owner decision
 2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`

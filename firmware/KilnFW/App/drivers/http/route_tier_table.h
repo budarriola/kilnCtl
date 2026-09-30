@@ -347,12 +347,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/diagnostics/danger", HTTP_GET, ROUTE_TIER_ADMIN),
 
-    /* OTA, reset, filesystem -- includes the nine routes that authenticate
-     * today via ota_auth/AP-password (plan item 2b): they become ordinary
-     * ADMIN routes here. The runtime fallback described in item 2b/11 (auth
-     * off -> these nine still require the AP-password challenge, never
-     * open) is the enforcement layer's job, not this table's -- this table
-     * only records the nominal tier. */
+    /* OTA, reset, filesystem -- includes the nine routes that used to also
+     * authenticate via ota_auth/AP-password (plan item 2b) on top of this
+     * table's classification; that scheme was retired 2026-09-29 (owner
+     * decision "Retire; open when login off"), so these are now ordinary
+     * ADMIN routes with no second, in-handler check. */
     ROUTE_TIER("/api/ota/esp", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/esp/rollback", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/esp/recovery_exit", HTTP_POST, ROUTE_TIER_ADMIN),

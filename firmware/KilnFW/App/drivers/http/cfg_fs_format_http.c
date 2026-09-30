@@ -7,8 +7,8 @@
 #include "esp_log.h"
 
 #include "cfg_fs_mount.h"
-#include "ota_http.h" /* challenge/response auth -- see this file's header comment for
-                        * why POST reuses OTA_HTTP_CONTEXT_FACTORY_RESET */
+#include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
+                        * carry under OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29 */
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
 #include "system_mode_gate.h" /* SYS_ACTION_CFGFS_FORMAT -- owner decision Q3, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
@@ -45,9 +45,7 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
      * must not learn whether formatting is even pending from this
      * endpoint's own refusal. */
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_FACTORY_RESET, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse outright while a firing or autotune

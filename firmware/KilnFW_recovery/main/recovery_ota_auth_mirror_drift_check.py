@@ -33,13 +33,18 @@ for that guarantee.
 
 WHAT IS COMPARED, and why each normalization exists:
 
-1. (Retired 2026-09-29 -- see the module docstring update above.) This used
-   to diff recovery_http.c's hex_decode() loop body (per-nibble
-   classification of `hi`/`lo` against [0-9a-fA-F], two nibbles per byte)
-   against ota_http_util.c's ota_http_hex_decode() loop body; the latter no
-   longer exists in the main app, so there is nothing left to diff against.
-   recovery_http.c's own hex_decode() is untouched and still correct on its
-   own -- this item is simply gone, not failing.
+1. hex_decode() drift, now against a FROZEN GOLDEN COPY instead of the main
+   app: until 2026-09-29 this diffed recovery_http.c's hex_decode() loop body
+   (per-nibble classification of `hi`/`lo` against [0-9a-fA-F], two nibbles
+   per byte) against ota_http_util.c's ota_http_hex_decode() loop body; the
+   latter no longer exists in the main app, so there is nothing live left to
+   diff against. Rather than drop the check entirely and rely on nothing
+   catching a silent edit to this security-relevant nibble-decode logic,
+   GOLDEN_HEX_DECODE_BODY below is a byte-for-byte transcription of
+   hex_decode()'s body taken at the moment the live cross-file diff was
+   retired -- an intentional, security-classifier-reviewed edit to this
+   constant (not the recovery file) is required to accept a real future
+   change to that logic.
 
 2. Ordering + wire strings in the shared auth helper
    (recovery_http.c's recovery_authenticate_request() -- factored out of
@@ -109,8 +114,8 @@ WHAT IS COMPARED, and why each normalization exists:
    empty, since every mutating route today is expected to authenticate.
 
 Usage: python recovery_ota_auth_mirror_drift_check.py [repo_root]
-Exit 0: ordering/wire-strings, route coverage, and per-route context strings
-        all pass.
+Exit 0: hex_decode() golden copy, ordering/wire-strings, route coverage, and
+        per-route context strings all pass.
 Exit 1: a mismatch, or a fragment could not be located at all (fail
         closed, per this repo's standing rule for this class of check).
 """
@@ -126,6 +131,57 @@ def strip_comments(text: str) -> str:
     text = re.sub(r"//[^\n]*", "", text)
     return text
 
+
+# --- hex_decode() golden-copy check -----------------------------------------
+# Frozen 2026-09-29 when the live main-app comparison target
+# (ota_http_util.c's ota_http_hex_decode()) was deleted -- see docstring item
+# 1. Whitespace-normalized (split on any run of whitespace) before comparing,
+# so reindentation alone does not trip this; the nibble-decode LOGIC itself
+# must match exactly.
+GOLDEN_HEX_DECODE_BODY = """
+if (strlen(in) != out_len * 2) {
+    return false;
+}
+for (size_t i = 0; i < out_len; i++) {
+    int hi = -1, lo = -1;
+    char ch = in[2 * i];
+    if (ch >= '0' && ch <= '9') hi = ch - '0';
+    else if (ch >= 'a' && ch <= 'f') hi = ch - 'a' + 10;
+    else if (ch >= 'A' && ch <= 'F') hi = ch - 'A' + 10;
+    ch = in[2 * i + 1];
+    if (ch >= '0' && ch <= '9') lo = ch - '0';
+    else if (ch >= 'a' && ch <= 'f') lo = ch - 'a' + 10;
+    else if (ch >= 'A' && ch <= 'F') lo = ch - 'A' + 10;
+    if (hi < 0 || lo < 0) {
+        return false;
+    }
+    out[i] = (uint8_t)((hi << 4) | lo);
+}
+return true;
+"""
+
+
+def check_hex_decode_golden(recovery_text: str) -> list:
+    """Returns a list of problems (empty if none): recovery_http.c's
+    hex_decode() body must match GOLDEN_HEX_DECODE_BODY exactly, modulo
+    whitespace. See the module docstring item 1 for why this replaced the
+    former live cross-file diff against the main app."""
+    handler_match = re.search(
+        r"static bool hex_decode\([^)]*\)\n\{\n(.*?)\n\}\n",
+        recovery_text,
+        re.DOTALL,
+    )
+    if not handler_match:
+        return ["could not locate hex_decode() in recovery_http.c -- update this "
+                "check's regex rather than letting it pass vacuously"]
+    actual = " ".join(strip_comments(handler_match.group(1)).split())
+    golden = " ".join(GOLDEN_HEX_DECODE_BODY.split())
+    if actual != golden:
+        return ["hex_decode() body no longer matches the frozen golden copy -- if this "
+                "is a deliberate, reviewed change to the nibble-decode logic, update "
+                "GOLDEN_HEX_DECODE_BODY in this check to match; if not, this is exactly "
+                "the silent-drift class this check exists to catch"]
+    return []
 
 
 # --- ordering/wire-string check -------------------------------------------
@@ -319,6 +375,13 @@ def main() -> int:
 
     failed = False
 
+    hex_problems = check_hex_decode_golden(recovery_text)
+    if hex_problems:
+        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (hex_decode golden copy)")
+        for p in hex_problems:
+            print(f"  {p}")
+        failed = True
+
     order_problems = check_ordering(recovery_text)
     if order_problems:
         print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (ordering/wire-strings)")
@@ -345,9 +408,9 @@ def main() -> int:
 
     mutating_count = len(discover_mutating_handlers(recovery_text))
     print(
-        "RECOVERY OTA-AUTH MIRROR DRIFT CHECK: OK (header->hex->lockout ordering and wire "
-        f"strings confirmed; {mutating_count} mutating routes all call "
-        "recovery_authenticate_request())"
+        "RECOVERY OTA-AUTH MIRROR DRIFT CHECK: OK (hex_decode golden copy, "
+        "header->hex->lockout ordering and wire strings confirmed; "
+        f"{mutating_count} mutating routes all call recovery_authenticate_request())"
     )
     return 0
 

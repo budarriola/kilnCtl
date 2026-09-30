@@ -72,21 +72,12 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // state for the AP-password challenge/response scheme retired 2026-09-29
 // (see this file's top comment) -- that part of its job is gone.
 
-// Runs the interlock/system-mode-gate checks for the given context and
-// writes the client's IP into ip_out (must be >= 46 bytes -- same buffer
-// size every handler in this file uses). Always returns true and sends
-// nothing itself -- route_tier_table.h's ADMIN tier is the only auth gate
-// on these routes now (AP-password HMAC retired 2026-09-29, see this file's
-// top comment); this function is kept as the one call site every mutating
-// handler in this split already goes through, so a future gate (if any) has
-// a single place to land.
-bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46]);
-
-// Always false now that the AP-password HMAC scheme is retired (2026-09-29)
-// -- ADMIN tier is the only gate on these routes and is never "disabled".
-// Kept so dashboard_http.c's existing `ota_auth_disabled` status field keeps
-// compiling without an unrelated change to that file in this pass.
-bool ota_http_auth_disabled(void);
+// ota_http_authenticate_request() -- the always-true auth stub every
+// mutating handler in this split used to call before anything else -- was
+// deleted 2026-09-29 along with the AP-password HMAC scheme itself.
+// route_tier_table.h's ADMIN tier is the only auth gate on these routes now;
+// each handler calls ota_http_get_client_ip() directly for its IP-logging
+// line (see ota_http_internal.h).
 
 // --- Single cross-processor update mutex (TODO.md 9.4/9.5) ---------------
 //
@@ -145,8 +136,8 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // holds the claim -- see ota_interlock_snapshot_t::other_update_in_progress'
 // doc comment.)
 //
-// POST /api/ota/{esp,pico} call this after ota_http_authenticate_request()
-// (ADMIN tier only, since the AP-password HMAC was retired 2026-09-29).
+// POST /api/ota/{esp,pico} call this first (ADMIN tier only, since the
+// AP-password HMAC was retired 2026-09-29).
 //
 // reason_out/reason_cap: same contract as ota_interlock_check() -- filled
 // with a specific, human-readable refusal reason on OTA_INTERLOCK_REFUSED,
@@ -265,8 +256,8 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 
 // --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------
 //
-// Same auth (ADMIN tier only) and check order (ota_http_authenticate_request()
-// -> ota_http_check_interlocks() -> ota_http_update_try_begin()) as POST
+// Same auth (ADMIN tier only) and check order (ota_http_check_interlocks()
+// -> ota_http_update_try_begin()) as POST
 // /api/ota/esp, same raw (non-multipart) byte-stream body. The difference is what happens to the
 // body and how the response is shaped:
 //
@@ -326,8 +317,8 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 // image deliberately (e.g. the new version is valid but behaves worse in
 // practice than the one it replaced).
 //
-// Same order as POST /api/ota/esp (ota_http_authenticate_request() ->
-// ota_http_check_interlocks() -> ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)
+// Same order as POST /api/ota/esp (ota_http_check_interlocks() ->
+// ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)
 // -- reusing the ESP claim slot, not a separate one, since a rollback is
 // exactly as disruptive to "another update in flight" as a push would be),
 // PLUS one more gate specific to this route: esp_ota_check_rollback_is_

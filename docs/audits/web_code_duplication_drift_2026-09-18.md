@@ -98,11 +98,15 @@ gates, and passing the first does not satisfy the second.
 
 Neither bypass rescues these calls, and this is worth stating precisely because it is
 the reason the failure is total rather than configuration-dependent. Both bypasses —
-the boot-button window and `http_auth_policy_web_enabled()` — live *inside*
-`ota_http_verify_request()`, which `ota_http_authenticate_request()`
-(`http/ota_http.c:937`) reaches only after its unconditional header checks. The
-64-character length test at `http/ota_http.c:939-946` runs first, in every auth mode,
-on every board. A request with no `X-Ota-Mac` header cannot get past it.
+the boot-button window and `http_auth_policy_web_enabled()` — lived *inside*
+`ota_http_verify_request()`, which `ota_http_authenticate_request()` reached only
+after its unconditional header checks: a 64-character length test that ran first, in
+every auth mode, on every board. A request with no `X-Ota-Mac` header could not get
+past it. (**2026-09-29 update:** `ota_http_verify_request()` and this whole header
+check were deleted outright in the AP-password HMAC retirement --
+`ota_http_authenticate_request()` is now a no-op stub that always returns `true`; the
+specific line numbers this section originally cited no longer exist. See git history
+at or before commit `a1ca2b13` for the removed code this section describes.)
 
 Observable consequence: pressing "Format config filesystem" (confirm step) or
 "Factory reset" on the Settings page fails with HTTP 400 and the body
@@ -139,9 +143,14 @@ drift — see 3.1.
 
 The eighth implementation is the one that has actually drifted.
 `firmware/KilnFW_recovery/main/recovery_http.c:165-185` implements the same wire
-contract independently, and disagrees with `http/ota_http.c:939-957` on all four axes:
+contract independently, and at the time of this audit disagreed with the main app's
+now-deleted `ota_http.c` HMAC-verify block on all four axes below. (**2026-09-29
+update:** the main-app column describes code removed in the AP-password HMAC
+retirement -- see the note above. `recovery_http.c:165-185` and its own
+mirror-drift check, `recovery_ota_auth_mirror_drift_check.py`, are unaffected and
+still describe live code.)
 
-| | Main app (`ota_http.c:939-957`) | Recovery (`recovery_http.c:165-185`) |
+| | Main app, as it read pre-2026-09-29 (`ota_http.c`, since deleted) | Recovery (`recovery_http.c:165-185`) |
 |---|---|---|
 | Error string, absent header | `missing or malformed X-Ota-Mac header (want 64 hex chars)` | `missing X-Ota-Mac` (line 174) |
 | Error string, bad hex | `X-Ota-Mac must be 64 hex characters` | `malformed X-Ota-Mac` (line 179) |

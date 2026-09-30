@@ -4,12 +4,15 @@
 // immediately useful for clearing an S6a-class stuck trip on the bench that
 // currently needs JTAG to clear.
 //
-// Lives next to factory_reset.c and reuses its exact idiom (challenge/
-// response auth via OTA_HTTP_CONTEXT_SW_RESET, ota_http_check_interlocks()
-// for the firing/autotune refusal, the same respond-then-delay-then-reboot
-// task shape) -- but this route erases NOTHING. No NVS partition is touched,
-// no LittleFS format runs, no config store write happens anywhere on this
-// path. See sw_reset_http.c's own handler comment for exactly what runs.
+// Lives next to factory_reset.c and reuses its exact idiom
+// (ota_http_check_interlocks() for the firing/autotune refusal, the same
+// respond-then-delay-then-reboot task shape; the challenge/response
+// AP-password auth both routes used to also require under their own
+// ota_http_context_t -- this one's was OTA_HTTP_CONTEXT_SW_RESET -- was
+// retired 2026-09-29) -- but this route erases NOTHING. No NVS partition is
+// touched, no LittleFS format runs, no config store write happens anywhere
+// on this path. See sw_reset_http.c's own handler comment for exactly what
+// runs.
 //
 // Pico half: SAFETY_CMD_REBOOT (0x29, CommonFW's kilnlink_reboot.h) --
 // added 2026-09-09, the genuine "safety processor, reboot yourself in place,

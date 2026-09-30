@@ -27,7 +27,6 @@
 #include <math.h>
 
 #include "autotune_engine.h"
-#include "boot_button.h"
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- TODO.md 9.4's protocol-version-mismatch warning */
@@ -369,14 +368,13 @@ cleanup:
 
 esp_err_t ota_pico_post_handler(httpd_req_t *req)
 {
-    // Same four-step order as ota_esp_post_handler() -- see ota_http.h's
-    // documented order and that handler's own comments for why each step
-    // precedes the next. Steps 1-2 (header parse + auth) are consolidated
-    // in ota_http_authenticate_request(); see its doc comment in ota_http.h.
+    // Same order as ota_esp_post_handler() -- see ota_http.h's documented
+    // order and that handler's own comments for why each step precedes the
+    // next. Auth is route_tier_table.h's ADMIN tier, enforced by the
+    // dispatcher before this handler runs at all (the AP-password HMAC
+    // check this used to also require was retired 2026-09-29).
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_PICO, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     char reason[OTA_INTERLOCK_REASON_MAX];
     ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
@@ -518,9 +516,7 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
     // 1-2. Auth (ADMIN tier only, since 2026-09-29 -- see
     // ota_http_esp.c's ota_esp_post_handler() for the retirement note).
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_PICO_ROLLBACK, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     // 3. Interlocks -- identical gate to POST /api/ota/esp/rollback: a Pico
     // rollback is exactly as disruptive as pushing it a new image (kiln not

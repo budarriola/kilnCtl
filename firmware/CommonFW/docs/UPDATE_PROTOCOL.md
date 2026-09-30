@@ -131,6 +131,19 @@ below for history; it describes the **separate, standalone recovery
 firmware image** (`firmware/KilnFW_recovery/`), which still implements this
 scheme unchanged on its own routes.
 
+**RECOVERY-IMAGE ONLY, still live:** `tools/PcTools/src/kilnctrl/
+recovery_ota_auth_client.py` is a from-scratch, narrowly-scoped signer kept
+specifically for talking to a board that has fallen back to
+`firmware/KilnFW_recovery/` (unreachable via the main app at all) — its
+`derive_mac()`/`get_challenge()`/`signed_post()` implement exactly this
+section's scheme against that image's still-unchanged `/api/ota/challenge`,
+`/api/ota/esp`, `/api/ota/esp/boot_guard_reset` and `/api/sw_reset` routes
+only, reading the AP password from a caller-supplied string (the MCP layer
+reads `KILNCTL_AP_PASSWORD`) and never logging it. It must never be pointed
+at the main app — since 2026-09-29 the main app has no `/api/ota/challenge`
+route to answer it at all, so a caller confusing the two gets an immediate,
+loud 404 rather than a silent wrong-scheme success.
+
 The user's requirement: **the same password as the ESP's local access point**,
 for both update paths. `wifi_prov_get_ap_password()` already returns it.
 

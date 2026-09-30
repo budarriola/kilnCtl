@@ -614,9 +614,6 @@ def normalised_gate_violations(roots):
 # thermo_owner.c -- see stack_budget_lib.py's docstring).
 # ---------------------------------------------------------------------------
 TASKS = [
-    dict(name="boot_button", root="boot_button_task",
-         stack=lambda: extract_int_literal("drivers/bridge/boot_button.c",
-             r'xTaskCreate\(boot_button_task,\s*"boot_button",\s*(\d+)')),
     dict(name="gpio_probe", root="gpio_probe_task",
          # Whole task is #if CONFIG_KILNCTL_ENABLE_GPIO_PROBE'd out
          # (gpio_probe.c:7). That option defaults to n, so it is COMPILED OUT
@@ -926,7 +923,6 @@ CEILING_BYTES = {
     # budget; reported here per the standing instruction not to bump a
     # stack size just because a checker was newly wired up.
     "pico_auto_update": 3104,
-    "boot_button": 1552,
     "gpio_probe": 3376,
     "link_watchdog": 160,
     # 3792 = 48 (bx_worker_task's own dispatch loop) + 3744 (the deepest of

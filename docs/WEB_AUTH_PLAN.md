@@ -236,10 +236,14 @@ HTML only, but an unauthenticated visitor who can load
 the diagnostics shell learns the board's full feature surface, and it is
 cheaper to gate the shell than to audit every widget inside it.
 
-`GET /api/ota/challenge` stays OPEN — it issues a nonce and (per item 2b) the
-administrator record's salt and iteration count, none of which is usable
-without the administrator password itself. Gating it would break the flow it
-exists to serve. The nine routes it serves are ADMIN like any other.
+**Superseded 2026-09-29:** `GET /api/ota/challenge` was removed from the main
+app entirely along with the whole AP-password HMAC scheme it served (owner
+decision "Retire; open when login off") — the nine routes below are ordinary
+ROUTE_TIER_ADMIN routes now, gated only by web-auth login, with no second
+in-handler check. The route still exists, unchanged, in the recovery image
+(`firmware/KilnFW_recovery/`), which is unaffected by this decision — see
+`UPDATE_PROTOCOL.md`/`MCP_SERVERS.md` for the recovery-image-only signer kept
+in PcTools for it.
 
 **`GET /api/ota/esp/status` — FIXED in `9c2b1c1b`.** The payload was trimmed
 to remove the commit-and-dirty-flag fingerprint and the other identity/

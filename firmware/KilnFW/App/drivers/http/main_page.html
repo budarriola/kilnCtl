@@ -344,12 +344,6 @@
      (renderSafetyTrip() below only ever fills it in, matching lastRunBanner's
      own hide-when-nothing-to-report pattern) -- never rendered as a green/
      blank "all clear" card, just absent when there is nothing to report. -->
-<!-- boot_button.h's BOOT-button OTA-auth bypass window. Sits ABOVE the
-     safety-trip banner: while this window is open, ANY device on the
-     network can push firmware with no password check at all, which is a
-     more urgent thing for an operator glancing at this page to know about
-     than an ordinary safety trip. Empty by default, same hide-when-nothing-
-     to-report pattern as safetyTripBanner/lastRunBanner below. -->
 <!-- SPI-owner wedge (opus review, commit 9fc55d9, M4): thermo_spi_wedged
      reached /api/status correctly from the first pass (MAX31856_bus_spi_wedged
      -> dashboard_get_status -> status_get_handler, unconditional, NULL-safe)
@@ -366,7 +360,6 @@
      WHY every channel is down at once. Empty by default, same hide-when-
      nothing-to-report pattern as the other banners here. -->
 <div id="spiWedgedBanner"></div>
-<div id="bootButtonBypassBanner"></div>
 <div id="zonesConfigLoadFaultBanner"></div>
 <div id="zonesConfigMigrationPersistFaultBanner"></div>
 <div id="kilnCfgSwapBootFaultBanner"></div>
@@ -2048,24 +2041,6 @@ function renderSafetyTrip(data) {
   }
 }
 
-// boot_button.h -- same solid-fill "safety-trip" visual treatment as
-// renderSafetyTrip() below (border-only "banner" is what this page reserves
-// for merely informational strips like lastRunBanner; a window that lets
-// ANYONE on the network flash firmware with no password gets the same
-// impossible-to-miss styling as a live safety trip, not a quieter one).
-function renderBootButtonBypass(data) {
-  var el = document.getElementById('bootButtonBypassBanner');
-  if (!data.boot_button_bypass_active) { el.innerHTML = ''; return; }
-  var remS = data.boot_button_bypass_remaining_s || 0;
-  var mm = Math.floor(remS / 60), ss = remS % 60;
-  el.innerHTML = '<div class="banner safety-trip">' +
-    '<h3>BOOT-BUTTON RECOVERY: OTA PASSWORD CHECK BYPASSED</h3>' +
-    '<div class="row"><span>Any device on this network can flash firmware right now, no password.</span></div>' +
-    '<div class="row"><span>Closes automatically in</span><span class="kc-live-value">' +
-      mm + ':' + (ss < 10 ? '0' : '') + ss + '</span></div>' +
-    '</div>';
-}
-
 // CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: firing is refused
 // (profile_executor_run.c) while a real, previously-tuned zones config
 // exists on flash but this firmware could not decode it -- either an OTA
@@ -2221,7 +2196,7 @@ function renderSafetyGuardDisabledByZero(data) {
 // through to a prominent, impossible-to-miss indicator -- see this banner's
 // own <div> comment above for why it outranks even the safety-trip banner in
 // reading order. Same hide-when-nothing-to-report pattern as
-// renderSafetyTrip()/renderBootButtonBypass().
+// renderSafetyTrip().
 function renderSpiWedged(data) {
   var el = document.getElementById('spiWedgedBanner');
   if (!el) return;
@@ -4317,7 +4292,6 @@ function poll() {
       renderChannels(data);
       renderRelayLife(data);
       renderSpiWedged(data);
-      renderBootButtonBypass(data);
       renderZonesConfigLoadFault(data);
       renderZonesConfigMigrationPersistFault(data);
       renderKilnCfgSwapBootFault(data);

@@ -42,7 +42,6 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
-#include "boot_button.h"
 #include "dashboard_http.h"
 #include "kiln_io.h"
 #include "kiln_ui.h"

@@ -21,7 +21,8 @@
                    * primitives as diagnostics_http.c's nvs_keys_get_handler() */
 #include "nvs_key_check.h"
 #include "http_form.h"
-#include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
+#include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
+                        * require was retired 2026-09-29, see reset_post_handler() */
 #include "profile_executor.h" /* firing_stats_cache_invalidate_all() -- see the erase loop in
                                 * execute_scope_job() below */
 #include "profiles_builtin.h"
@@ -394,21 +395,20 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
-    /* Authenticate FIRST, before the interlock check below: route_tier_table.h's
-     * ADMIN tier is the only gate on this route (the AP-password HMAC it used
-     * to also require was retired 2026-09-29 -- WEB_AUTH_PLAN.md item 2b,
-     * owner decision "Retire; open when login off"), same as every other
-     * ADMIN route, via ota_http_authenticate_request() (ota_http.h).
+    /* Log the client IP FIRST, before the interlock check below:
+     * route_tier_table.h's ADMIN tier is the only gate on this route (the
+     * AP-password HMAC it used to also require was retired 2026-09-29 --
+     * WEB_AUTH_PLAN.md item 2b, owner decision "Retire; open when login
+     * off"), enforced by the dispatcher before this handler ever runs --
+     * same as every other ADMIN route.
      *
-     * Auth before the interlock check for the same reason ota_http_check_
-     * interlocks()'s own doc comment gives for every other route: an
-     * unauthenticated caller must not be able to use this endpoint's refusal
-     * reason (which can name a live zone temperature) to learn live kiln
-     * telemetry. */
+     * Still logged before the interlock check for the same reason
+     * ota_http_check_interlocks()'s own doc comment gives for every other
+     * route: an unauthenticated caller must not be able to use this
+     * endpoint's refusal reason (which can name a live zone temperature) to
+     * learn live kiln telemetry. */
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_FACTORY_RESET, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse outright while a firing or autotune run

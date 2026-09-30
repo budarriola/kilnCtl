@@ -29,7 +29,6 @@
 #include <math.h>
 
 #include "autotune_engine.h"
-#include "boot_button.h"
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kiln_io.h"
@@ -64,21 +63,16 @@
 // instead of waiting for that to happen (or for the RTC/task watchdog to do
 // it for you) and land back in normal mode this run.
 //
-// AUTHENTICATED, same as every other mutating route in this file (esp/pico
+// ROUTE_TIER_ADMIN, same as every other mutating route in this file (esp/pico
 // update, esp rollback) -- this used to be the one deliberately
 // unauthenticated exception (the reasoning was "it does nothing an attacker
 // could not already do by power-cycling the board", plus the cost of adding
 // a fourth ota_http_context_t for a button whose only job is "reboot this
-// board"). The owner reviewed that tradeoff and chose authentication: a
-// forced, unauthenticated reboot reachable from anywhere on the LAN is a
-// nuisance-DoS vector worth closing even though the same effect is
-// physically achievable by other means, and OTA_HTTP_CONTEXT_RECOVERY_EXIT
-// (its own HMAC context string "recovery", its own lockout state, its own
-// client-side signing support in ota_page.html/ota_http_client.py/
-// mcp_server.py) turned out not to be disproportionate once the other three
-// contexts already existed as a template to follow. See ota_http.h's doc
-// comment on OTA_HTTP_CONTEXT_RECOVERY_EXIT for why it is its own context
-// rather than reusing OTA_HTTP_CONTEXT_ESP.
+// board"). The owner reviewed that tradeoff and chose authentication, first
+// as its own AP-password HMAC context (OTA_HTTP_CONTEXT_RECOVERY_EXIT) and,
+// since 2026-09-29, as plain ADMIN-tier login once that whole HMAC scheme
+// was retired -- a forced, unauthenticated reboot reachable from anywhere on
+// the LAN stays closed either way.
 //
 // Auth runs BEFORE the recovery-mode check, not after: ota_interlock.h's doc
 // comment on why POST /api/ota/esp's real ordering is "auth first, then
@@ -125,9 +119,7 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
     // recovery-mode check below, not after -- see the doc comment above this
     // handler for why.
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_RECOVERY_EXIT, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     // 3. Only meaningful in recovery mode -- refuses (403) outside it so
     // this is not just a general-purpose authenticated reboot button on a
@@ -210,9 +202,7 @@ esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req)
     // after this, unlike recovery_exit -- see this handler's own doc comment
     // above for why.
     char ip[46];
-    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_BOOT_GUARD_RESET, ip)) {
-        return ESP_OK;
-    }
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     bool verified = boot_guard_reset_counter();
     char json[96];
@@ -268,12 +258,12 @@ esp_err_t ota_boot_guard_status_get_handler(httpd_req_t *req)
 // 340 C", folded into the refusal reason string). That reasoning is sound in
 // isolation, but this codebase's own GET /api/status (dashboard_http.c) is
 // ALREADY unauthenticated and already returns every zone's live temperature
-// directly -- so gating this endpoint behind the OTA challenge/HMAC dance
-// (which would force the web page to ask for the Wi-Fi AP password just to
-// show "kiln is running a profile" before the file picker even appears)
-// would not close any exposure that isn't already open on this same LAN.
-// Unauthenticated here, matching /api/status's existing exposure level, not
-// a new one. Returns {"ok":true} or {"ok":false,"reason":"<why>"}.
+// directly -- so gating this endpoint behind an ADMIN-tier login (which
+// would force the web page to ask for a password just to show "kiln is
+// running a profile" before the file picker even appears) would not close
+// any exposure that isn't already open on this same LAN. Unauthenticated
+// here, matching /api/status's existing exposure level, not a new one.
+// Returns {"ok":true} or {"ok":false,"reason":"<why>"}.
 esp_err_t ota_interlock_get_handler(httpd_req_t *req)
 {
     /* Asked WITHOUT the acknowledgement on purpose: this endpoint reports

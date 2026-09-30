@@ -10,19 +10,14 @@
 // convention as every other plain status endpoint in this codebase
 // (/api/status, /api/cfgfs itself): {"pending":bool,"reason":"..."}.
 //
-// POST /api/cfgfs/format_confirm -- authenticated with the SAME
-// challenge/response scheme and the SAME context (OTA_HTTP_CONTEXT_
-// FACTORY_RESET) factory_reset.c's POST /api/factory_reset already uses,
-// deliberately NOT a new context: formatting the `cfg` partition on
-// operator say-so is the identical danger tier as factory_reset.c's own
-// scopes (irreversible, config-destroying, requires a signed confirmation),
-// and TODO.md 8.1's "no default scope, explicit choice only" reasoning
-// applies here just as directly. A MAC signed for "factory-reset" already
-// authorizes wiping zone/Wi-Fi/profile config; authorizing an erase of the
-// filesystem that (per docs/FILESYSTEM_USER_DATA_PLAN.md) increasingly
-// backs that very same config is not a meaningfully different grant, so
-// this reuses that lockout budget rather than standing up a fifth
-// independent one for a single narrow action.
+// POST /api/cfgfs/format_confirm -- ROUTE_TIER_ADMIN, same tier as
+// factory_reset.c's POST /api/factory_reset (route_tier_table.h): formatting
+// the `cfg` partition on operator say-so is the identical danger tier as
+// factory_reset.c's own scopes (irreversible, config-destroying). Until
+// 2026-09-29 both routes also required a signed AP-password MAC under the
+// shared OTA_HTTP_CONTEXT_FACTORY_RESET context; that scheme was retired
+// (owner decision "Retire; open when login off") and ADMIN-tier login is now
+// the only gate on both.
 #ifndef CFG_FS_FORMAT_HTTP_H
 #define CFG_FS_FORMAT_HTTP_H
 

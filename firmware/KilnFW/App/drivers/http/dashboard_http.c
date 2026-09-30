@@ -16,7 +16,6 @@
 #include "hal_time.h" /* hal_time_now_us() -- uptime_s below, was esp_timer_get_time() */
 
 #include "autotune_engine.h"
-#include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
 #include "lvgl_port.h" /* lvgl_port_touch_is_calibrated() -- see the "touch_calibrated" /api/status field below */
 #include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
 #include "dashboard_json.h" /* json_escape()/append_zone_status_json() -- split out for host-testability, see that header */

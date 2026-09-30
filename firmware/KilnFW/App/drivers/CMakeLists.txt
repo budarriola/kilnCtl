@@ -282,7 +282,6 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # its header for why the plan's "embed the image in
                        # the ESP build" shape is not implementable here.
                        "persist/pico_image_manifest.c"
-                       "bridge/boot_button.c"
                        "safety/danger_mode.c"
                        "safety/watchdog_cfg.c"
                        "safety/rtc_watchdog.c"

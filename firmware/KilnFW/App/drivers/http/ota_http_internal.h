@@ -24,8 +24,7 @@
 // widening rename above) or visibility change beyond what moving requires.
 //
 //   ota_http.c       -- includes, the update-claim mutex (try_begin/end/in_progress),
-//                        the interlock snapshot/refusal glue, auth-disabled
-//                        check, ota_http_authenticate_request(), the shared
+//                        the interlock snapshot/refusal glue, the shared
 //                        get_client_ip/send_json_clamped/set_fail_reason
 //                        helpers, and ota_http_start() (route registration)
 //   ota_http_esp.c   -- POST /api/ota/esp transfer + status + rollback
@@ -78,8 +77,9 @@ extern const char *OTA_HTTP_TAG;
 // neighbor (the esp status handler it used to sit directly above).
 #define esp_phase_str ota_http_esp_phase_str
 
-// Client IP formatting (used by the challenge handler in ota_http.c and by
-// every mutating handler in the esp/pico/recovery files).
+// Client IP formatting (used for logging by every mutating handler in the
+// esp/pico/recovery files, and by ota_http.c/http_auth_http.c/
+// web_auth_session_status_http.c elsewhere).
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t out_len);
 
 // Checked variant (2026-09-18, d2c51f55 follow-up): same lookup, but

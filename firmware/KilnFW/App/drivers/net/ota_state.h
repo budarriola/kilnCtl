@@ -8,8 +8,8 @@
 // the rest of this file's declarations here for autotune_engine_internal.h,
 // factory_reset.c, kiln_cfg_store.c, ota_pico_relay.c and
 // zones_current_sweep_task.c, none of which register httpd routes -- except
-// the three httpd_req_t-shaped accessors (ota_http_authenticate_request(),
-// ota_http_req_ack_no_safety(), ota_http_send_interlock_refusal()), which
+// the httpd_req_t-shaped accessors (ota_http_req_ack_no_safety(),
+// ota_http_send_interlock_refusal()), which
 // moved back to ota_http.h since every caller of those already holds a live
 // httpd_req_t and includes esp_http_server.h anyway. ota_http.h includes
 // this header so existing http-layer callers are unaffected; every
@@ -96,9 +96,9 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap);
 // ota_http.h's git history for the original, fuller doc comments (still
 // accurate -- only the declaration site moved).
 //
-// The three httpd_req_t-shaped accessors that used to live here
-// (ota_http_authenticate_request(), ota_http_req_ack_no_safety(),
-// ota_http_send_interlock_refusal()) moved back to ota_http.h -- every
+// The httpd_req_t-shaped accessors that used to live here
+// (ota_http_req_ack_no_safety(), ota_http_send_interlock_refusal()) moved
+// back to ota_http.h -- every
 // caller of those needs esp_http_server.h anyway (they hold a live
 // httpd_req_t), so keeping them here bought nothing but forced this header,
 // which callers WITHOUT a request in hand (kiln_io_owner.c, profile_executor.c

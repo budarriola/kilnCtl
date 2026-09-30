@@ -109,18 +109,6 @@ safety processor over the isolated UART link. Every action below requires an
 administrator session (Settings &rarr; Security), the same as any other admin
 route.</p>
 
-<!-- boot_button.h: a long-press on the ESP32-S3's BOOT button, WHILE THE
-     BOARD IS RUNNING, opens a ~5 minute window -- see GET /api/status's
-     boot_button_bypass_active/boot_button_bypass_remaining_s fields
-     (dashboard_http.c) and boot_button.h's own header comment. It used to
-     directly change what this page's own auth was doing (it suspended the
-     AP-password HMAC check); that scheme was retired 2026-09-29 and
-     ROUTE_TIER_ADMIN is now the only gate here, which the button press does
-     not affect -- this box is kept only so the physical-press recovery
-     window itself stays visible to an operator. Hidden (empty) when not
-     active. -->
-<div id="bootButtonBypassBox" class="blocker" style="display:none"></div>
-
 <h2>Kiln state</h2>
 <div id="interlockBox" class="card">Checking…</div>
 
@@ -361,9 +349,9 @@ function pollEspStatus() {
  * safety processor's own SAFETY_CMD_FW_VERSION broadcast
  * (safety_link.h's safety_link_get_peer_build_status(), TODO.md owner-report
  * item 5) and retained there, not part of this ota_http.c relay status.
- * Stashed in s_safetyBuild by pollBootButtonBypass() below (which already
- * polls /api/status every 3s for the boot-button banner) and merged in here
- * so a single render function still owns all of #picoInfo's markup. */
+ * Stashed in s_safetyBuild by pollSafetyBuildInfo() below (which polls
+ * /api/status every 3s) and merged in here so a single render function
+ * still owns all of #picoInfo's markup. */
 var s_safetyBuild = null; // { known, dirty, commit, datetime } or null before the first /api/status reply
 var s_lastPicoStatus = null;
 
@@ -617,25 +605,16 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
   });
 });
 
-/* ---- boot_button.h bypass banner -----------------------------------------
+/* ---- Safety-processor build info poll --------------------------------
  * GET /api/status (dashboard_http.c) is already the shared status endpoint
  * every other page in this app polls -- this page has never needed it
  * before (it drives everything else off the /api/ota/... status routes
- * instead), so this is a small dedicated poll just for the two
- * boot_button_bypass_* fields. */
-function pollBootButtonBypass() {
+ * instead), so this is a small dedicated poll just for the safety_build_*
+ * fields. (Used to also drive a BOOT-button OTA-auth-bypass banner here;
+ * that banner and the boot_button.h module it read from were both retired
+ * 2026-09-29 along with the AP-password HMAC scheme.) */
+function pollSafetyBuildInfo() {
   fetch('/api/status').then(function (r) { return r.json(); }).then(function (data) {
-    var box = document.getElementById('bootButtonBypassBox');
-    if (!data.boot_button_bypass_active) { box.style.display = 'none'; }
-    else {
-      var remS = data.boot_button_bypass_remaining_s || 0;
-      var mm = Math.floor(remS / 60), ss = remS % 60;
-      box.style.display = '';
-      box.textContent = 'BOOT-BUTTON RECOVERY: OTA password check is BYPASSED right now -- ' +
-        'anyone on this network can push firmware with no password. Closes automatically in ' +
-        mm + ':' + (ss < 10 ? '0' : '') + ss + '.';
-    }
-
     // safety_build_* -- dashboard_http.c's parse of the RP2040's own
     // SAFETY_CMD_FW_VERSION broadcast (TODO.md owner-report item 5). Only
     // trust the commit/dirty/datetime fields when known is true -- see
@@ -671,8 +650,8 @@ loadInterlock();
 setInterval(loadInterlock, 15000);
 pollEspStatus();
 pollPicoStatus();
-pollBootButtonBypass();
-setInterval(pollBootButtonBypass, 3000);
+pollSafetyBuildInfo();
+setInterval(pollSafetyBuildInfo, 3000);
 
 (function () {
   var btn = document.getElementById('themeBtn');

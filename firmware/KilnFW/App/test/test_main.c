@@ -64,7 +64,6 @@ void run_test_pico_auto_update_state(void);
 void run_test_pico_update_attempts(void);
 void run_test_pico_image_identity(void);
 void run_test_pico_image_embedded(void);
-void run_test_boot_button(void);
 void run_test_backlight_pwm(void);
 void run_test_display_power_policy(void);
 void run_test_display_power_cfg(void);
@@ -183,7 +182,6 @@ int main(void)
     run_test_pico_update_attempts();
     run_test_pico_image_identity();
     run_test_pico_image_embedded();
-    run_test_boot_button();
     run_test_backlight_pwm();
     run_test_display_power_policy();
     run_test_display_power_cfg();

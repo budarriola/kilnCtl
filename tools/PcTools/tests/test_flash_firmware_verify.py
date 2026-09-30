@@ -666,9 +666,8 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
 
     def test_unreachable_boot_guard_endpoint_reported_as_warning_not_error(self):
         """An OtaHttpError calling the endpoint (e.g. the board dropped off
-        Wi-Fi in the instant between verification and this call, or there is
-        no admin session and web auth is on) is also a WARNING, not a tool
-        failure -- the flash already landed."""
+        Wi-Fi in the instant between verification and this call) is also a
+        WARNING, not a tool failure -- the flash already landed."""
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(
@@ -681,6 +680,25 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING", result)
         self.assertIn("boot_guard_reset call failed", result)
+
+    def test_no_admin_session_reported_as_skip_not_lost_result(self):
+        """With web auth on and no KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD
+        set (or a refused login), http_auth.urlopen() raises HttpAuthError,
+        a RuntimeError -- NOT an OtaHttpError. Before this fix that escaped
+        _maybe_reset_boot_guard() uncaught and lost the whole (already
+        successful) flash result. It must instead be reported as a plain
+        skip, same non-fatal shape as the other boot_guard_reset outcomes."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 side_effect=mf.http_auth.HttpAuthError("no credentials")):
+            result = mf.flash_firmware(verify=True)
+        self.assertFalse(result.startswith("error:"))
+        self.assertIn("boot_guard reset skipped: no admin session", result)
 
 
 class KilnFwRootOverrideTest(unittest.TestCase):

@@ -16,7 +16,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
-#include "boot_button.h"
 #include "lvgl_port.h"
 #include "dashboard_json.h"
 #include "http_auth_http.h" /* http_auth_caller_is_admin() -- see the
@@ -29,7 +28,6 @@
                                       * comment below */
 #include "kiln_io_owner.h"
 #include "nvs_report.h"
-#include "ota_http.h"
 #include "relay_authority.h"
 #include "time_sync.h"
 #include "relay_cycles.h"
@@ -980,24 +978,16 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * ui_page_home.c's own dialogs). */
     APPEND(",\"watchdog_panic_disabled\":%s", watchdog_cfg_panic_disabled() ? "true" : "false");
 
-    /* boot_button.h -- the BOOT-button OTA-auth bypass window. Same
-     * always-visible-in-status reasoning as watchdog_panic_disabled just
-     * above: a board currently reachable by anyone on the network with NO
-     * OTA password check must say so everywhere this status is read, not
-     * only at the moment a request happens to hit the bypassed check. */
-    APPEND(",\"boot_button_bypass_active\":%s", boot_button_ota_bypass_active() ? "true" : "false");
-    /* Permanently visible for the same reason boot_button_bypass_active is:
-     * "this board has no OTA auth right now" is a state an operator must be
-     * able to see without going looking. True when the AP password is empty,
-     * which would let anyone in range compute a valid MAC from public
-     * information -- ota_http.c now refuses in that state rather than
-     * HMACing with a zero-length key. */
-    APPEND(",\"ota_auth_disabled\":%s", ota_http_auth_disabled() ? "true" : "false");
-    APPEND(",\"boot_button_bypass_remaining_s\":%lu",
-           (unsigned long)(boot_button_bypass_remaining_ms() / 1000u));
+    /* boot_button_bypass_active, boot_button_bypass_remaining_s, and
+     * ota_auth_disabled were retired 2026-09-29 along with the AP-password
+     * HMAC scheme itself (WEB_AUTH_PLAN.md item 2b) -- there is no OTA auth
+     * check left for the BOOT-button window or ota_http_auth_disabled() to
+     * suspend or report on, so these three status fields were removed with
+     * them, and boot_button.c/.h was deleted entirely since nothing else
+     * used it. */
 
     /* lvgl_port.h -- same always-visible-in-status reasoning as
-     * watchdog_panic_disabled and ota_auth_disabled above: a board still
+     * watchdog_panic_disabled above: a board still
      * running the known-inaccurate touch bootstrap guess (no per-board
      * calibration ever completed) must say so everywhere this status is
      * read, not only in a boot log an operator has probably already

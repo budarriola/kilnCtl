@@ -924,9 +924,6 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     }
 
     STATUS_APPEND(",\"watchdog_panic_disabled\":%s", "true");
-    STATUS_APPEND(",\"boot_button_bypass_active\":%s", "true");
-    STATUS_APPEND(",\"ota_auth_disabled\":%s", "true");
-    STATUS_APPEND(",\"boot_button_bypass_remaining_s\":%lu", (unsigned long)0xFFFFFFFFu);
     STATUS_APPEND(",\"touch_calibrated\":%s", "false");
     /* Mirrors dashboard_status_http.c's touch_cal_supported. Worst case is
      * the LONGEST value touch_cal_support_name() can return -- "unknown" and

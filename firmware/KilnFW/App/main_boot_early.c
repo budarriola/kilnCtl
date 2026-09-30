@@ -9,7 +9,7 @@
  * "heap stage display+touch" checkpoint -- reset-reason/coredump
  * diagnostics, the board die-temp sensor, time_sync, Wi-Fi + mDNS, the I2C
  * bus and the SX1509/kiln_io board layer, boot_guard/rtc_watchdog/
- * watchdog_cfg/boot_button, the i2c_scan, the shared SPI bus, the MAX31856
+ * watchdog_cfg, the i2c_scan, the shared SPI bus, the MAX31856
  * thermocouple channels, and the display/touch/screen_idle/backlight-pwm
  * bring-up. See main_internal.h for the shared context struct and
  * main.c for app_main() itself, which calls main_boot_early() first. */
@@ -28,7 +28,6 @@
 
 #include "hal_sysinfo.h" /* hal_sysinfo_reset_reason() */
 #include "board_temps.h"
-#include "boot_button.h"
 #include "boot_guard.h"
 #include "cfg_fs_mount.h"
 #include "watchdog_cfg.h"
@@ -485,24 +484,10 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // dev-mode setting via esp_task_wdt_reconfigure(). See watchdog_cfg.h.
     watchdog_cfg_init();
 
-    // boot_button.h: the "I lost the AP password" long-press recovery hatch.
-    // Started in BOTH a normal boot and a recovery-mode boot -- deliberately
-    // NOT gated by `ctx->recovery_mode` the way profile_executor_start()/
-    // autotune_engine_start() further below are. Recovery
-    // mode is exactly the situation an operator locked out of OTA auth is
-    // most likely to be stuck in (a boot loop already forced the board into
-    // Wi-Fi+OTA-only mode), so refusing to start this hatch there would
-    // remove the one manual escape a stuck-and-locked-out operator has left.
-    // Safe to start this early: boot_button_task's own handle_open_requested()
-    // calls profile_executor_get_status(), and that function is hardened to
-    // answer a clean "not running" (profile_exec state IDLE, see
-    // profile_executor.c's NULL-mutex guard on every public entry point) even
-    // before profile_executor_start() has run -- exactly the same guarantee
-    // boot_guard.h's RECOVERY_MODE_ENABLED comment already documents was
-    // fixed and host-tested (App/test/test_profile_executor_prestart.c) for
-    // this precise "called before this module's own _start()" situation, so
-    // this call is safe on a normal boot too, before the block below runs.
-    boot_button_start();
+    // boot_button.h (the "I lost the AP password" long-press recovery hatch)
+    // was deleted 2026-09-29 along with the AP-password HMAC scheme it
+    // existed to bypass -- ROUTE_TIER_ADMIN is the only gate on OTA routes
+    // now and there is nothing left for a BOOT-button window to suspend.
 
     // Runs once the expander is in its safe state (relays off) but before
     // anything else starts talking on the bus, so the results reflect what is

@@ -192,11 +192,13 @@ _ADMIN_TIERS = frozenset({"ROUTE_TIER_ADMIN", "ROUTE_TIER_USER"})
 #:                            merged saved+scanned status readout), same
 #:                            disturbance as /scan even though the name
 #:                            doesn't say so.
-#:   /api/ota/challenge    -- mints/rotates the OTA auth nonce
-#:                            (ota_auth_nonce_issue()) on every call.
 #: Excluded rows are recorded in the case's detail as "excluded: side
 #: effect" and never fetched -- see the loop below.
-_SIDE_EFFECT_EXCLUDE = frozenset({"/scan", "/networks", "/api/ota/challenge"})
+#: (`/api/ota/challenge` was excluded here for its nonce-rotation side effect
+#: until 2026-09-29, when the route -- and the whole AP-password HMAC scheme
+#: it served -- was removed from the main app; it no longer appears in this
+#: suite's route table at all.)
+_SIDE_EFFECT_EXCLUDE = frozenset({"/scan", "/networks"})
 
 _ROUTE_TIER_ROW_RE = re.compile(
     r'ROUTE_TIER\(\s*"([^"]*)"\s*,\s*(HTTP_[A-Za-z0-9_]+)\s*,\s*(ROUTE_TIER_[A-Za-z0-9_]+)\s*\)'
