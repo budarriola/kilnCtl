@@ -803,13 +803,25 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     # fails the POST (a transient network blip between the two calls) still
     # gets a useful before/after report instead of losing the before value
     # entirely.
-    before_count: Optional[int] = None
+    # persisted_count (added alongside boot_guard_get_persisted_count(),
+    # boot_guard.c) is what actually moves on a clear -- boot_count is this
+    # boot's fixed in-RAM count (e.g. 1) and never changes across this call,
+    # which used to make a genuinely successful reset read like a no-op. An
+    # older firmware without the field reports None here, not an error --
+    # _fmt_persisted() below renders that as "unknown (older firmware)"
+    # rather than crashing on a missing key.
+    before_persisted: Optional[int] = None
     try:
-        before_count = ota_http.get_boot_guard_status(resolved).get("boot_count")
+        before_data = ota_http.get_boot_guard_status(resolved)
+        before_persisted = before_data.get("persisted_count")
     except (ota_http.OtaHttpError, http_auth.HttpAuthError) as exc:
         _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
                                    "only, does not block the reset call): %s", exc)
-    before_str = "unknown" if before_count is None else str(before_count)
+
+    def _fmt_persisted(value: Optional[int]) -> str:
+        return "unknown (older firmware)" if value is None else str(value)
+
+    before_str = _fmt_persisted(before_persisted)
     try:
         body = ota_http.boot_guard_reset_esp(resolved)
     except http_auth.HttpAuthError as exc:
@@ -823,14 +835,16 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     except ota_http.OtaHttpError as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
-                f"but the recovery-mode counter was NOT cleared by this flash (boot_count before "
-                f"this attempt: {before_str}).")
+                f"but the recovery-mode counter was NOT cleared by this flash (persisted counter "
+                f"before this attempt: {before_str}).")
+    after_str = _fmt_persisted(body.get("persisted_count"))
     if body.get("ok"):
-        return (f"boot_guard_reset: recovery-mode counter cleared and verified "
-                f"(boot_count before={before_str}, after={body.get('boot_count')})")
+        return (f"boot_guard_reset: persisted counter cleared and verified "
+                f"(persisted before={before_str}, after={after_str}; this boot's own "
+                f"boot_count={body.get('boot_count')}, unchanged by this call)")
     return (f"WARNING: boot_guard_reset did not verify (board reported {body!r}) -- the flash "
             "itself landed fine, but the recovery-mode counter was NOT confirmed cleared "
-            f"(boot_count before={before_str}, reported after={body.get('boot_count')}); a run of "
+            f"(persisted before={before_str}, reported after={after_str}); a run of "
             "ordinary reflashes could still eventually walk this board into recovery mode.")
 
 

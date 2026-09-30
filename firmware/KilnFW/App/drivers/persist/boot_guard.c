@@ -574,6 +574,27 @@ bool boot_guard_mark_healthy(void)
     return verified;
 }
 
+bool boot_guard_get_persisted_count(uint32_t *out_count)
+{
+    /* Read-only: only calls load_count(), never persist_count()/
+     * erase_then_persist_count() -- safe to call from a PSRAM-stacked httpd
+     * task (this module's write paths are not; see boot_guard.h's doc
+     * comment on this function). Requires boot_guard_init() to have already
+     * run this boot -- s_bg.lock does not exist before that, and there is no
+     * NVS partition handle to read from either. */
+    if (!out_count) {
+        return false;
+    }
+    if (!s_bg.initialized || !s_bg.lock) {
+        return false;
+    }
+    xSemaphoreTake(s_bg.lock, portMAX_DELAY);
+    uint32_t count = load_count();
+    xSemaphoreGive(s_bg.lock);
+    *out_count = count;
+    return true;
+}
+
 bool boot_guard_reset_counter(void)
 {
     /* See docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md:

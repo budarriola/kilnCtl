@@ -1155,8 +1155,16 @@ def boot_guard_get(host: Optional[str] = None) -> str:
     seam every other admin-tier tool in this package uses. Pure GET, no
     side effects, refuses nothing, and reports no credentials.
 
-    Returns ``{"boot_count": int, "recovery_mode": bool}`` rendered as one
-    short text block plus a one-line interpretation. See CLAUDE.md's
+    Returns ``{"boot_count": int, "recovery_mode": bool, "persisted_count":
+    int|None}`` rendered as one short text block plus a one-line
+    interpretation. ``boot_count`` is fixed for the life of the current
+    boot (set once at boot_guard_init()); ``persisted_count`` is a live
+    re-read of what is actually in NVS right now (0 covers both "really
+    cleared" and "nothing valid there" -- see
+    boot_guard_get_persisted_count()'s doc comment in boot_guard.h), so it
+    is the field that actually moves right after a boot_guard_reset call.
+    Older firmware that predates this field omits it; this renders as
+    ``persisted_count=None`` rather than an error. See CLAUDE.md's
     boot_guard section and docs/audits/boot_guard_post_flash_recovery_
     footgun_2026-09-08.md for why this counter and this route exist.
 
@@ -1175,11 +1183,14 @@ def boot_guard_get(host: Optional[str] = None) -> str:
 
     boot_count = data.get("boot_count")
     recovery_mode = data.get("recovery_mode")
+    persisted_count = data.get("persisted_count")
     return (
         f"host={resolved}\n"
         f"boot_count={boot_count!r}\n"
         f"recovery_mode={recovery_mode!r}\n"
-        f"summary: counter {boot_count!r}, recovery_mode {recovery_mode!r}"
+        f"persisted_count={persisted_count!r}\n"
+        f"summary: counter {boot_count!r}, recovery_mode {recovery_mode!r}, "
+        f"persisted {persisted_count!r}"
     )
 
 

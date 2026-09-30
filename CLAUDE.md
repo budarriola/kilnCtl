@@ -839,7 +839,17 @@ independent AP-password HMAC on its own routes.)
 `flash_firmware()`'s result reports the counter's before value, the clear result, and the
 verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
 also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so
-this class of fix no longer needs a JTAG read of `s_bg` to verify), never from inside an
+this class of fix no longer needs a JTAG read of `s_bg` to verify. **2026-09-30 fix:** both that
+route and `POST /api/ota/esp/boot_guard_reset` now also report `persisted_count` -- a live
+re-read of NVS via the new read-only `boot_guard_get_persisted_count()` accessor
+(`boot_guard.c`), omitted rather than fabricated when it cannot be read. `boot_count` alone is
+fixed for the life of the current boot (set once at `boot_guard_init()`), so a `boot_guard_reset`
+response reporting only `boot_count` read as a no-op even on a genuinely successful clear --
+`persisted_count` is the field that actually moves. `flash_firmware()`'s reported before/after
+values and `boot_guard_get()`'s MCP tool output now use `persisted_count` too, falling back to
+"unknown (older firmware)"/`None` against a board that predates this field. This does not change
+anything about `boot_guard_reset_counter()`'s own clear-and-verify behavior, only what is
+reported about it. Never from inside an
 unconditional firmware boot path: a negative
 test proved that wiring it into every `boot_guard_init()` call instead defeats the counter
 entirely, masking a genuinely failing board. Firmware cannot itself distinguish "a developer

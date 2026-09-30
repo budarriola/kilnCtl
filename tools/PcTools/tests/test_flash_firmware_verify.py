@@ -560,20 +560,24 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(
                  mf.ota_http, "get_boot_guard_status",
-                 return_value={"boot_count": 2, "recovery_mode": False}) as status_mock, \
+                 return_value={"boot_count": 1, "recovery_mode": False,
+                               "persisted_count": 2}) as status_mock, \
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
-                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
+                 return_value={"ok": True, "boot_count": 1, "persisted_count": 0}) as reset_mock:
             result = mf.flash_firmware(verify=True)
         status_mock.assert_called_once_with("192.168.1.156")
         reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
         self.assertIn("boot_guard_reset", result)
         self.assertIn("cleared and verified", result)
-        # Item 4 of the plan: report the count BEFORE the clear (from the
-        # GET probe above) alongside the verified after-value, not just the
-        # after-value alone -- a silent clear with no before/after context
-        # is not acceptable per RELEASE_HARDENING_PLAN.md blocker 6.
+        # Item 4 of the plan: report the PERSISTED count (what is actually in
+        # NVS) BEFORE the clear (from the GET probe above) alongside the
+        # verified after-value, not just the after-value alone -- a silent
+        # clear with no before/after context is not acceptable per
+        # RELEASE_HARDENING_PLAN.md blocker 6. boot_count (this boot's fixed
+        # in-RAM count) never changes across this call and is reported
+        # separately.
         self.assertIn("before=2", result)
         self.assertIn("after=0", result)
 
@@ -588,12 +592,30 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                  side_effect=mf.ota_http.OtaHttpError("unreachable")), \
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
-                 return_value={"ok": True, "boot_count": 0}) as reset_mock:
+                 return_value={"ok": True, "boot_count": 1, "persisted_count": 0}) as reset_mock:
             result = mf.flash_firmware(verify=True)
         reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
         self.assertIn("before=unknown", result)
         self.assertIn("after=0", result)
+
+    def test_persisted_count_absent_reports_older_firmware(self):
+        """A board running firmware from before persisted_count existed
+        omits the field from both responses -- this must render as an
+        explicit "older firmware" note, not a crash or a bare None, on both
+        the before and after side."""
+        self.preflash_mock.return_value = "192.168.1.156"
+        with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "get_boot_guard_status",
+                 return_value={"boot_count": 2, "recovery_mode": False}), \
+             unittest.mock.patch.object(
+                 mf.ota_http, "boot_guard_reset_esp",
+                 return_value={"ok": True, "boot_count": 2}):
+            result = mf.flash_firmware(verify=True)
+        self.assertNotIn("error:", result)
+        self.assertIn("before=unknown (older firmware)", result)
+        self.assertIn("after=unknown (older firmware)", result)
 
     def test_reset_boot_guard_false_opts_out(self):
         """`reset_boot_guard=False` is an unconditional opt-out."""

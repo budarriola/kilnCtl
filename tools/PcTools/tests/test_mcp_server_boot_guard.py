@@ -45,6 +45,25 @@ class RenderTest(_Base):
         self.assertIn("boot_count=7", result)
         self.assertIn("recovery_mode=True", result)
 
+    def test_renders_persisted_count_when_present(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(ota_http_client, "get_boot_guard_status",
+                                         return_value={"boot_count": 1, "recovery_mode": False,
+                                                        "persisted_count": 5}):
+            result = msi.boot_guard_get()
+        self.assertIn("persisted_count=5", result)
+        self.assertIn("persisted 5", result)
+
+    def test_renders_persisted_count_none_on_older_firmware(self):
+        """A board running firmware from before persisted_count existed
+        omits the field entirely -- this must render as None, not raise a
+        KeyError."""
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(ota_http_client, "get_boot_guard_status",
+                                         return_value={"boot_count": 3, "recovery_mode": False}):
+            result = msi.boot_guard_get()
+        self.assertIn("persisted_count=None", result)
+
     def test_explicit_host_bypasses_resolution(self):
         with unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host",
                                          return_value="192.168.1.156") as resolve_mock, \

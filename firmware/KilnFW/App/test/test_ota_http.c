@@ -472,6 +472,21 @@ static bool s_stub_boot_guard_reset_verified = true;
 static uint32_t s_stub_boot_guard_count = 0;
 bool boot_guard_reset_counter(void) { return s_stub_boot_guard_reset_verified; }
 uint32_t boot_guard_get_boot_count(void) { return s_stub_boot_guard_count; }
+// Test-controllable third state (present/value/absent) so the handlers'
+// persisted_count field -- added so a caller can tell "really cleared just
+// now" apart from boot_count's fixed-for-the-boot value -- can be exercised
+// without the real NVS-backed boot_guard.c (covered directly by
+// test_boot_guard.c's own persisted-count tests).
+static bool s_stub_boot_guard_persisted_available = true;
+static uint32_t s_stub_boot_guard_persisted_count = 0;
+bool boot_guard_get_persisted_count(uint32_t *out_count)
+{
+    if (!s_stub_boot_guard_persisted_available) {
+        return false;
+    }
+    *out_count = s_stub_boot_guard_persisted_count;
+    return true;
+}
 
 // web_encoding.h -- only reached from page GET handlers, never called here.
 bool web_client_accepts_gzip(httpd_req_t *req) { (void)req; return true; }
@@ -1501,6 +1516,8 @@ static void test_boot_guard_reset_authenticated_reports_success(void)
                  "ok:true when it verifies");
     s_stub_boot_guard_reset_verified = true;
     s_stub_boot_guard_count = 0;
+    s_stub_boot_guard_persisted_available = true;
+    s_stub_boot_guard_persisted_count = 0;
     stub_headers_reset();
     s_last_err_code = 0;
     s_last_err_msg[0] = '\0';
@@ -1514,6 +1531,34 @@ static void test_boot_guard_reset_authenticated_reports_success(void)
     TEST_CHECK(s_last_err_code == 0, "an ordinary request is not refused");
     TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") != NULL,
               "reports ok:true when boot_guard_reset_counter() verifies its clear");
+    TEST_CHECK(strstr(s_last_resp_body, "\"persisted_count\":0") != NULL,
+              "reports the live persisted count (re-read AFTER the reset), not just boot_count -- "
+              "boot_count alone never moves across this call and used to make a genuine clear read "
+              "like a no-op");
+}
+
+static void test_boot_guard_reset_omits_persisted_count_when_unavailable(void)
+{
+    TEST_SECTION("ota_boot_guard_reset_post_handler -- omits persisted_count rather than fabricating "
+                 "a value when boot_guard_get_persisted_count() itself cannot read it back");
+    s_stub_boot_guard_reset_verified = true;
+    s_stub_boot_guard_count = 0;
+    s_stub_boot_guard_persisted_available = false;
+    stub_headers_reset();
+    s_last_err_code = 0;
+    s_last_err_msg[0] = '\0';
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_reset_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") != NULL, "still reports ok:true from the reset itself");
+    TEST_CHECK(strstr(s_last_resp_body, "persisted_count") == NULL,
+              "omits the field entirely rather than printing a fabricated 0 or null when the "
+              "read-back itself failed");
+    s_stub_boot_guard_persisted_available = true;
 }
 
 static void test_boot_guard_reset_authenticated_reports_failure_honestly(void)
@@ -1521,6 +1566,8 @@ static void test_boot_guard_reset_authenticated_reports_failure_honestly(void)
     TEST_SECTION("ota_boot_guard_reset_post_handler -- reports ok:false, not a bare 200 that implies "
                  "success, when boot_guard_reset_counter() could NOT verify the clear");
     s_stub_boot_guard_reset_verified = false; // the lying-write case, from the caller's side
+    s_stub_boot_guard_persisted_available = true;
+    s_stub_boot_guard_persisted_count = 2;
     stub_headers_reset();
     s_last_err_code = 0;
     s_last_err_msg[0] = '\0';
@@ -1829,6 +1876,8 @@ static void test_boot_guard_status_reports_count_and_recovery_mode(void)
     TEST_SECTION("ota_boot_guard_status_get_handler -- unauthenticated, reports the real count and "
                  "recovery-mode flag with no auth gate");
     s_stub_boot_guard_count = 7;
+    s_stub_boot_guard_persisted_available = true;
+    s_stub_boot_guard_persisted_count = 3;
     s_last_resp_body[0] = '\0';
 
     httpd_req_t req;
@@ -1840,7 +1889,29 @@ static void test_boot_guard_status_reports_count_and_recovery_mode(void)
     TEST_CHECK(strstr(s_last_resp_body, "\"recovery_mode\":false") != NULL,
               "reports the real recovery-mode flag (this file's boot_guard_is_recovery_mode() stub "
               "always returns false)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"persisted_count\":3") != NULL,
+              "also reports the live persisted count, distinct from boot_count");
     s_stub_boot_guard_count = 0;
+}
+
+static void test_boot_guard_status_omits_persisted_count_when_unavailable(void)
+{
+    TEST_SECTION("ota_boot_guard_status_get_handler -- omits persisted_count rather than fabricating "
+                 "a value when the read-back itself fails");
+    s_stub_boot_guard_count = 7;
+    s_stub_boot_guard_persisted_available = false;
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_boot_guard_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler always returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"boot_count\":7") != NULL, "still reports boot_count");
+    TEST_CHECK(strstr(s_last_resp_body, "persisted_count") == NULL,
+              "omits the field entirely rather than a fabricated value");
+    s_stub_boot_guard_count = 0;
+    s_stub_boot_guard_persisted_available = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2089,8 +2160,10 @@ void run_test_ota_http(void)
     test_check_interlocks_ok_when_no_sweep();
 
     test_boot_guard_reset_authenticated_reports_success();
+    test_boot_guard_reset_omits_persisted_count_when_unavailable();
     test_boot_guard_reset_authenticated_reports_failure_honestly();
     test_boot_guard_status_reports_count_and_recovery_mode();
+    test_boot_guard_status_omits_persisted_count_when_unavailable();
 
     test_ota_esp_status_web_auth_off_shows_build_identity();
     test_ota_esp_status_unauthenticated_redacts_build_identity();

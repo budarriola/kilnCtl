@@ -205,9 +205,24 @@ esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req)
     ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
     bool verified = boot_guard_reset_counter();
-    char json[96];
-    int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"boot_count\":%lu}",
+    /* persisted_count is read AFTER the reset attempt so it reflects what is
+     * actually in NVS now (0 on a verified clear) -- boot_count alone (this
+     * boot's fixed in-RAM count, e.g. 1) never changes across this call and
+     * was the whole reason this route's response used to read as a no-op
+     * even when the clear worked; see boot_guard_get_persisted_count()'s doc
+     * comment. */
+    uint32_t persisted = 0;
+    bool have_persisted = boot_guard_get_persisted_count(&persisted);
+    char json[128];
+    int n;
+    if (have_persisted) {
+        n = snprintf(json, sizeof(json), "{\"ok\":%s,\"boot_count\":%lu,\"persisted_count\":%lu}",
+                      verified ? "true" : "false", (unsigned long)boot_guard_get_boot_count(),
+                      (unsigned long)persisted);
+    } else {
+        n = snprintf(json, sizeof(json), "{\"ok\":%s,\"boot_count\":%lu}",
                       verified ? "true" : "false", (unsigned long)boot_guard_get_boot_count());
+    }
     if (!verified) {
         // Same reasoning as ota_recovery_exit_post_handler()'s equivalent
         // log line: the caller (a tool that just flashed the board and is
@@ -236,10 +251,21 @@ esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req)
 // below for the same reasoning applied to that route.
 esp_err_t ota_boot_guard_status_get_handler(httpd_req_t *req)
 {
-    char json[96];
-    int n = snprintf(json, sizeof(json), "{\"boot_count\":%lu,\"recovery_mode\":%s}",
+    uint32_t persisted = 0;
+    bool have_persisted = boot_guard_get_persisted_count(&persisted);
+    char json[128];
+    int n;
+    if (have_persisted) {
+        n = snprintf(json, sizeof(json),
+                      "{\"boot_count\":%lu,\"recovery_mode\":%s,\"persisted_count\":%lu}",
+                      (unsigned long)boot_guard_get_boot_count(),
+                      boot_guard_is_recovery_mode() ? "true" : "false",
+                      (unsigned long)persisted);
+    } else {
+        n = snprintf(json, sizeof(json), "{\"boot_count\":%lu,\"recovery_mode\":%s}",
                       (unsigned long)boot_guard_get_boot_count(),
                       boot_guard_is_recovery_mode() ? "true" : "false");
+    }
     httpd_resp_set_type(req, "application/json");
     ota_http_send_json_clamped(req, json, n, sizeof(json));
     return ESP_OK;

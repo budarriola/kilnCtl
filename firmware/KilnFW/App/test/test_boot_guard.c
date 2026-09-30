@@ -683,6 +683,58 @@ static void test_reset_counter_refuses_success_when_every_write_lies(void)
                "having verified in the call that made it");
 }
 
+// ---------------------------------------------------------------------------
+// boot_guard_get_persisted_count() -- the read-only re-read added so a
+// caller (the boot_guard_reset HTTP route/flash_firmware()'s post-flash
+// step) can tell "the persisted counter was really cleared just now" apart
+// from "this boot's own fixed in-RAM count, unchanged by the call" -- see
+// boot_guard.h's doc comment on this function.
+// ---------------------------------------------------------------------------
+static void test_get_persisted_count_before_init_fails(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle(); /* s_bg.initialized == false, no lock yet */
+
+    uint32_t out = 0xdeadbeefu;
+    TEST_CHECK(!boot_guard_get_persisted_count(&out),
+               "before boot_guard_init() has run this boot, there is no lock and nothing to read -- "
+               "must report failure, not a fabricated 0");
+    TEST_CHECK(out == 0xdeadbeefu, "a failed call must not touch *out_count");
+}
+
+static void test_get_persisted_count_null_arg_fails(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+    boot_guard_init();
+    TEST_CHECK(!boot_guard_get_persisted_count(NULL), "a NULL out-param is refused, not a crash");
+}
+
+static void test_get_persisted_count_tracks_live_nvs_value(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    boot_guard_init(); /* boot 1: persists count 1 */
+    uint32_t out = 0;
+    TEST_CHECK(boot_guard_get_persisted_count(&out), "reads back successfully once initialized");
+    TEST_CHECK(out == 1u, "matches what boot_guard_init() just persisted");
+    // THE distinction this function exists for: boot_guard_get_boot_count()
+    // (this boot's fixed in-RAM value) does NOT move when the persisted
+    // record is cleared out from under it mid-boot, but this function does,
+    // because it re-reads flash every call rather than returning s_bg.count.
+    TEST_CHECK(boot_guard_get_boot_count() == 1u, "this boot's in-RAM count is still 1");
+    TEST_CHECK(boot_guard_mark_healthy(), "clear verifies");
+    TEST_CHECK(boot_guard_get_boot_count() == 1u,
+               "NEGATIVE-TEST CONTROL: boot_count is unchanged by the clear -- this is exactly the "
+               "confusing behavior the new field exists to give a caller a way around");
+    TEST_CHECK(boot_guard_get_persisted_count(&out), "reads back successfully after the clear");
+    TEST_CHECK(out == 0u, "persisted_count DOES reflect the clear immediately, unlike boot_count");
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -700,4 +752,7 @@ void run_test_boot_guard(void)
     test_a_genuinely_failing_boot_still_trips_recovery();
     test_reset_counter_recovers_from_a_single_lying_write();
     test_reset_counter_refuses_success_when_every_write_lies();
+    test_get_persisted_count_before_init_fails();
+    test_get_persisted_count_null_arg_fails();
+    test_get_persisted_count_tracks_live_nvs_value();
 }

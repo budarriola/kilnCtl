@@ -215,6 +215,31 @@ bool boot_guard_reset_counter(void);
  * incremented to) this boot. */
 uint32_t boot_guard_get_boot_count(void);
 
+/* Read-only re-read of the count actually sitting in NVS right now (as
+ * opposed to boot_guard_get_boot_count(), which is this BOOT's in-RAM
+ * count -- fixed at boot_guard_init() time and never re-read from flash
+ * afterward). This is what a caller needs to tell "the persisted counter
+ * was really cleared just now" apart from "this boot's own count, which was
+ * 1 before either function existed and always will be right after a fresh
+ * boot" -- the confusion the boot_guard_reset route's response caused before
+ * this accessor existed (a "cleared and verified" reset reporting the same
+ * boot_count=1 it always does, indistinguishable from a no-op to a caller
+ * reading the JSON alone).
+ *
+ * Read-only: touches load_count() only, never a write path, so it is safe to
+ * call from a PSRAM-stacked task (see this file's own httpd handlers) --
+ * unlike boot_guard_mark_healthy()/boot_guard_reset_counter(), which persist.
+ *
+ * Returns false (leaving *out_count untouched) if out_count is NULL or
+ * boot_guard_init() has not yet run this boot (no lock, no partition handle
+ * to read from). Otherwise returns true and sets *out_count to the value
+ * actually read from NVS right now -- 0 covers both "confirmed zero" and
+ * "nothing valid there" (missing/corrupt/wrong-version), the same collapse
+ * load_count() already uses everywhere else in this file; this call cannot
+ * tell those two apart any better than boot_guard_init() itself could at
+ * boot. */
+bool boot_guard_get_persisted_count(uint32_t *out_count);
+
 /* STUCK-COUNTER ESCAPE -- see the long comment of the same name in
  * boot_guard.c for the hardware evidence behind this.
  *
