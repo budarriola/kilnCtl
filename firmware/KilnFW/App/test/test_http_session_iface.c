@@ -102,7 +102,7 @@ static void test_touch_extends_valid_session(void)
     make_session("tok-touch-1", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
     fake_time_advance_ms(50000); // 50s in, still valid
 
-    http_auth_session_touch("tok-touch-1", "10.0.0.5");
+    http_auth_session_touch("tok-touch-1", "10.0.0.5", false);
 
     web_auth_session_role_t role;
     uint32_t last_seen = 0;
@@ -136,7 +136,7 @@ static void test_touch_never_revives_expired_session(void)
     // buggy client hammering an activity route (or this touch call
     // directly) after the deadline must not be able to resurrect the
     // session. ***
-    http_auth_session_touch("tok-touch-2", "10.0.0.5");
+    http_auth_session_touch("tok-touch-2", "10.0.0.5", false);
 
     web_auth_session_role_t role;
     uint32_t last_seen = 0;
@@ -189,7 +189,7 @@ static void test_unreadable_policy_fails_closed(void)
                "not 'never expires'");
     TEST_CHECK(role == WEB_AUTH_SESSION_ROLE_NONE, "role collapses to NONE under UNREADABLE");
 
-    http_auth_session_touch("tok-unreadable", "10.0.0.5");
+    http_auth_session_touch("tok-unreadable", "10.0.0.5", false);
     // The touch above must have been a no-op: prove the underlying slot's
     // last_seen_ms was never moved by reading it back after the policy is
     // repaired.
@@ -211,14 +211,14 @@ static void test_touch_unknown_token_and_never_timeout(void)
 
     // No session exists for this token at all -- must not crash, must not
     // create one.
-    http_auth_session_touch("never-issued-2", "10.0.0.5");
-    http_auth_session_touch(NULL, "10.0.0.5");
-    http_auth_session_touch("", "10.0.0.5");
+    http_auth_session_touch("never-issued-2", "10.0.0.5", false);
+    http_auth_session_touch(NULL, "10.0.0.5", false);
+    http_auth_session_touch("", "10.0.0.5", false);
 
     set_policy_timeout(-1); // "never" (web_auth_store's -1 sentinel)
     make_session("tok-never", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
     fake_time_advance_ms(1000u * 3600u * 24u); // a full day later
-    http_auth_session_touch("tok-never", "10.0.0.5");
+    http_auth_session_touch("tok-never", "10.0.0.5", false);
 
     web_auth_session_role_t role;
     uint32_t last_seen = 0;
@@ -295,13 +295,13 @@ static void test_status_and_touch_deny_mismatched_client_ip(void)
     TEST_CHECK(http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &before, &timeout_s),
                "sanity read of last_seen_ms before the mismatched touch attempts below");
 
-    http_auth_session_touch("tok-ip-bound-2", "10.0.0.99");
+    http_auth_session_touch("tok-ip-bound-2", "10.0.0.99", false);
     uint32_t after_wrong_ip = 0;
     http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &after_wrong_ip, &timeout_s);
     TEST_CHECK(after_wrong_ip == before,
                "a touch from the wrong address must not extend a session it cannot otherwise use");
 
-    http_auth_session_touch("tok-ip-bound-2", NULL);
+    http_auth_session_touch("tok-ip-bound-2", NULL, false);
     uint32_t after_null_ip = 0;
     http_auth_session_status("tok-ip-bound-2", "10.0.0.5", &role, &after_null_ip, &timeout_s);
     TEST_CHECK(after_null_ip == before,
@@ -443,6 +443,70 @@ static void test_any_session_active(void)
     set_policy_timeout(60); // repair for later tests
 }
 
+// 2026-09-29 owner decision: http_auth_any_ap_session_active() is the fix for
+// the bug ap_teardown_should_defer()'s old http_auth_any_session_active()
+// signal caused -- a LAN-only session (via_ap never set) must NOT count,
+// only one whose via_ap tag is true, and "last used" wins (a touch can flip
+// the tag either direction). Drives the REAL function against the REAL
+// table/policy, same idiom as test_any_session_active() above.
+static void test_any_ap_session_active(void)
+{
+    TEST_SECTION("http_auth_any_ap_session_active -- counts only still-valid, AP-tagged sessions; "
+                 "a LAN-only session never counts; fails toward TRUE on an UNREADABLE policy");
+
+    reset_all();
+    set_policy_timeout(60);
+    TEST_CHECK(!http_auth_any_ap_session_active(), "empty table -- nobody logged in");
+
+    // A session created and touched only ever over the LAN (via_ap stays
+    // false, its default at creation) must NOT count -- this is the actual
+    // regression: the PC's MCP tools hold an admin session this way, never
+    // through the AP, and must never defer AP teardown by itself.
+    make_session("tok-lan-only", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    fake_time_advance_ms(1000);
+    http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/false);
+    TEST_CHECK(!http_auth_any_ap_session_active(),
+               "a LAN-only session (via_ap never set) does not defer AP teardown");
+    TEST_CHECK(http_auth_any_session_active(),
+               "sanity: the same session DOES count toward the old, broader any-session signal -- "
+               "proving these two are genuinely different predicates, not a rename");
+
+    // A session touched over the AP (via_ap=true) DOES count.
+    http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/true);
+    TEST_CHECK(http_auth_any_ap_session_active(), "a session last used over the AP defers AP teardown");
+
+    // "Last used", not "origin only": touching it again over the LAN flips it
+    // back off.
+    http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/false);
+    TEST_CHECK(!http_auth_any_ap_session_active(),
+               "touching the same session over the LAN again stops it deferring -- via_ap tracks "
+               "LAST use, not merely how the session was created");
+
+    // Expiry still applies exactly like the broader signal: an idle,
+    // AP-tagged session must not hold the AP up forever.
+    http_auth_session_touch("tok-lan-only", "10.0.0.5", /*via_ap=*/true);
+    TEST_CHECK(http_auth_any_ap_session_active(), "setup: AP-tagged and fresh");
+    fake_time_advance_ms(61000); // past the 60s timeout
+    TEST_CHECK(!http_auth_any_ap_session_active(),
+               "an expired-but-still-in_use AP-tagged slot does NOT count");
+
+    // UNREADABLE policy still fails closed toward TRUE, same direction as
+    // http_auth_any_session_active().
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "setup: open kiln_auth");
+    uint8_t blob[64];
+    size_t blob_len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, "auth_policy", blob, &blob_len) == HAL_OK, "setup: read policy blob");
+    TEST_CHECK(blob_len > 0 && blob_len <= sizeof(blob), "setup: policy blob length sane");
+    blob[blob_len - 1] ^= 0xFFu; // corrupt the trailing crc32
+    TEST_CHECK(hal_kv_set_blob(&h, "auth_policy", blob, blob_len) == HAL_OK, "setup: write corrupted blob");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit corruption");
+    hal_kv_close(&h);
+    TEST_CHECK(http_auth_any_ap_session_active(),
+               "UNREADABLE policy reports TRUE (keep the AP up) even with every session expired");
+    set_policy_timeout(60); // repair for later tests
+}
+
 void run_test_http_session_iface(void) {
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
@@ -456,4 +520,5 @@ void run_test_http_session_iface(void) {
     test_logout_is_idempotent_and_tolerates_unknown_tokens();
     test_logout_does_not_require_a_still_valid_session();
     test_any_session_active();
+    test_any_ap_session_active();
 }

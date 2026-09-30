@@ -16,6 +16,7 @@
 #ifndef KILNCTL_HTTP_SESSION_IFACE_H
 #define KILNCTL_HTTP_SESSION_IFACE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -142,7 +143,15 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
 // lock prompt and keeps calling this (or any USER/ADMIN route) after the
 // deadline gets nothing, because the validity check runs before the touch,
 // not after.
-void http_auth_session_touch(const char *token, const char *client_ip);
+// `via_ap`: 2026-09-29 owner decision -- whether THIS request arrived over
+// the SoftAP interface (wifi_prov_request_arrived_on_ap(), wifi_prov.h),
+// resolved by the caller (http_auth_http.c's kiln_http_prehandler()) exactly
+// once per request, same convention as `client_ip`. On a successful touch
+// (all the validity/IP checks above pass), this also calls
+// web_auth_table_set_via_ap() so the slot's AP-origin tag always reflects the
+// interface that LAST used it, not merely the one that created it -- see
+// web_auth_session.h's via_ap field comment for why "last used" was chosen.
+void http_auth_session_touch(const char *token, const char *client_ip, bool via_ap);
 
 // Explicit logout: hashes `token`, looks it up against the SAME table
 // http_session_table() owns, and destroys that slot via
@@ -197,6 +206,21 @@ void http_auth_session_logout(const char *token);
 // module never has to reach into this file's clock source or risk passing a
 // stale/mismatched timestamp.
 bool http_auth_any_session_active(void);
+
+// 2026-09-29 owner decision, and the actual fix for the bug report above:
+// wifi_prov_link.c's ap_teardown_should_defer() no longer consults
+// http_auth_any_session_active() (which counts ANY session anywhere,
+// including one only ever used over the home LAN -- e.g. the PC's MCP tools,
+// which never touch the AP). This is the AP-scoped sibling: reports whether
+// any slot's session is both still valid AND was LAST USED over the SoftAP
+// interface (web_auth_table_any_ap_session_active()). Same fail-closed-
+// toward-TRUE direction on an unreadable policy record as
+// http_auth_any_session_active(), for the identical reason (this also guards
+// a physical action, not a capability grant). Callers only use this when
+// http_auth_policy_web_enabled() has already reported auth ON -- with auth
+// off, wifi_prov_link.c's own auth-off branch (any AP station connected)
+// applies instead and this function is not consulted.
+bool http_auth_any_ap_session_active(void);
 
 #ifdef __cplusplus
 }

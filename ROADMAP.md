@@ -4286,6 +4286,17 @@ Owner instruction, 2026-09-21.
     auth off, the AP stays up while any station is connected to it, not just
     while a user is logged in. `59e84b57`/`f3991c09`'s `/wifi` setup-tier gate
     (open only while unprovisioned) landed the same day and is unaffected.
+  - **Fix, 2026-09-29:** `ap_teardown_should_defer()` deferred AP teardown for
+    ANY active admin session, including a LAN-only one (e.g. the PC's own MCP
+    tools reaching the board over the home LAN) -- so it stayed up with zero
+    AP clients connected. Fixed by tagging each web session slot with
+    `via_ap` (set at login and re-set on every touch, so it reflects the
+    session's current interface, not just its origin) and checking a new
+    AP-scoped signal, `http_auth_any_ap_session_active()`, instead of "any
+    session anywhere". A LAN/STA session now never defers teardown by
+    itself. Owner-accepted judgment call: with auth on, a station physically
+    associated to the AP but not yet authenticated (mid-login) still defers
+    teardown, so a connecting operator is never stranded.
   - **Pending bench work (not yet done):** flash the landed firmware above
     to the bench board; hardware-verify the LCD edit-firing page, the login
     gates, AP-fallback radio timing and the LCD's "[AP kept up]" render;

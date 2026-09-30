@@ -530,7 +530,17 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 
     web_auth_session_role_t session_role =
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
-    web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
+    size_t session_idx =
+        web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
+    // 2026-09-29 owner decision: tag the session's initial AP-origin state at
+    // login time. Necessary here specifically because POST /api/auth/login
+    // is ROUTE_TIER_OPEN (http_auth_http.c's activity-touch path never runs
+    // for it), so login is the only chance to record whether THIS session
+    // started life over the SoftAP interface before any ordinary request
+    // touch has a chance to (re-)tag it -- see web_auth_session.h's via_ap
+    // field comment for why later touches can still flip it either way.
+    web_auth_table_set_via_ap(http_session_table(), session_idx,
+                               wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req)));
 
     // 128 bytes: "kiln_sid=" (9) + 64 hex chars + "; HttpOnly; SameSite=Strict; Path=/"
     // (35) + NUL = 109 -- Finding 5 fix (2026-09-17 review): this comment's

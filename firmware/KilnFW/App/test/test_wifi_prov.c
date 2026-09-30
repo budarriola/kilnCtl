@@ -92,18 +92,34 @@ httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 int g_stub_time_sync_notify_got_ip_calls = 0;
 void time_sync_notify_got_ip(void) { g_stub_time_sync_notify_got_ip_calls++; }
 
-// http_auth_policy_web_enabled()/http_auth_any_session_active() are declared
-// by the real http_auth_policy_iface.h/http_session_iface.h (off-limits --
-// their real bodies pull in PSA crypto/hal_time/web_auth_store, none of which
-// this narrow host-test build links) and called from wifi_prov_link.c's new
-// ap_teardown_should_defer() (2026-09-28 owner request: "reconnect to wifi
-// ... when there are no users logged in to the website"). Fakes here are
-// directly controllable (unlike time_sync_notify_got_ip() above, which only
-// counts) so tests can drive both branches of ap_teardown_should_defer().
+// http_auth_policy_web_enabled()/http_auth_any_ap_session_active() are
+// declared by the real http_auth_policy_iface.h/http_session_iface.h
+// (off-limits -- their real bodies pull in PSA crypto/hal_time/web_auth_store,
+// none of which this narrow host-test build links) and called from
+// wifi_prov_link.c's ap_teardown_should_defer() (2026-09-28 owner request:
+// "reconnect to wifi ... when there are no users logged in to the website";
+// 2026-09-29 owner follow-up: narrowed to "a session that arrived through the
+// AP", not any admin session -- see ap_teardown_should_defer()'s own header
+// comment). Fakes here are directly controllable (unlike
+// time_sync_notify_got_ip() above, which only counts) so tests can drive
+// every branch of ap_teardown_should_defer().
 bool g_stub_web_auth_enabled = false;
 bool http_auth_policy_web_enabled(void) { return g_stub_web_auth_enabled; }
-bool g_stub_any_session_active = false;
-bool http_auth_any_session_active(void) { return g_stub_any_session_active; }
+// 2026-09-29: renamed from g_stub_any_session_active/http_auth_any_session_active()
+// -- the production signal ap_teardown_should_defer() consults is now the
+// AP-scoped one (a LAN-only session must never defer by itself; see the
+// header comment above). g_stub_any_session_active is deliberately NOT kept
+// as a second fake: nothing in this file's production call graph
+// (wifi_prov_link.c) calls http_auth_any_session_active() any more, so a
+// second fake for it would be untested dead weight here. From this layer's
+// vantage point, false covers BOTH "nobody has any session at all" and "a
+// session exists but has only ever been used over the LAN" -- the two are
+// indistinguishable here by design, since ap_teardown_should_defer() itself
+// only ever asks the AP-scoped question; the LAN-vs-AP distinction itself is
+// exercised at the lower layer, test_http_session_iface.c's
+// test_any_ap_session_active().
+bool g_stub_any_ap_session_active = false;
+bool http_auth_any_ap_session_active(void) { return g_stub_any_ap_session_active; }
 
 // stack_margin_register() is declared by the real stack_margin.h (safe to
 // include -- that header is deliberately FreeRTOS-free, see its own top
@@ -188,7 +204,7 @@ static void reset_state(void)
     // in, no AP client", i.e. teardown never deferred, matching every
     // pre-existing test above that expects an immediate teardown.
     g_stub_web_auth_enabled = false;
-    g_stub_any_session_active = false;
+    g_stub_any_ap_session_active = false;
     g_stub_ap_sta_count = 0;
     g_stub_netif_ip_addr = 0; // no lease by default -- sta_link_is_live() reads false unless a test opts in
 }
@@ -689,16 +705,16 @@ static void test_ap_fallback_tick_raises_ap_after_timeout(void)
     TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_APSTA, "radio mode is now APSTA -- home STA config is preserved");
 }
 
-static void test_got_ip_defers_ap_teardown_while_session_active(void)
+static void test_got_ip_defers_ap_teardown_while_ap_session_active(void)
 {
-    TEST_SECTION("do_ev_got_ip -- home Wi-Fi back, web auth ON and a session IS active: "
-                 "AP teardown is deferred, never cut off a logged-in operator");
+    TEST_SECTION("do_ev_got_ip -- home Wi-Fi back, web auth ON and an AP-origin session IS active: "
+                 "AP teardown is deferred, never cut off a logged-in AP operator");
 
     reset_state();
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING; // was in fallback, home came back
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = true;
+    g_stub_any_ap_session_active = true;
 
     do_ev_got_ip();
 
@@ -707,15 +723,78 @@ static void test_got_ip_defers_ap_teardown_while_session_active(void)
     TEST_CHECK(s_wifi.ap_pending_teardown, "ap_pending_teardown is set so do_rescan_tick() retries later");
 }
 
-static void test_got_ip_drops_ap_when_no_session_active(void)
+// *** 2026-09-29 owner decision, and the actual regression test for the bug
+// report: a LAN-only admin session (e.g. the PC's MCP tools, which reach the
+// board over the home LAN and never through the fallback AP) must NOT defer
+// AP teardown by itself. At this layer, "no AP session" (g_stub_any_ap_session_active
+// == false) is exactly what a LAN-only session looks like -- the fake models
+// the production seam's AP-scoped answer, and the LAN-vs-AP distinction
+// itself is proven at the lower layer in test_http_session_iface.c's
+// test_any_ap_session_active() (a session touched only over the LAN never
+// makes http_auth_any_ap_session_active() true). Before the 2026-09-29 fix,
+// ap_teardown_should_defer() asked the broader http_auth_any_session_active()
+// instead, which WOULD have deferred here even with zero AP clients, purely
+// because SOME session (anywhere) was live -- this test would have failed
+// against that old logic. ***
+static void test_got_ip_drops_ap_for_lan_only_session_even_with_auth_on(void)
 {
-    TEST_SECTION("do_ev_got_ip -- home Wi-Fi back, web auth ON but NO session active: AP comes down immediately");
+    TEST_SECTION("do_ev_got_ip -- home Wi-Fi back, web auth ON, a LAN-only admin session exists but NO AP "
+                 "session and NO AP client: AP comes down immediately (2026-09-29 fix -- a LAN session must "
+                 "never defer AP teardown by itself)");
 
     reset_state();
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = false;
+    g_stub_any_ap_session_active = false; // no session was ever used over the AP
+    g_stub_ap_sta_count = 0;              // and nothing is physically associated to the AP radio
+
+    do_ev_got_ip();
+
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "join reaches CONNECTED");
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 1,
+               "AP is torn down immediately -- a LAN-only session must not hold it up");
+    TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_STA, "radio mode is STA-only");
+    TEST_CHECK(!s_wifi.ap_pending_teardown, "nothing left pending");
+}
+
+// *** 2026-09-29 judgment call (explicitly requested by the task): with auth
+// ON, a station physically connected to the AP radio but with NO session yet
+// (e.g. mid-login, still typing a password on the captive page) also defers
+// -- chosen deliberately in the direction of never stranding a connecting
+// operator over the more convenient early teardown. This is the OR half of
+// ap_teardown_should_defer()'s auth-on branch. ***
+static void test_got_ip_defers_ap_teardown_auth_on_with_ap_client_but_no_session(void)
+{
+    TEST_SECTION("do_ev_got_ip -- web auth ON, no session at all, but a client IS associated to the fallback "
+                 "AP (mid-login): teardown deferred (2026-09-29 judgment call)");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    s_wifi.started = true; // AP fallback already brought the radio up (APSTA)
+    g_stub_wifi_mode = WIFI_MODE_APSTA;
+    g_stub_web_auth_enabled = true;
+    g_stub_any_ap_session_active = false; // no session yet -- still on the login page
+    g_stub_ap_sta_count = 1;
+
+    do_ev_got_ip();
+
+    TEST_CHECK(g_stub_wifi_set_mode_calls == 0,
+               "AP teardown deferred -- a connected-but-unauthenticated station may be mid-login");
+    TEST_CHECK(s_wifi.ap_pending_teardown, "ap_pending_teardown recorded");
+}
+
+static void test_got_ip_drops_ap_when_no_session_active(void)
+{
+    TEST_SECTION("do_ev_got_ip -- home Wi-Fi back, web auth ON but NO AP session and NO AP client: "
+                 "AP comes down immediately");
+
+    reset_state();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
+    g_stub_web_auth_enabled = true;
+    g_stub_any_ap_session_active = false;
 
     do_ev_got_ip();
 
@@ -771,7 +850,7 @@ static void test_confirm_static_reachable_defers_ap_teardown_while_session_activ
     s_wifi.static_ip_confirmed = false;
     s_wifi.state = WIFI_PROV_STATE_CONNECTED;
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = true;
+    g_stub_any_ap_session_active = true;
 
     do_confirm_static_reachable();
 
@@ -790,13 +869,13 @@ static void test_rescan_tick_retries_deferred_teardown_until_session_ends(void)
     s_wifi.state = WIFI_PROV_STATE_CONNECTED;
     s_wifi.ap_pending_teardown = true;
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = true;
+    g_stub_any_ap_session_active = true;
 
     do_rescan_tick();
     TEST_CHECK(g_stub_wifi_set_mode_calls == 0, "still logged in on this tick -- AP left up, retried next tick");
     TEST_CHECK(s_wifi.ap_pending_teardown, "still pending");
 
-    g_stub_any_session_active = false; // the operator logged out (or session expired) between ticks
+    g_stub_any_ap_session_active = false; // the operator logged out (or session expired) between ticks
     do_rescan_tick();
     TEST_CHECK(g_stub_wifi_set_mode_calls == 1, "nobody logged in any more -- the deferred teardown completes");
     TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_STA, "radio mode is now STA-only");
@@ -890,7 +969,7 @@ static void test_reconcile_sta_state_defers_ap_drop_while_session_active(void)
     g_stub_ap_info_result = ESP_OK;
     g_stub_netif_ip_addr = 0x0101A8C0;
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = true;
+    g_stub_any_ap_session_active = true;
 
     bool live = reconcile_sta_state();
 
@@ -962,7 +1041,7 @@ static void test_got_ip_after_reconcile_dropped_ap_is_a_no_op(void)
     TEST_CHECK(g_stub_wifi_set_mode_calls == 1 && g_stub_wifi_mode == WIFI_MODE_STA, "setup: reconcile dropped the AP");
 
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = true;
+    g_stub_any_ap_session_active = true;
     do_ev_got_ip();
 
     TEST_CHECK(g_stub_wifi_set_mode_calls == 1, "no redundant esp_wifi_set_mode(STA)");
@@ -987,7 +1066,7 @@ static void test_teardown_and_mode_changes_clear_fallback_active(void)
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
     s_wifi.ap_fallback_active = true;
     g_stub_web_auth_enabled = true;
-    g_stub_any_session_active = true;
+    g_stub_any_ap_session_active = true;
     do_ev_got_ip();
     TEST_CHECK(s_wifi.ap_fallback_active, "a DEFERRED teardown keeps ap_fallback_active (AP still up)");
 
@@ -1031,7 +1110,9 @@ void run_test_wifi_prov(void)
     test_do_set_mode_home_sets_connecting_and_defers_the_join();
     test_is_unprovisioned_requires_no_saved_network();
     test_ap_fallback_tick_raises_ap_after_timeout();
-    test_got_ip_defers_ap_teardown_while_session_active();
+    test_got_ip_defers_ap_teardown_while_ap_session_active();
+    test_got_ip_drops_ap_for_lan_only_session_even_with_auth_on();
+    test_got_ip_defers_ap_teardown_auth_on_with_ap_client_but_no_session();
     test_got_ip_drops_ap_when_no_session_active();
     test_got_ip_defers_ap_teardown_auth_off_with_ap_client();
     test_got_ip_drops_ap_auth_off_no_ap_client();

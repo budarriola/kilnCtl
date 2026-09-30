@@ -21,3 +21,18 @@
 bool wifi_prov_is_unprovisioned(void) {
     return false;
 }
+
+// 2026-09-29: same reasoning as above, for wifi_prov_request_arrived_on_ap()
+// (drivers/net/wifi_prov_link.c) -- http_auth_http.c now calls it to tag
+// each session touch with whether the request arrived over the SoftAP
+// interface (see http_session_iface.h's http_auth_session_touch() doc
+// comment). Every executable that links this stub has no real socket to
+// inspect, so it reports false ("not AP", i.e. treat as an ordinary LAN/STA
+// request) -- the fail-closed direction for THIS call site, since the
+// caller only uses the result to tag a session as AP-origin, and understating
+// that (never over-tagging a LAN request as AP) is the safer default absent
+// a real socket to check.
+bool wifi_prov_request_arrived_on_ap(int sockfd) {
+    (void)sockfd;
+    return false;
+}

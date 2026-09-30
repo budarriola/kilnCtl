@@ -13,6 +13,7 @@
 #include "http_auth_enforce.h"
 #include "http_auth_policy_iface.h"
 #include "http_session_iface.h"
+#include "wifi_prov.h" // wifi_prov_request_arrived_on_ap() -- 2026-09-29 via_ap tagging
 // ota_http_get_client_ip() -- same client-IP extraction helper ota_http.c's
 // own authenticated routes already use (no reason for a second one to
 // exist), declared here rather than via ota_http_internal.h: that header is
@@ -334,7 +335,13 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         // threading it back out of that function's own signature.
         char ip[46];
         ota_http_get_client_ip(req, ip, sizeof(ip));
-        http_auth_session_touch(token, ip);
+        // 2026-09-29 owner decision: tag this touch with whether it arrived
+        // over the SoftAP interface, same detector wifi_provision_http.c's
+        // /status handler already uses -- see http_session_iface.h's
+        // http_auth_session_touch() doc comment for why this drives
+        // "last used over AP", not "origin only".
+        bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
+        http_auth_session_touch(token, ip, on_ap);
     }
     switch (decision) {
         case HTTP_AUTH_DECISION_ALLOW:

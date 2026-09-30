@@ -100,6 +100,23 @@ typedef struct {
     bool     prompted; // true once the 10 s stay-unlocked prompt has been surfaced
                         // for this slot since its last touch -- lets a caller show
                         // the prompt exactly once per idle approach to expiry
+    bool     via_ap;    // 2026-09-29 owner decision: true iff this session was LAST
+                        // USED (not merely created) over the SoftAP interface --
+                        // see web_auth_table_set_via_ap() below. Defaults false at
+                        // creation (web_auth_table_create_session() zeroes the slot),
+                        // so a session must be explicitly tagged AP-origin at login
+                        // and re-tagged on every subsequent touch, matching whichever
+                        // interface actually carried that request. "Last used", not
+                        // "origin only", so a session that logged in over the AP and
+                        // then genuinely moved to the LAN stops holding the AP
+                        // fallback open, and one that logged in over the LAN but is
+                        // now being used over the AP (e.g. a client that roamed)
+                        // starts holding it open. Drives
+                        // web_auth_table_any_ap_session_active() /
+                        // http_auth_any_ap_session_active(), the signal
+                        // wifi_prov_link.c's ap_teardown_should_defer() consults so a
+                        // LAN-only admin session (e.g. the PC's MCP tools over the
+                        // home LAN) never defers AP teardown by itself.
 } web_auth_slot_t;
 
 typedef struct {
@@ -171,6 +188,19 @@ int web_auth_table_find_by_token(const web_auth_table_t *t, const uint8_t token_
 // slot, since the session is no longer near its timeout). A no-op if idx is
 // out of range or the slot is not in_use.
 void web_auth_table_touch(web_auth_table_t *t, size_t idx, uint32_t now_ms);
+
+// 2026-09-29: tags slot[idx]'s via_ap field -- "was this session LAST USED
+// over the SoftAP interface". Deliberately a separate call from
+// web_auth_table_touch() rather than a new parameter on it: that function has
+// ~20 existing call sites across several test files, and most callers of
+// "touch" (e.g. a plain activity ping) already know their own interface at
+// the point they call web_auth_table_touch() but not all of them need to
+// change that classification on every touch (see http_auth_session_touch()'s
+// caller in http_auth_http.c, which does call this on every touch, and
+// web_auth_login_http.c's login handler, which calls this once at creation).
+// A no-op if idx is out of range or the slot is not in_use -- same
+// out-of-range convention as web_auth_table_touch().
+void web_auth_table_set_via_ap(web_auth_table_t *t, size_t idx, bool via_ap);
 
 // Explicit teardown of one slot (logout). A no-op if idx is out of range.
 void web_auth_table_destroy_session(web_auth_table_t *t, size_t idx);
@@ -290,6 +320,17 @@ bool web_auth_session_in_prompt_window(uint32_t last_seen_ms, uint32_t timeout_s
 web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool web_enabled,
                                                  const uint8_t *token_hash, const char *client_ip,
                                                  uint32_t timeout_s, uint32_t now_ms);
+
+// 2026-09-29 owner decision: true iff at least one in_use slot is both still
+// valid (web_auth_session_is_valid() under `timeout_s` at `now_ms`) AND
+// via_ap. Pure function, no I/O -- scans all WEB_AUTH_WEB_SLOT_COUNT slots
+// (cheap, same as every other linear scan in this module). This is the
+// AP-scoped sibling of the old "any session anywhere" signal
+// ap_teardown_should_defer() used to consult (http_auth_any_session_active());
+// replacing that blanket signal with this one is the actual fix for the
+// 2026-09-29 bug report: a LAN-only admin session (the PC's MCP tools, over
+// the home LAN, never via the AP) must never defer AP teardown by itself.
+bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms);
 
 // --- Admin-credential bootstrap state (plan items 10 & 11) ------------------
 //

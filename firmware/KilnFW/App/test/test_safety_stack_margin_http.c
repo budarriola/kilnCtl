@@ -51,6 +51,9 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *u
     return ESP_OK;
 }
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
+// 2026-09-29: http_auth_http.c now calls wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req))
+// to tag each session touch with whether it arrived over the SoftAP interface.
+int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;

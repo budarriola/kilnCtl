@@ -85,6 +85,10 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *u
     return ESP_OK;
 }
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
+// 2026-09-29: login_post_handler() now calls wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req))
+// to tag a freshly-minted session with whether it started over the SoftAP interface (see
+// web_auth_login_http.c's login_post_handler() and http_session_iface.h's via_ap doc comment).
+int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
 
 static char s_last_set_cookie[256];
 static char s_last_retry_after[16];

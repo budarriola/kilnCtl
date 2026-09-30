@@ -227,7 +227,7 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
     return true;
 }
 
-void http_auth_session_touch(const char *token, const char *client_ip) {
+void http_auth_session_touch(const char *token, const char *client_ip, bool via_ap) {
     if (!token || token[0] == '\0') {
         return;
     }
@@ -263,6 +263,10 @@ void http_auth_session_touch(const char *token, const char *client_ip) {
         return;
     }
     web_auth_table_touch(t, (size_t)idx, now);
+    // 2026-09-29: re-tag via_ap on every successful touch, not just at
+    // login -- "last used", not "origin only" (see web_auth_session.h's
+    // via_ap field comment).
+    web_auth_table_set_via_ap(t, (size_t)idx, via_ap);
 }
 
 bool http_auth_any_session_active(void) {
@@ -284,6 +288,18 @@ bool http_auth_any_session_active(void) {
         }
     }
     return false;
+}
+
+bool http_auth_any_ap_session_active(void) {
+    // Same fail-closed-toward-TRUE direction as http_auth_any_session_active()
+    // above, for the identical reason -- see this function's header comment.
+    resolved_timeout_t timeout = resolve_timeout_s();
+    if (timeout.unreadable) {
+        return true;
+    }
+    web_auth_table_t *t = http_session_table();
+    uint32_t now = (uint32_t)hal_time_now_ms();
+    return web_auth_table_any_ap_session_active(t, timeout.timeout_s, now);
 }
 
 void http_auth_session_logout(const char *token) {

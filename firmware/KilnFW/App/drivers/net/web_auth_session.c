@@ -97,6 +97,25 @@ void web_auth_table_touch(web_auth_table_t *t, size_t idx, uint32_t now_ms)
     t->slots[idx].prompted = false;
 }
 
+void web_auth_table_set_via_ap(web_auth_table_t *t, size_t idx, bool via_ap)
+{
+    if (idx >= WEB_AUTH_WEB_SLOT_COUNT || !t->slots[idx].in_use) {
+        return;
+    }
+    t->slots[idx].via_ap = via_ap;
+}
+
+bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms)
+{
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        const web_auth_slot_t *slot = &t->slots[i];
+        if (slot->in_use && slot->via_ap && web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void web_auth_table_destroy_session(web_auth_table_t *t, size_t idx)
 {
     if (idx >= WEB_AUTH_WEB_SLOT_COUNT) {

@@ -247,34 +247,45 @@ static void select_and_apply_join_candidate(void)
     apply_sta_config();
 }
 
-/* 2026-09-28 owner request predicate: should the fallback AP's teardown be
- * DEFERRED right now? Two signals, chosen for honesty over convenience (the
- * owner's own wording: "pick the most honest signal"):
+/* 2026-09-29 owner decision, superseding the 2026-09-28 design below: the
+ * bench found the 2026-09-28 "web auth ON -> ask http_auth_any_session_active()"
+ * signal too broad -- it defers on ANY live session anywhere, including one
+ * that has only ever been used over the home LAN (the PC's MCP tools hold an
+ * admin session that way, never through the AP). A board that had rejoined
+ * home Wi-Fi with 0 AP clients kept the fallback AP up indefinitely purely
+ * because that LAN session existed. The owner's actual rule: "defer only for
+ * a session that arrived through the AP, not any admin session."
  *
- *   - Web auth ON: ask http_auth_any_session_active() -- the actual session
- *     table, which already excludes expired/idle sessions
- *     (web_auth_session_is_valid()). An idle-timed-out browser tab must NOT
- *     hold the AP up forever; only a genuinely still-valid session defers.
- *   - Web auth OFF: there is no session table to ask (nothing ever creates a
- *     session when auth is off), so the honest signal is "is anything
- *     actually associated to the AP radio right now" --
- *     wifi_prov_get_ap_client_count() (esp_wifi_ap_get_sta_list(), already
- *     used by /status's ap_clients field). HTTP-request-recency was
- *     considered and rejected: a client can be mid-page-load or about to
- *     poll again with no request in flight at the exact instant this runs,
- *     whereas a station that is still associated to the radio is
- *     unambiguous ground truth requiring no arbitrary "recent enough"
- *     window.
+ * Three signals now, still chosen for honesty over convenience:
+ *
+ *   - Web auth ON: ask http_auth_any_ap_session_active() -- the AP-scoped
+ *     sibling of the old signal, true only for a still-valid session whose
+ *     via_ap tag says it was LAST USED over the SoftAP interface (see
+ *     web_auth_session.h's via_ap field comment: "last used", not "origin
+ *     only", so a session that logged in over the AP and has since moved to
+ *     the LAN stops deferring, and one used over the LAN that later roams
+ *     onto the AP starts deferring). ALSO OR wifi_prov_get_ap_client_count()
+ *     > 0 even with auth on: a station physically associated to the AP radio
+ *     but with no session yet may be mid-login (typing a password on the
+ *     captive page) -- judgment call, made deliberately in the direction of
+ *     never stranding a connecting operator over the more convenient early
+ *     teardown. A LAN-only admin session with zero AP clients now correctly
+ *     does NOT defer -- the actual bug fix.
+ *   - Web auth OFF: unchanged from 2026-09-28 -- there is no session table to
+ *     ask (nothing ever creates a session when auth is off), so the honest
+ *     signal is still "is anything actually associated to the AP radio right
+ *     now" (wifi_prov_get_ap_client_count(), esp_wifi_ap_get_sta_list(),
+ *     already used by /status's ap_clients field).
  *
  * Runs on owner_task() only (called from do_ev_got_ip()/
  * do_confirm_static_reachable()/do_rescan_tick(), same as every other
- * function in this file) -- http_auth_any_session_active() and
+ * function in this file) -- http_auth_any_ap_session_active() and
  * wifi_prov_get_ap_client_count() are both safe to call from any task
  * (neither touches s_wifi), so this adds no new cross-task hazard. */
 static bool ap_teardown_should_defer(void)
 {
     if (http_auth_policy_web_enabled()) {
-        return http_auth_any_session_active();
+        return http_auth_any_ap_session_active() || wifi_prov_get_ap_client_count() > 0;
     }
     return wifi_prov_get_ap_client_count() > 0;
 }
