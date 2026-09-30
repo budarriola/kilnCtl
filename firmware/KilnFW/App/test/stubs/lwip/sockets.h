@@ -96,11 +96,13 @@ static inline int close(int fd)
  * confirm" and returns early on). Defaults set in test_wifi_prov.c before
  * each scenario. */
 extern int g_stub_getsockname_result;
-/* The dotted-quad string inet_ntop() hands back -- this is the "local
- * address the incoming request arrived on" the real code reads via
- * getsockname()+inet_ntop() in sequence. The test sets this directly; the
- * stub getsockname() below never actually touches the address it's asked to
- * fill in, since only the string inet_ntop() returns is ever compared. */
+/* The dotted-quad (or "::ffff:"-prefixed) string inet_ntop() hands back --
+ * this is the "local address the incoming request arrived on" the real code
+ * reads via getsockname()+inet_ntop() in sequence. The test sets this
+ * directly; getsockname() below only writes the family word (see
+ * g_stub_getsockname_family) into the address buffer it's asked to fill in,
+ * never an actual address -- inet_ntop() ignores the buffer's address bytes
+ * and returns g_stub_local_ip (or "0.0.0.0" on a family mismatch). */
 // 2026-09-29: widened 16 -> 48 (>= INET6_ADDRSTRLEN) so an IPv4-mapped
 // AF_INET6 string ("::ffff:192.168.4.1", 19 chars + NUL) fits -- see
 // test_wifi_prov.c's definition-site comment.
@@ -114,9 +116,11 @@ extern char g_stub_local_ip[48];
  * test-controllable too, not just the resulting string. sin_family/
  * sin6_family are both a uint16_t at offset 0 of their respective structs,
  * so writing through a uint16_t* below is safe for either caller --
- * wifi_prov_note_possible_static_reachability() also calls getsockname()
- * with a plain sockaddr_in buffer and never reads the family word back, so
- * this write is inert for it. Defaults to AF_INET6, the shape actually
+ * wifi_prov_note_possible_static_reachability() now also goes through
+ * get_local_ipv4_string(), which calls getsockname() with a sockaddr_in6
+ * buffer and does read the family word back (to pick the AF_INET vs.
+ * mapped-AF_INET6 decode path), so this write matters for it too, not just
+ * for sockaddr_is_ap_default_ip(). Defaults to AF_INET6, the shape actually
  * observed on hardware; a test wanting the plain-AF_INET branch sets this to
  * AF_INET first. */
 extern int g_stub_getsockname_family;

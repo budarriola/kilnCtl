@@ -411,6 +411,30 @@ static void test_set_static_ip_resets_confirmation(void)
     TEST_CHECK(strcmp(s_wifi.static_ip, "10.0.0.5") == 0, "the new address is stored");
 }
 
+static void test_set_static_ip_rejects_ap_subnet(void)
+{
+    TEST_SECTION("wifi_prov_set_static_ip() -- refuses an address inside the fallback AP's own 192.168.4.0/24 subnet");
+
+    reset_state();
+    s_wifi.started = true;
+
+    esp_err_t err = wifi_prov_set_static_ip("192.168.4.1", "255.255.255.0", "192.168.4.1");
+    TEST_CHECK(err == ESP_ERR_INVALID_ARG, "the AP's own address is refused");
+    TEST_CHECK(s_wifi.ip_mode != WIFI_PROV_IP_MODE_STATIC, "refused request never applies");
+
+    err = wifi_prov_set_static_ip("192.168.4.200", "255.255.255.0", "192.168.4.1");
+    TEST_CHECK(err == ESP_ERR_INVALID_ARG, "any other address in the AP subnet is refused too, not just .1");
+
+    // A genuinely different subnet must still pass validation and reach the
+    // post -- this is not a blanket refusal of the STATIC feature. The stub
+    // xQueueSend() always "fails" (see this file's top-of-file comment), so
+    // the real owner_task() dispatch never runs here and the call times out
+    // rather than returning ESP_OK; ESP_ERR_TIMEOUT (not ESP_ERR_INVALID_ARG)
+    // is exactly the signal that validation was passed.
+    err = wifi_prov_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1");
+    TEST_CHECK(err == ESP_ERR_TIMEOUT, "an address outside 192.168.4.0/24 passes validation (times out on the stubbed queue, not refused)");
+}
+
 static void test_set_dhcp_resets_confirmation(void)
 {
     TEST_SECTION("do_set_dhcp -- switching back to DHCP resets static_ip_confirmed (hygiene, per the doc comment)");
@@ -1180,9 +1204,11 @@ static void test_arrived_on_ap_getsockname_failure_fails_closed(void)
 // inet_ntop() used to ignore af entirely, so a plain-AF_INET call always got
 // back whatever string a mapped-AF_INET6 test happened to leave behind) and
 // never covered the uppercase "::FFFF:" prefix lwIP is documented to print.
-// Now that the stub's inet_ntop() strips a leading "::ffff:"/"::FFFF:" prefix
-// specifically for an AF_INET caller (see its own comment), the same
-// g_stub_local_ip value can be reused for both families.
+// The stub's inet_ntop() now actually honours `af`: it returns "0.0.0.0" when
+// `af` disagrees with the family marker getsockname() left at `src`, and
+// g_stub_local_ip verbatim otherwise (see its own comment). The "::ffff:"/
+// "::FFFF:" prefix stripping happens in production code, in
+// get_local_ipv4_string() -- not in this stub.
 static void test_arrived_on_ap_plain_af_inet_matches(void)
 {
     TEST_SECTION("wifi_prov_request_arrived_on_ap() -- plain AF_INET family reporting the AP's own address: true");
@@ -1291,6 +1317,7 @@ void run_test_wifi_prov(void)
     test_dhcp_got_ip_drops_ap_immediately();
     test_static_already_confirmed_got_ip_drops_ap();
     test_set_static_ip_resets_confirmation();
+    test_set_static_ip_rejects_ap_subnet();
     test_set_dhcp_resets_confirmation();
     test_reply_slot_normal_roundtrip();
     test_reply_slot_abandon_then_owner_recycles();

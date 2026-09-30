@@ -806,19 +806,6 @@ void do_confirm_static_reachable(void)
     try_drop_fallback_ap_after_join();
 }
 
-/* Public entry point for confirming a STATIC join is actually reachable --
- * called from wifi_provision_http.c's handlers with the fd of the socket
- * that just served a request. Deliberately does the getsockname()/string
- * compare HERE, on the caller's (http worker) thread, rather than posting
- * the raw fd across to owner_task(): the socket is only valid for the
- * duration of this one request, and by the time owner_task() got around to
- * it, httpd could have already closed or reused it. Reading s_wifi.ip_mode/
- * static_ip/static_ip_confirmed without the queue is the same convention
- * every other getter in this file already uses (e.g.
- * wifi_prov_get_static_ip()) -- s_wifi's "one writer" rule is about who
- * MUTATES it, not who may read a snapshot of a string field. Only the
- * actual mutation (do_confirm_static_reachable()) is funneled through
- * owner_task(). */
 /* True when this HTTP request arrived on the board's own SoftAP interface
  * rather than over the home network. Used to decide whether it is safe to
  * echo the AP password back (wifi_provision_http.c): a client already
@@ -921,6 +908,19 @@ bool wifi_prov_request_arrived_on_ap(int sockfd)
     return sockaddr_is_ap_default_ip(sockfd);
 }
 
+/* Public entry point for confirming a STATIC join is actually reachable --
+ * called from wifi_provision_http.c's handlers with the fd of the socket
+ * that just served a request. Deliberately does the getsockname()/string
+ * compare HERE, on the caller's (http worker) thread, rather than posting
+ * the raw fd across to owner_task(): the socket is only valid for the
+ * duration of this one request, and by the time owner_task() got around to
+ * it, httpd could have already closed or reused it. Reading s_wifi.ip_mode/
+ * static_ip/static_ip_confirmed without the queue is the same convention
+ * every other getter in this file already uses (e.g.
+ * wifi_prov_get_static_ip()) -- s_wifi's "one writer" rule is about who
+ * MUTATES it, not who may read a snapshot of a string field. Only the
+ * actual mutation (do_confirm_static_reachable()) is funneled through
+ * owner_task(). */
 void wifi_prov_note_possible_static_reachability(int sockfd)
 {
     if (sockfd < 0) {
