@@ -226,18 +226,25 @@ uint32_t boot_guard_get_boot_count(void);
  * boot_count=1 it always does, indistinguishable from a no-op to a caller
  * reading the JSON alone).
  *
- * Read-only: touches load_count() only, never a write path, so it is safe to
- * call from a PSRAM-stacked task (see this file's own httpd handlers) --
- * unlike boot_guard_mark_healthy()/boot_guard_reset_counter(), which persist.
+ * Read-only: touches a strict NVS read only, never a write path -- but it
+ * still requires an internal-RAM task stack, same as
+ * boot_guard_mark_healthy()/boot_guard_reset_counter()'s write paths. A
+ * flash read disables the cache exactly as a flash write does, so a
+ * PSRAM-stacked task is NOT safe here either; this call must not be made
+ * from one.
  *
- * Returns false (leaving *out_count untouched) if out_count is NULL or
+ * Returns false (leaving *out_count untouched) if out_count is NULL,
  * boot_guard_init() has not yet run this boot (no lock, no partition handle
- * to read from). Otherwise returns true and sets *out_count to the value
- * actually read from NVS right now -- 0 covers both "confirmed zero" and
- * "nothing valid there" (missing/corrupt/wrong-version), the same collapse
- * load_count() already uses everywhere else in this file; this call cannot
- * tell those two apart any better than boot_guard_init() itself could at
- * boot. */
+ * to read from), or the record could not be read back cleanly (an open/get
+ * error other than "not found", a length mismatch, or a failed CRC/version
+ * check) -- unlike load_count(), this does NOT collapse a read failure to 0,
+ * since doing so would fabricate a "persisted_count":0 that a caller (e.g.
+ * the boot_guard_reset HTTP route) could easily read as a confirmed clear.
+ * Otherwise returns true and sets *out_count to the value actually read from
+ * NVS right now; 0 still merges two distinct states that both read as "0"
+ * (a verified clear, and a record that has genuinely never been written) --
+ * this call can tell "unreadable" apart from "0", but not "cleared" apart
+ * from "never written". */
 bool boot_guard_get_persisted_count(uint32_t *out_count);
 
 /* STUCK-COUNTER ESCAPE -- see the long comment of the same name in

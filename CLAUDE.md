@@ -842,12 +842,21 @@ also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauth
 this class of fix no longer needs a JTAG read of `s_bg` to verify. **2026-09-30 fix:** both that
 route and `POST /api/ota/esp/boot_guard_reset` now also report `persisted_count` -- a live
 re-read of NVS via the new read-only `boot_guard_get_persisted_count()` accessor
-(`boot_guard.c`), omitted rather than fabricated when it cannot be read. `boot_count` alone is
-fixed for the life of the current boot (set once at `boot_guard_init()`), so a `boot_guard_reset`
-response reporting only `boot_count` read as a no-op even on a genuinely successful clear --
-`persisted_count` is the field that actually moves. `flash_firmware()`'s reported before/after
-values and `boot_guard_get()`'s MCP tool output now use `persisted_count` too, falling back to
-"unknown (older firmware)"/`None` against a board that predates this field. This does not change
+(`boot_guard.c`), omitted rather than fabricated when it cannot be read -- the accessor goes
+through a strict reader (`load_count_strict()`, modeled on `verify_persisted_count()`) that
+returns failure rather than a fallback 0 on an open/get error, length mismatch, or failed
+CRC/version check, so the route can never print a fabricated `"persisted_count":0` next to
+`ok:false` when NVS is genuinely unreadable. A GET `0` is still ambiguous in one specific way that
+this fix does not resolve: it merges "verified cleared" with "never written" (`boot_guard.h`'s own
+doc comment on this accessor), since both states genuinely read back as the same value. `boot_count`
+alone is fixed for the life of the current boot (set once at `boot_guard_init()`), so a
+`boot_guard_reset` response reporting only `boot_count` read as a no-op even on a genuinely
+successful clear -- `persisted_count` is the field that actually moves. `flash_firmware()`'s
+reported before/after values and `boot_guard_get()`'s MCP tool output now use `persisted_count`
+too, distinguishing a GET call that outright failed ("unknown (GET failed)") from one that
+succeeded but omitted the field ("not reported (older firmware or read failure)") -- the latter
+covers both a board that predates this field and current firmware whose own strict read-back
+failed and correctly left the field out rather than fabricate a value. This does not change
 anything about `boot_guard_reset_counter()`'s own clear-and-verify behavior, only what is
 reported about it. Never from inside an
 unconditional firmware boot path: a negative

@@ -735,6 +735,33 @@ static void test_get_persisted_count_tracks_live_nvs_value(void)
     TEST_CHECK(out == 0u, "persisted_count DOES reflect the clear immediately, unlike boot_count");
 }
 
+static void test_get_persisted_count_unreadable_record_fails_not_fabricated_zero(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    boot_guard_init(); /* boot 1: persists a genuine, valid count 1 */
+    uint32_t out = 0;
+    TEST_CHECK(boot_guard_get_persisted_count(&out), "reads back successfully before corruption");
+    TEST_CHECK(out == 1u, "sanity: matches what boot_guard_init() just persisted");
+
+    // fake_kv_script_corrupt_key() makes the NEXT get_* on this key fail
+    // outright with HAL_IO -- this is the exact "NVS unreadable" condition
+    // load_count() would silently collapse to 0. load_count_strict() (and
+    // therefore this accessor) must instead report failure, never a
+    // fabricated 0 -- a caller (the boot_guard_reset HTTP route in
+    // particular) must not be able to mistake "could not read the record" for
+    // "confirmed cleared".
+    TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_REC),
+               "precondition: the persisted record can be corrupted for this test");
+    out = 0xdeadbeefu;
+    TEST_CHECK(!boot_guard_get_persisted_count(&out),
+               "an unreadable persisted record must report failure, not a fabricated 0 -- "
+               "this is the negative-tested guard against the reviewed gap");
+    TEST_CHECK(out == 0xdeadbeefu, "a failed call must not touch *out_count");
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -755,4 +782,5 @@ void run_test_boot_guard(void)
     test_get_persisted_count_before_init_fails();
     test_get_persisted_count_null_arg_fails();
     test_get_persisted_count_tracks_live_nvs_value();
+    test_get_persisted_count_unreadable_record_fails_not_fabricated_zero();
 }

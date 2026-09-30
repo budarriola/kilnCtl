@@ -746,6 +746,33 @@ def _verify_flash_landed(
     return ""
 
 
+# Distinct from both None and any real int, so _fmt_persisted() below can
+# tell apart "the GET itself raised" from "the GET succeeded but the field
+# was absent" -- conflating them under one None used to print "unknown
+# (older firmware)" even when the failure was a network/auth error that told
+# us nothing about the firmware at all.
+_BOOT_GUARD_GET_FAILED = object()
+
+
+def _fmt_persisted(value: object) -> str:
+    """Renders a persisted_count value (or its absence) for the
+    boot_guard_reset report. Three distinct cases, per review -- must not be
+    collapsed back into one:
+      - _BOOT_GUARD_GET_FAILED: the GET /api/boot_guard call itself raised
+        (network/auth failure) -- we have no idea what the field would say.
+      - None: the GET succeeded but the response had no "persisted_count"
+        key -- either older firmware that predates the field, or current
+        firmware whose own strict read-back failed and correctly omitted the
+        field rather than fabricate a value
+        (boot_guard_get_persisted_count()).
+      - anything else: a real reported value."""
+    if value is _BOOT_GUARD_GET_FAILED:
+        return "unknown (GET failed)"
+    if value is None:
+        return "not reported (older firmware or read failure)"
+    return str(value)
+
+
 def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
                              reset_boot_guard: bool = True) -> str:
     """Called from flash_firmware()'s _post_flash() ONLY after
@@ -806,20 +833,24 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     # persisted_count (added alongside boot_guard_get_persisted_count(),
     # boot_guard.c) is what actually moves on a clear -- boot_count is this
     # boot's fixed in-RAM count (e.g. 1) and never changes across this call,
-    # which used to make a genuinely successful reset read like a no-op. An
-    # older firmware without the field reports None here, not an error --
-    # _fmt_persisted() below renders that as "unknown (older firmware)"
-    # rather than crashing on a missing key.
-    before_persisted: Optional[int] = None
+    # which used to make a genuinely successful reset read like a no-op.
+    #
+    # Two distinct "we don't have a number" cases must not be labeled the
+    # same, per review: a GET that raised (network/auth failure -- we truly
+    # know nothing) versus a GET that succeeded but returned no
+    # "persisted_count" key (older firmware that predates the field, OR
+    # current firmware whose own read-back failed and correctly omitted the
+    # field rather than fabricate one -- see boot_guard_get_persisted_count()'s
+    # strict reader). _BOOT_GUARD_GET_FAILED is a sentinel distinct from both
+    # None and any real int, so _fmt_persisted() can tell all three apart.
+    before_persisted: object = None
     try:
         before_data = ota_http.get_boot_guard_status(resolved)
         before_persisted = before_data.get("persisted_count")
     except (ota_http.OtaHttpError, http_auth.HttpAuthError) as exc:
+        before_persisted = _BOOT_GUARD_GET_FAILED
         _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
                                    "only, does not block the reset call): %s", exc)
-
-    def _fmt_persisted(value: Optional[int]) -> str:
-        return "unknown (older firmware)" if value is None else str(value)
 
     before_str = _fmt_persisted(before_persisted)
     try:
@@ -844,7 +875,8 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
                 f"boot_count={body.get('boot_count')}, unchanged by this call)")
     return (f"WARNING: boot_guard_reset did not verify (board reported {body!r}) -- the flash "
             "itself landed fine, but the recovery-mode counter was NOT confirmed cleared "
-            f"(persisted before={before_str}, reported after={after_str}); a run of "
+            f"(persisted before={before_str}, reported after={after_str}; this boot's own "
+            f"boot_count={body.get('boot_count')}); a run of "
             "ordinary reflashes could still eventually walk this board into recovery mode.")
 
 

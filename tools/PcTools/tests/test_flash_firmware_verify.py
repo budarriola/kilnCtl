@@ -596,14 +596,17 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
             result = mf.flash_firmware(verify=True)
         reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
-        self.assertIn("before=unknown", result)
+        # The GET itself raised -- distinct from a GET that succeeded but
+        # simply omitted the field (see the older-firmware test below).
+        self.assertIn("before=unknown (GET failed)", result)
         self.assertIn("after=0", result)
 
     def test_persisted_count_absent_reports_older_firmware(self):
         """A board running firmware from before persisted_count existed
         omits the field from both responses -- this must render as an
-        explicit "older firmware" note, not a crash or a bare None, on both
-        the before and after side."""
+        explicit "field absent" note, not a crash or a bare None, on both
+        the before and after side, and must be distinguishable from a GET
+        that failed outright (see test_before_count_unknown_when_get_status_fails)."""
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(
@@ -614,8 +617,10 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                  return_value={"ok": True, "boot_count": 2}):
             result = mf.flash_firmware(verify=True)
         self.assertNotIn("error:", result)
-        self.assertIn("before=unknown (older firmware)", result)
-        self.assertIn("after=unknown (older firmware)", result)
+        self.assertIn("before=not reported (older firmware or read failure)", result)
+        self.assertIn("after=not reported (older firmware or read failure)", result)
+        # boot_count must still be visible when persisted_count is absent.
+        self.assertIn("boot_count=2", result)
 
     def test_reset_boot_guard_false_opts_out(self):
         """`reset_boot_guard=False` is an unconditional opt-out."""

@@ -336,6 +336,87 @@ static bool verify_persisted_count(uint32_t expected)
     return rec.boot_count == expected;
 }
 
+/* Strict read for boot_guard_get_persisted_count(): unlike load_count()
+ * (which deliberately collapses every read failure -- open failure, get
+ * error, wrong length, bad CRC/version -- down to a safe boot-time default
+ * of 0), this distinguishes "genuinely never written" from "could not be
+ * read". Conflating them let boot_guard_get_persisted_count() report
+ * "persisted_count":0 while NVS was actually unreadable, which on the reset
+ * route reads as a fabricated "cleared" sitting next to that same call's own
+ * ok:false.
+ *
+ * Returns true with *out_count = 0 only when the record is genuinely absent
+ * from BOTH the current and legacy namespaces (HAL_NOT_FOUND on the get, or
+ * the legacy namespace failing to open at all) -- the same "never written"
+ * case load_count()'s legacy fallback exists for. Returns false, leaving
+ * *out_count untouched, on any other failure: an open error other than "the
+ * namespace doesn't exist yet", a get error other than HAL_NOT_FOUND, a
+ * length mismatch, or a failed record_is_valid() (bad CRC/version) in either
+ * namespace.
+ *
+ * Logs at most once, at ESP_LOGW, and only for the CRC/version-fail path --
+ * GET /api/boot_guard is unauthenticated and may be polled, so this must not
+ * become a per-request log line the way load_count()'s own warning would if
+ * reused here unchanged. */
+static bool load_count_strict(uint32_t *out_count)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return false;
+    }
+    boot_guard_record_t rec;
+    size_t len = sizeof(rec);
+    err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
+    hal_kv_close(&h);
+    if (err == HAL_OK) {
+        if (len != sizeof(rec)) {
+            return false;
+        }
+        if (!record_is_valid(&rec)) {
+            ESP_LOGW(TAG, "boot_guard_get_persisted_count: record failed its version/CRC check -- "
+                          "reporting unreadable rather than a fabricated 0");
+            return false;
+        }
+        *out_count = rec.boot_count;
+        return true;
+    }
+    if (err != HAL_NOT_FOUND) {
+        return false;
+    }
+
+    /* Not found at the current location -- check the legacy one, same as
+     * load_count(). A missing legacy namespace is also a genuine "never
+     * written" case, not an error. */
+    hal_kv_handle_t lh;
+    hal_status_t lopen = hal_kv_open(&lh, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_ONLY,
+                                      KILN_NVS_PARTITION);
+    if (lopen != HAL_OK) {
+        *out_count = 0;
+        return true;
+    }
+    len = sizeof(rec);
+    err = hal_kv_get_blob(&lh, NVS_KEY_REC_LEGACY, &rec, &len);
+    hal_kv_close(&lh);
+    if (err == HAL_OK) {
+        if (len != sizeof(rec)) {
+            return false;
+        }
+        if (!record_is_valid(&rec)) {
+            ESP_LOGW(TAG, "boot_guard_get_persisted_count: legacy record failed its version/CRC "
+                          "check -- reporting unreadable rather than a fabricated 0");
+            return false;
+        }
+        *out_count = rec.boot_count;
+        return true;
+    }
+    if (err != HAL_NOT_FOUND) {
+        return false;
+    }
+    *out_count = 0;
+    return true;
+}
+
 /* Best-effort mitigation, tried once by boot_guard_mark_healthy() before it
  * gives up for this call: explicitly erase the key first, then write+commit
  * a fresh record. An ordinary nvs_set_blob() overwrite-in-place is what
@@ -576,12 +657,18 @@ bool boot_guard_mark_healthy(void)
 
 bool boot_guard_get_persisted_count(uint32_t *out_count)
 {
-    /* Read-only: only calls load_count(), never persist_count()/
-     * erase_then_persist_count() -- safe to call from a PSRAM-stacked httpd
-     * task (this module's write paths are not; see boot_guard.h's doc
-     * comment on this function). Requires boot_guard_init() to have already
-     * run this boot -- s_bg.lock does not exist before that, and there is no
-     * NVS partition handle to read from either. */
+    /* Read-only: only ever calls load_count_strict(), never persist_count()/
+     * erase_then_persist_count() -- but a flash read still requires an
+     * internal-RAM task stack, same as this module's write paths (flash
+     * reads disable the cache too; see boot_guard.h's doc comment on this
+     * function). Requires boot_guard_init() to have already run this boot --
+     * s_bg.lock does not exist before that, and there is no NVS partition
+     * handle to read from either.
+     *
+     * Deliberately NOT load_count(): that helper collapses every read
+     * failure to a safe default of 0, which is correct for an ordinary
+     * boot-time load but would fabricate a "persisted_count":0 here whenever
+     * NVS is genuinely unreadable -- see load_count_strict()'s own comment. */
     if (!out_count) {
         return false;
     }
@@ -589,8 +676,12 @@ bool boot_guard_get_persisted_count(uint32_t *out_count)
         return false;
     }
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
-    uint32_t count = load_count();
+    uint32_t count = 0;
+    bool ok = load_count_strict(&count);
     xSemaphoreGive(s_bg.lock);
+    if (!ok) {
+        return false;
+    }
     *out_count = count;
     return true;
 }
