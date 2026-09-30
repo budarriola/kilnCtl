@@ -3145,6 +3145,75 @@ class Lcd19AllowHeatStopGatedTest(unittest.TestCase):
         self.assertTrue(result.observed["bench_cleanup"]["verified"])
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_allow_heat_start_dismisses_stale_confirm_start_via_cancel_only(self):
+        # 2026-09-30 fix: block A's right_pin_started sub-check enters the
+        # right PIN and stops at the Confirm Start dialog without ever
+        # pressing it (PinKeypadUiTest's state machine lands in "confirm",
+        # i.e. list_tap_targets() -> ["Start", "Cancel"]) -- it never
+        # dismisses that dialog itself. Before the allow_heat block starts
+        # its own (mocked) API firing, it must notice that stale dialog and
+        # dismiss it via the on-glass "Cancel" -- never by pressing "Start"
+        # (this dialog's own confirm button) and never a PIN digit. Track
+        # every click_by_name() call so a Start click would be caught even
+        # though nothing downstream currently depends on this dialog's
+        # state (the allow_heat firing starts over a mocked UART path, and
+        # _firing_settled overrides list_tap_targets() once exec status
+        # reads "running" regardless of self._state).
+        ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        clicks: list = []
+        real_click = ui.click_by_name
+
+        def tracked_click(name):
+            clicks.append(name)
+            return real_click(name)
+
+        ui.click_by_name = tracked_click
+        running_status = FakeExecStatus(state_name="running")
+        idle_status = FakeExecStatus(state_name="idle")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)), \
+             mock.patch.object(CH, "_cleanup_bench_profile"), \
+             mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        # "Start" appears exactly once in `clicks` -- block A's own initial
+        # tap that opens the PIN keypad from the idle home page (unrelated
+        # to this fix). The dialog left open afterward is the Confirm Start
+        # popup itself (state "confirm", ["Start", "Cancel"]); THIS fix's
+        # assertion is that its own confirm button is never pressed a
+        # second time to dismiss it -- only "Cancel" is used for that.
+        self.assertEqual(clicks.count("Start"), 1, clicks)
+        self.assertEqual(
+            clicks.count("Cancel"), 1,
+            "must dismiss the stale Confirm Start dialog via exactly one Cancel click, "
+            f"never its own Start button: {clicks}")
+        self.assertLess(
+            clicks.index("Cancel"), clicks.index("Stop"),
+            f"the stale-dialog Cancel must happen before Stop is ever tapped: {clicks}")
+        dismiss = result.observed.get("allow_heat_pre_start_dismiss")
+        self.assertIsNotNone(dismiss, "allow_heat start must record the pre-start dismiss attempt")
+        self.assertTrue(dismiss.get("checked"))
+        self.assertTrue(dismiss.get("present"), dismiss)
+        self.assertFalse(dismiss.get("is_keypad"), dismiss)
+        self.assertEqual(dismiss.get("dismiss_method"), "click_by_name_cancel")
+        self.assertTrue(dismiss.get("dismissed"), dismiss)
+        self.assertEqual(ui._state, "idle", "Cancel must actually close the stale Confirm Start dialog")
+        self.assertEqual(result.observed.get("stop_gated"), True)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
     def test_stop_not_gated_fails_and_cleanup_still_runs(self):
         ui = _StopGatedUiTest(right_pin="1234", wrong_pin="0000", stop_mode="ungated")
         idle_status = FakeExecStatus(state_name="idle")

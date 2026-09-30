@@ -378,11 +378,38 @@ typedef struct {
      * walked in two passes, FLOATING children first. Deeper levels always
      * visit every child. */
     uint8_t root_filter;
+    /* LCD-19 bench root cause, 2026-09-30 (docs/BENCH_TEST_LOG.md
+     * 20260930T203243Z_lcd): within each of log_all_tap_targets()'s
+     * priority groups (overlay layers, then the screen's FLOATING direct
+     * children, then everything else), this walk now runs an actionable
+     * pass before a non-actionable one -- see actionable_filter's values
+     * below. Without this, a plain lv_obj_create() container is CLICKABLE
+     * by default in this codebase (see the "borrowed" comment below) and
+     * gets emitted in plain tree order right alongside real buttons, so a
+     * page with several decorative clickable containers ahead of its real
+     * action button in tree order (ui_page_home.c's WiFi status label,
+     * temperature readout, chart legend swatches and zone rows all precede
+     * action_row's Start/Stop button) can fill the 253 B LIST_TAP_TARGETS
+     * reply before the walk ever reaches the one button a test harness
+     * actually needs -- confirmed on the bench: 20 of 20 allow_heat_settle_reads polls in the
+     * allow_heat Stop wait truncated with "Stop" entirely absent from the
+     * emitted names, even though the button existed and was reachable by
+     * tree walk, just past the truncation point. */
+    uint8_t actionable_filter;
 } tap_walk_ctx_t;
 
 #define TAP_WALK_ROOT_ALL 0u
 #define TAP_WALK_ROOT_FLOATING_ONLY 1u
 #define TAP_WALK_ROOT_NON_FLOATING_ONLY 2u
+
+/* actionable_filter values -- see tap_walk_ctx_t's comment above.
+ * log_all_tap_targets()'s own calls always pass ONLY or NON_ACTIONABLE_ONLY;
+ * ALL (0, the ctx zero-value) exists only so a hypothetical direct
+ * log_tap_targets() call that never goes through log_all_tap_targets()
+ * still emits everything rather than nothing. */
+#define TAP_WALK_ACTIONABLE_ALL 0u
+#define TAP_WALK_ACTIONABLE_ONLY 1u
+#define TAP_WALK_NON_ACTIONABLE_ONLY 2u
 
 static void tap_walk_add(tap_walk_ctx_t *ctx, const char *name, int cx, int cy, bool hidden)
 {
@@ -449,6 +476,16 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
          * way to aim at an individual key, so a keyboard widget is handled
          * before (and instead of) the generic CLICKABLE check below. */
         if (lv_obj_check_type(child, &lv_buttonmatrix_class)) {
+            /* Every key of a buttonmatrix is a real, tappable action (see
+             * this branch's own header comment) -- always actionable, never
+             * a decorative label, so it is skipped outright in the
+             * non-actionable pass and fully emitted in the actionable one.
+             * Recursion is irrelevant here regardless (a buttonmatrix has no
+             * lv_obj_t children, see the `continue` below), so skipping the
+             * whole branch loses nothing a later pass would have reached. */
+            if (ctx->actionable_filter == TAP_WALK_NON_ACTIONABLE_ONLY) {
+                continue;
+            }
             lv_buttonmatrix_t *bm = (lv_buttonmatrix_t *)child;
             lv_area_t bm_area;
             lv_obj_get_coords(child, &bm_area);
@@ -519,6 +556,45 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
         }
 
         if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
+            /* LCD-19 fix, 2026-09-30: a plain lv_obj_create() container is
+             * CLICKABLE by default in this codebase (that default is exactly
+             * why a decorative container can "borrow" a child label's text
+             * below), so CLICKABLE alone does not distinguish a real button
+             * a test harness wants to tap from a decorative status strip it
+             * doesn't.
+             *
+             * Opus review, 2026-09-30: lv_button_class alone is not the full
+             * "actionable" line. Real home-page buttons (ui_home_build_button())
+             * are lv_button_class, but a msgbox's OWN buttons -- ui_confirm.c's
+             * Confirm/Cancel, ui_page_network's connect-manage Yes/No, and the
+             * PIN keypad's Cancel (ui_lcd_keypad.c) -- are built via
+             * lv_msgbox_add_footer_button(), which is lv_msgbox_footer_button_class
+             * (a base lv_obj_class subclass, NOT lv_button; see
+             * lv_msgbox.c:77-78,234), and likewise lv_msgbox_add_header_button()
+             * is lv_msgbox_header_button_class (lv_msgbox.c:86,180). Checking
+             * only lv_button_class put every one of those buttons in the
+             * non-actionable pass -- exactly backwards for a modal, whose
+             * Cancel/Confirm is the one thing a harness needs most. Also,
+             * lv_obj_check_type() is an exact-class match, not "is-a": it
+             * would also exclude lv_list_button_class rows (ui_page_network's
+             * scan-result list), which subclass lv_button but fail an exact
+             * check against &lv_button_class. lv_obj_has_class() (which walks
+             * the class hierarchy) is used for that one instead.
+             *
+             * The buttonmatrix branch above is deliberately NOT touched by
+             * this fix -- an lv_keyboard's expanded/shifted key layout is a
+             * separate, out-of-scope concern; it is unconditionally treated as
+             * always-actionable already (see that branch's own comment) and
+             * needs no is-a check. */
+            bool is_button = lv_obj_has_class(child, &lv_button_class) ||
+                              lv_obj_check_type(child, &lv_msgbox_footer_button_class) ||
+                              lv_obj_check_type(child, &lv_msgbox_header_button_class);
+            if ((ctx->actionable_filter == TAP_WALK_ACTIONABLE_ONLY && !is_button) ||
+                (ctx->actionable_filter == TAP_WALK_NON_ACTIONABLE_ONLY && is_button)) {
+                log_tap_targets(child, depth + 1, ctx);
+                continue;
+            }
+
             lv_area_t area;
             lv_obj_get_coords(child, &area);
 
@@ -631,12 +707,35 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
      * direct children (the topbar icon proxy; ui_page_home.c's corner tap
      * zones), then everything else in the screen's normal child order.
      * Relative order within each group is unchanged, and hit-testing is not
-     * affected -- this is only the order targets are REPORTED in. */
+     * affected -- this is only the order targets are REPORTED in.
+     *
+     * LCD-19 fix, 2026-09-30 (docs/BENCH_TEST_LOG.md
+     * 20260930T203243Z_lcd): "everything else in the screen's normal child
+     * order" above cost the allow_heat Stop check its tap target. On the
+     * home page several plain lv_obj_create() containers -- CLICKABLE by
+     * default in this codebase, each borrowing a child label's text (the
+     * WiFi status readout, the live temperature, the chart legend swatches,
+     * the zone rows) -- sit earlier in tree order than action_row's real
+     * Start/Stop button, so a truncated reply can fill up on those
+     * decorative entries and never reach the one button a harness actually
+     * needs; 20 of 20 allow_heat_settle_reads polls in that bench run did exactly this, with "Stop"
+     * entirely absent from the reply. Each of the three groups above is
+     * therefore now itself walked in TWO passes -- actionable targets (real
+     * lv_button_class buttons, and every buttonmatrix key, which is always a
+     * real key) first, then everything else CLICKABLE second -- so a
+     * truncated reply drops decorative entries before it ever drops a real
+     * button, within whichever group it's cut short in. Group order itself
+     * (overlay, then floating, then normal) is unchanged, so an open modal's
+     * "Cancel" is still always emitted ahead of anything on the page
+     * beneath it. */
     lv_obj_t *top = lv_layer_top();
     if (top && lv_obj_get_child_count(top) > 0) {
         if (ctx->do_log) {
             ESP_LOGI(TAG, "  -- top-layer --");
         }
+        ctx->actionable_filter = TAP_WALK_ACTIONABLE_ONLY;
+        log_tap_targets(top, 0, ctx);
+        ctx->actionable_filter = TAP_WALK_NON_ACTIONABLE_ONLY;
         log_tap_targets(top, 0, ctx);
     }
 
@@ -645,16 +744,28 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
         if (ctx->do_log) {
             ESP_LOGI(TAG, "  -- sys-layer --");
         }
+        ctx->actionable_filter = TAP_WALK_ACTIONABLE_ONLY;
+        log_tap_targets(sys, 0, ctx);
+        ctx->actionable_filter = TAP_WALK_NON_ACTIONABLE_ONLY;
         log_tap_targets(sys, 0, ctx);
     }
 
     if (screen) {
         ctx->root_filter = TAP_WALK_ROOT_FLOATING_ONLY;
+        ctx->actionable_filter = TAP_WALK_ACTIONABLE_ONLY;
         log_tap_targets(screen, 0, ctx);
+        ctx->actionable_filter = TAP_WALK_NON_ACTIONABLE_ONLY;
+        log_tap_targets(screen, 0, ctx);
+
         ctx->root_filter = TAP_WALK_ROOT_NON_FLOATING_ONLY;
+        ctx->actionable_filter = TAP_WALK_ACTIONABLE_ONLY;
         log_tap_targets(screen, 0, ctx);
+        ctx->actionable_filter = TAP_WALK_NON_ACTIONABLE_ONLY;
+        log_tap_targets(screen, 0, ctx);
+
         ctx->root_filter = TAP_WALK_ROOT_ALL;
     }
+    ctx->actionable_filter = TAP_WALK_ACTIONABLE_ALL;
 }
 
 esp_err_t kiln_ui_show(const char *name)

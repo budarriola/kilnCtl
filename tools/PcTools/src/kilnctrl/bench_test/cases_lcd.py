@@ -2775,29 +2775,46 @@ def _wait_for_home_settled(ctx: dict, ui, target_name: str, min_wait_s: float = 
     label ticking over no longer resets the counter. The Start-side call
     (page idle, nothing live changing names) behaves identically to before.
 
-    Truncated reads (2026-09-30 review, advisory A): a truncated
-    LIST_TAP_TARGETS reply is not rejected outright. `kiln_ui.c`'s
-    `log_all_tap_targets()` (the walk both `kiln_ui_collect_tap_targets()`
-    and this command's handler go through) documents its own emission
-    order at kiln_ui.c:629-633 -- "the overlay layers (a modal covers the
-    page beneath it, so its targets matter most), then the screen's
-    FLOATING direct children ..., then everything else in the screen's
-    normal child order" -- and `uart_bridge_ui_test.c`'s
-    `UI_TEST_CMD_LIST_TAP_TARGETS` handler (around line 111-135) emits
-    entries in exactly that walk order, stopping (and setting the
-    truncated flag) once the 253 B wire reply is full, i.e. truncation
-    always drops entries off the END of that order, never the start. Any
-    modal's own "Cancel" is therefore always walked, and would be emitted,
-    before the home page's own `target_name` button (a normal, non-floating
-    child of the screen, walked last of all). If a truncated read still
-    contains `target_name`, the walk necessarily got all the way past the
-    overlay-layer section without running out of room, so a "Cancel" from
-    an open modal -- had one been open -- would already have been emitted
-    too; its absence from a truncated-but-target-containing read is
-    therefore real evidence, not an artifact of truncation. A truncated read
-    that does NOT contain `target_name` stays non-qualifying (indeterminate:
-    the cut could have landed before or after where an overlay's own
-    targets would appear).
+    Truncated reads (2026-09-30 review, advisory A; walk order updated
+    2026-09-30 by the LCD-19 fix below): a truncated LIST_TAP_TARGETS reply
+    is not rejected outright. `kiln_ui.c`'s `log_all_tap_targets()` (the walk
+    both `kiln_ui_collect_tap_targets()` and this command's handler go
+    through) documents its own emission order at kiln_ui.c:686-711 --
+    "the overlay layers (a modal covers the page beneath it, so its targets
+    matter most), then the screen's FLOATING direct children ..., then
+    everything else in the screen's normal child order", with each of those
+    three GROUPS now itself split into two passes: real, actionable buttons
+    (lv_button_class, plus a msgbox's own lv_msgbox_footer_button_class/
+    lv_msgbox_header_button_class buttons -- Cancel/Confirm/Yes/No are these,
+    not lv_button_class, see kiln_ui.c's own comment at the CLICKABLE check --
+    and every buttonmatrix key) first, then every other merely-CLICKABLE
+    object (a decorative container borrowing a child label's text -- the
+    WiFi status readout, a temperature/chart-legend label, a zone row --
+    CLICKABLE only because that's an `lv_obj_create()` default in this
+    codebase, never a real action) second. This is the LCD-19 bench fix
+    (`logs/bench_test/20260930T203243Z_lcd/summary.json`): the home page's
+    decorative labels sat ahead of action_row's real Start/Stop button in
+    plain tree order and filled a truncated reply before the walk ever
+    reached it, 20 of 20 `allow_heat_settle_reads` in that run. `Stop`/
+    `Start` are real buttons, so the actionable-first split now protects
+    them the same way -- and `uart_bridge_ui_test.c`'s
+    `UI_TEST_CMD_LIST_TAP_TARGETS` handler (around line 111-135) still just
+    emits entries in whatever order the firmware walk produces, stopping
+    (and setting the truncated flag) once the 253 B wire reply is full, so
+    truncation still always drops entries off the END of that order, never
+    the start. GROUP order itself is unchanged: any modal's own "Cancel" is
+    still always walked, and would be emitted, before the home page's own
+    `target_name` button (a real button, so also actionable, but still in
+    the normal/non-floating group, walked after the overlay and floating
+    groups). If a truncated read still contains `target_name`, the walk
+    necessarily got all the way past the overlay-layer group (both its
+    actionable and non-actionable passes) without running out of room, so a
+    "Cancel" from an open modal -- had one been open -- would already have
+    been emitted too; its absence from a truncated-but-target-containing
+    read is therefore real evidence, not an artifact of truncation. A
+    truncated read that does NOT contain `target_name` stays non-qualifying
+    (indeterminate: the cut could have landed before or after where an
+    overlay's own targets would appear).
 
     `log`, when given a list, gets one dict appended per poll
     (`{"names": sorted(...) or None, "target_present", "cancel_present",
@@ -3263,6 +3280,28 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             f"(state={state.get('allow_heat_pre_exec_state', 'unknown')})"
                         )
                     else:
+                        # 2026-09-30 fix: the earlier right_pin_started
+                        # sub-check (block A above) enters the right PIN and
+                        # stops at the Confirm Start dialog -- it never
+                        # presses Confirm Start (see the comment at
+                        # "right_pin_started" is a placeholder name" above),
+                        # but it also never dismisses that dialog itself, so
+                        # a stale Confirm Start can still be sitting on the
+                        # glass here. Starting the API firing underneath it
+                        # would leave that dialog open on top of a genuinely
+                        # running profile, and the settle-wait/Stop-tap logic
+                        # below reads the home page's OWN "Stop"/"Cancel"
+                        # tap targets, not this dialog's -- an unrelated
+                        # leftover Confirm Start would be indistinguishable
+                        # from a fresh one the firing start itself raised.
+                        # Dismiss it via the on-glass "Cancel" (never
+                        # Confirm Start/Confirm Stop, never a PIN digit --
+                        # see _dismiss_lcd19_overlay()'s own header comment)
+                        # before starting anything. Best-effort: a dismiss
+                        # that fails or finds nothing to dismiss does not
+                        # block the start attempt, it is only recorded for
+                        # diagnosis.
+                        state["allow_heat_pre_start_dismiss"] = _dismiss_lcd19_overlay(ctx, ui)
                         ok, reason, _ambient = _heat._start_bench_profile(ctx, zone_mask=0b001)
                         state["allow_heat_start_attempted"] = True
                         if not ok:
