@@ -99,6 +99,19 @@ ZERO_CALLER_ALLOWLIST = {
     # more (2026-09-22): it now has a real in-repo caller, assert_binary_fresh
     # itself (binary_provenance.py:106), so it is no longer zero-caller.
     ("tools/PcTools/src/kilnctrl/binary_provenance.py", "assert_binary_fresh"),
+    # recovery_ota_auth_client.{recovery_push_esp_image,recovery_boot_guard_reset,
+    # recovery_sw_reset}: the AP-password X-Ota-Mac signer kept alive only for
+    # firmware/KilnFW_recovery/'s own, separate recovery-image firmware, after
+    # the main app's nine ROUTE_TIER_ADMIN routes retired the scheme outright
+    # 2026-09-29 (see the module's own docstring and docs/MCP_SERVERS.md's
+    # "RECOVERY-IMAGE-ONLY signer kept in PcTools, unwired to any MCP tool
+    # today"). Deliberately not wired into any MCP tool yet -- a board that
+    # has actually fallen back to the recovery image needs this signed path,
+    # but that wiring is a separate, not-yet-done piece of work. Test coverage
+    # only: tools/PcTools/tests/test_recovery_ota_auth_client.py.
+    ("tools/PcTools/src/kilnctrl/recovery_ota_auth_client.py", "recovery_push_esp_image"),
+    ("tools/PcTools/src/kilnctrl/recovery_ota_auth_client.py", "recovery_boot_guard_reset"),
+    ("tools/PcTools/src/kilnctrl/recovery_ota_auth_client.py", "recovery_sw_reset"),
     ("tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py", "find_best_strength_per_load"),
     ("tools/PcTools/src/kilnctrl/http_capture_log.py", "starting_temps_c"),
     ("tools/PcTools/src/kilnctrl/load_mass_sweep.py", "run_profile7_loaded"),
