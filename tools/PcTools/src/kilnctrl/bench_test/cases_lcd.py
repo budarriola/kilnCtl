@@ -2733,7 +2733,8 @@ def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
 
 def _wait_for_home_settled(ctx: dict, ui, target_name: str, min_wait_s: float = 2.5,
                             timeout_s: float = 10.0, poll_interval_s: float = 0.5,
-                            stable_reads: int = 2) -> bool:
+                            stable_reads: int = 2,
+                            log: Optional[list] = None) -> bool:
     """Shared settle-wait for the keypad/confirm-popup self-close race
     (2026-09-30 review, scope-addition item): `set_policy(lcd_enabled=True)`
     (`cases_lcd.py`'s entry, before the Start click) and the allow_heat
@@ -2743,12 +2744,66 @@ def _wait_for_home_settled(ctx: dict, ui, target_name: str, min_wait_s: float = 
     edge closes any keypad/popup opened in the meantime, win-or-lose
     depending on exactly where in the current tick the `set_policy` POST
     landed. Wait at least 2.5s (more than two 1s ticks, `min_wait_s`) before
-    even looking, then require `stable_reads` (default 2) consecutive
-    identical polls showing `target_name` present and `"Cancel"` absent --
-    not merely non-empty, which the page already was before the wait --
-    before calling it genuinely settled. Never raises; returns False (caller
-    stays INCONCLUSIVE, never taps `target_name`) if it never stabilizes
-    within `timeout_s`.
+    even looking, then require `stable_reads` (default 2) consecutive polls
+    that all show `target_name` present and `"Cancel"` absent (see the
+    truncation rule below for how a truncated read is judged) -- before
+    calling it genuinely settled. Never raises;
+    returns False (caller stays INCONCLUSIVE, never taps `target_name`) if
+    it never stabilizes within `timeout_s`.
+
+    2026-09-30 bench fix (run 20260930T200715Z_lcd, LCD-19 allow_heat path):
+    the Stop-side call of this helper runs while a firing is genuinely
+    active, and the home page's own live content changes on its own cadence
+    independent of the lock-race this helper watches for -- most likely the
+    "Elapsed %s" progress label (`ui_page_home_refresh.c:163-172`), which is
+    rebuilt every second the page refreshes while a profile runs, with the
+    temperature readout (e.g. `"17C"` -> `"18C"`) as a secondary contributor.
+    This is not confirmed from the one bench run that hit it -- that run
+    predates the per-read `log` this fix adds (see below) and only recorded
+    the final True/False, not the actual differing name sets -- but a future
+    run's `allow_heat_settle_reads`/`start_settle_reads` log will show
+    exactly which name(s) changed between reads. The original version
+    required the FULL tap-target name set to read byte-identical across
+    `stable_reads` consecutive polls, so on that path the qualifying
+    condition (target present, Cancel absent) was true on every single poll
+    but the changing label(s) reset `stable_count` back to 1 each time -- an
+    unbroken string of qualifying reads was never allowed to reach 2 in a
+    row, and the wait always ran out. Stability is now judged on the
+    *relevant subset* -- target present, `"Cancel"` absent, plus the
+    truncation rule below -- holding for `stable_reads` consecutive polls,
+    not on whole-name-list identity; a live temperature or elapsed-time
+    label ticking over no longer resets the counter. The Start-side call
+    (page idle, nothing live changing names) behaves identically to before.
+
+    Truncated reads (2026-09-30 review, advisory A): a truncated
+    LIST_TAP_TARGETS reply is not rejected outright. `kiln_ui.c`'s
+    `log_all_tap_targets()` (the walk both `kiln_ui_collect_tap_targets()`
+    and this command's handler go through) documents its own emission
+    order at kiln_ui.c:629-633 -- "the overlay layers (a modal covers the
+    page beneath it, so its targets matter most), then the screen's
+    FLOATING direct children ..., then everything else in the screen's
+    normal child order" -- and `uart_bridge_ui_test.c`'s
+    `UI_TEST_CMD_LIST_TAP_TARGETS` handler (around line 111-135) emits
+    entries in exactly that walk order, stopping (and setting the
+    truncated flag) once the 253 B wire reply is full, i.e. truncation
+    always drops entries off the END of that order, never the start. Any
+    modal's own "Cancel" is therefore always walked, and would be emitted,
+    before the home page's own `target_name` button (a normal, non-floating
+    child of the screen, walked last of all). If a truncated read still
+    contains `target_name`, the walk necessarily got all the way past the
+    overlay-layer section without running out of room, so a "Cancel" from
+    an open modal -- had one been open -- would already have been emitted
+    too; its absence from a truncated-but-target-containing read is
+    therefore real evidence, not an artifact of truncation. A truncated read
+    that does NOT contain `target_name` stays non-qualifying (indeterminate:
+    the cut could have landed before or after where an overlay's own
+    targets would appear).
+
+    `log`, when given a list, gets one dict appended per poll
+    (`{"names": sorted(...) or None, "target_present", "cancel_present",
+    "truncated", "qualifies"}`) so a caller can record the full settle
+    read sequence into `state`/observed for diagnosis, rather than only the
+    final True/False.
 
     `ctx["_now"]`/`ctx["_sleep"]` are injectable for tests, same pattern as
     `cases_heat._rest_gate`; default to real wall-clock time."""
@@ -2756,27 +2811,40 @@ def _wait_for_home_settled(ctx: dict, ui, target_name: str, min_wait_s: float = 
     sleep = ctx.get("_sleep", time.sleep)
     sleep(min_wait_s)
     deadline = now() + timeout_s
-    last_names: Optional[frozenset] = None
     stable_count = 0
     while True:
         names: Optional[frozenset] = None
+        truncated = False
         try:
             resp = ui.list_tap_targets()
+            truncated = bool(resp.get("truncated"))
             targets = resp.get("targets") or []
             names = frozenset(t.get("name") for t in targets if not t.get("hidden"))
         except Exception:  # noqa: BLE001
             names = None
-        if names is not None and target_name in names and "Cancel" not in names:
-            if names == last_names:
-                stable_count += 1
-            else:
-                stable_count = 1
-                last_names = names
+        target_present = names is not None and target_name in names
+        cancel_present = names is not None and "Cancel" in names
+        # A truncated read still qualifies as long as target_name made it
+        # in -- see the truncation-rule docstring above: the walk order
+        # guarantees an overlay's "Cancel" would have been emitted first,
+        # so target_name present + Cancel absent is real evidence even
+        # when truncated. A truncated read missing target_name never
+        # qualifies (indeterminate).
+        qualifies = target_present and not cancel_present
+        if log is not None:
+            log.append({
+                "names": sorted(names) if names is not None else None,
+                "target_present": target_present,
+                "cancel_present": cancel_present,
+                "truncated": truncated,
+                "qualifies": qualifies,
+            })
+        if qualifies:
+            stable_count += 1
             if stable_count >= stable_reads:
                 return True
         else:
             stable_count = 0
-            last_names = names
         if now() >= deadline:
             return False
         sleep(poll_interval_s)
@@ -2894,8 +2962,10 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                 # (see its docstring) -- clicking "Start" right after that
                 # POST with no wait can race the tick that force-closes
                 # whatever popup was open. Settle first.
-                start_settled = _wait_for_home_settled(ctx, ui, "Start")
+                start_settle_log: list = []
+                start_settled = _wait_for_home_settled(ctx, ui, "Start", log=start_settle_log)
                 state["start_settle_ok"] = start_settled
+                state["start_settle_reads"] = start_settle_log
                 if not start_settled:
                     state["start_click_skip_reason"] = (
                         "home page never settled (stable 'Start' present / 'Cancel' absent read) "
@@ -3298,8 +3368,10 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # firing this run started); the legacy
                         # `firing_active_with_lock` config-flag path never
                         # relocks here and never races this tick.
-                        settled = _wait_for_home_settled(ctx, ui, "Stop")
+                        allow_heat_settle_log: list = []
+                        settled = _wait_for_home_settled(ctx, ui, "Stop", log=allow_heat_settle_log)
                         state["allow_heat_settle_ok"] = settled
+                        state["allow_heat_settle_reads"] = allow_heat_settle_log
                         if not settled:
                             state["allow_heat_stop_skip_reason"] = (
                                 "home page never settled (stable 'Stop' present / 'Cancel' absent read) "

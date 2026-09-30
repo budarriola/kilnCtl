@@ -3624,6 +3624,166 @@ class Lcd19AllowHeatStopGatedTest(unittest.TestCase):
         self.assertIsNone(result.observed.get("stop_gated"))
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
+    def test_stop_tap_settles_despite_live_temperature_readout_changing(self):
+        # Bench bug, run 20260930T200715Z_lcd (LCD-19, allow_heat=True):
+        # allow_heat_relock_ok was True but allow_heat_settle_ok stayed
+        # False and Stop was never tapped, leaving stop_gated INCONCLUSIVE.
+        # Root cause: the pre-fix `_wait_for_home_settled` required the
+        # FULL tap-target name set to read byte-identical across two
+        # consecutive polls. While a firing is genuinely active the home
+        # page's own live temperature readout changes on its own cadence
+        # (independent of the lock-race the helper watches for), so on a
+        # real board "Stop" was present and "Cancel" was absent on every
+        # single poll, but the reading (e.g. "17C" -> "18C") ticking over
+        # kept resetting the stability counter and the wait always timed
+        # out. This fixture reproduces that shape: every settle-phase poll
+        # already qualifies (Stop present, Cancel absent), but the
+        # temperature name changes every single read.
+        class ChangingTempUiTest(_StopGatedUiTest):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._settle_polls = 0
+
+            def list_tap_targets(self):
+                if self._stop_tapped or not self._firing_settled:
+                    return super().list_tap_targets()
+                self._settle_polls += 1
+                temp_name = f"{16 + self._settle_polls}C"  # a different name every poll
+                return {"targets": [{"name": "Stop", "hidden": False},
+                                     {"name": temp_name, "hidden": False}],
+                        "truncated": False}
+
+        ui = ChangingTempUiTest(right_pin="1234", wrong_pin="0000", stop_mode="gated")
+        idle_status = FakeExecStatus(state_name="idle")
+        running_status = FakeExecStatus(state_name="running")
+        profiles = FakeProfiles(status=idle_status)
+        calls = {"n": 0}
+
+        def sequenced():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return idle_status
+            if calls["n"] == 2:
+                ui._firing_settled = True
+                return running_status
+            return idle_status
+
+        profiles.get_exec_status = sequenced
+        ctx, srv = self._ctx(ui, allow_heat=True)
+        srv._profiles = profiles
+        with mock.patch.object(CH, "_start_bench_profile", return_value=(True, "started", 20.0)),              mock.patch.object(CH, "_cleanup_bench_profile"),              mock.patch.object(CH, "_read_energized", return_value=False):
+            result = C._case_lcd19(ctx)
+        self.assertTrue(ui._stop_tapped,
+                         "Stop must still be tapped when the qualifying condition holds even if "
+                         "unrelated live content (e.g. temperature) changes every poll")
+        self.assertTrue(result.observed.get("allow_heat_settle_ok"))
+        self.assertEqual(result.observed.get("stop_gated"), True)
+        reads = result.observed.get("allow_heat_settle_reads")
+        self.assertIsNotNone(reads)
+        self.assertTrue(len(reads) >= 2)
+        self.assertTrue(all(r["qualifies"] for r in reads),
+                         "every settle-phase poll already qualified (Stop present, Cancel absent)")
+        # The reproduction of the bug: consecutive reads' full name sets
+        # actually differ (the changing temperature reading), yet settling
+        # still succeeds under the fixed, subset-based stability check.
+        self.assertNotEqual(reads[0]["names"], reads[1]["names"])
+
+    def test_settle_requires_consecutive_qualifying_reads(self):
+        # 2026-09-30 opus review, item 1: the "consecutive" part of
+        # `stable_reads` was untested -- changing the non-qualifying else
+        # branch's `stable_count = 0` to a no-op `pass` left every prior
+        # test green, because none of them exercised a qualifying read,
+        # then a non-qualifying read, then qualifying reads again. This
+        # test drives `_wait_for_home_settled` directly (rather than
+        # through the full LCD-19 case) with exactly that sequence:
+        #   read 1: qualifies (Stop present, Cancel absent)      -> count=1
+        #   read 2: does NOT qualify (Cancel present)             -> count=0 (reset)
+        #   read 3: qualifies again                               -> count=1
+        #   read 4: qualifies again                               -> count=2, settled
+        # A correct implementation must poll all 4 times before returning
+        # True; the reset-skipping mutation returns True after only 3
+        # (reads 1 then 3 then 4 would already read as 2-in-a-row without
+        # the reset, since a bare `pass` leaves stable_count at 1 across
+        # the bad read instead of dropping it to 0).
+        responses = [
+            {"targets": [{"name": "Stop", "hidden": False}], "truncated": False},
+            {"targets": [{"name": "Stop", "hidden": False}, {"name": "Cancel", "hidden": False}],
+             "truncated": False},
+            {"targets": [{"name": "Stop", "hidden": False}], "truncated": False},
+            {"targets": [{"name": "Stop", "hidden": False}], "truncated": False},
+        ]
+        calls = {"n": 0}
+
+        class FakeUi:
+            def list_tap_targets(self):
+                idx = calls["n"]
+                calls["n"] += 1
+                # Any read beyond the scripted 4 means the helper settled
+                # (or kept polling) later than the sequence above intends --
+                # returning the last scripted response keeps the loop from
+                # crashing while `calls["n"]` still records the true count.
+                return responses[min(idx, len(responses) - 1)]
+
+        ui = FakeUi()
+        ctx = {"_sleep": lambda s: None, "_now": itertools.count(0.0, 0.1).__next__}
+        result = C._wait_for_home_settled(
+            ctx, ui, "Stop", min_wait_s=0.0, timeout_s=100.0, poll_interval_s=0.0, stable_reads=2)
+        self.assertTrue(result)
+        self.assertEqual(
+            calls["n"], 4,
+            "settling must require stable_reads consecutive qualifying reads -- a "
+            "non-qualifying read in between must reset the count, not merely be ignored")
+
+    def test_settle_accepts_truncated_read_when_target_present_cancel_absent(self):
+        # 2026-09-30 opus review, item 2 / reviewer advisory A: kiln_ui.c's
+        # log_all_tap_targets() walks the overlay layers (lv_layer_top(),
+        # kiln_ui.c:629-633) before the home screen's own normal children,
+        # and uart_bridge_ui_test.c's UI_TEST_CMD_LIST_TAP_TARGETS handler
+        # truncates by simply stopping mid-walk once the 253 B wire reply
+        # is full -- always dropping entries off the END of that order. So
+        # a truncated read that still contains the home page's own
+        # `target_name` (walked last of all) proves the walk got all the
+        # way past the overlay section, meaning any modal's own "Cancel"
+        # would already have been emitted had one been open. Such a read
+        # must still qualify.
+        responses = {"targets": [{"name": "Stop", "hidden": False}], "truncated": True}
+
+        class FakeUi:
+            def list_tap_targets(self):
+                return dict(responses)
+
+        ui = FakeUi()
+        log: list = []
+        ctx = {"_sleep": lambda s: None, "_now": itertools.count(0.0, 0.1).__next__}
+        result = C._wait_for_home_settled(
+            ctx, ui, "Stop", min_wait_s=0.0, timeout_s=100.0, poll_interval_s=0.0,
+            stable_reads=2, log=log)
+        self.assertTrue(result, "a truncated read with target present and Cancel absent must qualify")
+        self.assertTrue(len(log) >= 2)
+        self.assertTrue(all(r["truncated"] for r in log))
+        self.assertTrue(all(r["qualifies"] for r in log))
+
+    def test_settle_rejects_truncated_read_missing_target(self):
+        # Companion to the above: a truncated read that does NOT contain
+        # target_name is indeterminate (the cut could have landed before or
+        # after where an overlay's own targets would appear) and must never
+        # qualify, so the wait times out and Stop/Start is never tapped.
+        responses = {"targets": [{"name": "17C", "hidden": False}], "truncated": True}
+
+        class FakeUi:
+            def list_tap_targets(self):
+                return dict(responses)
+
+        ui = FakeUi()
+        log: list = []
+        ctx = {"_sleep": lambda s: None, "_now": itertools.count(0.0, 0.1).__next__}
+        result = C._wait_for_home_settled(
+            ctx, ui, "Stop", min_wait_s=0.0, timeout_s=0.5, poll_interval_s=0.05,
+            stable_reads=2, log=log)
+        self.assertFalse(result, "a truncated read missing target_name must never qualify")
+        self.assertTrue(log)
+        self.assertFalse(any(r["qualifies"] for r in log))
+
 
 class _SharedBoardSecClient:
     """One fake board's policy/PIN state, shared across both WEB-SEC-04 and
