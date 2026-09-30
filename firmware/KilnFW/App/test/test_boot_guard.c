@@ -762,6 +762,40 @@ static void test_get_persisted_count_unreadable_record_fails_not_fabricated_zero
     TEST_CHECK(out == 0xdeadbeefu, "a failed call must not touch *out_count");
 }
 
+static void test_get_persisted_count_legacy_open_error_fails_not_fabricated_zero(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+
+    boot_guard_init(); /* creates+persists a genuine record under NVS_NAMESPACE/NVS_KEY_REC */
+
+    /* Erase the primary key so its own get_blob() reports HAL_NOT_FOUND (the
+     * namespace itself still exists and opens fine) -- this is the "not
+     * found at the current location, fall back to legacy" branch of
+     * load_count_strict(). */
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "primary namespace still opens for the erase");
+    TEST_CHECK(hal_kv_erase_key(&h, NVS_KEY_REC) == HAL_OK, "primary key erases cleanly");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "erase commits");
+    hal_kv_close(&h);
+
+    /* Script the legacy namespace's NEXT open to fail with something other
+     * than HAL_NOT_FOUND -- e.g. HAL_NOT_READY, a real "could not open"
+     * error distinct from "this namespace has genuinely never been written".
+     * Before this fix, load_count_strict() treated ANY non-HAL_OK open
+     * (including this one) as "never written" and fabricated a 0; it must
+     * instead report failure. */
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE_LEGACY, HAL_NOT_READY),
+               "precondition: the legacy namespace's next open can be scripted to fail");
+    uint32_t out = 0xdeadbeefu;
+    TEST_CHECK(!boot_guard_get_persisted_count(&out),
+               "a legacy-namespace open error other than HAL_NOT_FOUND must report failure, not a "
+               "fabricated 0 -- this is the negative-tested guard against the reviewed gap");
+    TEST_CHECK(out == 0xdeadbeefu, "a failed call must not touch *out_count");
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -783,4 +817,5 @@ void run_test_boot_guard(void)
     test_get_persisted_count_null_arg_fails();
     test_get_persisted_count_tracks_live_nvs_value();
     test_get_persisted_count_unreadable_record_fails_not_fabricated_zero();
+    test_get_persisted_count_legacy_open_error_fails_not_fabricated_zero();
 }

@@ -75,6 +75,17 @@ static hal_status_t           s_next_write_fail_status = HAL_OK;
 static bool                   s_lossy_uncommitted = false;
 static unsigned               s_silent_erase_noops = 0u;
 static unsigned               s_silent_set_noops = 0u;
+/* One-shot hal_kv_open() failure injection, scoped to a single namespace
+ * name so scripting a failure for one namespace (e.g. the boot_guard legacy
+ * namespace) can't accidentally also fail an unrelated open the same test
+ * performs first (e.g. the primary namespace). Added for
+ * load_count_strict()'s "legacy namespace open fails with something other
+ * than HAL_NOT_FOUND" case, which no existing fake_kv script could reach:
+ * a real namespace-name-length/HAL_INVALID_ARG failure isn't test-triggerable
+ * for a fixed, short, hardcoded namespace string. */
+static bool                   s_next_open_fail_armed = false;
+static hal_status_t           s_next_open_fail_status = HAL_OK;
+static char                   s_next_open_fail_namespace[FAKE_KV_MAX_NAME_LEN];
 
 static const char *norm_partition(const char *partition)
 {
@@ -153,6 +164,9 @@ void fake_kv_reset_all(void)
     s_silent_erase_noops = 0u;
     s_silent_set_noops = 0u;
     s_get_call_count = 0u;
+    s_next_open_fail_armed = false;
+    s_next_open_fail_status = HAL_OK;
+    s_next_open_fail_namespace[0] = '\0';
 }
 
 /* Total hal_kv_get_blob()/hal_kv_get_str() calls since the last reset,
@@ -256,6 +270,15 @@ void fake_kv_script_next_write_status(hal_status_t status)
     s_next_write_fail_status = status;
 }
 
+bool fake_kv_script_next_open_status(const char *namespace_name, hal_status_t status)
+{
+    if (namespace_name == NULL || strlen(namespace_name) >= FAKE_KV_MAX_NAME_LEN) return false;
+    s_next_open_fail_armed = true;
+    s_next_open_fail_status = status;
+    copy_bounded(s_next_open_fail_namespace, sizeof(s_next_open_fail_namespace), namespace_name);
+    return true;
+}
+
 void fake_kv_script_silent_erase_noops(unsigned count)
 {
     s_silent_erase_noops = count;
@@ -278,6 +301,11 @@ hal_status_t hal_kv_open(hal_kv_handle_t *h, const char *namespace_name,
 {
     if (h == NULL || namespace_name == NULL) return HAL_INVALID_ARG;
     if (strlen(namespace_name) >= FAKE_KV_MAX_NAME_LEN) return HAL_INVALID_ARG;
+
+    if (s_next_open_fail_armed && strcmp(s_next_open_fail_namespace, namespace_name) == 0) {
+        s_next_open_fail_armed = false;
+        return s_next_open_fail_status;
+    }
 
     int p = find_partition_slot(partition);
     /* HAL_NOT_READY, NOT HAL_NOT_FOUND -- deliberately NOT mirroring

@@ -158,6 +158,15 @@ bool fake_kv_script_corrupt_key(const char *partition, const char *namespace_nam
  * injection per the plan's "error injection ... no-space" spec. */
 void fake_kv_script_next_write_status(hal_status_t status);
 
+/* Forces the NEXT hal_kv_open() call for `namespace_name` specifically to
+ * return `status` instead of its normal result, then reverts to normal
+ * behavior; other namespaces' opens are unaffected. Returns false (no-op)
+ * for a NULL or too-long namespace_name. Added for load_count_strict()'s
+ * legacy-namespace-open-error path: a genuine non-HAL_NOT_FOUND open failure
+ * (e.g. HAL_NOT_READY, HAL_IO) has no other test-triggerable path for a
+ * fixed, short, hardcoded namespace name. */
+bool fake_kv_script_next_open_status(const char *namespace_name, hal_status_t status);
+
 /* Arms `count` subsequent hal_kv_erase_key() calls to report HAL_OK while
  * leaving the key exactly where it was -- a write that LIES about having
  * succeeded, rather than one that fails honestly (which is what

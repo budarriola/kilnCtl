@@ -354,10 +354,14 @@ static bool verify_persisted_count(uint32_t expected)
  * length mismatch, or a failed record_is_valid() (bad CRC/version) in either
  * namespace.
  *
- * Logs at most once, at ESP_LOGW, and only for the CRC/version-fail path --
- * GET /api/boot_guard is unauthenticated and may be polled, so this must not
- * become a per-request log line the way load_count()'s own warning would if
- * reused here unchanged. */
+ * Logs at most ONCE PER BOOT, at ESP_LOGW, and only for the CRC/version-fail
+ * path -- GET /api/boot_guard is unauthenticated and may be polled, so a
+ * persistently corrupt record must not become a per-request log line the
+ * way load_count()'s own warning would if reused here unchanged. Enforced by
+ * the s_strict_corrupt_warned static below, not merely asserted in this
+ * comment. */
+static bool s_strict_corrupt_warned = false;
+
 static bool load_count_strict(uint32_t *out_count)
 {
     hal_kv_handle_t h;
@@ -374,8 +378,12 @@ static bool load_count_strict(uint32_t *out_count)
             return false;
         }
         if (!record_is_valid(&rec)) {
-            ESP_LOGW(TAG, "boot_guard_get_persisted_count: record failed its version/CRC check -- "
-                          "reporting unreadable rather than a fabricated 0");
+            if (!s_strict_corrupt_warned) {
+                s_strict_corrupt_warned = true;
+                ESP_LOGW(TAG, "boot_guard_get_persisted_count: record failed its version/CRC check -- "
+                              "reporting unreadable rather than a fabricated 0 (further occurrences "
+                              "this boot are suppressed)");
+            }
             return false;
         }
         *out_count = rec.boot_count;
@@ -386,14 +394,20 @@ static bool load_count_strict(uint32_t *out_count)
     }
 
     /* Not found at the current location -- check the legacy one, same as
-     * load_count(). A missing legacy namespace is also a genuine "never
-     * written" case, not an error. */
+     * load_count(). A missing legacy namespace (HAL_NOT_FOUND on open) is
+     * also a genuine "never written" case, not an error -- but any OTHER
+     * open failure (e.g. a genuine I/O error) must not be folded into the
+     * same "never written" 0, the same class of gap this whole accessor
+     * exists to close for the primary namespace. */
     hal_kv_handle_t lh;
     hal_status_t lopen = hal_kv_open(&lh, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_ONLY,
                                       KILN_NVS_PARTITION);
-    if (lopen != HAL_OK) {
+    if (lopen == HAL_NOT_FOUND) {
         *out_count = 0;
         return true;
+    }
+    if (lopen != HAL_OK) {
+        return false;
     }
     len = sizeof(rec);
     err = hal_kv_get_blob(&lh, NVS_KEY_REC_LEGACY, &rec, &len);
@@ -403,8 +417,12 @@ static bool load_count_strict(uint32_t *out_count)
             return false;
         }
         if (!record_is_valid(&rec)) {
-            ESP_LOGW(TAG, "boot_guard_get_persisted_count: legacy record failed its version/CRC "
-                          "check -- reporting unreadable rather than a fabricated 0");
+            if (!s_strict_corrupt_warned) {
+                s_strict_corrupt_warned = true;
+                ESP_LOGW(TAG, "boot_guard_get_persisted_count: legacy record failed its version/CRC "
+                              "check -- reporting unreadable rather than a fabricated 0 (further "
+                              "occurrences this boot are suppressed)");
+            }
             return false;
         }
         *out_count = rec.boot_count;
