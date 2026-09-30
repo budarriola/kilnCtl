@@ -1970,3 +1970,38 @@ Post-run board state: `profiles_stop()` called (`ok - stopped`),
 (residual ~50C from the heat run, cooling, no relay energized). No firmware
 flashed, no crash report touched, no `estop_verify` called, board lock never
 held past each run's own completion.
+
+## 2026-09-30: AP-password HMAC retirement + static-IP fix, two flashes, AP-teardown verify
+
+Two `flash_firmware()` flashes from clean worktrees at HEAD, verified after
+each: first to `d5d6d64a` (`KilnCtrl-1ba4582e3e35`), then to `50edd830`
+(`KilnCtrl-6c9152cebb9d`). Pico unchanged, `405d3c54`. Neither flash tripped
+or crashed the board; readiness after both was 17 ok / 1 not_done
+(`safety_commissioned`) / 3 other; task liveness OK.
+
+- **AP-password HMAC retirement (`a7b3e436`..`d5d6d64a`).** The nine
+  main-app admin OTA/reset routes now gate on an admin web session only, and
+  are open when web auth is off, same as other admin routes; the recovery
+  image keeps its own separate HMAC. `flash_firmware()`'s post-flash
+  `boot_guard_reset` now signs with the admin session. Bench-verified: an
+  unauthenticated `POST /api/ota/esp/boot_guard_reset` returned 401; the
+  same call under an admin session, run immediately after the second flash
+  above, succeeded.
+- **Static-IP reachability fix (through `50edd830`).** Flashed to the
+  bench; not exercised end to end this sweep (setting a static IP was
+  deliberately not tried).
+- **`d3c4c826` AP-teardown fix, PASS.** Saved a decoy network, forgot the
+  real one, cycled mode ap then home, and reached `state=reconnecting` with
+  the LAN down. Restoring the real credentials rejoined within 26 s at
+  `.156`, `ap_pending_teardown=False` on the first read after rejoin. A
+  `GET /status` from the LAN admin session read `ap_password` empty and
+  `ap_password_known=false`. AP-client case (a SoftAP-associated station
+  seeing `ap_password` in `/status`) SKIPPED -- no free Wi-Fi adapter on the
+  bench PC to join the SoftAP with.
+- **New finding, fix in progress:** `boot_guard_reset`/`GET /api/boot_guard`
+  report the in-RAM `boot_count` for the current boot, not the persisted NVS
+  counter -- `flash_firmware()` printed `after=1` on both flashes above even
+  though the persisted clear itself worked. A `persisted_count` field is in
+  progress, not yet pushed.
+
+No crash report touched, no `estop_verify` called.

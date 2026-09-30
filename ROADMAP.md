@@ -4339,16 +4339,56 @@ Owner instruction, 2026-09-21.
     home restored, saved-network list matched baseline, no reboot). Still
     open: AP-fallback radio timing and the LCD's "[AP kept up]" render were
     not confirmed this run (LCD capture came back unreadable/black).
-  - **Pending bench work (not yet done):** flash the landed firmware above
-    to the bench board; hardware-verify the LCD edit-firing page, the login
-    gates, AP-fallback radio timing and the LCD's "[AP kept up]" render;
-    measure `wifi_prov_owner` stack margin under the new fallback logic
-    (its stack-budget table entry landed 2026-09-29, `0de1a334`, but the
-    live bench measurement is still open); measure `crash_report/clear`
-    latency; verify the `d3c4c826` AP-teardown fix on
-    hardware -- the AP tears down after rejoin even while a LAN admin
-    session stays active, and an AP client sees `ap_password` in `/status`
-    while a LAN client does not.
+  - **Pending bench work (not yet done):** hardware-verify the LCD edit-firing
+    page, the login gates, AP-fallback radio timing and the LCD's "[AP kept
+    up]" render; measure `wifi_prov_owner` stack margin under the new
+    fallback logic (its stack-budget table entry landed 2026-09-29,
+    `0de1a334`, but the live bench measurement is still open); measure
+    `crash_report/clear` latency.
+  - **`d3c4c826` AP-teardown fix, bench-verified PASS, 2026-09-30:** a
+    decoy network was saved, the real one forgotten, mode cycled ap then
+    home, and the board reached `state=reconnecting` with the LAN down.
+    Restoring the real credentials rejoined within 26 s at `.156` with
+    `ap_pending_teardown=False` on the first read after rejoin. A `GET
+    /status` from the LAN admin session showed `ap_password` empty and
+    `ap_password_known=false`, confirming the AP tears down after rejoin
+    even with a LAN admin session active, and that a LAN client never sees
+    the AP password. The companion AP-client case (a station associated to
+    the SoftAP seeing `ap_password` in `/status`) was SKIPPED -- the bench
+    PC has no free Wi-Fi adapter to join the SoftAP with.
+  - **AP-password HMAC retired on the nine main-app admin routes, landed
+    2026-09-30** (`a7b3e436`, review fixes `1822ab02`, build-failure fix
+    `cae52ae9`, pytest fixes `429033f8`/`fd8fc308`, zero-caller allowlist
+    `7cdb9539`): those nine routes (OTA/reset/boot_guard admin actions) now
+    require only an admin web session and are reachable unauthenticated
+    when web auth itself is off, matching every other admin route -- the
+    AP-password HMAC challenge–response these routes used is gone. The
+    recovery image's own HMAC (a separate, unrelated mechanism) is
+    unchanged. `flash_firmware()`'s post-flash `boot_guard_reset` call now
+    signs with the admin session instead of `KILNCTL_AP_PASSWORD`.
+    **Bench-verified 2026-09-30:** an unauthenticated
+    `POST /api/ota/esp/boot_guard_reset` returned 401; the same call under
+    an admin session, issued right after a flash, succeeded.
+  - **Static-IP reachability fix landed, through `50edd830`** (`03654117`
+    fixes the shared `get_local_ipv4_string` helper's handling of an
+    IPv4-mapped IPv6 address; `a829f71d`/`93a8716f` add the AP-subnet
+    guard so the static-IP setter, the HTTP handler (a distinct 400) and
+    the confirm-side check all refuse `192.168.4.0/24`; `dc1a8072`/
+    `50edd830` render the provisioning page's errors via `textContent`
+    with corrected no-response wording). Flashed to the bench; **not yet
+    bench-verified end to end** -- setting a static IP was deliberately
+    not exercised this sweep.
+  - **New finding, fix in progress, not yet pushed:** `boot_guard_reset`
+    and `GET /api/boot_guard` report the in-RAM `boot_count` for the
+    current boot, not the persisted NVS counter, so `flash_firmware()`
+    prints `after=1` even when the persisted clear itself succeeded. A fix
+    adding a separate `persisted_count` field is in progress.
+  - **Bench board flashed twice, 2026-09-30, both from clean worktrees via
+    `flash_firmware()`:** first to `d5d6d64a` (`KilnCtrl-1ba4582e3e35`),
+    then to `50edd830` (`KilnCtrl-6c9152cebb9d`); the Pico was untouched
+    (`405d3c54`). Neither flash tripped or crashed the board. Readiness
+    after: 17 ok / 1 not_done (`safety_commissioned`) / 3 other; task
+    liveness OK.
 
 ---
 
