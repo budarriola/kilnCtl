@@ -4179,7 +4179,32 @@ Owner instruction, 2026-09-21.
   correct PIN was accepted. No `page_before`/`navigate_home` evidence was
   recorded either run. This is a different failure shape from both the prior
   `keypad_raised=false` FAIL and the `59c9306a` INCONCLUSIVE -- root cause not
-  yet found; board was left idle both runs, no trip, no crash.
+  yet found; board was left idle both runs, no trip, no crash. **Harness
+  fixes landed 2026-09-30** (`46d9726d` waits for a stable, digit-bearing
+  keypad read before typing a PIN; `b2cf2f89` adds `enter_pin_verified()` to
+  `ui_test_client.py`, verifying each PIN digit was actually applied before
+  typing the next, and only reports `wrong_pin_refused=True` when the
+  OK+Cancel dialog is present and its dots are cleared) -- pushed to
+  `origin/main`. **Bench reran against `b2cf2f89`** (firmware build "Sep 30
+  2026 01:50:10"), three runs: `20260930T103536Z_lcd` FAILed with "keypad not
+  raised" after the LCD's own idle timeout, suspected a harness race
+  (`_wait_for_overlay_names` has no raised-then-closed detection), fix in
+  progress; `20260930T103634Z_lcd` INCONCLUSIVE with only `stop_gated`
+  missing -- wrong PIN refused, right PIN accepted, all 6 digits verified,
+  but the case never presses the Confirm Start dialog, so the executor stayed
+  idle throughout; `20260930T103752Z_lcd` INCONCLUSIVE on
+  `keypad_closed_before_entry`. Board stayed healthy across all three (armed,
+  no trip, no reboot, no crash). Three gaps remain: (1) `stop_gated` is
+  structurally unreachable today -- `pin_cfg`'s `firing_active_with_lock`
+  condition is never set because LCD-19 never presses Confirm Start, so no
+  firing is ever active to test stopping; needs an owner decision on whether
+  the case should press Confirm Start or on another way to arm that
+  precondition. (2) The raise-detection race in `_wait_for_overlay_names`
+  (harness fix in progress). (3) The keypad's own self-close cause is
+  unknown -- candidates in `ui_lcd_lock.c`'s `tick_timer_cb` (inactivity
+  expiry, policy disabled, an unlocked->locked edge, or
+  `ui_lcd_lock_force_lock`) -- needs a serial log capture on COM14 during a
+  rerun to narrow down.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,

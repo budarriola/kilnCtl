@@ -2053,3 +2053,42 @@ rerun `logs/bench_test/20260930T073503Z_lcd_lcd_rerun_0930_7550fdf6_r2`.
 
 Board left idle after both runs, no trip, no crash. No firmware flashed, no
 crash report touched, no `estop_verify` called.
+
+## 2026-09-30: LCD-19 harness fixes `46d9726d`/`b2cf2f89` pushed; rerun still INCONCLUSIVE/FAIL
+
+Two harness commits landed on `origin/main` today, addressing the digit-tap
+reliability gap noted above: `46d9726d` waits for a stable, digit-bearing
+keypad read before typing a PIN digit, and `b2cf2f89` adds
+`enter_pin_verified()` to `ui_test_client.py`, which verifies each digit was
+actually applied before typing the next and only reports
+`wrong_pin_refused=True` when the OK+Cancel dialog is present with its dots
+cleared.
+
+Three bench runs followed, against firmware build "Sep 30 2026 01:50:10"
+(harness at `b2cf2f89`):
+
+- `20260930T103536Z_lcd` -- FAIL, "keypad not raised" after the LCD's own
+  idle timeout. Suspected a harness race: `_wait_for_overlay_names` has no
+  raised-then-closed detection, so a keypad that raises and closes again
+  between polls reads as never raised. Fix in progress.
+- `20260930T103634Z_lcd` -- INCONCLUSIVE, only `stop_gated` missing. Wrong
+  PIN correctly refused, right PIN accepted, all 6 digits verified applied,
+  but the case never presses the Confirm Start dialog, so the executor
+  stayed idle and `stop_gated` had nothing to exercise.
+- `20260930T103752Z_lcd` -- INCONCLUSIVE, `keypad_closed_before_entry`.
+
+Board healthy throughout all three: armed, no trip, no reboot, no crash.
+
+**Remaining gaps:**
+1. `stop_gated` is structurally unreachable as the case is written today --
+   `pin_cfg`'s `firing_active_with_lock` condition is never set because
+   LCD-19 never presses Confirm Start, so no firing is ever active to test
+   stopping. Needs an owner decision: have the case press Confirm Start, or
+   find another way to arm that precondition.
+2. The raise-detection race in `_wait_for_overlay_names` (harness fix in
+   progress).
+3. The keypad's own self-close cause is still unknown. Candidates in
+   `firmware/KilnFW/App/drivers/ui/ui_lcd_lock.c`'s `tick_timer_cb`:
+   inactivity expiry, the lock policy being disabled, an unlocked->locked
+   edge, or `ui_lcd_lock_force_lock`. Needs a serial log capture on COM14
+   during a rerun to narrow down.
