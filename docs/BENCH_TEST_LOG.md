@@ -2092,3 +2092,81 @@ Board healthy throughout all three: armed, no trip, no reboot, no crash.
    inactivity expiry, the lock policy being disabled, an unlocked->locked
    edge, or `ui_lcd_lock_force_lock`. Needs a serial log capture on COM14
    during a rerun to narrow down.
+
+- `20260925T053033Z_web_post_flash_2e1c1c9e` suite=`web` exit_code=3 PASS=25 FAIL=0 INCONCLUSIVE=0 NOT_RUN=93 SKIP=1 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T053033Z_web_post_flash_2e1c1c9e/`
+- `20260925T053101Z_lcd_post_flash_2e1c1c9e` suite=`lcd` exit_code=1 PASS=5 FAIL=1 INCONCLUSIVE=0 NOT_RUN=15 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T053101Z_lcd_post_flash_2e1c1c9e/`
+- `20260925T053231Z_heat_post_flash_2e1c1c9e` suite=`heat` exit_code=1 PASS=1 FAIL=6 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T053231Z_heat_post_flash_2e1c1c9e/`
+- `20260925T055112Z_full` suite=`full` exit_code=2 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=2 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T055112Z_full/`
+- `20260925T055150Z_full` suite=`full` exit_code=1 PASS=1 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260925T055150Z_full/`
+- `20260925T055159Z_full` suite=`full` exit_code=3 PASS=1 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T055159Z_full/`
+- `20260925T055234Z_lcd` suite=`lcd` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T055234Z_lcd/`
+- `20260925T145527Z_heat` suite=`heat` exit_code=1 PASS=1 FAIL=7 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T145527Z_heat/`
+- `20260925T145922Z_full` suite=`full` exit_code=2 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=2 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T145922Z_full/`
+- `20260925T150032Z_full` suite=`full` exit_code=1 PASS=1 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260925T150032Z_full/`
+- `20260925T150041Z_full` suite=`full` exit_code=1 PASS=1 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T150041Z_full/`
+- `20260925T150107Z_lcd` suite=`lcd` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 24 2026 22:26:56 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T150107Z_lcd/`
+- `20260925T170357Z_full` suite=`full` exit_code=3 PASS=1 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T170357Z_full/`
+- `20260925T170424Z_full` suite=`full` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T170424Z_full/`
+- `20260925T170757Z_heat` suite=`heat` exit_code=2 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=8 SKIP=0 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T170757Z_heat/`
+- `20260925T171042Z_heat` suite=`heat` exit_code=1 PASS=5 FAIL=3 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T171042Z_heat/`
+- `20260925T182858Z_lcd_lcd01_19_rerun` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=1 SKIP=0 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T182858Z_lcd_lcd01_19_rerun/`
+- `20260925T191704Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=2 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T191704Z_lcd/`
+- `20260925T191709Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=2 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 09:58:11 pico_fw=Pico build: bf3cd244 built 2026-09-25 05:25:20Z log=`logs/bench_test/20260925T191709Z_lcd/`
+- `20260925T225016Z_heat_bench_20260925_update` suite=`heat` exit_code=1 PASS=1 FAIL=2 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 15:45:59 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260925T225016Z_heat_bench_20260925_update/`
+- `20260925T231908Z_lcd_bench_20260925_update` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=2 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 15:45:59 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260925T231908Z_lcd_bench_20260925_update/`
+- `20260925T232539Z_heat_hp02_rootcause_rerun` suite=`heat` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 25 2026 15:45:59 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260925T232539Z_heat_hp02_rootcause_rerun/`
+- `20260928T082832Z_heat` suite=`heat` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 28 2026 01:25:01 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260928T082832Z_heat/`
+- `20260928T083029Z_heat` suite=`heat` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 28 2026 01:25:01 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260928T083029Z_heat/`
+- `20260928T084446Z_heat` suite=`heat` exit_code=0 PASS=1 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 28 2026 01:25:01 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260928T084446Z_heat/`
+- `20260928T084825Z_heat` suite=`heat` exit_code=0 PASS=1 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 28 2026 01:25:01 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260928T084825Z_heat/`
+- `20260928T201810Z_heat` suite=`heat` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=1 esp_fw=Sep 28 2026 04:20:50 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260928T201810Z_heat/`
+- `20260928T201814Z_heat_hp07_rerun` suite=`heat` exit_code=0 PASS=1 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 28 2026 04:20:50 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260928T201814Z_heat_hp07_rerun/`
+- `20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a` suite=`lcd` exit_code=1 PASS=4 FAIL=1 INCONCLUSIVE=2 NOT_RUN=14 SKIP=0 esp_fw=Sep 29 2026 08:56:52 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a/`
+- `20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72` suite=`heat` exit_code=0 PASS=8 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 29 2026 08:56:52 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72/`
+- `20260930T073410Z_lcd_lcd_rerun_0930_7550fdf6` suite=`lcd` exit_code=1 PASS=2 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 00:17:28 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T073410Z_lcd_lcd_rerun_0930_7550fdf6/`
+- `20260930T073503Z_lcd_lcd_rerun_0930_7550fdf6_r2` suite=`lcd` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 00:17:28 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T073503Z_lcd_lcd_rerun_0930_7550fdf6_r2/`
+- `20260930T082643Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 00:17:28 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T082643Z_lcd/`
+- `20260930T082657Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 00:17:28 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T082657Z_lcd/`
+- `20260930T090130Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T090130Z_lcd/`
+- `20260930T090222Z_lcd` suite=`lcd` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T090222Z_lcd/`
+- `20260930T103536Z_lcd` suite=`lcd` exit_code=1 PASS=0 FAIL=1 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T103536Z_lcd/`
+- `20260930T103634Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T103634Z_lcd/`
+- `20260930T103752Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T103752Z_lcd/`
+- `20260930T185925Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=1 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T185925Z_lcd/`
+- `20260930T185935Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T185935Z_lcd/`
+- `20260930T190017Z_lcd` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Sep 30 2026 01:50:10 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20260930T190017Z_lcd/`
+
+## 2026-09-30: LCD-19 harness commit `4754e91f` (tail-based FAIL judgment); keypad self-close reproduced on hardware
+
+Harness commit `4754e91f` pushed to `origin/main`, addressing the
+raise-detection race flagged in the entry above: the keypad-raise poll now
+uses a tail-based FAIL judgment -- FAIL is only reported when the last two
+reads after the last empty/truncated read are identical, real, non-truncated,
+and not the keypad. A keypad that was raised and then closed again now reads
+INCONCLUSIVE with `keypad_raised_then_closed` recorded instead of a false
+FAIL. The keypad signature now requires the digit keys to be present, and a
+per-read `reads_log` is recorded for later inspection.
+
+Two bench reruns followed on `4754e91f`, firmware build "Sep 30 2026
+08:49:24" (`9b77e2b2`), `allow_heat=False`, LCD-19 alone:
+
+- `20260930T185935Z_lcd` -- INCONCLUSIVE, only `stop_gated` unexercised.
+  Keypad raised, wrong PIN refused, right PIN started. No `ui_lcd_lock` lines
+  in the serial log.
+- `20260930T190017Z_lcd` -- INCONCLUSIVE, `keypad_raised_then_closed=true`:
+  the self-close is reproduced on hardware. The keypad raised about 1 s after
+  the Start tap, then the home screen returned; the case took 2.28 s overall.
+  The serial log (`get_device_log_json`, info and debug) shows only the Start
+  touch, then 1.18 s of silence, with no `ui_lcd_lock` line at all. The
+  home-only reads were NOT truncated (10 names), confirming a tail-based FAIL
+  is reachable on real hardware, not just in the harness's own test data.
+
+Board healthy before and after both runs: armed, not tripped, no reboot
+(uptime continuous across both), no crash.
+
+**Still open:**
+1. The keypad self-close root cause. Leading hypothesis: the `lcd_enabled`
+   policy write sets `ui_lcd_lock_force_lock`'s pending flag, and the next
+   1 s lock tick's unlocked->locked edge closes the keypad silently.
+2. `stop_gated` via an opt-in firing (owner decision 2026-09-30);
+   implementation in review.

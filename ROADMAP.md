@@ -4204,7 +4204,22 @@ Owner instruction, 2026-09-21.
   unknown -- candidates in `ui_lcd_lock.c`'s `tick_timer_cb` (inactivity
   expiry, policy disabled, an unlocked->locked edge, or
   `ui_lcd_lock_force_lock`) -- needs a serial log capture on COM14 during a
-  rerun to narrow down.
+  rerun to narrow down. **Harness fix landed 2026-09-30** (`4754e91f`): the
+  keypad-raise poll now uses a tail-based FAIL judgment (FAIL only when the
+  last 2 reads after the last empty/truncated read are identical, real,
+  non-truncated and not the keypad), fixing gap (2) above; a keypad that
+  raised then closed now reads INCONCLUSIVE with `keypad_raised_then_closed`
+  recorded instead of a false FAIL. Reruns on `4754e91f`, firmware `9b77e2b2`
+  (built 2026-09-30 08:49:24Z), `allow_heat=False`: `20260930T185935Z_lcd`
+  INCONCLUSIVE with only `stop_gated` unexercised (keypad raised, wrong PIN
+  refused, right PIN started); `20260930T190017Z_lcd` INCONCLUSIVE with
+  `keypad_raised_then_closed=true`, reproducing gap (3) on hardware -- the
+  keypad raised ~1 s after the Start tap then the home screen returned, with
+  no `ui_lcd_lock` line in the serial log during that window. Board healthy
+  both runs. Still open: the self-close root cause (leading hypothesis: the
+  `lcd_enabled` policy write's `ui_lcd_lock_force_lock` pending flag, closed
+  by the next 1 s lock tick's unlocked->locked edge) and `stop_gated` via an
+  opt-in firing (owner decision 2026-09-30), implementation in review.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,
