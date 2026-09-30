@@ -16,6 +16,7 @@
 #include "ota_http.h" /* interlocks -- same idiom as factory_reset.c's
                         * reset_post_handler(); the challenge/response auth
                         * this used to also require was retired 2026-09-29 */
+#include "ota_http_internal.h" /* ota_http_get_client_ip() declaration -- logging only */
 #include "kilnlink/kilnlink_reboot_result.h" /* kilnlink_reboot_result_reason_t --
                                                 * decoding the Pico's REFUSED reason so
                                                 * the operator-facing sentence names the

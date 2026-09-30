@@ -23,6 +23,7 @@
 #include "http_form.h"
 #include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
                         * require was retired 2026-09-29, see reset_post_handler() */
+#include "ota_http_internal.h" /* ota_http_get_client_ip() declaration -- logging only */
 #include "profile_executor.h" /* firing_stats_cache_invalidate_all() -- see the erase loop in
                                 * execute_scope_job() below */
 #include "profiles_builtin.h"

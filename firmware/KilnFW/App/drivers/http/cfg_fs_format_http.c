@@ -9,6 +9,7 @@
 #include "cfg_fs_mount.h"
 #include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
                         * carry under OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29 */
+#include "ota_http_internal.h" /* ota_http_get_client_ip() declaration -- logging only */
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
 #include "system_mode_gate.h" /* SYS_ACTION_CFGFS_FORMAT -- owner decision Q3, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
