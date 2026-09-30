@@ -50,6 +50,23 @@ static bool s_was_locked = true;
 // lcd_lock_force_lock(&s_lock) and the LVGL close_prompt()/keypad calls run.
 static atomic_bool s_force_lock_requested = false;
 
+// LVGL-task-only (set/read/cleared only from ui_lcd_lock_run_gated() and
+// tick_timer_cb(), both on the LVGL task -- no atomic needed). True when the
+// keypad currently open, if any, was raised by ui_lcd_lock_run_gated() while
+// a ui_lcd_lock_force_lock() request was still pending (i.e. it already IS
+// the PIN gate for the incoming locked state, not leftover UI from the
+// session that request is revoking). LCD-19 (2026-09-30 bench run,
+// 20260930T190017Z_lcd): a policy force-lock landed, the harness tapped
+// Start within the same ~1s tick window, has_role() correctly denied and
+// raised the keypad -- and the very next tick, which applied the pending
+// lock, then immediately force-closed that same keypad via the unconditional
+// "locked_now && !s_was_locked" edge below, because that edge cannot tell a
+// fresh PIN gate from a stale session's leftover UI. One-shot: cleared at the
+// end of every tick_timer_cb() call so it only exempts the single tick that
+// applies the force-lock it was raised for -- a later, unrelated edge
+// (inactivity timeout, or the NEXT force-lock request) still closes it.
+static bool s_keypad_is_pending_lock_gate = false;
+
 static ui_lcd_lock_policy_t default_policy(void)
 {
     ui_lcd_lock_policy_t p = { .enabled = false, .timeout_s = LCD_LOCK_TIMEOUT_NEVER };
@@ -158,6 +175,12 @@ static void tick_timer_cb(lv_timer_t *t)
             lcd_lock_force_lock(&s_lock);
             s_was_locked = false;
             ESP_LOGI(TAG, "LCD session force-locked (policy transition)");
+        } else {
+            // Requirement: log a consumed flag even when it was a no-op (the
+            // session was already locked -- e.g. the earlier inactivity-
+            // timeout edge, or a second policy write landing before the
+            // first's flag was consumed).
+            ESP_LOGI(TAG, "LCD force-lock request consumed (session already locked, no-op)");
         }
     }
 
@@ -180,11 +203,19 @@ static void tick_timer_cb(lv_timer_t *t)
         // the policy-write call site.
         if (!lcd_lock_is_locked(&s_lock)) {
             lcd_lock_force_lock(&s_lock);
+            bool had_prompt = s_prompt_mbox && !lv_obj_has_flag(s_prompt_mbox, LV_OBJ_FLAG_HIDDEN);
             close_prompt();
-            if (ui_lcd_keypad_is_open()) {
+            bool had_keypad = ui_lcd_keypad_is_open();
+            if (had_keypad) {
                 ui_lcd_keypad_force_close();
             }
+            if (had_prompt || had_keypad) {
+                ESP_LOGI(TAG, "LCD lock: closed%s%s (policy disabled)",
+                         had_prompt ? " stay-unlocked prompt" : "",
+                         had_keypad ? " keypad" : "");
+            }
         }
+        s_keypad_is_pending_lock_gate = false;
         s_was_locked = false; // auth off: the panel is effectively unlocked
         return; // section 11: auth off, nothing further to tick
     }
@@ -203,15 +234,18 @@ static void tick_timer_cb(lv_timer_t *t)
             show_prompt((remaining_ms + 999u) / 1000u);
             break;
         }
-        case LCD_LOCK_TICK_EXPIRED:
+        case LCD_LOCK_TICK_EXPIRED: {
             close_prompt();
             /* A stranded keypad behind a lock that just expired would sit on
              * screen authorising nothing -- close it rather than leave it. */
-            if (ui_lcd_keypad_is_open()) {
+            bool had_keypad = ui_lcd_keypad_is_open();
+            if (had_keypad) {
                 ui_lcd_keypad_force_close();
             }
-            ESP_LOGI(TAG, "LCD session locked (inactivity timeout)");
+            ESP_LOGI(TAG, "LCD session locked (inactivity timeout)%s",
+                     had_keypad ? " -- closed open keypad" : "");
             break; // the relock itself runs on the edge below
+        }
         case LCD_LOCK_TICK_OK:
             close_prompt();
             break;
@@ -228,15 +262,33 @@ static void tick_timer_cb(lv_timer_t *t)
      * the LVGL timer, never from the httpd task that may have force-locked. */
     bool locked_now = lcd_lock_is_locked(&s_lock);
     if (locked_now && !s_was_locked) {
+        bool had_prompt = s_prompt_mbox && !lv_obj_has_flag(s_prompt_mbox, LV_OBJ_FLAG_HIDDEN);
         close_prompt();
-        if (ui_lcd_keypad_is_open()) {
-            ui_lcd_keypad_force_close();
+        if (had_prompt) {
+            ESP_LOGI(TAG, "LCD relock edge: closed stay-unlocked prompt");
         }
+
+        bool keypad_open = ui_lcd_keypad_is_open();
+        if (lcd_lock_relock_should_close_keypad(keypad_open, s_keypad_is_pending_lock_gate)) {
+            ui_lcd_keypad_force_close();
+            ESP_LOGI(TAG, "LCD relock edge: closed open keypad");
+        } else if (keypad_open) {
+            ESP_LOGI(TAG, "LCD relock edge: keypad kept open (raised as PIN gate for this lock)");
+        }
+
+        bool had_confirm = ui_confirm_is_open();
         ui_confirm_close_open();
+        if (had_confirm) {
+            ESP_LOGI(TAG, "LCD relock edge: closed open confirm dialog");
+        }
+
         if (s_relock_cb) {
             s_relock_cb();
         }
     }
+    // One-shot: this exemption only ever protects the single tick that
+    // applies the force-lock request the exempted keypad was raised for.
+    s_keypad_is_pending_lock_gate = false;
     s_was_locked = locked_now;
 }
 
@@ -334,6 +386,21 @@ void ui_lcd_lock_run_gated(const char *prompt, lcd_pin_role_t min_role, ui_lcd_l
         }
         return;
     }
+
+    // has_role() just returned false, for one of exactly two reasons: the
+    // panel is locked (or a lock is pending), or a session is genuinely
+    // active but its role is too low for this action. Only the first is
+    // "this keypad IS the incoming/current lock's own PIN gate" -- the
+    // second is a role-upgrade prompt against a still-active session, which
+    // must still be torn down if that session is later revoked. Use the
+    // same pure disjunction has_role() itself checks (currently locked OR a
+    // force-lock is pending) rather than requiring "not yet locked" -- see
+    // lcd_lock_keypad_raise_is_lock_gate()'s header comment for why an
+    // earlier version of this stamp, which required `!lcd_lock_is_locked()`,
+    // missed the case where ui_lcd_lock.c's own disabled-policy branch had
+    // already force-locked s_lock directly (LCD-19, 2026-09-30).
+    s_keypad_is_pending_lock_gate =
+        lcd_lock_keypad_raise_is_lock_gate(lcd_lock_is_locked(&s_lock), atomic_load(&s_force_lock_requested));
 
     s_gate_ctx.action = action;
     s_gate_ctx.user_data = user_data;

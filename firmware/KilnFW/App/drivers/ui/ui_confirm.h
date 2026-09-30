@@ -19,6 +19,8 @@
 #ifndef UI_CONFIRM_H
 #define UI_CONFIRM_H
 
+#include <stdbool.h>
+
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -60,6 +62,12 @@ void ui_confirm_show(const ui_confirm_params_t *params);
  * session that has since expired must not stay tappable by someone who never
  * entered the PIN (owner decision 2026-09-28). LVGL task only. */
 void ui_confirm_close_open(void);
+
+/* True iff a dialog shown by ui_confirm_show() is currently open. LVGL task
+ * only. Used only for logging what a relock edge actually tore down
+ * (LCD-19, 2026-09-30) -- ui_confirm_close_open() itself is already a safe
+ * no-op when nothing is open. */
+bool ui_confirm_is_open(void);
 
 #ifdef __cplusplus
 }

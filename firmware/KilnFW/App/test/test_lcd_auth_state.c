@@ -258,6 +258,103 @@ static void test_lock_has_role_ordering(void)
     TEST_CHECK(LCD_PIN_ROLE_USER < LCD_PIN_ROLE_ADMIN, "USER orders below ADMIN");
 }
 
+// LCD-19 (2026-09-30 bench run, 20260930T190017Z_lcd): a policy force-lock
+// landed, the harness tapped Start within the same ~1s tick window,
+// ui_lcd_lock_has_role() correctly denied and raised the PIN keypad -- and
+// the very next tick, which applied the pending lock, immediately
+// force-closed that SAME keypad via the (then-)unconditional relock edge,
+// because the edge could not tell a fresh PIN gate from a stale session's
+// leftover UI. lcd_lock_relock_should_close_keypad() is the pure decision
+// this fix pulled out of ui_lcd_lock.c's tick_timer_cb() (LVGL-dependent,
+// not itself host-testable -- see this file's top comment); these three
+// cases are exactly requirements (a)/(b) from the fix's task.
+static void test_relock_edge_keypad_decision(void)
+{
+    TEST_SECTION("lcd_lock_relock_should_close_keypad -- LCD-19 relock-edge fix");
+
+    // (a) A keypad raised AFTER the force-lock request (i.e. it already IS
+    // the PIN gate for the incoming locked state) must survive the edge that
+    // applies that same request.
+    TEST_CHECK(!lcd_lock_relock_should_close_keypad(/*keypad_open=*/true, /*pending_lock_gate=*/true),
+               "keypad raised as this lock's own PIN gate is NOT closed by the relock edge");
+
+    // (b) A keypad/dialog opened while unlocked, under the session now being
+    // revoked (inactivity timeout, or a policy force-lock unrelated to why
+    // the keypad is open), is still closed -- the 2026-09-28 "relock closes
+    // open privileged UI" owner decision is not weakened by this fix.
+    TEST_CHECK(lcd_lock_relock_should_close_keypad(/*keypad_open=*/true, /*pending_lock_gate=*/false),
+               "an ordinary open keypad (not raised as this lock's own gate) is still closed by the relock edge");
+
+    // No keypad open -- nothing to close either way, regardless of the flag.
+    TEST_CHECK(!lcd_lock_relock_should_close_keypad(/*keypad_open=*/false, /*pending_lock_gate=*/true),
+               "no keypad open -- nothing to close (pending_lock_gate true)");
+    TEST_CHECK(!lcd_lock_relock_should_close_keypad(/*keypad_open=*/false, /*pending_lock_gate=*/false),
+               "no keypad open -- nothing to close (pending_lock_gate false)");
+}
+
+// LCD-19 follow-up (2026-09-30, Opus review of commit a10a35d1): the first
+// fix stamped the exemption with `!lcd_lock_is_locked(&s_lock) && pending`,
+// requiring the lock to be NOT YET locked. That misses the actual bench
+// scenario -- lcd_enabled flipping false->true (cases_lcd.py) -- because
+// ui_lcd_lock.c's disabled-policy branch force-locks s_lock directly on
+// *every* tick while disabled, so by the time the policy write lands and the
+// Start tap follows, s_lock is already locked, not merely pending. That
+// stamp was always false for this transition, so the keypad it correctly
+// raised as the enable-transition's own PIN gate was left unprotected.
+//
+// lcd_lock_keypad_raise_is_lock_gate() is the corrected, pure stamp
+// decision: exempt whenever the panel is ALREADY locked OR a lock is merely
+// pending -- either way this keypad is the incoming/current lock's own PIN
+// gate, not leftover UI from a still-active session. A `!s_was_locked`-only
+// stamp was considered and rejected (see lcd_auth_state.h's header comment):
+// it would also read true for an ordinary role-upgrade keypad opened while a
+// session is genuinely unlocked and idle, wrongly exempting it from a LATER,
+// unrelated revoke.
+static void test_keypad_raise_is_lock_gate_decision(void)
+{
+    TEST_SECTION("lcd_lock_keypad_raise_is_lock_gate -- LCD-19 stamp-time fix");
+
+    // The actual LCD-19 bench case: auth just enabled (false->true) while the
+    // disabled-policy branch had already force-locked s_lock directly, so by
+    // the time run_gated() stamps this, the lock already reads locked --
+    // whether or not the force_lock() pending flag has also been consumed
+    // yet is irrelevant, both must be a gate.
+    TEST_CHECK(lcd_lock_keypad_raise_is_lock_gate(/*currently_locked=*/true, /*force_lock_pending=*/true),
+               "already-locked (disabled->enabled transition) + pending flag still set -- exempt");
+    TEST_CHECK(lcd_lock_keypad_raise_is_lock_gate(/*currently_locked=*/true, /*force_lock_pending=*/false),
+               "already-locked (disabled->enabled transition), pending flag already consumed -- still exempt");
+
+    // The original force_lock() case: not yet locked, but a pending flag is
+    // already posted -- the keypad about to open is the incoming lock's gate.
+    TEST_CHECK(lcd_lock_keypad_raise_is_lock_gate(/*currently_locked=*/false, /*force_lock_pending=*/true),
+               "unlocked but a force-lock is pending -- exempt");
+
+    // Genuinely unlocked, no lock pending: any keypad here is a role-upgrade
+    // prompt against a still-active session, not a lock's own PIN gate --
+    // must NOT be exempt, or a later real revoke would leave it open.
+    TEST_CHECK(!lcd_lock_keypad_raise_is_lock_gate(/*currently_locked=*/false, /*force_lock_pending=*/false),
+               "genuinely unlocked, nothing pending -- NOT exempt (role-upgrade prompt, not a lock gate)");
+}
+
+// Negative-test note (2026-09-30): reverting
+// lcd_lock_keypad_raise_is_lock_gate() to the earlier, incorrect
+// `!currently_locked && force_lock_pending` form fails the first of the four
+// checks above (the actual bench case) -- confirmed by hand before this
+// comment was written, then restored and the host-test build forced clean
+// before the final run.
+static void test_relock_edge_full_lcd19_sequence(void)
+{
+    TEST_SECTION("LCD-19 end-to-end: stamp then consume, both fixed cases");
+
+    // Simulates ui_lcd_lock_run_gated()'s stamp call at the moment of the
+    // Start tap, immediately followed by tick_timer_cb()'s relock-edge
+    // consumption of that stamp -- the two pure functions this fix wired
+    // together, exercised as a pair the way the real glue calls them.
+    bool stamp = lcd_lock_keypad_raise_is_lock_gate(/*currently_locked=*/true, /*force_lock_pending=*/true);
+    TEST_CHECK(!lcd_lock_relock_should_close_keypad(/*keypad_open=*/true, stamp),
+               "LCD-19 bench sequence: keypad survives the relock edge end-to-end");
+}
+
 void run_test_lcd_auth_state(void)
 {
     test_pin_entry();
@@ -265,4 +362,7 @@ void run_test_lcd_auth_state(void)
     test_keypad_submit_outcomes();
     test_lock_state_boundaries();
     test_lock_has_role_ordering();
+    test_relock_edge_keypad_decision();
+    test_keypad_raise_is_lock_gate_decision();
+    test_relock_edge_full_lcd19_sequence();
 }

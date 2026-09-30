@@ -198,6 +198,58 @@ typedef enum {
 // no new timer" per the plan). Never blocks, never allocates, no I/O.
 lcd_lock_tick_result_t lcd_lock_tick(lcd_lock_state_t *ls, uint32_t now_ms);
 
+// --- Relock edge: which open UI must be torn down (LCD-19, 2026-09-30) ----
+//
+// Owner decision 2026-09-28 ("re-lock closes open privileged UI") made every
+// unlocked->locked edge force-close an open keypad. That is correct for a
+// keypad/dialog left over from a session the edge is revoking, but wrong for
+// a keypad raised strictly AFTER the very lock transition driving this edge
+// was already under way -- that keypad already IS the PIN gate for the
+// incoming locked state, not leftover privileged UI.
+//
+// LCD-19 bench run 20260930T190017Z_lcd: lcd_enabled flips false->true
+// (cases_lcd.py). While disabled, ui_lcd_lock.c's tick_timer_cb() force-locks
+// s_lock on *every* tick directly (not via the pending flag) -- so by the
+// time the policy write lands and the Start tap follows ~1s later, s_lock is
+// already locked, not merely about to become locked. The first fix here
+// (2026-09-30, superseded the same day) stamped the exemption only when
+// `!lcd_lock_is_locked(&s_lock) && force_pending` -- requiring the lock to
+// still be UNLOCKED with a pending flag -- which is exactly backwards for
+// this transition: since s_lock was already locked, that condition was
+// always false, so the keypad this raise correctly opened as the enable-
+// transition's PIN gate was left unprotected and the relock edge closed it.
+// A `!s_was_locked`-only stamp (considered and rejected) fails a different
+// way: s_was_locked reads false whenever a session is genuinely unlocked and
+// idle (not just mid-transition -- see tick_timer_cb()'s normal LOCK_TICK_OK
+// path, which keeps s_was_locked in sync with locked_now every tick), so it
+// would also exempt a keypad opened for an ordinary role-upgrade prompt
+// (has_role() denies on role, not lock) while a session is genuinely active
+// -- if a real revoke then landed before that keypad was resolved, this
+// stale, no-longer-authorized keypad would wrongly survive the very edge
+// meant to close it.
+//
+// The correct signal is simpler: has_role() itself denies for exactly two
+// reasons -- "locked or pending" (this keypad IS the incoming lock's PIN
+// gate) vs "role too low while genuinely unlocked" (this keypad belongs to
+// a still-active session and must NOT survive a later revoke). This
+// function is that same disjunction, made pure and host-testable so a
+// future edit to either side of it fails a test rather than only a bench
+// run: exempt iff `currently_locked || force_lock_pending` at the moment the
+// keypad was raised, which is already true if s_lock was force-locked
+// directly (disabled-branch case) OR only pending via the atomic flag (the
+// original force_lock() case) -- both are "this keypad IS the lock's own PIN
+// gate", never "leftover from an unlocked session".
+bool lcd_lock_keypad_raise_is_lock_gate(bool currently_locked, bool force_lock_pending);
+
+// The relock-edge consumer: `keypad_open` false always returns false
+// (nothing to close). Otherwise: exempt (false) iff
+// `keypad_is_pending_lock_gate` is true (as decided by
+// lcd_lock_keypad_raise_is_lock_gate() above at raise time); a later,
+// unrelated edge (inactivity timeout, or the NEXT force-lock request) is not
+// exempt -- the caller stamps `keypad_is_pending_lock_gate` false again once
+// this one tick has consumed it (one-shot).
+bool lcd_lock_relock_should_close_keypad(bool keypad_open, bool keypad_is_pending_lock_gate);
+
 #ifdef __cplusplus
 }
 #endif

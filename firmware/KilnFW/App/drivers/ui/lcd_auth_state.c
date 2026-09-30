@@ -195,3 +195,16 @@ lcd_lock_tick_result_t lcd_lock_tick(lcd_lock_state_t *ls, uint32_t now_ms)
     ls->prompt_open = false;
     return LCD_LOCK_TICK_OK;
 }
+
+bool lcd_lock_keypad_raise_is_lock_gate(bool currently_locked, bool force_lock_pending)
+{
+    return currently_locked || force_lock_pending;
+}
+
+bool lcd_lock_relock_should_close_keypad(bool keypad_open, bool keypad_is_pending_lock_gate)
+{
+    if (!keypad_open) {
+        return false;
+    }
+    return !keypad_is_pending_lock_gate;
+}

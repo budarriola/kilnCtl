@@ -51,6 +51,11 @@ void ui_confirm_close_open(void)
     lv_msgbox_close(mbox);
 }
 
+bool ui_confirm_is_open(void)
+{
+    return s_open_mbox != NULL;
+}
+
 static void confirm_yes_cb(lv_event_t *e)
 {
     lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
