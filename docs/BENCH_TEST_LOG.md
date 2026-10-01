@@ -2440,3 +2440,35 @@ suite's own preflight, which still has no live link from this session):
 "could not be located" gap the `20261001T011515Z_stack` entry above left
 open -- the figure is now captured, via a direct call rather than a
 run-directory artifact.
+
+## 2026-10-01: stack suite on `eb83c1ac` after the SK judge/baseline changes
+
+Run `20261001T050213Z_stack` (dir `logs/bench_test/20261001T050213Z_stack`),
+board `eb83c1ac` (tree clean, 8 commits behind HEAD `e1ed37fa`), idle, no trip
+latched, uptime 2577 s at readiness check. Verdicts: SK-01 PASS, SK-02
+INCONCLUSIVE (no `web_ui_open`/`mid_firing` baseline for `eb83c1ac`, have
+`idle` only), SK-03 PASS, SK-04 PASS. Exit code 3, as expected for an
+INCONCLUSIVE.
+
+SK judge changes since `433a2a10`: `a522b22a`/`14971dce` make SK filter stored
+baselines to the board's own `fw_commit` (an "unknown" commit never matches)
+and check the SK-02 512 B floor first. `ee7e30d1`/`e1ed37fa` add a per-task
+SK-01 tolerance: 384 B for `thermo_uart_bridge`/`io_uart_bridge`/
+`info_uart_bridge`, 64 B for the rest, and it only ever widens.
+`803db311`/`2b0a57e5` add the owner warmup capture rule: board up at least 10
+minutes, stack suite run once that boot, plus warmup commands
+(`get_board_state`, `thermo_read`, `thermo_read_faults`, `io_read`,
+`get_fw_version`, `get_pin_config`, several `get_stack_margin`). The new idle
+baseline is `docs/stack_margin_baseline/stack_margin_idle_eb83c1ac_20261001T045510Z.json`.
+
+Hardware-confirmed first-command bridge step: `thermo_read` alone took
+`thermo_uart_bridge` from 2796 to 1660 B free; `io_read` alone took
+`io_uart_bridge` from 2544 to 1552 B; `thermo_read_faults` changed nothing.
+The thermo post-command floor was 1660 B on one boot and 1856 B on another.
+`info_uart_bridge` dropped 176 B with no explanation yet.
+
+S6b trip: earlier this session a double ESP reset latched an S6b (reason 7)
+trip. The first reset left the board unreachable over UART and HTTP for
+minutes. Likely a stale host serial session, not established. The trip was
+cleared once with owner authorization and stayed clear (readiness
+`safety_trip` ok on this run).
