@@ -3765,6 +3765,292 @@ def _case_lcd19(ctx: dict) -> CaseResult:
     return result
 
 
+# ---------------------------------------------------------------------------
+# LCD-22 -- Edit firing page (ui_page_edit_firing.c / ui_edit_firing_apply.c):
+# live-edit a future segment of a RUNNING low-temperature firing from the
+# panel, then prove the live working copy and executor took it. Heat case:
+# runs only with allow_heat; the profile is started and stopped over the
+# UART/HTTP APIs, never via the LCD Stop/Confirm path, and no PIN is ever
+# typed (a PIN-locked panel is INCONCLUSIVE).
+# ---------------------------------------------------------------------------
+
+#: The Edit firing page's stepper and topbar glyph buttons carry NO tap name
+#: (their labels are LV_SYMBOL glyphs, and click_by_name() answers ambiguous
+#: or not_found for them), so they are tapped by panel coordinate. Measured
+#: on the bench 2026-10-01 against build_step_row() (ui_page_edit_firing.c
+#: lines 367-410, ROW_HEIGHT_PX 46; rows built at lines 445/447/449 in
+#: Target, Ramp, Dwell order) and the topbar's Back/Home/Prev/Next slots
+#: (ui_topbar.c). If the page layout moves these must be re-measured.
+_LCD22_NEXT_XY = (453, 20)
+_LCD22_TARGET_PLUS_XY = (443, 86)
+_LCD22_DWELL_PLUS_XY = (443, 186)
+#: Fallback only when click_by_name("Apply") finds no named target.
+_LCD22_APPLY_XY = (239, 255)
+#: Step sizes from ui_page_edit_firing.c: target +5 C, dwell +5 min.
+_LCD22_TARGET_STEP_C = 5.0
+_LCD22_DWELL_STEP_MIN = 5.0
+#: Segment 0 is the running one (long dwell, so the firing stays on it for
+#: the whole case); segment 1 is the future segment the case edits.
+_LCD22_SEG0_OFFSET_C = 10.0
+_LCD22_SEG1_OFFSET_C = 20.0
+_LCD22_SEG0_DWELL_MIN = 10
+_LCD22_SEG1_DWELL_MIN = 5
+_LCD22_RAMP_C_PER_HR = 600.0
+#: Highest target the case may ever command, after the +5 C edit.
+_LCD22_MAX_TARGET_C = 60.0
+_LCD22_ZONE_MASK = 1
+
+
+def _lcd22_tap(ctx: dict, xy: "tuple[int, int]") -> bool:
+    touch = getattr(_srv(ctx), "_touch", None)
+    if touch is None:
+        return False
+    try:
+        press = touch.inject(xy[0], xy[1], True)
+        release = touch.inject(xy[0], xy[1], False)
+    except Exception:  # noqa: BLE001
+        return False
+    ok = bool(getattr(press, "ok", False)) and bool(getattr(release, "ok", False))
+    ctx.get("_sleep", time.sleep)(0.3)
+    return ok
+
+
+def _lcd22_exec_dict(srv) -> "Optional[dict]":
+    try:
+        st = srv._profiles.get_exec_status()
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        "state_name": getattr(st, "state_name", None),
+        "profile_id": getattr(st, "profile_id", None),
+        "segment_count": getattr(st, "segment_count", None),
+        "segment_index": getattr(st, "segment_index", None),
+    }
+
+
+def _lcd22_read_live(client, host: str) -> "tuple[Optional[dict], Optional[dict]]":
+    """(status, content) -- either may be None when the read raised (a 409 on
+    content just means no working copy exists)."""
+    try:
+        status = client.get_live_status(host)
+    except Exception:  # noqa: BLE001
+        status = None
+    try:
+        content = client.get_live_content(host)
+    except Exception:  # noqa: BLE001
+        content = None
+    return status, content
+
+
+def _lcd22_cleanup(ctx: dict, client, host: str, heat) -> "tuple[bool, dict]":
+    """Stop the profile via the API, discard the live working copy, then verify
+    (bounded) that the executor is idle/done/faulted, no working copy remains
+    and every relay reads de-energized. Returns (verified, details)."""
+    srv = _srv(ctx)
+    now = ctx.get("_now", time.monotonic)
+    sleep = ctx.get("_sleep", time.sleep)
+    details: Dict[str, Any] = {}
+    try:
+        heat._cleanup_bench_profile(ctx)
+    except Exception as exc:  # noqa: BLE001
+        details["cleanup_error"] = type(exc).__name__
+    try:
+        client.decide_live_discard(host)
+        details["discard"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        # 409 = nothing pending (no working copy was ever made): fine, the
+        # verification below is what decides.
+        details["discard"] = f"{type(exc).__name__}:{getattr(exc, 'status', None)}"
+    verified = False
+    last_state = None
+    last_energized: Optional[bool] = None
+    working_id: Optional[int] = None
+    deadline = now() + 15.0
+    while True:
+        ex = _lcd22_exec_dict(srv)
+        last_state = ex["state_name"] if ex else None
+        try:
+            working_id = int(client.get_live_status(host).get("working_id", -1))
+        except Exception:  # noqa: BLE001
+            working_id = None
+        if last_state in ("idle", "done", "faulted") and working_id is not None and working_id < 0:
+            last_energized = heat._read_energized(ctx)
+            if last_energized is False:
+                verified = True
+                break
+        if now() >= deadline:
+            break
+        sleep(0.5)
+    details.update({"final_exec_state": last_state, "final_working_id": working_id,
+                    "final_energized": last_energized, "verified": verified})
+    return verified, details
+
+
+def _case_lcd22(ctx: dict) -> CaseResult:
+    if ctx.get("allow_heat") is not True:
+        return CaseResult(Verdict.NOT_RUN, reason="allow_heat=False: LCD-22 starts a real low-temperature firing")
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx (needed for profile_live and relay reads)")
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
+    client = ctx.get("_profile_live_client")
+    if client is None:
+        from .. import profile_live_http_client as client
+    srv = _srv(ctx)
+
+    # Pre-checks: nothing is started or tapped unless all of these hold.
+    before = _lcd22_exec_dict(srv)
+    if before is None or before["state_name"] not in ("idle", "done", "faulted"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            f"executor is not idle before LCD-22 (state={before['state_name'] if before else 'unreadable'}); "
+            "no action taken"), observed={"exec": before})
+    ok, why = _heat._capability_preflight_ok(ctx)
+    if not ok:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
+    temps = _heat._zone_temps(ctx)
+    if not temps:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no valid thermo reading to use as an ambient reference; no action taken")
+    ambient = min(temps.values())
+    seg1_target = ambient + _LCD22_SEG1_OFFSET_C
+    if seg1_target + _LCD22_TARGET_STEP_C > _LCD22_MAX_TARGET_C:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            f"ambient {ambient:.1f} C leaves no room under the {_LCD22_MAX_TARGET_C:.0f} C case ceiling; no action taken"))
+    seg0_target = ambient + _LCD22_SEG0_OFFSET_C
+    ceiling_ok, ceiling_reason = _heat._check_zone_ceilings(ctx, _LCD22_ZONE_MASK, seg1_target + _LCD22_TARGET_STEP_C)
+    if not ceiling_ok:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{ceiling_reason}; no action taken")
+
+    from .. import devices
+    segments = [
+        devices.ProfileSegment(target_c=seg0_target, ramp_c_per_hr=_LCD22_RAMP_C_PER_HR, dwell_min=_LCD22_SEG0_DWELL_MIN),
+        devices.ProfileSegment(target_c=seg1_target, ramp_c_per_hr=_LCD22_RAMP_C_PER_HR, dwell_min=_LCD22_SEG1_DWELL_MIN),
+    ]
+    orig = {"seg0_target_c": seg0_target, "seg0_dwell_min": float(_LCD22_SEG0_DWELL_MIN),
+            "seg1_target_c": seg1_target, "seg1_dwell_min": float(_LCD22_SEG1_DWELL_MIN)}
+    expected = dict(orig)
+    expected["seg1_target_c"] = seg1_target + _LCD22_TARGET_STEP_C
+    expected["seg1_dwell_min"] = float(_LCD22_SEG1_DWELL_MIN) + _LCD22_DWELL_STEP_MIN
+
+    result: Optional[CaseResult] = None
+    started = False
+    observed: Dict[str, Any] = {"ambient_c": ambient, "orig": orig, "expected": expected}
+    ui = srv._ui_test
+    now = ctx.get("_now", time.monotonic)
+    sleep = ctx.get("_sleep", time.sleep)
+    try:
+        try:
+            save = srv._profiles.save(_heat.BENCH_PROFILE_SLOT_ID, _heat.BENCH_PROFILE_NAME, _LCD22_ZONE_MASK, segments)
+        except Exception as exc:  # noqa: BLE001
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.save raised {type(exc).__name__}: {exc}")
+            return result
+        started = True  # the slot may exist from here on: the finally tears it down
+        if not save.ok:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.save refused: {save.error}")
+            return result
+        try:
+            start = srv._profiles.start(_heat.BENCH_PROFILE_SLOT_ID)
+        except Exception as exc:  # noqa: BLE001
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.start raised {type(exc).__name__}: {exc}")
+            return result
+        if not start.ok:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.start refused: {start.error}")
+            return result
+
+        deadline = now() + 10.0
+        exec_before = _lcd22_exec_dict(srv)
+        while not exec_before or exec_before["state_name"] != "running":
+            if now() >= deadline:
+                break
+            sleep(0.5)
+            exec_before = _lcd22_exec_dict(srv)
+        observed["exec_before"] = exec_before
+        if not exec_before or exec_before["state_name"] != "running":
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="firing never reached running; nothing was edited", observed=observed)
+            return result
+
+        _wake_and_home(ctx)
+        click_fail, _page, _w, _s, _n, _b = _click_then_page(ui, "Edit", "edit_firing")
+        if click_fail is not None:
+            names = _lcd19_overlay_names(ui)
+            if _is_keypad_names(names):
+                observed["overlay_dismiss"] = _dismiss_lcd19_overlay(ctx, ui)
+                result = CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+                    "Edit raised the PIN keypad (panel is locked); LCD-22 never types a PIN"))
+                return result
+            click_fail.observed = dict(click_fail.observed or {})
+            click_fail.observed.update(observed)
+            result = click_fail
+            return result
+        tap = _list_tap_targets_resolving_busy(ui)[0]
+        _remember_page_targets(ctx, "edit_firing", tap)
+
+        # The page opens on the running segment; Next reaches the future one.
+        taps = {
+            "next": _lcd22_tap(ctx, _LCD22_NEXT_XY),
+            "target_plus": _lcd22_tap(ctx, _LCD22_TARGET_PLUS_XY),
+            "dwell_plus": _lcd22_tap(ctx, _LCD22_DWELL_PLUS_XY),
+        }
+        observed["taps"] = taps
+        if not all(taps.values()):
+            result = CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                                reason="touch_inject failed for a stepper tap; Apply was not pressed")
+            return result
+        apply = ui.click_by_name("Apply")
+        observed["apply_click"] = apply.get("result")
+        if apply.get("result") == "not_found":
+            observed["apply_by_coordinate"] = _lcd22_tap(ctx, _LCD22_APPLY_XY)
+        elif apply.get("result") not in ("ok", "verdict_unknown"):
+            result = CaseResult(Verdict.FAIL, observed=observed,
+                                reason=f"click_by_name('Apply') returned {apply.get('result')!r}")
+            return result
+
+        status = content = None
+        deadline = now() + 10.0
+        while True:
+            status, content = _lcd22_read_live(client, host)
+            segs = (content or {}).get("segments") or []
+            try:
+                landed = len(segs) >= 2 and abs(float(segs[1].get("target_c", -1)) - expected["seg1_target_c"]) <= J.LCD_EDIT_FIRING_TOL
+            except (TypeError, ValueError):
+                landed = False
+            if landed or now() >= deadline:
+                break
+            sleep(0.5)
+        exec_after = _lcd22_exec_dict(srv)
+        result = J.judge_lcd_edit_firing(orig, expected, status, content, exec_before, exec_after, tap)
+        result.observed = dict(result.observed or {})
+        result.observed.update(observed)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result = CaseResult(Verdict.FAIL, reason=f"LCD-22 aborted by {type(exc).__name__}: {exc}", observed=dict(observed))
+        return result
+    finally:
+        if started:
+            try:
+                verified, details = _lcd22_cleanup(ctx, client, host, _heat)
+            except Exception as exc:  # noqa: BLE001
+                verified, details = False, {"cleanup_error": type(exc).__name__}
+            try:
+                _navigate_home(ui)
+            except Exception:  # noqa: BLE001
+                pass
+            if result is not None:
+                result.observed = dict(result.observed or {})
+                result.observed["cleanup"] = details
+                if not verified:
+                    # Unconditional: a cleanup that cannot be confirmed is a
+                    # FAIL whatever the LCD checks found, and never a PASS.
+                    prior = result.reason if result.verdict != Verdict.PASS else ""
+                    msg = (
+                        "LCD-22 cleanup could not be verified "
+                        f"(exec_state={details.get('final_exec_state')}, working_id={details.get('final_working_id')}, "
+                        f"safety_relay_energized={details.get('final_energized')}) -- "
+                        "use the hardware E-stop if the fixture is still heating"
+                    )
+                    result.reason = f"{prior}; also: {msg}" if prior else msg
+                    result.verdict = Verdict.FAIL
+
+
 _CASE_FUNCS = {
     "LCD-01": _case_lcd01,
     "LCD-02": _case_lcd02,
@@ -3776,6 +4062,7 @@ _CASE_FUNCS = {
     "LCD-16": _case_lcd16,
     "LCD-19": _case_lcd19,
     "LCD-21": _case_lcd21,
+    "LCD-22": _case_lcd22,
 }
 
 for _cid, _fn in _CASE_FUNCS.items():

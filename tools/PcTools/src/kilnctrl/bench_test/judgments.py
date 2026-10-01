@@ -987,6 +987,70 @@ def judge_lcd_no_scroll_budget(pages_targets: "dict[str, dict]") -> CaseResult:
     return CaseResult(Verdict.PASS, observed=observed)
 
 
+#: LCD-22 tolerance when comparing a segment value read back over HTTP
+#: (JSON floats) against the value the case computed.
+LCD_EDIT_FIRING_TOL = 0.01
+
+
+def judge_lcd_edit_firing(orig: dict, expected: dict, status: "dict | None",
+                          content: "dict | None", exec_before: "dict | None",
+                          exec_after: "dict | None", edit_targets: "dict | None") -> CaseResult:
+    """LCD-22: after tapping a future segment's target "+" and dwell "+" on the
+    Edit firing page and Apply, the live working copy and the executor must
+    reflect both edits and nothing else. Pure data in, CaseResult out.
+
+    `orig`/`expected` carry seg0_target_c, seg0_dwell_min, seg1_target_c,
+    seg1_dwell_min (what the profile started with / what it must read now).
+    `status`/`content` are profile_live get_live_status()/get_live_content()
+    dicts, `exec_*` are {state_name, profile_id, segment_count}, and
+    `edit_targets` is the edit_firing page's list_tap_targets() dict. A None
+    status/content (status read failed) is INCONCLUSIVE; a read that succeeded and
+    shows the change absent is FAIL ("change not picked up")."""
+    if status is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="could not read the live profile status after Apply",
+                          observed={"status": status, "content": content})
+    # status readable but no content (409: no working copy) is the "Apply did
+    # nothing" shape -- a FAIL below, not an unreadable board.
+    content = content or {}
+    problems = []
+    observed: dict = {"status": status, "content": content, "exec_before": exec_before,
+                      "exec_after": exec_after, "expected": expected}
+    if not status.get("active") or int(status.get("working_id", -1)) < 0:
+        problems.append("change not picked up: no live working copy exists after Apply")
+    if status.get("last_refusal"):
+        problems.append(f"executor refused the edit (last_refusal={status.get('last_refusal')!r})")
+    segs = content.get("segments") or []
+    if len(segs) < 2:
+        problems.append(f"working copy has {len(segs)} segment(s), expected at least 2")
+    else:
+        def _eq(seg, key, want):
+            try:
+                return abs(float(seg.get(key)) - float(want)) <= LCD_EDIT_FIRING_TOL
+            except (TypeError, ValueError):
+                return False
+        if not _eq(segs[1], "target_c", expected["seg1_target_c"]):
+            problems.append(
+                f"change not picked up: segment 2 target is {segs[1].get('target_c')!r}, "
+                f"expected {expected['seg1_target_c']}")
+        if not _eq(segs[1], "dwell_min", expected["seg1_dwell_min"]):
+            problems.append(
+                f"change not picked up: segment 2 dwell is {segs[1].get('dwell_min')!r}, "
+                f"expected {expected['seg1_dwell_min']}")
+        if not _eq(segs[0], "target_c", orig["seg0_target_c"]) or not _eq(segs[0], "dwell_min", orig["seg0_dwell_min"]):
+            problems.append("segment 1 (the running one) changed although only segment 2 was edited")
+    if not exec_after or exec_after.get("state_name") != "running":
+        problems.append(f"executor is not running after Apply ({(exec_after or {}).get('state_name')!r})")
+    elif exec_before and exec_after.get("profile_id") != exec_before.get("profile_id"):
+        problems.append("executor profile_id changed across Apply")
+    scroll = judge_lcd_no_scroll_budget({"edit_firing": edit_targets}) if edit_targets else None
+    if scroll is not None and scroll.verdict == Verdict.FAIL:
+        problems.append(scroll.reason)
+    observed["no_scroll"] = scroll.observed if scroll is not None else None
+    if problems:
+        return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
 # ---------------------------------------------------------------------------
 # LCD-02/03/04/09/14/16/19 (Wave 2, plan doc §3.8/§8). Same split as the
 # Wave 1c block above: these take already-fetched plain data and return a

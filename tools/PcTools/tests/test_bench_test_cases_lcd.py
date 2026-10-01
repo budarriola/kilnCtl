@@ -1245,7 +1245,10 @@ class ClickThenPageTest(unittest.TestCase):
             m = re.fullmatch(r'"([^"]+)"', arg)
             self.assertIsNotNone(m, f"non-literal retried click target {arg!r} in {helper}()")
             literals.add(m.group(1))
-        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics"})
+        # "Edit" (LCD-22) is reviewed: it only opens the Edit firing page (or,
+        # on a PIN-locked panel, the keypad, which LCD-22 cancels and never
+        # types into); a re-tap of it starts, stops and confirms nothing.
+        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics", "Edit"})
         unsafe = ("start", "stop", "confirm", "pin", "toggle", "cancel", "ack", "reset", "clear", "ok")
         for title in literals:
             words = re.findall(r"[a-z]+", title.lower())

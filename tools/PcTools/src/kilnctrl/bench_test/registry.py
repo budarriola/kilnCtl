@@ -212,7 +212,7 @@ _WEB_IDS = [
     "WEB-LOG-01", "WEB-LOG-02", "WEB-LOG-03",
     "WEB-X-01", "WEB-X-02", "WEB-X-03",
 ]
-_LCD_IDS = [f"LCD-{i:02d}" for i in range(1, 22)]
+_LCD_IDS = [f"LCD-{i:02d}" for i in range(1, 23)]
 _SP = [
     ("SP-01", "Commissioning read-back"), ("SP-02", "Status and diag consistency"),
     ("SP-03", "Link stats over a firing"), ("SP-04", "Trip / clear"),
@@ -281,7 +281,7 @@ _LCD_DEPENDS_ON = {
     "LCD-02": "HP-01", "LCD-03": "HP-04", "LCD-04": "OT-B01", "LCD-19": "WEB-SEC-04",
 }
 for cid in _LCD_IDS:
-    register(_c(cid, "LCD", cid, depends_on=_LCD_DEPENDS_ON.get(cid)))
+    register(_c(cid, "LCD", cid, depends_on=_LCD_DEPENDS_ON.get(cid), heat=(cid == "LCD-22")))
 _SP_DEPENDS_ON = {"SP-03": "HP-02", "SP-06": "HP-01", "SP-04": "OT-B01"}
 for cid, desc in _SP:
     register(_c(
