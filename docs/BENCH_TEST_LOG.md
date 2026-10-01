@@ -2472,3 +2472,20 @@ trip. The first reset left the board unreachable over UART and HTTP for
 minutes. Likely a stale host serial session, not established. The trip was
 cleared once with owner authorization and stayed clear (readiness
 `safety_trip` ok on this run).
+
+## 2026-10-01: eb83c1ac web_ui_open and mid_firing stack baselines, stack rerun
+
+Two new stack-margin baselines on `eb83c1ac` now sit beside the idle one
+(`045510Z`):
+
+- `web_ui_open` (`050508Z`): 6 rounds of `GET /`, `/api/status` and
+  `/api/profile_exec`, plus `board_page_structure`.
+- `mid_firing` (`050631Z`): profile #0 `M18C_TEST` captured about 51 s into the
+  ramp at target 38.9 C, peak 27.8 C. Stopped cleanly, no trip. Internal-heap
+  `min_free` dipped 18175 -> 14075 B and DMA `min_free` 10387 -> 6287 B during
+  that run (largest block 10240 B). Not investigated.
+
+Rerun of suite `stack` against those baselines (board on `eb83c1ac`, idle,
+relays off, no trip, port: HTTP 192.168.1.156): run
+`20261001T050807Z_stack` (`logs/bench_test/20261001T050807Z_stack/`), exit 0,
+SK-01, SK-02, SK-03, SK-04 all PASS.
