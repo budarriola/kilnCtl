@@ -314,27 +314,51 @@ def debug_reset(
     recovery_mode, and returns a loud WARNING if nothing answers or the board
     is in recovery mode. It only reports -- it never resumes or resets.
     Every call appends one JSON line to logs/debug_reset/history.jsonl
-    (gitignored, not rotated)."""
-    ok, output = debug_probe.reset(peer, mode)
+    (gitignored, not rotated).
+
+    Cost: an ESP run-mode reset now blocks while it verifies -- roughly 5-10 s
+    on a healthy board, up to the full `verify_window_s` on a silent one.
+    Pass verify=False to skip."""
+    record: dict = {"peer": peer, "mode": mode, "openocd_ok": None, "probe": None}
+
+    def _append() -> None:
+        hist_err = reset_probe.append_history(debug_probe._repo_root(), record)
+        if hist_err:
+            _srv._session_log.warning("debug_reset: history append failed: %s", hist_err)
+
+    try:
+        ok, output = debug_probe.reset(peer, mode)
+    except Exception as exc:  # noqa: BLE001 - recorded, then re-raised unchanged
+        record["reset_raised"] = f"{type(exc).__name__}: {exc}"
+        _append()
+        raise
+    record["openocd_ok"] = ok
     _log_openocd_result(f"debug_reset(peer={peer}, mode={mode})", ok, output)
-    record: dict = {"peer": peer, "mode": mode, "openocd_ok": ok, "probe": None}
     probe_res = None
+    probe_error = None
     esp_run = peer == debug_probe.PEER_ESP and mode == "run"
     if ok and esp_run:
         if verify:
-            probe_res = _probe_esp_after_reset(verify_window_s)
-            record["probe"] = probe_res.to_json()
+            try:
+                probe_res = _probe_esp_after_reset(verify_window_s)
+                record["probe"] = probe_res.to_json()
+            except Exception as exc:  # noqa: BLE001 - the reset result must survive
+                probe_error = f"{type(exc).__name__}: {exc}"
+                record["probe_error"] = probe_error
         else:
             record["probe_skipped"] = "verify=False"
     if not ok:
         record["openocd_decisive_line"] = _decisive_openocd_line(output)
-    hist_err = reset_probe.append_history(debug_probe._repo_root(), record)
-    if hist_err:
-        _srv._session_log.warning("debug_reset: history append failed: %s", hist_err)
+    _append()
     if ok:
         msg = f"reset {peer} ({mode}) OK"
         if probe_res is not None:
             msg += "\n" + reset_probe.format_report(peer, mode, probe_res)
+        elif probe_error is not None:
+            msg += (
+                f"\nWARNING: the post-reset reachability probe itself raised ({probe_error}); "
+                "the board's state after the reset is UNVERIFIED."
+            )
         return msg
     return _openocd_error_message(f"reset failed for {peer}", output)
 
@@ -342,8 +366,8 @@ def debug_reset(
 def _probe_esp_after_reset(window_s: float) -> "reset_probe.ProbeResult":
     from .mcp_server_flash import _resolve_verify_hosts  # local: avoids a circular import
 
-    def uart_fw():
-        return _srv._info.get_fw_version(timeout=reset_probe.UART_ATTEMPT_TIMEOUT_S)
+    def uart_fw(timeout: float = reset_probe.UART_ATTEMPT_TIMEOUT_S):
+        return _srv._info.get_fw_version(timeout=timeout)
 
     return reset_probe.probe_after_reset(
         hosts_fn=lambda: _resolve_verify_hosts(None),

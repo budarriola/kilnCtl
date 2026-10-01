@@ -17,6 +17,8 @@ import unittest.mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import debug_probe, reset_probe  # noqa: E402
+from kilnctrl.http_auth import HttpAuthError  # noqa: E402
+from kilnctrl.ota_http_client import OtaHttpError  # noqa: E402
 from kilnctrl import mcp_server_debug as md  # noqa: E402
 
 
@@ -31,10 +33,10 @@ class FakeClock:
         self.t += s
 
 
-def _run(get_boot_guard, get_uart=None, window_s=60.0):
-    clk = FakeClock()
+def _run(get_boot_guard, get_uart=None, window_s=60.0, clk=None, hosts_fn=None):
+    clk = clk or FakeClock()
     return reset_probe.probe_after_reset(
-        hosts_fn=lambda: ["10.0.0.5"],
+        hosts_fn=hosts_fn or (lambda: ["10.0.0.5"]),
         get_boot_guard=get_boot_guard,
         get_uart_fw=get_uart,
         window_s=window_s,
@@ -47,7 +49,7 @@ def _run(get_boot_guard, get_uart=None, window_s=60.0):
 class ProbeTest(unittest.TestCase):
     def test_answers_immediately(self):
         res = _run(lambda host, timeout: {"boot_count": 1, "persisted_count": 0, "recovery_mode": False},
-                   lambda: "fw1")
+                   lambda timeout: "fw1")
         self.assertEqual(res.http_answered_s, 0.0)
         self.assertEqual(res.uart_answered_s, 0.0)
         self.assertFalse(res.recovery_mode)
@@ -73,7 +75,7 @@ class ProbeTest(unittest.TestCase):
         def bg(host, timeout):
             raise OSError("down")
 
-        res = _run(bg, lambda: (_ for _ in ()).throw(RuntimeError("no reply")), window_s=10.0)
+        res = _run(bg, lambda timeout: (_ for _ in ()).throw(RuntimeError("no reply")), window_s=10.0)
         self.assertFalse(res.any_answered)
         text = reset_probe.format_report("esp", "run", res)
         self.assertTrue(text.startswith("WARNING"))
@@ -88,6 +90,123 @@ class ProbeTest(unittest.TestCase):
         text = reset_probe.format_report("esp", "run", res)
         self.assertTrue(text.startswith("WARNING"))
         self.assertIn("recovery_mode=true", text)
+
+
+    def test_401_counts_as_answered_not_silent(self):
+        def bg(host, timeout):
+            raise OtaHttpError("/api/boot_guard refused: HTTP 401", 401, "unauthorized")
+
+        res = _run(bg, window_s=30.0)
+        self.assertEqual(res.http_answered_s, 0.0)
+        self.assertIsNone(res.boot_guard)
+        text = reset_probe.format_report("esp", "run", res)
+        self.assertNotIn("WARNING", text)
+        self.assertIn("recovery state unknown", text)
+        self.assertIn("HTTP 401", text)
+
+    def test_auth_error_counts_as_answered(self):
+        def bg(host, timeout):
+            raise HttpAuthError("no credential in the environment")
+
+        res = _run(bg, window_s=30.0)
+        self.assertIsNotNone(res.http_answered_s)
+        self.assertTrue(res.any_answered)
+        self.assertNotIn("WARNING", reset_probe.format_report("esp", "run", res))
+
+    def test_transport_error_with_no_status_is_not_answered(self):
+        def bg(host, timeout):
+            raise OtaHttpError("/api/boot_guard unreachable: timed out")
+
+        res = _run(bg, window_s=4.0)
+        self.assertIsNone(res.http_answered_s)
+
+    def test_uart_first_keeps_polling_http_and_reads_recovery_mode(self):
+        calls = {"n": 0}
+
+        def bg(host, timeout):
+            calls["n"] += 1
+            if calls["n"] < 6:
+                raise OSError("down")
+            return {"boot_count": 4, "recovery_mode": True}
+
+        res = _run(bg, lambda timeout: "fw1", window_s=60.0)
+        self.assertEqual(res.uart_answered_s, 0.0)
+        self.assertEqual(res.http_answered_s, 10.0)
+        self.assertTrue(res.recovery_mode)
+        self.assertTrue(res.recovery_state_known)
+        self.assertIn("recovery_mode=true", reset_probe.format_report("esp", "run", res))
+
+    def test_uart_only_reports_recovery_unknown_and_real_elapsed(self):
+        def bg(host, timeout):
+            raise OSError("down")
+
+        res = _run(bg, lambda timeout: "fw1", window_s=10.0)
+        self.assertIsNone(res.http_answered_s)
+        self.assertEqual(res.elapsed_s, 10.0)
+        text = reset_probe.format_report("esp", "run", res)
+        self.assertNotIn("answer over HTTP or UART", text)
+        self.assertIn("HTTP: no answer after 10s (recovery state unknown)", text)
+        self.assertIn("recovery_mode was never read", text)
+
+    def test_deadline_not_overshot_and_hosts_resolved_once(self):
+        clk = FakeClock()
+        seen = []
+        resolves = {"n": 0}
+
+        def hosts():
+            resolves["n"] += 1
+            return ["a", "b", "c"]
+
+        def bg(host, timeout):
+            seen.append(timeout)
+            clk.t += timeout  # an unreachable host burns its whole timeout
+            raise OSError("timed out")
+
+        def uart(timeout):
+            seen.append(timeout)
+            clk.t += timeout
+            raise RuntimeError("no reply")
+
+        res = _run(bg, uart, window_s=25.0, clk=clk, hosts_fn=hosts)
+        self.assertLessEqual(clk.t, 25.0 + 1e-9)
+        self.assertEqual(resolves["n"], 1)
+        self.assertTrue(all(t <= reset_probe.HTTP_ATTEMPT_TIMEOUT_S for t in seen))
+        self.assertFalse(res.any_answered)
+        self.assertEqual(res.elapsed_s, 25.0)
+
+    def test_report_uses_elapsed_not_window(self):
+        res = reset_probe.ProbeResult(window_s=60.0, elapsed_s=10.0, uart_answered_s=1.0, uart_fw="fw1")
+        text = reset_probe.format_report("esp", "run", res)
+        self.assertIn("HTTP: no answer after 10s", text)
+        self.assertIn("UART link answered", text)
+        res2 = reset_probe.ProbeResult(window_s=60.0, elapsed_s=10.0)
+        self.assertIn("UART link: no answer after 10s", reset_probe.format_report("esp", "run", res2))
+
+    def test_uart_timeout_clamped_to_remaining_budget(self):
+        clk = FakeClock()
+        seen = []
+
+        def bg(host, timeout):
+            raise OSError("down")
+
+        def uart(timeout):
+            seen.append(timeout)
+            clk.t += timeout
+            raise RuntimeError("no reply")
+
+        _run(bg, uart, window_s=1.0, clk=clk)
+        self.assertEqual(seen[0], 1.0)
+        self.assertLessEqual(clk.t, 1.0 + 1e-9)
+
+    def test_errors_deduped_capped_and_reported(self):
+        def bg(host, timeout):
+            raise OSError("boom")
+
+        res = _run(bg, window_s=30.0, hosts_fn=lambda: [f"h{i}" for i in range(9)])
+        self.assertLessEqual(len(res.errors), reset_probe.MAX_ERRORS_REPORTED)
+        self.assertEqual(len(res.errors), len(set(res.errors)))
+        self.assertEqual(res.to_json()["errors"], res.errors)
+        self.assertIn("probe errors: h0: boom", reset_probe.format_report("esp", "run", res))
 
 
 class DebugResetWiringTest(unittest.TestCase):
@@ -154,6 +273,40 @@ class DebugResetWiringTest(unittest.TestCase):
         rec = self._history()[0]
         self.assertFalse(rec["openocd_ok"])
         self.assertEqual(rec["openocd_decisive_line"], "Error: boom")
+
+
+    def test_probe_raising_keeps_reset_result_and_logs(self):
+        with unittest.mock.patch.object(md, "_probe_esp_after_reset", side_effect=RuntimeError("kaboom")):
+            out = md.debug_reset(peer="esp", mode="run")
+        self.assertTrue(out.startswith("reset esp (run) OK"))
+        self.assertIn("UNVERIFIED", out)
+        self.assertIn("kaboom", self._history()[0]["probe_error"])
+
+    def test_reset_raising_is_logged_and_surfaced(self):
+        # The _tool() guard turns a raised exception into an "error: ..." string.
+        with unittest.mock.patch.object(debug_probe, "reset", side_effect=ValueError("bad mode")):
+            out = md.debug_reset(peer="esp", mode="bogus")
+        self.assertTrue(out.startswith("error"), out)
+        rec = self._history()[0]
+        self.assertIn("bad mode", rec["reset_raised"])
+        self.assertIsNone(rec["openocd_ok"])
+
+    def test_probe_wiring_passes_right_callables(self):
+        import kilnctrl.mcp_server_flash as mf
+        fake_info = unittest.mock.Mock()
+        fake_info.get_fw_version.return_value = "fw"
+        with unittest.mock.patch.object(reset_probe, "probe_after_reset", return_value="R") as pr,                 unittest.mock.patch.object(mf, "_resolve_verify_hosts", return_value=["h1"]) as rh,                 unittest.mock.patch.object(md._srv, "_info", fake_info, create=True):
+            out = md._probe_esp_after_reset(12.0)
+            self.assertEqual(out, "R")
+            kw = pr.call_args.kwargs
+            self.assertEqual(kw["window_s"], 12.0)
+            self.assertIs(kw["get_boot_guard"], md.ota_http.get_boot_guard_status)
+            self.assertEqual(kw["hosts_fn"](), ["h1"])
+            rh.assert_called_once_with(None)
+            # The callables resolve _srv._info lazily, so they must be
+            # invoked while the fake is still patched in (never a real link).
+            self.assertEqual(kw["get_uart_fw"](timeout=1.5), "fw")
+            fake_info.get_fw_version.assert_called_once_with(timeout=1.5)
 
 
 if __name__ == "__main__":

@@ -78,7 +78,8 @@ class DebugResetLoggingIntegrationTest(unittest.TestCase):
 
     def test_failed_reset_logs_full_output_and_surfaces_decisive_line(self):
         fake_output = "Info: examine\nError: Could not find MEM-AP to control the core\ntail line"
-        with unittest.mock.patch.object(debug_probe, "reset", return_value=(False, fake_output)),                 unittest.mock.patch.object(md.reset_probe, "append_history", return_value=None), \
+        with unittest.mock.patch.object(debug_probe, "reset", return_value=(False, fake_output)), \
+                unittest.mock.patch.object(md.reset_probe, "append_history", return_value=None), \
                 unittest.mock.patch.object(md._srv, "_session_log") as log_mock:
             result = md.debug_reset(peer="pico", mode="run")
         # The tool's own return leads with the decisive line.
@@ -91,7 +92,8 @@ class DebugResetLoggingIntegrationTest(unittest.TestCase):
 
     def test_successful_reset_does_not_dump_body_to_log(self):
         fake_output = "Info: examine\n" + ("Info: routine step\n" * 100)
-        with unittest.mock.patch.object(debug_probe, "reset", return_value=(True, fake_output)),                 unittest.mock.patch.object(md.reset_probe, "append_history", return_value=None), \
+        with unittest.mock.patch.object(debug_probe, "reset", return_value=(True, fake_output)), \
+                unittest.mock.patch.object(md.reset_probe, "append_history", return_value=None), \
                 unittest.mock.patch.object(md._srv, "_session_log") as log_mock:
             result = md.debug_reset(peer="pico", mode="run")
         self.assertIn("OK", result)
