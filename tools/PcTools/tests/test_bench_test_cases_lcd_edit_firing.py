@@ -57,7 +57,9 @@ class FakeBoard:
 
     def __init__(self, exec_state="idle", apply_works=True, apply_refused=False, locked=False,
                  stop_works=True, relays_energized=False, discard_works=True,
-                 apply_changes_target_only=False, extra_edit_target=None):
+                 apply_changes_target_only=False, extra_edit_target=None,
+                 preexisting_working=False, foreign_after_stop=False, zone_relay_on=False,
+                 last_refusal=None):
         self.exec_state = exec_state
         self.apply_works = apply_works
         self.apply_refused = apply_refused
@@ -76,6 +78,13 @@ class FakeBoard:
         self.pending_dwell_steps = 0
         self.working = None  # list of segment dicts once Apply took
         self.calls = []
+        self.working_id = 9
+        self.foreign_after_stop = foreign_after_stop
+        self.zone_relay_on = zone_relay_on
+        self.last_refusal = last_refusal
+        if preexisting_working:
+            self.working_id = 5
+            self.working = [{"seg_kind": 0, "target_c": 99.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}]
 
     # -- executor
     def exec_status(self):
@@ -101,6 +110,8 @@ class FakeProfiles:
         self.b.calls.append("stop")
         if self.b.stop_works:
             self.b.exec_state = "idle"
+        if self.b.foreign_after_stop:
+            self.b.working_id = 11  # someone else's edit replaced ours
 
     def delete(self, slot):
         self.b.calls.append("delete")
@@ -188,8 +199,8 @@ class FakeLiveClient:
 
     def get_live_status(self, host):
         b = self.b
-        return {"active": b.working is not None, "working_id": 9 if b.working is not None else -1,
-                "last_refusal": "window" if (b.apply_refused and b.working is not None) else None}
+        return {"active": b.working is not None, "working_id": b.working_id if b.working is not None else -1,
+                "last_refusal": ("window" if (b.apply_refused and b.working is not None) else b.last_refusal)}
 
     def get_live_content(self, host):
         if self.b.working is None:
@@ -197,6 +208,7 @@ class FakeLiveClient:
         return {"id": 9, "segment_count": 2, "segments": self.b.working}
 
     def decide_live_discard(self, host):
+        self.b.calls.append("discard")
         if self.b.working is None:
             raise FakeLiveError(409)
         if self.b.discard_works:
@@ -229,7 +241,8 @@ def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4", edit_heat=True
         "_profile_live_client": FakeLiveClient(board),
         "capability_preflight_run": lambda *_a, **_k: SimpleNamespace(ok=True),
         "_get_zones_config": lambda h: {"zones": []},
-        "_http_get_json": lambda h, p: (404, {}),
+        "_http_get_json": lambda h, p: (200, {"zones": [{"zone": 0, "relay_on": board.zone_relay_on}]})
+        if p == "/api/profile_exec" else (404, {}),
     }
     with mock.patch("kilnctrl.dashboard_http_client.get_status", side_effect=lambda h: dict(
             safety_relay_energized=board.relays_energized)):
@@ -269,6 +282,57 @@ class EditHeatGateTest(unittest.TestCase):
         result, srv = _run(board, allow_heat=False, edit_heat=True)
         self.assertEqual(result.verdict, Verdict.NOT_RUN)
         self.assertIn("allow_heat", result.reason)
+
+
+class PendingEditTest(unittest.TestCase):
+    def test_preexisting_live_edit_is_inconclusive_and_untouched(self):
+        board = FakeBoard(preexisting_working=True)
+        result, srv = _run(board)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("pending", result.reason)
+        self.assertEqual(board.calls, [])
+        self.assertIsNotNone(board.working)
+        self.assertFalse(board.started)
+
+    def test_unreadable_live_status_is_inconclusive_with_no_action(self):
+        board = FakeBoard()
+        class Boom(FakeLiveClient):
+            def get_live_status(self, host):
+                raise FakeLiveError(500)
+        clock = _Clock()
+        srv = SimpleNamespace(_ui_test=FakeUi(board), _profiles=FakeProfiles(board), _touch=FakeTouch(board),
+                              _thermo=SimpleNamespace(read=lambda *a, **k: [
+                                  SimpleNamespace(channel=0, temperature_c=AMBIENT, valid=True)]))
+        ctx = {"srv": srv, "host": "h", "allow_heat": True, "lcd22_allow_heat": True,
+               "_now": clock.now, "_sleep": clock.sleep, "_profile_live_client": Boom(board),
+               "capability_preflight_run": lambda *_a, **_k: SimpleNamespace(ok=True)}
+        result = C._case_lcd22(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(board.calls, [])
+
+
+class CleanupOwnershipTest(unittest.TestCase):
+    def test_discards_its_own_working_copy(self):
+        board = FakeBoard()
+        result, _ = _run(board)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(board.calls.count("discard"), 1)
+        self.assertEqual(result.observed["cleanup"]["own_working_id"], 9)
+
+    def test_never_discards_a_working_copy_that_is_not_its_own(self):
+        board = FakeBoard(foreign_after_stop=True)
+        result, _ = _run(board)
+        self.assertNotIn("discard", board.calls)
+        self.assertIsNotNone(board.working)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("cleanup could not be verified", result.reason)
+        self.assertIn("not_ours", result.reason)
+
+    def test_zone_relay_still_on_forces_fail(self):
+        board = FakeBoard(zone_relay_on=True)
+        result, _ = _run(board)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("cleanup could not be verified", result.reason)
 
 
 class Lcd22Test(unittest.TestCase):
@@ -367,6 +431,20 @@ class Lcd22Test(unittest.TestCase):
         self.assertNotIn("click:OK", board.calls)
         self.assertEqual(board.exec_state, "idle")
 
+    def test_locked_panel_edit_is_clicked_exactly_once(self):
+        # The keypad stays raised (backdrop dismiss does not clear the fake):
+        # no second Edit click, no digit/OK/Cancel-by-name click, and the only
+        # touches are the keypad backdrop dismissal.
+        board = FakeBoard(locked=True)
+        result, srv = _run(board)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(board.calls.count("click:Edit"), 1)
+        self.assertNotIn("click:OK", board.calls)
+        self.assertEqual([c for c in board.calls if c.startswith("click:") and c[6:].isdigit()], [])
+        self.assertTrue(board.keypad)
+        for xy in srv._touch.presses:
+            self.assertNotEqual(xy, (240, 280))  # Edit's coordinates never re-tapped
+
     def test_target_below_320_px_budget_fails(self):
         board = FakeBoard(extra_edit_target={"name": "low", "cx": 10, "cy": 400, "hidden": False})
         result, _ = _run(board)
@@ -395,6 +473,20 @@ class JudgeTest(unittest.TestCase):
 
     def test_unchanged_dwell_fails(self):
         self.assertEqual(self._judge(seg1_dwell=5.0).verdict, Verdict.FAIL)
+
+    def test_status_with_copy_but_unreadable_content_is_inconclusive(self):
+        status = {"active": True, "working_id": 9, "last_refusal": None}
+        r = J.judge_lcd_edit_firing(self.ORIG, self.EXP, status, None, None, None, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+
+    def test_stale_last_refusal_from_before_the_run_is_ignored(self):
+        status = {"active": True, "working_id": 9, "last_refusal": "old"}
+        content = {"segments": [{"target_c": 35.0, "dwell_min": 10.0}, {"target_c": 50.0, "dwell_min": 10.0}]}
+        ex = {"state_name": "running", "profile_id": 7, "segment_count": 2}
+        r = J.judge_lcd_edit_firing(self.ORIG, self.EXP, status, content, ex, ex, None, refusal_before="old")
+        self.assertEqual(r.verdict, Verdict.PASS)
+        r = J.judge_lcd_edit_firing(self.ORIG, self.EXP, status, content, ex, ex, None, refusal_before=None)
+        self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_unreadable_is_inconclusive(self):
         r = J.judge_lcd_edit_firing(self.ORIG, self.EXP, None, None, None, None, None)

@@ -3842,10 +3842,30 @@ def _lcd22_read_live(client, host: str) -> "tuple[Optional[dict], Optional[dict]
     return status, content
 
 
-def _lcd22_cleanup(ctx: dict, client, host: str, heat) -> "tuple[bool, dict]":
-    """Stop the profile via the API, discard the live working copy, then verify
-    (bounded) that the executor is idle/done/faulted, no working copy remains
-    and every relay reads de-energized. Returns (verified, details)."""
+def _lcd22_zone_relays(ctx: dict, heat) -> "Optional[dict]":
+    """{zone: relay_on} from /api/profile_exec, or None when it cannot be read
+    (no zones, or any zone without a boolean relay_on) -- never a guess."""
+    try:
+        zones = (heat._zone_diag_snapshot(ctx) or {}).get("zones") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    if not zones:
+        return None
+    relays = {idx: z.get("relay_on") for idx, z in zones.items()}
+    if any(not isinstance(v, bool) for v in relays.values()):
+        return None
+    return relays
+
+
+def _lcd22_cleanup(ctx: dict, client, host: str, heat, own_working_id: "Optional[int]" = None
+                   ) -> "tuple[bool, dict]":
+    """Stop the profile via the API, discard ONLY the live working copy this run
+    created (`own_working_id`, read right after Apply), then verify (bounded)
+    that the executor is idle/done/faulted, no working copy remains and every
+    relay (safety relay and each zone relay) reads de-energized. A working copy
+    that is not provably ours, or a status that cannot be read, is never
+    discarded: it is reported and the run cannot verify. Returns
+    (verified, details)."""
     srv = _srv(ctx)
     now = ctx.get("_now", time.monotonic)
     sleep = ctx.get("_sleep", time.sleep)
@@ -3854,14 +3874,27 @@ def _lcd22_cleanup(ctx: dict, client, host: str, heat) -> "tuple[bool, dict]":
         heat._cleanup_bench_profile(ctx)
     except Exception as exc:  # noqa: BLE001
         details["cleanup_error"] = type(exc).__name__
+    details["own_working_id"] = own_working_id
     try:
-        client.decide_live_discard(host)
-        details["discard"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        # 409 = nothing pending (no working copy was ever made): fine, the
-        # verification below is what decides.
-        details["discard"] = f"{type(exc).__name__}:{getattr(exc, 'status', None)}"
+        pre_status = client.get_live_status(host)
+        pre_wid = int(pre_status.get("working_id", -1))
+    except Exception:  # noqa: BLE001
+        pre_wid = None
+    if pre_wid is None:
+        details["discard"] = "skipped:status_unreadable"
+    elif pre_wid < 0:
+        details["discard"] = "none_pending"
+    elif own_working_id is None or pre_wid != own_working_id:
+        details["discard"] = f"skipped:working_copy_not_ours(working_id={pre_wid})"
+        details["foreign_working_copy"] = pre_wid
+    else:
+        try:
+            client.decide_live_discard(host)
+            details["discard"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            details["discard"] = f"{type(exc).__name__}:{getattr(exc, 'status', None)}"
     verified = False
+    last_zone_relays: "Optional[dict]" = None
     last_state = None
     last_energized: Optional[bool] = None
     working_id: Optional[int] = None
@@ -3875,14 +3908,17 @@ def _lcd22_cleanup(ctx: dict, client, host: str, heat) -> "tuple[bool, dict]":
             working_id = None
         if last_state in ("idle", "done", "faulted") and working_id is not None and working_id < 0:
             last_energized = heat._read_energized(ctx)
-            if last_energized is False:
+            last_zone_relays = _lcd22_zone_relays(ctx, heat)
+            if last_energized is False and last_zone_relays is not None \
+                    and not any(last_zone_relays.values()):
                 verified = True
                 break
         if now() >= deadline:
             break
         sleep(0.5)
     details.update({"final_exec_state": last_state, "final_working_id": working_id,
-                    "final_energized": last_energized, "verified": verified})
+                    "final_energized": last_energized, "final_zone_relays": last_zone_relays,
+                    "verified": verified})
     return verified, details
 
 
@@ -3906,6 +3942,21 @@ def _case_lcd22(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
 
     # Pre-checks: nothing is started or tapped unless all of these hold.
+    # An operator's own pending live edit must never be clobbered: the case
+    # saves slot 7 and later discards a working copy, so refuse up front when
+    # one already exists (or the status cannot be read).
+    try:
+        live_before = client.get_live_status(host)
+        live_wid = int(live_before.get("working_id", -1))
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            f"could not read /api/profile/live before LCD-22 ({type(exc).__name__}); no action taken"))
+    if live_wid >= 0 or live_before.get("active") or live_before.get("pending_decision"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            "a live profile edit or decision is already pending "
+            f"(working_id={live_wid}); LCD-22 will not touch it; no action taken"),
+            observed={"live_status": live_before})
+    refusal_before = live_before.get("last_refusal")
     before = _lcd22_exec_dict(srv)
     if before is None or before["state_name"] not in ("idle", "done", "faulted"):
         return CaseResult(Verdict.INCONCLUSIVE, reason=(
@@ -3940,6 +3991,7 @@ def _case_lcd22(ctx: dict) -> CaseResult:
 
     result: Optional[CaseResult] = None
     started = False
+    own_working_id: Optional[int] = None
     observed: Dict[str, Any] = {"ambient_c": ambient, "orig": orig, "expected": expected}
     ui = srv._ui_test
     now = ctx.get("_now", time.monotonic)
@@ -3976,18 +4028,34 @@ def _case_lcd22(ctx: dict) -> CaseResult:
             return result
 
         _wake_and_home(ctx)
-        click_fail, _page, _w, _s, _n, _b = _click_then_page(ui, "Edit", "edit_firing")
-        if click_fail is not None:
+        # Edit is clicked exactly ONCE (swallow retries only: a swallowed tap
+        # sent no press). It must NOT go through _click_then_page: on a
+        # PIN-locked panel Edit raises the keypad while the page still reads
+        # "home", and a page-poll retry would re-tap Edit's coordinates onto
+        # the keypad (digit keys / Cancel). The keypad is checked before the
+        # page on every poll.
+        edit_click, _sw, _nf, _wb = _click_resolving_swallow(
+            ui, "Edit", max_not_found_retries=0, max_walk_busy_retries=0)
+        observed["edit_click"] = edit_click.get("result")
+        if edit_click.get("result") not in ("ok", "verdict_unknown"):
+            result = CaseResult(Verdict.FAIL, observed=observed, reason=(
+                f"click_by_name('Edit') returned {edit_click.get('result')!r} while the firing was running"))
+            return result
+        page_deadline = time.monotonic() + _PAGE_POLL_TIMEOUT_S
+        while True:
             names = _lcd19_overlay_names(ui)
             if _is_keypad_names(names):
                 observed["overlay_dismiss"] = _dismiss_lcd19_overlay(ctx, ui)
                 result = CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
                     "Edit raised the PIN keypad (panel is locked); LCD-22 never types a PIN"))
                 return result
-            click_fail.observed = dict(click_fail.observed or {})
-            click_fail.observed.update(observed)
-            result = click_fail
-            return result
+            if ui.get_current_page() == "edit_firing":
+                break
+            if time.monotonic() >= page_deadline:
+                result = CaseResult(Verdict.FAIL, observed=observed, reason=(
+                    f"Edit was clicked but the page is {ui.get_current_page()!r}, not 'edit_firing'"))
+                return result
+            time.sleep(_PAGE_POLL_INTERVAL_S)
         tap = _list_tap_targets_resolving_busy(ui)[0]
         _remember_page_targets(ctx, "edit_firing", tap)
 
@@ -4015,6 +4083,13 @@ def _case_lcd22(ctx: dict) -> CaseResult:
         deadline = now() + 10.0
         while True:
             status, content = _lcd22_read_live(client, host)
+            if own_working_id is None and status is not None:
+                try:
+                    wid = int(status.get("working_id", -1))
+                except (TypeError, ValueError):
+                    wid = -1
+                if wid >= 0:
+                    own_working_id = wid
             segs = (content or {}).get("segments") or []
             try:
                 landed = len(segs) >= 2 and abs(float(segs[1].get("target_c", -1)) - expected["seg1_target_c"]) <= J.LCD_EDIT_FIRING_TOL
@@ -4024,7 +4099,8 @@ def _case_lcd22(ctx: dict) -> CaseResult:
                 break
             sleep(0.5)
         exec_after = _lcd22_exec_dict(srv)
-        result = J.judge_lcd_edit_firing(orig, expected, status, content, exec_before, exec_after, tap)
+        result = J.judge_lcd_edit_firing(orig, expected, status, content, exec_before, exec_after, tap,
+                                      refusal_before=refusal_before)
         result.observed = dict(result.observed or {})
         result.observed.update(observed)
         return result
@@ -4034,7 +4110,7 @@ def _case_lcd22(ctx: dict) -> CaseResult:
     finally:
         if started:
             try:
-                verified, details = _lcd22_cleanup(ctx, client, host, _heat)
+                verified, details = _lcd22_cleanup(ctx, client, host, _heat, own_working_id)
             except Exception as exc:  # noqa: BLE001
                 verified, details = False, {"cleanup_error": type(exc).__name__}
             try:
@@ -4051,7 +4127,8 @@ def _case_lcd22(ctx: dict) -> CaseResult:
                     msg = (
                         "LCD-22 cleanup could not be verified "
                         f"(exec_state={details.get('final_exec_state')}, working_id={details.get('final_working_id')}, "
-                        f"safety_relay_energized={details.get('final_energized')}) -- "
+                        f"safety_relay_energized={details.get('final_energized')}, "
+                        f"zone_relays={details.get('final_zone_relays')}, discard={details.get('discard')}) -- "
                         "use the hardware E-stop if the fixture is still heating"
                     )
                     result.reason = f"{prior}; also: {msg}" if prior else msg

@@ -994,7 +994,8 @@ LCD_EDIT_FIRING_TOL = 0.01
 
 def judge_lcd_edit_firing(orig: dict, expected: dict, status: "dict | None",
                           content: "dict | None", exec_before: "dict | None",
-                          exec_after: "dict | None", edit_targets: "dict | None") -> CaseResult:
+                          exec_after: "dict | None", edit_targets: "dict | None",
+                          refusal_before: "str | None" = None) -> CaseResult:
     """LCD-22: after tapping a future segment's target "+" and dwell "+" on the
     Edit firing page and Apply, the live working copy and the executor must
     reflect both edits and nothing else. Pure data in, CaseResult out.
@@ -1009,15 +1010,26 @@ def judge_lcd_edit_firing(orig: dict, expected: dict, status: "dict | None",
     if status is None:
         return CaseResult(Verdict.INCONCLUSIVE, reason="could not read the live profile status after Apply",
                           observed={"status": status, "content": content})
-    # status readable but no content (409: no working copy) is the "Apply did
-    # nothing" shape -- a FAIL below, not an unreadable board.
+    # status readable but no content: if status shows a working copy the
+    # content read failed (unreadable board) -> INCONCLUSIVE; if it shows none
+    # (409: no working copy) that is the "Apply did nothing" shape -- a FAIL
+    # below.
+    if content is None:
+        try:
+            has_copy = bool(status.get("active")) and int(status.get("working_id", -1)) >= 0
+        except (TypeError, ValueError):
+            has_copy = False
+        if has_copy:
+            return CaseResult(Verdict.INCONCLUSIVE, observed={"status": status, "content": None},
+                              reason="the live status shows a working copy but its content could not be read")
     content = content or {}
     problems = []
     observed: dict = {"status": status, "content": content, "exec_before": exec_before,
                       "exec_after": exec_after, "expected": expected}
     if not status.get("active") or int(status.get("working_id", -1)) < 0:
         problems.append("change not picked up: no live working copy exists after Apply")
-    if status.get("last_refusal"):
+    # A last_refusal identical to the pre-run snapshot predates this run.
+    if status.get("last_refusal") and status.get("last_refusal") != refusal_before:
         problems.append(f"executor refused the edit (last_refusal={status.get('last_refusal')!r})")
     segs = content.get("segments") or []
     if len(segs) < 2:
