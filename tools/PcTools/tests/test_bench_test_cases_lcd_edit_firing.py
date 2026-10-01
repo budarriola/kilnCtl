@@ -59,7 +59,12 @@ class FakeBoard:
                  stop_works=True, relays_energized=False, discard_works=True,
                  apply_changes_target_only=False, extra_edit_target=None,
                  preexisting_working=False, foreign_after_stop=False, zone_relay_on=False,
-                 last_refusal=None):
+                 last_refusal=None, edit_visible_after_lists=0):
+        # The home Edit button is hidden until the page's refresh sees the
+        # firing: the listing omits it (and click_by_name -> not_found) for
+        # the first `edit_visible_after_lists` list_tap_targets calls.
+        self.edit_visible_after_lists = edit_visible_after_lists
+        self.list_calls = 0
         self.exec_state = exec_state
         self.apply_works = apply_works
         self.apply_refused = apply_refused
@@ -162,13 +167,16 @@ class FakeUi:
         if self.b.page == "edit_firing":
             extra = [self.b.extra_edit_target] if self.b.extra_edit_target else []
             return {"targets": _EDIT_TARGETS + extra, "truncated": False}
+        self.b.list_calls += 1
+        if self.b.list_calls <= self.b.edit_visible_after_lists:
+            return {"targets": [{"name": "Start", "cx": 100, "cy": 280, "hidden": False}], "truncated": False}
         return {"targets": _HOME_TARGETS, "truncated": False}
 
     def click_by_name(self, name):
         b = self.b
         b.calls.append(f"click:{name}")
         if name == "Edit" and b.page == "home":
-            if b.exec_state not in ("running", "paused"):
+            if b.exec_state not in ("running", "paused") or b.list_calls < b.edit_visible_after_lists:
                 return {"result": "not_found"}
             if b.locked:
                 b.keypad = True  # PIN-locked: the keypad rises, the page stays home
@@ -361,6 +369,38 @@ class CleanupOwnershipTest(unittest.TestCase):
         result, _ = _run(board)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("cleanup could not be verified", result.reason)
+
+
+class EditAppearanceWaitTest(unittest.TestCase):
+    """2026-10-01 board run: Edit is hidden until the home refresh sees the
+    running firing, so the case must wait for it before its single click."""
+
+    def test_delayed_edit_appearance_passes_with_one_click(self):
+        board = FakeBoard(edit_visible_after_lists=6)
+        result, _ = _run(board)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(board.calls.count("click:Edit"), 1)
+        self.assertGreaterEqual(board.list_calls, 6)
+
+    def test_edit_never_appearing_is_inconclusive_with_no_edit_click(self):
+        board = FakeBoard(edit_visible_after_lists=10 ** 6)
+        result, srv = _run(board)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("Edit", result.reason)
+        self.assertIn("page='home'", result.reason)
+        self.assertIn("Start", result.reason)
+        self.assertEqual(board.calls.count("click:Edit"), 0)
+        self.assertEqual(srv._touch.presses, [])
+        # still cleaned up: the firing it started is stopped
+        self.assertEqual(board.exec_state, "idle")
+        self.assertTrue(result.observed["cleanup"]["verified"])
+
+    def test_keypad_open_never_gets_an_edit_click(self):
+        board = FakeBoard(locked=True)
+        board.keypad = True
+        result, _ = _run(board)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(board.calls.count("click:Edit"), 0)
 
 
 class Lcd22Test(unittest.TestCase):

@@ -3936,6 +3936,11 @@ def _lcd22_cleanup(ctx: dict, client, host: str, heat, own_working_id: "Optional
     return verified, details
 
 
+#: Bounded wait for the home page's Edit button to appear after the firing
+#: reaches running (see the settle call in _case_lcd22).
+_LCD22_EDIT_WAIT_S = 10.0
+
+
 def _case_lcd22(ctx: dict) -> CaseResult:
     if ctx.get("allow_heat") is not True:
         return CaseResult(Verdict.NOT_RUN, reason="allow_heat=False: LCD-22 starts a real low-temperature firing")
@@ -4042,6 +4047,30 @@ def _case_lcd22(ctx: dict) -> CaseResult:
             return result
 
         _wake_and_home(ctx)
+        # 2026-10-01 (first board run, 20261001T172420Z_lcd_lcd22run): the
+        # Edit click returned 'not_found' 2.69 s in. The Edit button is built
+        # hidden and only un-hidden by the home page's periodic refresh
+        # (ui_page_home_refresh.c) once it sees RUNNING/PAUSED, and
+        # list_tap_targets/click_by_name skip hidden widgets -- so a click
+        # right after the start can precede that refresh. Wait (bounded) for
+        # a visible "Edit" with no keypad/popup open, the same settle LCD-19
+        # uses before its Start/Stop click, BEFORE the single click below.
+        # This only polls the read-only target listing; it never taps.
+        edit_settle_log: list = []
+        edit_ready = _wait_for_home_settled(
+            ctx, ui, "Edit", min_wait_s=0.0, timeout_s=_LCD22_EDIT_WAIT_S, log=edit_settle_log)
+        observed["edit_settle_reads"] = edit_settle_log[-5:]
+        if not edit_ready:
+            last = edit_settle_log[-1] if edit_settle_log else {}
+            try:
+                page_now = ui.get_current_page()
+            except Exception:  # noqa: BLE001
+                page_now = None
+            result = CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+                f"'Edit' never became a visible, unobstructed tap target within {_LCD22_EDIT_WAIT_S:.0f} s "
+                f"of the firing reaching running (page={page_now!r}, last names={last.get('names')!r}); "
+                "no tap was sent"))
+            return result
         # Edit is clicked exactly ONCE (swallow retries only: a swallowed tap
         # sent no press). It must NOT go through _click_then_page: on a
         # PIN-locked panel Edit raises the keypad while the page still reads
