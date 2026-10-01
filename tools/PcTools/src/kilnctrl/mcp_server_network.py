@@ -7,7 +7,14 @@ Request/response handling lives in wifi_prov_http_client.py (wire contract in
 the comment block above ``post_ip_config`` there). The one thing a caller must
 know: the POST never reliably returns its "ok" body, because applying the
 change forces a Wi-Fi disconnect, so success is decided ONLY by polling
-GET /status afterwards. Never prints a credential.
+GET /status afterwards.
+
+CREDENTIAL SAFETY. This module sends the administrator web credential only to
+an address it has independently established is the board: the station IP the
+board itself reports over the UART link. The address a static change MOVES the
+board to is therefore never contacted with credentials until the UART reports
+the board there -- a printer or NAS that already owns that address must never
+see the admin login. Never prints a credential.
 """
 from __future__ import annotations
 
@@ -35,6 +42,40 @@ def _describe_status(st: dict) -> str:
     return " ".join(parts)
 
 
+def _uart_sta_ip() -> Optional[str]:
+    """The station IP the board reports over the UART link, or None when the
+    link is down or the station is not connected. This is the identity anchor:
+    an HTTP host is the board only if it equals this value."""
+    from .wifi_uart import WifiUartQueryError
+
+    try:
+        status = _srv._wifi.get_status()
+    except WifiUartQueryError:
+        return None
+    except Exception:  # noqa: BLE001 -- any UART failure means identity unknown
+        return None
+    if status.sta_connected and status.sta_ip:
+        return status.sta_ip
+    return None
+
+
+def _diagnose(before: dict, old_host: str) -> str:
+    """After an unconfirmed change: where is the board, and did it change?"""
+    uart_ip = _uart_sta_ip()
+    if uart_ip is None:
+        return (f"board not located: the UART reports no connected station address and the verification "
+                f"never confirmed it at the requested address (previously at {old_host})")
+    try:
+        st = wph.get_status_admin(uart_ip, timeout=4.0, trusted=True)
+    except Exception as exc:  # noqa: BLE001
+        return f"UART reports the board at {uart_ip}, but GET /status there failed ({type(exc).__name__})"
+    unchanged = all(st.get(k) == before.get(k) for k in
+                    ("ip_mode", "static_ip", "static_netmask", "static_gateway"))
+    if uart_ip == old_host and unchanged:
+        return f"board UNCHANGED, still at {old_host} with the same ip configuration"
+    return f"board is at {uart_ip} now ({_describe_status(st)}); previously {old_host}"
+
+
 @_srv._tool()
 def network_get_ip_config(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the board's STA IP configuration from GET /status:
@@ -43,19 +84,22 @@ def network_get_ip_config(host: Optional[str] = None) -> str:
 
     ``static_ip``/``static_netmask``/``static_gateway`` are redacted to JSON
     null by the firmware unless the caller holds an admin session (or web
-    auth is off); this tool tries one login from ``KILNCTL_WEB_USERNAME``/
-    ``KILNCTL_WEB_PASSWORD`` when it sees them redacted, and says so plainly
-    if they stay null. ``sta_ip`` is likewise withheld from a non-admin caller
-    that arrived over the fallback AP. Never prints a credential.
+    auth is off). The tool logs in from ``KILNCTL_WEB_USERNAME``/
+    ``KILNCTL_WEB_PASSWORD`` only against the address the UART link reports as
+    the board's station IP; an explicit ``host`` that differs is read
+    WITHOUT any login (its static fields then stay null). Never prints a
+    credential.
     """
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import
 
     resolved = _ota_resolve_host(host)
+    trusted = resolved == _uart_sta_ip()
     try:
-        st = wph.get_status_admin(resolved)
+        st = wph.get_status_admin(resolved, trusted=trusted)
     except wph.WifiProvHttpError as exc:
         return f"error: GET /status failed (host={resolved}): {exc}"
-    return f"{_describe_status(st)} (host={resolved})"
+    note = "" if trusted else " [no login: host is not confirmed as the board by the UART link]"
+    return f"{_describe_status(st)} (host={resolved}){note}"
 
 
 @_srv._tool()
@@ -70,31 +114,40 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
     DISRUPTIVE: the change forces a Wi-Fi disconnect/rejoin, so the board
     drops this connection and, for a static ip different from its current
     address, MOVES to the new address -- anything else talking to the old one
-    loses it. The result says which address the board is expected at.
+    loses it.
 
     REFUSES unless ``confirm is True`` exactly (not merely truthy), validates
     every field PC-side before any I/O (strict dotted quads, contiguous
     netmask, ip outside the setup AP's 192.168.4.0/24, gateway inside the
-    subnet), and refuses while a profile or autotune is running. The firmware
-    has no run gate on this route; the refusal is this tool's own, because a
-    link drop mid-firing blinds the host.
+    subnet), refuses while a profile or autotune is running (the firmware has
+    no run gate on this route; the refusal is this tool's own, because a link
+    drop mid-firing blinds the host), and refuses unless the UART link reports
+    a connected station address -- that address is the board's identity, and
+    an explicit ``host`` that differs from it is refused (the run gate and the
+    verification both read the UART-attached board). For a static ip that
+    differs from the current address it also refuses if something already
+    answers at that address (an address conflict), probed with no credentials.
 
-    The POST never reliably returns its "ok" body (ConnectionReset on static,
-    IncompleteRead on dhcp are the normal outcome of a successful change), so a
-    reset after the request is treated as EXPECTED, not as failure, and the
+    CREDENTIAL SAFETY: the admin credential goes only to an address the UART
+    link reports as the board's station IP. The new static address is not
+    contacted at all until the UART reports the board there.
+
+    The POST never reliably returns its "ok" body (a reset or truncated read
+    after the request is the normal outcome of a successful change, and a read
+    timeout after the connection was made is ambiguous, not a failure), so the
     result is decided only by polling GET /status -- at the new address for
     static; at the old address and the UART-reported station IP for dhcp,
-    re-resolved on every attempt -- for up to ``verify_timeout_s`` seconds. It
+    re-resolved every attempt -- for up to ``verify_timeout_s`` seconds. It
     FAILS LOUD unless ``ip_mode`` and (for static) the three static fields read
-    back exactly as requested; static fields that are still redacted (no admin
-    session) cannot be verified and fail. A 400/500 from the board is reported
-    as a failure with the board's message.
+    back exactly as requested, and on failure says where the board actually is
+    (unchanged at the old address, or at a new one per the UART). A 400/500
+    from the board, or a failure to connect (nothing sent), is reported as a
+    failure with the board's message.
 
     Credentials come only from the environment (``KILNCTL_WEB_USERNAME``/
     ``KILNCTL_WEB_PASSWORD``), never a parameter, never echoed.
     """
     from .mcp_server_control import _profile_or_autotune_running_reason
-    from .mcp_server_ota import _ota_resolve_host, _ota_resolve_host_with_source
 
     reason = wph.validate_ip_config(mode, ip, netmask, gateway)
     if reason is not None:
@@ -106,52 +159,69 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
             or not (5 <= verify_timeout_s <= 600):
         return f"refused: verify_timeout_s={verify_timeout_s!r} must be a number in [5, 600]"
 
-    resolved = _ota_resolve_host(host)
+    uart_ip = _uart_sta_ip()
+    if uart_ip is None:
+        return ("refused: the UART link reports no connected station address, so the board's identity at "
+                "any HTTP address cannot be confirmed -- no credential is sent to an unconfirmed host")
+    if host is not None and host != uart_ip:
+        return (f"refused: host={host!r} differs from the UART-reported station IP {uart_ip} -- the run gate "
+                f"and the verification both read the UART-attached board; pass host={uart_ip} or omit it")
+    resolved = uart_ip
 
     running_reason = _profile_or_autotune_running_reason()
     if running_reason is not None:
         return (f"refused: {running_reason} -- the IP configuration is not changed mid-run, a Wi-Fi drop "
                 f"would blind the host (host={resolved})")
 
+    if mode == "static" and ip != resolved:
+        taken, detail = wph.probe_host_answers(ip)
+        if taken:
+            return (f"refused: something already answers at the requested static ip {ip} ({detail}) -- "
+                    f"an address conflict would strand the board; pick a free address")
+
     try:
-        before = wph.get_status_admin(resolved)
+        before = wph.get_status_admin(resolved, trusted=True)
     except wph.WifiProvHttpError as exc:
         return f"error: GET /status failed before the change (host={resolved}): {exc}"
     before_line = f"before: {_describe_status(before)}"
 
-    current_ip = before.get("sta_ip") or resolved
     if mode == "static":
         if wph._matches(before, "static", ip, netmask, gateway)[0]:
-            return (f"ok: already configured, nothing sent -- {before_line} (host={resolved})")
-        moves = (ip != current_ip)
-        expected = (f"WARNING: static ip {ip} differs from the current address {current_ip}; the board "
-                    f"will MOVE to {ip}" if moves else f"static ip equals the current address {current_ip}; no move")
+            return f"ok: already configured, nothing sent -- {before_line} (host={resolved})"
+        expected = (f"static ip {ip} differs from the previous address {resolved}: the board MOVED to {ip}"
+                    if ip != resolved else f"static ip equals the previous address {resolved}: no move")
     else:
         if before.get("ip_mode") == "dhcp":
             return f"ok: already DHCP, nothing sent -- {before_line} (host={resolved})"
-        expected = ("board will re-lease an address from DHCP; it may change from the current "
-                    f"{current_ip} and will be looked up via the UART link")
+        expected = f"board re-leased an address from DHCP (previously {resolved})"
 
     try:
         outcome = wph.post_ip_config(resolved, mode, ip, netmask, gateway)
     except wph.WifiProvHttpError as exc:
         return f"failed: {exc}\n{before_line}"
-    post_line = {"ok": "POST answered ok",
-                 "dropped": "POST connection reset/truncated after sending (expected: Wi-Fi was forced to rejoin)"
-                 }.get(outcome, f"POST answered an unexpected body ({outcome})")
 
     def resolve_hosts():
         if mode == "static":
             return [ip]
         hosts = [resolved]
-        try:
-            h, src = _ota_resolve_host_with_source(None)
-            if src == "STA IP" and h not in hosts:
-                hosts.append(h)
-        except Exception:  # noqa: BLE001 -- UART may be mid-rejoin; keep polling the old host
-            pass
+        now = _uart_sta_ip()
+        if now is not None and now not in hosts:
+            hosts.append(now)
         return hosts
 
-    ok, why = wph.verify_ip_config(resolve_hosts, mode, ip, netmask, gateway, timeout_s=float(verify_timeout_s))
-    head = "ok: ip configuration verified" if ok else "FAILED verification: ip configuration not confirmed"
-    return f"{head} -- {why}\n{expected}\n{post_line}\n{before_line}"
+    ok, why = wph.verify_ip_config(resolve_hosts, mode, ip, netmask, gateway,
+                                   is_trusted=lambda h: h == _uart_sta_ip(),
+                                   timeout_s=float(verify_timeout_s))
+    if ok:
+        post_line = {"ok": "POST answered ok",
+                     "dropped": "POST connection reset/truncated after sending (expected: Wi-Fi was forced to rejoin)",
+                     "timeout": "POST response timed out after sending (outcome decided by verification)"
+                     }.get(outcome, f"POST answered an unexpected body ({outcome})")
+        return f"ok: ip configuration verified -- {why}\n{expected}\n{post_line}\n{before_line}"
+    post_line = {"ok": "POST answered ok", "dropped": "POST connection dropped after sending (outcome unconfirmed)",
+                 "timeout": "POST response timed out after sending (outcome unconfirmed)"
+                 }.get(outcome, f"POST answered an unexpected body ({outcome})")
+    where = _diagnose(before, resolved)
+    requested = f"requested: {mode}" + (f" ip={ip} netmask={netmask} gateway={gateway}" if mode == "static" else "")
+    return (f"FAILED verification: ip configuration NOT confirmed -- {why}\n{requested}\n{where}\n"
+            f"{post_line}\n{before_line}")

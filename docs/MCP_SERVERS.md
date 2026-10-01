@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 197 tools (195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-09-30; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 197 tools (195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in

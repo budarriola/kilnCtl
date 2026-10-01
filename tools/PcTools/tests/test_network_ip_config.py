@@ -109,9 +109,13 @@ class PostTest(unittest.TestCase):
         with self.assertRaises(wph.WifiProvHttpError):
             self._post(side_effect=urllib.error.URLError(ConnectionRefusedError(10061, "refused")))
 
-    def test_timeout_is_failure_not_drop(self):
+    def test_read_timeout_after_connect_is_ambiguous_not_failure(self):
+        out, _ = self._post(side_effect=TimeoutError("timed out"))
+        self.assertEqual(out, "timeout")
+
+    def test_connect_timeout_is_a_definite_failure(self):
         with self.assertRaises(wph.WifiProvHttpError):
-            self._post(side_effect=TimeoutError("timed out"))
+            self._post(side_effect=urllib.error.URLError(TimeoutError("timed out")))
 
 
 def _status(mode="static", ip="192.168.1.50", nm="255.255.255.0", gw="192.168.1.1", sta="192.168.1.50"):
@@ -120,7 +124,8 @@ def _status(mode="static", ip="192.168.1.50", nm="255.255.255.0", gw="192.168.1.
 
 
 class VerifyTest(unittest.TestCase):
-    def _run(self, responses, mode="static", timeout_s=30.0, hosts=("192.168.1.50",), **kw):
+    def _run(self, responses, mode="static", timeout_s=30.0, hosts=("192.168.1.50",),
+             is_trusted=lambda h: True, **kw):
         t = [0.0]
         calls = []
         it = iter(responses)
@@ -133,6 +138,7 @@ class VerifyTest(unittest.TestCase):
             return r
 
         res = wph.verify_ip_config(lambda: list(hosts), mode, timeout_s=timeout_s, poll_s=5.0,
+                                   is_trusted=is_trusted,
                                    sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0],
                                    get_status_fn=fetch, **kw)
         return res, calls
@@ -179,11 +185,93 @@ class VerifyTest(unittest.TestCase):
             return _status(mode="dhcp", ip="", nm="", gw="") if host == "10.0.0.77" else \
                 (_ for _ in ()).throw(wph.WifiProvHttpError("down"))
 
-        ok, _ = wph.verify_ip_config(lambda: next(seq), "dhcp", timeout_s=30, poll_s=1,
+        ok, _ = wph.verify_ip_config(lambda: next(seq), "dhcp", is_trusted=lambda h: True, timeout_s=30, poll_s=1,
                                      sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0],
                                      get_status_fn=fetch)
         self.assertTrue(ok)
         self.assertEqual(seen, ["10.0.0.5", "10.0.0.5", "10.0.0.77"])
+
+
+    def test_untrusted_host_is_never_contacted_and_never_passes(self):
+        (ok, why), calls = self._run([_status()] * 20, timeout_s=10.0, is_trusted=lambda h: False, **GOOD)
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])
+        self.assertIn("not contacted", why)
+
+    def test_trust_is_asked_per_host_per_attempt(self):
+        asked = []
+        trust = {"on": False}
+
+        def is_trusted(h):
+            asked.append(h)
+            return trust["on"]
+
+        responses = iter([_status()])
+        t = [0.0]
+
+        def sleep(s):
+            t[0] += s
+            trust["on"] = True
+
+        ok, _ = wph.verify_ip_config(lambda: ["192.168.1.50"], "static", **GOOD, is_trusted=is_trusted,
+                                     timeout_s=30, poll_s=1, sleep=sleep, clock=lambda: t[0],
+                                     get_status_fn=lambda h, timeout=None: next(responses))
+        self.assertTrue(ok)
+        self.assertEqual(asked, ["192.168.1.50", "192.168.1.50"])
+
+
+class GetStatusTrustTest(unittest.TestCase):
+    def test_untrusted_get_status_uses_no_relogin(self):
+        with unittest.mock.patch.object(wph.http_auth, "urlopen", return_value=_Resp('{"ip_mode": "dhcp"}')) as m:
+            wph.get_status("10.0.0.9", trusted=False)
+            self.assertIs(m.call_args.kwargs.get("no_relogin"), True)
+            wph.get_status("10.0.0.9")
+            self.assertIs(m.call_args.kwargs.get("no_relogin"), False)
+
+    def test_foreign_401_at_untrusted_host_gets_no_credentials(self):
+        err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        err.read = lambda: b""
+        login = unittest.mock.Mock()
+        with unittest.mock.patch.object(wph.http_auth, "urlopen", side_effect=err), \
+                unittest.mock.patch.object(wph.http_auth, "login", login), \
+                unittest.mock.patch.object(wph.http_auth, "_login", login):
+            with self.assertRaises(wph.WifiProvHttpError):
+                wph.get_status_admin("10.0.0.9", trusted=False)
+        login.assert_not_called()
+
+    def test_real_urlopen_never_logs_in_for_untrusted_401(self):
+        # Exercise the real http_auth.urlopen: only the urllib layer is faked.
+        err = urllib.error.HTTPError("http://10.0.0.9/status", 401, "Unauthorized", {}, None)
+        err.read = lambda: b""
+        login = unittest.mock.Mock()
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=err) as raw, \
+                unittest.mock.patch.object(wph.http_auth, "_login", login):
+            with self.assertRaises(wph.WifiProvHttpError):
+                wph.get_status("10.0.0.9", trusted=False)
+        login.assert_not_called()
+        self.assertEqual(raw.call_count, 1)
+
+
+class ProbeTest(unittest.TestCase):
+    def _probe(self, **side):
+        with unittest.mock.patch.object(wph.http_auth, "urlopen", **side):
+            return wph.probe_host_answers("192.168.1.50")[0]
+
+    def test_answers(self):
+        self.assertTrue(self._probe(return_value=_Resp("x")))
+        self.assertTrue(self._probe(side_effect=urllib.error.HTTPError("u", 401, "x", {}, None)))
+        self.assertTrue(self._probe(side_effect=urllib.error.URLError(ConnectionRefusedError(10061, "r"))))
+
+    def test_free(self):
+        self.assertFalse(self._probe(side_effect=urllib.error.URLError(TimeoutError("t"))))
+        self.assertFalse(self._probe(side_effect=urllib.error.URLError(OSError(10051, "no route"))))
+
+    def test_probe_sends_no_credentials(self):
+        # A 401 must not trigger a login: the probe passes no_relogin=True.
+        with unittest.mock.patch.object(wph.http_auth, "urlopen",
+                                        side_effect=urllib.error.HTTPError("u", 401, "x", {}, None)) as ha:
+            wph.probe_host_answers("192.168.1.50")
+        self.assertIs(ha.call_args.kwargs.get("no_relogin"), True)
 
 
 class GetStatusAdminTest(unittest.TestCase):
@@ -201,6 +289,20 @@ class GetStatusAdminTest(unittest.TestCase):
             wph.get_status_admin("10.0.0.5", login=login)
         login.assert_not_called()
 
+    def test_no_login_when_reply_lacks_board_keys(self):
+        # A foreign JSON (no ip_mode) must not make us send the admin credentials.
+        login = unittest.mock.Mock()
+        with unittest.mock.patch.object(wph, "get_status", return_value={"hello": "printer"}):
+            st = wph.get_status_admin("10.0.0.9", login=login)
+        login.assert_not_called()
+        self.assertEqual(st, {"hello": "printer"})
+
+    def test_no_login_for_untrusted_host_even_if_redacted(self):
+        login = unittest.mock.Mock()
+        with unittest.mock.patch.object(wph, "get_status", return_value=_status(ip=None, nm=None, gw=None)):
+            wph.get_status_admin("10.0.0.9", login=login, trusted=False)
+        login.assert_not_called()
+
     def test_login_failure_keeps_redacted_view(self):
         with unittest.mock.patch.object(wph, "get_status", return_value=_status(ip=None, nm=None, gw=None)):
             st = wph.get_status_admin("10.0.0.5", login=unittest.mock.Mock(side_effect=RuntimeError("no cred")))
@@ -211,12 +313,14 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self.patches = [
             unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5"),
-            unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host_with_source",
-                                       return_value=("10.0.0.9", "STA IP")),
+            unittest.mock.patch.object(mn, "_uart_sta_ip", return_value="10.0.0.5"),
+            unittest.mock.patch.object(wph, "probe_host_answers", return_value=(False, "no answer")),
             unittest.mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason",
                                 return_value=None),
         ]
         self.mocks = [p.start() for p in self.patches]
+        self.uart = self.mocks[1]
+        self.probe = self.mocks[2]
         for p in self.patches:
             self.addCleanup(p.stop)
 
@@ -239,8 +343,53 @@ class ToolGateTest(_Base):
             post.assert_not_called()
             get.assert_not_called()
 
+    def test_refused_when_uart_has_no_station_address(self):
+        self.uart.return_value = None
+        with unittest.mock.patch.object(wph, "post_ip_config") as post, \
+                unittest.mock.patch.object(wph, "get_status_admin") as get:
+            r = mn.network_set_ip_config("dhcp", confirm=True)
+        self.assertTrue(r.startswith("refused"), r)
+        self.assertIn("UART", r)
+        post.assert_not_called()
+        get.assert_not_called()
+
+    def test_refused_when_explicit_host_differs_from_uart(self):
+        with unittest.mock.patch.object(wph, "post_ip_config") as post, \
+                unittest.mock.patch.object(wph, "get_status_admin") as get:
+            r = mn.network_set_ip_config("dhcp", confirm=True, host="10.9.9.9")
+        self.assertTrue(r.startswith("refused"), r)
+        self.assertIn("differs", r)
+        post.assert_not_called()
+        get.assert_not_called()
+
+    def test_explicit_host_equal_to_uart_is_accepted(self):
+        with unittest.mock.patch.object(wph, "get_status_admin", return_value=_status(mode="dhcp", ip="", nm="", gw="")), \
+                unittest.mock.patch.object(wph, "post_ip_config") as post:
+            r = mn.network_set_ip_config("dhcp", confirm=True, host="10.0.0.5")
+        self.assertIn("already DHCP", r)
+        post.assert_not_called()
+
+    def test_refused_on_address_conflict_before_anything_is_sent(self):
+        self.probe.return_value = (True, "answered HTTP 401")
+        with unittest.mock.patch.object(wph, "post_ip_config") as post, \
+                unittest.mock.patch.object(wph, "get_status_admin") as get:
+            r = mn.network_set_ip_config("static", confirm=True, **GOOD)
+        self.assertTrue(r.startswith("refused"), r)
+        self.assertIn("already answers", r)
+        post.assert_not_called()
+        get.assert_not_called()
+        self.probe.assert_called_once_with("192.168.1.50")
+
+    def test_no_conflict_probe_when_ip_is_the_current_address(self):
+        with unittest.mock.patch.object(wph, "get_status_admin", return_value=_status(mode="dhcp", ip="", nm="", gw="")), \
+                unittest.mock.patch.object(wph, "post_ip_config", return_value="dropped"), \
+                unittest.mock.patch.object(wph, "verify_ip_config", return_value=(True, "v")):
+            mn.network_set_ip_config("static", confirm=True, ip="10.0.0.5", netmask="255.255.255.0",
+                                     gateway="10.0.0.1")
+        self.probe.assert_not_called()
+
     def test_refused_mid_run(self):
-        self.mocks[2].return_value = "a profile is currently running (#3 'x')"
+        self.mocks[3].return_value = "a profile is currently running (#3 'x')"
         with unittest.mock.patch.object(wph, "post_ip_config") as post, \
                 unittest.mock.patch.object(wph, "get_status_admin") as get:
             r = mn.network_set_ip_config("dhcp", confirm=True)
@@ -255,6 +404,7 @@ class ToolFlowTest(_Base):
         seen = []
 
         def fake_verify(resolve_hosts, mode, ip, nm, gw, **kw):
+            self.assertIn("is_trusted", kw)
             seen.append(list(resolve_hosts()))
             return True, "verified at x"
 
@@ -264,7 +414,7 @@ class ToolFlowTest(_Base):
                 unittest.mock.patch.object(wph, "verify_ip_config", side_effect=fake_verify):
             r = mn.network_set_ip_config("static", confirm=True, **GOOD)
         self.assertTrue(r.startswith("ok:"), r)
-        self.assertIn("MOVE", r)
+        self.assertIn("MOVED", r)
         self.assertIn("expected", r)
         self.assertEqual(seen, [["192.168.1.50"]])
         post.assert_called_once()
@@ -273,6 +423,7 @@ class ToolFlowTest(_Base):
         seen = []
 
         def fake_verify(resolve_hosts, *a, **kw):
+            self.uart.return_value = "10.0.0.9"  # the board re-leased a new address
             seen.append(list(resolve_hosts()))
             return True, "ok"
 
@@ -290,6 +441,45 @@ class ToolFlowTest(_Base):
                 unittest.mock.patch.object(wph, "verify_ip_config", return_value=(False, "not verified")):
             r = mn.network_set_ip_config("static", confirm=True, **GOOD)
         self.assertTrue(r.startswith("FAILED verification"), r)
+        self.assertNotIn("expected: Wi-Fi was forced", r)
+
+    def _failed_verify(self, uart_after, after_status):
+        before = _status(mode="dhcp", ip="", nm="", gw="")
+        reads = iter([before, after_status])
+
+        def verify(*a, **kw):
+            self.uart.return_value = uart_after
+            return False, "not verified within 90s; last: x"
+
+        with unittest.mock.patch.object(wph, "get_status_admin", side_effect=lambda *a, **k: next(reads)), \
+                unittest.mock.patch.object(wph, "post_ip_config", return_value="dropped"), \
+                unittest.mock.patch.object(wph, "verify_ip_config", side_effect=verify):
+            return mn.network_set_ip_config("static", confirm=True, **GOOD)
+
+    def test_failure_says_board_unchanged_at_old_host(self):
+        r = self._failed_verify("10.0.0.5", _status(mode="dhcp", ip="", nm="", gw=""))
+        self.assertIn("UNCHANGED", r)
+        self.assertIn("10.0.0.5", r)
+        self.assertIn("unconfirmed", r)
+
+    def test_failure_says_board_is_elsewhere(self):
+        r = self._failed_verify("10.0.0.77", _status(mode="dhcp", ip="", nm="", gw="", sta="10.0.0.77"))
+        self.assertIn("board is at 10.0.0.77", r)
+        self.assertNotIn("UNCHANGED", r)
+
+    def test_failure_with_no_uart_address_says_not_located(self):
+        r = self._failed_verify(None, _status())
+        self.assertIn("board not located", r)
+
+    def test_post_timeout_goes_to_verification_not_failure(self):
+        with unittest.mock.patch.object(wph, "get_status_admin",
+                                        return_value=_status(mode="dhcp", ip="", nm="", gw="")), \
+                unittest.mock.patch.object(wph, "post_ip_config", return_value="timeout"), \
+                unittest.mock.patch.object(wph, "verify_ip_config", return_value=(True, "verified")) as ver:
+            r = mn.network_set_ip_config("static", confirm=True, **GOOD)
+        self.assertTrue(r.startswith("ok:"), r)
+        ver.assert_called_once()
+        self.assertIn("timed out", r)
 
     def test_board_400_reported_as_failure_no_verify(self):
         with unittest.mock.patch.object(wph, "get_status_admin",
@@ -316,7 +506,82 @@ class ToolFlowTest(_Base):
         post.assert_not_called()
 
 
+class EndToEndTest(_Base):
+    """Real verify_ip_config / get_status_admin / post_ip_config / http_auth.urlopen;
+    only the urllib layer and the UART query are faked."""
+
+    def _world(self):
+        state = {"mode": "dhcp", "ip": "", "nm": "", "gw": ""}
+        log = []
+
+        def status_json(host):
+            return ('{"ip_mode": "%s", "static_ip": "%s", "static_netmask": "%s", "static_gateway": "%s", '
+                    '"sta_ip": "%s", "sta_connected": true}'
+                    % (state["mode"], state["ip"], state["nm"], state["gw"], host))
+
+        def fake_urlopen(req, timeout=None):
+            url = req.full_url
+            log.append((req.get_method(), url))
+            host = url.split("//")[1].split("/")[0]
+            if req.get_method() == "POST":
+                self.assertEqual(host, "10.0.0.5")
+                state.update(mode="static", ip="192.168.1.50", nm="255.255.255.0", gw="192.168.1.1")
+                self.uart.return_value = "192.168.1.50"
+                raise ConnectionResetError(10054, "reset")
+            if host == "10.0.0.5" and state["mode"] == "dhcp":
+                return _Resp(status_json(host))
+            if host == "192.168.1.50" and state["mode"] == "static":
+                return _Resp(status_json(host))
+            raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+        return state, log, fake_urlopen
+
+    def test_static_change_verified_end_to_end(self):
+        state, log, fake = self._world()
+        login = unittest.mock.Mock()
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=fake), \
+                unittest.mock.patch.object(wph.http_auth, "_login", login):
+            r = mn.network_set_ip_config("static", confirm=True, **GOOD)
+        self.assertTrue(r.startswith("ok: ip configuration verified"), r)
+        self.assertIn(("POST", "http://10.0.0.5/ip_config"), log)
+        self.assertEqual(log[-1], ("GET", "http://192.168.1.50/status"))
+        login.assert_not_called()
+
+    def test_new_address_not_contacted_until_uart_confirms(self):
+        # The UART never reports the new address: the board is "somewhere else".
+        state, log, fake = self._world()
+
+        def fake_noconfirm(req, timeout=None):
+            try:
+                return fake(req, timeout)
+            finally:
+                self.uart.return_value = "10.0.0.5"
+
+        login = unittest.mock.Mock()
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_noconfirm), \
+                unittest.mock.patch.object(wph.http_auth, "_login", login), \
+                unittest.mock.patch.object(wph.http_auth, "login", login):
+            r = mn.network_set_ip_config("static", confirm=True, verify_timeout_s=5, **GOOD)
+        self.assertTrue(r.startswith("FAILED verification"), r)
+        login.assert_not_called()
+        self.assertTrue(all("192.168.1.50" not in u for _, u in log), log)
+
+
 class GetToolTest(_Base):
+    def test_no_login_for_host_the_uart_does_not_confirm(self):
+        self.uart.return_value = "10.0.0.77"
+        with unittest.mock.patch.object(wph, "get_status_admin",
+                                        return_value=_status(ip=None, nm=None, gw=None)) as get:
+            r = mn.network_get_ip_config()
+        self.assertIs(get.call_args.kwargs["trusted"], False)
+        self.assertIn("no login", r)
+
+    def test_login_allowed_for_uart_confirmed_host(self):
+        with unittest.mock.patch.object(wph, "get_status_admin", return_value=_status()) as get:
+            mn.network_get_ip_config()
+        self.assertIs(get.call_args.kwargs["trusted"], True)
+
+
     def test_reports_redaction(self):
         with unittest.mock.patch.object(wph, "get_status_admin",
                                         return_value=_status(ip=None, nm=None, gw=None)):

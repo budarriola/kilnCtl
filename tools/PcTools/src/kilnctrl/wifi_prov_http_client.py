@@ -61,16 +61,22 @@ def _http_error_detail(exc: Exception) -> "tuple[Optional[int], str]":
     return None, str(exc)
 
 
-def get_status(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S) -> dict:
+def get_status(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S, trusted: bool = True) -> dict:
     """GET /status and return the full decoded JSON object, straight from
     status_get_handler() -- mode/state/ssid/sta_connected/sta_ip/ap_ssid/
     ap_password/sta_rssi/ap_clients/ip_mode/static_*/ap_password_known/
     ap_password_set/ap_pending_teardown (the last since be7bcad4; absent on
     older firmware -- callers must check with ``"ap_pending_teardown" in
-    data``, never assume the key exists)."""
+    data``, never assume the key exists).
+
+    ``trusted=False`` is for a host whose identity is NOT yet established
+    (e.g. an address the board is only expected to move to): the request goes
+    out with ``no_relogin=True``, so a 401 from whatever answers there can
+    never trigger a login and no credential or remembered session cookie is
+    ever sent to it."""
     req = urllib.request.Request(_url(host, "/status"), method="GET")
     try:
-        with http_auth.urlopen(req, timeout=timeout) as resp:
+        with http_auth.urlopen(req, timeout=timeout, no_relogin=not trusted) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -198,10 +204,11 @@ def _is_expected_drop(exc: BaseException) -> bool:
 
 def post_ip_config(host: str, mode: str, ip=None, netmask=None, gateway=None,
                    timeout: float = WIFI_PROV_HTTP_TIMEOUT_S) -> str:
-    """POST /ip_config. Returns "ok" if the board answered ok, or "dropped" if
+    """POST /ip_config. Returns "ok" if the board answered ok, "dropped" if
     the connection was reset/truncated after the request went out (the
     EXPECTED outcome of a successful change -- not proof of one; the caller
-    must verify via /status). Raises WifiProvHttpError for an HTTP error
+    must verify via /status), or "timeout" if the response never arrived
+    after the connection was established (ambiguous; verify). Raises WifiProvHttpError for an HTTP error
     status (400/500/401...), for an auth failure, and for any other failure
     (e.g. could not connect: nothing was sent, so nothing changed)."""
     body = build_ip_config_body(mode, ip, netmask, gateway)
@@ -219,21 +226,36 @@ def post_ip_config(host: str, mode: str, ip=None, netmask=None, gateway=None,
     except Exception as exc:  # noqa: BLE001
         if _is_expected_drop(exc):
             return "dropped"
+        # urllib wraps a CONNECT-phase failure in URLError (nothing was sent);
+        # a bare TimeoutError means the request went out and the response
+        # never came -- the board may well have applied the change and dropped
+        # Wi-Fi, so that is AMBIGUOUS (verify decides), not a failure.
+        if isinstance(exc, TimeoutError) and not isinstance(exc, urllib.error.URLError):
+            return "timeout"
         _, detail = _http_error_detail(exc)
         raise WifiProvHttpError(f"POST {IP_CONFIG_PATH} failed: {detail}") from exc
     return "ok" if text == "ok" else f"unexpected-body:{text[:40]}"
 
 
 def get_status_admin(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S,
-                     login: Optional[Callable[[str], object]] = None) -> dict:
+                     login: Optional[Callable[[str], object]] = None,
+                     trusted: bool = True) -> dict:
     """GET /status, and if the static_* fields come back redacted (null)
     because no admin session was presented, log in once (env credentials, via
     :func:`http_auth.login`) and read again. /status is ROUTE_TIER_OPEN, so
     http_auth.urlopen never sees a 401 and would otherwise never log in.
     If no credentials are available or login fails, the first (redacted)
-    reading is returned -- callers must treat null static_* as "unknown"."""
-    data = get_status(host, timeout=timeout)
+    reading is returned -- callers must treat null static_* as "unknown".
+
+    CREDENTIAL SAFETY: the login only ever happens against a ``trusted`` host
+    (caller has established it is the board, e.g. via the UART-reported STA
+    IP) whose reply actually looks like this board's /status (carries
+    ``ip_mode``) -- a foreign JSON without the keys must not make us send the
+    admin credentials to whatever answered. ``trusted=False`` never logs in."""
+    data = get_status(host, timeout=timeout, trusted=trusted)
     if data.get("static_ip") is not None or data.get("static_netmask") is not None:
+        return data
+    if not trusted or "ip_mode" not in data:
         return data
     do_login = login or (lambda origin: http_auth.login(origin, timeout))
     try:
@@ -241,9 +263,29 @@ def get_status_admin(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S,
     except Exception:  # noqa: BLE001 -- no credential / refused: keep the redacted view
         return data
     try:
-        return get_status(host, timeout=timeout)
+        return get_status(host, timeout=timeout, trusted=trusted)
     except WifiProvHttpError:
         return data
+
+
+def probe_host_answers(host: str, timeout: float = 2.0) -> "tuple[bool, str]":
+    """Credential-free check for 'does ANYTHING already answer at host:80?'
+    -- used before moving the board onto a static ip to catch an address
+    conflict. Goes through http_auth with no_relogin=True, which disables login and
+    cookie handling entirely (no credential, no session cookie).
+    Any HTTP response, or a connection REFUSED (a live host with the port
+    closed), counts as answering; a timeout or no-route counts as free."""
+    req = urllib.request.Request(_url(host, "/status"), method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout, no_relogin=True):
+            return True, "answered HTTP 200"
+    except urllib.error.HTTPError as exc:
+        return True, f"answered HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        cur = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(cur, ConnectionRefusedError):
+            return True, "connection refused (a host is alive there)"
+        return False, f"no answer ({type(cur).__name__})"
 
 
 def _matches(status: dict, mode: str, ip, netmask, gateway) -> "tuple[bool, str]":
@@ -265,7 +307,8 @@ def _matches(status: dict, mode: str, ip, netmask, gateway) -> "tuple[bool, str]
 
 
 def verify_ip_config(resolve_hosts: Callable[[], Iterable[str]], mode: str, ip=None, netmask=None,
-                     gateway=None, timeout_s: float = 90.0, poll_s: float = 3.0,
+                     gateway=None, *, is_trusted: Callable[[str], bool],
+                     timeout_s: float = 90.0, poll_s: float = 3.0,
                      status_timeout: float = 4.0,
                      sleep: Callable[[float], None] = time.sleep,
                      clock: Callable[[], float] = time.monotonic,
@@ -275,12 +318,25 @@ def verify_ip_config(resolve_hosts: Callable[[], Iterable[str]], mode: str, ip=N
     board's address can change between polls -- flash_firmware()'s verify
     re-resolves the same way) and returns the candidate hosts in order.
     Returns (ok, message); a board never reached, or reachable only with
-    redacted fields, is a failure, never a pass."""
+    redacted fields, is a failure, never a pass.
+
+    ``is_trusted(host)`` must say whether the board's identity at that host is
+    independently established (the UART-reported STA IP equals it). A host
+    that is not trusted is NEVER contacted: no request, no login, no
+    credential -- and so can never produce a pass either."""
     fetch = get_status_fn or get_status_admin
     deadline = clock() + timeout_s
     last = "no attempt made"
     while True:
         for host in list(resolve_hosts()):
+            try:
+                trusted = bool(is_trusted(host))
+            except Exception:  # noqa: BLE001 -- UART mid-rejoin: unknown is untrusted
+                trusted = False
+            if not trusted:
+                last = (f"{host}: board identity not confirmed (the UART does not report it as the "
+                        f"station address yet); not contacted")
+                continue
             try:
                 st = fetch(host, timeout=status_timeout)
             except WifiProvHttpError as exc:
