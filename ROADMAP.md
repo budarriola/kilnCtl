@@ -4126,7 +4126,9 @@ Owner instruction, 2026-09-21.
   2026-10-01** (`20261001T155811Z_lcd`, ESP `eb83c1ac`, defaults, no heat): LCD-08/09/14/16/21
   PASS, LCD-01 and LCD-19 INCONCLUSIVE (camera exposure/cast; LCD-19 stop_gated
   not exercisable without `allow_heat`), the rest NOT_RUN (not_implemented or
-  precondition absent); no FAIL.
+  precondition absent); no FAIL. **Full rerun with heat opt-ins, 2026-10-01** (`20261001T183355Z_lcd_lcdsuite3`,
+  `90fc6658`+`e52f256d`): LCD-08/09/14/16/19/21/22 PASS (LCD-16 rewind fix confirmed,
+  7/7 pages; LCD-19 stop_gated and LCD-22 exercised), LCD-01 INCONCLUSIVE (camera cast), no FAIL.
 - [x] Fix the SK-01/02 noise-tolerance/fw_commit-gate issue — done,
   2026-09-24 (`866003ea`; plan-note follow-up `9d905ab9`). **Still pending:
   rerun** the stack suite against this fix — the last attempt
