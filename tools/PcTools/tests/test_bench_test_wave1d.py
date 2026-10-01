@@ -309,6 +309,16 @@ class StackMarginTaskToleranceOverrideTest(unittest.TestCase):
     def test_non_bridge_100b_drop_still_fails(self):
         self.assertEqual(self._judge("lvgl", 4000, 3900).verdict, Verdict.FAIL)
 
+    def test_wider_default_tolerance_never_narrowed_by_override(self):
+        """tolerance_bytes=1000 must win over a bridge's 384 B override."""
+        for name in ("thermo_uart_bridge", "io_uart_bridge", "info_uart_bridge", "lvgl"):
+            self.assertEqual(self._judge(name, 2000, 1500, tolerance_bytes=1000).verdict, Verdict.PASS, name)
+
+    def test_fail_reason_names_per_task_tolerance(self):
+        r = self._judge("info_uart_bridge", 2000, 1600)
+        self.assertIn("per-task noise tolerance", r.reason)
+        self.assertIn("(-400 B > 384 B)", r.reason)
+
     def test_bridge_floor_still_fails(self):
         r = self._judge("thermo_uart_bridge", 600, 500, min_free_bytes=512)
         self.assertEqual(r.verdict, Verdict.FAIL)

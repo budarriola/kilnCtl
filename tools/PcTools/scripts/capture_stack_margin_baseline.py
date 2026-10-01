@@ -51,7 +51,7 @@ The full warmup list, all sent on the capture boot: get_board_state,
 thermo_read, thermo_read_faults, io_read, get_fw_version, get_pin_config,
 several get_stack_margin, then the stack suite. info_uart_bridge drops are
 not tied to any single info command (leading candidate: ESP_LOGW formatting
-via uart_log_vprintf under log-queue pressure), so SK-01 also carries a
+via uart_log_vprintf under log-queue pressure), so SK-01/SK-02 also carry a
 per-task tolerance table (judgments.py
 _STACK_MARGIN_TASK_TOLERANCE_OVERRIDES): thermo_uart_bridge, io_uart_bridge
 and info_uart_bridge get 384 B, every other task keeps 64 B, and the

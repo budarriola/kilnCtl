@@ -264,7 +264,7 @@ def judge_stack_margin_against_baseline(
 
     ``task_tolerance_overrides`` (default
     :data:`_STACK_MARGIN_TASK_TOLERANCE_OVERRIDES`) maps a task name to its
-    own tolerance in place of ``tolerance_bytes``; pass ``{}`` to disable.
+    own tolerance, which can only widen ``tolerance_bytes`` (the larger wins); pass ``{}`` to disable.
 
     A dead (``alive=False``) task is never scored against a byte figure --
     it FAILs outright, since a task that was never created or was deleted
@@ -300,7 +300,7 @@ def judge_stack_margin_against_baseline(
         drop = base.hwm_bytes - e.hwm_bytes
         if drop <= 0:
             continue
-        task_tol = task_tolerance_overrides.get(e.name, tolerance_bytes)
+        task_tol = max(tolerance_bytes, task_tolerance_overrides.get(e.name, tolerance_bytes))
         entry_info = {"task": e.name, "hwm_bytes": e.hwm_bytes, "baseline_hwm_bytes": base.hwm_bytes,
                       "drop_bytes": drop, "tolerance_bytes": task_tol}
         if drop > task_tol:
@@ -358,8 +358,8 @@ def judge_stack_margin_against_baseline(
         return CaseResult(
             Verdict.INCONCLUSIVE,
             reason=(
-                f"{commit_desc}: {len(regressed_beyond_tolerance)} task(s) dropped more than the "
-                f"{tolerance_bytes} B noise tolerance below their committed baseline, but a cross-build "
+                f"{commit_desc}: {len(regressed_beyond_tolerance)} task(s) dropped beyond their "
+                f"per-task noise tolerance below their committed baseline, but a cross-build "
                 f"comparison cannot be scored as a regression: {names}"
             ),
             observed=observed,
@@ -369,7 +369,7 @@ def judge_stack_margin_against_baseline(
         names = ", ".join(f"{r['task']} (-{r['drop_bytes']} B > {r['tolerance_bytes']} B)" for r in regressed_beyond_tolerance)
         return CaseResult(
             Verdict.FAIL,
-            reason=f"{len(regressed_beyond_tolerance)} task(s) dropped more than the {tolerance_bytes} B noise "
+            reason=f"{len(regressed_beyond_tolerance)} task(s) dropped beyond their per-task noise "
                    f"tolerance below their committed baseline: {names}",
             observed=observed,
         )
