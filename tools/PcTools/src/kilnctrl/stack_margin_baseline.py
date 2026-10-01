@@ -308,6 +308,28 @@ def load_records(out_dir: Path) -> list[StackMarginBaselineRecord]:
     return records
 
 
+def records_matching_commit(
+    records: Iterable[StackMarginBaselineRecord], fw_commit: Optional[str],
+) -> list[StackMarginBaselineRecord]:
+    """Committed records whose ``fw_commit`` exactly equals ``fw_commit`` --
+    the filter a live comparison (SK-01/SK-02) must apply *before* computing
+    a worst case, so an old build's lower reading never gets mixed into a
+    live comparison for a different, newer build just because both files
+    happen to sit in the same directory (2026-10-01 finding: once a baseline
+    existed for the running commit, ``worst_case_across_conditions`` was
+    still being handed every committed record regardless of commit, so the
+    comparison silently kept using the lowest reading from any build ever
+    captured -- see docs/BENCH_TEST_SYSTEM_PLAN.md SK-01/SK-02).
+
+    Returns an empty list (never raises) when ``fw_commit`` is falsy/unknown
+    or no record matches -- the caller is expected to treat an empty result
+    as "no same-commit baseline", i.e. INCONCLUSIVE, not as "compare against
+    nothing and pass by default"."""
+    if not fw_commit:
+        return []
+    return [r for r in records if r.fw_commit == fw_commit]
+
+
 def worst_case_across_conditions(
     records: Iterable[StackMarginBaselineRecord],
 ) -> dict[str, StackMarginEntry]:

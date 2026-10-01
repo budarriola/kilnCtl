@@ -121,7 +121,23 @@ def _dead_by_design_names(ctx: dict, entries) -> "tuple[str, ...]":
     )
 
 
-def _judge_against_baseline(ctx: dict, condition: str, min_free_bytes: Optional[int]) -> CaseResult:
+#: SK-01 needs a same-commit *idle* record (plan row: "board up >= 2 min",
+#: the idle condition itself). SK-02 needs its own condition, or the heavier
+#: `mid_firing` load -- either satisfies the plan's "exercised" requirement
+#: (BENCH_TEST_SYSTEM_PLAN.md SK-02 row: "HP-01 or HP-02 just completed ...
+#: plus one GET /api/backup/export and one POST /api/zones ... to walk the
+#: httpd heavy paths"). An idle-only baseline is not evidence the board was
+#: ever exercised under load, so it must not silently stand in for one, and
+#: a same-commit MID_FIRING/WEB_UI_OPEN-only baseline is not evidence of an
+#: idle capture either.
+_SK01_REQUIRED_BASELINE_CONDITIONS = ("idle",)
+_SK02_REQUIRED_BASELINE_CONDITIONS = ("web_ui_open", "mid_firing")
+
+
+def _judge_against_baseline(
+    ctx: dict, condition: str, min_free_bytes: Optional[int],
+    required_baseline_conditions: "tuple[str, ...]",
+) -> CaseResult:
     from .. import stack_margin_baseline as smb
 
     try:
@@ -131,9 +147,6 @@ def _judge_against_baseline(ctx: dict, condition: str, min_free_bytes: Optional[
 
     _write_esp_capture(ctx, condition, entries, fw_version, notes=f"bench_test {condition} capture")
 
-    committed = smb.load_records(_baseline_dir(ctx))
-    baseline_by_name = smb.worst_case_across_conditions(committed)
-
     # Exclude by-design-dead tasks (e.g. pico_auto_update, boot-once, self-
     # deletes after boot) from the entries scored against the baseline --
     # judge_stack_margin_against_baseline has no tag awareness and FAILs any
@@ -141,24 +154,70 @@ def _judge_against_baseline(ctx: dict, condition: str, min_free_bytes: Optional[
     info_dead = _dead_by_design_names(ctx, entries)
     scored_entries = [e for e in entries if e.name not in info_dead] if info_dead else entries
 
+    def _finish(result: CaseResult) -> CaseResult:
+        if info_dead:
+            if result.observed is None:
+                result.observed = {}
+            result.observed["dead_by_design"] = list(info_dead)
+        return result
+
+    committed = smb.load_records(_baseline_dir(ctx))
+    board_commit = fw_version.commit
+
+    # 2026-10-01 fix: the comparison must only ever be scored against
+    # baseline records captured on THIS commit -- a record from an older
+    # build (e.g. the 8 KB lvgl/info_uart_bridge stacks before eb83c1ac)
+    # must never supply a "worst case" for a live reading on a newer build.
+    # judge_stack_margin_against_baseline()'s own commit-mismatch softening
+    # only ever downgrades a verdict after the fact; filtering here is what
+    # keeps a stale, lower reading from ever entering the comparison at all.
+    same_commit = smb.records_matching_commit(committed, board_commit)
+
+    # A genuinely dead (not by-design) task FAILs outright regardless of
+    # baseline availability -- that check must never be preempted by an
+    # INCONCLUSIVE about missing baseline data, so it is evaluated before
+    # the condition-presence precondition below.
+    has_hard_dead = any(not e.alive for e in scored_entries)
+
+    if not has_hard_dead:
+        have_conditions = {r.condition for r in same_commit}
+        if not (have_conditions & set(required_baseline_conditions)):
+            return _finish(CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=(
+                    f"no {'/'.join(required_baseline_conditions)} baseline record for fw_commit "
+                    f"{board_commit!r} (have: {sorted(have_conditions) or ['none']})"
+                ),
+                observed={"board_fw_commit": board_commit, "baseline_conditions_present": sorted(have_conditions)},
+            ))
+
+    baseline_by_name = smb.worst_case_across_conditions(same_commit)
+
+    # baseline_fw_commits is passed for diagnostic/reporting purposes only
+    # (the "both commits" text in judge_stack_margin_against_baseline's
+    # INCONCLUSIVE reasons) -- the actual comparison dict above is already
+    # restricted to the board's own commit, so that function's own
+    # commit-mismatch logic can never trigger here.
     baseline_fw_commits = {r.fw_commit for r in committed if r.fw_commit}
     result = J.judge_stack_margin_against_baseline(
         scored_entries, baseline_by_name, min_free_bytes=min_free_bytes,
-        board_fw_commit=fw_version.commit, baseline_fw_commits=baseline_fw_commits,
+        board_fw_commit=board_commit, baseline_fw_commits=baseline_fw_commits,
     )
-    if info_dead:
-        if result.observed is None:
-            result.observed = {}
-        result.observed["dead_by_design"] = list(info_dead)
-    return result
+    return _finish(result)
 
 
 def _case_sk01(ctx: dict) -> CaseResult:
-    return _judge_against_baseline(ctx, condition="idle", min_free_bytes=None)
+    return _judge_against_baseline(
+        ctx, condition="idle", min_free_bytes=None,
+        required_baseline_conditions=_SK01_REQUIRED_BASELINE_CONDITIONS,
+    )
 
 
 def _case_sk02(ctx: dict) -> CaseResult:
-    return _judge_against_baseline(ctx, condition="web_ui_open", min_free_bytes=_SK02_MIN_FREE_BYTES)
+    return _judge_against_baseline(
+        ctx, condition="web_ui_open", min_free_bytes=_SK02_MIN_FREE_BYTES,
+        required_baseline_conditions=_SK02_REQUIRED_BASELINE_CONDITIONS,
+    )
 
 
 # ---------------------------------------------------------------------------
