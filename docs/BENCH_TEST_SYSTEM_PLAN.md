@@ -240,6 +240,8 @@ WEB-DASH-01 render (`profileSelect`, `runBtn`, zone cards) · WEB-DASH-02 profil
 | LCD-20 | recovery-mode idle policy | only under OT-E11 | `screen_idle`'s recovery flag: panel does not blank; otherwise `NOT_RUN` | — |
 | LCD-21 | no-scroll budget | every page visited above | `list_tap_targets()` reports no target with `cy > 320` and `truncated:false` (memory `feedback_lcd_no_scrolling`) | in-line |
 | LCD-22 | Edit firing live edit | **heat case, needs `allow_heat` AND the separate default-off `lcd_edit_heat` opt-in (`-LcdEditHeat` in bench_test.ps1; without it NOT_RUN naming `lcd_edit_heat`)** (own low-temperature 2-segment firing, target at most ambient+25 and never above 60 C; executor must be idle or done (not running or faulted), no trip, and no live profile edit already pending, else INCONCLUSIVE with no action) | Home `Edit` opens `edit_firing` (a PIN-locked panel is INCONCLUSIVE; the case never types a PIN); Next, Target `+` and Dwell `+` are tapped by coordinate (the glyph buttons carry no tap name); `Apply` is clicked. PASS only if `profile_live` status/content show segment 2 target +5 C and dwell +5 min, segment 1 untouched, `last_refusal` null, executor still running, and no `edit_firing` target has `cy > 320`. `finally`: stop via API, discard the working copy, verify executor idle, no working copy and relays off; an unverified cleanup is a FAIL, never a PASS | 15 s |
+| LCD-23 | Edit firing steppers + refusals | **heat case, needs `allow_heat` AND the separate default-off `lcd_edit_heat` opt-in (same as LCD-22; without it NOT_RUN naming `lcd_edit_heat`)** (own low-temperature 3-segment firing, target at most zone temperature+20 and never above 60 C; segment 1 dwells one minute; same idle/no-trip/no-pending-live-edit pre-checks as LCD-22, else INCONCLUSIVE with no action) | Home `Edit`; Next, then Target `-`, Ramp `+`,`+`,`-` and Dwell `-` on segment 2, steppers located from the tap-target positions (never by name, never retried); `Apply`. Then Prev, a stale Target `+` on the running segment 1, wait for the firing to move to segment 2 (steppers lock), `Apply` again. PASS only if the working copy holds exactly target -5 C, ramp +5 C/hr, dwell -5 min on segment 2 and nothing else changed; the stale Apply adopts nothing (same `working_id`, segments unchanged, `last_refusal` unchanged because the LCD's own window check refuses it first); HTTP `POST /api/profile/live` answers 409 for a finished-segment edit and 400 for a target above the bound, each leaving the working copy unchanged. The LCD status line is a plain label UI_TEST cannot read, so refusal is judged by effect. `finally`: as LCD-22 | 150 s |
+| LCD-24 | Edit firing end-of-firing | **heat case, needs `allow_heat` AND the separate default-off `lcd_edit_heat` opt-in (same as LCD-22; without it NOT_RUN naming `lcd_edit_heat`)** (own low-temperature 2-segment firing at the zone temperature, segment 1 dwells one minute, segment 2 has zero dwell, so it ends on its own; same pre-checks) | Next, Ramp `+` on segment 2, `Apply`; edit adopted. Wait (at most 120 s) for the executor to reach `done`. PASS only if the open Edit page then shows no `Apply` and no clickable stepper, `profile_live` reports `pending_decision` with the same `working_id` and edited segments, and `decide discard` clears the working copy. The LCD has NO save/discard/overwrite UI (the decision is made on the web), so only the HTTP Discard is exercised; Save-as and Overwrite are deliberately not run. `finally`: as LCD-22 | 140 s |
 
 ### 3.9 Suite SP — safety-processor surface
 
@@ -305,10 +307,10 @@ case in the same run.
 | AT autotune | 5 | 2 | 0 |
 | HP heating profiles | 8 | 6 | 0 |
 | WEB | 119 (DASH 13, PROF 11, ZONE 13, SAF 4, STIM 2, COMM 7, RDY 4, WIZ 11, DIAG 11, OTA 8, WIFI 6, SEC 6, BAK 4, KCFG 5, SET 4, DISP 4, LOG 3, X 3) | 0 own heat (several observe HP/AT) | WIFI-06 operator |
-| LCD | 22 | 1 (LCD-22) | LCD-20 only under OT-E11 |
+| LCD | 24 | 3 (LCD-22, LCD-23, LCD-24) | LCD-20 only under OT-E11 |
 | SP | 11 | 1 (SP-09) | SP-08/09 operator; SP-10 INCONCLUSIVE by design |
 | TP | 4 | 0 | TP-M01 opt-in via env credentials |
-| **total** | **208** | **10 heat-originating** | |
+| **total** | **210** | **12 heat-originating** | |
 
 ## 5. Routine subsets, ordering, interdependence
 

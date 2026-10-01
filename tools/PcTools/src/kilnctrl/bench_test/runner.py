@@ -253,7 +253,7 @@ class BenchTestRunner:
         # default for everything else.
         self.ctx["allow_heat"] = allow_heat
         self.ctx["lcd19_allow_heat"] = lcd_stop_heat
-        # LCD-22 (Edit firing live edit) IS spec.heat-marked, so a False
+        # LCD-22/23/24 (Edit firing live edit) ARE spec.heat-marked, so a False
         # allow_heat skips it outright, but allow_heat defaults True, so it
         # is not by itself a safe gate for an unsolicited firing on an
         # ordinary suite="lcd" run. Same shape as LCD-19 above: the case

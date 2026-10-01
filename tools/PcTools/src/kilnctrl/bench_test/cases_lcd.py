@@ -14,6 +14,7 @@ degrades, to INCONCLUSIVE, when no frame could be captured.
 """
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import time
@@ -4271,6 +4272,593 @@ def _case_lcd22(ctx: dict) -> CaseResult:
                     result.verdict = Verdict.FAIL
 
 
+# ---------------------------------------------------------------------------
+# LCD-23 / LCD-24 -- more of the Edit firing page (see LCD-22 above for the
+# shared geometry, cleanup and gating rationale). Both are heat cases with the
+# same safety structure as LCD-22 (allow_heat AND lcd_edit_heat, a pending-
+# live-edit pre-check, one Edit click, no retried taps, a keypad check after
+# every tap batch, and a finally that stops the profile, verifies every relay
+# off and discards only this run's own working copy).
+#
+#   LCD-23: ramp-rate/target/dwell minus+plus steppers on a FUTURE segment,
+#           then the refusal paths: a stale Apply of a segment that has since
+#           finished (the LCD's own window check must refuse it and adopt
+#           nothing) and the HTTP 409 (window) / 400 (bound) answers.
+#   LCD-24: a firing with an adopted edit ends on its own; the open Edit page
+#           must show the ended state and the live status must report a
+#           pending decision. The LCD has NO save/discard UI (the decision is
+#           made on the web), so the decision half is an HTTP Discard.
+#
+# The Edit page's status line ("Refused: ...", "Applied.", "Firing ended.") is
+# a plain lv_label with no tap name, so UI_TEST cannot read it; every check
+# below is on an observable effect (HTTP live status/content, executor state,
+# which tap targets exist) instead of the text.
+# ---------------------------------------------------------------------------
+
+#: Row centre y of the three stepper rows (LCD-22 measured Target ~86 and
+#: Dwell ~186; Ramp sits between them) and the band that still counts as the
+#: same row. Steppers are located by position in list_tap_targets(), never by
+#: name (their labels are glyphs) and never by a hardcoded x: a disabled
+#: stepper is not clickable and so is simply absent from the listing.
+_LCD_EDIT_ROW_Y = {"target": 86, "ramp": 136, "dwell": 186}
+_LCD_EDIT_ROW_BAND_PX = 14
+_LCD_EDIT_ROW_MIN_X = 200
+_LCD_EDIT_TOPBAR_Y = 20
+#: UI_TOPBAR_ICON_W_PX (36) + UI_TOPBAR_ICON_GAP_PX (4): Prev's x is Next's
+#: minus this, used only when the topbar listing cannot say.
+_LCD_EDIT_TOPBAR_PITCH_PX = 40
+_LCD_EDIT_ZONE_MASK = 1
+#: Segment durations. Segment 0 dwells one whole minute (dwell_min is an
+#: integer) so the firing sits in it long enough to edit a later segment.
+_LCD_EDIT_SEG0_DWELL_MIN = 1
+_LCD_EDIT_RAMP_C_PER_HR = 600.0
+_LCD_EDIT_MAX_TARGET_C = 60.0
+_LCD23_SEG1_OFFSET_C = 10.0
+_LCD23_SEG2_OFFSET_C = 20.0
+_LCD23_SEG1_DWELL_MIN = 30
+_LCD23_SEG2_DWELL_MIN = 5
+#: Bounded waits (total wall time stays under about 3 minutes).
+_LCD23_ADVANCE_WAIT_S = 100.0
+_LCD24_END_WAIT_S = 120.0
+_LCD_EDIT_ENDED_WAIT_S = 4.0
+_LCD_EDIT_BOUND_TARGET_C = 5000.0
+
+
+def _lcd_edit_names(tap: dict) -> set:
+    return {t.get("name") for t in (tap or {}).get("targets", []) if t.get("name")}
+
+
+def _lcd_edit_page_state(ui) -> dict:
+    """Read the Edit page's tap targets once and locate, by position only:
+    each field's (minus_xy, plus_xy) (None when either stepper is absent, i.e.
+    disabled), the Next/Prev topbar xy (None when disabled), and whether
+    Apply and a keypad are present. {"readable": False} when the walk is
+    busy/empty."""
+    tap = _list_tap_targets_resolving_busy(ui)[0]
+    targets = [t for t in (tap or {}).get("targets", []) if not t.get("hidden")]
+    names = {t.get("name") for t in targets if t.get("name")}
+    if (tap or {}).get("busy") or not targets:
+        return {"readable": False, "keypad": False}
+    state: Dict[str, Any] = {"readable": True, "keypad": _is_keypad_names(names), "apply": "Apply" in names,
+                             "steppers": {}, "names": sorted(names)}
+    for field, row_y in _LCD_EDIT_ROW_Y.items():
+        row = sorted((t for t in targets if abs(t.get("cy", -999) - row_y) <= _LCD_EDIT_ROW_BAND_PX
+                      and t.get("cx", 0) >= _LCD_EDIT_ROW_MIN_X), key=lambda t: t["cx"])
+        state["steppers"][field] = ((row[0]["cx"], row[0]["cy"]), (row[-1]["cx"], row[-1]["cy"])) \
+            if len(row) == 2 else None
+    top = sorted((t for t in targets if abs(t.get("cy", -999) - _LCD_EDIT_TOPBAR_Y) <= _LCD_EDIT_ROW_BAND_PX
+                  and t.get("cx", 0) >= 300 and t.get("name") not in ("back", "home", "settings")), key=lambda t: t["cx"])
+    # Unnamed glyph icons right of Back/Home: [..., prev, next] (each present
+    # only while enabled). The rightmost is Next unless it is disabled, in
+    # which case Prev is rightmost; the page position tells which we need, so
+    # report both candidates by x and let the caller pick (see _lcd_edit_nav).
+    state["topbar_x"] = [t["cx"] for t in top]
+    return state
+
+
+def _lcd_edit_nav(state: dict, which: str) -> "Optional[tuple[int, int]]":
+    """Next/Prev xy from a page state. Next is the rightmost unnamed topbar
+    icon; Prev is the one a pitch to its left (or, when only one icon is
+    clickable and that is Prev, simply the rightmost -- the caller only asks
+    for Prev on a page where Next is clickable too)."""
+    xs = sorted(state.get("topbar_x") or [])
+    if not xs:
+        return None
+    nxt = xs[-1]
+    if which == "next":
+        return (nxt, _LCD_EDIT_TOPBAR_Y)
+    return (xs[-2] if len(xs) >= 2 else nxt - _LCD_EDIT_TOPBAR_PITCH_PX, _LCD_EDIT_TOPBAR_Y)
+
+
+def _lcd_edit_step(env: dict, field: str, sign: str) -> "Optional[str]":
+    """One stepper tap, located fresh. Returns None when tapped, else why not
+    ('unreadable', 'keypad', 'absent'); never retries a tap."""
+    st = _lcd_edit_page_state(env["ui"])
+    if not st["readable"]:
+        return "unreadable"
+    if st["keypad"]:
+        return "keypad"
+    pair = st["steppers"].get(field)
+    if pair is None:
+        return "absent"
+    xy = pair[0] if sign == "-" else pair[1]
+    ok = _lcd22_tap(env["ctx"], xy)
+    env["observed"].setdefault("taps", []).append({"field": field, "sign": sign, "xy": list(xy), "ok": ok})
+    return None if ok else "inject_failed"
+
+
+def _lcd_edit_nav_tap(env: dict, which: str) -> "Optional[str]":
+    st = _lcd_edit_page_state(env["ui"])
+    if not st["readable"]:
+        return "unreadable"
+    if st["keypad"]:
+        return "keypad"
+    xy = _lcd_edit_nav(st, which)
+    if xy is None:
+        return "absent"
+    ok = _lcd22_tap(env["ctx"], xy)
+    env["observed"].setdefault("taps", []).append({"nav": which, "xy": list(xy), "ok": ok})
+    return None if ok else "inject_failed"
+
+
+def _lcd_edit_tap_failure(env: dict, what: str, why: str, cid: str) -> CaseResult:
+    """A tap that could not be sent. A keypad means a PIN-locked panel (dismissed,
+    never typed into); anything else is INCONCLUSIVE with Apply NOT pressed."""
+    if why == "keypad":
+        env["observed"]["overlay_dismiss"] = _dismiss_lcd19_overlay(env["ctx"], env["ui"])
+        return CaseResult(Verdict.INCONCLUSIVE, observed=env["observed"], reason=(
+            f"a PIN keypad appeared during {what}; {cid} never types a PIN"))
+    return CaseResult(Verdict.INCONCLUSIVE, observed=env["observed"], reason=(
+        f"could not tap {what} ({why}); Apply was not pressed"))
+
+
+def _lcd_edit_apply(env: dict, cid: str) -> "Optional[CaseResult]":
+    """Single Apply click; None when sent, else a FAIL."""
+    apply = env["ui"].click_by_name("Apply")
+    env["observed"].setdefault("apply_clicks", []).append(apply.get("result"))
+    if apply.get("result") == "not_found":
+        env["observed"]["apply_by_coordinate"] = _lcd22_tap(env["ctx"], _LCD22_APPLY_XY)
+    elif apply.get("result") not in ("ok", "verdict_unknown"):
+        return CaseResult(Verdict.FAIL, observed=env["observed"],
+                          reason=f"click_by_name('Apply') returned {apply.get('result')!r}")
+    return None
+
+
+def _lcd_edit_wait_adopted(env: dict, want_seg: int, want_target: float) -> "tuple[Optional[dict], Optional[dict]]":
+    """Poll live status/content (bounded 10 s) until segment `want_seg` shows
+    `want_target`; records the run's own working_id the first time one exists."""
+    now, sleep = env["now"], env["sleep"]
+    status = content = None
+    deadline = now() + 10.0
+    while True:
+        status, content = _lcd22_read_live(env["client"], env["host"])
+        if env["state"].get("own_working_id") is None and status is not None:
+            wid = J._lcd_edit_wid(status)
+            if wid >= 0:
+                env["state"]["own_working_id"] = wid
+        segs = (content or {}).get("segments") or []
+        try:
+            landed = len(segs) > want_seg and abs(float(segs[want_seg].get("target_c", -1)) - want_target) \
+                <= J.LCD_EDIT_FIRING_TOL
+        except (TypeError, ValueError):
+            landed = False
+        if landed or now() >= deadline:
+            return status, content
+        sleep(0.5)
+
+
+def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
+    """Shared driver for LCD-23/24, mirroring _case_lcd22's structure:
+    gates -> pre-checks -> save+start slot 7 -> wait running -> wait for Edit
+    -> ONE Edit click (keypad checked first) -> page open -> body(env) ->
+    finally: stop, verify relays off, discard only our own working copy.
+
+    plan(ctx, zone_temp_c) -> (segments, orig_list, max_target_c) or a
+    CaseResult (INCONCLUSIVE, nothing started)."""
+    if ctx.get("allow_heat") is not True:
+        return CaseResult(Verdict.NOT_RUN, reason=f"allow_heat=False: {cid} starts a real low-temperature firing")
+    if ctx.get("lcd22_allow_heat") is not True:
+        return CaseResult(
+            Verdict.NOT_RUN,
+            reason=f"lcd_edit_heat=False: {cid} starts a real low-temperature firing "
+                   "and needs the separate lcd_edit_heat=True opt-in")
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx (needed for profile_live and relay reads)")
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
+    client = ctx.get("_profile_live_client")
+    if client is None:
+        from .. import profile_live_http_client as client
+    srv = _srv(ctx)
+
+    try:
+        live_before = client.get_live_status(host)
+        live_wid = int(live_before.get("working_id", -1))
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            f"could not read /api/profile/live before {cid} ({type(exc).__name__}); no action taken"))
+    if live_wid >= 0 or live_before.get("active") or live_before.get("pending_decision"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            "a live profile edit or decision is already pending "
+            f"(working_id={live_wid}); {cid} will not touch it; no action taken"),
+            observed={"live_status": live_before})
+    refusal_before = live_before.get("last_refusal")
+    before = _lcd22_exec_dict(srv)
+    if before is None or before["state_name"] not in ("idle", "done", "faulted"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            f"executor is not idle before {cid} (state={before['state_name'] if before else 'unreadable'}); "
+            "no action taken"), observed={"exec": before})
+    ok, why = _heat._capability_preflight_ok(ctx)
+    if not ok:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
+    temps = _heat._zone_temps(ctx)
+    if not temps:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no valid thermo reading to use as an ambient reference; no action taken")
+    zone_temp = temps.get(0, min(temps.values()))
+    planned = plan(ctx, zone_temp)
+    if isinstance(planned, CaseResult):
+        return planned
+    segments, orig, max_target = planned
+    if max_target > _LCD_EDIT_MAX_TARGET_C:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=(
+            f"zone temperature {zone_temp:.1f} C leaves no room under the {_LCD_EDIT_MAX_TARGET_C:.0f} C "
+            f"case ceiling; no action taken"))
+    ceiling_ok, ceiling_reason = _heat._check_zone_ceilings(ctx, _LCD_EDIT_ZONE_MASK, max_target)
+    if not ceiling_ok:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{ceiling_reason}; no action taken")
+
+    result: Optional[CaseResult] = None
+    started = False
+    observed: Dict[str, Any] = {"zone_temp_c": zone_temp, "orig": orig}
+    ui = srv._ui_test
+    now = ctx.get("_now", time.monotonic)
+    sleep = ctx.get("_sleep", time.sleep)
+    env = {"ctx": ctx, "srv": srv, "ui": ui, "client": client, "host": host, "now": now, "sleep": sleep,
+           "observed": observed, "state": {"own_working_id": None}, "refusal_before": refusal_before,
+           "orig": orig, "exec_before": None}
+    try:
+        try:
+            save = srv._profiles.save(_heat.BENCH_PROFILE_SLOT_ID, _heat.BENCH_PROFILE_NAME,
+                                      _LCD_EDIT_ZONE_MASK, segments)
+        except Exception as exc:  # noqa: BLE001
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.save raised {type(exc).__name__}: {exc}")
+            return result
+        started = True  # the slot may exist from here on: the finally tears it down
+        if not save.ok:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.save refused: {save.error}")
+            return result
+        try:
+            start = srv._profiles.start(_heat.BENCH_PROFILE_SLOT_ID)
+        except Exception as exc:  # noqa: BLE001
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.start raised {type(exc).__name__}: {exc}")
+            return result
+        if not start.ok:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.start refused: {start.error}")
+            return result
+
+        deadline = now() + 10.0
+        exec_before = _lcd22_exec_dict(srv)
+        while not exec_before or exec_before["state_name"] != "running":
+            if now() >= deadline:
+                break
+            sleep(0.5)
+            exec_before = _lcd22_exec_dict(srv)
+        observed["exec_before"] = exec_before
+        env["exec_before"] = exec_before
+        if not exec_before or exec_before["state_name"] != "running":
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="firing never reached running; nothing was edited", observed=observed)
+            return result
+
+        _wake_and_home(ctx)
+        edit_settle_log: list = []
+        edit_ready = _wait_for_home_settled(
+            ctx, ui, "Edit", min_wait_s=0.0, timeout_s=_LCD22_EDIT_WAIT_S, log=edit_settle_log)
+        observed["edit_settle_reads"] = edit_settle_log[-5:]
+        if not edit_ready:
+            last = edit_settle_log[-1] if edit_settle_log else {}
+            try:
+                page_now = ui.get_current_page()
+            except Exception:  # noqa: BLE001
+                page_now = None
+            result = CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+                f"'Edit' never became a visible, unobstructed tap target within {_LCD22_EDIT_WAIT_S:.0f} s "
+                f"of the firing reaching running (page={page_now!r}, last names={last.get('names')!r}); "
+                "no tap was sent"))
+            return result
+        # ONE Edit click (swallow retries only); NOT via _click_then_page: on a
+        # PIN-locked panel Edit raises the keypad while the page still reads
+        # "home" and a page-poll retry would tap digit keys/Cancel.
+        edit_click, _sw, _nf, _wb = _click_resolving_swallow(
+            ui, "Edit", max_not_found_retries=0, max_walk_busy_retries=0)
+        observed["edit_click"] = edit_click.get("result")
+        if edit_click.get("result") not in ("ok", "verdict_unknown"):
+            result = CaseResult(Verdict.FAIL, observed=observed, reason=(
+                f"click_by_name('Edit') returned {edit_click.get('result')!r} while the firing was running"))
+            return result
+        page_deadline = now() + _PAGE_POLL_TIMEOUT_S
+        while True:
+            names = _lcd19_overlay_names(ui)
+            if _is_keypad_names(names):
+                observed["overlay_dismiss"] = _dismiss_lcd19_overlay(ctx, ui)
+                result = CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+                    f"Edit raised the PIN keypad (panel is locked); {cid} never types a PIN"))
+                return result
+            if ui.get_current_page() == "edit_firing":
+                break
+            if now() >= page_deadline:
+                result = CaseResult(Verdict.FAIL, observed=observed, reason=(
+                    f"Edit was clicked but the page is {ui.get_current_page()!r}, not 'edit_firing'"))
+                return result
+            sleep(_PAGE_POLL_INTERVAL_S)
+        tap = _list_tap_targets_resolving_busy(ui)[0]
+        _remember_page_targets(ctx, "edit_firing", tap)
+
+        result = body(env)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result = CaseResult(Verdict.FAIL, reason=f"{cid} aborted by {type(exc).__name__}: {exc}", observed=dict(observed))
+        return result
+    finally:
+        if started:
+            try:
+                verified, details = _lcd22_cleanup(ctx, client, host, _heat, env["state"].get("own_working_id"))
+            except Exception as exc:  # noqa: BLE001
+                verified, details = False, {"cleanup_error": type(exc).__name__}
+            try:
+                _navigate_home(ui)
+            except Exception:  # noqa: BLE001
+                pass
+            if result is not None:
+                result.observed = dict(result.observed or {})
+                result.observed["cleanup"] = details
+                if not verified:
+                    prior = result.reason if result.verdict != Verdict.PASS else ""
+                    msg = (
+                        f"{cid} cleanup could not be verified "
+                        f"(exec_state={details.get('final_exec_state')}, working_id={details.get('final_working_id')}, "
+                        f"safety_relay_energized={details.get('final_energized')}, "
+                        f"zone_relays={details.get('final_zone_relays')}, discard={details.get('discard')}) -- "
+                        "use the hardware E-stop if the fixture is still heating"
+                    )
+                    result.reason = f"{prior}; also: {msg}" if prior else msg
+                    result.verdict = Verdict.FAIL
+
+
+def _lcd_edit_seg(target: float, ramp: float, dwell: float) -> dict:
+    return {"target_c": float(target), "ramp_c_per_hr": float(ramp), "dwell_min": float(dwell)}
+
+
+def _lcd_edit_pstep(ProfileSegment, seg: dict):
+    return ProfileSegment(target_c=seg["target_c"], ramp_c_per_hr=seg["ramp_c_per_hr"],
+                          dwell_min=int(seg["dwell_min"]))
+
+
+def _lcd23_plan(ctx: dict, zone_temp: float):
+    from .. import devices
+    base = float(math.floor(zone_temp))
+    orig = [
+        _lcd_edit_seg(base, _LCD_EDIT_RAMP_C_PER_HR, _LCD_EDIT_SEG0_DWELL_MIN),
+        _lcd_edit_seg(base + _LCD23_SEG1_OFFSET_C, _LCD_EDIT_RAMP_C_PER_HR, _LCD23_SEG1_DWELL_MIN),
+        _lcd_edit_seg(base + _LCD23_SEG2_OFFSET_C, _LCD_EDIT_RAMP_C_PER_HR, _LCD23_SEG2_DWELL_MIN),
+    ]
+    return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + _LCD23_SEG2_OFFSET_C
+
+
+def _lcd23_body(env: dict) -> CaseResult:
+    cid = "LCD-23"
+    observed, orig, srv = env["observed"], env["orig"], env["srv"]
+    client, host, ui = env["client"], env["host"], env["ui"]
+    now, sleep = env["now"], env["sleep"]
+
+    # Part 1: the page opens on the running segment (0); Next reaches segment
+    # 1 (future). target -, ramp +, ramp +, ramp -, dwell - => net target -5 C,
+    # ramp +5 C/hr, dwell -5 min.
+    expected = [dict(s) for s in orig]
+    expected[1] = _lcd_edit_seg(orig[1]["target_c"] - _LCD22_TARGET_STEP_C,
+                                orig[1]["ramp_c_per_hr"] + 5.0,
+                                orig[1]["dwell_min"] - _LCD22_DWELL_STEP_MIN)
+    observed["expected"] = expected
+    plan = [("nav", "next"), ("step", "target", "-"), ("step", "ramp", "+"), ("step", "ramp", "+"),
+            ("step", "ramp", "-"), ("step", "dwell", "-")]
+    for item in plan:
+        why = _lcd_edit_nav_tap(env, item[1]) if item[0] == "nav" else _lcd_edit_step(env, item[1], item[2])
+        if why:
+            return _lcd_edit_tap_failure(env, f"{item[0]} {item[1:]}", why, cid)
+    fail = _lcd_edit_apply(env, cid)
+    if fail:
+        return fail
+    status, content = _lcd_edit_wait_adopted(env, 1, expected[1]["target_c"])
+    exec_after = _lcd22_exec_dict(srv)
+    part1 = J.judge_lcd_edit_ramp_steppers(expected, status, content, exec_after,
+                                           refusal_before=env["refusal_before"])
+    part1.observed = dict(part1.observed or {})
+    part1.observed.update(observed)
+    if part1.verdict != Verdict.PASS:
+        part1.reason = f"stepper edit: {part1.reason}"
+        return part1
+    wid_before = J._lcd_edit_wid(status)
+
+    # Part 2: back to the RUNNING segment 0, make a stale edit there, wait for
+    # the firing to move on (segment 0 becomes 'already run'), then Apply.
+    # The candidate = the page's working copy = adopted + the segment-0 edit,
+    # which live_edit_check_window() must refuse on the LCD, before any save.
+    why = _lcd_edit_nav_tap(env, "prev")
+    if why:
+        return _lcd_edit_tap_failure(env, "Prev", why, cid)
+    ex_now = _lcd22_exec_dict(srv)
+    if not ex_now or ex_now.get("segment_index") != 0 or ex_now.get("state_name") != "running":
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            f"segment 0 was no longer the running segment when the stale edit was due ({ex_now!r}); "
+            "refusal path not exercised"))
+    why = _lcd_edit_step(env, "target", "+")
+    if why:
+        return _lcd_edit_tap_failure(env, "segment-0 target +", why, cid)
+    deadline = now() + _LCD23_ADVANCE_WAIT_S
+    advanced = None
+    while True:
+        ex_now = _lcd22_exec_dict(srv)
+        if ex_now and ex_now.get("state_name") == "running" and (ex_now.get("segment_index") or 0) >= 1:
+            advanced = ex_now
+            break
+        if not ex_now or ex_now.get("state_name") != "running" or now() >= deadline:
+            break
+        sleep(1.0)
+    observed["advanced"] = advanced
+    if advanced is None:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            f"the firing did not leave segment 0 within {_LCD23_ADVANCE_WAIT_S:.0f} s "
+            f"(exec={ex_now!r}); the finished-segment refusal was not exercised"))
+    # Wait (bounded) for the page's 1 s poll to lock segment 0's steppers.
+    locked_seen = False
+    lock_deadline = now() + _LCD_EDIT_ENDED_WAIT_S
+    while True:
+        st = _lcd_edit_page_state(ui)
+        if st.get("keypad"):
+            return _lcd_edit_tap_failure(env, "the locked-segment check", "keypad", cid)
+        if st.get("readable") and all(st["steppers"][f] is None for f in ("target", "ramp", "dwell")):
+            locked_seen = True
+            break
+        if now() >= lock_deadline:
+            break
+        sleep(0.5)
+    observed["locked_seen"] = locked_seen
+    fail = _lcd_edit_apply(env, cid)
+    if fail:
+        return fail
+    sleep(2.0)
+    status_after, content_after = _lcd22_read_live(client, host)
+    exec_after2 = _lcd22_exec_dict(srv)
+
+    # HTTP refusals against the same running firing.
+    def _post(segs):
+        try:
+            client.edit_live(host, (content_after or {}).get("name") or "Edit refusal", _LCD_EDIT_ZONE_MASK,
+                             [dict(kind=0, target_c=s["target_c"], ramp_c_per_hr=s["ramp_c_per_hr"],
+                                   dwell_min=s["dwell_min"]) for s in segs])
+            return (None, "accepted")
+        except Exception as exc:  # noqa: BLE001
+            return (getattr(exc, "status", None), str(getattr(exc, "detail", "") or exc)[:120])
+    window_segs = [dict(s) for s in expected]
+    window_segs[0] = dict(window_segs[0], target_c=window_segs[0]["target_c"] + _LCD22_TARGET_STEP_C)
+    bound_segs = [dict(s) for s in expected]
+    bound_segs[2] = dict(bound_segs[2], target_c=_LCD_EDIT_BOUND_TARGET_C)
+    http_window = _post(window_segs)
+    http_bound = _post(bound_segs)
+    _s, content_http = _lcd22_read_live(client, host)
+    result = J.judge_lcd_edit_refusal(expected, wid_before, status_after, content_after, exec_after2,
+                                      env["refusal_before"], locked_seen, http_window, http_bound, content_http)
+    result.observed = dict(result.observed or {})
+    result.observed.update(observed)
+    return result
+
+
+def _case_lcd23(ctx: dict) -> CaseResult:
+    return _lcd_edit_run(ctx, "LCD-23", _lcd23_plan, _lcd23_body)
+
+
+def _lcd24_plan(ctx: dict, zone_temp: float):
+    from .. import devices
+    base = float(math.floor(zone_temp))
+    orig = [
+        _lcd_edit_seg(base, _LCD_EDIT_RAMP_C_PER_HR, _LCD_EDIT_SEG0_DWELL_MIN),
+        _lcd_edit_seg(base, _LCD_EDIT_RAMP_C_PER_HR, 0),
+    ]
+    return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + 5.0
+
+
+def _lcd24_body(env: dict) -> CaseResult:
+    cid = "LCD-24"
+    observed, orig, srv = env["observed"], env["orig"], env["srv"]
+    client, host, ui = env["client"], env["host"], env["ui"]
+    now, sleep = env["now"], env["sleep"]
+
+    expected = [dict(s) for s in orig]
+    expected[1] = dict(orig[1], ramp_c_per_hr=orig[1]["ramp_c_per_hr"] + 5.0)
+    observed["expected"] = expected
+    for item in (("nav", "next"), ("step", "ramp", "+")):
+        why = _lcd_edit_nav_tap(env, item[1]) if item[0] == "nav" else _lcd_edit_step(env, item[1], item[2])
+        if why:
+            return _lcd_edit_tap_failure(env, f"{item[0]} {item[1:]}", why, cid)
+    fail = _lcd_edit_apply(env, cid)
+    if fail:
+        return fail
+    status, content = _lcd_edit_wait_adopted(env, 1, expected[1]["target_c"])
+    # Segment 1's target is unchanged, so "landed" above is trivially true;
+    # wait for the ramp itself before judging.
+    deadline = now() + 10.0
+    while True:
+        segs = (content or {}).get("segments") or []
+        try:
+            if len(segs) > 1 and abs(float(segs[1].get("ramp_c_per_hr")) - expected[1]["ramp_c_per_hr"]) \
+                    <= J.LCD_EDIT_FIRING_TOL:
+                break
+        except (TypeError, ValueError):
+            pass
+        if now() >= deadline:
+            break
+        sleep(0.5)
+        status, content = _lcd22_read_live(client, host)
+    part1 = J.judge_lcd_edit_ramp_steppers(expected, status, content, _lcd22_exec_dict(srv),
+                                           refusal_before=env["refusal_before"])
+    part1.observed = dict(part1.observed or {})
+    part1.observed.update(observed)
+    if part1.verdict != Verdict.PASS:
+        part1.reason = f"adopting the edit: {part1.reason}"
+        return part1
+    own_wid = J._lcd_edit_wid(status)
+
+    # Let the firing end on its own (segment 0's one-minute dwell, then a
+    # zero-dwell segment at the ambient temperature).
+    deadline = now() + _LCD24_END_WAIT_S
+    end_state = None
+    while True:
+        ex = _lcd22_exec_dict(srv)
+        st_name = ex["state_name"] if ex else None
+        if st_name in ("done", "idle", "faulted"):
+            end_state = st_name
+            break
+        if now() >= deadline:
+            break
+        sleep(1.0)
+    observed["end_state"] = end_state
+    if end_state is None:
+        return J.judge_lcd_edit_firing_end(expected, own_wid, None, None, None, None, None, None)
+    # Give the page's 1 s poll time to notice, then read the panel.
+    lcd_ended: "Optional[bool]" = None
+    ended_deadline = now() + _LCD_EDIT_ENDED_WAIT_S
+    while True:
+        st = _lcd_edit_page_state(ui)
+        if st.get("keypad"):
+            return _lcd_edit_tap_failure(env, "the ended-state check", "keypad", cid)
+        if st.get("readable"):
+            lcd_ended = (not st["apply"]) and all(st["steppers"][f] is None for f in ("target", "ramp", "dwell"))
+            if lcd_ended:
+                break
+        if now() >= ended_deadline:
+            break
+        sleep(0.5)
+    observed["lcd_ended"] = lcd_ended
+    status_ended, content_ended = _lcd22_read_live(client, host)
+    discard_error = None
+    try:
+        client.decide_live_discard(host)
+    except Exception as exc:  # noqa: BLE001
+        discard_error = f"{type(exc).__name__}:{getattr(exc, 'status', None)}"
+    try:
+        status_discarded = client.get_live_status(host)
+    except Exception:  # noqa: BLE001
+        status_discarded = None
+    result = J.judge_lcd_edit_firing_end(expected, own_wid, end_state, lcd_ended, status_ended, content_ended,
+                                         discard_error, status_discarded)
+    result.observed = dict(result.observed or {})
+    result.observed.update(observed)
+    return result
+
+
+def _case_lcd24(ctx: dict) -> CaseResult:
+    return _lcd_edit_run(ctx, "LCD-24", _lcd24_plan, _lcd24_body)
+
+
 _CASE_FUNCS = {
     "LCD-01": _case_lcd01,
     "LCD-02": _case_lcd02,
@@ -4283,6 +4871,8 @@ _CASE_FUNCS = {
     "LCD-19": _case_lcd19,
     "LCD-21": _case_lcd21,
     "LCD-22": _case_lcd22,
+    "LCD-23": _case_lcd23,
+    "LCD-24": _case_lcd24,
 }
 
 for _cid, _fn in _CASE_FUNCS.items():

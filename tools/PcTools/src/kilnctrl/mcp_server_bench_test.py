@@ -39,8 +39,9 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     2026-09-30) -- LCD-19 is not spec.heat-marked, so `allow_heat` alone
     never gates it; both flags must be true for that firing to start.
     `lcd_edit_heat=True` is the same kind of separate, default-False
-    opt-in for LCD-22 (Edit firing live edit), which starts its own
-    low-temperature 2-segment firing. LCD-22 is spec.heat-marked, so
+    opt-in for LCD-22/23/24 (Edit firing live edit, steppers and
+    refusals, end-of-firing), each of which starts its own low-temperature
+    firing. They are spec.heat-marked, so
     `allow_heat=False` skips it, but `allow_heat` defaults True, so
     without `lcd_edit_heat=True` it returns NOT_RUN naming that parameter.
 

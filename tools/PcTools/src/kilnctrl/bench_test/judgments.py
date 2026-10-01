@@ -1064,6 +1064,137 @@ def judge_lcd_edit_firing(orig: dict, expected: dict, status: "dict | None",
 
 
 # ---------------------------------------------------------------------------
+def _lcd_edit_segs_problems(content, want: "list[dict]", label: str) -> "list[str]":
+    """Compare the live working copy's segments with `want` (a list of
+    {target_c, ramp_c_per_hr, dwell_min}) within LCD_EDIT_FIRING_TOL."""
+    segs = (content or {}).get("segments") or []
+    if len(segs) != len(want):
+        return [f"{label}: working copy has {len(segs)} segment(s), expected {len(want)}"]
+    out = []
+    for i, (got, exp) in enumerate(zip(segs, want)):
+        for key in ("target_c", "ramp_c_per_hr", "dwell_min"):
+            try:
+                ok = abs(float(got.get(key)) - float(exp[key])) <= LCD_EDIT_FIRING_TOL
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                out.append(f"{label}: segment {i + 1} {key} is {got.get(key)!r}, expected {exp[key]}")
+    return out
+
+
+def _lcd_edit_wid(status) -> int:
+    try:
+        return int((status or {}).get("working_id", -1))
+    except (TypeError, ValueError):
+        return -1
+
+
+def judge_lcd_edit_ramp_steppers(expected: "list[dict]", status: "dict | None", content: "dict | None",
+                                 exec_after: "dict | None", refusal_before: "str | None" = None) -> CaseResult:
+    """LCD-23 part 1: after Next + the minus/plus steppers on a FUTURE segment
+    (target -, ramp +, ramp +, ramp -, dwell -) and Apply, the live working
+    copy must hold exactly `expected` (every field of every segment: the ramp
+    net +5 C/hr, target -5 C, dwell -5 min on segment 2, segment 1 untouched),
+    with no executor refusal and the firing still running."""
+    if status is None or content is None:
+        return CaseResult(Verdict.INCONCLUSIVE, observed={"status": status, "content": content},
+                          reason="could not read the live profile status/content after Apply")
+    problems = []
+    if not status.get("active") or _lcd_edit_wid(status) < 0:
+        problems.append("change not picked up: no live working copy exists after Apply")
+    problems += _lcd_edit_segs_problems(content, expected, "after Apply")
+    if status.get("last_refusal") and status.get("last_refusal") != refusal_before:
+        problems.append(f"executor refused the edit (last_refusal={status.get('last_refusal')!r})")
+    if not exec_after or exec_after.get("state_name") != "running":
+        problems.append(f"executor is not running after Apply ({(exec_after or {}).get('state_name')!r})")
+    observed = {"status": status, "content": content, "exec_after": exec_after, "expected": expected}
+    if problems:
+        return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_edit_refusal(adopted: "list[dict]", wid_before: int, status_after: "dict | None",
+                           content_after: "dict | None", exec_after: "dict | None",
+                           refusal_before: "str | None", locked_seen: bool,
+                           http_window: "tuple | None", http_bound: "tuple | None",
+                           content_after_http: "dict | None") -> CaseResult:
+    """LCD-23 part 2: an edit the firmware must refuse. The finished segment's
+    steppers must vanish from the Edit page (locked_seen), the LCD Apply of a
+    stale edit to that segment must adopt NOTHING (working copy still equals
+    `adopted`, same working_id, no executor refusal record -- the LCD's own
+    window check turned it away before the executor saw it), the HTTP window
+    violation must answer 409 and the HTTP bound violation 400 (each a
+    (status, detail) tuple, status None when the call was accepted), and the
+    working copy must still equal `adopted` afterwards."""
+    if status_after is None or content_after is None or content_after_http is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="could not read the live profile after the refused edits",
+                          observed={"status_after": status_after, "content_after": content_after})
+    problems = []
+    if not locked_seen:
+        problems.append("the finished segment's steppers were still tappable on the Edit page (not locked)")
+    problems += _lcd_edit_segs_problems(content_after, adopted, "after the LCD Apply of a finished-segment edit")
+    if _lcd_edit_wid(status_after) != wid_before:
+        problems.append(f"working_id changed across the refused edit ({wid_before} -> {_lcd_edit_wid(status_after)})")
+    if status_after.get("last_refusal") != refusal_before:
+        problems.append(f"an edit reached the executor and was refused there "
+                        f"(last_refusal={status_after.get('last_refusal')!r}); the LCD should refuse it first")
+    if not exec_after or exec_after.get("state_name") != "running":
+        problems.append(f"executor is not running after the refused edits ({(exec_after or {}).get('state_name')!r})")
+    for label, got, want in (("window violation", http_window, 409), ("bound violation", http_bound, 400)):
+        status = got[0] if got else None
+        if status != want:
+            problems.append(f"HTTP {label} answered {status!r}, expected {want} ({got[1] if got else 'no result'})")
+    problems += _lcd_edit_segs_problems(content_after_http, adopted, "after the HTTP refusals")
+    observed = {"status_after": status_after, "content_after": content_after, "exec_after": exec_after,
+                "locked_seen": locked_seen, "http_window": http_window, "http_bound": http_bound}
+    if problems:
+        return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_lcd_edit_firing_end(adopted: "list[dict]", own_wid: int, end_state: "str | None",
+                              lcd_ended: "bool | None", status_ended: "dict | None",
+                              content_ended: "dict | None", discard_error: "str | None",
+                              status_discarded: "dict | None") -> CaseResult:
+    """LCD-24: a firing with an adopted live edit ends on its own (state done).
+    The Edit page, left open, must show the ended state (Apply and steppers
+    gone -- `lcd_ended`); the live status must then report pending_decision
+    with the same working copy; the LCD has NO decision UI (owner decision:
+    "leave the working copy's end-of-run decision to the web"), so the
+    decision is made over HTTP: Discard must clear the working copy."""
+    if end_state is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="the firing did not end within the bounded wait",
+                          observed={})
+    if status_ended is None or content_ended is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="could not read the live profile after the firing ended",
+                          observed={"end_state": end_state})
+    problems = []
+    if end_state != "done":
+        problems.append(f"firing ended as {end_state!r}, expected 'done'")
+    if lcd_ended is not True:
+        problems.append("the Edit page still offered Apply/steppers after the firing ended"
+                        if lcd_ended is False else "could not confirm the Edit page's ended state")
+    if not status_ended.get("pending_decision"):
+        problems.append("live status shows no pending_decision after the firing with an edit ended")
+    if _lcd_edit_wid(status_ended) != own_wid:
+        problems.append(f"working_id after the end is {_lcd_edit_wid(status_ended)}, expected {own_wid}")
+    problems += _lcd_edit_segs_problems(content_ended, adopted, "after the firing ended")
+    if discard_error:
+        problems.append(f"decide discard failed: {discard_error}")
+    elif status_discarded is None:
+        problems.append("could not read live status after discard")
+    else:
+        if _lcd_edit_wid(status_discarded) >= 0:
+            problems.append("a working copy remains after decide discard")
+        if status_discarded.get("pending_decision"):
+            problems.append("pending_decision still true after decide discard")
+    observed = {"end_state": end_state, "lcd_ended": lcd_ended, "status_ended": status_ended,
+                "content_ended": content_ended, "status_discarded": status_discarded}
+    if problems:
+        return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
 # LCD-02/03/04/09/14/16/19 (Wave 2, plan doc §3.8/§8). Same split as the
 # Wave 1c block above: these take already-fetched plain data and return a
 # CaseResult, with no I/O of their own -- cases_lcd.py does the fetching
