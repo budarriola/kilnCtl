@@ -2021,6 +2021,10 @@ class FakeTouchAdvancesDiag:
 
     def inject(self, x, y, pressed):
         self.injected.append((x, y, pressed))
+        if not pressed and abs(x - (180 + _DIAG_PITCH)) < 1 and abs(y - 26) < 1:
+            if self._ui.step > 0:
+                self._ui.step -= 1  # Prev
+            return
         if not pressed and abs(x - _DIAG_NEXT["cx"]) < 1 and abs(y - _DIAG_NEXT["cy"]) < 1:
             if self._ui._swallow_step == self._ui.step and self._ui.step not in self._ui._swallowed_once:
                 self._ui._swallowed_once.add(self._ui.step)
@@ -2092,6 +2096,29 @@ class Lcd16Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(result.observed.get("pages_paged"), 7)
         self.assertEqual(result.observed.get("crash_report_step"), 7)
+
+    def test_starts_on_last_subpage_rewinds_then_passes(self):
+        # Pages are never torn down, so a prior run leaves the diagnostics
+        # screen on its last sub-page; the case must page back to the first
+        # before counting hops (bench run 20261001T172420Z: 0/7 hops).
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        ui.step = 7
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("pages_paged"), 7)
+        self.assertEqual(result.observed.get("rewind_prev_taps"), 7)
+
+    def test_starts_mid_subpage_rewinds_then_passes(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        ui.step = 3
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("rewind_prev_taps"), 3)
+
+    def test_clean_start_sends_no_prev_taps(self):
+        ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertNotIn("rewind_prev_taps", result.observed)
 
     def test_relay_life_reset_still_present_fails(self):
         # Relay Life's own Reset control was fully removed

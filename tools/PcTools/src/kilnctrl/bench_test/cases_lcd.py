@@ -1997,17 +1997,87 @@ def _diagnostics_next_target(targets: "list[dict]") -> Optional[dict]:
         return None
     if pitch <= 0:
         return None
-    next_cx = home_cx + 2 * pitch
+    return _diagnostics_topbar_glyph(targets, home_cx + 2 * pitch, home_cy, pitch)
+
+
+def _diagnostics_topbar_glyph(targets: "list[dict]", want_cx: float,
+                              want_cy: float, pitch: float) -> Optional[dict]:
     for t in targets:
         if not _is_glyph_name(t.get("name")) or t.get("hidden"):
             continue
         try:
-            if (abs(float(t.get("cx", -1000)) - next_cx) <= pitch / 4
-                    and abs(float(t.get("cy", -1000)) - home_cy) <= pitch / 4):
+            if (abs(float(t.get("cx", -1000)) - want_cx) <= pitch / 4
+                    and abs(float(t.get("cy", -1000)) - want_cy) <= pitch / 4):
                 return t
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _diagnostics_prev_target(targets: "list[dict]") -> Optional[dict]:
+    """Prev icon, one pitch right of Home (see _diagnostics_next_target()).
+    None when Prev is disabled (first sub-page) or the anchors are missing."""
+    back = _find(targets, "back")
+    home = _find(targets, "home")
+    if back is None or home is None:
+        return None
+    try:
+        pitch = float(home["cx"]) - float(back["cx"])
+        home_cx = float(home["cx"])
+        home_cy = float(home["cy"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if pitch <= 0:
+        return None
+    return _diagnostics_topbar_glyph(targets, home_cx + pitch, home_cy, pitch)
+
+
+def _rewind_diagnostics_to_first(ctx: dict, ui, tap: dict,
+                                 timeout_s: "Optional[float]" = None
+                                 ) -> "tuple[dict, int]":
+    """Page the diagnostics screen back to sub-page 1 before LCD-16 counts
+    forward hops. kiln_ui pages are never torn down (kiln_ui.h), so
+    ui_page_diagnostics.c's s_page_index survives leaving the page: a
+    previous LCD-16 run (or a human) that left it on the last sub-page makes
+    the next visit open there, Next is disabled, and the case read 0/7 hops
+    (run 20261001T172420Z_lcd_lcd22run; the 155811Z run passed only because
+    the board had just rebooted). Taps Prev (raw touch, same as Next) until
+    Prev is gone, bounded by the page count; a missing-anchor read is
+    re-polled, never taken as "at page 1". Returns (latest read, taps sent).
+    Best effort: any failure just returns what it has and LCD-16 judges."""
+    if timeout_s is None:
+        timeout_s = _PAGE_POLL_TIMEOUT_S
+    touch = getattr(_srv(ctx), "_touch", None)
+    taps = 0
+    if touch is None:
+        return tap, taps
+    for _ in range(J.DIAGNOSTICS_PAGE_COUNT):
+        targets = tap.get("targets", [])
+        prev = _diagnostics_prev_target(targets)
+        if prev is None:
+            if _find(targets, "back") is not None and _find(targets, "home") is not None:
+                break  # anchors present, no Prev: first sub-page
+            start = time.monotonic()
+            while prev is None and time.monotonic() - start < timeout_s:
+                time.sleep(_PAGE_POLL_INTERVAL_S)
+                tap = ui.list_tap_targets()
+                targets = tap.get("targets", [])
+                prev = _diagnostics_prev_target(targets)
+                if prev is None and _find(targets, "back") is not None \
+                        and _find(targets, "home") is not None:
+                    break
+            if prev is None:
+                break
+        try:
+            x, y = float(prev["cx"]), float(prev["cy"])
+            touch.inject(x, y, True)
+            touch.inject(x, y, False)
+        except Exception:
+            break
+        taps += 1
+        time.sleep(_PAGE_POLL_INTERVAL_S)
+        tap = ui.list_tap_targets()
+    return tap, taps
 
 
 def _targets_signature(targets: "list[dict]") -> tuple:
@@ -2209,6 +2279,7 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         walk_busy_retries = config_walk_busy_retries + diag_walk_busy_retries
         first_tap, first_tap_busy_retries = _list_tap_targets_resolving_busy(ui)
         walk_busy_retries += first_tap_busy_retries
+        first_tap, rewind_taps = _rewind_diagnostics_to_first(ctx, ui, first_tap)
         targets = first_tap.get("targets", [])
         # The LIST_TAP_TARGETS reply carries a `truncated` flag (253 B wire
         # cap, see kiln_ui.c's log_all_tap_targets()); a truncated read can
@@ -2273,6 +2344,8 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         observed = dict(result.observed or {})
         observed["retried_hops"] = list(retried_hops)
         observed["tap_list_truncated_steps"] = list(truncated_steps)
+        if rewind_taps:
+            observed["rewind_prev_taps"] = rewind_taps
         if swallow_retries:
             observed["swallow_retries"] = swallow_retries
         if not_found_retries:
