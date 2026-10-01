@@ -227,7 +227,19 @@ class _Clock:
         self.t += max(s, 0.01)
 
 
-def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4", edit_heat=True):
+def _default_http(board):
+    """/api/profile_exec lists only ACTIVE zones: [] once the executor is not
+    running (a stopped executor clears every zone's active flag)."""
+    def get(h, p):
+        if p != "/api/profile_exec":
+            return 404, {}
+        if board.exec_state in ("running", "paused") or board.zone_relay_on:
+            return 200, {"zones": [{"zone": 0, "relay_on": board.zone_relay_on}]}
+        return 200, {"zones": []}
+    return get
+
+
+def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4", edit_heat=True, http=None):
     clock = _Clock()
     srv = SimpleNamespace(
         _ui_test=FakeUi(board), _profiles=FakeProfiles(board), _touch=FakeTouch(board),
@@ -241,8 +253,7 @@ def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4", edit_heat=True
         "_profile_live_client": FakeLiveClient(board),
         "capability_preflight_run": lambda *_a, **_k: SimpleNamespace(ok=True),
         "_get_zones_config": lambda h: {"zones": []},
-        "_http_get_json": lambda h, p: (200, {"zones": [{"zone": 0, "relay_on": board.zone_relay_on}]})
-        if p == "/api/profile_exec" else (404, {}),
+        "_http_get_json": http or _default_http(board),
     }
     with mock.patch("kilnctrl.dashboard_http_client.get_status", side_effect=lambda h: dict(
             safety_relay_energized=board.relays_energized)):
@@ -327,6 +338,23 @@ class CleanupOwnershipTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("cleanup could not be verified", result.reason)
         self.assertIn("not_ours", result.reason)
+
+    def test_idle_with_no_listed_zones_verifies_and_passes(self):
+        board = FakeBoard()
+        result, _ = _run(board)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["cleanup"]["final_zone_relays"], {})
+
+    def test_unreadable_profile_exec_forces_fail(self):
+        board = FakeBoard()
+        result, _ = _run(board, http=lambda h, p: (500, {}))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("cleanup could not be verified", result.reason)
+
+    def test_listed_zone_without_boolean_relay_forces_fail(self):
+        board = FakeBoard()
+        result, _ = _run(board, http=lambda h, p: (200, {"zones": [{"zone": 0}]}))
+        self.assertEqual(result.verdict, Verdict.FAIL)
 
     def test_zone_relay_still_on_forces_fail(self):
         board = FakeBoard(zone_relay_on=True)

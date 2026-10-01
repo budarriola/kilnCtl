@@ -3843,17 +3843,31 @@ def _lcd22_read_live(client, host: str) -> "tuple[Optional[dict], Optional[dict]
 
 
 def _lcd22_zone_relays(ctx: dict, heat) -> "Optional[dict]":
-    """{zone: relay_on} from /api/profile_exec, or None when it cannot be read
-    (no zones, or any zone without a boolean relay_on) -- never a guess."""
+    """{zone: relay_on} from /api/profile_exec; {} when the read succeeded and
+    lists no zones; None when it cannot be read or a listed zone lacks a
+    boolean relay_on -- never a guess.
+
+    /api/profile_exec only lists ACTIVE zones (dashboard_json.c skips
+    inactive ones) and a stopped executor clears every zone's active flag, so
+    after a stop an empty list is the normal, healthy shape. It means "all
+    zone relays off" only together with an idle/done/faulted executor (Halt
+    forces every relay off before IDLE); the caller's verify loop already
+    requires that state before it consults this."""
+    host = ctx.get("host")
+    if not host:
+        return None
+    get_json = ctx.get("_http_get_json", heat._http_get_json)
     try:
-        zones = (heat._zone_diag_snapshot(ctx) or {}).get("zones") or {}
+        status, body = get_json(host, "/api/profile_exec")
     except Exception:  # noqa: BLE001
         return None
-    if not zones:
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get("zones"), list):
         return None
-    relays = {idx: z.get("relay_on") for idx, z in zones.items()}
-    if any(not isinstance(v, bool) for v in relays.values()):
-        return None
+    relays = {}
+    for i, z in enumerate(body["zones"]):
+        if not isinstance(z, dict) or not isinstance(z.get("relay_on"), bool):
+            return None
+        relays[z.get("zone", z.get("index", i))] = z["relay_on"]
     return relays
 
 
@@ -4041,7 +4055,7 @@ def _case_lcd22(ctx: dict) -> CaseResult:
             result = CaseResult(Verdict.FAIL, observed=observed, reason=(
                 f"click_by_name('Edit') returned {edit_click.get('result')!r} while the firing was running"))
             return result
-        page_deadline = time.monotonic() + _PAGE_POLL_TIMEOUT_S
+        page_deadline = now() + _PAGE_POLL_TIMEOUT_S
         while True:
             names = _lcd19_overlay_names(ui)
             if _is_keypad_names(names):
@@ -4051,11 +4065,11 @@ def _case_lcd22(ctx: dict) -> CaseResult:
                 return result
             if ui.get_current_page() == "edit_firing":
                 break
-            if time.monotonic() >= page_deadline:
+            if now() >= page_deadline:
                 result = CaseResult(Verdict.FAIL, observed=observed, reason=(
                     f"Edit was clicked but the page is {ui.get_current_page()!r}, not 'edit_firing'"))
                 return result
-            time.sleep(_PAGE_POLL_INTERVAL_S)
+            sleep(_PAGE_POLL_INTERVAL_S)
         tap = _list_tap_targets_resolving_busy(ui)[0]
         _remember_page_targets(ctx, "edit_firing", tap)
 
