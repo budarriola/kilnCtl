@@ -2607,3 +2607,12 @@ no trip, crash report acknowledged, no profile, uptime 3432 s. Run-level gate pa
 - After the run: link up, trip none, uptime 22 s (reset_reason 'software (esp_restart)'), Pico not
   reported armed (60 s post-reboot grace, expected), no crash banner. Trip before: none; after: none;
   `safety_clear_trip()` not called.
+
+## 2026-10-01 -- first live use: network_get_ip_config and debug_reset verify (bench, COM14, 192.168.1.156)
+
+Server fresh at 57a3abb1; board FW eb83c1ac (clean, built 2026-10-01 01:49:28Z).
+
+- Pre-checks: safety_get_status needed `connect()` first (the serial port was not open: "no serial port open - connect first"); after it, link up, armed, not tripped. Profile executor state=0 (idle). get_readiness: safety_trip ok, crash_report ok (acknowledged), recovery_mode ok. get_heap_status uptime 29698 s.
+- network_get_ip_config, called twice with no host: identical both times, `ip_mode='dhcp' sta_connected=True sta_ip='192.168.1.156' static fields: empty (DHCP) (host=192.168.1.156)`. It used the UART-reported STA IP. wifi_get_status agreed (mode=home, connected, sta_ip 192.168.1.156). No divergence, no error. network_set_ip_config was not called.
+- debug_reset(peer="esp") once, defaults: reset OK; HTTP answered at 192.168.1.156 after 23.2 s (boot_count=1 persisted_count=0 recovery_mode=False); UART link answered after 20.0 s; no WARNING. history.jsonl last line agrees (errors list holds the early-poll timeouts at 192.168.1.156 and 192.168.4.1; the AP address never answered). This is slower than the tool doc's "5-10 s" estimate.
+- After: link up, armed, no trip latched, so safety_clear_trip was not needed. get_heap_status uptime 23 s, reset_reason='software (esp_restart)' (after a JTAG reset; shown as reported).
