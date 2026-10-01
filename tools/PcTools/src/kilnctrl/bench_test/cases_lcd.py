@@ -858,6 +858,15 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
     # 'verdict_unknown' (the press was injected; only its swallow verdict
     # timed out) is judged by the target-set change below exactly like 'ok'
     # -- never a pass on its own, never a hard not_found FAIL.
+    if click.get("result") == "walk_busy":
+        # 2026-09-30: the walk dispatch itself timed out (KILN_UI_CLICK_
+        # WALK_BUSY), distinct from a completed walk that found no match --
+        # same lvgl_port_task race _click_resolving_swallow() retries for
+        # _click_then_page(). One bounded retry here too, before falling
+        # through to the same not-ok handling below (which now labels a
+        # still-busy result as "walk_busy", not "not_found").
+        time.sleep(_ENTER_PIN_RETRY_POLL_S)
+        click = ui.click_by_name(name)
     if click.get("result") not in ("ok", "verdict_unknown"):
         if click.get("result") == "inject_failed":
             attribution = "inject_failed"
@@ -865,6 +874,8 @@ def _click_then_targets_change(ui, name: str, prev_names: "set",
             # 2026-09-25: the target WAS found, but its reported centre lies
             # off the panel -- distinct from a genuinely absent target.
             attribution = "offscreen"
+        elif click.get("result") == "walk_busy":
+            attribution = "walk_busy"
         else:
             attribution = "not_found"
         return (
@@ -1850,7 +1861,8 @@ def _case_lcd14(ctx: dict) -> CaseResult:
         swallow_retries += config_swallow_retries
         not_found_retries += config_not_found_retries
         walk_busy_retries += config_walk_busy_retries
-        tap = ui.list_tap_targets()
+        tap, list_busy_retries = _list_tap_targets_resolving_busy(ui)
+        walk_busy_retries += list_busy_retries
         _remember_page_targets(ctx, "temperature", tap)
         thermo_error: Optional[str] = None
         try:
@@ -2195,7 +2207,8 @@ def _case_lcd16(ctx: dict) -> CaseResult:
         swallow_retries = config_swallow_retries + diag_swallow_retries
         not_found_retries = config_not_found_retries + diag_not_found_retries
         walk_busy_retries = config_walk_busy_retries + diag_walk_busy_retries
-        first_tap = ui.list_tap_targets()
+        first_tap, first_tap_busy_retries = _list_tap_targets_resolving_busy(ui)
+        walk_busy_retries += first_tap_busy_retries
         targets = first_tap.get("targets", [])
         # The LIST_TAP_TARGETS reply carries a `truncated` flag (253 B wire
         # cap, see kiln_ui.c's log_all_tap_targets()); a truncated read can
@@ -2790,21 +2803,28 @@ _KEYPAD_DIGIT_NAMES = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
 
 def _entry_all_digits_not_found(entry: Optional[Dict[str, Any]]) -> bool:
     """True only when every digit click AND the trailing "OK" click from
-    :meth:`UiTestClient.enter_pin` reported "not_found" -- the shape seen on
-    2026-09-30 (20260930T082643Z_lcd/082657Z_lcd) when every click landed
-    inside the 300ms UI_WALK_WAIT_TIMEOUT_MS busy window. Recorded as its
-    own `observed` marker so this specific "every click missed" shape is
-    distinguishable from a partial/mixed not_found without re-running
-    against the board -- see :func:`_entry_result_summary`."""
+    :meth:`UiTestClient.enter_pin` reported "not_found" OR "walk_busy" -- the
+    shape seen on 2026-09-30 (20260930T082643Z_lcd/082657Z_lcd) when every
+    click landed inside the 300ms UI_WALK_WAIT_TIMEOUT_MS busy window.
+    "walk_busy" is accepted here too (2026-09-30 follow-up): enter_pin()
+    already retries a "not_found"/"walk_busy" click once, but a click that
+    is STILL busy after that one retry is recorded in `digit_results`/
+    `ok_result` as "walk_busy", not "not_found" -- the exact same
+    exhausted-busy-window shape this marker exists to name, just reported
+    under its own, more precise result string rather than folded into
+    "not_found". Recorded as its own `observed` marker so this specific
+    "every click missed" shape is distinguishable from a partial/mixed
+    not_found without re-running against the board -- see
+    :func:`_entry_result_summary`."""
     if not entry:
         return False
     digit_results = entry.get("digit_results") or []
     if not digit_results:
         return False
-    if not all(d.get("result") == "not_found" for d in digit_results):
+    if not all(d.get("result") in ("not_found", "walk_busy") for d in digit_results):
         return False
     ok_result = entry.get("ok_result") or {}
-    return ok_result.get("result") == "not_found"
+    return ok_result.get("result") in ("not_found", "walk_busy")
 
 
 def _dots_have_cleared(names: Optional[set]) -> bool:

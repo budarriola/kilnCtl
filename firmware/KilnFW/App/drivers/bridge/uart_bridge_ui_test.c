@@ -93,10 +93,16 @@ static void ui_test_bridge_task(void *arg)
                  * list back, not a fire-and-forget dump, hence the new
                  * bounded-wait dispatcher instead of reusing that one. A
                  * dispatch timeout (lvgl_port_task itself wedged or merely
-                 * behind) reports the same way a genuinely truncated walk
-                 * would -- count 0, truncated true -- rather than a distinct
-                 * wire shape; see lvgl_port_collect_tap_targets()'s own doc
-                 * comment. */
+                 * behind) reports count 0, truncated true -- a shape a
+                 * completed walk cannot produce (a genuinely empty page
+                 * reports truncated false), so this IS a distinct, reliable
+                 * signal the PC side relies on rather than an ambiguous
+                 * collision: ui_test_client.py's list_tap_targets() derives
+                 * its own "busy" field from exactly this (count==0 and
+                 * truncated), and cases_lcd.py's
+                 * _list_tap_targets_resolving_busy() retries on it instead of
+                 * treating a busy walk as a genuinely empty page; see
+                 * lvgl_port_collect_tap_targets()'s own doc comment. */
                 kiln_ui_tap_target_t targets[32];
                 bool collect_truncated = false;
                 size_t n = lvgl_port_collect_tap_targets(targets,

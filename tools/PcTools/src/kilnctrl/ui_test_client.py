@@ -203,8 +203,9 @@ class UiTestClient:
         completed walk of an empty page reports ``truncated=False``, while a
         walk that never completed (lvgl_port_task busy/wedged past
         UI_WALK_WAIT_TIMEOUT_MS -- see
-        lvgl_port_collect_tap_targets()'s own doc comment, kiln_ui.c's
-        `collect_truncated`) reports zero targets AND truncated=True. This is
+        lvgl_port_collect_tap_targets()'s own doc comment,
+        uart_bridge_ui_test.c's `collect_truncated`) reports zero targets AND
+        truncated=True. This is
         the same root cause and wire signal click_by_name()'s
         ``"walk_busy"`` result names explicitly (see
         UI_TEST_CLICK_WALK_BUSY); LIST_TAP_TARGETS has no equivalent
@@ -239,7 +240,7 @@ class UiTestClient:
     def click_by_name(self, name: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
         """Inject a tap at the named target's centre.
 
-        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed"|"verdict_unknown"|"inject_failed","cx":int,"cy":int}``
+        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed"|"verdict_unknown"|"inject_failed"|"offscreen"|"walk_busy","cx":int,"cy":int}``
         -- unlike touch.py's inject()/set_tap_dump(), a firmware-level refusal
         here (target not found, ambiguous, or hidden) is not an
         exceptional/transport failure, so it comes back as a result code

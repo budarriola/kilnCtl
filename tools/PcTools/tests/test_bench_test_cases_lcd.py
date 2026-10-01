@@ -1268,6 +1268,211 @@ class ClickThenPageTest(unittest.TestCase):
         self.assertIn("touch.inject", src)
 
 
+class _QueuedClickUi(PageNavUiTest):
+    """A UI double whose click_by_name() for one specific target name pops
+    results off a queue (one per call), falling back to PageNavUiTest's
+    normal nav-map behavior once the queue is exhausted or for any other
+    name -- used to exercise _click_resolving_swallow()'s/_click_then_page()'s
+    walk_busy retry loop, which needs the SAME click to answer differently
+    across consecutive calls."""
+
+    def __init__(self, *a, queued_name=None, queued_results=None, **kw):
+        super().__init__(*a, **kw)
+        self._queued_name = queued_name
+        self._queue = list(queued_results or [])
+        self.calls_for_queued_name = 0
+
+    def click_by_name(self, name):
+        if name == self._queued_name and self._queue:
+            self.calls_for_queued_name += 1
+            result = self._queue.pop(0)
+            if result == "ok":
+                dest = self._nav_map.get(name)
+                if dest is not None:
+                    self._page = dest
+            return {"result": result, "cx": 0, "cy": 0}
+        return super().click_by_name(name)
+
+
+class _QueuedListTapTargetsUi(FakeUiTest):
+    """A UI double whose list_tap_targets() pops one result off a queue per
+    call, falling back to repeating the last queued result once exhausted --
+    used to exercise _list_tap_targets_resolving_busy()'s retry loop."""
+
+    def __init__(self, *a, queued_results=None, **kw):
+        super().__init__(*a, **kw)
+        self._queue = list(queued_results or [])
+        self.calls = 0
+
+    def list_tap_targets(self):
+        self.calls += 1
+        if self._queue:
+            result = self._queue.pop(0)
+        else:
+            result = {"targets": [], "truncated": False, "busy": False}
+        return result
+
+
+class ClickResolvingSwallowWalkBusyTest(unittest.TestCase):
+    """Direct unit tests for _click_resolving_swallow()'s walk_busy arm
+    (cases_lcd.py, 2026-09-30): a 'walk_busy' click result (KILN_UI_CLICK_
+    WALK_BUSY / UI_TEST_CLICK_WALK_BUSY) must be retried, bounded by
+    _CLICK_THEN_PAGE_WALK_BUSY_RETRIES, with its own counter kept separate
+    from swallow_retries/not_found_retries."""
+
+    def test_retries_once_then_succeeds_counts_one(self):
+        ui = _QueuedClickUi(page="home", nav_map={"settings": "config"},
+                             queued_name="settings",
+                             queued_results=["walk_busy", "ok"])
+        with mock.patch.object(C.time, "sleep"):
+            click, swallow_retries, not_found_retries, walk_busy_retries = C._click_resolving_swallow(ui, "settings")
+        self.assertEqual(click["result"], "ok")
+        self.assertEqual(walk_busy_retries, 1)
+        self.assertEqual(swallow_retries, 0)
+        self.assertEqual(not_found_retries, 0)
+        self.assertEqual(ui.calls_for_queued_name, 2)
+
+    def test_gives_up_after_budget_returns_last_busy_read(self):
+        # Budget is _CLICK_THEN_PAGE_WALK_BUSY_RETRIES (2 by default): the
+        # first call plus 2 retries == 3 calls total, still busy.
+        ui = _QueuedClickUi(page="home", nav_map={"settings": "config"},
+                             queued_name="settings",
+                             queued_results=["walk_busy", "walk_busy", "walk_busy", "ok"])
+        with mock.patch.object(C.time, "sleep"):
+            click, swallow_retries, not_found_retries, walk_busy_retries = C._click_resolving_swallow(ui, "settings")
+        self.assertEqual(click["result"], "walk_busy")
+        self.assertEqual(walk_busy_retries, C._CLICK_THEN_PAGE_WALK_BUSY_RETRIES)
+        self.assertEqual(ui.calls_for_queued_name, 3)
+
+    def test_click_then_page_attributes_walk_busy_after_budget_exhausted(self):
+        ui = _QueuedClickUi(page="home", nav_map={"settings": "config"},
+                             queued_name="settings",
+                             queued_results=["walk_busy", "walk_busy", "walk_busy"])
+        with mock.patch.object(C.time, "sleep"):
+            fail, page, waited_s, swallow_retries, not_found_retries, walk_busy_retries = C._click_then_page(
+                ui, "settings", "config")
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertEqual(fail.observed.get("attribution"), "walk_busy")
+        self.assertEqual(fail.observed.get("walk_busy_retries"), C._CLICK_THEN_PAGE_WALK_BUSY_RETRIES)
+        self.assertEqual(walk_busy_retries, 0)  # failure path's own tuple slot is always 0
+
+
+class ListTapTargetsResolvingBusyTest(unittest.TestCase):
+    """Direct unit tests for _list_tap_targets_resolving_busy() (cases_lcd.py,
+    2026-09-30 LCD-09 fix): retries a busy (count==0, truncated=True) read,
+    stops as soon as a non-busy read arrives, and gives up after
+    _LIST_TAP_TARGETS_BUSY_RETRIES, returning the last (still-busy) read."""
+
+    _BUSY = {"targets": [], "truncated": True, "busy": True}
+
+    def test_retries_while_busy_then_returns_real_read(self):
+        real = {"targets": [{"name": "Profiles", "cx": 1, "cy": 2, "hidden": False}],
+                "truncated": False, "busy": False}
+        ui = _QueuedListTapTargetsUi(queued_results=[self._BUSY, real])
+        with mock.patch.object(C.time, "sleep"):
+            tap, busy_retries = C._list_tap_targets_resolving_busy(ui)
+        self.assertEqual(tap, real)
+        self.assertEqual(busy_retries, 1)
+        self.assertEqual(ui.calls, 2)
+
+    def test_non_busy_empty_read_returns_immediately_no_retry(self):
+        # A genuinely empty page (truncated=False) must never be retried --
+        # only the busy (truncated=True, count==0) shape is.
+        empty = {"targets": [], "truncated": False, "busy": False}
+        ui = _QueuedListTapTargetsUi(queued_results=[empty])
+        with mock.patch.object(C.time, "sleep") as fake_sleep:
+            tap, busy_retries = C._list_tap_targets_resolving_busy(ui)
+        self.assertEqual(tap, empty)
+        self.assertEqual(busy_retries, 0)
+        self.assertEqual(ui.calls, 1)
+        fake_sleep.assert_not_called()
+
+    def test_gives_up_after_budget_returns_last_busy_read(self):
+        ui = _QueuedListTapTargetsUi(queued_results=[self._BUSY, self._BUSY, self._BUSY])
+        with mock.patch.object(C.time, "sleep"):
+            tap, busy_retries = C._list_tap_targets_resolving_busy(ui)
+        self.assertTrue(tap.get("busy"))
+        self.assertEqual(busy_retries, C._LIST_TAP_TARGETS_BUSY_RETRIES)
+        self.assertEqual(ui.calls, 1 + C._LIST_TAP_TARGETS_BUSY_RETRIES)
+
+
+class Lcd09WalkBusyTest(unittest.TestCase):
+    """_case_lcd09() must route its profile-list read through
+    _list_tap_targets_resolving_busy() (2026-09-30 LCD-09 fix,
+    logs/bench_test/20260930T234916Z_lcd_harness_retry_verify) and record the
+    retries actually used in observed['walk_busy_retries']."""
+
+    def test_busy_once_then_real_read_recorded_and_passes(self):
+        real_targets = [
+            {"name": "back", "cx": 10, "cy": 20, "hidden": False},
+            {"name": "add", "cx": 400, "cy": 20, "hidden": False},
+            {"name": "profile1", "cx": 240, "cy": 200, "hidden": False},
+        ]
+        ui = PageNavUiTest(
+            page="home",
+            page_targets={"home": [], "config": _CONFIG_TARGETS, "profiles": real_targets},
+            nav_map={"settings": "config", "Profiles": "profiles", "profile1": "profile_detail"},
+        )
+        busy = {"targets": [], "truncated": True, "busy": True}
+        real = {"targets": real_targets, "truncated": False, "busy": False}
+        srv = FakeSrvFull(ui)
+        # Only the FIRST read taken while parked on 'profiles' is busy --
+        # _wake_and_home()'s own stray-overlay check (_lcd19_clear_stray_
+        # overlay -> _lcd19_overlay_names) also calls list_tap_targets() once
+        # while still on 'home', before _case_lcd09 ever navigates anywhere;
+        # a plain queue (busy, real, ...) would hand that unrelated home-page
+        # read the busy response instead of the profiles-page read this test
+        # means to exercise.
+        profiles_calls = {"n": 0}
+        orig_list_tap_targets = PageNavUiTest.list_tap_targets
+
+        def fake_list_tap_targets(self):
+            if self._page == "profiles":
+                profiles_calls["n"] += 1
+                if profiles_calls["n"] == 1:
+                    return busy
+                return real
+            return orig_list_tap_targets(self)
+
+        with mock.patch.object(C, "_list_tap_targets_resolving_busy",
+                                wraps=C._list_tap_targets_resolving_busy) as wrapped, \
+             mock.patch.object(ui, "list_tap_targets", new=fake_list_tap_targets.__get__(ui)), \
+             mock.patch.object(C.time, "sleep"):
+            result = C._case_lcd09({"srv": srv})
+        wrapped.assert_called_once()
+        self.assertEqual(result.observed.get("walk_busy_retries"), 1)
+
+
+class EntryAllDigitsNotFoundWalkBusyTest(unittest.TestCase):
+    """_entry_all_digits_not_found() (cases_lcd.py:2804, 2026-09-30 follow-up)
+    must accept 'walk_busy' as equivalent to 'not_found' for both
+    digit_results and ok_result, since enter_pin()'s own internal retry can
+    still leave a digit/OK result as 'walk_busy' (not folded down to
+    'not_found') after its own retry budget is exhausted."""
+
+    def test_all_walk_busy_digits_and_ok_counts_as_all_not_found(self):
+        entry = {
+            "digit_results": [{"result": "walk_busy"}, {"result": "not_found"}],
+            "ok_result": {"result": "walk_busy"},
+        }
+        self.assertTrue(C._entry_all_digits_not_found(entry))
+
+    def test_one_ok_digit_result_is_not_all_not_found(self):
+        entry = {
+            "digit_results": [{"result": "walk_busy"}, {"result": "ok"}],
+            "ok_result": {"result": "not_found"},
+        }
+        self.assertFalse(C._entry_all_digits_not_found(entry))
+
+    def test_walk_busy_ok_result_with_not_found_digits_counts(self):
+        entry = {
+            "digit_results": [{"result": "not_found"}, {"result": "not_found"}],
+            "ok_result": {"result": "walk_busy"},
+        }
+        self.assertTrue(C._entry_all_digits_not_found(entry))
+
+
 class ThemeMirrorDriftTest(unittest.TestCase):
     """cases_lcd.py mirrors four ui_theme.h colors as reference values.
     Fails (never skips) if the header moves or a value drifts."""

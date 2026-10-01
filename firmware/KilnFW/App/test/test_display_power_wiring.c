@@ -1470,6 +1470,34 @@ static void run_section12_inject_failed_wired(void)
     free(ui_stripped);
     free(ui_text);
 
+    // --- kiln_ui_click_by_name(): WALK_BUSY returned before the match/
+    // injection logic, on a dispatch-timeout read (n==0 && truncated). ---
+    char *ui_text_wb = read_file_any(KILN_UI_C_CANDIDATES, 3);
+    char *ui_stripped_wb = ui_text_wb ? strip_c_comments(ui_text_wb) : NULL;
+    if (!ui_stripped_wb) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/kiln_ui.c");
+    } else {
+        size_t len = 0;
+        const char *body = find_function_body(ui_stripped_wb, "kiln_ui_click_result_t kiln_ui_click_by_name(", &len);
+        char *fn = body ? dup_range(body, len) : NULL;
+        TEST_CHECK(fn != NULL, "found kiln_ui_click_by_name()'s function body");
+        if (fn) {
+            const char *guard = strstr(fn, "if (n == 0 && truncated)");
+            const char *ret = guard ? strstr(guard, "return KILN_UI_CLICK_WALK_BUSY;") : NULL;
+            const char *match_scan = strstr(fn, "int match = -1;");
+            TEST_CHECK(guard != NULL && ret != NULL && match_scan != NULL && ret < match_scan,
+                       "kiln_ui_click_by_name() must return KILN_UI_CLICK_WALK_BUSY on "
+                       "`n == 0 && truncated` (a dispatch timeout from "
+                       "lvgl_port_collect_tap_targets(), e.g. lvgl_port_task busy/wedged past "
+                       "UI_WALK_WAIT_TIMEOUT_MS) BEFORE the match-scanning loop -- otherwise a "
+                       "walk that never completed is indistinguishable from a genuinely absent "
+                       "name (2026-09-30 LCD-09/LCD-16 false-FAIL root cause).");
+            free(fn);
+        }
+    }
+    free(ui_stripped_wb);
+    free(ui_text_wb);
+
     // --- uart_bridge_ui_test.c: an explicit case for every enum member. ---
     char *h_text = read_file_any(KILN_UI_H_CANDIDATES, 3);
     char *h_stripped = h_text ? strip_c_comments(h_text) : NULL;
@@ -1516,6 +1544,10 @@ static void run_section12_inject_failed_wired(void)
                                        "UI_TEST_CLICK_INJECT_FAILED;") != NULL,
                    "uart_bridge_ui_test.c must map KILN_UI_CLICK_INJECT_FAILED to "
                    "UI_TEST_CLICK_INJECT_FAILED.");
+        TEST_CHECK(strstr(br_stripped, "case KILN_UI_CLICK_WALK_BUSY: wire_result = "
+                                       "UI_TEST_CLICK_WALK_BUSY;") != NULL,
+                   "uart_bridge_ui_test.c must map KILN_UI_CLICK_WALK_BUSY to "
+                   "UI_TEST_CLICK_WALK_BUSY.");
     }
     free(h_stripped);
     free(h_text);
