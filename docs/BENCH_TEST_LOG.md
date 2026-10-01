@@ -2489,3 +2489,39 @@ Rerun of suite `stack` against those baselines (board on `eb83c1ac`, idle,
 relays off, no trip, port: HTTP 192.168.1.156): run
 `20261001T050807Z_stack` (`logs/bench_test/20261001T050807Z_stack/`), exit 0,
 SK-01, SK-02, SK-03, SK-04 all PASS.
+
+## 2026-10-01 wifi_prov_owner AP-fallback stack margin + static-IP end to end, eb83c1ac, host 192.168.1.156
+
+Board on `eb83c1ac`, idle, no trip, no heating, no flash. Port: HTTP 192.168.1.156
+plus the UART-backed `wifi_*`/`get_stack_margin` tools (COM14 path). Credentials
+read only from User-scope env vars by scratchpad scripts, never printed.
+
+**Task 1 -- wifi_prov_owner under AP-fallback probing: PASS.** Recovery path
+fixed before mutating (UART tools work with the LAN down; STA credentials present
+in env). Saved a decoy network, forgot the real one, cycled `wifi_set_mode`
+ap -> home so the board lost the LAN and sat in `reconnecting` (AP fallback with
+failed join/probe attempts). Sampled `get_stack_margin` + `wifi_get_status` every
+20 s for 18 samples (~6 min): `wifi_prov_owner` free stack was 1344 B of 4096 B
+(32.8%, OK) on every sample, constant from the first. Idle baseline
+(`docs/stack_margin_baseline/stack_margin_idle_eb83c1ac_*.json`) is 1536 B, so the
+AP-fallback path costs a one-time 192 B high-water drop and stays OK with no
+further erosion over the probe cycles. Restored the real network from env; board
+rejoined at 192.168.1.156 (`connected`), decoy forgotten, no reboot (uptime
+3394 -> 3844 s across the test).
+
+**Task 2 -- static IP end to end: PASS, with divergences.** Static 192.168.1.156 /
+255.255.255.0 / gw 192.168.1.1 via `POST /ip_config` (netmask/gateway taken from
+the PC on the same LAN, see below). Board stayed at .156 with `ip_mode=static`;
+`debug_reset(esp)` -> uptime 14 s, link up, no trip, back at .156 with
+`ip_mode=static` and the static fields persisted. Reverted with `mode=dhcp`:
+`ip_mode=dhcp`, still .156; second `debug_reset(esp)` -> uptime 45 s, `dhcp`, .156,
+link up, no trip, readiness 17 ok / 1 not_done / 3 other (unchanged).
+Divergences/notes: (1) the POST never returns its "ok" body in either direction --
+the forced disconnect resets the connection (static: ConnectionReset; dhcp:
+IncompleteRead), so the caller must verify by polling `/status`. (2) There is no
+DNS field anywhere in the setter, so the DNS requirement could not be exercised
+and static mode sets none. (3) No endpoint or tool reports the live DHCP
+netmask/gateway, so they had to come from the PC's adapter. (4) `/status` redacts
+`static_*` for an unauthenticated read and the route is not login-gated, so a
+client helper only sees them after an explicit login. (5) No MCP tool wraps
+`/ip_config`; done with a scratchpad script over `http_auth`.

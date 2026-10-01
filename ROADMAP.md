@@ -4495,12 +4495,10 @@ Owner instruction, 2026-09-21.
     not confirmed this run (LCD capture came back unreadable/black).
   - **Pending bench work (not yet done):** hardware-verify the LCD edit-firing
     page, the login gates, AP-fallback radio timing and the LCD's "[AP kept
-    up]" render; measure `crash_report/clear` latency. `wifi_prov_owner`
-    stack margin: a steady-state reading landed 2026-10-01
-    (`20261001T011515Z_stack`, `c471101c`, uptime ~215s) at 1492 B free of
-    4096 B configured (36.4%, OK) -- but this was an idle read, not taken
-    while exercising the AP-fallback probing path the criterion above asks
-    about, so this item stays open until that path is actually measured.
+    up]" render; measure `crash_report/clear` latency. (`wifi_prov_owner`
+    stack margin under AP-fallback probing: measured 2026-10-01 on `eb83c1ac`,
+    min 1344 B free of 4096 B (32.8%, OK) vs. 1536 B idle baseline -- done,
+    see `docs/BENCH_TEST_LOG.md`.)
   - **`d3c4c826` AP-teardown fix, bench-verified PASS, 2026-09-30:** a
     decoy network was saved, the real one forgotten, mode cycled ap then
     home, and the board reached `state=reconnecting` with the LAN down.
@@ -4531,9 +4529,10 @@ Owner instruction, 2026-09-21.
     guard so the static-IP setter, the HTTP handler (a distinct 400) and
     the confirm-side check all refuse `192.168.4.0/24`; `dc1a8072`/
     `50edd830` render the provisioning page's errors via `textContent`
-    with corrected no-response wording). Flashed to the bench; **not yet
-    bench-verified end to end** -- setting a static IP was deliberately
-    not exercised this sweep.
+    with corrected no-response wording). Flashed to the bench; **bench-verified end to end, 2026-10-01 PASS** (`eb83c1ac`): static .156/24 gw .1 set,
+    HTTP + reboot stayed at the static address, then DHCP revert, HTTP + reboot, same address.
+    Remaining gap: the static-IP API has no DNS field and nothing reads the live DHCP
+    netmask/gateway; see `docs/BENCH_TEST_LOG.md`.
   - **`persisted_count` fix landed on `origin/main`, 2026-09-30**
     (`9fc8b589`, `ee6a3809`, `9b77e2b2`, Opus-reviewed across three
     rounds): `GET /api/boot_guard` and `POST /api/ota/esp/boot_guard_reset`
