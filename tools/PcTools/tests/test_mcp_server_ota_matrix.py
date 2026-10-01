@@ -275,8 +275,8 @@ class RunLevelPreflightTest(unittest.TestCase):
         }
         self.assertIsNone(M._run_level_preflight(ctx, host=None))
 
-    def test_armed_refuses(self):
-        pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=True)
+    def test_unreadable_armed_state_refuses(self):
+        pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=None)
         ctx = {"gpio_test_preflight_fn": lambda host: pf, "resolve_host_fn": lambda host: host}
         reason = M._run_level_preflight(ctx, host=None)
         self.assertIsNotNone(reason)
@@ -354,6 +354,96 @@ class RunLevelPreflightTest(unittest.TestCase):
         self.assertIn("crash", reason.lower())
 
 
+class _FakeIo:
+    def __init__(self, relays=0, i2c_failed=False):
+        self._relays, self.i2c_failed = relays, i2c_failed
+
+    def relay(self, n):
+        return bool(self._relays & (1 << (n - 1)))
+
+
+class _ArmedFakeSrv:
+    """Fake `_srv` for the ARMED-latch condition reads."""
+
+    def __init__(self, at_state="idle", relays=0, i2c_failed=False, trip=0,
+                 ever_received=True, raise_io=False):
+        outer = self
+        self.at_state, self.trip, self.ever_received = at_state, trip, ever_received
+        self.io = _FakeIo(relays, i2c_failed)
+        self.raise_io = raise_io
+
+        class _At:
+            def get_status(self_inner):
+                return _FakeAutotuneStatus(outer.at_state)
+
+        class _Io:
+            def read(self_inner):
+                if outer.raise_io:
+                    raise RuntimeError("io timeout")
+                return outer.io
+
+        class _Safety:
+            def get_diag(self_inner):
+                return _FakeSafetyDiag(outer.ever_received, outer.trip)
+
+        self._autotune, self._io, self._safety = _At(), _Io(), _Safety()
+
+
+class ArmedLatchGateTest(unittest.TestCase):
+    """Owner decision 2026-10-01: ARMED is the safety processor's latched
+    idle state, so `ota_matrix_run` accepts it when everything else reads
+    clean. `coordinated_gpio_test` keeps its strict not-ARMED rule."""
+
+    def _gate(self, srv, **pf_changes):
+        pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=True, **pf_changes)
+        ctx = {"gpio_test_preflight_fn": lambda host: pf, "resolve_host_fn": lambda host: host,
+               "capability_preflight_run": lambda preset, host: _FakeCapabilityPreflightReport(ok=True)}
+        with mock.patch.object(M, "_srv", srv):
+            return M._run_level_preflight(ctx, host=None)
+
+    def test_armed_idle_relays_off_passes(self):
+        self.assertIsNone(self._gate(_ArmedFakeSrv()))
+
+    def test_armed_while_firing_refuses(self):
+        reason = self._gate(_ArmedFakeSrv(), profile_running_or_paused=True,
+                            profile_state_name="running")
+        self.assertIsNotNone(reason)
+        self.assertIn("profile is running", reason)
+
+    def test_armed_autotune_active_refuses(self):
+        reason = self._gate(_ArmedFakeSrv(at_state="stepping"))
+        self.assertIn("autotune is not idle", reason)
+
+    def test_armed_relay_energized_refuses(self):
+        reason = self._gate(_ArmedFakeSrv(relays=0b010))
+        self.assertIn("relay output(s) energized: [2]", reason)
+
+    def test_armed_relay_unreadable_refuses(self):
+        self.assertIn("relay outputs could not be read",
+                      self._gate(_ArmedFakeSrv(raise_io=True)))
+        self.assertIn("could not be confirmed de-energized",
+                      self._gate(_ArmedFakeSrv(i2c_failed=True)))
+
+    def test_armed_trip_latched_refuses(self):
+        self.assertIn("trip is latched", self._gate(_ArmedFakeSrv(trip=5)))
+
+    def test_armed_trip_unknown_refuses(self):
+        self.assertIn("trip state could not be confirmed",
+                      self._gate(_ArmedFakeSrv(ever_received=False)))
+
+    def test_armed_link_down_refuses(self):
+        self.assertIn("link", self._gate(_ArmedFakeSrv(), link_up=False))
+
+    def test_armed_interlock_not_ok_refuses(self):
+        self.assertIn("OTA interlock", self._gate(
+            _ArmedFakeSrv(), ota_interlock_ok=False, ota_interlock_reason="busy"))
+
+    def test_coordinated_gpio_test_still_refuses_armed(self):
+        pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=True)
+        reasons = pf.refusal_reasons()
+        self.assertTrue(any("ARMED" in r for r in reasons), reasons)
+
+
 class RunOtaMatrixTest(unittest.TestCase):
     """`_run_ota_matrix` -- the board-touching path, exercised only through
     injected ctx fakes (never a real board)."""
@@ -386,6 +476,7 @@ class RunOtaMatrixTest(unittest.TestCase):
         # ever runs, distinct from BenchTestRunner's own preflight.
         armed_pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=True)
         self.ctx["gpio_test_preflight_fn"] = lambda host: armed_pf
+        self.ctx["armed_checks_fn"] = lambda: ["a safety trip is latched (trip_reason=3)"]
         result = M._run_ota_matrix(self.ctx, cases="OT-B01", tag=None,
                                     allow_heat=False, logs_root=self.tmpdir)
         self.assertTrue(result.startswith("error: refused"), result)

@@ -36,7 +36,11 @@ What this wrapper adds on top of the general ``bench_test_run()`` tool:
   ``mcp_server_coordinated_gpio_test._gpio_test_preflight()`` (the same
   ARMED/link-up/profile-idle/OTA-interlock probe `coordinated_gpio_test`
   already refuses on, tri-state so an unreadable status refuses rather than
-  passing) plus an explicit `capability_preflight` read (unreadable, or a
+  passing; UNLIKE `coordinated_gpio_test`, ARMED itself is accepted here --
+  owner decision 2026-10-01, ARMED being the safety processor's latched
+  idle state -- but only while autotune is idle, zone relays 1-3 read
+  de-energized and no trip is latched, each unreadable = refusal, and the
+  refusal text names the failed condition) plus an explicit `capability_preflight` read (unreadable, or a
   present crash report, is also a refusal here) -- because
   ``BenchTestRunner.preflight()`` on its own (runner.py `_safe_call`) folds
   every probe exception into "could not determine" and only treats the
@@ -98,7 +102,9 @@ def _ota_preconditions_text() -> str:
         "Run-level preconditions checked by this tool BEFORE BenchTestRunner is even "
         "constructed (refuses the whole run, no case attempted, if any fails; unreadable "
         "counts as failed, never as passed):",
-        "  - safety relay confirmed NOT ARMED (SafetyFlag.ENABLED clear)",
+        "  - safety ARMED state readable; ARMED itself is acceptable (it is a latch, the "
+        "normal idle state) provided autotune is idle, zone relays 1-3 read de-energized "
+        "and no safety trip is latched (each unreadable = refusal)",
         "  - safety link confirmed up",
         "  - profile executor confirmed idle (running OR paused refuses)",
         "  - GET /api/ota/interlock confirmed ok:true",
@@ -144,16 +150,68 @@ def _dry_run_listing(cases: Optional[str]) -> str:
     return "\n".join(lines)
 
 
-def _ota_refusal_reasons(pf) -> "list[str]":
+#: Autotune states that mean "not currently driving the heater" (idle, or a
+#: finished/aborted run). Anything else, including a state this client could
+#: not decode, refuses.
+_AUTOTUNE_INACTIVE = ("idle", "done", "aborted")
+
+#: Expander relays 1-3 are the zone relays. Relay 4's expander bit is NOT
+#: K4/heat (K4 is Pico-owned), so it is not a de-energized-outputs signal.
+_ZONE_RELAYS = (1, 2, 3)
+
+
+def _read_armed_latch_conditions() -> "list[str]":
+    """Extra conditions that must read clean for an ARMED board to be
+    acceptable to `ota_matrix_run` (owner decision 2026-10-01: ARMED is the
+    safety processor's latched idle state, not a heat window). Returns the
+    list of failed/unreadable conditions, each naming itself; empty means
+    all clean. Every read that raises, or reports itself stale, is a
+    refusal (fail-closed). Profile executor idle is checked separately by
+    the shared preflight; link-up and OTA interlock likewise."""
+    reasons: "list[str]" = []
+    try:
+        at = _srv._autotune.get_status()
+        if at.state_name not in _AUTOTUNE_INACTIVE:
+            reasons.append(f"autotune is not idle (autotune_state={at.state_name!r})")
+    except Exception as exc:  # noqa: BLE001 -- unreadable must refuse
+        reasons.append(f"autotune state could not be read: {exc}")
+    try:
+        io = _srv._io.read()
+        if io.i2c_failed:
+            reasons.append("relay outputs could not be confirmed de-energized "
+                           "(expander reports its last I2C transfer failed)")
+        else:
+            on = [r for r in _ZONE_RELAYS if io.relay(r)]
+            if on:
+                reasons.append(f"relay output(s) energized: {on}")
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"relay outputs could not be read: {exc}")
+    try:
+        diag = _srv._safety.get_diag()
+        if not diag.ever_received:
+            reasons.append("safety trip state could not be confirmed (no diag received yet)")
+        elif diag.trip_reason != 0:
+            reasons.append(f"a safety trip is latched (trip_reason={diag.trip_reason})")
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"safety trip state could not be read: {exc}")
+    return reasons
+
+
+def _ota_refusal_reasons(pf, armed_checks_fn=None) -> "list[str]":
     """Same tri-state fields `GpioTestPreflight.refusal_reasons()` checks,
-    reworded for an OTA run instead of the GPIO-detach test that dataclass
-    was originally written for -- its own text ("refusing to detach
-    GPIO4/5/10 from firmware...") is misleading here."""
+    reworded for an OTA run, with ONE deliberate difference: ARMED is
+    acceptable (owner decision 2026-10-01 -- on this system ARMED is a
+    latch, the normal idle state of the safety processor) provided no
+    profile is firing, the link is up, the OTA interlock is ok, and
+    `armed_checks_fn()` (autotune idle, relays de-energized, no latched
+    trip) reports nothing. An ARMED state that could not be read at all
+    (`None`) still refuses. `coordinated_gpio_test` keeps its own strict
+    not-ARMED rule via `GpioTestPreflight.refusal_reasons()` -- untouched."""
     reasons = []
-    if pf.safety_armed is not False:
-        reasons.append(f"safety relay is ARMED or its state could not be confirmed "
-                        f"(safety_armed={pf.safety_armed!r}) -- refusing to run an OTA "
-                        f"update while the safety chain could be live")
+    if pf.safety_armed is None:
+        reasons.append("safety ARMED state could not be confirmed "
+                        "(safety_armed=None) -- refusing to run an OTA update "
+                        "while the safety chain state is unknown")
     if pf.profile_running_or_paused is not False:
         reasons.append(f"a profile is running or paused, or its state could not be "
                         f"confirmed (profile_state={pf.profile_state_name!r}) -- an OTA "
@@ -164,6 +222,13 @@ def _ota_refusal_reasons(pf) -> "list[str]":
     if pf.link_up is not True:
         reasons.append(f"safety link was not confirmed up before the run "
                         f"(link_up={pf.link_up!r})")
+    if pf.safety_armed is True:
+        fn = armed_checks_fn or _read_armed_latch_conditions
+        try:
+            extra = fn()
+        except Exception as exc:  # noqa: BLE001
+            extra = [f"ARMED-state conditions could not be read: {exc}"]
+        reasons.extend(f"safety is ARMED and {r}" for r in extra)
     return reasons
 
 
@@ -187,7 +252,7 @@ def _run_level_preflight(ctx: dict, host: Optional[str]) -> Optional[str]:
         pf = gpio_preflight_fn(resolved_host)
     except Exception as exc:  # noqa: BLE001 -- unreadable must refuse, not pass
         return f"could not read run-level preconditions (ARMED/link/idle/interlock): {exc}"
-    reasons = _ota_refusal_reasons(pf)
+    reasons = _ota_refusal_reasons(pf, ctx.get("armed_checks_fn"))
     if reasons:
         return "; ".join(reasons)
 
@@ -320,7 +385,10 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
 
     Before `BenchTestRunner` is even constructed, this tool runs its own
     fail-closed run-level gate (`_run_level_preflight`): safety relay
-    confirmed NOT ARMED, safety link confirmed up, profile executor
+    ARMED state readable (ARMED is acceptable -- it is a latch, the
+    safety processor's normal idle state -- only if autotune is idle, zone
+    relays 1-3 read de-energized and no trip is latched; owner decision
+    2026-10-01), safety link confirmed up, profile executor
     confirmed idle (running OR paused refuses), the OTA interlock confirmed
     ok, and `capability_preflight` confirmed reachable with no unacknowledged
     crash report or readiness-gate blocker -- any of these being unreadable
