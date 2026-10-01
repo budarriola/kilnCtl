@@ -2525,3 +2525,52 @@ netmask/gateway, so they had to come from the PC's adapter. (4) `/status` redact
 `static_*` for an unauthenticated read and the route is not login-gated, so a
 client helper only sees them after an explicit login. (5) No MCP tool wraps
 `/ip_config`; done with a scratchpad script over `http_auth`.
+
+## Heap min_free dip probe (board eb83c1ac, 192.168.1.156) -- 2026-09-30
+
+Question: does a short firing step internal/DMA `min_free` by 4100 B once (hypothesis:
+`firing_stats_persist()` at STOP) or leak? Procedure: `debug_reset(esp)`, 3 idle
+samples, then `profiles_start(0)` / `profiles_stop` x5 (M18C_TEST, zone_mask 0x7,
+40 C then 30 C; stopped at about +50 s each time), sampling `get_heap_status` at
++5/+30/+50 s and +2/+10/+60 s after stop. Relays verified off (`io_read` R1-R3=0,
+K4 bit 0) after every stop. No trip at any point; board never rebooted (uptime
+17 -> 754 s). No firing-history tool/route exists in the facade, so that probe
+group was skipped.
+
+Reset timing (polled by hand, no wall clock): first two polls after `debug_reset`
+failed on HTTP; UART answered on the 2nd poll (1st was a NACK, destination task not
+registered), HTTP answered on the 3rd poll at uptime_s=17. UART came up before HTTP.
+`boot_guard_get`: boot_count 1, persisted_count 0, recovery_mode False.
+
+Result (internal free / min_free, DMA free / min_free, bytes; largest block 9728 throughout):
+
+| Step | uptime s | int free | int min | DMA free | DMA min |
+|---|---|---|---|---|---|
+| boot, first HTTP answer | 17 | 30631 | 16883 | 22843 | 9095 |
+| after 1 GET /api/cfgfs (2 calls ran before next sample) | 36 | 30895 | 13975 | 23107 | 6187 |
+| idle x3 (uptime 123/138/150) | 123-150 | 30895 | 13975 | 23107 | 6187 |
+| after cfgfs x3, then profile_exec x3 | 169 | 30895 | 13975 | 23107 | 6187 |
+| cycle 1 start/+30/+50 | 182-228 | 30895 | 13975 | 23107 | 6187 |
+| cycle 1 stop +2 / +10 / +60 | 229/241/293 | 30247 | 13975 | 22459 | 6187 |
+| cycle 2 run samples | 297-347 | 30247 | 13975 | 22459 | 6187 |
+| cycle 2 stop +2 / +10 / +60 | 348/366/408 | 30115 | 13975 | 22327 | 6187 |
+| cycle 3 run samples | 415-461 | 30115 | 13975 | 22327 | 6187 |
+| cycle 3 stop +2 / +10 / +60 | 462/470/525 | 30115 | 13975 | 22327 | 6187 |
+| cycle 4 run samples | 525-579 | 30115 | 13975 | 22327 | 6187 |
+| cycle 4 stop +2 / +10 / +60 | 580/588/644 | 29983 | 13975 | 22195 | 6187 |
+| cycle 5 run samples | 644-694 | 29983 | 13975 | 22195 | 6187 |
+| cycle 5 stop +2 / +10 / +60 | 695/703/754 | 30247 | 13975 | 22459 | 6187 |
+
+Verdict: one-time step, not a leak, but NOT at firing stop in this run. `min_free`
+stepped exactly once, 16883 -> 13975 (-2908 B, DMA identical), at uptime ~35 s
+between two samples, before any idle sample or firing; the only things that ran in
+that window were two `GET /api/cfgfs` reads (and the LCD flush max jumped to 1.3 s
+there, so a boot-time display/LVGL event is not excluded). It never moved again
+through 3 more cfgfs reads, 3 profile_exec reads and five full start/run/stop
+cycles. Post-stop free moved -648, -132, 0, -132, +264 B (net -648 vs idle over
+5 cycles, bounded, last cycle recovered), so no per-cycle drift. Caveat: once min
+sat at 13975, a stop-time transient only shows in `min_free` if free dips below
+it; free never fell below 29983, so a stop-time 4 KB peak could not register here,
+and the 2026-10-01 stop-peak hypothesis is neither confirmed nor excluded. To
+test it, reboot and run the firing cycle first, before any `GET /api/cfgfs`.
+Final state: idle, relays off, no trip, uptime 754 s, reachable.
