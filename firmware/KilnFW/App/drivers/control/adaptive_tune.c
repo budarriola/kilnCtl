@@ -47,6 +47,18 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- adaptive_tune_zones[] below, moved to PSRAM 2026-09-30
+                        * to pay for lvgl's stack bump (see lvgl_port.c). Safe: every access to this
+                        * array -- the zone_tick/run_end hot path, init/load_enable_flags,
+                        * set_enabled/clear_ki_baseline, the getters (including the HTTP status
+                        * read in adaptive_tune_http.c), revert, the model/Ki-diagnosis helpers in
+                        * adaptive_tune_ki.c/adaptive_tune_model.c, and the autotune accept path --
+                        * runs in ordinary task context under adaptive_tune_lock, never an ISR or
+                        * IRAM code. Every flash/NVS/cfg persistence path copies through a separate
+                        * local or job blob rather than passing this array itself as a buffer, so
+                        * it is never a DMA target and never touched with the flash cache disabled.
+                        * This is not a closed enumeration -- any future caller must keep taking
+                        * adaptive_tune_lock and must not hand this array to a DMA/ISR path. */
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -68,7 +80,7 @@
 
 const char *ADAPTIVE_TUNE_TAG = "adaptive_tune";
 
-adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];
+EXT_RAM_BSS_ATTR adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];
 
 /* Set true if adaptive_tune_init()'s boot-time kibase migrate-on-load write
  * (pref_cfg_fs_resolve() below) was attempted before the flash-safe worker

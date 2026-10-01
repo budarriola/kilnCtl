@@ -51,8 +51,8 @@ urgent.
 | `touch_uart_bridge` | 5 | 4096 | UART bridge subsystem task, TOUCH command family | `App/drivers/bridge/uart_bridge_touch.c:274` (split out of `uart_bridge.c`) |
 | `safety_uart_bridge` | 5 | 4096 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/bridge/uart_bridge_safety.c:294` (split out of `uart_bridge.c`) |
 | `system_uart_bridge` | 5 | 3072 | UART bridge subsystem task, SYSTEM command family (`FACTORY_RESET` reboots immediately after, so blocking briefly is accepted) | `App/drivers/bridge/uart_bridge_system.c:162` (split out of `uart_bridge.c`) |
-| `info_uart_bridge` | 5 | 3072 | UART bridge subsystem task, INFO/version command family | `App/drivers/bridge/uart_bridge_info.c:337` (split out of `uart_bridge.c`) |
-| `info_boot_push` | 5 | 3072 | One-shot: pushes firmware version/boot info to the PC link right after boot | `App/drivers/bridge/uart_bridge_info.c:359` (split out of `uart_bridge.c`) |
+| `info_uart_bridge` | 5 | 4096 (was 3584, corrected 2026-09-30 — bench LOW reading) | UART bridge subsystem task, INFO/version command family | `App/drivers/bridge/uart_bridge_info.c:347` (split out of `uart_bridge.c`) |
+| `info_boot_push` | 5 | 3072 | One-shot: pushes firmware version/boot info to the PC link right after boot | `App/drivers/bridge/uart_bridge_info.c:369` (split out of `uart_bridge.c`) |
 | `control_uart_bridge` | 5 | 4096 | UART bridge extension task, CONTROL command family (calibration offset, etc.) | `App/drivers/bridge/uart_bridge_ext_control.c:199` (split out of `uart_bridge_ext.c`) |
 | `profiles_uart_bridge` | 5 | 4096 | UART bridge extension task, PROFILES command family — dispatches into `profile_executor`'s public API | `App/drivers/bridge/uart_bridge_ext_control.c:593` (split out of `uart_bridge_ext.c`, landed alongside CONTROL rather than its own file) |
 | `autotune_uart_bridge` | 5 | 4096 | UART bridge extension task, AUTOTUNE command family | `App/drivers/bridge/uart_bridge_ext_autotune.c:239` (split out of `uart_bridge_ext.c`) |
@@ -63,7 +63,7 @@ urgent.
 | `esp_spi_owner` (`spi_owner_task`) | configurable | configurable | `espInterfaces/esp_spi_owner.c` — single owner of the shared SPI bus request queue, underneath `thermo_owner`/MAX31856 | `firmware/hwAbstraction/esp/spi/esp_spi_owner.c:81` |
 | `i2c_owner_task` | configurable | configurable | `espInterfaces/i2c_owner.c` — single owner of the shared I2C bus request queue, underneath `kiln_io_owner`/SX1509 | `firmware/hwAbstraction/esp/i2c/i2c_owner.c:136` |
 | `safety_poll` | `SAFETY_POLL_TASK_PRIORITY` | `SAFETY_POLL_TASK_STACK` | `safety_link.c` — polls/exchanges frames with the RP2040 safety processor over the isolated link, builds the periodic context broadcast | `App/drivers/safety/safety_link.c:533` |
-| `lvgl` (`lvgl_port_task`) | 4 | 8192 | **The only task allowed to call any `lv_*` function.** Owns the on-device LCD UI entirely | `App/drivers/ui/lvgl_port.c` (line unverified this pass; not spot-checked) |
+| `lvgl` (`lvgl_port_task`) | 4 | 10240 (was 8192, corrected 2026-09-30 — bench LOW reading) | **The only task allowed to call any `lv_*` function.** Owns the on-device LCD UI entirely | `App/drivers/ui/lvgl_port.c` (line unverified this pass; not spot-checked) |
 | `monitor_task` | 4 | 3072 | Heartbeat/liveness monitor | `App/monitor_task.c:130` |
 | `gpio_probe` | 3 | **6144** (STALE — was 3072, corrected 2026-09-04) | Debug GPIO probing task (bench/dev tool) | `App/drivers/bridge/gpio_probe.c:305` |
 | `screen_idle` | 3 | **6144** (STALE — was 3072, corrected 2026-09-04) | LCD idle/screensaver timer | `App/drivers/ui/screen_idle.c:326` |

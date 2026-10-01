@@ -72,6 +72,34 @@ DEFAULT_ELF = base.DEFAULT_ELF
 # before the 100-slot change). 101000 leaves ~5.7 kB for ordinary growth
 # while still refusing anything on the order of the jumps this check was
 # written for. See module docstring before raising.
+#
+# 2026-09-30: ordinary growth since 2026-09-21 had already brought this to
+# 99672 B (within the 101000 B ceiling). The same day, a bench run
+# (logs/bench_test/20261001T011515Z_stack, firmware c471101c) found
+# `lvgl`'s task LOW at 1296 B free of 8192 B (15.8%) -- raised to 10240 B
+# (lvgl_port.c's s_lvgl_task_stack) for ~32.7% free at the same measured
+# worst-case usage. This stack cannot move to PSRAM: it is explicitly, by
+# design, internal SRAM only (see lvgl_port.c's own comment on
+# s_lvgl_task_stack and ui_page_edit_firing.c's apply_cb() -- settings/
+# profile pages write NVS from this task, and a PSRAM-stacked task must
+# never write NVS), so the +2048 B initially landed here, taking
+# .dram0.bss to 101720 B against the 101000 B ceiling -- live board
+# `heap_internal` headroom (13523 B min_free, c471101c) made that a real
+# risk against dram_margin.h's KILN_DRAM_FREE_ALARM_BYTES (11903 B), not
+# just a ceiling number. Fix: adaptive_tune_zones[] (2700 B,
+# App/drivers/control/adaptive_tune.c) moved to PSRAM via
+# EXT_RAM_BSS_ATTR -- every access to it (zone_tick/run_end, init/
+# load_enable_flags, set_enabled/clear_ki_baseline, the getters including
+# the HTTP status read, revert, the model/Ki-diagnosis helpers, and the
+# autotune accept path; not a closed list) runs in ordinary task context
+# under adaptive_tune_lock, never an ISR or IRAM code, and every flash/NVS/
+# cfg persistence path copies through a separate local or job blob rather
+# than passing the array itself as a buffer, so it is never a DMA target and
+# never touched with the flash cache disabled. That move more than pays for
+# lvgl's +2048 B, bringing
+# .dram0.bss back down to a measured 99016 B -- back under the original
+# 101000 B ceiling (1984 B headroom), which is restored here rather than
+# left raised.
 CEILING_BYTES = 101000
 
 GRADED_SECTION = ".dram0.bss"

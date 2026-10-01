@@ -1340,7 +1340,18 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
      * with internal linkage still lands in on-chip DRAM by default on this
      * target, reachable with the flash cache disabled, same as the dynamic
      * allocation was. */
-    static StackType_t s_lvgl_task_stack[8192 / sizeof(StackType_t)];
+    /* 2026-09-30 (bench run logs/bench_test/20261001T011515Z_stack, firmware
+     * c471101c, uptime ~215 s): get_stack_margin reported this task LOW at
+     * 1296 B free of 8192 B (15.8%, just above the 15% CRITICAL cutoff).
+     * Raised 8192 -> 10240 (owner pre-authorized raising too-small stacks):
+     * at the same measured worst-case usage (~6896 B) that gives ~3344 B
+     * free, ~32.7%, clear of the 30% LOW cutoff. This stack cannot move to
+     * PSRAM (see the comment above and the NVS-write precedent at
+     * ui_page_edit_firing.c's apply_cb()/live_profile_save_working() --
+     * settings/profile pages write NVS from this task, and a task with a
+     * PSRAM stack must not write NVS), so the extra 2048 B lands in
+     * `.dram0.bss`; see check_kilnfw_dram_bss_budget.py's before/after. */
+    static StackType_t s_lvgl_task_stack[10240 / sizeof(StackType_t)];
     static StaticTask_t s_lvgl_task_tcb;
     TaskHandle_t created_handle = xTaskCreateStaticPinnedToCore(
         lvgl_port_task, "lvgl", sizeof(s_lvgl_task_stack) / sizeof(StackType_t), NULL, 4,
@@ -1362,7 +1373,7 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
      * returned. Static creation returns the handle directly rather than
      * filling an out-param, so it's copied into a static slot for
      * stack_margin_register() to read through, same as every other call
-     * site's &task_handle. 8192 must match sizeof(s_lvgl_task_stack) above. */
+     * site's &task_handle. 10240 must match sizeof(s_lvgl_task_stack) above. */
     static TaskHandle_t s_lvgl_task_handle;
     s_lvgl_task_handle = created_handle;
     s_ui_walk_owner_task = created_handle;

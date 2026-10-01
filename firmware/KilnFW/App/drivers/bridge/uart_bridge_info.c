@@ -332,9 +332,19 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
      * cutoff -- thin enough, and cheap enough given this stack is PSRAM (not
      * the scarce internal-DRAM budget the ~11.9 kB cliff applies to), to
      * warrant the extra 512 B rather than leaving it this close to the line.
-     * See ROADMAP.md's ead4123 entry for the before/after re-measurement. */
+     * See ROADMAP.md's ead4123 entry for the before/after re-measurement.
+     *
+     * 2026-09-30 (bench run logs/bench_test/20261001T011515Z_stack, firmware
+     * c471101c, uptime ~215 s): get_stack_margin reported this task LOW at
+     * 1064 B free of 3584 B (29.7%) -- worst case had grown past the 2026-09-04
+     * re-measurement without anyone re-checking the headroom. Raised 3584 ->
+     * 4096 (owner pre-authorized raising too-small stacks): at the same
+     * measured worst-case usage (~2520 B) that gives ~1576 B free, ~38.5%,
+     * comfortably clear of the 30% LOW cutoff. Cheap to do: this stack is
+     * PSRAM (MALLOC_CAP_SPIRAM), not the scarce internal-DRAM budget, so the
+     * extra 512 B has no `.dram0.bss` cost at all. */
     static TaskHandle_t s_info_bridge_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(info_bridge_task, "info_uart_bridge", 3584, &ctx, 5,
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(info_bridge_task, "info_uart_bridge", 4096, &ctx, 5,
                                                          &s_info_bridge_task, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
@@ -342,9 +352,9 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
         return ESP_ERR_NO_MEM;
     }
     /* Registration only, no size change -- only reached with a real handle
-     * since the failure branch above already returned. 3584 must match the
+     * since the failure branch above already returned. 4096 must match the
      * xTaskCreatePinnedToCoreWithCaps() literal above. */
-    stack_margin_register("info_uart_bridge", &s_info_bridge_task, 3584);
+    stack_margin_register("info_uart_bridge", &s_info_bridge_task, 4096);
 
     /* Best-effort unsolicited push so a GUI already connected at boot shows
      * the version immediately, without polling. If nothing is listening
