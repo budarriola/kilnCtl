@@ -130,19 +130,19 @@ class Sk01CommitFilterTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS)
 
     def test_same_commit_idle_record_beyond_tolerance_fails(self):
-        """The live 2026-10-01 bench finding: info_uart_bridge dropped
+        """Modeled on the live 2026-10-01 bench finding (info_uart_bridge, since moved to a 384 B override; lvgl stands in for a 64 B task): lvgl dropped
         128 B (1624 -> 1496) since its same-commit idle baseline was
         captured -- a real regression, not noise, and must FAIL once the
         comparison is correctly scored against its own commit."""
         with _TempRepoRoot() as t:
-            t.write("idle", "eb83c1ac", [_entry("info_uart_bridge", 1624)])
+            t.write("idle", "eb83c1ac", [_entry("lvgl", 1624)])
             ctx, srv = _ctx(t.root)
             ctx["repo_root"] = str(t.root)
-            srv._info.get_stack_margin.return_value = [_entry("info_uart_bridge", 1496)]
+            srv._info.get_stack_margin.return_value = [_entry("lvgl", 1496)]
             srv._info.get_fw_version.return_value = _fw("eb83c1ac")
             result = C._case_sk01(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
-        self.assertIn("info_uart_bridge", result.reason)
+        self.assertIn("lvgl", result.reason)
 
     def test_no_same_commit_record_is_inconclusive(self):
         with _TempRepoRoot() as t:
@@ -163,15 +163,15 @@ class Sk01CommitFilterTest(unittest.TestCase):
         increase (no drop at all) and PASS trivially; the current
         commit's own 1000 B baseline correctly exposes the regression."""
         with _TempRepoRoot() as t:
-            t.write("idle", "aaaa0000", [_entry("info_uart_bridge", 100)])
-            t.write("idle", "eb83c1ac", [_entry("info_uart_bridge", 1000)])
+            t.write("idle", "aaaa0000", [_entry("lvgl", 100)])
+            t.write("idle", "eb83c1ac", [_entry("lvgl", 1000)])
             ctx, srv = _ctx(t.root)
             ctx["repo_root"] = str(t.root)
-            srv._info.get_stack_margin.return_value = [_entry("info_uart_bridge", 800)]
+            srv._info.get_stack_margin.return_value = [_entry("lvgl", 800)]
             srv._info.get_fw_version.return_value = _fw("eb83c1ac")
             result = C._case_sk01(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
-        self.assertIn("info_uart_bridge", result.reason)
+        self.assertIn("lvgl", result.reason)
         # The old commit's lower reading must not appear as the baseline
         # used for comparison.
         regressed = result.observed.get("regressed_beyond_tolerance", [])

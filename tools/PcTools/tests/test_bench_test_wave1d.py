@@ -285,6 +285,44 @@ class StackMarginAgainstBaselineTest(unittest.TestCase):
         self.assertIn("floor", r.reason)
 
 
+class StackMarginTaskToleranceOverrideTest(unittest.TestCase):
+    """2026-10-01 owner decision: the three UART bridge tasks get 384 B,
+    every other task keeps 64 B; floor and dead-task FAIL are unchanged."""
+
+    def _judge(self, name, base, live, **kw):
+        return J.judge_stack_margin_against_baseline(
+            [_entry(name, hwm=live)], {name: _entry(name, hwm=base)},
+            min_free_bytes=kw.pop("min_free_bytes", None),
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"}, **kw,
+        )
+
+    def test_bridge_300b_drop_passes(self):
+        for name in ("thermo_uart_bridge", "io_uart_bridge", "info_uart_bridge"):
+            self.assertEqual(self._judge(name, 2000, 1700).verdict, Verdict.PASS, name)
+
+    def test_bridge_400b_drop_fails(self):
+        for name in ("thermo_uart_bridge", "io_uart_bridge", "info_uart_bridge"):
+            r = self._judge(name, 2000, 1600)
+            self.assertEqual(r.verdict, Verdict.FAIL, name)
+            self.assertIn(name, r.reason)
+
+    def test_non_bridge_100b_drop_still_fails(self):
+        self.assertEqual(self._judge("lvgl", 4000, 3900).verdict, Verdict.FAIL)
+
+    def test_bridge_floor_still_fails(self):
+        r = self._judge("thermo_uart_bridge", 600, 500, min_free_bytes=512)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("floor", r.reason)
+
+    def test_bridge_dead_still_fails(self):
+        r = J.judge_stack_margin_against_baseline(
+            [_entry("info_uart_bridge", hwm=0, alive=False)],
+            {"info_uart_bridge": _entry("info_uart_bridge", hwm=2000)},
+            board_fw_commit="abcdef1", baseline_fw_commits={"abcdef1"},
+        )
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+
 class Fl09ProjectDescriptionTest(unittest.TestCase):
     def test_no_match_still_fails(self):
         r = J.judge_pico_archive_with_description("error: no archived ELF found", lambda p: True)

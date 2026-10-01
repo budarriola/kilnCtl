@@ -191,6 +191,24 @@ def judge_stack_margin(report_text: str, min_free_bytes: Optional[int] = None) -
 #: commit mismatch.
 _STACK_MARGIN_NOISE_TOLERANCE_BYTES = 64
 
+#: Per-task SK-01/SK-02 tolerance overrides (owner decision 2026-10-01).
+#: The three UART bridge tasks sit at a pristine HWM until their first
+#: command, and the first command lowers it by about 1 KB (confirmed for
+#: thermo_uart_bridge/io_uart_bridge: first thermo_read/io_read per boot).
+#: The warmup rule absorbs that step, but boot-to-boot spread remains:
+#: thermo_uart_bridge read 1660 B free on one boot and 1856 B on another
+#: (196 B apart on the same commit), and info_uart_bridge showed a 176 B
+#: drop that no single info command reproduces (ESP_LOGW formatting through
+#: uart_log_vprintf under log-queue pressure is the leading candidate). A
+#: 64 B tolerance flags that as a regression every other boot, so these
+#: three get 384 B; every other task keeps the default. Only the tolerance
+#: moves: the absolute floor and the dead-task FAIL are untouched.
+_STACK_MARGIN_TASK_TOLERANCE_OVERRIDES = {
+    "thermo_uart_bridge": 384,
+    "io_uart_bridge": 384,
+    "info_uart_bridge": 384,
+}
+
 #: Commit strings that mean "the build did not report one" (info.py /
 #: stack_margin_baseline.py placeholders) -- treated as unknown, never as a
 #: match, by judge_stack_margin_against_baseline().
@@ -202,6 +220,7 @@ def judge_stack_margin_against_baseline(
     board_fw_commit: Optional[str] = None,
     baseline_fw_commits: "Optional[Iterable[str]]" = None,
     tolerance_bytes: int = _STACK_MARGIN_NOISE_TOLERANCE_BYTES,
+    task_tolerance_overrides: "Optional[dict]" = None,
 ) -> CaseResult:
     """SK-01/SK-02 (wave 1d): compares a live ``StackMarginEntry`` reading
     against the committed baseline's worst-case-across-conditions figure
@@ -243,6 +262,10 @@ def judge_stack_margin_against_baseline(
     relative to its own history but was dangerously close in absolute
     terms).
 
+    ``task_tolerance_overrides`` (default
+    :data:`_STACK_MARGIN_TASK_TOLERANCE_OVERRIDES`) maps a task name to its
+    own tolerance in place of ``tolerance_bytes``; pass ``{}`` to disable.
+
     A dead (``alive=False``) task is never scored against a byte figure --
     it FAILs outright, since a task that was never created or was deleted
     is not "using less stack than expected", it is missing."""
@@ -261,6 +284,9 @@ def judge_stack_margin_against_baseline(
             if e.hwm_bytes < min_free_bytes
         ]
 
+    if task_tolerance_overrides is None:
+        task_tolerance_overrides = _STACK_MARGIN_TASK_TOLERANCE_OVERRIDES
+
     regressed_beyond_tolerance = []
     regressed_within_tolerance = []
     inconclusive_tasks = []
@@ -274,8 +300,10 @@ def judge_stack_margin_against_baseline(
         drop = base.hwm_bytes - e.hwm_bytes
         if drop <= 0:
             continue
-        entry_info = {"task": e.name, "hwm_bytes": e.hwm_bytes, "baseline_hwm_bytes": base.hwm_bytes, "drop_bytes": drop}
-        if drop > tolerance_bytes:
+        task_tol = task_tolerance_overrides.get(e.name, tolerance_bytes)
+        entry_info = {"task": e.name, "hwm_bytes": e.hwm_bytes, "baseline_hwm_bytes": base.hwm_bytes,
+                      "drop_bytes": drop, "tolerance_bytes": task_tol}
+        if drop > task_tol:
             regressed_beyond_tolerance.append(entry_info)
         else:
             regressed_within_tolerance.append(entry_info)
@@ -296,6 +324,7 @@ def judge_stack_margin_against_baseline(
         "regressed_within_tolerance": regressed_within_tolerance,
         "no_baseline": inconclusive_tasks,
         "tolerance_bytes": tolerance_bytes,
+        "task_tolerance_overrides": dict(task_tolerance_overrides),
         "board_fw_commit": board_fw_commit,
         "baseline_fw_commits": sorted(baseline_commits_set),
         "commit_mismatch": commit_mismatch,
@@ -320,7 +349,7 @@ def judge_stack_margin_against_baseline(
     # alongside both commits, so the numbers stay visible even though the
     # verdict is softened from FAIL.
     if regressed_beyond_tolerance and (commit_mismatch or commit_unverified):
-        names = ", ".join(r["task"] for r in regressed_beyond_tolerance)
+        names = ", ".join(f"{r['task']} (-{r['drop_bytes']} B > {r['tolerance_bytes']} B)" for r in regressed_beyond_tolerance)
         commit_desc = (
             f"fw_commit mismatch (board={board_fw_commit!r}, baseline={sorted(baseline_commits_set)!r})"
             if commit_mismatch
@@ -337,7 +366,7 @@ def judge_stack_margin_against_baseline(
         )
     # Same, known commit: a beyond-tolerance drop IS a real regression.
     if regressed_beyond_tolerance:
-        names = ", ".join(r["task"] for r in regressed_beyond_tolerance)
+        names = ", ".join(f"{r['task']} (-{r['drop_bytes']} B > {r['tolerance_bytes']} B)" for r in regressed_beyond_tolerance)
         return CaseResult(
             Verdict.FAIL,
             reason=f"{len(regressed_beyond_tolerance)} task(s) dropped more than the {tolerance_bytes} B noise "

@@ -36,6 +36,17 @@ and thermo_uart_bridge / io_uart_bridge sit at a pristine high-water mark until
 the first bridge command reaches them (reply buffer + uart_protocol_send/ACK
 wait on the task stack), after which they read ~1 KB lower (thermo 2796 -> 1660 B,
 io 2544 -> 1552 B free, confirmed 2026-10-01 on eb83c1ac).
+The full warmup list, all sent on the capture boot: get_board_state,
+thermo_read, thermo_read_faults, io_read, get_fw_version, get_pin_config,
+several get_stack_margin, then the stack suite. info_uart_bridge drops are
+not tied to any single info command (leading candidate: ESP_LOGW formatting
+via uart_log_vprintf under log-queue pressure), so SK-01 also carries a
+per-task tolerance table (judgments.py
+_STACK_MARGIN_TASK_TOLERANCE_OVERRIDES): thermo_uart_bridge, io_uart_bridge
+and info_uart_bridge get 384 B, every other task keeps 64 B, and the
+absolute floor and dead-task FAIL are unchanged. Measured spread behind 384
+B: thermo_uart_bridge 1660 vs 1856 B free across two boots, an unexplained
+176 B info_uart_bridge drop, and the ~1 KB first-command step.
 Record the uptime, the warmup run dir and the bridge commands sent in the notes.
 """
 from __future__ import annotations
@@ -78,8 +89,8 @@ def main() -> int:
         built=args.fw_built,
     )
     notes_lc = args.notes.lower()
-    if "warmup" not in notes_lc or not all(c in notes_lc for c in ("thermo_read", "thermo_read_faults", "io_read")):
-        print("WARNING: --notes does not mention a warmup and each of thermo_read, thermo_read_faults, io_read (owner rule 2026-10-01: capture only on a board up >= 10 min that has already run bench_test_run(suite=stack) once on this boot AND been sent at least one thermo_read, thermo_read_faults and io_read, since the stack suite never exercises the thermo/io UART bridge tasks; record uptime, the warmup run dir and the bridge commands sent).", file=sys.stderr)
+    if "warmup" not in notes_lc or not all(c in notes_lc for c in ("thermo_read", "thermo_read_faults", "io_read", "get_board_state", "get_fw_version", "get_pin_config")):
+        print("WARNING: --notes does not mention a warmup and each of thermo_read, thermo_read_faults, io_read, get_board_state, get_fw_version, get_pin_config (owner rule 2026-10-01: capture only on a board up >= 10 min that has already run bench_test_run(suite=stack) once on this boot AND been sent at least one thermo_read, thermo_read_faults and io_read, since the stack suite never exercises the thermo/io UART bridge tasks; record uptime, the warmup run dir and the bridge commands sent).", file=sys.stderr)
     record = build_record(args.condition, entries, fw_version, notes=args.notes)
     path = write_record(record, args.out_dir)
     print(f"parsed {len(entries)} task(s), wrote {path}")
