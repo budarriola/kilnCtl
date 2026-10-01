@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, elf_archive, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, elf_archive, mcp_facade, openocd_util, pico_gpio_probe, reset_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -283,7 +283,9 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
             note = (
                 "\n\nNOTE: this reset the Pico. If the ESP was also reset around the "
                 "same time (a dual reflash), expect a correct S6a (mainFault) trip "
-                "while the ESP's safety link handshake is still coming up -- see "
+                "only if the ESP is up and asserting mainFault while its safety link "
+                "handshake is still coming up; if the ESP stays silent for more than "
+                "120 s the Pico trips S6b (link dead, trip_reason 7) instead -- see "
                 "docs/audits/s6a_startup_grace_revert_2026-09-07.md. Confirm the "
                 "link is up (safety_get_status shows link up and FW_VERSION "
                 "exchanged) before calling safety_clear_trip()."
@@ -295,15 +297,60 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
 
 
 @_srv._tool()
-def debug_reset(peer: str, mode: str = "run") -> str:
+def debug_reset(
+    peer: str,
+    mode: str = "run",
+    verify: bool = True,
+    verify_window_s: float = reset_probe.DEFAULT_WINDOW_S,
+) -> str:
     """Resets `peer` ("esp"/"pico"). `mode` is "run" (default, resumes
     execution), "halt" (resets and halts), or "init" (resets and runs any
-    OpenOCD target init sequence, then halts)."""
+    OpenOCD target init sequence, then halts).
+
+    For peer="esp" in mode "run", a successful OpenOCD reset is NOT taken as
+    proof the board came back: with `verify=True` (default) this polls for up
+    to `verify_window_s` seconds for the board answering GET /api/boot_guard
+    (and the UART link), reports time-to-answer, boot_count/persisted_count/
+    recovery_mode, and returns a loud WARNING if nothing answers or the board
+    is in recovery mode. It only reports -- it never resumes or resets.
+    Every call appends one JSON line to logs/debug_reset/history.jsonl
+    (gitignored, not rotated)."""
     ok, output = debug_probe.reset(peer, mode)
     _log_openocd_result(f"debug_reset(peer={peer}, mode={mode})", ok, output)
+    record: dict = {"peer": peer, "mode": mode, "openocd_ok": ok, "probe": None}
+    probe_res = None
+    esp_run = peer == debug_probe.PEER_ESP and mode == "run"
+    if ok and esp_run:
+        if verify:
+            probe_res = _probe_esp_after_reset(verify_window_s)
+            record["probe"] = probe_res.to_json()
+        else:
+            record["probe_skipped"] = "verify=False"
+    if not ok:
+        record["openocd_decisive_line"] = _decisive_openocd_line(output)
+    hist_err = reset_probe.append_history(debug_probe._repo_root(), record)
+    if hist_err:
+        _srv._session_log.warning("debug_reset: history append failed: %s", hist_err)
     if ok:
-        return f"reset {peer} ({mode}) OK"
+        msg = f"reset {peer} ({mode}) OK"
+        if probe_res is not None:
+            msg += "\n" + reset_probe.format_report(peer, mode, probe_res)
+        return msg
     return _openocd_error_message(f"reset failed for {peer}", output)
+
+
+def _probe_esp_after_reset(window_s: float) -> "reset_probe.ProbeResult":
+    from .mcp_server_flash import _resolve_verify_hosts  # local: avoids a circular import
+
+    def uart_fw():
+        return _srv._info.get_fw_version(timeout=reset_probe.UART_ATTEMPT_TIMEOUT_S)
+
+    return reset_probe.probe_after_reset(
+        hosts_fn=lambda: _resolve_verify_hosts(None),
+        get_boot_guard=ota_http.get_boot_guard_status,
+        get_uart_fw=uart_fw,
+        window_s=window_s,
+    )
 
 
 @_srv._tool()

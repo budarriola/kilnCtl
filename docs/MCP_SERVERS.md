@@ -246,7 +246,19 @@ Flashing is not in this table on purpose. It already exists as
 `debug_program(peer=...)` with `esp` / `pico` peers, each pinned to the
 right probe serial (`kilnctrl/debug_probe.py`).
 
-**Dual reflash (both processors reset close together) trips S6a -- this is
+`debug_reset(peer="esp")` (mode `run`) no longer trusts OpenOCD's exit 0: by
+default (`verify=True`, `verify_window_s=60`) it polls `GET /api/boot_guard`
+(candidate hosts as in `flash_firmware()`'s verify) and the UART link, reports
+time-to-answer and `boot_count`/`persisted_count`/`recovery_mode`, and returns
+a loud WARNING if the board is silent (it may be halted, in ROM or in recovery
+mode; no ANNOUNCE_REBOOT was sent, so the Pico trips S6b after 120 s) or in
+recovery mode. It only reports, never resumes or resets. Every `debug_reset`
+call appends a JSON line to `logs/debug_reset/history.jsonl` (gitignored, not
+rotated; `kilnctrl/reset_probe.py`).
+
+**Dual reflash (both processors reset close together) trips S6a only if the
+ESP is up and asserting `mainFault` while its link handshake comes up; an ESP
+that stays silent for more than 120 s trips S6b instead. The S6a case is
 correct, not a bug.** The Pico starts polling `mainFault` almost immediately
 on its own reset; the ESP takes longer to reach `safety_link_init()` and
 complete the FW_VERSION handshake, and correctly drives GPIO6 (asserted)
