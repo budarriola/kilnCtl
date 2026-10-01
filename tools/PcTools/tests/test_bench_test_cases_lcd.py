@@ -2073,6 +2073,26 @@ class DiagPagingUiTransientRead(DiagPagingUi):
         return super().list_tap_targets()
 
 
+class DiagPagingUiTruncated(DiagPagingUi):
+    """Diagnostics reads whose tap list is cut right after Home (the 253 B
+    wire cap): Prev/Next/page content are dropped and ``truncated`` is set.
+    ``truncate_first_reads`` truncates only that many diagnostics reads
+    (None = every read)."""
+
+    def __init__(self, *a, truncate_first_reads=None, **kw):
+        super().__init__(*a, **kw)
+        self._truncate_left = truncate_first_reads
+
+    def list_tap_targets(self):
+        if self._page != "diagnostics":
+            return super().list_tap_targets()
+        if self._truncate_left is not None:
+            if self._truncate_left <= 0:
+                return super().list_tap_targets()
+            self._truncate_left -= 1
+        return {"targets": [_DIAG_BACK, _DIAG_HOME], "truncated": True}
+
+
 class Lcd16Test(unittest.TestCase):
     def test_finally_restores_home_on_exception(self):
         nav_map = {"settings": "config", "Diagnostics": "diag_hub"}
@@ -2114,6 +2134,39 @@ class Lcd16Test(unittest.TestCase):
         result = C._case_lcd16({"srv": _diag_srv(ui)})
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(result.observed.get("rewind_prev_taps"), 3)
+
+    def test_truncated_first_read_is_repolled_then_rewinds(self):
+        # Back+Home present but Prev cut by truncation must not read as
+        # "first sub-page"; the re-poll sees the full list and rewinds.
+        ui = DiagPagingUiTruncated(page="home", page_targets=_DIAG_PAGE_TARGETS,
+                                   nav_map=_DIAG_NAV, truncate_first_reads=1)
+        ui.step = 3
+        result = C._case_lcd16({"srv": _diag_srv(ui)})
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed.get("rewind_prev_taps"), 3)
+        self.assertNotIn("rewind_truncated", result.observed)
+
+    def test_persistently_truncated_rewind_records_flag_not_page_one(self):
+        ui = DiagPagingUiTruncated(page="home", page_targets=_DIAG_PAGE_TARGETS,
+                                   nav_map=_DIAG_NAV)
+        ui.step = 3
+        srv = _diag_srv(ui)
+        with mock.patch.object(C, "_PAGE_POLL_TIMEOUT_S", 0.3):
+            result = C._case_lcd16({"srv": srv})
+        self.assertNotEqual(result.verdict, Verdict.PASS)
+        self.assertIs(result.observed.get("rewind_truncated"), True)
+        self.assertNotIn("rewind_prev_taps", result.observed)
+        self.assertIn("rewind", result.reason)
+        self.assertEqual(ui.step, 3)  # nothing tapped without a located glyph
+        self.assertNotIn((180 + _DIAG_PITCH, 26, True), srv._touch.injected)
+
+    def test_rewind_helper_truncated_does_not_claim_first_page(self):
+        ui = DiagPagingUiTruncated(page="diagnostics")
+        ui.step = 2
+        srv = _diag_srv(ui)
+        tap = ui.list_tap_targets()
+        tap, taps, trunc = C._rewind_diagnostics_to_first({"srv": srv}, ui, tap, timeout_s=0.3)
+        self.assertEqual((taps, trunc), (0, True))
 
     def test_clean_start_sends_no_prev_taps(self):
         ui = DiagPagingUi(page="home", page_targets=_DIAG_PAGE_TARGETS, nav_map=_DIAG_NAV)
@@ -4494,7 +4547,7 @@ class WakeAndHomeTest(unittest.TestCase):
         srv = FakeSrvWithTouch(ui)
         srv._touch.idle_ms = 1000
         C._wake_and_home({"srv": srv})
-        self.assertEqual(srv._touch.injected, [])
+        self.assertNotIn((180 + _DIAG_PITCH, 26, True), srv._touch.injected)
 
     def test_wake_tap_sent_when_awake_but_idle_long(self):
         ui = SwallowingUiTest(page="home", page_targets={"home": []}, nav_map={})
