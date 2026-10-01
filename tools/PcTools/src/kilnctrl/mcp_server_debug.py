@@ -316,7 +316,7 @@ def debug_reset(
     Every call appends one JSON line to logs/debug_reset/history.jsonl
     (gitignored, not rotated).
 
-    Cost: an ESP run-mode reset now blocks while it verifies -- roughly 5-10 s
+    Cost: an ESP run-mode reset now blocks while it verifies -- typically ~20-25 s (bench-measured 2026-10-01: UART 20.0 s, HTTP 23.2 s)
     on a healthy board, up to the full `verify_window_s` on a silent one.
     Pass verify=False to skip."""
     record: dict = {"peer": peer, "mode": mode, "openocd_ok": None, "probe": None}

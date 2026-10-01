@@ -224,12 +224,16 @@ class _ClientHandler:
         rid = req.get("id")
         try:
             if op == "connect":
-                result = self.hub.link.connect(req.get("port"))
+                result = self.hub.connect(req.get("port"))
                 self._reply(rid, True, result)
                 self.hub.broadcast_connection_state()
             elif op == "disconnect":
-                self.hub.link.disconnect()
+                self.hub.disconnect()
                 self._reply(rid, True, None)
+                self.hub.broadcast_connection_state()
+            elif op == "ensure_connected":
+                status = self.hub.ensure_connected()
+                self._reply(rid, True, status)
                 self.hub.broadcast_connection_state()
             elif op == "status":
                 self._reply(rid, True, self.hub.link.status())
@@ -278,6 +282,11 @@ class LinkHub:
         self._listen_sock = listen_sock
         self._clients: list[_ClientHandler] = []
         self._clients_lock = threading.Lock()
+        #: Set by an explicit disconnect op, cleared by an explicit connect;
+        #: while set, ensure_connected() never reopens the port.
+        self._explicit_disconnect = False
+        #: Port of the last successful open, reused by a lazy reconnect.
+        self._last_port: Optional[str] = None
         #: task_id -> (inbox queue, drain thread, stop event); created lazily
         #: on first subscriber, torn down when the last one unsubscribes.
         self._drains: "dict[int, tuple[queue.Queue, threading.Thread, threading.Event]]" = {}
@@ -285,6 +294,37 @@ class LinkHub:
         #: the heartbeat has to run (and therefore needs its inbox open)
         #: whether or not any real client has ever subscribed to anything.
         self._heartbeat_inbox = self.link.register_task(_HEARTBEAT_TASK_ID)
+
+    # -- connection ownership -----------------------------------------------
+    def connect(self, port: Optional[str] = None) -> str:
+        """Explicit connect: clears any explicit-disconnect latch."""
+        opened = self.link.connect(port)
+        self._explicit_disconnect = False
+        self._last_port = opened
+        return opened
+
+    def disconnect(self) -> None:
+        """Explicit disconnect: latches so ensure_connected() will not reopen."""
+        self._explicit_disconnect = True
+        self.link.disconnect()
+
+    def ensure_connected(self) -> dict:
+        """Lazy connect for a send that found the shared link closed.
+
+        Reopens the port (the last one explicitly/lazily opened, else the
+        autodiscovered recommendation -- what connect() with no port would
+        pick, at the link's configured baud) unless the user explicitly
+        disconnected. Never steals a port: if the open fails (held by another
+        process, device absent) the link stays closed and the failure is
+        logged, not raised -- the caller then reports NOT_CONNECTED as before.
+        """
+        if not self.link.is_connected and not self._explicit_disconnect:
+            try:
+                self._last_port = self.link.connect(self._last_port)
+                log.info("lazy reconnect opened %s", self._last_port)
+            except Exception as exc:  # noqa: BLE001 - stays disconnected
+                log.warning("lazy reconnect failed: %s", exc)
+        return self.link.status()
 
     def start(self) -> None:
         threading.Thread(target=self._accept_loop, daemon=True, name="link-hub-accept").start()
@@ -525,7 +565,17 @@ class RemoteUartLink:
         timeout: Optional[float] = None,
     ) -> SendResult:
         if not self._is_connected:
-            return SendResult.NOT_CONNECTED
+            # The shared port may have closed without an explicit disconnect
+            # (observed on the bench: safety_get_status failed "no serial port
+            # open" after the server had been up a while). Ask the hub to
+            # reopen it; the hub refuses if the user disconnected on purpose
+            # and never takes a port another process holds.
+            try:
+                self._apply_status(self._request("ensure_connected", rpc_timeout=_RPC_TIMEOUT_CONNECT))
+            except (TimeoutError, RuntimeError, OSError):
+                return SendResult.NOT_CONNECTED
+            if not self._is_connected:
+                return SendResult.NOT_CONNECTED
         try:
             result = self._request(
                 "send",
