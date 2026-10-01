@@ -467,6 +467,7 @@ from .mcp_server_safety import *  # noqa: F401,F403
 from .mcp_server_gpio_probe import *  # noqa: F401,F403
 from .mcp_server_pico_gpio_probe import *  # noqa: F401,F403
 from .mcp_server_wifi import *  # noqa: F401,F403
+from .mcp_server_network import *  # noqa: F401,F403
 from .mcp_server_ota import *  # noqa: F401,F403
 from .mcp_server_control import *  # noqa: F401,F403
 from .mcp_server_config_presets import *  # noqa: F401,F403

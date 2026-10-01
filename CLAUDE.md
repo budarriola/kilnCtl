@@ -22,7 +22,7 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (195 tools for `kilnctrl`, 86 for `kicad`, both
+the rest behind a search facade (197 tools for `kilnctrl`, 86 for `kicad`, both
 per `kiln_help()`/`kicad_help()` as of 2026-09-29, when the AP-password HMAC
 retirement (below) deleted the `ota_get_challenge` tool along with
 `GET /api/ota/challenge` itself, dropping the count from 196 to 195. The one
