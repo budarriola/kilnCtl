@@ -54,9 +54,10 @@ class _SafetyStatus:
 
 
 class _SafetyDiag:
-    def __init__(self, trip_reason=None, trip_mask=None):
+    def __init__(self, trip_reason=None, trip_mask=None, ever_received=True):
         self.trip_reason = trip_reason
         self.trip_mask = trip_mask
+        self.ever_received = ever_received
 
 
 def _clock():
@@ -91,7 +92,8 @@ class IdleGateTest(unittest.TestCase):
 class Otb01Test(unittest.TestCase):
     def _ctx(self, state_name="idle", link_up=True, trip_reason=6, trip_mask=0x0020,
               enabled_after_clear=True, readiness_ok=True, relay_energized=False,
-              esp_restarts=True, pico_reboots=True):
+              esp_restarts=True, pico_reboots=True, trip_before=0, boot_id_unknown_polls=0,
+              boot_id_after=8, diag_unreceived_polls=0):
         _clockstate, now, sleep = _clock()
         srv = _FakeSrv(state_name=state_name)
         statuses = iter([_SafetyStatus(link_up=link_up)] * 5)
@@ -121,8 +123,25 @@ class Otb01Test(unittest.TestCase):
                 return 3.0
             return 500.0 + (_clockstate["t"] if reset["done"] else 0.0)
 
+        polls = {"boot": 0, "diag": 0}
+
         def boot_id_fn():
-            return 8 if (reset["done"] and pico_reboots) else 7
+            # None == unknown (no FW_VERSION frame yet after the ESP restart).
+            if not reset["done"]:
+                return 7
+            polls["boot"] += 1
+            if polls["boot"] <= boot_id_unknown_polls:
+                return None
+            return boot_id_after if pico_reboots else 7
+
+        def diag_fn():
+            if not reset["done"]:
+                # Pre-reset: received; any pre-latched trip is the test's choice.
+                return _SafetyDiag(trip_reason=trip_before, trip_mask=(1 << (trip_before - 1)) if trip_before else 0)
+            polls["diag"] += 1
+            if polls["diag"] <= diag_unreceived_polls:
+                return _SafetyDiag(trip_reason=0, trip_mask=0, ever_received=False)
+            return diag
 
         ctx = {
             "srv": srv, "host": "192.168.4.1",
@@ -133,7 +152,7 @@ class Otb01Test(unittest.TestCase):
             "dashboard_http_client": _FakeDashboardClient(relay_energized=relay_energized),
             "_now": now, "_sleep": sleep,
             "_get_safety_status_fn": get_status_fn,
-            "_get_safety_diag_fn": lambda: diag,
+            "_get_safety_diag_fn": diag_fn,
             "_clear_trip_fn": clear_trip_fn,
             "_readiness_trip_ok_fn": lambda: readiness_ok,
         }
@@ -291,7 +310,7 @@ class Otb01Test(unittest.TestCase):
 
         def diag():
             reads["n"] += 1
-            if reads["n"] <= 1:
+            if reads["n"] <= 2:  # baseline read + first post-reset read
                 return _SafetyDiag(trip_reason=0, trip_mask=0)
             return _SafetyDiag(trip_reason=6, trip_mask=0x0020)
 
@@ -307,9 +326,91 @@ class Otb01Test(unittest.TestCase):
         self.assertIn("boot_id unchanged", result.reason)
 
     def test_boot_id_unchanged_but_trip_latched_is_valid_evidence(self):
-        ctx = self._ctx(pico_reboots=False)  # trip 6 / 0x0020, same boot_id
+        ctx = self._ctx(pico_reboots=False)  # trip 0 before the reset, trip 6 only after, same boot_id
         result = C._case_otb01(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_trip_latched_before_reset_is_inconclusive_and_no_reset(self):
+        sw_reset_called = {"v": False}
+        ctx = self._ctx(trip_before=6)
+        ctx["_sw_reset_fn"] = lambda: sw_reset_called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("already latched", result.reason)
+        self.assertFalse(sw_reset_called["v"])
+        self.assertEqual(ctx["_otb01"]["outcome"], "inconclusive_trip_prelatched")
+
+    def test_unreceived_baseline_diag_means_no_reset_is_issued(self):
+        sw_reset_called = {"v": False}
+        ctx = self._ctx()
+        ctx["_get_safety_diag_fn"] = lambda: _SafetyDiag(trip_reason=0, trip_mask=0, ever_received=False)
+        ctx["_sw_reset_fn"] = lambda: sw_reset_called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertFalse(sw_reset_called["v"])
+
+    def test_unknown_baseline_boot_id_means_no_reset_is_issued(self):
+        sw_reset_called = {"v": False}
+        ctx = self._ctx()
+        ctx["_pico_boot_id_fn"] = lambda: None
+        ctx["_sw_reset_fn"] = lambda: sw_reset_called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertFalse(sw_reset_called["v"])
+
+    def test_boot_id_never_known_after_reset_is_inconclusive_not_pass(self):
+        """Placeholder boot_id 0 / protocol_version 0 after the ESP restart
+        must not read as 'the Pico rebooted'."""
+        ctx = self._ctx(trip_reason=0, trip_mask=0, boot_id_unknown_polls=10**6)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(ctx["_otb01"]["outcome"], "inconclusive_boot_id_unknown")
+
+    def test_boot_id_that_becomes_known_later_is_waited_for(self):
+        ctx = self._ctx(trip_reason=0, trip_mask=0, boot_id_unknown_polls=3)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ctx["_otb01"]["pico_boot_id_after"], 8)
+
+    def test_real_boot_id_zero_after_reset_counts_as_a_change(self):
+        # 0 is a legal random boot_id: baseline 7 -> real 0 is a reboot.
+        ctx = self._ctx(trip_reason=0, trip_mask=0, boot_id_after=0)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ctx["_otb01"]["pico_boot_id_after"], 0)
+
+    def test_diag_never_received_after_reset_is_inconclusive_not_no_trip(self):
+        ctx = self._ctx(trip_reason=0, trip_mask=0, diag_unreceived_polls=10**6)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(ctx["_otb01"]["outcome"], "inconclusive_diag_not_received")
+
+    def test_diag_unreceived_through_settle_window_is_inconclusive(self):
+        ctx = self._ctx(trip_reason=0, trip_mask=0)
+        reads = {"n": 0}
+
+        def diag():
+            reads["n"] += 1
+            if reads["n"] <= 2:  # baseline + first post-reset read are real
+                return _SafetyDiag(trip_reason=0, trip_mask=0)
+            return _SafetyDiag(trip_reason=0, trip_mask=0, ever_received=False)
+
+        ctx["_get_safety_diag_fn"] = diag
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(ctx["_otb01"]["outcome"], "inconclusive_settle_diag_not_received")
+
+    def test_diag_that_becomes_received_later_is_waited_for(self):
+        ctx = self._ctx(trip_reason=0, trip_mask=0, diag_unreceived_polls=3)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_default_boot_id_reader_treats_protocol_version_zero_as_unknown(self):
+        fw = lambda pv, b: type("F", (), {"protocol_version": pv, "boot_id": b})()
+        mk = lambda f: type("S", (), {"_safety": type("X", (), {"get_fw_version": staticmethod(lambda: f)})()})()
+        self.assertIsNone(C._pico_boot_id_known(mk(fw(0, 0))))
+        self.assertEqual(C._pico_boot_id_known(mk(fw(16, 0))), 0)
+        self.assertEqual(C._pico_boot_id_known(mk(fw(16, 9))), 9)
 
     def test_no_baseline_means_no_reset_is_issued(self):
         sw_reset_called = {"v": False}

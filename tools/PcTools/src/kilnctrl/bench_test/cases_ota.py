@@ -187,6 +187,17 @@ def _esp_uptime_s(ctx: dict, host) -> Optional[float]:
     return _dashboard_client(ctx).get_status(host).get("uptime_s")
 
 
+def _pico_boot_id_known(srv) -> Optional[int]:
+    """Pico boot_id from the ESP's cached FW_VERSION, or None while unknown.
+    Before the first FW_VERSION frame arrives the ESP reports boot_id=0 with
+    protocol_version=0; 0 is also a legal real (random) boot_id, so the
+    protocol_version, never the value, decides whether it is known."""
+    fw = srv._safety.get_fw_version()
+    if not getattr(fw, "protocol_version", 0):
+        return None
+    return fw.boot_id
+
+
 def _case_otb01(ctx: dict) -> CaseResult:
     """OT-B01: sw_reset_esp(confirm=True) resets both processors close
     together. S6a (SAFETY_TRIP_MAIN_FAULT) is EXPECTED to latch while the
@@ -215,7 +226,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
     Stashes the observed data into ctx["_otb01"] for SP-04's observer.
 
     Every board interaction is behind an injectable ctx seam
-    (``_esp_uptime_fn``/``_pico_boot_id_fn``/``_get_safety_status_fn``/
+    (``_esp_uptime_fn``/``_pico_boot_id_fn`` (None = unknown)/``_get_safety_status_fn``/
     ``_get_safety_diag_fn``/``_clear_trip_fn``/``_readiness_trip_ok_fn``) so
     this can be unit tested with fakes rather than a live link."""
     idle, reason = _is_idle(ctx)
@@ -236,7 +247,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
     get_status_fn = ctx.get("_get_safety_status_fn") or (lambda: srv._safety.get_status())
     get_diag_fn = ctx.get("_get_safety_diag_fn") or (lambda: srv._safety.get_diag())
     esp_uptime_fn = ctx.get("_esp_uptime_fn") or (lambda: _esp_uptime_s(ctx, host))
-    boot_id_fn = ctx.get("_pico_boot_id_fn") or (lambda: srv._safety.get_fw_version().boot_id)
+    boot_id_fn = ctx.get("_pico_boot_id_fn") or (lambda: _pico_boot_id_known(srv))
     clear_trip_fn = ctx.get("_clear_trip_fn", lambda: _default_clear_trip_fn(ctx))
     readiness_trip_ok_fn = ctx.get("_readiness_trip_ok_fn", lambda: _default_readiness_trip_ok_fn(ctx))
 
@@ -274,8 +285,10 @@ def _case_otb01(ctx: dict) -> CaseResult:
         ctx["_otb01"] = data
         return data
 
-    # Baseline BEFORE the reset. Without both, a later read can never be
-    # shown to post-date the reset, so do not reset at all.
+    # Baseline BEFORE the reset. Without all of it, a later read can never be
+    # shown to post-date the reset, so do not reset at all. An UNKNOWN Pico
+    # boot_id (None: no FW_VERSION frame yet, protocol_version 0) is not a
+    # baseline -- and 0 is a legal real boot_id, never a sentinel.
     try:
         uptime_before = esp_uptime_fn()
     except Exception as exc:
@@ -284,12 +297,31 @@ def _case_otb01(ctx: dict) -> CaseResult:
         boot_id_before = boot_id_fn()
     except Exception as exc:
         _note_error("baseline pico boot_id", exc)
-    if uptime_before is None or boot_id_before is None:
+    diag_before_ok = False
+    trip_before = None
+    try:
+        d0 = get_diag_fn()
+        if getattr(d0, "ever_received", False):
+            diag_before_ok = True
+            trip_before = getattr(d0, "trip_reason", None)
+    except Exception as exc:
+        _note_error("baseline pico diag", exc)
+    if uptime_before is None or boot_id_before is None or not diag_before_ok:
         data = _stash("inconclusive_no_baseline")
         return CaseResult(
             Verdict.INCONCLUSIVE,
             reason=(f"could not snapshot a pre-reset baseline (esp uptime_s={uptime_before!r}, "
-                    f"pico boot_id={boot_id_before!r}; last error: {errors['last']}) -- "
+                    f"pico boot_id={boot_id_before!r} (None = not yet known), "
+                    f"diag received={diag_before_ok}; last error: {errors['last']}) -- "
+                    f"no reset was issued"),
+            observed=data,
+        )
+    if trip_before:
+        data = _stash("inconclusive_trip_prelatched", trip_before=trip_before)
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(f"a safety trip (reason {trip_before}) is already latched before the reset, so a "
+                    f"post-reset trip could not be attributed to it -- clear/diagnose it first; "
                     f"no reset was issued"),
             observed=data,
         )
@@ -322,31 +354,43 @@ def _case_otb01(ctx: dict) -> CaseResult:
             observed=data,
         )
 
-    # Phase 2: link back up, then read diag + Pico boot_id (fresh: the ESP's
-    # cache was emptied by its own restart).
+    # Phase 2: link back up, then read diag + Pico boot_id. After the ESP's
+    # restart both caches start EMPTY (diag ever_received False; boot_id
+    # unknown, reported as 0 with protocol_version 0), so keep polling until
+    # they are populated; placeholder zeros are never evidence.
     deadline = now() + 30.0
-    diag = None
+    diag_received = False
     while now() < deadline:
         try:
             status = get_status_fn()
             if getattr(status, "link_up", False):
                 link_up = True
                 diag = get_diag_fn()
-                trip_reason = getattr(diag, "trip_reason", None)
-                trip_mask = getattr(diag, "trip_mask", None)
+                if getattr(diag, "ever_received", False):
+                    diag_received = True
+                    trip_reason = getattr(diag, "trip_reason", None)
+                    trip_mask = getattr(diag, "trip_mask", None)
                 boot_id_after = boot_id_fn()
-                # Valid evidence: Pico rebooted, or a trip latched.
-                if boot_id_after != boot_id_before or trip_reason:
-                    break
+                if diag_received and (trip_reason or (boot_id_after is not None and boot_id_after != boot_id_before)):
+                    break  # Valid evidence: a trip latched, or the Pico rebooted.
         except Exception as exc:
             _note_error("post-reset link poll", exc)
         sleep(1.0)
 
-    if link_up and (diag is None or boot_id_after is None):
-        data = _stash("inconclusive_unreadable")
+    if link_up and not diag_received:
+        data = _stash("inconclusive_diag_not_received")
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason=(f"link up after ESP restart but diag/boot_id unreadable "
+            reason=(f"link up after ESP restart but no DIAG frame ever arrived (trip_reason is a "
+                    f"placeholder) -- poll errors {errors['count']}, last: {errors['last']}"),
+            observed=data,
+        )
+    if link_up and not trip_reason and boot_id_after is None:
+        data = _stash("inconclusive_boot_id_unknown")
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(f"link up after ESP restart but the Pico boot_id never became known "
+                    f"(no FW_VERSION frame) -- cannot show the Pico was reset "
                     f"(poll errors {errors['count']}, last: {errors['last']})"),
             observed=data,
         )
@@ -361,19 +405,32 @@ def _case_otb01(ctx: dict) -> CaseResult:
         )
 
     # A trip may latch a little after link-up (S6a is debounced 200 ms):
-    # before recording "no trip", look a few seconds longer.
+    # before recording "no trip", look a few seconds longer. Only a diag
+    # that has actually been received counts as a look.
     if evidence_valid and not trip_reason:
         settle_deadline = now() + 5.0
+        settle_received = 0
         while now() < settle_deadline:
             sleep(1.0)
             try:
                 d2 = get_diag_fn()
+                if not getattr(d2, "ever_received", False):
+                    continue
+                settle_received += 1
                 trip_reason = getattr(d2, "trip_reason", None)
                 trip_mask = getattr(d2, "trip_mask", None)
                 if trip_reason:
                     break
             except Exception as exc:
                 _note_error("post-reset settle poll", exc)
+        if not trip_reason and settle_received == 0:
+            data = _stash("inconclusive_settle_diag_not_received")
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=(f"no DIAG frame was received during the 5 s settle window, so 'no trip' is "
+                        f"unproven (poll errors {errors['count']}, last: {errors['last']})"),
+                observed=data,
+            )
 
     if link_up and not trip_reason:
         data = _stash("no_trip")
