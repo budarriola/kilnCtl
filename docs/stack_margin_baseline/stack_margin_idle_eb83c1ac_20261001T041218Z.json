@@ -1,25 +1,25 @@
 {
-  "captured_at_utc": "2026-10-01T03:39:01Z",
+  "captured_at_utc": "2026-10-01T04:12:18Z",
   "condition": "idle",
   "entries": [
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 1536,
+      "hwm_bytes": 1540,
       "level": "OK",
       "name": "wifi_prov_owner"
     },
     {
       "alive": true,
       "configured_stack_bytes": 8192,
-      "hwm_bytes": 4004,
+      "hwm_bytes": 4168,
       "level": "OK",
       "name": "httpd_worker"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 2784,
+      "hwm_bytes": 2788,
       "level": "OK",
       "name": "i2c_owner_sx1509"
     },
@@ -40,21 +40,21 @@
     {
       "alive": true,
       "configured_stack_bytes": 6144,
-      "hwm_bytes": 3136,
+      "hwm_bytes": 3076,
       "level": "OK",
       "name": "screen_idle"
     },
     {
       "alive": true,
       "configured_stack_bytes": 3072,
-      "hwm_bytes": 1120,
+      "hwm_bytes": 1156,
       "level": "OK",
       "name": "backlight_pwm"
     },
     {
       "alive": true,
       "configured_stack_bytes": 3072,
-      "hwm_bytes": 1016,
+      "hwm_bytes": 1180,
       "level": "OK",
       "name": "safety_owner_evt"
     },
@@ -68,21 +68,21 @@
     {
       "alive": true,
       "configured_stack_bytes": 8192,
-      "hwm_bytes": 4976,
+      "hwm_bytes": 5216,
       "level": "OK",
       "name": "safety_poll"
     },
     {
       "alive": true,
       "configured_stack_bytes": 3072,
-      "hwm_bytes": 2324,
+      "hwm_bytes": 2320,
       "level": "OK",
       "name": "danger_mode"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 2108,
+      "hwm_bytes": 2824,
       "level": "OK",
       "name": "kiln_io_owner"
     },
@@ -96,7 +96,7 @@
     {
       "alive": true,
       "configured_stack_bytes": 10240,
-      "hwm_bytes": 6480,
+      "hwm_bytes": 6320,
       "level": "OK",
       "name": "bx_flash_worker"
     },
@@ -110,70 +110,70 @@
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 2976,
+      "hwm_bytes": 2988,
       "level": "OK",
       "name": "profile_exec_wdt"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 3288,
+      "hwm_bytes": 3260,
       "level": "OK",
       "name": "autotune_engine"
     },
     {
       "alive": true,
       "configured_stack_bytes": 8192,
-      "hwm_bytes": 5788,
+      "hwm_bytes": 5784,
       "level": "OK",
       "name": "kiln_cfg_swap"
     },
     {
       "alive": true,
       "configured_stack_bytes": 3072,
-      "hwm_bytes": 2344,
+      "hwm_bytes": 2348,
       "level": "OK",
       "name": "uart_owner_evt_task"
     },
     {
       "alive": true,
       "configured_stack_bytes": 8192,
-      "hwm_bytes": 3964,
+      "hwm_bytes": 3616,
       "level": "OK",
       "name": "uart_proto_rx"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 1864,
+      "hwm_bytes": 1868,
       "level": "OK",
       "name": "uart_log_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 1496,
+      "hwm_bytes": 1548,
       "level": "OK",
       "name": "info_uart_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 3072,
-      "hwm_bytes": 1136,
+      "hwm_bytes": 1176,
       "level": "OK",
       "name": "system_uart_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 2792,
+      "hwm_bytes": 1660,
       "level": "OK",
       "name": "thermo_uart_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 2556,
+      "hwm_bytes": 1552,
       "level": "OK",
       "name": "io_uart_bridge"
     },
@@ -187,42 +187,42 @@
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 2776,
+      "hwm_bytes": 2768,
       "level": "OK",
       "name": "touch_uart_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 8192,
-      "hwm_bytes": 5672,
+      "hwm_bytes": 5664,
       "level": "OK",
       "name": "ui_test_uart_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 1608,
+      "hwm_bytes": 1632,
       "level": "OK",
       "name": "safety_uart_bridge"
     },
     {
       "alive": true,
       "configured_stack_bytes": 6144,
-      "hwm_bytes": 4452,
+      "hwm_bytes": 4524,
       "level": "OK",
       "name": "telemetry_log"
     },
     {
       "alive": true,
       "configured_stack_bytes": 6144,
-      "hwm_bytes": 5044,
+      "hwm_bytes": 5052,
       "level": "OK",
       "name": "gpio_probe"
     },
     {
       "alive": true,
       "configured_stack_bytes": 3072,
-      "hwm_bytes": 2320,
+      "hwm_bytes": 2392,
       "level": "OK",
       "name": "link_watchdog"
     }
@@ -231,5 +231,5 @@
   "fw_commit": "eb83c1ac",
   "fw_dirty": false,
   "load": null,
-  "notes": "Warmed-up baseline per owner rule 2026-10-01 (stack baselines only on a board up >= 10 min that has already run bench_test_run(suite=stack) once on the same boot). Captured at board uptime_s ~6369 (reset_reason 'software (esp_restart)', no reboot since warmup; uptime 6075 at 2026-10-01T03:33:36Z). Warmup run: logs/bench_test/20261001T033329Z_stack. Board idle (profiles_get_exec_status state=0). Read-only kiln_call(get_stack_margin). Replaces the pre-rule capture stack_margin_idle_eb83c1ac_20261001T030311Z.json (info_uart_bridge read 1624 B there vs 1496 B after warmup)."
+  "notes": "Warmed-up baseline per owner rule 2026-10-01 extended with bridge warmup: captured at board uptime_s ~611 on a fresh boot (reset_reason 'software (esp_restart)', deliberate debug_reset peer=esp at uptime 0, no reboot since), after bench_test_run(suite=stack) warmup run logs/bench_test/20261001T041158Z_stack_bridgewarm and after thermo_read, thermo_read_faults and io_read were each sent this boot (first thermo_read dropped thermo_uart_bridge 2796->1660 B, first io_read dropped io_uart_bridge 2544->1552 B). Board idle (profiles_get_exec_status state=0). Read-only kiln_call(get_stack_margin). Replaces stack_margin_idle_eb83c1ac_20261001T033901Z.json, which predated the bridge warmup and made SK-01 FAIL on both bridge tasks."
 }

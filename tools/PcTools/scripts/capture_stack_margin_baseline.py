@@ -41,7 +41,13 @@ that has been up at least 10 minutes AND has already run
 bench_test_run(suite="stack") once on that same boot. High-water marks keep
 dropping during the first suite run on a boot (info_uart_bridge: 1624 B free
 fresh-idle, 1496 B later), so a pre-suite capture produces false SK-01 FAILs.
-Record the uptime and the warmup run dir in --notes.
+The warmup must ALSO include at least one thermo_read, thermo_read_faults and
+io_read call on that boot: the stack suite never sends UART bridge commands,
+and thermo_uart_bridge / io_uart_bridge sit at a pristine high-water mark until
+the first bridge command reaches them (reply buffer + uart_protocol_send/ACK
+wait on the task stack), after which they read ~1 KB lower (thermo 2796 -> 1660 B,
+io 2544 -> 1552 B free, confirmed 2026-10-01 on eb83c1ac).
+Record the uptime, the warmup run dir and the bridge commands sent in --notes.
 """
 from __future__ import annotations
 
