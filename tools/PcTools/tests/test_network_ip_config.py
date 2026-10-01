@@ -16,6 +16,7 @@ import urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from kilnctrl import http_auth  # noqa: E402
 from kilnctrl import mcp_server_network as mn  # noqa: E402
 from kilnctrl import mcp_server_ota  # noqa: E402
 from kilnctrl import wifi_prov_http_client as wph  # noqa: E402
@@ -272,6 +273,29 @@ class ProbeTest(unittest.TestCase):
                                         side_effect=urllib.error.HTTPError("u", 401, "x", {}, None)) as ha:
             wph.probe_host_answers("192.168.1.50")
         self.assertIs(ha.call_args.kwargs.get("no_relogin"), True)
+
+
+class NoRecordTest(unittest.TestCase):
+    """A foreign device answering at an unverified address must never be
+    persisted as last_host (a later credentialed call could target it)."""
+
+    def _run(self, fn):
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_Resp("{}")), \
+                unittest.mock.patch.object(http_auth.host_resolve, "record_host_seen") as rec:
+            fn()
+        return rec
+
+    def test_probe_never_records_on_2xx(self):
+        rec = self._run(lambda: wph.probe_host_answers("192.168.1.50"))
+        rec.assert_not_called()
+
+    def test_untrusted_status_read_never_records(self):
+        rec = self._run(lambda: wph.get_status("192.168.1.50", trusted=False))
+        rec.assert_not_called()
+
+    def test_trusted_status_read_still_records(self):
+        rec = self._run(lambda: wph.get_status("10.0.0.5", trusted=True))
+        rec.assert_called_once()
 
 
 class GetStatusAdminTest(unittest.TestCase):

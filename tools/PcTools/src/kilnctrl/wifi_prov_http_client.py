@@ -76,7 +76,7 @@ def get_status(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S, trusted: bo
     ever sent to it."""
     req = urllib.request.Request(_url(host, "/status"), method="GET")
     try:
-        with http_auth.urlopen(req, timeout=timeout, no_relogin=not trusted) as resp:
+        with http_auth.urlopen(req, timeout=timeout, no_relogin=not trusted, record=trusted) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         status, detail = _http_error_detail(exc)
@@ -272,12 +272,14 @@ def probe_host_answers(host: str, timeout: float = 2.0) -> "tuple[bool, str]":
     """Credential-free check for 'does ANYTHING already answer at host:80?'
     -- used before moving the board onto a static ip to catch an address
     conflict. Goes through http_auth with no_relogin=True, which disables login and
-    cookie handling entirely (no credential, no session cookie).
+    cookie handling entirely (no credential, no session cookie), and
+    record=False so a foreign device that answers is never persisted as the
+    default host (host_resolve.record_host_seen).
     Any HTTP response, or a connection REFUSED (a live host with the port
     closed), counts as answering; a timeout or no-route counts as free."""
     req = urllib.request.Request(_url(host, "/status"), method="GET")
     try:
-        with http_auth.urlopen(req, timeout=timeout, no_relogin=True):
+        with http_auth.urlopen(req, timeout=timeout, no_relogin=True, record=False):
             return True, "answered HTTP 200"
     except urllib.error.HTTPError as exc:
         return True, f"answered HTTP {exc.code}"

@@ -280,7 +280,7 @@ def logout(origin: str, timeout: Optional[float] = None) -> bool:
     return True
 
 
-def urlopen(req, timeout=None, no_relogin: bool = False):
+def urlopen(req, timeout=None, no_relogin: bool = False, record: bool = True):
     """Drop-in for ``urllib.request.urlopen`` that answers a 401 once.
 
     Behaviour when the board is not gating (today's state, and any route of
@@ -301,6 +301,11 @@ def urlopen(req, timeout=None, no_relogin: bool = False):
     quietly diverging behind one green result. When set, a 401 is raised
     exactly as urllib would raise it (no login attempt, no retry, no change
     to any remembered session); every other caller is unaffected.
+
+    ``record=False`` skips ``host_resolve.record_host_seen`` on a 2xx. A
+    caller probing an address whose identity is NOT established (something
+    that may be a foreign device) must pass it, or that device is persisted
+    as the default host and a later credentialed call could target it.
     """
     if no_relogin:
         # No session lookup, no 401 handling at all -- a 401 propagates to
@@ -311,7 +316,8 @@ def urlopen(req, timeout=None, no_relogin: bool = False):
         # the only behavioural difference from that path is "no session
         # lookup, no login, no retry on 401".
         resp = urllib.request.urlopen(req, timeout=timeout)
-        host_resolve.record_host_seen(_origin(_as_request(req).full_url))
+        if record:
+            host_resolve.record_host_seen(_origin(_as_request(req).full_url))
         return resp
     original = _as_request(req)
     origin = _origin(original.full_url)
@@ -339,7 +345,8 @@ def urlopen(req, timeout=None, no_relogin: bool = False):
         # above and is re-raised, never reaching here. A confirmed 2xx
         # response is worth remembering as the default for the next call
         # that doesn't name a host.
-        host_resolve.record_host_seen(origin)
+        if record:
+            host_resolve.record_host_seen(origin)
         return resp
     # Exactly one login, exactly one retry. A 401 on the retry propagates to
     # the caller unchanged rather than starting another round.
@@ -347,5 +354,6 @@ def urlopen(req, timeout=None, no_relogin: bool = False):
     retry = _copy_request(original)
     retry.add_unredirected_header("Cookie", f"{SESSION_COOKIE_NAME}={cookie}")
     resp = urllib.request.urlopen(retry, timeout=timeout)
-    host_resolve.record_host_seen(origin)
+    if record:
+        host_resolve.record_host_seen(origin)
     return resp
