@@ -4321,8 +4321,9 @@ Owner instruction, 2026-09-21.
   `docs/BENCH_TEST_LOG.md`'s 2026-09-30/10-01 entries for this regression and
   its resolution. **2026-10-01 follow-up:** run `20261001T172420Z_lcd_lcd22run` --
   LCD-19 PASS with `lcd_stop_heat=True` (real firing, Stop PIN-gated); first
-  LCD-22 board run FAILed (`click_by_name('Edit')` -> `not_found` while running),
-  unresolved; see `docs/BENCH_TEST_LOG.md`.
+  LCD-22 board run FAILed (`click_by_name('Edit')` -> `not_found` while running);
+  rerun after `e52f256d` PASSed (`20261001T183045Z_lcd_lcd22rerun`); see
+  `docs/BENCH_TEST_LOG.md`.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
   landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,

@@ -2638,3 +2638,10 @@ LCD-19 PASS (38 s): real firing started via the PIN keypad, Stop tapped, "Enter 
 LCD-22 cleanup (own): discard none_pending, final_exec_state idle, final_working_id -1, final_energized false.
 End state: profiles_get_exec_status state 0; get_board_state io.relays=0; safety armed, link up, not tripped; profile_live_get working_id -1, no pending decision; uptime 6213 s (no reboot). fixture_get_relays unavailable (no fixture port), relays read from get_board_state instead.
 Open: LCD-22's Edit lookup failed on a running firing; likely the Home page was not showing a button named "Edit" at that instant (LCD-19's settle reads show "Edit" present on Home while running). Cause not investigated; case code unmodified.
+
+## 2026-10-01 LCD-22 rerun after e52f256d, COM14, host 192.168.1.156
+
+Run `20261001T183045Z_lcd_lcd22rerun` (suite lcd, cases=LCD-22, allow_heat=True, lcd_edit_heat=True), exit 0. **LCD-22 PASS** (12.68 s).
+Observed: Edit tap ok on the first attempt (edit_settle_reads: 2 reads, both qualifies=true, target_present=true, cancel_present=false; names list includes "Edit" on Home while running). Taps: target_plus, dwell_plus, next all true; apply click ok. Own firing: profile 7, 2 segments, running before and after (segment_index 0). Edited segment 1: target 45.68 -> 50.68 C (+5), dwell 5 -> 10 min; segment 0 unchanged (35.68 C, 10 min). Live-edit adoption: profile_live_get showed active, origin_id 7, working_id 100, pending_decision false; working copy content BENCH_HP segs [35.68 C/10 min, 50.68 C/10 min] matched expected. no_scroll: no offenders on edit_firing.
+Cleanup (own): discard ok, final_exec_state idle, final_working_id -1, final_energized false, verified.
+Independent end state: get_board_state profiles_exec_status state 0, io.relays=0; safety armed, link up, not tripped; profile_live_get working_id -1, no pending decision; uptime 10120 s before, 10139 s after (no reboot); no unacknowledged crash banner.
