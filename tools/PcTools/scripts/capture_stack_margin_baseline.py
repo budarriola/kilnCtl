@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 
-WARMUP RULE (owner, 2026-10-01): capture a reference baseline only on a board
-that has been up at least 10 minutes AND has already run
-bench_test_run(suite="stack") once on that same boot. High-water marks keep
-dropping during the first suite run on a boot (info_uart_bridge: 1624 B free
-fresh-idle, 1496 B later), so a pre-suite capture produces false SK-01 FAILs.
-Record the uptime and the warmup run dir in --notes.
 """Capture one DRAM_PSRAM_STATUS.md section 4.3/7 stack-margin baseline reading
 from a live board and record it where the plan can cite it.
 
@@ -41,6 +35,13 @@ verifiable without hardware. This script itself is not meant to be run by an
 agent with no hardware access; the DO-NOT-CALL-THE-BOARD rule in effect while
 writing/testing this applies to the module, not to a human operator running
 this file later.
+
+WARMUP RULE (owner, 2026-10-01): capture a reference baseline only on a board
+that has been up at least 10 minutes AND has already run
+bench_test_run(suite="stack") once on that same boot. High-water marks keep
+dropping during the first suite run on a boot (info_uart_bridge: 1624 B free
+fresh-idle, 1496 B later), so a pre-suite capture produces false SK-01 FAILs.
+Record the uptime and the warmup run dir in --notes.
 """
 from __future__ import annotations
 

@@ -325,7 +325,11 @@ def records_matching_commit(
     or no record matches -- the caller is expected to treat an empty result
     as "no same-commit baseline", i.e. INCONCLUSIVE, not as "compare against
     nothing and pass by default"."""
-    if not fw_commit:
+    # Lazy import: kilnctrl.bench_test's package __init__ imports cases_fl,
+    # which imports this module, so a module-level import would be a cycle.
+    from .bench_test.judgments import _UNKNOWN_FW_COMMITS
+
+    if not fw_commit or fw_commit in _UNKNOWN_FW_COMMITS:
         return []
     return [r for r in records if r.fw_commit == fw_commit]
 

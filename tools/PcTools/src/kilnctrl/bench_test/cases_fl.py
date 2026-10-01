@@ -179,6 +179,18 @@ def _judge_against_baseline(
     # the condition-presence precondition below.
     has_hard_dead = any(not e.alive for e in scored_entries)
 
+    # SK-02's absolute min_free floor FAILs regardless of baseline/commit
+    # availability (judge_stack_margin_against_baseline's own contract), so
+    # evaluate it before the missing-history INCONCLUSIVE too: judge against
+    # an empty baseline and keep the result only if it is a FAIL.
+    if not has_hard_dead and min_free_bytes is not None:
+        floor_probe = J.judge_stack_margin_against_baseline(
+            scored_entries, {}, min_free_bytes=min_free_bytes,
+            board_fw_commit=board_commit, baseline_fw_commits=set(),
+        )
+        if floor_probe.verdict == Verdict.FAIL:
+            return _finish(floor_probe)
+
     if not has_hard_dead:
         have_conditions = {r.condition for r in same_commit}
         if not (have_conditions & set(required_baseline_conditions)):

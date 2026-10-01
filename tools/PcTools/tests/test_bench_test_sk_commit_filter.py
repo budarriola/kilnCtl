@@ -107,6 +107,16 @@ class RecordsMatchingCommitTest(unittest.TestCase):
         self.assertEqual(smb.records_matching_commit([rec], ""), [])
         self.assertEqual(smb.records_matching_commit([rec], None), [])
 
+    def test_placeholder_unknown_commit_never_matches_placeholder_records(self):
+        """Firmware built without git emits the literal "unknown"
+        (gen_build_info.cmake); a record carrying it must not match a board
+        that also reports it, nor "?"."""
+        for placeholder in ("unknown", "?"):
+            rec = smb.build_record("idle", [_entry("t1", 100)], FirmwareVersion(
+                protocol_version=13, dirty=False, commit=placeholder, built="2026-01-01T00:00:00Z",
+            ))
+            self.assertEqual(smb.records_matching_commit([rec], placeholder), [])
+
 
 class Sk01CommitFilterTest(unittest.TestCase):
     def test_same_commit_idle_record_within_tolerance_passes(self):
@@ -207,20 +217,17 @@ class Sk02CommitAndConditionFilterTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS)
 
     def test_sk02_absolute_floor_still_fails_even_when_inconclusive_on_history(self):
-        """Negative test: SK-02's 512 B absolute floor is independent of
-        the commit/condition precondition above -- but that precondition
-        is itself a hard gate (no same-commit exercised record at all), so
-        a floor breach with ZERO exercised history is still reported as
-        the precondition failure (INCONCLUSIVE), not silently upgraded to
-        PASS. This confirms the precondition genuinely blocks the
-        comparison rather than merely padding the observed data."""
+        """SK-02's 512 B absolute floor is independent of the
+        commit/condition precondition: a floor breach FAILs even with ZERO
+        same-commit exercised history (judge_stack_margin_against_baseline's
+        contract -- the floor FAILs regardless of baseline or commit)."""
         with _TempRepoRoot() as t:
             ctx, srv = _ctx(t.root)
             ctx["repo_root"] = str(t.root)
             srv._info.get_stack_margin.return_value = [_entry("httpd_worker", 100)]  # below 512 B floor
             srv._info.get_fw_version.return_value = _fw("eb83c1ac")
             result = C._case_sk02(ctx)
-        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(result.verdict, Verdict.FAIL)
 
 
 if __name__ == "__main__":
