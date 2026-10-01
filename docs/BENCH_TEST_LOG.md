@@ -2394,3 +2394,49 @@ exercised from here. A reported "31/38, all missing by design" liveness
 figure could not be located in `20261001T011515Z_stack`'s `summary.json` or
 transcript, or in any other run directory from this session, and is not
 recorded here pending a run that actually captures it.
+
+## 2026-10-01: lvgl/info_uart_bridge stack raise (`eb83c1ac`), flashed and bench-verified
+
+Fix for the LOW-tagged `info_uart_bridge`/`lvgl` margins noted in the
+`20261001T011515Z_stack` entry above and ROADMAP's `profile_executor` stack
+item: `eb83c1ac` (Opus-reviewed) raises `lvgl`'s static stack 8192 -> 10240 B
+(`.dram0.bss`; stays internal DRAM because its UI pages write NVS) and
+`info_uart_bridge`'s 3584 -> 4096 B (PSRAM; this task never touches
+NVS/flash). To pay for the internal-DRAM half of that, `adaptive_tune_zones[]`
+(2700 B) moved to PSRAM via `EXT_RAM_BSS_ATTR` (task context only, held under
+`adaptive_tune_lock`; persistence goes through separate blobs, unaffected).
+Net `.dram0.bss`: 99672 -> 99016 B against the 101000 B ceiling (1984 B
+headroom). A first attempt that instead raised the ceiling to 102000 B was
+rejected on review: it projected `heap_internal` `min_free` at 11475 B,
+below `KILN_DRAM_FREE_ALARM_BYTES` (11903 B).
+
+Flashed to the bench 2026-10-01 from a clean worktree via `flash_firmware()`
+(ELF `KilnCtrl-d76180df9abf.elf`; verified running `app`; boot_guard
+persisted 0/0; no trip).
+
+Run `20261001T015305Z_stack` (suite `stack`, Pico unchanged `405d3c54`):
+**SK-03 (Pico task margins) and SK-04 (heap/DRAM floor) PASS; SK-01/SK-02
+INCONCLUSIVE** again, same cause as the `20261001T011515Z_stack` run above
+-- fw_commit mismatch (`eb83c1ac` vs. the stored `111b1b6f`/`75a5e459`
+baseline) -- plus `safety_owner_evt` and `safety_proto_rx` reading more than
+64 B below that stale baseline, called out by the scorer as cross-build and
+therefore unscored rather than a regression. `get_stack_margin` reports all
+31 instrumented tasks OK; `lvgl` now 4640 B free of 10240 B (45.3%) and
+`info_uart_bridge` 1624 B free of 4096 B (39.6%), both clear of the 15%
+CRITICAL threshold and no longer LOW. A stack-margin baseline refresh at
+`eb83c1ac` (`tools/PcTools/scripts/capture_stack_margin_baseline.py`) was
+not run this pass and is pending an owner decision.
+
+Heap at uptime 211 s: `heap_internal` free 31159 B, `min_free` 14995 B (up
+from 13523 B on `c471101c`), largest free block 9728 B (up from 9216 B;
+alarm floor 8704 B) -- all comfortably above their alarms.
+
+`check_task_liveness`, called directly via MCP (not through this stack
+suite's own preflight, which still has no live link from this session):
+**"31/38 expected task(s) alive", RESULT ok.** Dead-by-design:
+`pico_auto_update` (self-deletes after boot). Absent-by-design:
+`http_async_job`, `i2c_owner_ns2009`, `ota_pico_rollback`,
+`ota_rollback_reboot`, `recovery_exit`, `zone_sweep`. This closes the
+"could not be located" gap the `20261001T011515Z_stack` entry above left
+open -- the figure is now captured, via a direct call rather than a
+run-directory artifact.

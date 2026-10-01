@@ -4151,6 +4151,16 @@ Owner instruction, 2026-09-21.
   allocated dynamically by `xTaskCreatePinnedToCore`, not a static array) --
   `check_kilnfw_dram_bss_budget.ps1` still passes at the same static `.bss`
   figure (97256 B of a 101000 B ceiling).
+- [x] Raise the `info_uart_bridge`/`lvgl` LOW margins noted just above --
+  done, 2026-10-01 (`eb83c1ac`, Opus-reviewed): `lvgl` 8192 -> 10240 B
+  (internal DRAM; its UI pages write NVS), `info_uart_bridge` 3584 ->
+  4096 B (PSRAM). `adaptive_tune_zones[]` (2700 B) moved to PSRAM via
+  `EXT_RAM_BSS_ATTR` to fund the internal-DRAM half; net `.dram0.bss`
+  99672 -> 99016 B against the 101000 B ceiling (1984 B headroom). Flashed
+  and bench-verified same day: `get_stack_margin` now reads `lvgl`
+  4640/10240 B free (45.3%) and `info_uart_bridge` 1624/4096 B (39.6%),
+  both clear of the 15% CRITICAL threshold. Full detail:
+  `docs/BENCH_TEST_LOG.md`'s "lvgl/info_uart_bridge stack raise" entry.
 - [x] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
   timeout did not raise the PIN keypad", `keypad_raised=false`) root-caused
   2026-09-24 as a runner defect, not firmware: `_wait_for_overlay_names(present=True)`
