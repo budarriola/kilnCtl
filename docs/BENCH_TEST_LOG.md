@@ -2574,3 +2574,19 @@ it; free never fell below 29983, so a stop-time 4 KB peak could not register her
 and the 2026-10-01 stop-peak hypothesis is neither confirmed nor excluded. To
 test it, reboot and run the firing cycle first, before any `GET /api/cfgfs`.
 Final state: idle, relays off, no trip, uptime 754 s, reachable.
+
+## 2026-09-30 -- OTA matrix, first live run, no image parameters (port: kilnctrl MCP 8767, board COM14 / 192.168.1.156)
+
+Run `20261001T062928Z_ota` (`logs/bench_test/20261001T062928Z_ota`), `ota_matrix_run(confirm=True)`,
+allow_heat default False, MCP fresh at ccd62c7c. Pre-checks: link up, SaftyFW armed, no trip,
+crash report acknowledged, no profile, uptime 3582 s. Run-level gate passed (no refusal).
+
+- OT-B01: **FAIL** -- `trip_reason=0, expected 6 (SAFETY_TRIP_MAIN_FAULT)`, 0.24 s.
+- SKIP (no image path): OT-E01, E03, E04, E05, E06, E09, E10, OT-P01, OT-P05. SKIP allow_heat=False: OT-E07, E08.
+- NOT_RUN: OT-E02, E11, E12, OT-P02, P03, P04, OT-B02.
+
+After the run: first `safety_get_status` NACKed ("destination task not registered on the peer"),
+heap status uptime_s=11 (reset_reason 'software (esp_restart)'); about a minute later link up, uptime 20 s,
+status showed no trip and no longer armed. No trip was latched, so `safety_clear_trip()` was not called.
+Crash banner: none. Reachability timing was not recorded by the tool and
+`logs/debug_reset/history.jsonl` does not exist; HTTP answered by the first post-run poll (uptime 11 s).
