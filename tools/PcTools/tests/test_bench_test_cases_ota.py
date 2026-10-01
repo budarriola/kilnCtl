@@ -90,7 +90,8 @@ class IdleGateTest(unittest.TestCase):
 
 class Otb01Test(unittest.TestCase):
     def _ctx(self, state_name="idle", link_up=True, trip_reason=6, trip_mask=0x0020,
-              enabled_after_clear=True, readiness_ok=True, relay_energized=False):
+              enabled_after_clear=True, readiness_ok=True, relay_energized=False,
+              esp_restarts=True, pico_reboots=True):
         _clockstate, now, sleep = _clock()
         srv = _FakeSrv(state_name=state_name)
         statuses = iter([_SafetyStatus(link_up=link_up)] * 5)
@@ -107,8 +108,27 @@ class Otb01Test(unittest.TestCase):
         def clear_trip_fn():
             cleared["v"] = True
 
+        reset = {"done": False}
+
+        def sw_reset_fn():
+            reset["done"] = True
+            return {"ok": True}
+
+        def esp_uptime_fn():
+            # Before the reset: long uptime. After: restarted (small) unless
+            # the fake models an ESP that never actually rebooted.
+            if reset["done"] and esp_restarts:
+                return 3.0
+            return 500.0 + (_clockstate["t"] if reset["done"] else 0.0)
+
+        def boot_id_fn():
+            return 8 if (reset["done"] and pico_reboots) else 7
+
         ctx = {
             "srv": srv, "host": "192.168.4.1",
+            "_sw_reset_fn": sw_reset_fn,
+            "_esp_uptime_fn": esp_uptime_fn,
+            "_pico_boot_id_fn": boot_id_fn,
             "ota_http_client": type("O", (), {"sw_reset": staticmethod(lambda host: {"ok": True})})(),
             "dashboard_http_client": _FakeDashboardClient(relay_energized=relay_energized),
             "_now": now, "_sleep": sleep,
@@ -202,6 +222,124 @@ class Otb01Test(unittest.TestCase):
         result = C._case_otb01(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
+    # ---- reset-confirmation (stale pre-reset read) tests ----
+
+    def test_stale_pre_reset_read_is_not_judged(self):
+        """The 20261001T062928Z bench failure: sw_reset returns before the
+        ESP reboots, the cached telemetry still shows link up / trip 0, and
+        the old case judged that as FAIL. With the ESP uptime never
+        dropping, nothing may be judged -- INCONCLUSIVE, and no clear."""
+        called = {"v": False}
+        ctx = self._ctx(esp_restarts=False, trip_reason=0, trip_mask=0)
+        ctx["_clear_trip_fn"] = lambda: called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("not confirmed", result.reason)
+        self.assertFalse(called["v"])
+        self.assertEqual(ctx["_otb01"]["outcome"], "inconclusive_esp_not_restarted")
+
+    def test_stale_read_with_a_trip_present_is_also_not_judged(self):
+        # Even a stale trip-6 must not be cleared if the ESP never restarted.
+        called = {"v": False}
+        ctx = self._ctx(esp_restarts=False)
+        ctx["_clear_trip_fn"] = lambda: called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertFalse(called["v"])
+
+    def test_confirmed_reset_with_s6a_passes_and_clears(self):
+        called = {"v": False}
+        ctx = self._ctx()
+        orig = ctx["_clear_trip_fn"]
+
+        def clear():
+            called["v"] = True
+            orig()
+
+        ctx["_clear_trip_fn"] = clear
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertTrue(called["v"])
+        self.assertEqual(ctx["_otb01"]["outcome"], "s6a_latched")
+        self.assertTrue(ctx["_otb01"]["esp_restart_confirmed"])
+
+    def test_confirmed_reset_without_trip_passes_without_clear(self):
+        called = {"v": False}
+        ctx = self._ctx(trip_reason=0, trip_mask=0)
+        ctx["_clear_trip_fn"] = lambda: called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertIn("no S6a latched on sw_reset", result.reason)
+        self.assertFalse(called["v"], "clear_trip called although nothing was latched")
+        self.assertEqual(ctx["_otb01"]["outcome"], "no_trip")
+        self.assertEqual(ctx["_otb01"]["pico_boot_id_before"], 7)
+        self.assertEqual(ctx["_otb01"]["pico_boot_id_after"], 8)
+
+    def test_confirmed_reset_with_other_trip_fails_without_clear(self):
+        called = {"v": False}
+        ctx = self._ctx(trip_reason=3, trip_mask=0x0004)
+        ctx["_clear_trip_fn"] = lambda: called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertFalse(called["v"], "a non-S6a trip was cleared")
+
+    def test_trip_that_latches_during_settle_window_is_caught(self):
+        """No trip at the first read, S6a (debounced) appears a second
+        later: must be treated as the S6a outcome, not 'no trip'."""
+        ctx = self._ctx()
+        reads = {"n": 0}
+
+        def diag():
+            reads["n"] += 1
+            if reads["n"] <= 1:
+                return _SafetyDiag(trip_reason=0, trip_mask=0)
+            return _SafetyDiag(trip_reason=6, trip_mask=0x0020)
+
+        ctx["_get_safety_diag_fn"] = diag
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ctx["_otb01"]["outcome"], "s6a_latched")
+
+    def test_boot_id_unchanged_and_no_trip_is_inconclusive(self):
+        ctx = self._ctx(trip_reason=0, trip_mask=0, pico_reboots=False)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("boot_id unchanged", result.reason)
+
+    def test_boot_id_unchanged_but_trip_latched_is_valid_evidence(self):
+        ctx = self._ctx(pico_reboots=False)  # trip 6 / 0x0020, same boot_id
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_no_baseline_means_no_reset_is_issued(self):
+        sw_reset_called = {"v": False}
+        ctx = self._ctx()
+        ctx["_esp_uptime_fn"] = lambda: (_ for _ in ()).throw(RuntimeError("http down"))
+        ctx["_sw_reset_fn"] = lambda: sw_reset_called.__setitem__("v", True)
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("http down", result.reason)
+        self.assertFalse(sw_reset_called["v"])
+
+    def test_poll_errors_are_counted_and_reported_not_swallowed(self):
+        ctx = self._ctx(trip_reason=3, trip_mask=0x0004)  # ends in FAIL, reason carries errors
+        inner = ctx["_get_safety_status_fn"]
+        n = {"v": 0}
+
+        def flaky():
+            n["v"] += 1
+            if n["v"] == 1:
+                raise OSError("link flap")
+            return inner()
+
+        ctx["_get_safety_status_fn"] = flaky
+        result = C._case_otb01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("poll errors 1", result.reason)
+        self.assertIn("link flap", result.reason)
+        self.assertEqual(ctx["_otb01"]["poll_error_count"], 1)
+        self.assertIn("link flap", ctx["_otb01"]["last_poll_error"])
+
 
 class Sp04ObserverTest(unittest.TestCase):
     def test_not_run_when_otb01_absent(self):
@@ -223,6 +361,20 @@ class Sp04ObserverTest(unittest.TestCase):
         }}
         result = CS._case_sp04(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_no_trip_outcome_passes(self):
+        ctx = {"_otb01": {
+            "outcome": "no_trip", "link_up": True, "trip_reason": 0, "trip_mask": 0,
+            "clear_ok": None, "readiness_trip_ok": None,
+        }}
+        self.assertEqual(CS._case_sp04(ctx).verdict, Verdict.PASS)
+
+    def test_inconclusive_outcome_propagates(self):
+        ctx = {"_otb01": {
+            "outcome": "inconclusive_esp_not_restarted", "link_up": False, "trip_reason": None,
+            "trip_mask": None, "clear_ok": None, "readiness_trip_ok": None,
+        }}
+        self.assertEqual(CS._case_sp04(ctx).verdict, Verdict.INCONCLUSIVE)
 
 
 class _OtaPushResult:

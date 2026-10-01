@@ -651,11 +651,14 @@ def sw_reset(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     only gate; the AP-password HMAC challenge/response this route used to
     also require was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b).
 
-    IMPORTANT -- this call reliably LATCHES an S6a (SAFETY_TRIP_MAIN_FAULT)
-    trip on the safety processor: this ESP's isolated fault line to it goes
-    undefined across this ESP's own reset, which safety_guards.c's S6a block
-    reads as a main-fault unconditionally (there is no grace window over
-    S6a, only over S6b). This call does NOT clear that trip -- S6a exists to
+    IMPORTANT -- this call is EXPECTED to latch an S6a (SAFETY_TRIP_MAIN_FAULT)
+    trip on the safety processor, but that is UNCONFIRMED for a software
+    reset: the theory is that this ESP's isolated fault line to it floats
+    across this ESP's own reset, which safety_guards.c's S6a block reads as
+    a main-fault after a 200 ms debounce (no grace window over S6a, only over
+    S6b); the trip-6 cases actually observed came from JTAG/flash resets, not
+    this route. Check the trip state rather than assuming it (OT-B01 records
+    which happened). This call does NOT clear any trip -- S6a exists to
     report exactly this event, and auto-clearing it from the same call that
     caused it would defeat that purpose. A REQUIRED follow-up before heating
     is a separate, explicit call to clear the trip (POST

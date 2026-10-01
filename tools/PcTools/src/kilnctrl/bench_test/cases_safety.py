@@ -120,6 +120,17 @@ def _case_sp04(ctx: dict) -> CaseResult:
     otb01 = ctx.get("_otb01")
     if not otb01:
         return CaseResult(Verdict.NOT_RUN, reason="OT-B01 did not run in this session")
+    outcome = otb01.get("outcome")
+    if outcome and outcome.startswith("inconclusive"):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"OT-B01 could not confirm the reset ({outcome}); no S6a evidence either way",
+            observed=otb01,
+        )
+    if outcome == "no_trip":
+        # OT-B01 confirmed a real reset and no S6a latched on sw_reset; S6a
+        # latching there is expected but unconfirmed, so this is not a FAIL.
+        return CaseResult(Verdict.PASS, reason="no S6a latched on sw_reset (reset confirmed by OT-B01)", observed=otb01)
     return J.judge_dual_reset_trip(
         otb01.get("link_up"), otb01.get("trip_reason"), otb01.get("trip_mask"),
         otb01.get("clear_ok"), otb01.get("readiness_trip_ok"),

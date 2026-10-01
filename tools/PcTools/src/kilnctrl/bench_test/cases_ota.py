@@ -182,19 +182,42 @@ def _default_readiness_trip_ok_fn(ctx: dict) -> Optional[bool]:
     return not any("trip" in str(key).lower() or "trip" in str(label).lower() for key, label, _detail in blocked)
 
 
+def _esp_uptime_s(ctx: dict, host) -> Optional[float]:
+    """ESP ``uptime_s`` from GET /api/status (None when the field is absent)."""
+    return _dashboard_client(ctx).get_status(host).get("uptime_s")
+
+
 def _case_otb01(ctx: dict) -> CaseResult:
     """OT-B01: sw_reset_esp(confirm=True) resets both processors close
-    together. Confirm S6a (SAFETY_TRIP_MAIN_FAULT) latches while the link
-    handshake is still coming up -- expected, per CLAUDE.md, not a bug --
-    then clear it and confirm readiness. Stashes the observed data into
-    ctx["_otb01"] for SP-04's observer.
+    together. S6a (SAFETY_TRIP_MAIN_FAULT) is EXPECTED to latch while the
+    link handshake is still coming up, but that is UNCONFIRMED for a
+    software reset (the S6a evidence so far came from JTAG/flash resets,
+    not ``/api/sw_reset``): it relies on the ESP's fault line floating
+    through its own reset. This case therefore records which outcome
+    happened and accepts either, once the reset itself is proven:
 
-    Every board interaction past the initial reset is behind an injectable
-    ctx seam (``_get_safety_status_fn``/``_get_safety_diag_fn``/
-    ``_clear_trip_fn``/``_readiness_trip_ok_fn``) so this can be unit
-    tested with fakes rather than a live link, matching the "unit/mock
-    only" scope for this wave (the bench board carries an unacknowledged
-    crash report)."""
+    (a) reset confirmed + trip_reason 6 / mask 0x0020 -> clear it (the only
+        trip this case ever clears), confirm cleared and readiness: PASS.
+    (b) reset confirmed + no trip -> PASS, noting "no S6a latched on
+        sw_reset" so the bench log settles the empirical question.
+    (c) reset confirmed + any OTHER trip -> FAIL, never cleared.
+    (d) reset not confirmed -> INCONCLUSIVE, never judged on stale data.
+
+    Why the confirmation exists: ``POST /api/sw_reset`` returns BEFORE the
+    ESP reboots (sw_reset_http.c sleeps 500 ms, announces, then reboots),
+    and ``safety_get_status()/get_diag()`` read the ESP's CACHED Pico
+    telemetry, so a poll straight after the POST sees the PRE-reset state
+    (link up, no trip). A snapshot of the ESP ``uptime_s`` and the Pico
+    ``boot_id`` is taken first; the ESP must be seen restarted (uptime
+    below baseline) before the link is polled, and the read only counts as
+    evidence if the Pico boot_id changed or a trip latched.
+
+    Stashes the observed data into ctx["_otb01"] for SP-04's observer.
+
+    Every board interaction is behind an injectable ctx seam
+    (``_esp_uptime_fn``/``_pico_boot_id_fn``/``_get_safety_status_fn``/
+    ``_get_safety_diag_fn``/``_clear_trip_fn``/``_readiness_trip_ok_fn``) so
+    this can be unit tested with fakes rather than a live link."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
@@ -212,13 +235,10 @@ def _case_otb01(ctx: dict) -> CaseResult:
     sw_reset_fn = ctx.get("_sw_reset_fn", lambda: ota.sw_reset(host))
     get_status_fn = ctx.get("_get_safety_status_fn") or (lambda: srv._safety.get_status())
     get_diag_fn = ctx.get("_get_safety_diag_fn") or (lambda: srv._safety.get_diag())
+    esp_uptime_fn = ctx.get("_esp_uptime_fn") or (lambda: _esp_uptime_s(ctx, host))
+    boot_id_fn = ctx.get("_pico_boot_id_fn") or (lambda: srv._safety.get_fw_version().boot_id)
     clear_trip_fn = ctx.get("_clear_trip_fn", lambda: _default_clear_trip_fn(ctx))
     readiness_trip_ok_fn = ctx.get("_readiness_trip_ok_fn", lambda: _default_readiness_trip_ok_fn(ctx))
-
-    try:
-        sw_reset_fn()
-    except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"sw_reset_esp raised {type(exc).__name__}: {exc}")
 
     now = ctx.get("_now")
     sleep = ctx.get("_sleep")
@@ -226,8 +246,85 @@ def _case_otb01(ctx: dict) -> CaseResult:
     now = now or _time.monotonic
     sleep = sleep or _time.sleep
 
-    deadline = now() + 30.0
+    errors = {"count": 0, "last": None}
+
+    def _note_error(where: str, exc: BaseException) -> None:
+        errors["count"] += 1
+        errors["last"] = f"{where}: {type(exc).__name__}: {exc}"
+
     link_up = False
+    trip_reason = None
+    trip_mask = None
+    clear_ok = None
+    readiness_trip_ok = None
+    esp_restarted = False
+    boot_id_after = None
+    uptime_before = None
+    boot_id_before = None
+
+    def _stash(outcome: str, **extra) -> dict:
+        data = {
+            "outcome": outcome, "link_up": link_up, "trip_reason": trip_reason, "trip_mask": trip_mask,
+            "clear_ok": clear_ok, "readiness_trip_ok": readiness_trip_ok,
+            "esp_uptime_before": uptime_before, "esp_restart_confirmed": esp_restarted,
+            "pico_boot_id_before": boot_id_before, "pico_boot_id_after": boot_id_after,
+            "poll_error_count": errors["count"], "last_poll_error": errors["last"],
+        }
+        data.update(extra)
+        ctx["_otb01"] = data
+        return data
+
+    # Baseline BEFORE the reset. Without both, a later read can never be
+    # shown to post-date the reset, so do not reset at all.
+    try:
+        uptime_before = esp_uptime_fn()
+    except Exception as exc:
+        _note_error("baseline esp uptime", exc)
+    try:
+        boot_id_before = boot_id_fn()
+    except Exception as exc:
+        _note_error("baseline pico boot_id", exc)
+    if uptime_before is None or boot_id_before is None:
+        data = _stash("inconclusive_no_baseline")
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(f"could not snapshot a pre-reset baseline (esp uptime_s={uptime_before!r}, "
+                    f"pico boot_id={boot_id_before!r}; last error: {errors['last']}) -- "
+                    f"no reset was issued"),
+            observed=data,
+        )
+
+    try:
+        sw_reset_fn()
+    except Exception as exc:
+        return CaseResult(Verdict.FAIL, reason=f"sw_reset_esp raised {type(exc).__name__}: {exc}")
+    reset_at = now()
+
+    # Phase 1: wait for the ESP to actually restart (uptime below baseline).
+    last_uptime = None
+    restart_deadline = reset_at + 60.0
+    while now() < restart_deadline:
+        try:
+            last_uptime = esp_uptime_fn()
+            if last_uptime is not None and last_uptime < uptime_before:
+                esp_restarted = True
+                break
+        except Exception as exc:
+            _note_error("esp uptime poll", exc)  # expected while the ESP is down
+        sleep(1.0)
+    if not esp_restarted:
+        data = _stash("inconclusive_esp_not_restarted", esp_uptime_last=last_uptime)
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(f"ESP restart not confirmed within 60 s of sw_reset (uptime_s baseline "
+                    f"{uptime_before!r}, last read {last_uptime!r}; poll errors {errors['count']}, "
+                    f"last: {errors['last']}) -- not judging possibly pre-reset data"),
+            observed=data,
+        )
+
+    # Phase 2: link back up, then read diag + Pico boot_id (fresh: the ESP's
+    # cache was emptied by its own restart).
+    deadline = now() + 30.0
     diag = None
     while now() < deadline:
         try:
@@ -235,16 +332,59 @@ def _case_otb01(ctx: dict) -> CaseResult:
             if getattr(status, "link_up", False):
                 link_up = True
                 diag = get_diag_fn()
-                break
-        except Exception:
-            pass
+                trip_reason = getattr(diag, "trip_reason", None)
+                trip_mask = getattr(diag, "trip_mask", None)
+                boot_id_after = boot_id_fn()
+                # Valid evidence: Pico rebooted, or a trip latched.
+                if boot_id_after != boot_id_before or trip_reason:
+                    break
+        except Exception as exc:
+            _note_error("post-reset link poll", exc)
         sleep(1.0)
 
-    trip_reason = getattr(diag, "trip_reason", None) if diag is not None else None
-    trip_mask = getattr(diag, "trip_mask", None) if diag is not None else None
+    if link_up and (diag is None or boot_id_after is None):
+        data = _stash("inconclusive_unreadable")
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(f"link up after ESP restart but diag/boot_id unreadable "
+                    f"(poll errors {errors['count']}, last: {errors['last']})"),
+            observed=data,
+        )
+    evidence_valid = link_up and (boot_id_after != boot_id_before or bool(trip_reason))
+    if link_up and not evidence_valid:
+        data = _stash("inconclusive_pico_not_reset")
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=(f"ESP restarted but Pico boot_id unchanged ({boot_id_before!r}) and no trip -- "
+                    f"cannot show the Pico was reset (last error: {errors['last']})"),
+            observed=data,
+        )
 
-    clear_ok = None
-    readiness_trip_ok = None
+    # A trip may latch a little after link-up (S6a is debounced 200 ms):
+    # before recording "no trip", look a few seconds longer.
+    if evidence_valid and not trip_reason:
+        settle_deadline = now() + 5.0
+        while now() < settle_deadline:
+            sleep(1.0)
+            try:
+                d2 = get_diag_fn()
+                trip_reason = getattr(d2, "trip_reason", None)
+                trip_mask = getattr(d2, "trip_mask", None)
+                if trip_reason:
+                    break
+            except Exception as exc:
+                _note_error("post-reset settle poll", exc)
+
+    if link_up and not trip_reason:
+        data = _stash("no_trip")
+        return CaseResult(
+            Verdict.PASS,
+            reason=(f"no S6a latched on sw_reset (reset confirmed: ESP restarted from uptime_s "
+                    f"{uptime_before!r}, Pico boot_id {boot_id_before!r} -> {boot_id_after!r})"),
+            observed=data,
+            evidence=["no S6a latched on sw_reset"],
+        )
+
     # Plan doc section 6 rule 5 / CLAUDE.md: NEVER clear a trip without first
     # confirming, from safety_get_status()/get_diag(), that the link is up and
     # trip_mask == 1 << (trip_reason - 1) with trip_reason == 6 and no other
@@ -258,8 +398,8 @@ def _case_otb01(ctx: dict) -> CaseResult:
     if clear_allowed:
         try:
             clear_trip_fn()
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_error("clear_trip", exc)
         clear_deadline = now() + 10.0
         while now() < clear_deadline:
             try:
@@ -267,21 +407,23 @@ def _case_otb01(ctx: dict) -> CaseResult:
                 if getattr(status, "enabled", False):
                     clear_ok = True
                     break
-            except Exception:
-                pass
+            except Exception as exc:
+                _note_error("post-clear status poll", exc)
             sleep(1.0)
         if clear_ok is None:
             clear_ok = False
         try:
             readiness_trip_ok = readiness_trip_ok_fn()
-        except Exception:
+        except Exception as exc:
+            _note_error("readiness trip check", exc)
             readiness_trip_ok = None
 
-    ctx["_otb01"] = {
-        "link_up": link_up, "trip_reason": trip_reason, "trip_mask": trip_mask,
-        "clear_ok": clear_ok, "readiness_trip_ok": readiness_trip_ok,
-    }
-    return J.judge_dual_reset_trip(link_up, trip_reason, trip_mask, clear_ok, readiness_trip_ok)
+    _stash("s6a_latched" if clear_allowed else "other_or_no_link")
+    result = J.judge_dual_reset_trip(link_up, trip_reason, trip_mask, clear_ok, readiness_trip_ok)
+    if errors["count"]:
+        result.reason = (result.reason + "; " if result.reason else "") + (
+            f"poll errors {errors['count']}, last: {errors['last']}")
+    return result
 
 
 def _case_ote01(ctx: dict) -> CaseResult:
