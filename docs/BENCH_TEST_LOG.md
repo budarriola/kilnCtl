@@ -2321,3 +2321,76 @@ Tooling gap noted: no value-readback MCP tool exists yet for
 `relay_names`/`unit_pref`/`display_power`/`relay_cycles`/`tz` -- their
 correctness after the format was inferred from the file-count/NVS-key
 checks above, not read back directly.
+
+## 2026-09-30/10-01: LCD-09/LCD-16 regression resolved -- not `e388752c`
+
+The LCD-09/LCD-16 regression recorded above (both FAILing with
+`click_by_name('settings') returned 'not_found'`) was not caused by
+`e388752c`'s tap-target reordering. `kiln_ui_click_by_name()` and
+`list_tap_targets` dispatch the tap-target walk to `lvgl_port_task` with a
+300 ms wait (`UI_WALK_WAIT_TIMEOUT_MS`); a timeout on a busy UI task
+returned `n=0`/truncated, and the PC side read that as `not_found` rather
+than "the walk hasn't run yet." The same symptom reproduced on firmware
+predating `e388752c` (run `20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`,
+`fw=8ed37d8d`), ruling that fix out as the cause.
+
+First fix, `82de0234` (PC-only stopgap): the harness retries a `not_found`
+up to 2 times with a 0.15 s pause, counted separately as
+`not_found_retries`. Rerun `20260930T234916Z_lcd_harness_retry_verify` --
+LCD-16 PASS; LCD-08/LCD-14/LCD-21 PASS; LCD-09 still INCONCLUSIVE (a busy
+`list_tap_targets` read against the topbar anchor: `profiles_count 29` vs
+`row_count 0`); LCD-01 INCONCLUSIVE (camera color), LCD-19 INCONCLUSIVE (no
+heat requested). A separate same-day rerun,
+`20260930T235059Z_lcd_lcd19_stop_gated_verify` (heat allowed), got LCD-19 to
+**PASS**.
+
+Second fix, `232e668f` + `c471101c` (root cause, firmware + PC): firmware
+gained a new busy signal, `KILN_UI_CLICK_WALK_BUSY` /
+`UI_TEST_CLICK_WALK_BUSY=0x08` (no UART protocol version bump needed, same
+precedent as the OFFSCREEN fix `0ef18917`); the PC side gained busy
+derivation for `list_tap_targets` (count==0 and truncated) via
+`_list_tap_targets_resolving_busy()`, used by LCD-09/14/16, a
+`walk_busy_retries` counter distinct from `not_found_retries`, and
+host-test source-pattern pins. Flashed `c471101c` 2026-10-01 (ELF
+`KilnCtrl-39bdbebe1651.elf`, running `app`, boot_guard persisted 0/0, no
+trip).
+
+Verification: run `20261001T011155Z_lcd_walk_busy_verify` -- **LCD-08,
+LCD-09, LCD-14, LCD-16, LCD-21 all PASS** (LCD-14 and LCD-16 each needed one
+`walk_busy_retries`); LCD-01 INCONCLUSIVE (camera color cast); LCD-19
+INCONCLUSIVE (no heat requested, by design). A follow-up heat-allowed run,
+`20261001T011311Z_lcd_walk_busy_lcd19` -- **LCD-19 PASS**. Board healthy
+throughout both runs (`link_up=True`, no reboot, no trip beyond the
+scripted ones; boot_guard persisted 0/0). The LCD-09/LCD-16 regression is
+closed; see the ROADMAP.md bullet.
+
+## 2026-10-01: stack suite rerun on `c471101c`
+
+Run `20261001T011515Z_stack` (suite `stack`, same `c471101c` ESP flash as
+the LCD verification runs above; Pico unchanged, `405d3c54`): **SK-03
+(Pico task margins) and SK-04 (heap/DRAM floor) PASS.** SK-01 (ESP
+high-water marks, idle) and SK-02 (exercised) both came back
+**INCONCLUSIVE**, not FAIL: the stored baseline is from firmware
+`111b1b6f`/`75a5e459`, a commit mismatch against the now-running
+`c471101c`, and 5 tasks sit within the scorer's 64 B noise tolerance of
+their baseline high-water mark (`autotune_engine` -24 B, `thermo_uart_bridge`
+-24 B, `lvgl` -48 B, `safety_uart_bridge` -28 B, `gpio_probe` -8 B) --
+unscorable against a different build rather than a real regression. No
+task in either case fell below its configured floor beyond tolerance.
+
+Two LOW-tagged margins worth a separate note (a different session is
+evaluating stack-size bumps generally, so these are observational only):
+`info_uart_bridge` 1064 B free of 3584 B configured (29.7%) and `lvgl`
+1296 B free of 8192 B configured (15.8%).
+
+`check_task_liveness` (via `capability_preflight`'s task-liveness check) did
+not run in this stack suite: the preflight read in every run directory
+checked for this entry (`board_before.capability_preflight` in
+`20261001T011155Z_lcd_walk_busy_verify`, `20261001T011311Z_lcd_walk_busy_lcd19`
+and `20261001T011515Z_stack` itself) reports `[skip] task liveness: not
+checked (no link)` -- this MCP session has no live UART link to the board,
+so the required-vs-alive cross-check this entry performs could not be
+exercised from here. A reported "31/38, all missing by design" liveness
+figure could not be located in `20261001T011515Z_stack`'s `summary.json` or
+transcript, or in any other run directory from this session, and is not
+recorded here pending a run that actually captures it.
