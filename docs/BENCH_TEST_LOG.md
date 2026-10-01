@@ -2590,3 +2590,20 @@ heap status uptime_s=11 (reset_reason 'software (esp_restart)'); about a minute 
 status showed no trip and no longer armed. No trip was latched, so `safety_clear_trip()` was not called.
 Crash banner: none. Reachability timing was not recorded by the tool and
 `logs/debug_reset/history.jsonl` does not exist; HTTP answered by the first post-run poll (uptime 11 s).
+
+## 2026-10-01 -- OTA matrix rerun after OT-B01 fix (port: kilnctrl MCP 8767, board COM14 / 192.168.1.156)
+
+Run `20261001T072647Z_ota` (`logs/bench_test/20261001T072647Z_ota`), `ota_matrix_run(confirm=True)`,
+no image params, allow_heat default False, MCP fresh at 184080d8. Pre-checks: link up, SaftyFW armed,
+no trip, crash report acknowledged, no profile, uptime 3432 s. Run-level gate passed.
+
+- OT-B01: **PASS** (18.87 s) -- "no S6a latched on sw_reset". Recorded `outcome=no_trip`:
+  esp_uptime_before 3436 s, esp_restart_confirmed true, Pico boot_id 85 -> 42, link_up true,
+  trip_reason 0, trip_mask 0, clear_ok null (no clear), poll_error_count 2
+  (last: `GET /api/status ... unreachable: timed out`, expected while the ESP reboots).
+- Answer: sw_reset of both processors did NOT latch S6a on this bench. The 2026-09-30 FAIL
+  (trip_reason=0) was a real "no trip", not a too-early sample; the old case expectation was wrong.
+- All other cases SKIP (no image path / allow_heat=False) or NOT_RUN, same as before. SP-04 not in this suite.
+- After the run: link up, trip none, uptime 22 s (reset_reason 'software (esp_restart)'), Pico not
+  reported armed (60 s post-reboot grace, expected), no crash banner. Trip before: none; after: none;
+  `safety_clear_trip()` not called.
