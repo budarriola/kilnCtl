@@ -234,6 +234,12 @@ UI_TEST_CLICK_INJECT_FAILED = 6
 #: this even if it also happens to be hidden. See kiln_ui.h's
 #: KILN_UI_CLICK_OFFSCREEN.
 UI_TEST_CLICK_OFFSCREEN = 7
+#: 2026-09-30: the tap-target walk itself timed out (lvgl_port_task busy or
+#: wedged past UI_WALK_WAIT_TIMEOUT_MS) before any name could be matched --
+#: distinct from NOT_FOUND, a completed walk that genuinely found no match.
+#: See kiln_ui.h's KILN_UI_CLICK_WALK_BUSY. Fixes the false LCD-09/LCD-16
+#: bench FAILs previously caused by a busy walk reading back as NOT_FOUND.
+UI_TEST_CLICK_WALK_BUSY = 8
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged

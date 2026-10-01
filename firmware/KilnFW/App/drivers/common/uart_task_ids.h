@@ -630,7 +630,8 @@
  *   bytes4..5 = cy, i16 LE
  *   (cx/cy are the matched target's centre for OK/AMBIGUOUS/HIDDEN --
  *   kiln_ui_click_by_name() fills them even when it refuses to inject -- and
- *   0/0 for NOT_FOUND, where there was no match to report a centre for) */
+ *   0/0 for NOT_FOUND and WALK_BUSY, where there was no match to report a
+ *   centre for) */
 #define UI_TEST_CMD_GET_CURRENT_PAGE 0x01u
 #define UI_TEST_CMD_LIST_TAP_TARGETS 0x02u
 #define UI_TEST_CMD_CLICK_BY_NAME    0x03u
@@ -679,6 +680,16 @@
  * own default/"unknown result" arm; that decoder needs updating, this is
  * not a wire break. */
 #define UI_TEST_CLICK_OFFSCREEN 0x07u
+
+/* 2026-09-30: the tap-target walk itself timed out (lvgl_port_task busy or
+ * wedged past UI_WALK_WAIT_TIMEOUT_MS) before any name could be matched --
+ * distinct from UI_TEST_CLICK_NOT_FOUND, a completed walk that genuinely
+ * found no match. See KILN_UI_CLICK_WALK_BUSY (kiln_ui.h). Fixes the false
+ * LCD-09/LCD-16 bench FAILs this ambiguity caused (docs/BENCH_TEST_LOG.md).
+ * Same wire-compatibility note as the values above: an older PC decoder
+ * that has never seen this value falls into its own default/"unknown
+ * result" arm; that decoder needs updating, this is not a wire break. */
+#define UI_TEST_CLICK_WALK_BUSY 0x08u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

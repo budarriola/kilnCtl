@@ -26,6 +26,7 @@ from .protocol import (
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
     UI_TEST_CLICK_VERDICT_UNKNOWN,
+    UI_TEST_CLICK_WALK_BUSY,
     UI_TEST_CMD_CLICK_BY_NAME,
     UI_TEST_CMD_GET_CURRENT_PAGE,
     UI_TEST_CMD_LIST_TAP_TARGETS,
@@ -101,6 +102,13 @@ _CLICK_RESULT_NAMES = {
     #: used to be silently swallowed by the hit test and come back "ok", a
     #: false pass. Checked ahead of the hidden/visible split.
     UI_TEST_CLICK_OFFSCREEN: "offscreen",
+    #: 2026-09-30: the tap-target walk itself timed out (lvgl_port_task busy
+    #: or wedged past UI_WALK_WAIT_TIMEOUT_MS) before any name could be
+    #: matched -- distinct from "not_found", a completed walk that genuinely
+    #: found no match. This is the actual fix for the false-NOT_FOUND
+    #: mechanism documented above _ENTER_PIN_RETRY_POLL_S: firmware now
+    #: reports this case explicitly instead of folding it into NOT_FOUND.
+    UI_TEST_CLICK_WALK_BUSY: "walk_busy",
 }
 
 
@@ -181,12 +189,33 @@ class UiTestClient:
         """Every currently-hittable tap target on the current page.
 
         Returns ``{"targets": [{"name":str,"cx":int,"cy":int,"hidden":bool}, ...],
-        "truncated": bool}`` -- ``truncated`` mirrors the firmware's own
-        flag byte (uart_task_ids.h's UI_TEST_CMD_LIST_TAP_TARGETS layout):
-        True means more targets existed than BRIDGE_REPLY_MAX could carry
-        (same log_tap_targets() tree the device log dump walks), so a caller
-        relying on completeness should fall back to touch.py's
+        "truncated": bool, "busy": bool}`` -- ``truncated`` mirrors the
+        firmware's own flag byte (uart_task_ids.h's UI_TEST_CMD_LIST_TAP_TARGETS
+        layout): True means more targets existed than BRIDGE_REPLY_MAX could
+        carry (same log_tap_targets() tree the device log dump walks), so a
+        caller relying on completeness should fall back to touch.py's
         log_tap_targets() + the device log instead.
+
+        ``"busy"`` (2026-09-30) is ``True`` only for the zero-targets,
+        truncated=True shape -- ``count == 0 and truncated`` -- which is
+        indistinguishable on the wire from a genuinely empty page (no
+        targets, nothing truncated) UNLESS truncated is also set: a real,
+        completed walk of an empty page reports ``truncated=False``, while a
+        walk that never completed (lvgl_port_task busy/wedged past
+        UI_WALK_WAIT_TIMEOUT_MS -- see
+        lvgl_port_collect_tap_targets()'s own doc comment, kiln_ui.c's
+        `collect_truncated`) reports zero targets AND truncated=True. This is
+        the same root cause and wire signal click_by_name()'s
+        ``"walk_busy"`` result names explicitly (see
+        UI_TEST_CLICK_WALK_BUSY); LIST_TAP_TARGETS has no equivalent
+        dedicated result byte to extend (it already reports count/truncated
+        unconditionally, never a click-style result code), so this method
+        derives the same distinction from the two fields it already gets
+        back rather than requiring a firmware wire change. A caller that
+        needs a real answer (not just "the page happened to have nothing
+        clickable") should retry on ``busy`` rather than trusting an empty
+        ``targets`` list at face value -- see cases_lcd.py's
+        ``_list_tap_targets_resolving_busy()``.
         """
         payload = self._query(
             UI_TEST_CMD_LIST_TAP_TARGETS, struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS), timeout
@@ -204,7 +233,8 @@ class UiTestClient:
             cx, cy, hidden = struct.unpack_from("<hhB", payload, offset)
             offset += 5
             targets.append({"name": name, "cx": cx, "cy": cy, "hidden": bool(hidden)})
-        return {"targets": targets, "truncated": truncated}
+        busy = (count == 0) and truncated
+        return {"targets": targets, "truncated": truncated, "busy": busy}
 
     def click_by_name(self, name: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
         """Inject a tap at the named target's centre.
@@ -306,7 +336,7 @@ class UiTestClient:
         for ch in pin:
             click_start = time.monotonic()
             click = self.click_by_name(ch, timeout=timeout)
-            if click.get("result") == "not_found":
+            if click.get("result") in ("not_found", "walk_busy"):
                 # 2026-09-30 (LCD-19 bench evidence, 20260930T043143Z_lcd_lcd19_rerun):
                 # a 6-digit wrong-PIN entry saw digits 1-5 all report "ok" and
                 # digit 6 (the LAST digit, not "OK") report "not_found" --
@@ -327,7 +357,7 @@ class UiTestClient:
             digit_results.append(click)
         ok_start = time.monotonic()
         ok_result = self.click_by_name("OK", timeout=timeout)
-        if ok_result.get("result") == "not_found":
+        if ok_result.get("result") in ("not_found", "walk_busy"):
             time.sleep(_ENTER_PIN_RETRY_POLL_S)
             ok_result = self.click_by_name("OK", timeout=timeout)
         ok_result = dict(ok_result)
@@ -447,7 +477,7 @@ class UiTestClient:
         for i, ch in enumerate(pin):
             click_start = time.monotonic()
             click = self.click_by_name(ch, timeout=timeout)
-            if click.get("result") == "not_found":
+            if click.get("result") in ("not_found", "walk_busy"):
                 time.sleep(_ENTER_PIN_RETRY_POLL_S)
                 click = self.click_by_name(ch, timeout=timeout)
             click = dict(click)
@@ -483,7 +513,7 @@ class UiTestClient:
 
         ok_start = time.monotonic()
         ok_result = self.click_by_name("OK", timeout=timeout)
-        if ok_result.get("result") == "not_found":
+        if ok_result.get("result") in ("not_found", "walk_busy"):
             time.sleep(_ENTER_PIN_RETRY_POLL_S)
             ok_result = self.click_by_name("OK", timeout=timeout)
         ok_result = dict(ok_result)

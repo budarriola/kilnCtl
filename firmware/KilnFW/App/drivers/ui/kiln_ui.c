@@ -922,14 +922,18 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
      * here, unchanged, on the calling task -- moving the verdict wait onto
      * lvgl_port_task would block the very task that produces the verdict.
      * A dispatch timeout here (lvgl_port_task itself wedged or merely
-     * behind) surfaces as n == 0, i.e. no targets found, which the match
-     * loop below already treats as KILN_UI_CLICK_NOT_FOUND -- indistinguishable
-     * from a genuinely absent name, which is the correct, fail-safe verdict
-     * for "could not confirm this target exists" (never a false click). */
+     * behind) surfaces as n == 0 with `truncated` set -- reported as
+     * KILN_UI_CLICK_WALK_BUSY below, never conflated with a genuinely
+     * absent name (2026-09-30; see that result's own doc comment above for
+     * the false-FAIL history this fixes). */
     kiln_ui_tap_target_t targets[32];
     int32_t disp_w = 0, disp_h = 0;
-    size_t n = lvgl_port_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]), NULL,
-                                              &disp_w, &disp_h);
+    bool truncated = false;
+    size_t n = lvgl_port_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]),
+                                              &truncated, &disp_w, &disp_h);
+    if (n == 0 && truncated) {
+        return KILN_UI_CLICK_WALK_BUSY;
+    }
 
     /* Prefer a visible match over a hidden one: a page that show/hides
      * sibling buttons with the same name (a modal's own trigger button,

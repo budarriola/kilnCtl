@@ -221,6 +221,18 @@ typedef enum {
      * off-screen widget is reported as off-screen even if it also happens to
      * be hidden. */
     KILN_UI_CLICK_OFFSCREEN,
+    /* 2026-09-30: lvgl_port_collect_tap_targets() itself can time out
+     * waiting for lvgl_port_task to service the walk request (UI_WALK_WAIT_
+     * TIMEOUT_MS, lvgl_port.c) -- a busy or wedged render task, not a
+     * genuinely absent name. Before this result existed,
+     * kiln_ui_click_by_name() passed NULL for `truncated` and a timed-out
+     * walk (n == 0) fell through the match loop exactly like a real
+     * NOT_FOUND, which caused false LCD-09/LCD-16 bench FAILs
+     * (docs/BENCH_TEST_LOG.md, harness mitigation in cases_lcd.py before
+     * this fix landed). KILN_UI_CLICK_WALK_BUSY names that case explicitly:
+     * the walk could not complete in time, nothing was matched or injected,
+     * and a caller should retry rather than treat this as a defect. */
+    KILN_UI_CLICK_WALK_BUSY,
 } kiln_ui_click_result_t;
 
 /* Finds the tap target whose name exactly matches `name` (kiln_ui_collect_
@@ -255,6 +267,10 @@ typedef enum {
  *   KILN_UI_CLICK_OFFSCREEN -- the (first) match's centre lies outside the
  *                              display; nothing is injected, checked ahead of
  *                              the hidden/visible split above
+ *   KILN_UI_CLICK_WALK_BUSY -- the tap-target walk itself timed out before
+ *                              any name could be matched; nothing is
+ *                              injected -- distinct from NOT_FOUND (a
+ *                              completed walk that genuinely found no match)
  * Called directly from the UART bridge task, same as lvgl_port_inject_
  * touch() itself and TOUCH_CMD_INJECT's handler -- see that function's
  * thread-safety note (lvgl_port.h). */

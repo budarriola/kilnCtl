@@ -868,14 +868,14 @@ class ClickThenPageTest(unittest.TestCase):
     def test_success_returns_none_fail_and_the_arrived_page(self):
         ui = PageNavUiTest(page="home", page_targets={"home": [], "config": []},
                             nav_map={"settings": "config"})
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config")
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
 
     def test_click_itself_not_found_fails_without_polling(self):
         ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
         with mock.patch.object(C.time, "sleep"):
-            fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config")
+            fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("not_found", fail.reason)
@@ -894,7 +894,7 @@ class ClickThenPageTest(unittest.TestCase):
         # discarded.
         ui = PageNavUiTest(page="temperature", page_targets={"temperature": []},
                             nav_map={}, click_result="not_found")
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config")
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.observed.get("page_before"), "temperature")
 
@@ -905,7 +905,7 @@ class ClickThenPageTest(unittest.TestCase):
         # have caused.
         ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={},
                             click_result="inject_failed")
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config")
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("inject_failed", fail.reason)
@@ -919,7 +919,7 @@ class ClickThenPageTest(unittest.TestCase):
         # treated as a successful hop -- and a caller would go on to click
         # a target that cannot exist on the page the board is really on.
         ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={})  # "settings" click has no nav_map entry
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("config", fail.reason)
@@ -943,7 +943,7 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _RecoversOnSecondClick(page="home", page_targets={"home": [], "config": []},
                                      nav_map={"settings": "config"})
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 2)
@@ -974,7 +974,7 @@ class ClickThenPageTest(unittest.TestCase):
         ui = _RecoversOnSecondClick(page="home", page_targets={"home": [], "config": []},
                                      nav_map={"settings": "config"})
         with mock.patch.object(C.time, "sleep"):
-            fail, page, waited_s, swallow_retries, not_found_retries = C._click_then_page(
+            fail, page, waited_s, swallow_retries, not_found_retries, _ = C._click_then_page(
                 ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
@@ -993,7 +993,7 @@ class ClickThenPageTest(unittest.TestCase):
         # _CLICK_THEN_PAGE_NOT_FOUND_RETRIES extra round trips.
         ui = PageNavUiTest(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
         with mock.patch.object(C.time, "sleep"):
-            fail, page, waited_s, _, not_found_retries = C._click_then_page(ui, "settings", "config")
+            fail, page, waited_s, _, not_found_retries, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("not_found", fail.reason)
@@ -1005,7 +1005,7 @@ class ClickThenPageTest(unittest.TestCase):
 
     def test_retry_exhausted_fails_naming_the_retry(self):
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={})
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertIn("retried 2 times", fail.reason)
@@ -1038,7 +1038,7 @@ class ClickThenPageTest(unittest.TestCase):
                 return {"result": "ok", "cx": 0, "cy": 0}  # dead widget: never navigates
 
         ui = _SwallowOnceThenDeadNav(page="home", page_targets={"home": []}, nav_map={})
-        fail, page, _, _sr, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _sr, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
@@ -1060,7 +1060,7 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _SwallowOnceThenNav(page="home", page_targets={"home": [], "config": []},
                                  nav_map={"settings": "config"})
-        fail, page, _, _sr, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _sr, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 2)
@@ -1070,7 +1070,7 @@ class ClickThenPageTest(unittest.TestCase):
         # ERROR_HOLD) must FAIL within the swallow budget, never pass.
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
                             click_result="swallowed")
-        fail, page, _, _sr, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _sr, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertEqual(len(ui.clicks), 1 + C._CLICK_THEN_PAGE_SWALLOW_RETRIES)
@@ -1093,7 +1093,7 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _RecoversOnThirdClick(page="home", page_targets={"home": [], "config": []},
                                     nav_map={"settings": "config"})
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.calls, 3)
@@ -1103,7 +1103,7 @@ class ClickThenPageTest(unittest.TestCase):
         # click is a swallow, not "not_found" -- the target was found.
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
                             click_result="swallowed")
-        fail, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, _, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertEqual(fail.observed.get("attribution"), "swallowed")
 
     def test_verdict_unknown_press_that_landed_is_not_reclicked(self):
@@ -1117,7 +1117,7 @@ class ClickThenPageTest(unittest.TestCase):
 
         ui = _UnknownButNavigates(page="home", page_targets={"home": [], "config": []},
                                   nav_map={"settings": "config"})
-        fail, page, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNone(fail)
         self.assertEqual(page, "config")
         self.assertEqual(ui.clicks, ["settings"])
@@ -1125,7 +1125,7 @@ class ClickThenPageTest(unittest.TestCase):
     def test_always_verdict_unknown_unmoved_fails_bounded_never_defect(self):
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={},
                             click_result="verdict_unknown")
-        fail, page, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertEqual(fail.observed.get("attribution"), "verdict_unknown")
@@ -1143,10 +1143,10 @@ class ClickThenPageTest(unittest.TestCase):
                 return {"result": r, "cx": 0, "cy": 0}
 
         ui = _UnknownThenDeadOk(page="home", page_targets={"home": []}, nav_map={})
-        fail, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=1)
+        fail, _, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=1)
         self.assertEqual(fail.observed.get("attribution"), "verdict_unknown")
         ui = _UnknownThenDeadOk(page="home", page_targets={"home": []}, nav_map={})
-        fail, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=2)
+        fail, _, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=2)
         self.assertEqual(fail.observed.get("attribution"), "genuine_defect")
 
     def test_retry_click_inject_failed_attributed_and_not_reclicked(self):
@@ -1160,7 +1160,7 @@ class ClickThenPageTest(unittest.TestCase):
                 return {"result": r, "cx": 0, "cy": 0}
 
         ui = _OkThenInjectFailed(page="home", page_targets={"home": []}, nav_map={})
-        fail, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, _, _, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(fail.verdict, Verdict.FAIL)
         self.assertEqual(fail.observed.get("attribution"), "inject_failed")
@@ -1172,7 +1172,7 @@ class ClickThenPageTest(unittest.TestCase):
         # never-retry behavior, so the retry loop itself (not some other
         # path) is what's responsible for recovering a swallow.
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={})
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=0)
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05, max_retries=0)
         self.assertIsNotNone(fail)
         self.assertIn("not retried", fail.reason)
         self.assertEqual(fail.observed.get("attribution"), "wrong_page")
@@ -1190,7 +1190,7 @@ class ClickThenPageTest(unittest.TestCase):
         # one.
         ui = _CountingNavUi(page="home", page_targets={"home": []}, nav_map={}, click_result="not_found")
         with mock.patch.object(C.time, "sleep"):
-            fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config")
+            fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config")
         self.assertIsNotNone(fail)
         self.assertEqual(fail.observed.get("attribution"), "not_found")
         self.assertEqual(ui.clicks, ["settings", "settings", "settings"])
@@ -1205,7 +1205,7 @@ class ClickThenPageTest(unittest.TestCase):
         # widget, so it must never be sent.
         ui = _CountingNavUi(page="home", page_targets={"home": [], "diagnostics": []},
                             nav_map={"settings": "diagnostics"})
-        fail, page, waited_s, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
+        fail, page, waited_s, _, _, _ = C._click_then_page(ui, "settings", "config", timeout_s=0.05)
         self.assertIsNotNone(fail)
         self.assertEqual(ui.clicks, ["settings"])
         self.assertEqual(fail.observed.get("attribution"), "wrong_page")

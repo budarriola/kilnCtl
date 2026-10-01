@@ -25,6 +25,7 @@ from kilnctrl.protocol import (  # noqa: E402
     UI_TEST_CLICK_OK,
     UI_TEST_CLICK_SWALLOWED,
     UI_TEST_CLICK_VERDICT_UNKNOWN,
+    UI_TEST_CLICK_WALK_BUSY,
     UI_TEST_CMD_CLICK_BY_NAME,
     UI_TEST_CMD_GET_CURRENT_PAGE,
     UI_TEST_CMD_LIST_TAP_TARGETS,
@@ -115,6 +116,10 @@ class ListTapTargetsTest(unittest.TestCase):
         self.assertEqual(len(result["targets"]), 2)
         self.assertEqual(result["targets"][0], {"name": "Start", "cx": 100, "cy": 200, "hidden": False})
         self.assertEqual(result["targets"][1], {"name": "Stop", "cx": 100, "cy": 260, "hidden": True})
+        # 2026-09-30: a truncated-but-nonempty read is a wire-size truncation
+        # (BRIDGE_REPLY_MAX), not a busy walk -- "busy" means count==0 AND
+        # truncated, never truncated alone.
+        self.assertFalse(result["busy"])
 
     def test_empty_list_not_truncated(self):
         body = struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS) + struct.pack("<B", 0) + struct.pack("<B", 0)
@@ -122,6 +127,24 @@ class ListTapTargetsTest(unittest.TestCase):
         result = self.client.list_tap_targets(timeout=1.0)
         self.assertEqual(result["targets"], [])
         self.assertFalse(result["truncated"])
+        # A real, completed walk of a genuinely empty page: count==0 but
+        # truncated=False, so this is NOT busy.
+        self.assertFalse(result["busy"])
+
+    def test_zero_count_truncated_is_busy(self):
+        # 2026-09-30: lvgl_port_collect_tap_targets() itself timed out
+        # (lvgl_port_task busy/wedged past UI_WALK_WAIT_TIMEOUT_MS) --
+        # count==0 AND truncated=True is the dispatch-timeout sentinel, not a
+        # genuinely empty page. See cases_lcd.py's
+        # _list_tap_targets_resolving_busy() for the bench root cause this
+        # distinguishes (LCD-09, logs/bench_test/
+        # 20260930T234916Z_lcd_harness_retry_verify).
+        body = struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS) + struct.pack("<B", 0) + struct.pack("<B", 1)
+        self.link.push_reply(UART_TASK_ID_UI_TEST, body)
+        result = self.client.list_tap_targets(timeout=1.0)
+        self.assertEqual(result["targets"], [])
+        self.assertTrue(result["truncated"])
+        self.assertTrue(result["busy"])
 
     def test_truncated_entry_raises(self):
         body = (struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS) + struct.pack("<B", 1)
@@ -184,6 +207,13 @@ class ClickByNameTest(unittest.TestCase):
         # WAS sent, only its verdict is unconfirmed).
         self._reply(UI_TEST_CLICK_INJECT_FAILED)
         self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "inject_failed")
+
+    def test_walk_busy_result(self):
+        # 2026-09-30: the tap-target walk itself timed out before any name
+        # could be matched -- distinct from "not_found" (a completed walk
+        # that genuinely found no match). See KILN_UI_CLICK_WALK_BUSY.
+        self._reply(UI_TEST_CLICK_WALK_BUSY)
+        self.assertEqual(self.client.click_by_name("Start", timeout=1.0)["result"], "walk_busy")
 
     def test_request_carries_name(self):
         # uart_task_ids.h's CLICK_BY_NAME request is raw ASCII with NO
@@ -324,6 +354,21 @@ class EnterPinTest(unittest.TestCase):
         self.assertEqual(result["digit_results"][2]["result"], "ok")
         self.assertEqual(len(result["digit_results"]), 4)
         # 2 (digits 1,2) + 2 (digit 3: first + retry) + 1 (digit 4) + 1 (OK)
+        self.assertEqual(len(self.link.sent), 6)
+
+    def test_interior_digit_walk_busy_retries_once_after_a_short_poll(self):
+        # 2026-09-30: firmware now reports the same dispatch-timeout race as
+        # 'walk_busy' instead of folding it into 'not_found' -- enter_pin()
+        # must retry it the same way.
+        for _ in range(2):
+            self._reply(UI_TEST_CLICK_OK)  # digits "1", "2"
+        self._reply(UI_TEST_CLICK_WALK_BUSY)  # digit "3", first attempt
+        self._reply(UI_TEST_CLICK_OK)  # digit "3", retry
+        self._reply(UI_TEST_CLICK_OK)  # digit "4"
+        self._reply(UI_TEST_CLICK_OK)  # OK
+        result = self.client.enter_pin("1234", timeout=1.0)
+        self.assertEqual(result["digit_results"][2]["result"], "ok")
+        self.assertEqual(len(result["digit_results"]), 4)
         self.assertEqual(len(self.link.sent), 6)
 
     def test_interior_digit_swallowed_or_verdict_unknown_is_not_retried(self):

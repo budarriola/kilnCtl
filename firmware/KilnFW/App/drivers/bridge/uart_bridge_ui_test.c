@@ -178,6 +178,7 @@ static void ui_test_bridge_task(void *arg)
                     case KILN_UI_CLICK_VERDICT_UNKNOWN: wire_result = UI_TEST_CLICK_VERDICT_UNKNOWN; break;
                     case KILN_UI_CLICK_INJECT_FAILED: wire_result = UI_TEST_CLICK_INJECT_FAILED; break;
                     case KILN_UI_CLICK_OFFSCREEN: wire_result = UI_TEST_CLICK_OFFSCREEN; break;
+                    case KILN_UI_CLICK_WALK_BUSY: wire_result = UI_TEST_CLICK_WALK_BUSY; break;
                     case KILN_UI_CLICK_NOT_FOUND:
                     default:                       wire_result = UI_TEST_CLICK_NOT_FOUND; break;
                 }
