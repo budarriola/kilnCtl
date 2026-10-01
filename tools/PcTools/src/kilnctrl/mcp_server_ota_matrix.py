@@ -38,8 +38,9 @@ What this wrapper adds on top of the general ``bench_test_run()`` tool:
   already refuses on, tri-state so an unreadable status refuses rather than
   passing; UNLIKE `coordinated_gpio_test`, ARMED itself is accepted here --
   owner decision 2026-10-01, ARMED being the safety processor's latched
-  idle state -- but only while autotune is idle, zone relays 1-3 read
-  de-energized and no trip is latched, each unreadable = refusal, and the
+  idle state -- but only while autotune is idle, all four expander relays
+  (the heater relays) and the Pico safety relay K4 read de-energized and no
+  trip is latched, each unreadable = refusal, and the
   refusal text names the failed condition) plus an explicit `capability_preflight` read (unreadable, or a
   present crash report, is also a refusal here) -- because
   ``BenchTestRunner.preflight()`` on its own (runner.py `_safe_call`) folds
@@ -75,6 +76,8 @@ from __future__ import annotations
 from typing import Optional
 
 from . import mcp_server as _srv
+from .devices_io import IO_RELAY_COUNT
+from .devices_safety import SafetyFlag
 from . import mcp_server_coordinated_gpio_test as _gpio_tool
 from . import mcp_server_ota as _ota_tool
 from .bench_test import board_lock as bt_board_lock
@@ -103,8 +106,8 @@ def _ota_preconditions_text() -> str:
         "constructed (refuses the whole run, no case attempted, if any fails; unreadable "
         "counts as failed, never as passed):",
         "  - safety ARMED state readable; ARMED itself is acceptable (it is a latch, the "
-        "normal idle state) provided autotune is idle, zone relays 1-3 read de-energized "
-        "and no safety trip is latched (each unreadable = refusal)",
+        "normal idle state) provided autotune is idle, all four expander relays (heater relays) and the Pico safety relay K4 read de-energized "
+        "and no safety trip is latched (each unreadable = refusal; these reads need the PC UART link up)",
         "  - safety link confirmed up",
         "  - profile executor confirmed idle (running OR paused refuses)",
         "  - GET /api/ota/interlock confirmed ok:true",
@@ -155,39 +158,48 @@ def _dry_run_listing(cases: Optional[str]) -> str:
 #: not decode, refuses.
 _AUTOTUNE_INACTIVE = ("idle", "done", "aborted")
 
-#: Expander relays 1-3 are the zone relays. Relay 4's expander bit is NOT
-#: K4/heat (K4 is Pico-owned), so it is not a de-energized-outputs signal.
-_ZONE_RELAYS = (1, 2, 3)
+#: All expander relays are heater relays (Relay4 drives K5, or K1 after the
+#: PCB swap -- firmware/KilnFW/docs/HARDWARE.md); only the Pico's K4 is
+#: reported separately, via SafetyFlag.RELAY.
+_EXPANDER_RELAYS = tuple(range(1, IO_RELAY_COUNT + 1))
 
 
-def _read_armed_latch_conditions() -> "list[str]":
+def _read_armed_latch_conditions(srv=None) -> "list[str]":
     """Extra conditions that must read clean for an ARMED board to be
     acceptable to `ota_matrix_run` (owner decision 2026-10-01: ARMED is the
     safety processor's latched idle state, not a heat window). Returns the
     list of failed/unreadable conditions, each naming itself; empty means
-    all clean. Every read that raises, or reports itself stale, is a
-    refusal (fail-closed). Profile executor idle is checked separately by
+    all clean. Every read that raises is a refusal (fail-closed). These reads go
+    over the PC UART link to the board, so the ARMED path needs that link
+    up; without it every read fails and the run refuses. Profile executor idle is checked separately by
     the shared preflight; link-up and OTA interlock likewise."""
+    srv = srv if srv is not None else _srv
     reasons: "list[str]" = []
     try:
-        at = _srv._autotune.get_status()
+        at = srv._autotune.get_status()
         if at.state_name not in _AUTOTUNE_INACTIVE:
             reasons.append(f"autotune is not idle (autotune_state={at.state_name!r})")
     except Exception as exc:  # noqa: BLE001 -- unreadable must refuse
         reasons.append(f"autotune state could not be read: {exc}")
     try:
-        io = _srv._io.read()
+        io = srv._io.read()
         if io.i2c_failed:
             reasons.append("relay outputs could not be confirmed de-energized "
                            "(expander reports its last I2C transfer failed)")
         else:
-            on = [r for r in _ZONE_RELAYS if io.relay(r)]
+            on = [r for r in _EXPANDER_RELAYS if io.relay(r)]
             if on:
                 reasons.append(f"relay output(s) energized: {on}")
     except Exception as exc:  # noqa: BLE001
         reasons.append(f"relay outputs could not be read: {exc}")
     try:
-        diag = _srv._safety.get_diag()
+        st = srv._safety.get_status()
+        if st.flags & SafetyFlag.RELAY:
+            reasons.append("Pico safety relay K4 is energized")
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"safety relay K4 state could not be read: {exc}")
+    try:
+        diag = srv._safety.get_diag()
         if not diag.ever_received:
             reasons.append("safety trip state could not be confirmed (no diag received yet)")
         elif diag.trip_reason != 0:
@@ -252,7 +264,9 @@ def _run_level_preflight(ctx: dict, host: Optional[str]) -> Optional[str]:
         pf = gpio_preflight_fn(resolved_host)
     except Exception as exc:  # noqa: BLE001 -- unreadable must refuse, not pass
         return f"could not read run-level preconditions (ARMED/link/idle/interlock): {exc}"
-    reasons = _ota_refusal_reasons(pf, ctx.get("armed_checks_fn"))
+    armed_fn = ctx.get("armed_checks_fn") or (
+        lambda: _read_armed_latch_conditions(ctx.get("srv")))
+    reasons = _ota_refusal_reasons(pf, armed_fn)
     if reasons:
         return "; ".join(reasons)
 
@@ -386,8 +400,8 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
     Before `BenchTestRunner` is even constructed, this tool runs its own
     fail-closed run-level gate (`_run_level_preflight`): safety relay
     ARMED state readable (ARMED is acceptable -- it is a latch, the
-    safety processor's normal idle state -- only if autotune is idle, zone
-    relays 1-3 read de-energized and no trip is latched; owner decision
+    safety processor's normal idle state -- only if autotune is idle, all
+    expander relays and K4 read de-energized and no trip is latched; owner decision
     2026-10-01), safety link confirmed up, profile executor
     confirmed idle (running OR paused refuses), the OTA interlock confirmed
     ok, and `capability_preflight` confirmed reachable with no unacknowledged

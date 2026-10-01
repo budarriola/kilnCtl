@@ -44,8 +44,9 @@ class _FakeAutotuneStatus:
 
 
 class _FakeSafetyStatus:
-    def __init__(self, link_up=True):
+    def __init__(self, link_up=True, flags=0):
         self.link_up = link_up
+        self.flags = flags
 
 
 class _FakeSafetyDiag:
@@ -366,14 +367,18 @@ class _ArmedFakeSrv:
     """Fake `_srv` for the ARMED-latch condition reads."""
 
     def __init__(self, at_state="idle", relays=0, i2c_failed=False, trip=0,
-                 ever_received=True, raise_io=False):
+                 ever_received=True, raise_io=False,
+                 k4=False, raise_at=False, raise_diag=False, raise_status=False):
         outer = self
         self.at_state, self.trip, self.ever_received = at_state, trip, ever_received
         self.io = _FakeIo(relays, i2c_failed)
         self.raise_io = raise_io
+        self.k4, self.raise_at, self.raise_diag, self.raise_status = k4, raise_at, raise_diag, raise_status
 
         class _At:
             def get_status(self_inner):
+                if outer.raise_at:
+                    raise RuntimeError("at timeout")
                 return _FakeAutotuneStatus(outer.at_state)
 
         class _Io:
@@ -383,7 +388,15 @@ class _ArmedFakeSrv:
                 return outer.io
 
         class _Safety:
+            def get_status(self_inner):
+                if outer.raise_status:
+                    raise RuntimeError("status timeout")
+                from kilnctrl.devices_safety import SafetyFlag
+                return _FakeSafetyStatus(flags=int(SafetyFlag.RELAY) if outer.k4 else 0)
+
             def get_diag(self_inner):
+                if outer.raise_diag:
+                    raise RuntimeError("diag timeout")
                 return _FakeSafetyDiag(outer.ever_received, outer.trip)
 
         self._autotune, self._io, self._safety = _At(), _Io(), _Safety()
@@ -396,9 +409,9 @@ class ArmedLatchGateTest(unittest.TestCase):
 
     def _gate(self, srv, **pf_changes):
         pf = dataclasses.replace(_ok_gpio_preflight(), safety_armed=True, **pf_changes)
-        ctx = {"gpio_test_preflight_fn": lambda host: pf, "resolve_host_fn": lambda host: host,
+        ctx = {"srv": srv, "gpio_test_preflight_fn": lambda host: pf, "resolve_host_fn": lambda host: host,
                "capability_preflight_run": lambda preset, host: _FakeCapabilityPreflightReport(ok=True)}
-        with mock.patch.object(M, "_srv", srv):
+        with mock.patch.object(M, "_srv", object()):  # only ctx["srv"] may be used
             return M._run_level_preflight(ctx, host=None)
 
     def test_armed_idle_relays_off_passes(self):
@@ -423,6 +436,30 @@ class ArmedLatchGateTest(unittest.TestCase):
                       self._gate(_ArmedFakeSrv(raise_io=True)))
         self.assertIn("could not be confirmed de-energized",
                       self._gate(_ArmedFakeSrv(i2c_failed=True)))
+
+    def test_armed_relay4_energized_refuses(self):
+        # Relay4 drives a heater relay (K5/K1); it must not be ignored.
+        reason = self._gate(_ArmedFakeSrv(relays=0b1000))
+        self.assertIn("relay output(s) energized: [4]", reason)
+
+    def test_armed_k4_energized_refuses(self):
+        self.assertIn("K4 is energized", self._gate(_ArmedFakeSrv(k4=True)))
+
+    def test_armed_k4_unreadable_refuses(self):
+        self.assertIn("K4 state could not be read", self._gate(_ArmedFakeSrv(raise_status=True)))
+
+    def test_armed_autotune_unreadable_refuses(self):
+        self.assertIn("autotune state could not be read", self._gate(_ArmedFakeSrv(raise_at=True)))
+
+    def test_armed_trip_unreadable_refuses(self):
+        self.assertIn("trip state could not be read", self._gate(_ArmedFakeSrv(raise_diag=True)))
+
+    def test_armed_checks_fn_raising_refuses(self):
+        def boom():
+            raise RuntimeError("checks blew up")
+        reasons = M._ota_refusal_reasons(
+            dataclasses.replace(_ok_gpio_preflight(), safety_armed=True), boom)
+        self.assertTrue(any("checks blew up" in r for r in reasons), reasons)
 
     def test_armed_trip_latched_refuses(self):
         self.assertIn("trip is latched", self._gate(_ArmedFakeSrv(trip=5)))
