@@ -23,6 +23,14 @@ call returned into a text file, then:
 ``--fw-built``/``--fw-dirty`` are optional context, not re-verified here --
 this script never queries the board, so it cannot confirm them itself; the
 caller is responsible for having them right (or leaving them blank/"unknown").
+
+WARMUP RULE (owner, 2026-10-01): a reference baseline may only be captured on
+a board that has been up at least 10 minutes AND has already run
+``bench_test_run(suite="stack")`` once on that same boot. High-water marks
+keep dropping during the first suite run on a boot (info_uart_bridge read
+1624 B free at a fresh-idle capture and 1496 B later on the same boot, a
+128 B drop against the 64 B SK-01 tolerance), so a pre-suite capture produces
+false SK-01 FAILs. Record the uptime and the warmup run dir in the notes.
 """
 from __future__ import annotations
 
@@ -63,6 +71,8 @@ def main() -> int:
         commit=args.commit,
         built=args.fw_built,
     )
+    if "warmup" not in args.notes.lower():
+        print("WARNING: --notes does not mention a warmup (owner rule 2026-10-01: capture only on a board up >= 10 min that has already run bench_test_run(suite=stack) once on this boot; record uptime and the warmup run dir).", file=sys.stderr)
     record = build_record(args.condition, entries, fw_version, notes=args.notes)
     path = write_record(record, args.out_dir)
     print(f"parsed {len(entries)} task(s), wrote {path}")

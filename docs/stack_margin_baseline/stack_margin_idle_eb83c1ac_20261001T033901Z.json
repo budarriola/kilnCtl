@@ -1,5 +1,5 @@
 {
-  "captured_at_utc": "2026-10-01T03:03:11Z",
+  "captured_at_utc": "2026-10-01T03:39:01Z",
   "condition": "idle",
   "entries": [
     {
@@ -152,7 +152,7 @@
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 1624,
+      "hwm_bytes": 1496,
       "level": "OK",
       "name": "info_uart_bridge"
     },
@@ -201,7 +201,7 @@
     {
       "alive": true,
       "configured_stack_bytes": 4096,
-      "hwm_bytes": 1640,
+      "hwm_bytes": 1608,
       "level": "OK",
       "name": "safety_uart_bridge"
     },
@@ -231,5 +231,5 @@
   "fw_commit": "eb83c1ac",
   "fw_dirty": false,
   "load": null,
-  "notes": "Baseline refresh after owner-authorized investigation (safety_owner_evt/safety_proto_rx growth explained: identical static deepest-path stack usage 111b1b6f vs eb83c1ac per check_all_task_stack_budgets.py --dump, zero commits in range touch either task's call graph; live delta attributed to checker's unmodeled indirect-dispatch/ISR margin). Captured via read-only kiln_call(get_stack_margin) MCP facade, board idle (profiles_get_exec_status state=0), no firing started."
+  "notes": "Warmed-up baseline per owner rule 2026-10-01 (stack baselines only on a board up >= 10 min that has already run bench_test_run(suite=stack) once on the same boot). Captured at board uptime_s ~6369 (reset_reason 'software (esp_restart)', no reboot since warmup; uptime 6075 at 2026-10-01T03:33:36Z). Warmup run: logs/bench_test/20261001T033329Z_stack. Board idle (profiles_get_exec_status state=0). Read-only kiln_call(get_stack_margin). Replaces the pre-rule capture stack_margin_idle_eb83c1ac_20261001T030311Z.json (info_uart_bridge read 1624 B there vs 1496 B after warmup)."
 }
