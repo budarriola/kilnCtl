@@ -39,6 +39,11 @@ param(
     # not spec.heat-marked, so allow_heat alone never gates it; this is the
     # separate, default-off flag that does.
     [switch]$LcdStopHeat,
+    # Opt-in only: lets LCD-22 (Edit firing live edit) start its own
+    # low-temperature 2-segment firing. LCD-22 is spec.heat-marked, but
+    # allow_heat defaults on, so this separate default-off flag gates it;
+    # without it the case returns NOT_RUN naming lcd_edit_heat.
+    [switch]$LcdEditHeat,
     [string]$Tag,
     [string]$ApPassword,
     [string]$HostAddr,
@@ -67,6 +72,7 @@ $toolArgs = @{
     dry_run    = [bool]$DryRun
     allow_heat = -not [bool]$NoHeat
     lcd_stop_heat = [bool]$LcdStopHeat
+    lcd_edit_heat = [bool]$LcdEditHeat
 }
 if ($Cases) { $toolArgs["cases"] = ($Cases -join ",") }
 if ($Tag) { $toolArgs["tag"] = $Tag }

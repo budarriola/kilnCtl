@@ -3889,6 +3889,13 @@ def _lcd22_cleanup(ctx: dict, client, host: str, heat) -> "tuple[bool, dict]":
 def _case_lcd22(ctx: dict) -> CaseResult:
     if ctx.get("allow_heat") is not True:
         return CaseResult(Verdict.NOT_RUN, reason="allow_heat=False: LCD-22 starts a real low-temperature firing")
+    # Second, default-False opt-in (mirrors LCD-19's lcd_stop_heat):
+    # ctx["allow_heat"] defaults True, so it alone must not start a firing.
+    if ctx.get("lcd22_allow_heat") is not True:
+        return CaseResult(
+            Verdict.NOT_RUN,
+            reason="lcd_edit_heat=False: LCD-22 starts a real low-temperature firing "
+                   "and needs the separate lcd_edit_heat=True opt-in")
     host = ctx.get("host")
     if not host:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx (needed for profile_live and relay reads)")

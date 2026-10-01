@@ -213,6 +213,7 @@ class BenchTestRunner:
 
     def run(self, suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
              allow_heat: bool = True, lcd_stop_heat: bool = False,
+             lcd_edit_heat: bool = False,
              tag: Optional[str] = None) -> RunOutcome:
         requested = suite_case_ids(suite)
         if cases:
@@ -252,6 +253,13 @@ class BenchTestRunner:
         # default for everything else.
         self.ctx["allow_heat"] = allow_heat
         self.ctx["lcd19_allow_heat"] = lcd_stop_heat
+        # LCD-22 (Edit firing live edit) IS spec.heat-marked, so a False
+        # allow_heat skips it outright, but allow_heat defaults True, so it
+        # is not by itself a safe gate for an unsolicited firing on an
+        # ordinary suite="lcd" run. Same shape as LCD-19 above: the case
+        # requires a second, default-False opt-in, ctx["lcd22_allow_heat"]
+        # (`lcd_edit_heat` here), and returns NOT_RUN naming it without.
+        self.ctx["lcd22_allow_heat"] = lcd_edit_heat
 
         # Board lock (docs/audits/profile_executor_panic_2026-09-24.md
         # HP-02/HP-05): acquired here, before preflight even runs, for any
@@ -383,6 +391,7 @@ class BenchTestRunner:
 
 def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
               allow_heat: bool = True, lcd_stop_heat: bool = False,
+             lcd_edit_heat: bool = False,
               tag: Optional[str] = None, host: Optional[str] = None,
               logs_root: Optional[str] = None) -> RunOutcome:
     """Convenience entry point -- NOT what mcp_server_bench_test.py's
@@ -399,4 +408,5 @@ def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = Fal
     ctx: Dict[str, Any] = {"host": host, "tag": tag}
     runner = BenchTestRunner(ctx, logs_root=logs_root)
     return runner.run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
-                       lcd_stop_heat=lcd_stop_heat, tag=tag)
+                       lcd_stop_heat=lcd_stop_heat,
+                       lcd_edit_heat=lcd_edit_heat, tag=tag)

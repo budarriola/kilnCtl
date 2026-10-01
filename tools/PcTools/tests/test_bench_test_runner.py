@@ -239,6 +239,21 @@ class RunnerLifecycleTest(unittest.TestCase):
         runner.run(suite="smoke", dry_run=True)
         self.assertIs(runner.ctx.get("lcd19_allow_heat"), False)
 
+    def test_lcd_edit_heat_defaults_false_at_runner_and_mcp_layer(self):
+        # Same pin as lcd_stop_heat above, for LCD-22's opt-in.
+        import inspect
+        from kilnctrl import mcp_server_bench_test as MT
+        run_default = inspect.signature(BenchTestRunner.run).parameters["lcd_edit_heat"].default
+        self.assertIs(run_default, False)
+        fn = MT.bench_test_run.__wrapped__ if hasattr(MT.bench_test_run, "__wrapped__") else MT.bench_test_run
+        self.assertIs(inspect.signature(fn).parameters["lcd_edit_heat"].default, False)
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        runner.run(suite="smoke", dry_run=True)
+        self.assertIs(runner.ctx.get("lcd22_allow_heat"), False)
+        runner2 = BenchTestRunner(dict(self.ctx), logs_root=self.tmpdir)
+        runner2.run(suite="smoke", dry_run=True, lcd_edit_heat=True)
+        self.assertIs(runner2.ctx.get("lcd22_allow_heat"), True)
+
     def test_heat_case_skipped_when_allow_heat_false(self):
         heat_ids = [c for c in R.SUITES["heat"] if R.get_case(c).heat]
         self.assertTrue(heat_ids)

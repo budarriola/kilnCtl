@@ -215,7 +215,7 @@ class _Clock:
         self.t += max(s, 0.01)
 
 
-def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4"):
+def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4", edit_heat=True):
     clock = _Clock()
     srv = SimpleNamespace(
         _ui_test=FakeUi(board), _profiles=FakeProfiles(board), _touch=FakeTouch(board),
@@ -224,6 +224,7 @@ def _run(board, allow_heat=True, ambient=AMBIENT, host="1.2.3.4"):
     )
     ctx = {
         "srv": srv, "host": host, "allow_heat": allow_heat,
+        "lcd22_allow_heat": edit_heat,
         "_now": clock.now, "_sleep": clock.sleep,
         "_profile_live_client": FakeLiveClient(board),
         "capability_preflight_run": lambda *_a, **_k: SimpleNamespace(ok=True),
@@ -242,6 +243,32 @@ class RegistryTest(unittest.TestCase):
         self.assertTrue(spec.heat)
         self.assertIs(spec.judge, C._case_lcd22)
         self.assertIn("LCD-22", R.SUITES["lcd"])
+
+
+class EditHeatGateTest(unittest.TestCase):
+    def test_not_run_without_lcd_edit_heat_even_with_allow_heat(self):
+        board = FakeBoard()
+        result, srv = _run(board, allow_heat=True, edit_heat=False)
+        self.assertEqual(result.verdict, Verdict.NOT_RUN)
+        self.assertIn("lcd_edit_heat", result.reason)
+
+    def test_not_run_when_opt_in_is_merely_truthy(self):
+        board = FakeBoard()
+        result, srv = _run(board, allow_heat=True, edit_heat=1)
+        self.assertEqual(result.verdict, Verdict.NOT_RUN)
+        self.assertIn("lcd_edit_heat", result.reason)
+
+    def test_gate_refusal_touches_nothing(self):
+        board = FakeBoard()
+        result, srv = _run(board, allow_heat=True, edit_heat=False)
+        self.assertEqual(result.verdict, Verdict.NOT_RUN)
+        self.assertFalse(board.started)
+
+    def test_opt_in_alone_does_not_override_allow_heat_false(self):
+        board = FakeBoard()
+        result, srv = _run(board, allow_heat=False, edit_heat=True)
+        self.assertEqual(result.verdict, Verdict.NOT_RUN)
+        self.assertIn("allow_heat", result.reason)
 
 
 class Lcd22Test(unittest.TestCase):
@@ -283,7 +310,7 @@ class Lcd22Test(unittest.TestCase):
         srv = SimpleNamespace(_ui_test=FakeUi(board), _profiles=FakeProfiles(board), _touch=FakeTouch(board),
                               _thermo=SimpleNamespace(read=lambda *a, **k: []))
         board_ctx = {
-            "srv": srv, "host": "h", "allow_heat": True, "_now": clock.now, "_sleep": clock.sleep,
+            "srv": srv, "host": "h", "allow_heat": True, "lcd22_allow_heat": True, "_now": clock.now, "_sleep": clock.sleep,
             "_profile_live_client": FakeLiveClient(board),
             "capability_preflight_run": lambda *_a, **_k: SimpleNamespace(
                 ok=False, board=SimpleNamespace(crash_unacknowledged=False, readiness_blocked=True)),

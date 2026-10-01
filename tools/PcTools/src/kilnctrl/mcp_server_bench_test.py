@@ -22,6 +22,7 @@ from .bench_test.runner import BenchTestRunner
 @_srv._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
                     allow_heat: bool = True, lcd_stop_heat: bool = False,
+                    lcd_edit_heat: bool = False,
                     tag: Optional[str] = None, host: Optional[str] = None,
                     attended: bool = False, allow_flash: bool = False) -> str:
     """Run a standardized bench-test suite against this board
@@ -37,6 +38,11 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     to probe whether Stop is PIN-gated while heating (owner decision
     2026-09-30) -- LCD-19 is not spec.heat-marked, so `allow_heat` alone
     never gates it; both flags must be true for that firing to start.
+    `lcd_edit_heat=True` is the same kind of separate, default-False
+    opt-in for LCD-22 (Edit firing live edit), which starts its own
+    low-temperature 2-segment firing. LCD-22 is spec.heat-marked, so
+    `allow_heat=False` skips it, but `allow_heat` defaults True, so
+    without `lcd_edit_heat=True` it returns NOT_RUN naming that parameter.
 
     Every OTA/factory-reset/sw-reset route this can drive is ROUTE_TIER_ADMIN
     only, on or off, since the AP-password HMAC challenge/response scheme
@@ -87,7 +93,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     runner = BenchTestRunner(ctx)
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
-                              allow_heat=allow_heat, lcd_stop_heat=lcd_stop_heat, tag=tag)
+                              allow_heat=allow_heat, lcd_stop_heat=lcd_stop_heat,
+                              lcd_edit_heat=lcd_edit_heat, tag=tag)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
     except bt_board_lock.BoardLockHeld as exc:
