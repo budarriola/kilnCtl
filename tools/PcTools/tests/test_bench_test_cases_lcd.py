@@ -1358,6 +1358,58 @@ class ClickResolvingSwallowWalkBusyTest(unittest.TestCase):
         self.assertEqual(walk_busy_retries, 0)  # failure path's own tuple slot is always 0
 
 
+class ClickThenTargetsChangeWalkBusyTest(unittest.TestCase):
+    """Direct unit tests for _click_then_targets_change()'s single walk_busy
+    retry (cases_lcd.py:~861-878, 2026-09-30, Opus review follow-up): a
+    'walk_busy' click result is retried exactly once, same shape as
+    _click_resolving_swallow()'s walk_busy arm but with its own one-shot
+    budget (there is no separate retry counter here -- the function's
+    return shape predates that addition and was not widened for it), before
+    falling through to the same not-ok handling every other non-ok result
+    uses. A non-walk_busy not-ok result (e.g. 'not_found') must still never
+    be retried, same as before this fix landed."""
+
+    _PAGE_TARGETS = {"home": [{"name": "a", "cx": 0, "cy": 0, "hidden": False}],
+                      "config": [{"name": "b", "cx": 0, "cy": 0, "hidden": False}]}
+    _NAV_MAP = {"settings": "config"}
+    _PREV_NAMES = {"a"}
+
+    def test_busy_once_then_ok_proceeds(self):
+        ui = _QueuedClickUi(page="home", page_targets=self._PAGE_TARGETS, nav_map=self._NAV_MAP,
+                             queued_name="settings", queued_results=["walk_busy", "ok"])
+        with mock.patch.object(C.time, "sleep"):
+            fail, tap, waited_s, changed = C._click_then_targets_change(ui, "settings", self._PREV_NAMES)
+        self.assertIsNone(fail)
+        self.assertTrue(changed)
+        self.assertEqual({t.get("name") for t in tap.get("targets", [])}, {"b"})
+        self.assertEqual(ui.calls_for_queued_name, 2)
+
+    def test_busy_twice_attributes_walk_busy(self):
+        # Only one retry is budgeted: a second consecutive 'walk_busy' falls
+        # through to the same non-ok handling as any other not-ok result,
+        # attributed as 'walk_busy' rather than folded into 'not_found'.
+        ui = _QueuedClickUi(page="home", page_targets=self._PAGE_TARGETS, nav_map=self._NAV_MAP,
+                             queued_name="settings", queued_results=["walk_busy", "walk_busy"])
+        with mock.patch.object(C.time, "sleep"):
+            fail, tap, waited_s, changed = C._click_then_targets_change(ui, "settings", self._PREV_NAMES)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.verdict, Verdict.FAIL)
+        self.assertEqual(fail.observed.get("attribution"), "walk_busy")
+        self.assertEqual(ui.calls_for_queued_name, 2)
+
+    def test_not_found_is_never_retried(self):
+        # Pinning pre-existing behavior: a plain 'not_found' (not
+        # 'walk_busy') gets no retry at all here, exactly as before this
+        # fix added the walk_busy-only retry above it.
+        ui = _QueuedClickUi(page="home", page_targets=self._PAGE_TARGETS, nav_map=self._NAV_MAP,
+                             queued_name="settings", queued_results=["not_found"])
+        with mock.patch.object(C.time, "sleep"):
+            fail, tap, waited_s, changed = C._click_then_targets_change(ui, "settings", self._PREV_NAMES)
+        self.assertIsNotNone(fail)
+        self.assertEqual(fail.observed.get("attribution"), "not_found")
+        self.assertEqual(ui.calls_for_queued_name, 1)
+
+
 class ListTapTargetsResolvingBusyTest(unittest.TestCase):
     """Direct unit tests for _list_tap_targets_resolving_busy() (cases_lcd.py,
     2026-09-30 LCD-09 fix): retries a busy (count==0, truncated=True) read,
@@ -1403,7 +1455,18 @@ class Lcd09WalkBusyTest(unittest.TestCase):
     logs/bench_test/20260930T234916Z_lcd_harness_retry_verify) and record the
     retries actually used in observed['walk_busy_retries']."""
 
-    def test_busy_once_then_real_read_recorded_and_passes(self):
+    def test_busy_once_then_real_read_recorded_and_inconclusive(self):
+        # 2026-09-30 Opus review: this fixture's "add" target is a literal
+        # name, not the glyph bytes (U+FFFD) _is_glyph_name()/
+        # _profiles_topbar_icons() actually require to recognise the New
+        # icon, and it carries no "home" target at all -- so
+        # _profiles_topbar_icons() can't find its back/home anchor and
+        # judge_lcd_profiles_picker() reports INCONCLUSIVE, never PASS, for
+        # this fixture. That is fine: this test's job is the busy-retry
+        # plumbing (walk_busy_retries recorded, the resolving-busy helper
+        # called exactly once), not the topbar-icon judgment, so the
+        # verdict is pinned to what this fixture actually produces rather
+        # than asserted away or left unchecked.
         real_targets = [
             {"name": "back", "cx": 10, "cy": 20, "hidden": False},
             {"name": "add", "cx": 400, "cy": 20, "hidden": False},
@@ -1442,6 +1505,7 @@ class Lcd09WalkBusyTest(unittest.TestCase):
             result = C._case_lcd09({"srv": srv})
         wrapped.assert_called_once()
         self.assertEqual(result.observed.get("walk_busy_retries"), 1)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
 
 class EntryAllDigitsNotFoundWalkBusyTest(unittest.TestCase):
