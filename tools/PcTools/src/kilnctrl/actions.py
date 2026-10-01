@@ -853,10 +853,12 @@ def _connect(ctx: ActionContext, port: Optional[str] = None) -> str:
 
 
 def _disconnect(ctx: ActionContext) -> str:
-    if not ctx.link.is_connected:
-        return "not connected"
+    was_connected = ctx.link.is_connected
     port = ctx.link.port
+    # Always send the op so the hub's explicit-disconnect latch is set.
     ctx.link.disconnect()
+    if not was_connected:
+        return "not connected (disconnect latched; no automatic reopen until connect)"
     ctx.session_log.info("disconnected from %s", port)
     return f"disconnected from {port}"
 

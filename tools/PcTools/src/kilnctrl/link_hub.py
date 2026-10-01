@@ -38,9 +38,18 @@ Wire protocol (newline-delimited JSON, loopback only):
   changes (including as a result of some other client's connect/disconnect),
   so ``RemoteUartLink.is_connected`` stays accurate without polling.
 
-Ops: ``connect`` (fields: port), ``disconnect``, ``status``, ``send``
+Ops: ``connect`` (fields: port), ``disconnect``, ``ensure_connected``,
+``status``, ``send``
 (fields: dst_task, src_task, dst_device, payload [base64], timeout),
 ``register_task`` (fields: task_id), ``unregister_task`` (fields: task_id).
+
+``ensure_connected`` is the lazy-open path a client's ``send`` uses when it
+sees the link closed: the hub reopens the port unless the user explicitly
+disconnected (an explicit ``disconnect`` op always latches, even on a link
+that already reads closed; an explicit ``connect`` clears the latch), never
+steals a port another process holds, and backs off ~5 s after a failed open.
+A fresh hub with no prior connect therefore autodiscovers on the first send,
+via ``recommend_port()`` (which excludes debug probes and the fixture).
 
 register_task/unregister_task are subscriptions, not 1:1 registrations: the
 hub registers a given task_id on the real UartLink at most once (on the
@@ -129,6 +138,8 @@ _HEARTBEAT_TASK_ID = 200
 _RPC_TIMEOUT_DEFAULT = 5.0
 _RPC_TIMEOUT_CONNECT = 10.0
 _RPC_TIMEOUT_SEND = 8.0
+#: After a failed lazy open, skip further lazy opens for this long.
+_LAZY_RETRY_BACKOFF_S = 5.0
 
 
 def hub_diagnosis() -> str:
@@ -285,6 +296,11 @@ class LinkHub:
         #: Set by an explicit disconnect op, cleared by an explicit connect;
         #: while set, ensure_connected() never reopens the port.
         self._explicit_disconnect = False
+        #: Serializes connect/disconnect/ensure_connected across client threads
+        #: so a lazy open cannot interleave with an explicit one.
+        self._conn_lock = threading.Lock()
+        #: monotonic time before which a lazy open is not retried.
+        self._lazy_retry_after = 0.0
         #: Port of the last successful open, reused by a lazy reconnect.
         self._last_port: Optional[str] = None
         #: task_id -> (inbox queue, drain thread, stop event); created lazily
@@ -298,15 +314,18 @@ class LinkHub:
     # -- connection ownership -----------------------------------------------
     def connect(self, port: Optional[str] = None) -> str:
         """Explicit connect: clears any explicit-disconnect latch."""
-        opened = self.link.connect(port)
-        self._explicit_disconnect = False
-        self._last_port = opened
-        return opened
+        with self._conn_lock:
+            opened = self.link.connect(port)
+            self._explicit_disconnect = False
+            self._lazy_retry_after = 0.0
+            self._last_port = opened
+            return opened
 
     def disconnect(self) -> None:
         """Explicit disconnect: latches so ensure_connected() will not reopen."""
-        self._explicit_disconnect = True
-        self.link.disconnect()
+        with self._conn_lock:
+            self._explicit_disconnect = True
+            self.link.disconnect()
 
     def ensure_connected(self) -> dict:
         """Lazy connect for a send that found the shared link closed.
@@ -318,13 +337,19 @@ class LinkHub:
         process, device absent) the link stays closed and the failure is
         logged, not raised -- the caller then reports NOT_CONNECTED as before.
         """
-        if not self.link.is_connected and not self._explicit_disconnect:
-            try:
-                self._last_port = self.link.connect(self._last_port)
-                log.info("lazy reconnect opened %s", self._last_port)
-            except Exception as exc:  # noqa: BLE001 - stays disconnected
-                log.warning("lazy reconnect failed: %s", exc)
-        return self.link.status()
+        with self._conn_lock:
+            if (
+                not self.link.is_connected
+                and not self._explicit_disconnect
+                and time.monotonic() >= self._lazy_retry_after
+            ):
+                try:
+                    self._last_port = self.link.connect(self._last_port)
+                    log.info("lazy reconnect opened %s", self._last_port)
+                except Exception as exc:  # noqa: BLE001 - stays disconnected
+                    self._lazy_retry_after = time.monotonic() + _LAZY_RETRY_BACKOFF_S
+                    log.warning("lazy reconnect failed (retry in %.0fs): %s", _LAZY_RETRY_BACKOFF_S, exc)
+            return self.link.status()
 
     def start(self) -> None:
         threading.Thread(target=self._accept_loop, daemon=True, name="link-hub-accept").start()
@@ -502,7 +527,8 @@ class RemoteUartLink:
 
     def disconnect(self) -> None:
         """Disconnect the *shared* physical link -- affects every client, not
-        just this one. For "I'm done, but leave the link up for everyone
+        just this one. Always sends the op, even if this client believes the
+        link is closed, so the explicit-disconnect latch gets set. For "I'm done, but leave the link up for everyone
         else", use close() instead (e.g. at process shutdown)."""
         self._request("disconnect")
 
@@ -572,7 +598,8 @@ class RemoteUartLink:
             # and never takes a port another process holds.
             try:
                 self._apply_status(self._request("ensure_connected", rpc_timeout=_RPC_TIMEOUT_CONNECT))
-            except (TimeoutError, RuntimeError, OSError):
+            except (TimeoutError, RuntimeError, OSError) as exc:
+                self._note_hub_failure("ensure_connected", exc)
                 return SendResult.NOT_CONNECTED
             if not self._is_connected:
                 return SendResult.NOT_CONNECTED
@@ -586,7 +613,10 @@ class RemoteUartLink:
                 payload=base64.b64encode(payload).decode("ascii") if payload else "",
                 timeout=timeout,
             )
-        except (TimeoutError, RuntimeError, OSError):
+        except (TimeoutError, RuntimeError, OSError) as exc:
+            # NOT a closed port: the hub RPC itself failed (timeout or lost
+            # socket). Same return code for callers, distinct reason text.
+            self._note_hub_failure("send", exc)
             return SendResult.NOT_CONNECTED
         try:
             return SendResult(result)
@@ -597,6 +627,17 @@ class RemoteUartLink:
             # GUI worker / MCP tool that called us.
             log.warning("hub returned an unrecognized send result %r", result)
             return SendResult.TIMEOUT
+
+    #: Why the last NOT_CONNECTED came from the hub RPC rather than a closed
+    #: port (None when the port itself was reported closed). Diagnostic only.
+    last_hub_failure: Optional[str] = None
+
+    def _note_hub_failure(self, op: str, exc: Exception) -> None:
+        self.last_hub_failure = (
+            f"hub RPC {op!r} failed ({type(exc).__name__}: {exc}) "
+            "-- port state unknown, not necessarily closed"
+        )
+        log.warning("%s", self.last_hub_failure)
 
     # -- RPC plumbing ------------------------------------------------------
     def _request(self, op: str, rpc_timeout: float = _RPC_TIMEOUT_DEFAULT, **fields) -> object:

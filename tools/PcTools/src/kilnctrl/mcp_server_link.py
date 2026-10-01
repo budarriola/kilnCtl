@@ -143,10 +143,13 @@ def _check_peer_version() -> str:
 @_srv._tool()
 def disconnect() -> str:
     """Close the serial link."""
-    if not _srv._link.is_connected:
-        return "not connected"
+    was_connected = _srv._link.is_connected
     port = _srv._link.port
+    # Always send the op, even when the link reads closed: it latches the
+    # hub's explicit-disconnect flag so no lazy reconnect reopens the port.
     _srv._link.disconnect()
+    if not was_connected:
+        return "not connected (disconnect latched; no automatic reopen until connect)"
     _srv._session_log.info("disconnected from %s", port)
     return f"disconnected from {port}"
 
