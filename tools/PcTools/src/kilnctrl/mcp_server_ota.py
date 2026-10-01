@@ -283,11 +283,14 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     that per-processor outcome is in the returned detail text, not summarized
     away.
 
-    IMPORTANT, read before calling: this call reliably LATCHES an S6a
-    (SAFETY_TRIP_MAIN_FAULT) trip on the safety processor -- this ESP's
-    isolated fault line to it goes undefined across this ESP's own reset,
-    which safety_guards.c's S6a block reads as a main-fault unconditionally
-    (there is no grace window over S6a, only over S6b). This tool does NOT
+    IMPORTANT, read before calling: this call may latch an S6a
+    (SAFETY_TRIP_MAIN_FAULT) trip on the safety processor -- the theory is
+    that this ESP's isolated fault line to it goes undefined across this
+    ESP's own reset, which safety_guards.c's S6a block reads as a main-fault
+    unconditionally (there is no grace window over S6a, only over S6b). It
+    was OBSERVED NOT TO on the bench (OT-B01, 2026-09-30 and 2026-10-01,
+    run 20261001T072647Z_ota: trip_reason 0, mask 0); S6a sightings came
+    from JTAG/flash dual resets. Check the trip state afterward. This tool does NOT
     clear that trip -- S6a exists to report exactly this event, and
     auto-clearing it from the same call that caused it would defeat the
     point. REQUIRED FOLLOW-UP before heating: once safety_get_status()/
@@ -311,8 +314,9 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     """
     if not confirm:
         return ("error: refused -- confirm=True is required. This reboots BOTH processors right "
-                "now and WILL latch an S6a main-fault trip on the safety processor that you must "
-                "clear yourself afterward (safety_clear_trip(), only once trip_mask is confirmed "
+                "now and may latch an S6a main-fault trip on the safety processor (not observed on "
+                "the bench for sw_reset, 2026-10-01); if one latches you must "
+                "clear it yourself afterward (safety_clear_trip(), only once trip_mask is confirmed "
                 "to be exactly 0x0020). No request was sent to the board.")
     resolved = _ota_resolve_host(host)
     try:

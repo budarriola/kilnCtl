@@ -53,12 +53,17 @@ static const char kSwResetFallbackBody[] =
 //    own 2026-09-09 CORRECTION comment carries the full verification (S6a
 //    is unconditional in safety_guards.c -- reboot_grace_active gates only
 //    S6b -- and an ESP reset floats GPIO6, which the Pico reads AS
-//    mainFault, so this route reliably CAUSES an S6a latch rather than
+//    mainFault, so this route was expected to CAUSE an S6a latch rather than
 //    clearing one -- and now that the Pico reboots too, the Pico's own
-//    RAM-only latch clearing does not rescue it either: the RP2040 is back
-//    watching the still-floating line long before the ESP is. The response
-//    body therefore states plainly that the reboot WILL latch S6a and that
-//    POST /api/safety/clear_trip is a REQUIRED follow-up before heating.
+//    RAM-only latch clearing was not expected to rescue it either: the
+//    RP2040 is back watching the still-floating line long before the ESP
+//    is. CORRECTION 2026-10-01: that latch was NOT observed on the bench
+//    (OT-B01, run 20261001T072647Z_ota, and 2026-09-30: real dual reset
+//    confirmed, trip_reason 0, mask 0); the S6a sightings came from
+//    JTAG/flash dual resets, a different path. The response body below
+//    still says WILL (wording not changed here) -- read it as "may": check
+//    the trip state, and POST /api/safety/clear_trip is a follow-up only if
+//    a trip actually latched.
 //    Auto-clearing it here was considered and rejected outright: the trip is
 //    correct -- the main processor really was absent -- and clearing it from
 //    the same request that caused it would make S6a unable to report the one
@@ -508,14 +513,17 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     // when only one did will draw exactly the wrong conclusion about
     // whatever stuck state they were trying to clear.
     //
-    // The S6a sentence says WILL, not "does not clear": this route reliably
-    // CREATES a latched main-fault trip. GPIO6 floats through the ESP's
-    // reset (safety_link.c calls that an undefined fault state at the
-    // safety processor), safety_guards.c's S6a trips on the debounced
-    // mainFault line unconditionally, and a Pico that reboots too comes back
-    // first and re-latches on the still-floating line. So the follow-up is
-    // not optional advice, it is required before heating -- said here rather
-    // than left for the operator to discover from a refusing kiln.
+    // The S6a sentence says WILL, not "does not clear": the theory was that
+    // this route reliably CREATES a latched main-fault trip. GPIO6 floats
+    // through the ESP's reset (safety_link.c calls that an undefined fault
+    // state at the safety processor), safety_guards.c's S6a trips on the
+    // debounced mainFault line unconditionally, and a Pico that reboots too
+    // comes back first and would re-latch on the still-floating line.
+    // OBSERVED 2026-10-01 (OT-B01, run 20261001T072647Z_ota; also
+    // 2026-09-30): a confirmed dual reset via this route latched NO trip
+    // (trip_reason 0, mask 0). S6a was seen after JTAG/flash dual resets
+    // only. The wording below is unchanged (string, not comment); a trip is
+    // possible, not guaranteed, so check before heating.
     // This response buffer used to be a plain local directly on the
     // httpd_worker stack. Heap (PSRAM preferred); a malloc failure falls
     // back to the same short fixed string the truncation branch below

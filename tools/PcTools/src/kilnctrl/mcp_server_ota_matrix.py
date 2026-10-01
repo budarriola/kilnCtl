@@ -7,7 +7,7 @@ thin, safety-first front door onto ``BenchTestRunner``, the same engine
 ``bench_test_run()`` (mcp_server_bench_test.py) already drives for every
 other suite, not a second case-running engine.
 
-**Without image paths, only OT-B01 (the dual-reflash S6a handshake trip)
+**Without image paths, only OT-B01 (the sw_reset dual-reset case; S6a was seen only after JTAG/flash dual resets)
 can actually execute** -- every OT-E*/OT-P* case reads its own image path
 out of ctx (``ota_image_path``, ``ota_corrupt_image_path``, ...,
 ``cases_ota.py``) and SKIPs when it is unset, exactly like calling

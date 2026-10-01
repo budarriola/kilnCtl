@@ -334,7 +334,9 @@ will boot.
 
 Resetting both processors close together (a dual reflash) correctly trips
 S6a (mainFault) while the ESP's safety-link handshake is still coming up —
-expected, not a bug. Confirm link-up via `safety_get_status()` and that
+expected, not a bug. (A `POST /api/sw_reset` dual reset was observed NOT to
+latch S6a on 2026-10-01, so no trip after sw_reset is not a fault.) Confirm
+link-up via `safety_get_status()` and that
 `trip_reason`/`trip_mask` show only `SAFETY_TRIP_MAIN_FAULT` before calling
 `safety_clear_trip()`. **`trip_mask` is `1 << (trip_reason - 1)`**
 (`link_frame_trip_mask_for_reason()`, `firmware/SaftyFW/src/tasks/link_frame.c:237`)

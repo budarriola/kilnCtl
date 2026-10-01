@@ -200,12 +200,13 @@ def _pico_boot_id_known(srv) -> Optional[int]:
 
 def _case_otb01(ctx: dict) -> CaseResult:
     """OT-B01: sw_reset_esp(confirm=True) resets both processors close
-    together. S6a (SAFETY_TRIP_MAIN_FAULT) is EXPECTED to latch while the
-    link handshake is still coming up, but that is UNCONFIRMED for a
-    software reset (the S6a evidence so far came from JTAG/flash resets,
-    not ``/api/sw_reset``): it relies on the ESP's fault line floating
-    through its own reset. This case therefore records which outcome
-    happened and accepts either, once the reset itself is proven:
+    together. S6a (SAFETY_TRIP_MAIN_FAULT) was expected to latch while the
+    link handshake is still coming up, but a ``/api/sw_reset`` dual reset
+    has been OBSERVED NOT TO latch it (2026-09-30, and 2026-10-01 run
+    20261001T072647Z_ota: reset confirmed, trip_reason 0, mask 0); the S6a
+    sightings came from JTAG/flash dual resets. This case therefore records
+    which outcome happened and accepts either, once the reset itself is
+    proven:
 
     (a) reset confirmed + trip_reason 6 / mask 0x0020 -> clear it (the only
         trip this case ever clears), confirm cleared and readiness: PASS.
