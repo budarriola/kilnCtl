@@ -259,8 +259,8 @@ firmware timeout, (3) `_HEARTBEAT_TASK_ID` colliding with a real
 name="link-hub-heartbeat").start()`). Result: FAILED — "The heartbeat thread
 start() call is commented out in link_hub.py -- producer exists in source
 but never runs." Restored by removing the `#`; `git diff --quiet` empty;
-`git hash-object` (first 8 chars
-blob:tools/PcTools/src/kilnctrl/link_hub.py`15bc306a`) matched HEAD.
+`git hash-object` of the file matched
+the pre-sabotage blob at the time (its HEAD blob has since moved on).
 Re-run: PASS — "producer runs, margin holds, task id is isolated."
 
 **Verdict: load-bearing.**

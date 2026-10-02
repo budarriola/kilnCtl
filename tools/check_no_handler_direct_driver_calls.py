@@ -65,6 +65,9 @@ from pathlib import Path
 
 SCAN_DIR = "firmware/KilnFW/App/drivers/http"
 
+#: Discovery floor (59 files at 2026-10-02): fewer means the layout moved.
+MIN_FILES_SCANNED = 30
+
 _NAMES = (
     r"MAX31856_read_all|MAX31856_read|MAX31856_start_all|MAX31856_configure|"
     r"kiln_io_read|kiln_io_set_relay_mask|kiln_io_set_relay|kiln_io_all_relays_off|"
@@ -139,7 +142,10 @@ def _strip_c_strings(text: str) -> str:
 def find_files(root: Path) -> list[Path]:
     base = root / SCAN_DIR
     if not base.exists():
-        return []
+        raise SystemExit(
+            f"check_no_handler_direct_driver_calls: FAIL -- scan directory {SCAN_DIR} "
+            f"is missing under {root}; a moved tree must not make this pass vacuously."
+        )
     return sorted(base.glob("*.c"))
 
 
@@ -194,7 +200,15 @@ def main() -> int:
     root = Path(args.root) if args.root else Path(__file__).resolve().parents[1]
 
     violations: list[str] = []
-    for path in find_files(root):
+    files = find_files(root)
+    if len(files) < MIN_FILES_SCANNED:
+        print(
+            f"check_no_handler_direct_driver_calls: FAIL -- scanned only {len(files)} "
+            f".c file(s), floor is {MIN_FILES_SCANNED}; the scan root or layout changed "
+            "and this check would pass vacuously."
+        )
+        return 1
+    for path in files:
         violations.extend(check_file(path))
 
     if violations:

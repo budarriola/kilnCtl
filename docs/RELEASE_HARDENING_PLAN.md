@@ -822,6 +822,8 @@ copied in from the main tree, so they prove "origin/main's source builds
 against this machine's board config", not "a fresh clone builds"). Closing that
 hole is **desirable, not a blocker**, and is item 11.
 
+**Status, 2026-10-02 (eleventh pass).** `docs/audits/release_gate_vacuity_audit_2026-10-02.md`: 13 checks added or changed since 2026-09-18 negative-tested, all load-bearing; two discovery vacuities fixed (`check_no_exec_status_stack_locals.py`, `check_no_handler_direct_driver_calls.py` now fail on a missing scan directory or too few files).
+
 ---
 
 ## 4. BLOCKER — a safety argument that does not depend on the bench

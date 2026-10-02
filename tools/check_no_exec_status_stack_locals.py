@@ -81,6 +81,9 @@ from pathlib import Path
 
 SCAN_DIRS = ("firmware/KilnFW/App/drivers",)
 
+#: Discovery floor (267 files at 2026-10-02): fewer means the layout moved.
+MIN_FILES_SCANNED = 150
+
 #: (posix-relative-path-from-repo-root, line-number) pairs allowed to keep a
 #: profile_exec_status_t stack local. Empty: every site found by the
 #: 2026-09-22 audit was converted to heap-alloc or the narrow accessor.
@@ -119,7 +122,10 @@ def find_c_files(root: Path) -> list[Path]:
     for rel in SCAN_DIRS:
         base = root / rel
         if not base.exists():
-            continue
+            raise SystemExit(
+                f"check_no_exec_status_stack_locals: FAIL -- scan directory {rel} "
+                f"is missing under {root}; a moved tree must not make this pass vacuously."
+            )
         files.extend(sorted(base.rglob("*.c")))
     return files
 
@@ -157,7 +163,15 @@ def main() -> int:
     root = Path(args.root) if args.root else Path(__file__).resolve().parents[1]
 
     violations: list[str] = []
-    for path in find_c_files(root):
+    files = find_c_files(root)
+    if len(files) < MIN_FILES_SCANNED:
+        print(
+            f"check_no_exec_status_stack_locals: FAIL -- scanned only {len(files)} "
+            f".c file(s), floor is {MIN_FILES_SCANNED}; the scan root or layout changed "
+            "and this check would pass vacuously."
+        )
+        return 1
+    for path in files:
         violations.extend(check_file(path, root))
 
     if violations:
