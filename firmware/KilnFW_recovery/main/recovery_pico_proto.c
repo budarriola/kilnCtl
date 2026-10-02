@@ -499,7 +499,12 @@ void rpp_fin_start(rpp_fin_t *f)
 
 bool rpp_status_proves_bootloader(const rpp_status_t *st)
 {
-    return st->state == RPP_STATE_IDLE || st->total_chunks == 0;
+    return st->state == RPP_STATE_IDLE;
+}
+
+bool rpp_fin_status_beats_stop(const rpp_status_t *fresh)
+{
+    return fresh->state == RPP_STATE_COMPLETE;
 }
 
 bool rpp_fin_stop_is_unknown(const rpp_fin_t *f, bool pico_terminal)

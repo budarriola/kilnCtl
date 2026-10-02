@@ -93,7 +93,10 @@ try {
         @{ Name = "fin_unknown_as_fail"; Needle = 'return RPP_FIN_UNKNOWN;'; Repl = 'return fin_fail(f, "mutant");' },
         # A stop after END reported as an ordinary abort (which sends ABORT).
         @{ Name = "fin_stop_after_end_aborts"; Needle = 'return f->end_sent_once && !pico_terminal;'; Repl = 'return 0;' },
-        @{ Name = "discover_any_status_is_boot"; Needle = 'return st->state == RPP_STATE_IDLE || st->total_chunks == 0;'; Repl = 'return 1;' },
+        @{ Name = "discover_any_status_is_boot"; Needle = 'return st->state == RPP_STATE_IDLE;'; Repl = 'return 1;' },
+        @{ Name = "stop_unknown_ignores_pico_terminal"; Needle = 'return f->end_sent_once && !pico_terminal;'; Repl = 'return f->end_sent_once;' },
+        @{ Name = "stop_unknown_ignores_end_sent"; Needle = 'return f->end_sent_once && !pico_terminal;'; Repl = 'return !pico_terminal;' },
+        @{ Name = "stop_beats_complete"; Needle = 'return fresh->state == RPP_STATE_COMPLETE;'; Repl = 'return 0;' },
         @{ Name = "pace_floor"; Needle = '+ tick_us - 1u'; Repl = '+ 0u' },
         @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' }
     )

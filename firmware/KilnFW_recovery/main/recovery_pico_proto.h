@@ -340,16 +340,21 @@ typedef struct {
 void rpp_fin_start(rpp_fin_t *f);
 // The caller sent END (call right after every RPP_FIN_SEND_END / retransmit).
 void rpp_fin_end_sent(rpp_fin_t *f);
+// True when an UPDATE_STATUS proves the sender is a bootloader rather than a
+// busy application: only an IDLE report does (the real application never sends
+// IDLE, but does send ABORTED/FAILED/REFUSED with total_chunks == 0).
+bool rpp_status_proves_bootloader(const rpp_status_t *st);
 // The transfer is being stopped (operator Abort, browser gone) after END may
 // have gone out. True means: report outcome UNKNOWN and send NO ABORT (the Pico
 // may already have committed; ABORT is a no-op then, so sending it would only
 // make the report claim "aborted" for a possibly-live image). `pico_terminal`
 // is a stop caused by the Pico's own terminal state, which is a real answer.
-// True when an UPDATE_STATUS proves the sender is a bootloader rather than a
-// busy application with a stale transfer: an IDLE report, or no transfer
-// (total_chunks == 0). Used by discovery only when no Frame A was seen.
-bool rpp_status_proves_bootloader(const rpp_status_t *st);
+// Note: after END, a UART write failure is still reported FAILED + ABORT (not
+// unknown); that is practically unreachable with blocking uart_write_bytes.
 bool rpp_fin_stop_is_unknown(const rpp_fin_t *f, bool pico_terminal);
+// A fresh status that arrives together with a stop request wins over the stop
+// when it is COMPLETE: the transfer is reported DONE, not UNKNOWN.
+bool rpp_fin_status_beats_stop(const rpp_status_t *fresh);
 // `st` is only read for RPP_EV_STATUS. `since_end_ms` is the time since the
 // last END send (only read while an END is outstanding).
 rpp_fin_action_t rpp_fin_step(rpp_fin_t *f, rpp_fin_event_t ev, const rpp_status_t *st,

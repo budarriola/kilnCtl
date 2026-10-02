@@ -929,6 +929,7 @@ static bool state_is_terminal(uint8_t s)
            s == RPP_STATE_REJECTED_SLOT_LINKAGE || s == RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP;
 }
 
+static bool g_stop_complete; // with stop mode 1: the stop coincides with a fresh COMPLETE
 static int g_stop_mode; // 0 none, 1 stop right after the first END, 2 stop before END
 
 static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
@@ -951,9 +952,13 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
     }
     rpp_fin_t f;
     rpp_fin_start(&f);
-    if (g_stop_mode == 2) { // stop requested before END goes out: ordinary abort
-        fr_abort(r);
-        d.abort_sent = true;
+    if (g_stop_mode == 2) { // stop requested before END goes out
+        if (rpp_fin_stop_is_unknown(&f, false)) {
+            d.unknown = true;
+        } else {
+            fr_abort(r);
+            d.abort_sent = true;
+        }
         d.elapsed_ms = g_now_ms - start;
         return d;
     }
@@ -1003,7 +1008,23 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
             rpp_fin_end_sent(&f);
             d.end_sends++;
             t_end = g_now_ms;
-            if (g_stop_mode == 1) { // operator Abort / client gone, right after END
+            if (g_stop_mode == 1 || g_stop_mode == 3) { // Abort / client gone, right after END
+                if (g_stop_mode == 3) {
+                    // the stop coincides with a fresh COMPLETE: the status wins
+                    advance(r, 3000);
+                    rpp_status_t fresh;
+                    memset(&fresh, 0, sizeof(fresh));
+                    rpp_status_t x;
+                    while (fr_pop(r, &x)) {
+                        if (x.state == RPP_STATE_COMPLETE) {
+                            fresh = x; // the bootloader beacons IDLE after it
+                        }
+                    }
+                    if (rpp_fin_status_beats_stop(&fresh)) {
+                        d.ok = true;
+                        break;
+                    }
+                }
                 if (rpp_fin_stop_is_unknown(&f, false)) {
                     d.unknown = true;
                     d.why = "stopped after END - outcome unknown";
@@ -1040,6 +1061,9 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
 static drive_t drive_transfer_stop(fake_rx_t *r, uint32_t pace_ms, bool after_end)
 {
     g_stop_mode = after_end ? 1 : 2;
+    if (g_stop_mode == 1 && g_stop_complete) {
+        g_stop_mode = 3;
+    }
     drive_t d = drive_transfer(r, pace_ms);
     g_stop_mode = 0;
     return d;
@@ -1397,6 +1421,14 @@ static void test_finish_driver(void)
         snprintf(nm, sizeof(nm), "%s stop after END: outcome unknown, no ABORT sent", vn);
         CHECK(!d.ok && d.unknown && !d.abort_sent && r->aborts_seen == 0 && r->ends_seen >= 1, nm);
         free(r);
+        // A stop that coincides with a fresh COMPLETE: the status wins (DONE).
+        r = fr_new(v == 0, 100);
+        g_stop_complete = true;
+        d = drive_transfer_stop(r, pace, true);
+        g_stop_complete = false;
+        snprintf(nm, sizeof(nm), "%s stop with a fresh COMPLETE: reported DONE, not unknown", vn);
+        CHECK(d.ok && !d.unknown && !d.abort_sent && r->state == RPP_STATE_COMPLETE, nm);
+        free(r);
         // A stop BEFORE END is an ordinary abort and does send ABORT.
         r = fr_new(v == 0, 100);
         d = drive_transfer_stop(r, pace, false);
@@ -1537,6 +1569,20 @@ static void test_fin_unit(void)
     st.total_chunks = 100;
 
     rpp_fin_start(&f);
+    CHECK(!rpp_fin_stop_is_unknown(&f, false), "stop before any END: not unknown (ordinary abort)");
+    CHECK(!rpp_fin_stop_is_unknown(&f, true), "Pico-terminal stop before END: not unknown");
+    rpp_fin_end_sent(&f);
+    CHECK(rpp_fin_stop_is_unknown(&f, false), "stop after END: unknown");
+    CHECK(!rpp_fin_stop_is_unknown(&f, true), "Pico-terminal stop after END: a real answer, not unknown");
+    {
+        rpp_status_t cs;
+        memset(&cs, 0, sizeof(cs));
+        cs.state = RPP_STATE_COMPLETE;
+        CHECK(rpp_fin_status_beats_stop(&cs), "a fresh COMPLETE beats a stop");
+        cs.state = RPP_STATE_VERIFYING;
+        CHECK(!rpp_fin_status_beats_stop(&cs), "a fresh VERIFYING does not beat a stop");
+    }
+    rpp_fin_start(&f);
     CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, 0) == RPP_FIN_SEND_END, "silent round before END -> send END");
     rpp_fin_end_sent(&f);
     CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, 100) == RPP_FIN_WAIT, "quiet right after END -> wait");
@@ -1653,9 +1699,16 @@ static void test_discover_classify(void)
     memset(&st, 0, sizeof(st));
     st.state = RPP_STATE_IDLE;
     CHECK(rpp_status_proves_bootloader(&st), "IDLE status proves a bootloader");
+    {
+        // The real app sends these with total_chunks == 0 and never IDLE.
+        static const int apps[] = {RPP_STATE_ABORTED, RPP_STATE_FAILED, RPP_STATE_REFUSED};
+        for (unsigned i = 0; i < sizeof(apps) / sizeof(apps[0]); i++) {
+            st.state = apps[i];
+            st.total_chunks = 0;
+            CHECK(!rpp_status_proves_bootloader(&st), "ABORTED/FAILED/REFUSED with total_chunks 0 is NOT a bootloader");
+        }
+    }
     st.state = RPP_STATE_RECEIVING;
-    st.total_chunks = 0;
-    CHECK(rpp_status_proves_bootloader(&st), "no transfer (total_chunks 0) proves a bootloader");
     st.total_chunks = 3436;
     CHECK(!rpp_status_proves_bootloader(&st), "busy RECEIVING with a transfer is NOT taken for a bootloader");
     st.state = RPP_STATE_COMPLETE;

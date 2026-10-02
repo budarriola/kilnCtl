@@ -379,6 +379,10 @@ static int wait_status(relay_t *r, uint32_t seq, uint32_t timeout_ms)
     int64_t end = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
     while (esp_timer_get_time() < end) {
         pump(r);
+        // A fresh COMPLETE beats a simultaneous stop: report DONE, not UNKNOWN.
+        if (r->st_seq != seq && rpp_fin_status_beats_stop(&r->st)) {
+            return 1;
+        }
         if (should_stop(r)) {
             return -1;
         }
