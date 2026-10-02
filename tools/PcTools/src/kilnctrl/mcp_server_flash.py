@@ -1496,19 +1496,78 @@ def flash_firmware(
             shutil.rmtree(erase_tmp_dir, ignore_errors=True)
 
 
-def _recovery_board_state_refusals(host: Optional[str]) -> "list[str]":
-    """Live precondition read for flash_recovery(): profile idle, and (if the
-    safety processor reads ARMED) no firing evidence. Imports are lazy --
-    those modules import this package's mcp_server, which is mid-import when
-    this module is loaded. Any read that raises is a refusal."""
+def _recovery_board_state_refusals(host: Optional[str]) -> "tuple[list[str], list[str]]":
+    """Live precondition read for flash_recovery(): returns (hazards,
+    unreadable) -- see recovery_flash.board_state_refusals(). Imports are
+    lazy -- those modules import this package's mcp_server, which is
+    mid-import when this module is loaded. Any read that raises is
+    "unreadable", never a pass."""
     from . import mcp_server_coordinated_gpio_test as gpio_tool  # noqa: PLC0415
     from . import mcp_server_ota_matrix as ota_matrix  # noqa: PLC0415
 
     try:
         pf = gpio_tool._gpio_test_preflight(gpio_tool._gpio_test_resolve_host(host))
-    except Exception as exc:  # noqa: BLE001 -- unreadable must refuse
-        return [f"board state (profile/ARMED) could not be read: {exc}"]
+    except Exception as exc:  # noqa: BLE001 -- unreadable
+        return [], [f"board state (profile/ARMED/interlock/link) could not be read: {exc}"]
     return recovery_flash.board_state_refusals(pf, ota_matrix._read_armed_latch_conditions)
+
+
+def _probe_board_partitions(host: Optional[str]):
+    """One live GET /api/partitions read for flash_recovery()'s pre-write
+    checks. Returns (address, chip_entries, running):
+      * answered with the main app's table -> (addr, [PartitionEntry...], running)
+      * answered with the RECOVERY image's shape -> (addr, None, exc.running)
+      * nothing answered (or the body was unusable) -> (None, None, None)
+    A usable running name with an unusable table body is (addr, None, running)."""
+    for candidate in _resolve_verify_hosts(host):
+        try:
+            data = partition_http_client.get_partitions(candidate, timeout=_VERIFY_HTTP_TIMEOUT_S)
+        except partition_http_client.RecoveryImageResponse as exc:
+            return candidate, None, exc.running
+        except partition_http_client.PartitionHttpError:
+            continue
+        running = data.get("running")
+        try:
+            entries = [
+                partition_table.PartitionEntry(
+                    name=i["label"], type=int(i["type"]), subtype=int(i["subtype"]),
+                    offset=int(i["offset"]), size=int(i["size"]))
+                for i in data["partitions"]
+            ]
+        except (KeyError, TypeError, ValueError):
+            return candidate, None, running if isinstance(running, str) else None
+        return candidate, entries, running if isinstance(running, str) else None
+    return None, None, None
+
+
+def _observe_boot_after_recovery_flash(host: Optional[str], pre_flash_host: Optional[str]) -> str:
+    """Post-write, post-reset: poll GET /api/partitions and report what
+    actually booted. Never raises; one line, starting with `app`, `recovery`,
+    `other` or `unreachable`."""
+    tried: "list[str]" = []
+    last: Optional[str] = None
+    for attempt in range(_VERIFY_POLL_ATTEMPTS):
+        if attempt:
+            time.sleep(_VERIFY_POLL_INTERVAL_S)
+        for candidate in _resolve_verify_hosts(host, pre_flash_host):
+            if candidate not in tried:
+                tried.append(candidate)
+            try:
+                data = partition_http_client.get_partitions(candidate, timeout=_VERIFY_HTTP_TIMEOUT_S)
+            except partition_http_client.RecoveryImageResponse as exc:
+                return (f"recovery -- the board answered at {candidate} with the recovery image's "
+                        f"shape (running={exc.running!r}, next_update={exc.next_update!r})")
+            except partition_http_client.PartitionHttpError as exc:
+                last = str(exc)
+                continue
+            running = data.get("running")
+            if running == APP_PARTITION_NAME:
+                return f"app -- the board answered at {candidate} running {running!r}"
+            if running == recovery_flash.RECOVERY_PARTITION_NAME:
+                return f"recovery -- the board answered at {candidate} running {running!r}"
+            return f"other -- the board answered at {candidate} running {running!r}"
+    return (f"unreachable -- no answer at {', '.join(tried) or '(no candidate address)'} after "
+            f"{_VERIFY_POLL_ATTEMPTS} attempts ({last}); what booted is UNKNOWN")
 
 
 @_srv._tool()
@@ -1520,7 +1579,10 @@ def flash_recovery(
     board_cfg: str = "board/esp32s3-builtin.cfg",
     retry_once: bool = True,
     host: Optional[str] = None,
-    skip_board_state_check: bool = False,
+    allow_unreadable_board_state: bool = False,
+    allow_unconfirmed_partition_table: bool = False,
+    allow_reset_into_recovery: bool = False,
+    allow_stale: bool = False,
 ) -> str:
     """Writes the ESP32-S3 RECOVERY image (firmware/KilnFW_recovery's
     recovery.bin) into the `recovery` (factory-subtype) partition over JTAG
@@ -1531,37 +1593,63 @@ def flash_recovery(
     forbids `recovery`; this one writes exactly one range and nothing else.
 
     Offset and size come from the partition named `recovery` in
-    `<kiln_fw_root>/partitions.csv` (resolved fresh, never hardcoded).
-    `recovery_bin` defaults to `<kiln_fw_root>/../KilnFW_recovery/build/
-    recovery.bin`, where check_00_kilnfw_recovery_target_build.ps1
-    publishes it. OpenOCD is pinned to the main board's JTAG adapter serial
-    (refuses before OpenOCD if it is not enumerated), same as flash_firmware().
+    `<kiln_fw_root>/partitions.csv` (resolved fresh, never hardcoded; a
+    duplicate `recovery` row refuses). `recovery_bin` defaults to
+    `<kiln_fw_root>/../KilnFW_recovery/build/recovery.bin`, where
+    check_00_kilnfw_recovery_target_build.ps1 publishes it. OpenOCD is pinned
+    to the main board's JTAG adapter serial (refuses before OpenOCD if it is
+    not enumerated), same as flash_firmware().
 
     `dry_run=True` resolves and validates everything and reports what would
     be written -- zero board access, no `confirm` needed.
 
     Refuses (naming the reason) when: `confirm` is not exactly True; the
-    image is missing or empty; larger than the partition; image magic is not
-    0xE9; chip id is not ESP32-S3; the esp_app_desc_t is missing or its
-    project_name is not `recovery`; the JTAG adapter is absent; a profile is
-    running/paused, or the safety processor is ARMED with autotune active, a
-    relay energized or a latched trip (or any of those cannot be read --
-    `skip_board_state_check=True` is the bring-up escape hatch for a board
-    whose HTTP/UART link is not up).
+    image path contains any of `[ ] $ { } "` (Tcl injection); the image is
+    missing, empty, larger than the partition, wrong magic (not 0xE9), wrong
+    chip id (not ESP32-S3), or its esp_app_desc_t is missing or its
+    project_name is not `recovery`; the image's mtime predates the newest
+    file under firmware/KilnFW_recovery (excluding build/) -- override with
+    `allow_stale=True` (the image age is always printed); the JTAG adapter is
+    absent; the board reports `ota_interlock` not ok or the safety link down.
+
+    Board-state gate, split in two on purpose. POSITIVELY OBSERVED hazards --
+    a running/paused profile, ARMED with autotune active / a relay energized /
+    a latched trip, OTA interlock busy, link down -- ALWAYS refuse, no flag
+    waives them. Reasons that are only "could not be read" (HTTP/UART link
+    not up, probe raised) refuse unless `allow_unreadable_board_state=True`,
+    the bring-up escape hatch; it waives nothing else.
+
+    Live partition-table gate: before writing, GET /api/partitions must show
+    the chip's single `recovery` entry matching the CSV target in offset,
+    size, type and subtype. A readable table that DISAGREES always refuses.
+    If the board does not answer, or answers with the recovery image's shape
+    (no table), the match cannot be confirmed and the call refuses unless
+    `allow_unconfirmed_partition_table=True` (separate from every other flag).
+
+    Reset-into-recovery gate: the write ends with a reset. otadata is
+    untouched, and a blank/erased otadata makes the bootloader boot the
+    factory-subtype partition -- which IS `recovery` -- so on such a board the
+    reset boots the brand-new, untested image. The RUNNING partition is read
+    first; if it is `recovery` or cannot be read, the call refuses unless
+    `allow_reset_into_recovery=True`.
 
     Never writes otadata, app, nvs, the bootloader or the partition table:
     exactly one `program_esp ... verify` command, for the recovery range.
-    The write is followed by a reset (OpenOCD must not leave the CPU halted);
-    the board comes back up on `app` (otadata is untouched), the ESP reset
-    may latch S6a (mainFault) while the safety link re-handshakes -- check
-    safety_get_status before safety_clear_trip().
+    After the write the tool polls /api/partitions and reports what actually
+    booted: `app`, `recovery`, `other` or `unreachable`. The write itself is
+    JTAG read-back-verified; whether the new image boots/works is only as
+    proven as that poll says -- a recovery boot proof beyond it is an
+    owner-present step. S6a: this resets the ESP (halted during the JTAG
+    write), so before safety_clear_trip() the safety status must show
+    trip_reason 6 (SAFETY_TRIP_MAIN_FAULT) with trip_mask 0x0020 only;
+    anything else (e.g. reason 7 LINK_DEAD, mask 0x0040) needs investigating,
+    not clearing.
 
-    The result says plainly: written and read-back-verified over JTAG, NOT
-    booted. Proving a recovery boot is a separate, owner-present step.
     Provenance (hash, size, app_desc version/build time, git HEAD/dirty set)
-    goes to firmware/KilnFW/recovery_flash_provenance.json, and a
-    recovery.elf next to the image is archived under
-    firmware/KilnFW/recovery_elf_archive/."""
+    goes to firmware/KilnFW/recovery_flash_provenance.json. A recovery.elf
+    next to the image is archived under firmware/KilnFW/recovery_elf_archive/
+    only when its embedded esp_app_desc_t build timestamp and version match
+    the image's; otherwise a warning says why and nothing is archived."""
     if kiln_fw_root is not None:
         if not os.path.isabs(kiln_fw_root):
             return f"error: kiln_fw_root must be an absolute path, got {kiln_fw_root!r}"
@@ -1575,12 +1663,18 @@ def flash_recovery(
         target = recovery_flash.resolve_recovery_target(effective_root)
         bin_path = recovery_bin or recovery_flash.default_recovery_bin(effective_root)
         image = recovery_flash.validate_image(bin_path, target)
+        age_note = recovery_flash.image_age_note(
+            image.path,
+            os.path.normpath(os.path.join(effective_root, "..", "KilnFW_recovery")),
+            allow_stale,
+        )
     except recovery_flash.RecoveryFlashRefusal as exc:
         return f"error: refusing to flash recovery -- {exc}"
 
     summary = (
         f"image: {image.path}\n"
         f"  size {image.size} B, sha256 {image.sha256}\n"
+        f"  {age_note}\n"
         f"  app_desc: project={image.app_desc.project_name} version={image.app_desc.version} "
         f"build={image.app_desc.build_timestamp}\n"
         f"target: partition {target.name!r} offset=0x{target.offset:x} size=0x{target.size:x} "
@@ -1606,10 +1700,42 @@ def flash_recovery(
     if adapter_refusal:
         return adapter_refusal
 
-    if not skip_board_state_check:
-        reasons = _recovery_board_state_refusals(host)
-        if reasons:
-            return "error: refusing to flash recovery -- " + "; ".join(reasons)
+    hazards, unreadable = _recovery_board_state_refusals(host)
+    if hazards:
+        return ("error: refusing to flash recovery -- observed hazard (no flag overrides this): "
+                + "; ".join(hazards))
+    if unreadable and allow_unreadable_board_state is not True:
+        return ("error: refusing to flash recovery -- board state could not be read: "
+                + "; ".join(unreadable)
+                + ". Pass allow_unreadable_board_state=True only for bring-up of a board whose "
+                "HTTP/UART link is not up.")
+
+    pre_host, chip_entries, running = _probe_board_partitions(host)
+    if chip_entries is None:
+        if allow_unconfirmed_partition_table is not True:
+            why = ("the board did not answer GET /api/partitions" if pre_host is None else
+                   f"the board at {pre_host} answered without a usable partition table "
+                   f"(recovery-image shape or malformed; running={running!r})")
+            return (f"error: refusing to flash recovery -- {why}, so the `recovery` partition "
+                    f"(0x{target.offset:x}, 0x{target.size:x}, app/factory) cannot be confirmed "
+                    "against the chip's live table. Pass allow_unconfirmed_partition_table=True "
+                    "only after confirming the table another way (debug_check_partition_table).")
+    else:
+        mismatch = recovery_flash.compare_chip_recovery_row(chip_entries, target)
+        if mismatch is not None:
+            return (f"error: refusing to flash recovery -- the board at {pre_host} disagrees with "
+                    f"partitions.csv on the `recovery` partition: {mismatch}. One side is stale; "
+                    "confirm with debug_check_partition_table(). No flag overrides a readable "
+                    "table that disagrees.")
+    if running is None or running == target.name:
+        if allow_reset_into_recovery is not True:
+            state = ("could not be read" if running is None
+                     else f"is already {running!r} (the board is running the recovery image)")
+            return (f"error: refusing to flash recovery -- the RUNNING partition {state}. This tool "
+                    "does not write otadata, and a blank/erased otadata makes the bootloader boot "
+                    "the factory-subtype partition, which is `recovery`: the post-write reset "
+                    "would boot the brand-new, untested recovery image. Pass "
+                    "allow_reset_into_recovery=True only if that is acceptable.")
 
     provenance_path = recovery_flash.recovery_provenance_path(elf_archive._repo_root())
     archive_dir = recovery_flash.recovery_archive_dir(elf_archive._repo_root())
@@ -1639,22 +1765,24 @@ def flash_recovery(
     archive_note = ""
     archived: Optional[str] = None
     try:
-        archived = recovery_flash.archive_recovery_elf(image.path, archive_dir, image, tree_state.head)
-        archive_note = (f"\nelf archived: {archived}" if archived
-                        else "\nelf archive: no recovery.elf next to the image, nothing archived")
+        archived, note = recovery_flash.archive_recovery_elf(image.path, archive_dir, image, tree_state.head)
+        archive_note = f"\nelf archived: {archived}" if archived else f"\nelf archive: {note}"
     except Exception as exc:  # noqa: BLE001 -- surfaced, never fails the flash
         archive_note = f"\nWARNING: recovery elf archiving FAILED (flash itself succeeded): {exc}"
     recovery_flash.write_provenance(provenance_path, image, target, tree_state,
                                     outcome="flashed_ok", elf_archived=archived)
+    boot = _observe_boot_after_recovery_flash(host, pre_host)
     return (
         "recovery image WRITTEN and READ-BACK-VERIFIED over JTAG (OpenOCD program_esp ... verify, "
-        "recovery range only) -- NOT BOOTED: the board was reset and is running `app` (otadata "
-        "untouched); no HTTP verification is possible. Proving a recovery boot is a separate, "
-        "owner-present step.\n" + summary + archive_note + "\n"
+        "recovery range only), then the board was reset.\n"
+        f"post-reset observation (GET /api/partitions): {boot}\n"
+        + summary + archive_note + "\n"
         f"provenance: {provenance_path} (git head {tree_state.head}, "
         f"{len(tree_state.dirty_files)} dirty file(s))\n"
-        "NOTE: this reset the ESP; a correct S6a (mainFault) trip may latch while the safety link "
-        "re-handshakes -- check safety_get_status before safety_clear_trip()."
+        "NOTE: this reset the ESP; before safety_clear_trip(), safety_get_status must show "
+        "trip_reason 6 (SAFETY_TRIP_MAIN_FAULT) with trip_mask 0x0020 only. Anything else "
+        "(e.g. reason 7 LINK_DEAD, mask 0x0040 -- plausible, the ESP was halted during the JTAG "
+        "write) needs investigating, not clearing."
     )
 
 

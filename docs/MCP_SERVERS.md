@@ -525,17 +525,35 @@ its own tool, a separate one rather than a mode because none of
 sequence applies. It resolves offset/size from the partition named `recovery`
 in `<kiln_fw_root>/partitions.csv`, pins OpenOCD to the main board's adapter
 serial, and sends exactly one `program_esp ... verify` over that range (never
-otadata/app/nvs). Refuses: `confirm` not exactly True; image missing, empty or
-larger than the partition; magic not 0xE9; chip id not ESP32-S3; esp_app_desc_t
-missing or `project_name` not `recovery`; adapter absent; a profile running or
-paused, or ARMED with autotune active/relay energized/latched trip (unreadable
-refuses; `skip_board_state_check=True` is the bring-up escape). `dry_run=True`
-needs no board and no confirm. The result states the image was written and
-read-back-verified over JTAG but NOT booted (the board resets and keeps running
-`app`; proving a recovery boot is a separate owner-present step). Provenance goes
-to `firmware/KilnFW/recovery_flash_provenance.json`, and a `recovery.elf` beside
-the image to `firmware/KilnFW/recovery_elf_archive/`. Logic:
-`kilnctrl/recovery_flash.py`; tests: `tests/test_flash_recovery.py`.
+otadata/app/nvs). Refuses: `confirm` not exactly True; a duplicate or non-factory
+`recovery` CSV row; image path containing any of `[ ] $ { } "` or a backtick (Tcl
+injection); image missing, empty or larger than the partition; magic not 0xE9;
+chip id not ESP32-S3; esp_app_desc_t missing or `project_name` not `recovery`;
+image mtime older than the newest file under `firmware/KilnFW_recovery`
+(excluding `build/`; `allow_stale=True`, and the image age is always printed);
+adapter absent. Board state is split: a positively observed hazard (profile
+running/paused, ARMED with autotune active/relay energized/latched trip, OTA
+interlock busy, link down) ALWAYS refuses and no flag waives it; only reasons
+that are merely "could not be read" are waived, by
+`allow_unreadable_board_state=True` (the old `skip_board_state_check` is gone).
+Before writing it reads the board's live `/api/partitions`: a readable table
+whose single `recovery` row disagrees with the CSV in offset/size/type/subtype
+always refuses; an unreachable board or a recovery-image-shaped answer refuses
+unless `allow_unconfirmed_partition_table=True`. It also reads the RUNNING
+partition: `recovery` or unreadable refuses unless `allow_reset_into_recovery=True`
+(otadata is untouched and a blank otadata boots the factory-subtype partition,
+i.e. `recovery`, so the post-write reset would boot the brand-new image).
+`dry_run=True` needs no board and no confirm. After the write it polls
+`/api/partitions` and reports what actually booted (`app`, `recovery`, `other`
+or `unreachable`); the write itself is read-back-verified over JTAG. The reset
+may latch S6a: before `safety_clear_trip()` the status must show trip_reason 6
+(`SAFETY_TRIP_MAIN_FAULT`) with trip_mask 0x0020 only; anything else (e.g. reason
+7 LINK_DEAD, mask 0x0040) needs investigating, not clearing. Provenance goes to
+`firmware/KilnFW/recovery_flash_provenance.json`; a `recovery.elf` beside the
+image is archived to `firmware/KilnFW/recovery_elf_archive/` only when its
+embedded app descriptor's build timestamp and version match the image's (else a
+warning, nothing archived). Logic: `kilnctrl/recovery_flash.py`; tests:
+`tests/test_flash_recovery.py`.
 
 ## Building from a clean worktree for `kiln_fw_root`
 

@@ -70,15 +70,20 @@ def resolve_recovery_target(kiln_fw_root: str) -> partition_table.PartitionEntry
         entries = partition_table.parse_partitions_csv(csv_path)
     except (OSError, ValueError) as exc:
         raise RecoveryFlashRefusal(f"could not parse {csv_path}: {exc}") from exc
-    for entry in entries:
-        if entry.name == RECOVERY_PARTITION_NAME:
-            if entry.type != _APP_TYPE or entry.subtype != _SUBTYPE_FACTORY:
-                raise RecoveryFlashRefusal(
-                    f"{csv_path}: partition {RECOVERY_PARTITION_NAME!r} is not an app/factory "
-                    f"partition (type=0x{entry.type:02x} subtype=0x{entry.subtype:02x}) -- "
-                    "refusing to guess where a recovery image belongs"
-                )
-            return entry
+    matches = [e for e in entries if e.name == RECOVERY_PARTITION_NAME]
+    if len(matches) > 1:
+        raise RecoveryFlashRefusal(
+            f"{csv_path} has {len(matches)} partitions named {RECOVERY_PARTITION_NAME!r} -- "
+            "refusing to guess which one is the recovery image's home"
+        )
+    for entry in matches:
+        if entry.type != _APP_TYPE or entry.subtype != _SUBTYPE_FACTORY:
+            raise RecoveryFlashRefusal(
+                f"{csv_path}: partition {RECOVERY_PARTITION_NAME!r} is not an app/factory "
+                f"partition (type=0x{entry.type:02x} subtype=0x{entry.subtype:02x}) -- "
+                "refusing to guess where a recovery image belongs"
+            )
+        return entry
     names = ", ".join(e.name for e in entries) or "(no partitions)"
     raise RecoveryFlashRefusal(
         f"{csv_path} has no partition named {RECOVERY_PARTITION_NAME!r}. Partitions found: {names}"
@@ -92,8 +97,83 @@ def default_recovery_bin(kiln_fw_root: str) -> str:
     return os.path.normpath(os.path.join(kiln_fw_root, "..", "KilnFW_recovery", "build", "recovery.bin"))
 
 
+#: Characters refused in the image path (after backslash -> slash): the path
+#: is spliced inside a double-quoted Tcl word in the OpenOCD script, where
+#: these allow command/variable substitution or word breakout.
+_TCL_UNSAFE_CHARS = '[]${}"`'
+
+
+def check_tcl_safe_path(bin_path: str) -> None:
+    """Refuses a path that could inject Tcl into the OpenOCD command."""
+    path = bin_path.replace("\\", "/")
+    bad = sorted({c for c in path if c in _TCL_UNSAFE_CHARS})
+    if bad:
+        raise RecoveryFlashRefusal(
+            f"recovery image path contains character(s) {' '.join(bad)} that are unsafe inside "
+            f"the OpenOCD Tcl command: {bin_path!r} -- move/rename the image"
+        )
+
+
+def compare_chip_recovery_row(chip_entries, target: partition_table.PartitionEntry) -> "Optional[str]":
+    """None if the board's live table has exactly one `recovery` entry that
+    matches `target` in offset, size, type and subtype; else a description of
+    the disagreement. `chip_entries` are partition_table.PartitionEntry."""
+    rows = [e for e in chip_entries if e.name == target.name]
+    if not rows:
+        return f"board's live table has no partition named {target.name!r}"
+    if len(rows) > 1:
+        return f"board's live table has {len(rows)} partitions named {target.name!r}"
+    c = rows[0]
+    diffs = []
+    if c.offset != target.offset:
+        diffs.append(f"offset board 0x{c.offset:x} vs csv 0x{target.offset:x}")
+    if c.size != target.size:
+        diffs.append(f"size board 0x{c.size:x} vs csv 0x{target.size:x}")
+    if c.type != target.type:
+        diffs.append(f"type board 0x{c.type:02x} vs csv 0x{target.type:02x}")
+    if c.subtype != target.subtype:
+        diffs.append(f"subtype board 0x{c.subtype:02x} vs csv 0x{target.subtype:02x}")
+    return "; ".join(diffs) if diffs else None
+
+
+def newest_source_mtime(recovery_tree: str) -> "Optional[tuple[float, str]]":
+    """(mtime, path) of the newest file under `recovery_tree`, skipping its
+    top-level `build/` directory; None if there is nothing to compare."""
+    best: "Optional[tuple[float, str]]" = None
+    for dirpath, dirnames, filenames in os.walk(recovery_tree):
+        if os.path.normpath(dirpath) == os.path.normpath(recovery_tree):
+            dirnames[:] = [d for d in dirnames if d != "build"]
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            try:
+                m = os.path.getmtime(full)
+            except OSError:
+                continue
+            if best is None or m > best[0]:
+                best = (m, full)
+    return best
+
+
+def image_age_note(bin_path: str, recovery_tree: str, allow_stale: bool, now: Optional[float] = None) -> str:
+    """Always-returned age line; raises RecoveryFlashRefusal when the image
+    predates the newest recovery source file and `allow_stale` is not True."""
+    now = time.time() if now is None else now
+    img_m = os.path.getmtime(bin_path)
+    built = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(img_m))
+    note = f"image age: {(now - img_m) / 60.0:.1f} min (built {built})"
+    newest = newest_source_mtime(recovery_tree)
+    if newest is not None and img_m < newest[0]:
+        msg = (f"{bin_path} is OLDER than {newest[1]} (source newer by "
+               f"{(newest[0] - img_m) / 60.0:.1f} min) -- the image is stale; rebuild it")
+        if allow_stale is not True:
+            raise RecoveryFlashRefusal(msg + ", or pass allow_stale=True")
+        note += "\nWARNING: " + msg + " (allow_stale=True given)"
+    return note
+
+
 def validate_image(bin_path: str, target: partition_table.PartitionEntry) -> RecoveryImage:
     """Every image-level refusal. Raises RecoveryFlashRefusal naming the reason."""
+    check_tcl_safe_path(bin_path)
     if not os.path.isfile(bin_path):
         raise RecoveryFlashRefusal(
             f"recovery image not found: {bin_path} (build it with "
@@ -136,33 +216,51 @@ def validate_image(bin_path: str, target: partition_table.PartitionEntry) -> Rec
     return RecoveryImage(path=bin_path, size=size, sha256=hashlib.sha256(data).hexdigest(), app_desc=desc)
 
 
-def board_state_refusals(preflight, armed_conditions_fn) -> "list[str]":
-    """Refusal reasons from a GpioTestPreflight-shaped snapshot (tri-state
-    fields; None = could not read = refuse, fail closed). ARMED alone is
-    acceptable (the safety processor's latched idle state, owner decision
-    2026-10-01); ARMED with a firing in progress (profile running/paused, or
-    autotune active/relay energized per `armed_conditions_fn`) is not."""
-    reasons: "list[str]" = []
-    if preflight.profile_running_or_paused is not False:
-        reasons.append(
-            f"a profile is running or paused, or its state could not be confirmed "
-            f"(profile_state={preflight.profile_state_name!r}) -- no flash during a firing"
+def board_state_refusals(preflight, armed_conditions_fn) -> "tuple[list[str], list[str]]":
+    """(hazards, unreadable) from a GpioTestPreflight-shaped snapshot
+    (tri-state fields; None = could not read). `hazards` are POSITIVELY
+    OBSERVED unsafe states -- profile running/paused, ARMED with autotune
+    active / relay energized / latched trip, OTA interlock busy, link down --
+    and must refuse regardless of any flag. `unreadable` are reasons that are
+    only "could not be read"; the caller may waive exactly those with
+    allow_unreadable_board_state. ARMED alone is acceptable (the safety
+    processor's latched idle state, owner decision 2026-10-01)."""
+    hazards: "list[str]" = []
+    unreadable: "list[str]" = []
+    if preflight.profile_running_or_paused is True:
+        hazards.append(
+            f"a profile is running or paused (profile_state={preflight.profile_state_name!r}) "
+            "-- no flash during a firing"
         )
+    elif preflight.profile_running_or_paused is None:
+        unreadable.append(
+            f"profile state could not be read (profile_state={preflight.profile_state_name!r})"
+        )
+    if preflight.ota_interlock_ok is False:
+        hazards.append(f"OTA interlock is not idle: {preflight.ota_interlock_reason}")
+    elif preflight.ota_interlock_ok is not True:
+        unreadable.append(f"OTA interlock could not be confirmed: {preflight.ota_interlock_reason}")
+    if preflight.link_up is False:
+        hazards.append("safety link is down (link_up=False)")
+    elif preflight.link_up is not True:
+        unreadable.append(f"safety link state could not be confirmed (link_up={preflight.link_up!r})")
     if preflight.safety_armed is None:
-        reasons.append("safety ARMED state could not be confirmed (safety_armed=None)")
+        unreadable.append("safety ARMED state could not be read (safety_armed=None)")
     elif preflight.safety_armed is True:
         try:
             extra = armed_conditions_fn()
-        except Exception as exc:  # noqa: BLE001 -- unreadable must refuse
-            extra = [f"ARMED-state conditions could not be read: {exc}"]
-        reasons.extend(f"safety is ARMED and {r}" for r in extra)
-    return reasons
+        except Exception as exc:  # noqa: BLE001 -- unreadable
+            unreadable.append(f"safety is ARMED and its conditions could not be read: {exc}")
+        else:
+            hazards.extend(f"safety is ARMED and {r}" for r in extra)
+    return hazards, unreadable
 
 
 def build_tcl(adapter_serial: str, bin_path: str, target: partition_table.PartitionEntry) -> str:
     """The ONLY OpenOCD script this tool sends: pin the adapter, one
     `program_esp ... verify` over exactly the recovery range, reset, exit.
     `bin_path` is passed through with forward slashes (Tcl)."""
+    check_tcl_safe_path(bin_path)
     path = bin_path.replace("\\", "/")
     return (
         f"adapter serial {adapter_serial}; "
@@ -203,7 +301,7 @@ def write_provenance(path: str, image: RecoveryImage, target: partition_table.Pa
                 "dirty_files": tree_state.dirty_files,
                 "git_available": tree_state.git_available,
                 "booted_and_verified": False,
-                "note": "written and read-back-verified over JTAG only; never booted by this tool",
+                "note": "written and read-back-verified over JTAG; the boot outcome, if observed, is reported in the tool result only",
                 "elf_archived": elf_archived,
             }, f, indent=2)
     except (OSError, ValueError):
@@ -211,17 +309,31 @@ def write_provenance(path: str, image: RecoveryImage, target: partition_table.Pa
 
 
 def archive_recovery_elf(bin_path: str, archive_dir: str, image: RecoveryImage,
-                         git_head: Optional[str]) -> Optional[str]:
+                         git_head: Optional[str]) -> "tuple[Optional[str], str]":
     """Archives `recovery.elf` (the ELF next to `bin_path`) as
     `recovery-<sha12>.elf` plus a one-line manifest entry, so a future
-    recovery-image panic can be symbolized. Returns the archived path, or
-    None if no ELF sits alongside the image. Deliberately NOT routed through
-    elf_archive._archive(): that helper migrates a legacy `build/elf_archive`
-    next to the archive dir, which for this directory would be KilnFW's, not
-    ours. Raises OSError on a copy failure (the caller reports, not hides)."""
+    recovery-image panic can be symbolized. Returns (archived_path_or_None,
+    note). Nothing is archived (path None, note says why) when no ELF sits
+    alongside the image, or when the ELF's own embedded esp_app_desc_t does
+    not match the image's build timestamp AND version -- a stale ELF filed
+    under this image's key would symbolize crashes wrongly. Deliberately NOT
+    routed through elf_archive._archive(): that helper migrates a legacy
+    `build/elf_archive` next to the archive dir, which for this directory
+    would be KilnFW's, not ours. Raises OSError on a copy failure."""
     elf = os.path.splitext(bin_path)[0] + ".elf"
     if not os.path.isfile(elf):
-        return None
+        return None, "no recovery.elf next to the image, nothing archived"
+    want_ts = esp_app_desc.normalize_build_timestamp(image.app_desc.build_timestamp)
+    try:
+        descs = esp_app_desc.scan_elf_for_app_descs(elf)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"WARNING: could not scan {elf} for its app descriptor ({exc}); NOT archived"
+    if not any(esp_app_desc.normalize_build_timestamp(d.build_timestamp) == want_ts
+               and d.version == image.app_desc.version for d in descs):
+        got = ", ".join(f"{d.version!r}@{d.build_timestamp!r}" for d in descs) or "none found"
+        return None, (f"WARNING: {elf} does not match the flashed image (image version "
+                      f"{image.app_desc.version!r} built {image.app_desc.build_timestamp!r}; ELF "
+                      f"descriptors: {got}) -- NOT archived (stale ELF?)")
     h = hashlib.sha256()
     with open(elf, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -247,4 +359,4 @@ def archive_recovery_elf(bin_path: str, archive_dir: str, image: RecoveryImage,
     }
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
-    return dest
+    return dest, ""
