@@ -293,7 +293,8 @@ class DebugResetWiringTest(unittest.TestCase):
 
     # --- dark-rereset guard (S6b stacking) ---------------------------------
 
-    def _seed(self, age_s, probe="dark", peer="esp", mode="run", ok=True, raw=None):
+    def _seed(self, age_s, probe="dark", peer="esp", mode="run", ok=True, raw=None,
+              raw_bytes=None, elapsed_s=None, uart=False):
         import datetime
         path = reset_probe.history_path(self.tmp.name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -302,8 +303,16 @@ class DebugResetWiringTest(unittest.TestCase):
         rec = {"ts": ts, "peer": peer, "mode": mode, "openocd_ok": ok}
         if probe == "dark":
             rec["probe"] = {"http_answered_s": None, "any_answered": False}
+            if elapsed_s is not None:
+                rec["probe"]["elapsed_s"] = elapsed_s
+            if uart:
+                rec["probe"]["uart_answered_s"] = 5.0
         elif probe == "answered":
             rec["probe"] = {"http_answered_s": 4.0, "any_answered": True}
+        if raw_bytes is not None:
+            with open(path, "ab") as fh:
+                fh.write(raw_bytes + b"\n")
+            return
         with open(path, "a", encoding="utf-8") as fh:
             fh.write((raw if raw is not None else json.dumps(rec)) + "\n")
 
@@ -321,6 +330,30 @@ class DebugResetWiringTest(unittest.TestCase):
         self.assertIn("allow_dark_rereset=True", out)
         debug_probe.reset.assert_not_called()
         self.assertEqual(len(self._history()), 1)  # refusal is not a reset record
+
+    def test_probe_elapsed_counts_toward_age(self):
+        # ts is written after a 100 s probe: only 30 s old by ts, 130 s since the reset.
+        self._seed(30, elapsed_s=100.0)
+        self.assertTrue(self._reset().startswith("reset esp"))
+        # same ts with a short probe is still inside the window and reports remaining time
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        debug_probe._repo_root.return_value = self.tmp.name
+        self._seed(30, elapsed_s=60.0)
+        out = md.debug_reset(peer="esp", mode="run")
+        self.assertTrue(out.startswith("error: refusing"), out)
+        self.assertRegex(out, r"9[01]s ago")
+        self.assertRegex(out, r"about 2[89]s from now|about 30s from now")
+
+    def test_uart_answered_still_refuses_but_says_so(self):
+        self._seed(30, uart=True)
+        out = md.debug_reset(peer="esp", mode="run")
+        self.assertTrue(out.startswith("error: refusing"), out)
+        self.assertIn("UART answered; HTTP did not", out)
+        self._seed(0)  # newest record: plain dark
+        out2 = md.debug_reset(peer="esp", mode="run")
+        self.assertNotIn("UART answered", out2)
 
     def test_recent_dark_reset_refuses_halt_mode_too(self):
         self._seed(10)
@@ -349,7 +382,7 @@ class DebugResetWiringTest(unittest.TestCase):
 
     def test_corrupt_history_ok(self):
         self._seed(0, raw="{not json")
-        self._seed(0, raw="\\xffgarbage-not-json")
+        self._seed(0, raw_bytes=b"\xff\xfe\x00garbage")
         self._seed(0, raw=json.dumps({"ts": "bogus", "peer": "esp", "mode": "run",
                                       "openocd_ok": True, "probe": {"http_answered_s": None}}))
         self.assertTrue(self._reset().startswith("reset esp"))

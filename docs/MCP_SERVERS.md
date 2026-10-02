@@ -268,7 +268,10 @@ clearing S6b needs owner authorization. It refuses rather than warns because
 an output warning is easily missed by an agent, and uses the same
 explicit-override convention as `debug_program`'s `confirm`/`allow_stale`:
 pass `allow_dark_rereset=True` (exactly `True`). The refusal reports the
-previous reset's age and the seconds left in the window. Only the last ESP
+previous reset's age, measured from the reset itself (the history `ts` is
+written after the probe, so the probe's `elapsed_s` is added), and the seconds
+left in the window. If UART answered but HTTP did not, it says so (possibly a
+Wi-Fi/host issue) but still refuses. Only the last ESP
 record counts; a record with no probe (`verify=False`, halt/init mode, a probe
 that raised, a failed reset) is unknown, not dark; a missing or corrupt
 history never blocks. Pico resets are not gated (they do not lengthen ESP

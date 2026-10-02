@@ -276,6 +276,8 @@ class DarkReset:
     age_s: float
     remaining_s: float
     ts: str
+    #: UART answered although HTTP did not (maybe a Wi-Fi/host problem)
+    uart_answered: bool = False
 
 
 def _parse_ts(ts: object) -> Optional[datetime.datetime]:
@@ -296,7 +298,8 @@ def recent_dark_esp_reset(
 ) -> Optional[DarkReset]:
     """Return a DarkReset if the most recent ESP reset in the history file was a
     successful OpenOCD run-mode reset whose probe ran and never saw an HTTP
-    answer, and it is less than ``window_s`` old; otherwise None.
+    answer, and it is less than ``window_s`` old, measured from the reset itself
+    (record ts plus the probe's elapsed_s); otherwise None.
 
     Only the LAST ESP record is considered (an answered reset since then proves
     the board came back). A record with no probe (verify=False, halt/init mode,
@@ -331,10 +334,17 @@ def recent_dark_esp_reset(
             if then is None:
                 return None
             now = now or datetime.datetime.now(datetime.timezone.utc)
-            age = (now - then).total_seconds()
+            # ts is written AFTER the probe finishes (up to window_s later), so
+            # measure from the reset itself: add the probe's elapsed time.
+            try:
+                elapsed = float(probe.get("elapsed_s") or 0.0)
+            except (TypeError, ValueError):
+                elapsed = 0.0
+            age = (now - then).total_seconds() + max(elapsed, 0.0)
             if age < 0 or age >= window_s:
                 return None
-            return DarkReset(age_s=age, remaining_s=window_s - age, ts=str(rec.get("ts")))
+            return DarkReset(age_s=age, remaining_s=window_s - age, ts=str(rec.get("ts")),
+                             uart_answered=probe.get("uart_answered_s") is not None)
         return None
     except Exception:  # noqa: BLE001 - a guard read must never break a reset
         return None

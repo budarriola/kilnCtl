@@ -324,7 +324,9 @@ def debug_reset(
     Guard (peer="esp", any mode): REFUSES if the previous ESP reset in
     history.jsonl was a run-mode reset whose probe never got an HTTP answer and
     it was less than reset_probe.LINK_DEAD_HARD_S_DEFAULT (120 s, the firmware
-    default of the Pico's configurable link_dead_hard_s) ago. A JTAG reset sends
+    default of the Pico's configurable link_dead_hard_s) ago, measured from
+    the reset itself (the history ts is written after the probe, so the probe's
+    elapsed time is added). A JTAG reset sends
     no ANNOUNCE_REBOOT grace, so resetting an ESP that is still dark extends the
     link silence toward S6b (SAFETY_TRIP_LINK_DEAD, mask 0x0040), and clearing
     S6b needs owner authorization. The refusal states how many seconds remain
@@ -343,6 +345,11 @@ def debug_reset(
                 f"about {dark.remaining_s:.0f}s from now if the board stays dark) and clearing S6b needs owner authorization. "
                 "Check the board first (boot_guard_get / safety_get_status), wait out the window, "
                 "or pass allow_dark_rereset=True to proceed anyway."
+                + (
+                    " NOTE: UART answered; HTTP did not -- may be a Wi-Fi/host issue, "
+                    "not a dark ESP; override if so."
+                    if dark.uart_answered else ""
+                )
             )
     record: dict = {"peer": peer, "mode": mode, "openocd_ok": None, "probe": None}
 
