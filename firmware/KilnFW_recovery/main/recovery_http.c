@@ -5,11 +5,12 @@
 //   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
 //   mac = HMAC-SHA256(key, nonce || context)
 // where context is "esp" for POST /api/ota/esp, "boot-guard-reset" for POST
-// /api/ota/esp/boot_guard_reset, and "sw-reset" for POST /api/sw_reset --
-// matching ota_http.c's per-route OTA_HTTP_CONTEXT_* strings and
-// ota_http_client.py's derive_mac() calls exactly (see
-// recovery_authenticate_request()'s own comment for the per-route lockout
-// state that goes with each context).
+// /api/ota/esp/boot_guard_reset, "sw-reset" for POST /api/sw_reset,
+// "recovery-exit" for POST /api/recovery/exit and "wifi-reset" for POST
+// /api/recovery/wifi_reset -- matching recovery_ota_auth_client.py's
+// derive_mac() _VALID_CONTEXTS and the browser page's deriveMac() calls
+// exactly (see recovery_authenticate_request()'s own comment for the
+// per-route lockout state that goes with each context).
 // carried in the request as header "X-Ota-Mac", hex-encoded, checked
 // against a single-use, 30s-expiry nonce from GET /api/ota/challenge via
 // the same ota_auth.c state machine the main KilnFW image uses (copied in
@@ -17,7 +18,8 @@
 // and therefore safe to reuse unmodified rather than re-derive).
 //
 // Every mutating POST route in this file (POST /api/ota/esp, POST
-// /api/ota/esp/boot_guard_reset, POST /api/sw_reset) authenticates via the
+// /api/ota/esp/boot_guard_reset, POST /api/sw_reset, POST /api/recovery/exit,
+// POST /api/recovery/wifi_reset) authenticates via the
 // single shared recovery_authenticate_request() below -- 2026-09-19 closed
 // docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2's open
 // follow-up, which found the latter two routes had no X-Ota-Mac check at
@@ -33,27 +35,33 @@
 // section 1/3: the primitive is identical, only the calling convention
 // differs.
 //
-// GET /api/boot_guard reports whether the shared `kiln_cfg`/"bootguard"
-// NVS record exists and its raw length, but does NOT decode its fields --
-// decoding a struct layout owned by firmware/KilnFW/App/drivers/persist/
-// boot_guard.c from this independent project risks exactly the kind of
-// silent two-copies-of-one-format drift CLAUDE.md's "reset one side of a
-// pair" class describes, and a wrong decode here would misreport an
-// operator's boot-guard state during exactly the moment they are relying on
-// it. POST .../boot_guard_reset only erases the key (nvs_erase_key) rather
-// than writing a specific "cleared" struct value for the same reason --
-// erasing is format-agnostic and every known reader (boot_guard.c's own
-// hal_kv_open/get path) already treats "key not found" as counter-zero.
+// GET /api/boot_guard and GET /api/recovery/status report whether the shared
+// `kiln_cfg`/"bootguard" NVS record exists and its raw length, and decode its
+// count ONLY when ric_boot_guard_decode() (recovery_image_check.c, host-
+// tested against boot_guard.c's 12-byte record layout, version + CRC
+// verified) accepts it -- otherwise the count is omitted, never guessed.
+// POST .../boot_guard_reset only erases the key (nvs_erase_key) rather
+// than writing a specific "cleared" struct value -- erasing is
+// format-agnostic and every known reader (boot_guard.c's own hal_kv_open/get
+// path) already treats "key not found" as counter-zero.
+//
+// Upload plumbing (first-chunk validation, streaming, sink abort) lives in
+// recovery_upload.c; a new authenticated upload route authenticates here
+// with recovery_authenticate_request() and then calls
+// recovery_upload_stream() with its own validator and sink.
 #include "recovery_http.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -63,9 +71,31 @@
 #include "nvs.h"
 
 #include "ota_auth.h"
+#include "recovery_image_check.h"
+#include "recovery_upload.h"
 #include "recovery_wifi.h"
 
 static const char *TAG = "recovery_http";
+
+// Defined by recovery_io.c (relay-forced-off driver) once that lands; a weak
+// undefined reference resolves to NULL until then, which reads as "no fault".
+extern bool recovery_io_relay_fault(void) __attribute__((weak));
+
+// The page (recovery_page.html) is linked in via EMBED_FILES.
+extern const uint8_t recovery_page_html_start[] asm("_binary_recovery_page_html_start");
+extern const uint8_t recovery_page_html_end[] asm("_binary_recovery_page_html_end");
+
+#define APP_PARTITION_LABEL "app"
+// Wi-Fi namespace shared with the main app (wifi_prov_nvs.c NVS_NAMESPACE) and
+// the keys that describe the HOME network / addressing. ap_ssid/ap_pass are
+// deliberately NOT erased: ap_pass is the HMAC key material, so erasing it
+// would make this image's own authenticated routes unusable (500).
+#define WIFI_NVS_PARTITION "wifi_nvs"
+#define WIFI_NVS_NAMESPACE "wifi_cfg"
+static const char *const WIFI_RESET_KEYS[] = {
+    "ssid", "pass", "has_creds", "saved_nets", "mode", "local_only",
+    "ip_mode", "static_ip", "static_netmask", "static_gw",
+};
 
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define BOOT_GUARD_NAMESPACE "kiln_cfg"
@@ -81,6 +111,8 @@ static ota_auth_nonce_state_t s_nonce;
 static ota_auth_lockout_state_t s_lockout_esp;
 static ota_auth_lockout_state_t s_lockout_boot_guard_reset;
 static ota_auth_lockout_state_t s_lockout_sw_reset;
+static ota_auth_lockout_state_t s_lockout_recovery_exit;
+static ota_auth_lockout_state_t s_lockout_wifi_reset;
 
 static uint32_t now_ms(void)
 {
@@ -291,6 +323,8 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     _Static_assert(sizeof("esp") - 1 <= 16, "context literal exceeds msg[] headroom");
     _Static_assert(sizeof("boot-guard-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
     _Static_assert(sizeof("sw-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
+    _Static_assert(sizeof("recovery-exit") - 1 <= 16, "context literal exceeds msg[] headroom");
+    _Static_assert(sizeof("wifi-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
     size_t context_len = strlen(context);
     uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
     if (context_len > sizeof(msg) - OTA_AUTH_NONCE_LEN) {
@@ -322,7 +356,42 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     return true;
 }
 
-// POST /api/ota/esp
+static const esp_partition_t *find_app_partition(void)
+{
+    return esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0,
+                                    APP_PARTITION_LABEL);
+}
+
+// True when `app` starts with a plausible image (esp_ota_get_partition_
+// description checks the image/app-desc magic). A cheap sanity gate, not a
+// full verification -- the bootloader still verifies on boot.
+static bool app_has_valid_image(const esp_partition_t *part)
+{
+    esp_app_desc_t desc;
+    return part && esp_ota_get_partition_description(part, &desc) == ESP_OK;
+}
+
+static void restart_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)(uintptr_t)arg));
+    esp_restart();
+    vTaskDelete(NULL);
+}
+
+// Response is already sent by the caller; restart after a short delay so the
+// TCP stack can flush it. Falls back to restarting inline if no task fits.
+static void restart_soon(uint32_t delay_ms)
+{
+    if (xTaskCreate(restart_task, "rec_restart", 2048, (void *)(uintptr_t)delay_ms, 5, NULL) !=
+        pdPASS) {
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        esp_restart();
+    }
+}
+
+// POST /api/ota/esp -- authenticated, validated, streamed (recovery_upload.c).
+// Nothing is written until the first chunk passes ric_validate_first_chunk();
+// the boot partition is set only after esp_ota_end() verified the whole image.
 static esp_err_t ota_esp_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
@@ -330,54 +399,48 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return auth_err;
     }
 
-    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    const esp_partition_t *target = find_app_partition();
     if (!target) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "no OTA target partition in the flashed table",
+        return httpd_resp_send(req, "no app partition in the flashed table",
                                 HTTPD_RESP_USE_STRLEN);
     }
 
-    esp_ota_handle_t handle;
-    esp_err_t err = esp_ota_begin(target, OTA_SIZE_UNKNOWN, &handle);
-    if (err != ESP_OK) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "esp_ota_begin failed", HTTPD_RESP_USE_STRLEN);
+    recovery_upload_cfg_t cfg = {
+        .max_len = target->size,
+        .validate = recovery_upload_validate_esp,
+        .vctx = NULL,
+    };
+    recovery_sink_t sink;
+    recovery_esp_sink_state_t sink_state;
+    recovery_upload_esp_sink_init(&sink, &sink_state, target);
+
+    int http_status = 500;
+    const char *msg = "upload failed";
+    recovery_upload_result_t r = recovery_upload_stream(req, &cfg, &sink, &http_status, &msg);
+    if (r != RECOVERY_UPLOAD_OK) {
+        return recovery_upload_send_error(req, http_status, msg);
     }
 
-    char buf[1024];
-    int remaining = req->content_len;
-    while (remaining > 0) {
-        int n = httpd_req_recv(req, buf, (remaining < (int)sizeof(buf)) ? remaining : sizeof(buf));
-        if (n <= 0) {
-            esp_ota_abort(handle);
-            httpd_resp_set_status(req, "400 Bad Request");
-            return httpd_resp_send(req, "read error mid-image", HTTPD_RESP_USE_STRLEN);
-        }
-        err = esp_ota_write(handle, buf, n);
-        if (err != ESP_OK) {
-            esp_ota_abort(handle);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            return httpd_resp_send(req, "esp_ota_write failed", HTTPD_RESP_USE_STRLEN);
-        }
-        remaining -= n;
-    }
-
-    err = esp_ota_end(handle);
-    if (err != ESP_OK) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "esp_ota_end failed (image invalid?)", HTTPD_RESP_USE_STRLEN);
-    }
-    err = esp_ota_set_boot_partition(target);
+    esp_err_t err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
     }
 
     ESP_LOGI(TAG, "application image accepted and written -- rebooting into it");
-    httpd_resp_sendstr(req, "ok, rebooting into new application image");
-    vTaskDelay(pdMS_TO_TICKS(300));
-    esp_restart();
-    return ESP_OK;
+    esp_err_t sent = httpd_resp_sendstr(req, "ok, rebooting into new application image");
+    restart_soon(500);
+    return sent;
+}
+
+// GET / -- the embedded self-contained recovery page.
+static esp_err_t root_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    size_t len = (size_t)(recovery_page_html_end - recovery_page_html_start);
+    return httpd_resp_send(req, (const char *)recovery_page_html_start, (ssize_t)len);
 }
 
 // GET /api/partitions
@@ -396,39 +459,89 @@ static esp_err_t partitions_get(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
-// GET /api/boot_guard -- see this file's header comment: existence + length
-// only, deliberately not a decode of boot_guard.c's private struct.
+typedef struct {
+    bool present;
+    size_t len;
+    bool count_valid;
+    uint32_t count;
+} boot_guard_info_t;
+
+static void read_boot_guard(boot_guard_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    nvs_handle_t h;
+    if (nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE, NVS_READONLY, &h) !=
+        ESP_OK) {
+        return;
+    }
+    if (nvs_get_blob(h, BOOT_GUARD_KEY, NULL, &info->len) == ESP_OK) {
+        info->present = true;
+        uint8_t blob[16];
+        size_t blen = sizeof(blob);
+        if (info->len <= sizeof(blob) &&
+            nvs_get_blob(h, BOOT_GUARD_KEY, blob, &blen) == ESP_OK) {
+            info->count_valid = ric_boot_guard_decode(blob, blen, &info->count) != 0;
+        }
+    }
+    nvs_close(h);
+}
+
+// Formats "record_present":..,"record_len":..[,"boot_count":N]; boot_count
+// only when the record decoded cleanly (never guessed).
+static int fmt_boot_guard(char *out, size_t cap, const boot_guard_info_t *bg)
+{
+    int n = snprintf(out, cap, "\"record_present\":%s,\"record_len\":%u",
+                      bg->present ? "true" : "false", (unsigned)bg->len);
+    if (n > 0 && (size_t)n < cap && bg->count_valid) {
+        n += snprintf(out + n, cap - (size_t)n, ",\"boot_count\":%u", (unsigned)bg->count);
+    }
+    return n;
+}
+
+// GET /api/boot_guard
 static esp_err_t boot_guard_get(httpd_req_t *req)
 {
-    nvs_handle_t h;
-    bool present = false;
-    size_t len = 0;
-    if (nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE, NVS_READONLY, &h) ==
-        ESP_OK) {
-        if (nvs_get_blob(h, BOOT_GUARD_KEY, NULL, &len) == ESP_OK) {
-            present = true;
-        }
-        nvs_close(h);
-    }
-    char body[128];
-    int n = snprintf(body, sizeof(body), "{\"record_present\":%s,\"record_len\":%u}",
-                      present ? "true" : "false", (unsigned)len);
+    boot_guard_info_t bg;
+    read_boot_guard(&bg);
+    char body[160];
+    char inner[128];
+    fmt_boot_guard(inner, sizeof(inner), &bg);
+    int n = snprintf(body, sizeof(body), "{%s}", inner);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, body, n);
 }
 
-// POST /api/ota/esp/boot_guard_reset
-static esp_err_t boot_guard_reset_post(httpd_req_t *req)
+// GET /api/recovery/status -- unauthenticated, read-only.
+static esp_err_t recovery_status_get(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "boot-guard-reset", &s_lockout_boot_guard_reset)) {
-        return auth_err;
-    }
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *app = find_app_partition();
+    boot_guard_info_t bg;
+    read_boot_guard(&bg);
+    char bgs[128];
+    fmt_boot_guard(bgs, sizeof(bgs), &bg);
 
+    bool relay_fault = recovery_io_relay_fault ? recovery_io_relay_fault() : false;
+
+    char body[448];
+    int n = snprintf(body, sizeof(body),
+                      "{\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
+                      "\"app_valid\":%s,\"max_upload\":%u,%s,\"relay_fault\":%s,"
+                      "\"free_heap\":%u}",
+                      running ? running->label : "?", app ? "true" : "false",
+                      (unsigned)(app ? app->size : 0), app_has_valid_image(app) ? "true" : "false",
+                      (unsigned)(app ? app->size : 0), bgs, relay_fault ? "true" : "false",
+                      (unsigned)esp_get_free_heap_size());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
+
+static void clear_boot_guard(void)
+{
     nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE,
-                                             NVS_READWRITE, &h);
-    if (err == ESP_OK) {
+    if (nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE, NVS_READWRITE, &h) ==
+        ESP_OK) {
         nvs_erase_key(h, BOOT_GUARD_KEY); // ESP_ERR_NVS_NOT_FOUND is fine -- already clear
         nvs_commit(h);
         nvs_close(h);
@@ -440,7 +553,75 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
         nvs_commit(h);
         nvs_close(h);
     }
+}
+
+// POST /api/ota/esp/boot_guard_reset
+static esp_err_t boot_guard_reset_post(httpd_req_t *req)
+{
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err, "boot-guard-reset", &s_lockout_boot_guard_reset)) {
+        return auth_err;
+    }
+    clear_boot_guard();
     return httpd_resp_sendstr(req, "boot_guard counter cleared");
+}
+
+// POST /api/recovery/exit -- boot the application: refused (409) unless `app`
+// holds a valid image. Clears the boot_guard counter so the next boot is not
+// itself counted toward recovery, selects `app`, and restarts.
+static esp_err_t recovery_exit_post(httpd_req_t *req)
+{
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err, "recovery-exit", &s_lockout_recovery_exit)) {
+        return auth_err;
+    }
+    const esp_partition_t *app = find_app_partition();
+    if (!app_has_valid_image(app)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "no valid application image in app", HTTPD_RESP_USE_STRLEN);
+    }
+    if (esp_ota_set_boot_partition(app) != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
+    }
+    clear_boot_guard();
+    esp_err_t sent = httpd_resp_sendstr(req, "ok, rebooting into the application");
+    restart_soon(500);
+    return sent;
+}
+
+// POST /api/recovery/wifi_reset -- forget the HOME network credentials
+// (WIFI_RESET_KEYS) and restart. The AP name/password are kept: the password
+// is this image's HMAC key.
+static esp_err_t wifi_reset_post(httpd_req_t *req)
+{
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err, "wifi-reset", &s_lockout_wifi_reset)) {
+        return auth_err;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE,
+                                             &h);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "could not open the Wi-Fi settings store",
+                                HTTPD_RESP_USE_STRLEN);
+    }
+    for (size_t i = 0; i < sizeof(WIFI_RESET_KEYS) / sizeof(WIFI_RESET_KEYS[0]); i++) {
+        esp_err_t e = nvs_erase_key(h, WIFI_RESET_KEYS[i]);
+        if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "wifi_reset: erase %s failed: %s", WIFI_RESET_KEYS[i], esp_err_to_name(e));
+        }
+    }
+    err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "Wi-Fi settings commit failed", HTTPD_RESP_USE_STRLEN);
+    }
+    esp_err_t sent = httpd_resp_sendstr(req, "ok, Wi-Fi settings cleared, restarting");
+    restart_soon(500);
+    return sent;
 }
 
 // POST /api/sw_reset
@@ -461,6 +642,9 @@ void recovery_http_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
+    // 10 routes below; headroom for the later Pico upload route.
+    config.max_uri_handlers = 16;
+    config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed");
@@ -468,6 +652,10 @@ void recovery_http_start(void)
     }
 
     static const httpd_uri_t routes[] = {
+        {.uri = "/", .method = HTTP_GET, .handler = root_get},
+        {.uri = "/api/recovery/status", .method = HTTP_GET, .handler = recovery_status_get},
+        {.uri = "/api/recovery/exit", .method = HTTP_POST, .handler = recovery_exit_post},
+        {.uri = "/api/recovery/wifi_reset", .method = HTTP_POST, .handler = wifi_reset_post},
         {.uri = "/api/ota/challenge", .method = HTTP_GET, .handler = challenge_get},
         {.uri = "/api/ota/esp", .method = HTTP_POST, .handler = ota_esp_post},
         {.uri = "/api/partitions", .method = HTTP_GET, .handler = partitions_get},
@@ -476,6 +664,7 @@ void recovery_http_start(void)
          .handler = boot_guard_reset_post},
         {.uri = "/api/sw_reset", .method = HTTP_POST, .handler = sw_reset_post},
     };
+    _Static_assert(sizeof(routes) / sizeof(routes[0]) <= 16, "routes exceed max_uri_handlers");
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         httpd_register_uri_handler(server, &routes[i]);
     }

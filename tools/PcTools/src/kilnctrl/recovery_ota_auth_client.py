@@ -52,7 +52,7 @@ OTA_KDF_CONTEXT = b"kilnctl-ota-v1"
 #: strings). Deliberately a small, closed set: a caller asking for any other
 #: context is almost certainly confusing this module with the retired
 #: main-app scheme, which had six.
-_VALID_CONTEXTS = ("esp", "boot-guard-reset", "sw-reset")
+_VALID_CONTEXTS = ("esp", "boot-guard-reset", "sw-reset", "recovery-exit", "wifi-reset")
 
 DEFAULT_TIMEOUT_S = 10.0
 

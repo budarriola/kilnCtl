@@ -3,11 +3,14 @@ idf_component_register(
         "recovery_main.c"
         "recovery_wifi.c"
         "recovery_http.c"
+        "recovery_image_check.c"
+        "recovery_upload.c"
         "recovery_lcd.c"
         "recovery_io.c"
         "recovery_text.c"
         "ota_auth.c"
     INCLUDE_DIRS "."
+    EMBED_FILES "recovery_page.html"
     REQUIRES
         esp_wifi
         esp_netif
@@ -21,4 +24,6 @@ idf_component_register(
         esp_driver_i2c
         esp_driver_spi
         esp_timer
+        esp_partition
+        esp_system
 )

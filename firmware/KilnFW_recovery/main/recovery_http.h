@@ -7,7 +7,11 @@
 extern "C" {
 #endif
 
-// Starts esp_http_server and registers the six recovery routes:
+// Starts esp_http_server and registers the ten recovery routes:
+//   GET  /                          (embedded self-contained page)
+//   GET  /api/recovery/status       (unauthenticated JSON)
+//   POST /api/recovery/exit         (HMAC context "recovery-exit"; 409 if `app` invalid)
+//   POST /api/recovery/wifi_reset   (HMAC context "wifi-reset")
 //   GET  /api/ota/challenge
 //   POST /api/ota/esp
 //   GET  /api/partitions

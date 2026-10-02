@@ -50,8 +50,8 @@ class DeriveMacTest(unittest.TestCase):
         ap_password = "pw"
         nonce = b"\x01" * 16
         macs = {ctx: rec.derive_mac(ap_password, nonce, ctx) for ctx in
-                ("esp", "boot-guard-reset", "sw-reset")}
-        self.assertEqual(len(set(macs.values())), 3)
+                ("esp", "boot-guard-reset", "sw-reset", "recovery-exit", "wifi-reset")}
+        self.assertEqual(len(set(macs.values())), 5)
 
     def test_rejects_unknown_context(self):
         with self.assertRaises(ValueError):

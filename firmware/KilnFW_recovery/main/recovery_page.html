@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KilnFW Recovery</title>
+<style>
+body{font:15px system-ui,sans-serif;max-width:640px;margin:0 auto;padding:12px;background:#1b1b1b;color:#e8e8e8}
+h1{font-size:20px}h2{font-size:16px;margin:0 0 8px}
+fieldset{border:1px solid #555;border-radius:6px;margin:12px 0;padding:10px}
+input,button{font:inherit;margin:3px 0;max-width:100%}
+button{padding:6px 12px}
+pre{background:#000;padding:8px;overflow:auto;font-size:12px;max-height:240px;white-space:pre-wrap}
+progress{width:100%}
+.w{color:#f90}
+</style></head><body>
+<h1>KilnFW Recovery</h1>
+<p class="w">The main application is not running. Upload a KilnCtrl.bin to restore it.</p>
+<fieldset><h2>Status</h2><pre id="st">loading...</pre>
+<button onclick="status()">Refresh</button></fieldset>
+<fieldset><h2>Authentication</h2>
+<label>AP password <input id="pw" type="password" autocomplete="off"></label>
+<div>Every action below is signed in this page; the password never leaves it.</div></fieldset>
+<fieldset><h2>Upload ESP application</h2>
+<input id="f" type="file" accept=".bin"><br>
+<button id="up" onclick="upload()">Upload and boot</button>
+<progress id="pr" value="0" max="100"></progress><div id="pp"></div></fieldset>
+<fieldset id="pico" disabled><h2>Upload Pico firmware</h2>
+<div>Not available in this build.</div></fieldset>
+<fieldset><h2>Actions</h2>
+<button onclick="act('/api/recovery/exit','recovery-exit','Exit recovery and boot the application?')">Exit Recovery</button>
+<button onclick="act('/api/recovery/wifi_reset','wifi-reset','Forget the saved home Wi-Fi network and restart?')">Wi-Fi Reset</button></fieldset>
+<pre id="log"></pre>
+<script>
+/*CRYPTO-BEGIN*/
+function R(x,n){return x>>>n|x<<32-n}
+function cat(a,b){var r=new Uint8Array(a.length+b.length);r.set(a);r.set(b,a.length);return r}
+function sha256(d){
+var K=[],H=[],i,j,c=2;
+for(;K.length<64;c++){for(j=2;j*j<=c&&c%j;j++);if(j*j>c){if(H.length<8)H.push(Math.pow(c,.5)*4294967296|0);K.push(Math.pow(c,1/3)*4294967296|0)}}
+var l=d.length,n=l+9+63>>6<<6,b=new Uint8Array(n),w=[],o,x,y,a,e,t,u;
+b.set(d);b[l]=128;u=l*8;b[n-4]=u>>>24;b[n-3]=u>>>16;b[n-2]=u>>>8;b[n-1]=u;
+for(o=0;o<n;o+=64){
+for(i=0;i<16;i++)w[i]=b[o+4*i]<<24|b[o+4*i+1]<<16|b[o+4*i+2]<<8|b[o+4*i+3];
+for(;i<64;i++){x=w[i-15];y=w[i-2];w[i]=w[i-16]+(R(x,7)^R(x,18)^x>>>3)+w[i-7]+(R(y,17)^R(y,19)^y>>>10)|0}
+a=H.slice();
+for(i=0;i<64;i++){e=a[4];
+t=a[7]+(R(e,6)^R(e,11)^R(e,25))+(e&a[5]^~e&a[6])+K[i]+w[i]|0;
+u=(R(a[0],2)^R(a[0],13)^R(a[0],22))+(a[0]&a[1]^a[0]&a[2]^a[1]&a[2])|0;
+a.unshift(t+u|0);a[4]=a[4]+t|0;a.pop()}
+for(i=0;i<8;i++)H[i]=H[i]+a[i]|0}
+var r=new Uint8Array(32);for(i=0;i<32;i++)r[i]=H[i>>2]>>>24-8*(i&3);return r}
+function hmac(k,m){if(k.length>64)k=sha256(k);
+var a=new Uint8Array(64),b=new Uint8Array(64),i;a.set(k);b.set(k);
+for(i=0;i<64;i++){a[i]^=54;b[i]^=92}
+return sha256(cat(b,sha256(cat(a,m))))}
+function crc32(d){var c=-1,i,j;for(i=0;i<d.length;i++){c^=d[i];for(j=0;j<8;j++)c=c>>>1^-(c&1)&0xEDB88320}return(~c)>>>0}
+function utf8(s){return new TextEncoder().encode(s)}
+function hex(u){var s="";for(var i=0;i<u.length;i++)s+=(u[i]+256).toString(16).slice(1);return s}
+function unhex(s){var r=new Uint8Array(s.length/2);for(var i=0;i<r.length;i++)r[i]=parseInt(s.substr(2*i,2),16);return r}
+function deriveMac(pw,nonce,ctx){return hmac(hmac(utf8(pw),utf8("kilnctl-ota-v1")),cat(nonce,utf8(ctx)))}
+/*CRYPTO-END*/
+var $=function(i){return document.getElementById(i)};
+function log(s){$("log").textContent+=s+"\n"}
+function xhr(m,u,h,body,prog){return new Promise(function(ok,no){
+var x=new XMLHttpRequest();x.open(m,u);
+for(var k in h)x.setRequestHeader(k,h[k]);
+if(prog)x.upload.onprogress=function(e){if(e.lengthComputable)prog(e.loaded,e.total)};
+x.onload=function(){ok({s:x.status,t:x.responseText})};
+x.onerror=function(){no(new Error("network error (board may have rejected the upload or restarted)"))};
+x.send(body)})}
+function status(){xhr("GET","/api/recovery/status").then(function(r){
+try{$("st").textContent=JSON.stringify(JSON.parse(r.t),null,1)}catch(e){$("st").textContent=r.t}
+},function(e){$("st").textContent=e.message})}
+function signed(path,ctx,body,prog){
+var pw=$("pw").value;if(!pw)return Promise.reject(new Error("enter the AP password"));
+return xhr("GET","/api/ota/challenge").then(function(r){
+if(r.s!=200)throw new Error("challenge failed: "+r.s);
+var mac=hex(deriveMac(pw,unhex(JSON.parse(r.t).nonce),ctx));
+return xhr("POST",path,{"X-Ota-Mac":mac},body,prog)})}
+function done(r){log(r.s+" "+r.t);if(r.s==200)log("The board is restarting; reload this page in a few seconds.")}
+function act(path,ctx,q){if(!confirm(q))return;
+signed(path,ctx,null).then(done,function(e){log(e.message)})}
+function upload(){var f=$("f").files[0];
+if(!f)return log("choose a .bin file first");
+$("up").disabled=true;$("pr").value=0;
+signed("/api/ota/esp","esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
+status();
+</script></body></html>
