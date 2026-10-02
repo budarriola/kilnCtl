@@ -47,13 +47,14 @@ def tearDownModule():
 
 
 ZONE_TEMP = 25.4
-BASE = float(math.floor(ZONE_TEMP))
+# the cases start segment 0 above the reading so the warm start cannot skip it
+BASE = float(math.ceil(ZONE_TEMP)) + 2.0
+BASE_FLOOR = float(math.floor(ZONE_TEMP))   # the old, warm-start-skipped base
 ROW_Y = {"target": 86, "ramp": 136, "dwell": 186}
 MINUS_X, PLUS_X = 100, 443  # real layout: minus right after the caption
 GLYPH = "�" * 3     # ui_test_client decodes LVGL symbol names as U+FFFD
 NEXT_X, PREV_X = 453, 413
 ADVANCE_AT = 30.0   # seconds after start: segment 0 -> 1
-END_AT = 60.0       # seconds after start: firing done (LCD-24 profile)
 
 
 class FakeLiveError(Exception):
@@ -118,8 +119,11 @@ class FakeBoard:
         # 20261002T013957Z: the firing was at segment_index 1 by the time Edit
         # was tapped, and ui_page_edit_firing.c:214 opens the page on the
         # RUNNING segment, not segment 0).
-        self.start_seg = kw.get("start_seg", 0)
+        self.start_seg = kw.get("start_seg", 0)   # extra segments already run past the warm-start entry
+        self.zone_temp = kw.get("zone_temp", ZONE_TEMP)
         self.edit_never_listed = kw.get("edit_never_listed", False)
+        # first N edit-page tap lists come back truncated, with the Prev/Next glyphs missing
+        self.truncated_lists = kw.get("truncated_lists", 0)
         if self.preexisting_working:
             self.working = [{"target_c": 99.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}]
             self.working_id = 5
@@ -131,12 +135,28 @@ class FakeBoard:
         if self.started_at is None:
             return "idle", 0
         el = self.clock.now() - self.started_at
-        last = max(len(self.origin or []) - 1, 0)
-        if self.kind == "lcd24" and not self.never_advances and el >= END_AT:
-            return self.ends_as, min(self.start_seg, last)
+        segs = self.origin or []
+        last = max(len(segs) - 1, 0)
+        entry = self.entry_seg()
+        if entry >= len(segs):
+            return "done", 0   # warm start skipped every segment: nothing to run
+        first = min(entry + self.start_seg, last)
+        if self.kind == "lcd24" and not self.never_advances:
+            end_at = sum(float(s["dwell_min"]) * 60.0 for s in segs[entry:])
+            if el >= end_at:
+                return self.ends_as, first
         if self.kind == "lcd23" and not self.never_advances and el >= ADVANCE_AT:
-            return "running", min(self.start_seg + 1, last)
-        return "running", min(self.start_seg, last)
+            return "running", min(first + 1, last)
+        return "running", first
+
+    def entry_seg(self):
+        """Mirror of the executor's warm start (profile_executor_start.c:371-479):
+        the firing enters at the first segment whose target is above the zone's
+        current temperature; every earlier one is skipped."""
+        for i, s in enumerate(self.origin or []):
+            if float(s["target_c"]) > self.zone_temp:
+                return i
+        return len(self.origin or [])
 
     def seg_index(self):
         return self.exec_state()[1]
@@ -277,6 +297,10 @@ class FakeUi:
         if b.keypad:
             return {"targets": _KEYPAD, "truncated": False}
         if b.page == "edit_firing":
+            if b.truncated_lists > 0:
+                b.truncated_lists -= 1
+                return {"targets": [t for t in b.targets() if t["cy"] != 20 or t["name"] in ("back", "home")],
+                        "truncated": True}
             return {"targets": b.targets(), "truncated": False}
         if b.edit_never_listed:
             return {"targets": [{"name": "Start", "cx": 240, "cy": 280, "hidden": False}], "truncated": False}
@@ -359,7 +383,7 @@ def _http(b):
 
 def _run(case, kind, edit_heat=True, allow_heat=True, ambient=ZONE_TEMP, **kw):
     clock = _Clock()
-    b = FakeBoard(clock, kind=kind, **kw)
+    b = FakeBoard(clock, kind=kind, zone_temp=ambient, **kw)
     srv = SimpleNamespace(
         _ui_test=FakeUi(b), _profiles=FakeProfiles(b), _touch=FakeTouch(b),
         _thermo=SimpleNamespace(read=lambda *a, **k: [
@@ -615,13 +639,30 @@ class Lcd23GeometryAndLimitsTest(unittest.TestCase):
             self.assertLessEqual(result.observed["expected"][2]["ramp_c_per_hr"], ceiling)
 
 
+class TruncatedListTest(unittest.TestCase):
+    def test_truncated_list_is_unreadable_not_icon_absent(self):
+        clock = _Clock()
+        b = FakeBoard(clock, kind="lcd23", zone_temp=0.0, truncated_lists=1)
+        b.origin = [{"target_c": 1.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}] * 3
+        b.started_at = 0.0
+        b.open_page()
+        st = C._lcd_edit_page_state(FakeUi(b))
+        self.assertFalse(st["readable"])
+        self.assertTrue(st["truncated"])
+
+    def test_navigation_repolls_through_truncated_lists(self):
+        result, b = run23(truncated_lists=3)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(b.truncated_lists, 0)
+
+
 class NavSlotTest(unittest.TestCase):
     """_lcd_edit_nav derives Prev/Next from computed topbar slots, so a disabled
     Next (absent from the listing) is never mistaken for the rightmost Prev."""
 
     def _state(self, cur_seg):
         clock = _Clock()
-        b = FakeBoard(clock, kind="lcd23")
+        b = FakeBoard(clock, kind="lcd23", zone_temp=0.0)
         b.origin = [{"target_c": 1.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}] * 3
         b.started_at = 0.0
         b.open_page()
@@ -646,6 +687,59 @@ class NavSlotTest(unittest.TestCase):
     def test_missing_anchors_means_no_nav(self):
         self.assertIsNone(C._lcd_edit_nav({"topbar": {"prev": None, "next": None}}, "next"))
         self.assertIsNone(C._lcd_edit_nav({}, "prev"))
+
+
+class WarmStartRegressionTest(unittest.TestCase):
+    """The executor warm-starts every firing, skipping segments whose target is
+    <= the zone temperature (profile_executor_start.c:371-479). The first
+    hardware run used a floor(zone temp) segment-0 target, which was skipped.
+    These tests use the OLD floor-based plan against the fake, which mirrors
+    the warm start, to prove the fake would have caught it."""
+
+    def _old_plan(self, kind):
+        def plan(ctx, zone_temp):
+            ramp = 600.0
+            if kind == "lcd23":
+                offs, dw = (0.0, 10.0, 20.0, 25.0), (1, 1, 30, 5)
+            else:
+                offs, dw = (0.0, 0.0, 0.0), (1, 1, 0)
+            base = float(math.floor(zone_temp))
+            orig = [C._lcd_edit_seg(base + o, ramp, d) for o, d in zip(offs, dw)]
+            from kilnctrl import devices
+            return ([C._lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + offs[-1], {"max_temp_c": 1300.0, "max_ramp_c_per_hr": 1000.0})
+        return plan
+
+    def test_fake_enters_past_segment_zero_for_a_floor_base(self):
+        clock = _Clock()
+        b = FakeBoard(clock, kind="lcd23", zone_temp=ZONE_TEMP)
+        b.origin = [{"target_c": BASE0, "ramp_c_per_hr": 600.0, "dwell_min": 1.0}
+                    for BASE0 in (BASE_FLOOR, BASE_FLOOR + 10)]
+        b.started_at = 0.0
+        self.assertEqual(b.exec_state(), ("running", 1))
+
+    def test_fake_ends_a_floor_base_lcd24_profile_instantly(self):
+        clock = _Clock()
+        b = FakeBoard(clock, kind="lcd24", zone_temp=ZONE_TEMP)
+        b.origin = [{"target_c": BASE_FLOOR, "ramp_c_per_hr": 600.0, "dwell_min": 1.0}] * 3
+        b.started_at = 0.0
+        self.assertEqual(b.exec_state()[0], "done")
+
+    def test_current_plans_enter_segment_zero(self):
+        for case, kind in ((C._case_lcd23, "lcd23"), (C._case_lcd24, "lcd24")):
+            result, b = _run(case, kind)
+            self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+            self.assertEqual(result.observed["exec_at_page_open"]["segment_index"], 0)
+            self.assertGreater(result.observed["orig"][0]["target_c"], ZONE_TEMP)
+
+    def test_old_floor_plan_makes_lcd24_inconclusive_in_the_fake(self):
+        with mock.patch.object(C, "_lcd24_plan", self._old_plan("lcd24")):
+            result, b = _run(lambda ctx: C._lcd_edit_run(ctx, "LCD-24", C._lcd24_plan, C._lcd24_body), "lcd24")
+        self.assertNotEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_old_floor_plan_lcd23_opens_past_segment_zero(self):
+        with mock.patch.object(C, "_lcd23_plan", self._old_plan("lcd23")):
+            result, b = _run(lambda ctx: C._lcd_edit_run(ctx, "LCD-23", C._lcd23_plan, C._lcd23_body), "lcd23")
+        self.assertEqual(result.observed["exec_at_page_open"]["segment_index"], 1)
 
 
 class Lcd24Test(unittest.TestCase):

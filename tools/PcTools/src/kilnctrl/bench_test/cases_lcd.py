@@ -4309,7 +4309,22 @@ _LCD_EDIT_ROW_BAND_PX = 14
 _LCD_EDIT_ZONE_MASK = 1
 #: Segment durations. Segment 0 dwells one whole minute (dwell_min is an
 #: integer) so the firing sits in it long enough to edit a later segment.
+#:
+#: WARM START: the executor skips, at firing start, every segment whose target
+#: is <= the zone's current temperature (profile_executor_run.c ~970 applies
+#: profile_executor_plan_warm_start(), profile_executor_start.c:371-479). A
+#: segment-0 target at floor(zone temp) is therefore almost always skipped
+#: (first hardware run: zone 30.6-30.8 C, base 30, entered index 1). The
+#: profiles below start strictly ABOVE the reading (_lcd_edit_base) so the
+#: firing enters segment 0 deterministically.
 _LCD_EDIT_SEG0_DWELL_MIN = 1
+#: Margin above the zone reading for segment 0's target (a reading can drift
+#: up a fraction of a degree between the plan and the executor's own read).
+_LCD_EDIT_BASE_MARGIN_C = 2.0
+#: Slack added to a computed segment duration when waiting for it, and the cap
+#: on any single computed wait.
+_LCD_EDIT_WAIT_MARGIN_S = 30.0
+_LCD_EDIT_WAIT_CAP_S = 420.0
 _LCD_EDIT_RAMP_C_PER_HR = 600.0
 _LCD_EDIT_MAX_TARGET_C = 60.0
 _LCD_EDIT_MIN_RAMP_C_PER_HR = 10.0
@@ -4321,6 +4336,9 @@ _LCD_EDIT_MIN_RAMP_C_PER_HR = 10.0
 #: segment_index 1), so the case reads the running segment and navigates by
 #: topbar state; it never assumes segment 0. Segments 0 and 1 give runway for
 #: running segment 0 or 1; running segment >= 2 leaves no future edit segment.
+#: Every target is above the zone reading (warm start, see above), so the
+#: firing enters segment 0 and the running segment at Edit time is 0 unless a
+#: slow bench step let segment 0's dwell run out.
 _LCD23_SEG1_OFFSET_C = 10.0
 _LCD23_SEG2_OFFSET_C = 20.0
 _LCD23_SEG3_OFFSET_C = 25.0
@@ -4328,15 +4346,39 @@ _LCD23_SEG1_DWELL_MIN = 1
 _LCD23_SEG2_DWELL_MIN = 30
 _LCD23_SEG3_DWELL_MIN = 5
 _LCD23_EDIT_SEG = 2
-#: Bounded waits (total wall time stays under about 3 minutes).
-_LCD23_ADVANCE_WAIT_S = 100.0
-_LCD24_END_WAIT_S = 120.0
+#: LCD-24 profile: [0] base/2 min, [1] base/2 min, [2] base/0. All at one
+#: target above the zone reading (warm start), dwells long enough that the
+#: segment after the one running at Edit time is still future when Apply is
+#: tapped, and the whole firing ends by itself within a few minutes.
+_LCD24_SEG_DWELL_MIN = 2
+#: Bounded waits. The segment-advance (LCD-23) and firing-end (LCD-24) waits
+#: are computed from the plan's ramp/dwell (_lcd_edit_seg_duration_s) plus
+#: _LCD_EDIT_WAIT_MARGIN_S, capped at _LCD_EDIT_WAIT_CAP_S.
 _LCD_EDIT_ENDED_WAIT_S = 4.0
 #: ui_page_home_internal.h:79 UI_PAGE_HOME_REFRESH_MS.
 UI_HOME_REFRESH_MS = 1000
 _LCD_EDIT_BOUND_TARGET_C = 5000.0
 _LCD_EDIT_CEILING_PROBE_C = 10.0
 _LCD_EDIT_MAX_TARGET_FIELD_C = 2015.0
+
+
+def _lcd_edit_base(zone_temp: float) -> float:
+    """Segment-0 target: strictly above the zone reading so the executor's
+    warm start does not skip it."""
+    return float(math.ceil(zone_temp)) + _LCD_EDIT_BASE_MARGIN_C
+
+
+def _lcd_edit_seg_duration_s(prev_target: float, seg: dict) -> float:
+    """Nominal seconds a segment takes: the ramp from the previous target at
+    the segment's own rate plus its dwell. The executor's dwell credit can only
+    shorten it, so it is an upper bound on the nominal time."""
+    ramp = float(seg["ramp_c_per_hr"])
+    ramp_s = abs(float(seg["target_c"]) - float(prev_target)) / ramp * 3600.0 if ramp > 0 else 0.0
+    return ramp_s + float(seg["dwell_min"]) * 60.0
+
+
+def _lcd_edit_wait_s(seconds: float) -> float:
+    return min(float(seconds) + _LCD_EDIT_WAIT_MARGIN_S, _LCD_EDIT_WAIT_CAP_S)
 
 
 def _lcd_edit_names(tap: dict) -> set:
@@ -4354,6 +4396,10 @@ def _lcd_edit_page_state(ui) -> dict:
     names = {t.get("name") for t in targets if t.get("name")}
     if (tap or {}).get("busy") or not targets:
         return {"readable": False, "keypad": False}
+    if (tap or {}).get("truncated"):
+        # A truncated walk can omit the Prev/Next glyphs, which would read as
+        # "icon disabled"; never treat a partial list as a verified page.
+        return {"readable": False, "keypad": False, "truncated": True}
     state: Dict[str, Any] = {"readable": True, "keypad": _is_keypad_names(names), "apply": "Apply" in names,
                              "steppers": {}, "names": sorted(names)}
     for field, row_y in _LCD_EDIT_ROW_Y.items():
@@ -4432,6 +4478,18 @@ def _lcd_edit_nav_signature_ok(st: dict, k: int, count: int) -> bool:
     return (tb.get("prev") is not None) == (k > 0) and (tb.get("next") is not None) == (k < count - 1)
 
 
+def _lcd_edit_read_settled(env: dict) -> dict:
+    """Page state, re-polled (bounded 2 s) while unreadable (busy, empty or a
+    truncated tap list) so navigation never decides from a partial read."""
+    ui, sleep, now = env["ui"], env["sleep"], env["now"]
+    deadline = now() + 2.0
+    while True:
+        st = _lcd_edit_page_state(ui)
+        if st["readable"] or st.get("keypad") or now() >= deadline:
+            return st
+        sleep(0.3)
+
+
 def _lcd_edit_goto(env: dict, target: int, count: int) -> "Optional[str]":
     """Put the Edit page on segment `target` of `count` WITHOUT assuming which
     segment it opened on (firmware opens it on the running segment). Drives to
@@ -4449,7 +4507,7 @@ def _lcd_edit_goto(env: dict, target: int, count: int) -> "Optional[str]":
     anchor = count - 1 if to_end else 0
     drive, back = ("next", "prev") if to_end else ("prev", "next")
     for _ in range(count):
-        st = _lcd_edit_page_state(ui)
+        st = _lcd_edit_read_settled(env)
         if not st["readable"]:
             return "unreadable"
         if st["keypad"]:
@@ -4460,7 +4518,7 @@ def _lcd_edit_goto(env: dict, target: int, count: int) -> "Optional[str]":
         if why:
             return why
         sleep(0.3)
-    st = _lcd_edit_page_state(ui)
+    st = _lcd_edit_read_settled(env)
     if not st["readable"]:
         return "unreadable"
     if st["keypad"]:
@@ -4661,7 +4719,10 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
             if not exec_now or exec_now.get("state_name") != "running":
                 why_not = (
                     f"the firing is no longer running (exec={exec_now!r}): it ended before Edit could be "
-                    "tapped, which is a profile that is too short, not home-page refresh latency")
+                    "tapped. Either the profile ran out (the executor's warm start skips every segment "
+                    "whose target is <= the zone temperature, profile_executor_start.c:371-479, so a "
+                    "segment-0 target at or below the reading is skipped and a short profile can end at "
+                    "once) or the firing never started; it is not home-page refresh latency")
             else:
                 why_not = (f"the firing is still running (exec={exec_now!r}) so the home page was expected to "
                            f"show Edit within a {UI_HOME_REFRESH_MS} ms refresh")
@@ -4773,7 +4834,7 @@ def _lcd_edit_pstep(ProfileSegment, seg: dict):
 
 def _lcd23_plan(ctx: dict, zone_temp: float):
     from .. import devices
-    base = float(math.floor(zone_temp))
+    base = _lcd_edit_base(zone_temp)
     limits = _lcd_edit_zone_limits(ctx)
     ramp, why = _lcd_edit_base_ramp(limits)
     if ramp is None:
@@ -4859,7 +4920,10 @@ def _lcd23_body(env: dict) -> CaseResult:
     why = _lcd_edit_step(env, "target", "+")
     if why:
         return _lcd_edit_tap_failure(env, f"segment-{run_now} target +", why, cid)
-    deadline = now() + _LCD23_ADVANCE_WAIT_S
+    prev_t = observed.get("zone_temp_c") if run_now == 0 else orig[run_now - 1]["target_c"]
+    advance_wait_s = _lcd_edit_wait_s(_lcd_edit_seg_duration_s(prev_t, orig[run_now]))
+    observed["advance_wait_s"] = advance_wait_s
+    deadline = now() + advance_wait_s
     advanced = None
     while True:
         ex_now = _lcd22_exec_dict(srv)
@@ -4872,9 +4936,10 @@ def _lcd23_body(env: dict) -> CaseResult:
     observed["advanced"] = advanced
     if advanced is None:
         return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
-            f"the firing did not leave segment {run_now} within {_LCD23_ADVANCE_WAIT_S:.0f} s "
+            f"the firing did not leave segment {run_now} within {advance_wait_s:.0f} s "
+            f"(its nominal ramp+dwell plus {_LCD_EDIT_WAIT_MARGIN_S:.0f} s) "
             f"(exec={ex_now!r}); the finished-segment refusal was not exercised"))
-    # Wait (bounded) for the page's 1 s poll to lock segment 0's steppers.
+    # Wait (bounded) for the page's 1 s poll to lock the finished segment's steppers.
     locked_seen = False
     lock_deadline = now() + _LCD_EDIT_ENDED_WAIT_S
     while True:
@@ -4958,14 +5023,14 @@ def _case_lcd23(ctx: dict) -> CaseResult:
 
 def _lcd24_plan(ctx: dict, zone_temp: float):
     from .. import devices
-    base = float(math.floor(zone_temp))
+    base = _lcd_edit_base(zone_temp)
     limits = _lcd_edit_zone_limits(ctx)
     ramp, why = _lcd_edit_base_ramp(limits)
     if ramp is None:
         return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
     orig = [
-        _lcd_edit_seg(base, ramp, _LCD_EDIT_SEG0_DWELL_MIN),
-        _lcd_edit_seg(base, ramp, 1),
+        _lcd_edit_seg(base, ramp, _LCD24_SEG_DWELL_MIN),
+        _lcd_edit_seg(base, ramp, _LCD24_SEG_DWELL_MIN),
         _lcd_edit_seg(base, ramp, 0),
     ]
     return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + 5.0, limits
@@ -5029,9 +5094,16 @@ def _lcd24_body(env: dict) -> CaseResult:
         return part1
     own_wid = J._lcd_edit_wid(status)
 
-    # Let the firing end on its own (segment 0's one-minute dwell, then a
-    # zero-dwell segment at the ambient temperature).
-    deadline = now() + _LCD24_END_WAIT_S
+    # Let the firing end on its own: the remaining ramps/dwells of the plan
+    # (every target is above the reading, so none is warm-start skipped),
+    # computed from the plan and bounded.
+    total_s, prev_t = 0.0, observed.get("zone_temp_c")
+    for seg in orig:
+        total_s += _lcd_edit_seg_duration_s(prev_t, seg)
+        prev_t = seg["target_c"]
+    end_wait_s = _lcd_edit_wait_s(total_s)
+    observed["end_wait_s"] = end_wait_s
+    deadline = now() + end_wait_s
     end_state = None
     while True:
         ex = _lcd22_exec_dict(srv)
