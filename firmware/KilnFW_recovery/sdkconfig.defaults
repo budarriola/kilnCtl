@@ -1,7 +1,8 @@
 # KilnFW_recovery sdkconfig defaults. Deliberately minimal: this image's
 # entire value is having almost nothing that can fail (docs/
 # OTA_SINGLE_SLOT_PLAN.md section 3), so it takes on none of the main
-# KilnFW project's PSRAM/LVGL/UART-bridge configuration.
+# KilnFW project's LVGL/UART-bridge configuration. It does take optional PSRAM
+# (see below) for upload buffers, per docs/RECOVERY_IMAGE_PLAN.md.
 
 CONFIG_IDF_TARGET="esp32s3"
 
@@ -15,12 +16,49 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # costs nothing and keeps behaviour uniform with the main app image.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# No PSRAM on this image -- the display line, Wi-Fi and httpd all fit
-# comfortably in internal DRAM at this image's scale, and leaving PSRAM out
-# removes an entire bring-up dependency from the one image that must not
-# fail (see main KilnFW's own sdkconfig.defaults comments on how much
-# complexity SPIRAM bring-up costs there).
-# CONFIG_SPIRAM is not set
+# PSRAM ON, but optional. The recovery image's upload paths want big buffers
+# (a whole Pico image held for the Pico's gap-retransmit rounds, ESP image
+# chunk staging; docs/RECOVERY_IMAGE_PLAN.md), which do not fit internal DRAM.
+# Settings mirror firmware/KilnFW/sdkconfig.defaults (octal, CLK_IO 30, CS_IO
+# 26, 40 MHz -- this board's wiring). Two deliberate differences from the main
+# app: SPIRAM_MEMTEST is OFF (it adds seconds to every boot of the one image
+# that must come up fast), and SPIRAM_IGNORE_NOTFOUND is ON so a missing or
+# failed PSRAM degrades to small internal buffers instead of an init abort --
+# this image must still boot with no PSRAM at all.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_CLK_IO=30
+CONFIG_SPIRAM_CS_IO=26
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+# CONFIG_SPIRAM_MEMTEST is not set
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Size trims. WPA2-PSK is the only Wi-Fi mode this image uses (the STA and
+# SoftAP both pick WIFI_AUTH_WPA2_PSK or OPEN in recovery_wifi.c), so WPA3-SAE
+# (and its dependents H2E/SAE-PK/SoftAP-SAE/WPA3-compatible), OWE and WPA
+# enterprise are removed, and IPv6 is off (IPv4 only, the web page is reached
+# by IPv4 address). A WPA3-only AP is therefore not joinable from recovery.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# CONFIG_ESP_WIFI_ENABLE_WPA3_SAE is not set
+# CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA is not set
+# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
+# CONFIG_LWIP_IPV6 is not set
+
+# Log level WARN by default. Recovery has no log consumer in the field; WARN
+# keeps real faults on the UART without ESP_LOGI strings and formatting cost.
+# The bootloader keeps its own (INFO) level -- it is built separately, its
+# partition/boot-selection lines are the useful trail for an otadata problem,
+# and it is not part of the recovery.bin size.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+# Silent assertions: a failed assert still abort()s (same reset behaviour and
+# the same panic handler/coredump path), only the file/line/expression text is
+# dropped. Safe here because the abort address symbolizes against the ELF the
+# same way, and recovery has no behaviour keyed on assert text.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 
 # Single, small nonce/HMAC-scale HTTP server -- no need for esp-tls's larger
 # receive buffers or many concurrent sockets.
