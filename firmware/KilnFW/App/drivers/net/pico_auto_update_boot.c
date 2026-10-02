@@ -51,6 +51,28 @@ static const char *TAG = "pico_auto_update";
 static SafetyLinkClass *s_link;
 static TaskHandle_t s_task; /* stack_margin_register() target; also the "already running" guard */
 
+/* The Pico's own reported active slot (Frame A V3 flags2). The Pico only
+ * sends a V3 Frame A once it has confirmed this ESP via ANNOUNCE_VERSION, and
+ * its FW_VERSION burst (what wait_for_peer_identity() waits for) can land
+ * before that, so identity-known does not by itself imply the slot byte is
+ * present. Callers invoke this only after identity is known; it then polls
+ * briefly for link_up AND pico_active_slot_known, and reports unknown on
+ * timeout (an older Pico, or a non-slot-linked target) -- never a guess. */
+#define ACTIVE_SLOT_WAIT_MS 3000
+static bool wait_for_wire_active_slot(bool *out_is_b)
+{
+    const int attempts = ACTIVE_SLOT_WAIT_MS / FW_VERSION_POLL_MS;
+    for (int i = 0; i < attempts; i++) {
+        safety_link_status_t st;
+        if (safety_link_get_status(s_link, &st) == ESP_OK && st.link_up && st.pico_active_slot_known) {
+            *out_is_b = st.pico_active_slot_is_b;
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(FW_VERSION_POLL_MS));
+    }
+    return false;
+}
+
 /* Waits for the Pico's reported build identity. Returns true and fills the
  * caller's buffers only once safety_link_get_peer_build_status() reports
  * known. commit_buf is NOT NUL-terminated by that call -- *out_commit_len is
@@ -440,9 +462,14 @@ static void pico_auto_update_task(void *arg)
                                                          in.observed_commit_len);
     (void)pico_update_attempts_load(pair_hash, &in.attempt_count, &in.prior_attempt_failed);
     if (use_embedded) {
-        /* Alternates A/B per pair, per pico_update_attempts_next_slot()'s own
-         * header comment; a fresh pair defaults to slot 0/A. */
-        (void)pico_update_attempts_next_slot(pair_hash, &use_slot);
+        /* The Pico's reported active slot wins; the persisted alternation
+         * guess is used only while it is unknown (a fresh pair defaults to
+         * slot 0/A) -- see pico_update_attempts_next_slot(). Only read once
+         * the peer identity is known (link handshake + ANNOUNCE_VERSION done),
+         * else treated as unknown. */
+        bool wire_is_b = false;
+        bool wire_known = in.fw_version_known && wait_for_wire_active_slot(&wire_is_b);
+        (void)pico_update_attempts_next_slot(pair_hash, wire_known, wire_is_b, &use_slot);
     }
 
     const char *why = NULL;

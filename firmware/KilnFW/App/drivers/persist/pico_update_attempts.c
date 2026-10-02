@@ -271,27 +271,48 @@ bool pico_update_attempts_record_failure(uint32_t pair_hash)
  * implicit contract "the ESP alternated correctly last time". A Pico
  * reflashed by other means (SWD, `debug_program(peer="pico")`) or a Pico
  * that rejects a write for a reason unrelated to slot linkage silently
- * leaves this side's `last_slot` stale; the next alternation guess is then
- * simply wrong, discovered only via
- * SAFETY_LINK_UPDATE_STATE_REJECTED_SLOT_LINKAGE (state 8) at the next
- * attempt, not before.
+ * leaves this side's `last_slot` stale.
  *
- * 2026-09-23 (docs/PICO_AUTO_UPDATE_PLAN.md:64): a wire field carrying the
- * Pico's real active slot back now DOES exist -- safety_link.h's cached
- * `pico_active_slot_known`/`pico_active_slot_is_b`
- * (SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B, flags2 bits
- * 3/4, mirroring SaftyFW's `update_task_get_active_slot()`). This function
- * does not yet read it: deciding what to DO when it disagrees with
- * `last_slot` (trust the wire and overwrite the persisted guess? refuse to
- * alternate? just log?) is a separate design decision, not a small,
- * obviously-correct change, and is left as a TODO here rather than folded
- * into this pass. Do not add other state here that assumes this value
- * tracks the Pico without a read-back to confirm it. */
-bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot)
+ * Owner decision 2026-10-02 (docs/PICO_AUTO_UPDATE_PLAN.md sec 12): the
+ * Pico's own report wins. When the wire slot is known (safety_link.h's
+ * `pico_active_slot_known`/`pico_active_slot_is_b`) the next slot is the
+ * opposite of the reported active slot; the persisted `last_slot` guess is
+ * used only when the wire slot is unknown. When the two disagree,
+ * pico_update_attempts_next_slot() logs it once at WARN and rewrites the
+ * persisted guess to the reported slot, so the pair stops drifting.
+ *
+ * Pure selection, no I/O: unit-tested directly. */
+int pico_update_attempts_select_slot(bool have_record, int last_slot, bool wire_known,
+                                     bool wire_active_is_b, bool *out_disagree)
+{
+    bool disagree = have_record && wire_known && ((last_slot != 0) != wire_active_is_b);
+    if (out_disagree != NULL) {
+        *out_disagree = disagree;
+    }
+    if (wire_known) {
+        return wire_active_is_b ? 0 : 1;
+    }
+    return (have_record && last_slot == 0) ? 1 : 0; /* fresh pair, or last was B -> start/return to A */
+}
+
+bool pico_update_attempts_next_slot(uint32_t pair_hash, bool wire_known, bool wire_active_is_b,
+                                    int *out_slot)
 {
     pico_update_attempts_record_t rec;
     bool have = load_record(&rec) && rec.pair_hash == pair_hash;
-    int next = (have && rec.last_slot == 0u) ? 1 : 0; /* fresh pair, or last was B -> start/return to A */
+    bool disagree = false;
+    int next = pico_update_attempts_select_slot(have, have ? (int)rec.last_slot : 0, wire_known,
+                                                wire_active_is_b, &disagree);
+    if (disagree) {
+        int active = wire_active_is_b ? 1 : 0;
+        ESP_LOGW(TAG, "persisted last_slot=%c disagrees with the Pico's reported active slot %c -- "
+                      "trusting the Pico, next slot %c, updating the persisted guess",
+                 rec.last_slot != 0u ? 'B' : 'A', active != 0 ? 'B' : 'A', next != 0 ? 'B' : 'A');
+        if (!write_verified(pair_hash, rec.attempt_count, rec.failed != 0u, active)) {
+            ESP_LOGW(TAG, "could not persist the corrected last_slot guess (the Pico's report still "
+                          "decides the slot next boot)");
+        }
+    }
     if (out_slot != NULL) {
         *out_slot = next;
     }

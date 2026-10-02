@@ -228,7 +228,7 @@ static void test_next_slot_alternates_and_survives_reboot(void)
     uint32_t pair = 0xA1B2C3D4u;
     int slot = -1;
 
-    bool have = pico_update_attempts_next_slot(pair, &slot);
+    bool have = pico_update_attempts_next_slot(pair, false, false, &slot);
     TEST_CHECK(!have, "a fresh pair has no prior record");
     TEST_CHECK(slot == 0, "a fresh pair's first suggested slot is A (0)");
 
@@ -236,12 +236,12 @@ static void test_next_slot_alternates_and_survives_reboot(void)
     TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &new_count), "attempt 1 tries slot A");
 
     // Simulate a reboot: nothing but the NVS-backed fake_kv store survives.
-    have = pico_update_attempts_next_slot(pair, &slot);
+    have = pico_update_attempts_next_slot(pair, false, false, &slot);
     TEST_CHECK(have, "the slot A attempt is readable after a simulated reboot");
     TEST_CHECK(slot == 1, "after slot A was tried, the next suggested slot is B (1)");
 
     TEST_CHECK(pico_update_attempts_record_attempt(pair, 1, &new_count), "attempt 2 tries slot B");
-    have = pico_update_attempts_next_slot(pair, &slot);
+    have = pico_update_attempts_next_slot(pair, false, false, &slot);
     TEST_CHECK(have, "the slot B attempt is readable after a simulated reboot");
     TEST_CHECK(slot == 0, "after slot B was tried, the next suggested slot flips back to A (0)");
 
@@ -250,9 +250,82 @@ static void test_next_slot_alternates_and_survives_reboot(void)
     // alternation -- it must not inherit slot B's "next is A" from the
     // unrelated pair above.
     uint32_t other_pair = 0xDEADBEEFu;
-    have = pico_update_attempts_next_slot(other_pair, &slot);
+    have = pico_update_attempts_next_slot(other_pair, false, false, &slot);
     TEST_CHECK(!have, "an unrelated pair has no record of its own");
     TEST_CHECK(slot == 0, "an unrelated pair's first suggested slot is still A (0), not inherited");
+}
+
+// Owner decision 2026-10-02: the Pico's reported active slot wins; the
+// persisted guess is used only when the wire slot is unknown.
+static void test_select_slot_pure_truth_table(void)
+{
+    bool dis = true;
+    TEST_CHECK(pico_update_attempts_select_slot(false, 0, true, false, &dis) == 1 && !dis,
+               "known A, fresh pair -> next B, no disagreement without a record");
+    TEST_CHECK(pico_update_attempts_select_slot(false, 0, true, true, &dis) == 0 && !dis,
+               "known B, fresh pair -> next A");
+    TEST_CHECK(pico_update_attempts_select_slot(true, 0, true, false, &dis) == 1 && !dis,
+               "known A, last tried A -> agree, next B");
+    TEST_CHECK(pico_update_attempts_select_slot(true, 1, true, true, &dis) == 0 && !dis,
+               "known B, last tried B -> agree, next A");
+    TEST_CHECK(pico_update_attempts_select_slot(true, 0, true, true, &dis) == 0 && dis,
+               "known B but last tried A -> wire wins (A), disagreement");
+    TEST_CHECK(pico_update_attempts_select_slot(true, 1, true, false, &dis) == 1 && dis,
+               "known A but last tried B -> wire wins (B), disagreement");
+    TEST_CHECK(pico_update_attempts_select_slot(true, 0, false, true, &dis) == 1 && !dis,
+               "unknown wire ignores the wire value, falls back to the guess");
+    TEST_CHECK(pico_update_attempts_select_slot(false, 0, false, false, NULL) == 0,
+               "unknown wire, fresh pair -> A, NULL out_disagree tolerated");
+}
+
+static void test_next_slot_wire_known_a_and_b(void)
+{
+    reset_store();
+    uint32_t pair = 0x11112222u;
+    int slot = -1;
+    bool have = pico_update_attempts_next_slot(pair, true, false, &slot);
+    TEST_CHECK(!have && slot == 1, "fresh pair, Pico reports A -> push B");
+    have = pico_update_attempts_next_slot(pair, true, true, &slot);
+    TEST_CHECK(!have && slot == 0, "fresh pair, Pico reports B -> push A");
+}
+
+static void test_next_slot_unknown_wire_uses_guess(void)
+{
+    reset_store();
+    uint32_t pair = 0x33334444u;
+    uint32_t n = 0;
+    int slot = -1;
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 1, &n), "record slot B attempt");
+    // The wire value passed alongside wire_known=false must be ignored.
+    (void)pico_update_attempts_next_slot(pair, false, false, &slot);
+    TEST_CHECK(slot == 0, "unknown wire, last tried B -> guess says A");
+    (void)pico_update_attempts_next_slot(pair, false, true, &slot);
+    TEST_CHECK(slot == 0, "unknown wire ignores wire_active_is_b");
+}
+
+static void test_next_slot_disagreement_wire_wins_and_guess_updated(void)
+{
+    reset_store();
+    uint32_t pair = 0x55556666u;
+    uint32_t n = 0;
+    int slot = -1;
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &n), "attempt 1 tried A");
+    TEST_CHECK(pico_update_attempts_record_attempt(pair, 0, &n) && n == 2, "attempt 2 tried A");
+    TEST_CHECK(pico_update_attempts_record_failure(pair), "mark failed");
+
+    // Guess says last=A (next B); Pico reports it is on B (next must be A).
+    bool have = pico_update_attempts_next_slot(pair, true, true, &slot);
+    TEST_CHECK(have, "record existed");
+    TEST_CHECK(slot == 0, "disagreement: the Pico's report wins, next is A");
+
+    pico_update_attempts_record_t rec;
+    TEST_CHECK(load_record(&rec), "record still valid after the guess update");
+    TEST_CHECK(rec.last_slot == 1u, "persisted guess updated to the reported active slot B");
+    TEST_CHECK(rec.attempt_count == 2u && rec.failed == 1u, "count and failed flag preserved");
+
+    // With the wire now unknown the corrected guess drives the answer: no drift.
+    (void)pico_update_attempts_next_slot(pair, false, false, &slot);
+    TEST_CHECK(slot == 0, "after the update the guess alone agrees (last B -> next A)");
 }
 
 void run_test_pico_update_attempts(void)
@@ -269,4 +342,8 @@ void run_test_pico_update_attempts(void)
     test_record_attempt_recovers_from_a_single_lying_write();
     test_record_attempt_refuses_success_when_every_write_lies();
     test_next_slot_alternates_and_survives_reboot();
+    test_select_slot_pure_truth_table();
+    test_next_slot_wire_known_a_and_b();
+    test_next_slot_unknown_wire_uses_guess();
+    test_next_slot_disagreement_wire_wins_and_guess_updated();
 }

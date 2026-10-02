@@ -79,12 +79,26 @@ bool pico_update_attempts_load(uint32_t pair_hash, uint32_t *out_count, bool *ou
  * same wrong guess for the whole budget. */
 bool pico_update_attempts_record_attempt(uint32_t pair_hash, int slot_tried, uint32_t *out_new_count);
 
+/* Pure slot selection (no I/O). If `wire_known`, the Pico's report wins: the
+ * result is the opposite of the reported active slot (`wire_active_is_b`).
+ * Otherwise the result alternates from `last_slot` (0=A,1=B) when
+ * `have_record`, and is 0 (A) for a fresh pair. `*out_disagree` (may be
+ * NULL) is true iff there is a record AND the wire slot is known AND they
+ * differ (last_slot != reported active slot). */
+int pico_update_attempts_select_slot(bool have_record, int last_slot, bool wire_known,
+                                     bool wire_active_is_b, bool *out_disagree);
+
 /* Which embedded slot image (0=A, 1=B) the NEXT attempt for `pair_hash`
- * should push, alternating from whichever was tried last for this exact
- * pair. A fresh pair (no record, or a record for a different pair) always
- * starts at slot 0 (A) -- an arbitrary but fixed starting point, since
- * nothing distinguishes the two slots' likelihood of being correct on a
- * board this ESP has never attempted before.
+ * should push. Owner decision 2026-10-02: when the Pico's reported active
+ * slot is known (`wire_known`/`wire_active_is_b`, from safety_link.h's
+ * pico_active_slot_known/_is_b -- the caller must read them only once the
+ * link is up and a V3 Frame A has arrived, else pass wire_known=false) the
+ * answer is the opposite of it. When unknown, it alternates from whichever
+ * slot was tried last for this exact pair, and a fresh pair starts at slot 0
+ * (A). On a disagreement between the wire and the persisted guess it logs
+ * once at WARN and rewrites the persisted last_slot to the reported slot
+ * (count and failed flag preserved). Returns true iff a record for
+ * `pair_hash` existed.
  *
  * HOOK FOR THE SAFTYFW-SIDE REJECTION (N6, opus review 2026-09-20: this
  * rejection code EXISTS on the wire already -- Pico update_task.c:244's
@@ -100,7 +114,8 @@ bool pico_update_attempts_record_attempt(uint32_t pair_hash, int slot_tried, uin
  * budget for a guess that was never given a fair chance to succeed) -- see
  * pico_auto_update_boot.c's attempt_update(), which names this same hook at
  * its ota_pico_relay_start() call site. */
-bool pico_update_attempts_next_slot(uint32_t pair_hash, int *out_slot);
+bool pico_update_attempts_next_slot(uint32_t pair_hash, bool wire_known, bool wire_active_is_b,
+                                    int *out_slot);
 
 /* Marks `pair_hash`'s most recent attempt as a terminal (non-retryable)
  * failure -- plan sec 4/7's third unrecoverable cause. Does not touch the
