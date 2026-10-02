@@ -183,8 +183,9 @@ to keep the edit that was mid-flight.
 
 Because this is web-only by requirement, a board whose operator never opens
 the browser again keeps the working copy as an ordinary, named-by-derivation
-profile forever. That is safe: nothing is lost and nothing is overwritten. The
-LCD gets no page, no menu entry and no prompt.
+profile forever. That is safe: nothing is lost and nothing is overwritten.
+*(Superseded 2026-10-01 for the LCD: it now has a decision page, see "LCD
+end-of-run decision" at the end of this document.)*
 
 The record is cleared only by an explicit decision — save-as, overwrite, or
 discard. Discard deletes the working slot through the existing
@@ -603,3 +604,33 @@ name is a normal, allowed save, not a collision -- consistent with the
 5dd23944 fix that made ordinary builtin-copy saves work at all. See
 `live_profile.c`'s `live_edit_name_collides_ex()` comment for the full
 history.
+
+## LCD end-of-run decision (2026-10-01)
+
+When `pending_decision` is true (record pending and the executor not
+RUNNING/PAUSED/FAULTED) the LCD can resolve it without the browser.
+
+- **Shared core.** `profiles_live_decide_apply()` in `profiles_live_http.c` is
+  the single implementation of discard / save-as / overwrite; the HTTP decide
+  handler now only parses the form and maps the result code to a status, and
+  the LCD page calls the same function. No route was added and no rule
+  duplicated. `profiles_live_decide_status()` and
+  `profiles_live_decide_default_name()` are the read-only helpers.
+- **Reach.** The home Edit button slot is relabeled "Keep?" while a decision is
+  owed (cached on `live_profile_generation()`, so the 1 Hz refresh does not hit
+  NVS); the Edit firing page's Apply button becomes "Save/discard edit..." once
+  the firing ends. Both go through the LCD PIN gate and open page
+  `live_decide` (`ui_page_live_decide.c`).
+- **Page.** Discard (confirm dialog), Save as new, Overwrite original (confirm
+  dialog; disabled with a note for a builtin origin, mirroring the web 403,
+  and refused by the core regardless). The LCD has no text entry, so Save as
+  auto-names the copy "<origin>-E", then -E2..-E9, clipped to 15 characters,
+  checked against user slots; the name is shown afterwards and can be changed
+  on the web.
+- **Behavior change.** Discard now reports an error (HTTP 500) if the record
+  could not be cleared; previously the failure was ignored.
+- **Storage.** The NVS writes run on the LVGL task, whose stack is internal
+  static SRAM (same precedent as the builder review page's save); no new task.
+- **Bench still owed.** LCD-24 discards over HTTP today; a case that drives
+  the LCD Keep?/Discard buttons (PIN, confirm) has not been written or run on
+  hardware.

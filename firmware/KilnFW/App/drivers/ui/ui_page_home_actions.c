@@ -8,6 +8,8 @@
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
 #include "ui_page_edit_firing.h" /* owner request 2026-09-28 -- Edit-firing button */
+#include "ui_page_live_decide.h" /* "Keep?" -- end-of-run Discard/Save as/Overwrite */
+#include "profiles_live_http.h" /* profiles_live_decide_status() */
 #include "ui_page_profile_picker.h" /* ui_page_profile_picker_pick_refresh() -- UI_PLAN.md 6.1 */
 #include "profiles_builtin.h" /* profiles_builtin_get(), PROFILE_BUILTIN_ID_BASE -- UI_PLAN.md 6.1 */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
@@ -359,6 +361,17 @@ void ui_home_pause_resume_btn_cb(lv_event_t *e)
 static void ui_home_edit_btn_gated_cb(void *user_data)
 {
     (void)user_data;
+    /* While a firing runs this is "Edit"; once it has ended with a working
+     * copy still owed a decision the same button reads "Keep?" and opens the
+     * Discard / Save as / Overwrite page instead (same shared decide API as
+     * the web). Re-derived here, after the PIN, not trusted from the tap. */
+    profiles_live_decide_status_t ds;
+    profiles_live_decide_status(&ds);
+    if (ds.pending_decision) {
+        ui_page_live_decide_prepare();
+        kiln_ui_show("live_decide");
+        return;
+    }
     ui_page_edit_firing_prepare();
     kiln_ui_show("edit_firing");
 }

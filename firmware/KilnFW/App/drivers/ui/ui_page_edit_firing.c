@@ -5,8 +5,11 @@
 
 #include "esp_heap_caps.h"
 #include "kiln_ui.h"
+#include "profiles_live_http.h" /* profiles_live_decide_status() -- end-of-run decision button */
 #include "ui_edit_firing_apply.h" /* every rule and the whole Apply sequence -- this
                                    * file owns only widgets, paging and text */
+#include "ui_lcd_lock.h"
+#include "ui_page_live_decide.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
@@ -61,6 +64,8 @@ typedef struct {
     lv_obj_t *dwell_minus, *dwell_plus;
     lv_obj_t *status_label;
     lv_obj_t *apply_btn;
+    lv_obj_t *apply_lbl;
+    bool decide_mode;         /* firing ended with a decision owed: apply_btn is "Keep edit?" */
     ui_topbar_t tb;
 } edit_firing_page_t;
 
@@ -133,12 +138,19 @@ static void refresh(void)
         lv_label_set_text(s_pg->ramp_val_label, "--");
         lv_label_set_text(s_pg->dwell_val_label, "--");
         set_all_steppers(false);
-        lv_obj_add_flag(s_pg->apply_btn, LV_OBJ_FLAG_HIDDEN);
+        if (s_pg->decide_mode) {
+            lv_label_set_text(s_pg->apply_lbl, "Save/discard edit...");
+            lv_obj_remove_flag(s_pg->apply_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text(s_pg->apply_lbl, "Apply");
+            lv_obj_add_flag(s_pg->apply_btn, LV_OBJ_FLAG_HIDDEN);
+        }
         ui_topbar_set_title(&s_pg->tb, "Edit Firing");
         ui_topbar_set_prev_enabled(&s_pg->tb, false);
         ui_topbar_set_next_enabled(&s_pg->tb, false);
         return;
     }
+    lv_label_set_text(s_pg->apply_lbl, "Apply");
     lv_obj_remove_flag(s_pg->apply_btn, LV_OBJ_FLAG_HIDDEN);
 
     const profile_t *p = s_pg->working;
@@ -203,6 +215,7 @@ void ui_page_edit_firing_prepare(void)
     }
     release_working();
     s_pg->cur_seg = 0;
+    s_pg->decide_mode = false;
     set_status("");
 
     s_pg->working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -246,6 +259,7 @@ static void poll_timer_cb(lv_timer_t *t)
         }
         if (s_pg->working && edit_firing_load(s_pg->working, &s_pg->ctx)) {
             s_pg->active = true;
+            s_pg->decide_mode = false;
             s_pg->cur_seg = s_pg->ctx.running_seg;
             s_pg->applied_generation = 0;
             /* Clear a leftover "Firing ended." / "A different firing is
@@ -263,6 +277,15 @@ static void poll_timer_cb(lv_timer_t *t)
     case EDIT_FIRING_POLL_ENDED:
         release_working();
         set_status("Firing ended.");
+        {
+            /* Same predicate as the web's pending_decision. */
+            profiles_live_decide_status_t ds;
+            profiles_live_decide_status(&ds);
+            s_pg->decide_mode = ds.pending_decision;
+            if (ds.pending_decision) {
+                set_status("Firing ended -- keep this edit?");
+            }
+        }
         break;
     case EDIT_FIRING_POLL_OTHER_FIRING:
         release_working();
@@ -347,9 +370,23 @@ static void dwell_plus_cb(lv_event_t *e) { (void)e; step(EDIT_FIRING_FIELD_DWELL
  * live_profile_save_working() is legal here -- the same precedent as
  * ui_page_profile_builder_review.c's do_save(); live_profile.c refuses the
  * write itself on an external-RAM stack anyway. */
+static void open_decide_gated_cb(void *user_data)
+{
+    (void)user_data;
+    ui_page_live_decide_prepare();
+    kiln_ui_show("live_decide");
+}
+
 static void apply_cb(lv_event_t *e)
 {
     (void)e;
+    if (s_pg && s_pg->decide_mode && !s_pg->active) {
+        /* End of run: the button opens the Discard / Save as / Overwrite
+         * page. Same PIN gate as the home Edit button -- a session that
+         * expired while this page sat open must not reach a write action. */
+        ui_lcd_lock_run_gated("Enter PIN to keep/discard edit", LCD_PIN_ROLE_USER, open_decide_gated_cb, NULL);
+        return;
+    }
     if (!s_pg || !s_pg->active || !s_pg->working) return;
 
     char err[128];
@@ -470,15 +507,14 @@ lv_obj_t *ui_page_edit_firing_build(void)
     lv_obj_set_style_bg_color(s_pg->apply_btn, UI_THEME_ACCENT_4, 0);
     lv_obj_set_style_radius(s_pg->apply_btn, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(s_pg->apply_btn, apply_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *apply_lbl = lv_label_create(s_pg->apply_btn);
-    lv_label_set_text(apply_lbl, "Apply");
-    lv_obj_center(apply_lbl);
+    s_pg->apply_lbl = lv_label_create(s_pg->apply_btn);
+    lv_label_set_text(s_pg->apply_lbl, "Apply");
+    lv_obj_center(s_pg->apply_lbl);
     ui_theme_apply_touch_area(s_pg->apply_btn, false);
 
-    /* Owner: "leave the working copy's end-of-run decision to the web". */
     lv_obj_t *hint = lv_label_create(scr);
     lv_obj_set_style_text_color(hint, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(hint, "Save/discard this edit on the web when the firing ends.");
+    lv_label_set_text(hint, "When the firing ends, save or discard this edit here or on the web.");
 
     ui_topbar_raise(&s_pg->tb);
 

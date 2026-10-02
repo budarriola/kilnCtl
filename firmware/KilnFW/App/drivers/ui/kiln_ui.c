@@ -12,6 +12,7 @@
 #include "ui_page_config.h"
 #include "ui_page_diagnostics.h"
 #include "ui_page_edit_firing.h"
+#include "ui_page_live_decide.h"
 #include "ui_page_home.h"
 #include "ui_page_network.h"
 #include "ui_page_network_manage.h"
@@ -289,6 +290,9 @@ esp_err_t kiln_ui_init(void)
      * Config's own nav button, so a second, separate path to "touch_test"
      * would only be reachable mid-calibration anyway. */
     err = kiln_ui_register_page("edit_firing", ui_page_edit_firing_build);
+    if (err != ESP_OK) return err;
+
+    err = kiln_ui_register_page("live_decide", ui_page_live_decide_build);
     if (err != ESP_OK) return err;
 
     err = kiln_ui_register_page("touch_test", ui_page_touch_test_build);

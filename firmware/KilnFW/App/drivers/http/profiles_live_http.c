@@ -477,9 +477,164 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     return send_err;
 }
 
+/* ---- decide core (shared with the LCD) ---------------------------------- */
+
+void profiles_live_decide_status(profiles_live_decide_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    live_edit_record_t rec;
+    if (!live_profile_load_record(&rec) || !rec.pending) {
+        return;
+    }
+    out->record_pending = true;
+    out->origin_is_builtin = rec.origin_is_builtin != 0;
+    strncpy(out->origin_name, rec.origin_name, sizeof(out->origin_name) - 1);
+    profile_executor_live_status_t st;
+    profile_executor_get_live_status(&st);
+    out->pending_decision = live_edit_should_prompt(&rec, st.active);
+}
+
+bool profiles_live_decide_default_name(const profiles_live_decide_status_t *st, char *out, size_t cap)
+{
+    if (!st || !out || cap < PROFILE_NAME_MAX_LEN + 1) {
+        return false;
+    }
+    const char *base = st->origin_name[0] ? st->origin_name : "Edited";
+    for (unsigned n = 1; n <= 9; n++) {
+        char suffix[4];
+        if (n == 1) {
+            snprintf(suffix, sizeof(suffix), "-E");
+        } else {
+            snprintf(suffix, sizeof(suffix), "-E%u", n);
+        }
+        size_t keep = PROFILE_NAME_MAX_LEN - strlen(suffix);
+        size_t blen = strlen(base);
+        if (blen > keep) {
+            blen = keep;
+        }
+        memcpy(out, base, blen);
+        strcpy(out + blen, suffix);
+        if (!live_edit_name_collides_ex(out, live_http_name_at, NULL, 0xFF, false, NULL, 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+profiles_live_decide_result_t profiles_live_decide_apply(live_edit_decision_kind_t kind, const char *name, bool confirm,
+                                                          uint8_t *out_id, char *err, size_t err_cap)
+{
+    if (err && err_cap) {
+        err[0] = '\0';
+    }
+    live_edit_record_t rec;
+    if (!live_profile_load_record(&rec) || !rec.pending) {
+        snprintf(err, err_cap, "nothing pending");
+        return LIVE_DECIDE_NOTHING_PENDING;
+    }
+
+    if (kind == LIVE_EDIT_DECISION_DISCARD) {
+        live_edit_decide(LIVE_EDIT_DECISION_DISCARD, &rec, NULL, false, live_http_name_at, NULL, err, err_cap);
+        if (!live_profile_clear(err, err_cap)) {
+            return LIVE_DECIDE_SERVER_ERROR;
+        }
+        return LIVE_DECIDE_OK;
+    }
+
+    if (kind == LIVE_EDIT_DECISION_SAVE_AS) {
+        if (!name || !name[0]) {
+            snprintf(err, err_cap, "missing name");
+            return LIVE_DECIDE_BAD_REQUEST;
+        }
+        if (!live_edit_decide(LIVE_EDIT_DECISION_SAVE_AS, &rec, name, false, live_http_name_at, NULL, err, err_cap)) {
+            return LIVE_DECIDE_BAD_REQUEST;
+        }
+        profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!working) {
+            snprintf(err, err_cap, "out of memory");
+            return LIVE_DECIDE_SERVER_ERROR;
+        }
+        if (!live_profile_load_working(working)) {
+            heap_caps_free(working);
+            snprintf(err, err_cap, "out of memory");
+            return LIVE_DECIDE_SERVER_ERROR;
+        }
+        strncpy(working->name, name, sizeof(working->name) - 1);
+        working->name[sizeof(working->name) - 1] = '\0';
+        uint8_t id = 0;
+        uint8_t warn_count = 0;
+        bool saved = profiles_http_save(PROFILES_MAX_COUNT /* first free */, working, &id, &warn_count, err, err_cap);
+        heap_caps_free(working);
+        if (!saved) {
+            return LIVE_DECIDE_BAD_REQUEST;
+        }
+        char clear_err[64];
+        live_profile_clear(clear_err, sizeof(clear_err));
+        if (out_id) {
+            *out_id = id;
+        }
+        return LIVE_DECIDE_OK;
+    }
+
+    if (kind == LIVE_EDIT_DECISION_OVERWRITE) {
+        if (!live_edit_can_overwrite(&rec, err, err_cap)) {
+            return LIVE_DECIDE_FORBIDDEN;
+        }
+        if (!confirm) {
+            snprintf(err, err_cap, "confirm=1 required to overwrite");
+            return LIVE_DECIDE_BAD_REQUEST;
+        }
+        if (!live_edit_decide(LIVE_EDIT_DECISION_OVERWRITE, &rec, NULL, true, live_http_name_at, NULL, err, err_cap)) {
+            return LIVE_DECIDE_BAD_REQUEST;
+        }
+        profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!working) {
+            snprintf(err, err_cap, "out of memory");
+            return LIVE_DECIDE_SERVER_ERROR;
+        }
+        if (!live_profile_load_working(working)) {
+            heap_caps_free(working);
+            snprintf(err, err_cap, "out of memory");
+            return LIVE_DECIDE_SERVER_ERROR;
+        }
+        uint8_t id = 0;
+        uint8_t warn_count = 0;
+        bool saved = profiles_http_save(rec.origin_id, working, &id, &warn_count, err, err_cap);
+        heap_caps_free(working);
+        if (!saved) {
+            return LIVE_DECIDE_BAD_REQUEST;
+        }
+        char clear_err[64];
+        live_profile_clear(clear_err, sizeof(clear_err));
+        if (out_id) {
+            *out_id = id;
+        }
+        return LIVE_DECIDE_OK;
+    }
+
+    snprintf(err, err_cap, "unknown action");
+    return LIVE_DECIDE_BAD_REQUEST;
+}
+
+static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_result_t r, const char *err)
+{
+    switch (r) {
+    case LIVE_DECIDE_NOTHING_PENDING:
+        return send_conflict(req, err);
+    case LIVE_DECIDE_FORBIDDEN:
+        return send_forbidden(req, err);
+    case LIVE_DECIDE_SERVER_ERROR:
+        return send_server_error(req, err);
+    default:
+        return send_bad_request(req, err);
+    }
+}
+
 /* ---- POST /api/profile/live/decide -------------------------------------
  * action=save_as&name=... | action=overwrite&confirm=1 | action=discard.
- * 403 overwrite of a builtin origin; 400 overwrite without confirm=1. */
+ * 403 overwrite of a builtin origin; 400 overwrite without confirm=1.
+ * The decision itself is profiles_live_decide_apply() above -- this handler
+ * only parses the form and maps the result to a status. */
 
 static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
 {
@@ -493,86 +648,38 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
         return send_bad_request(req, "missing action");
     }
 
-    live_edit_record_t rec;
-    if (!live_profile_load_record(&rec) || !rec.pending) {
-        return send_conflict(req, "nothing pending");
-    }
-
     char err[160] = {0};
-
+    live_edit_decision_kind_t kind;
     if (strcmp(action, "discard") == 0) {
-        live_edit_decide(LIVE_EDIT_DECISION_DISCARD, &rec, NULL, false, live_http_name_at, NULL, err, sizeof(err));
-        live_profile_clear(err, sizeof(err));
-        return send_json(req, "{\"ok\":true}");
+        kind = LIVE_EDIT_DECISION_DISCARD;
+    } else if (strcmp(action, "save_as") == 0) {
+        kind = LIVE_EDIT_DECISION_SAVE_AS;
+    } else if (strcmp(action, "overwrite") == 0) {
+        kind = LIVE_EDIT_DECISION_OVERWRITE;
+    } else {
+        /* Unknown action: nothing pending still wins (409), as before. */
+        profiles_live_decide_status_t st;
+        profiles_live_decide_status(&st);
+        return st.record_pending ? send_bad_request(req, "unknown action") : send_conflict(req, "nothing pending");
     }
 
-    if (strcmp(action, "save_as") == 0) {
-        char name[PROFILE_NAME_MAX_LEN + 1];
-        if (http_form_find_field(body, "name", name, sizeof(name)) <= 0) {
-            return send_bad_request(req, "missing name");
-        }
-        if (!live_edit_decide(LIVE_EDIT_DECISION_SAVE_AS, &rec, name, false, live_http_name_at, NULL, err,
-                               sizeof(err))) {
-            return send_bad_request(req, err);
-        }
-        profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!working) {
-            return send_server_error(req, "out of memory");
-        }
-        if (!live_profile_load_working(working)) {
-            heap_caps_free(working);
-            return send_server_error(req, "out of memory");
-        }
-        strncpy(working->name, name, sizeof(working->name) - 1);
-        working->name[sizeof(working->name) - 1] = '\0';
-        uint8_t out_id = 0;
-        uint8_t warn_count = 0;
-        bool saved = profiles_http_save(PROFILES_MAX_COUNT /* first free */, working, &out_id, &warn_count, err,
-                                         sizeof(err));
-        heap_caps_free(working);
-        if (!saved) {
-            return send_bad_request(req, err);
-        }
-        live_profile_clear(err, sizeof(err));
+    char name[PROFILE_NAME_MAX_LEN + 1] = {0};
+    bool have_name = http_form_find_field(body, "name", name, sizeof(name)) > 0;
+    char confirm[4];
+    bool confirmed = http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 && strcmp(confirm, "1") == 0;
+
+    uint8_t out_id = 0;
+    profiles_live_decide_result_t r =
+        profiles_live_decide_apply(kind, have_name ? name : NULL, confirmed, &out_id, err, sizeof(err));
+    if (r != LIVE_DECIDE_OK) {
+        return send_decide_failure(req, r, err);
+    }
+    if (kind == LIVE_EDIT_DECISION_SAVE_AS) {
         char json[128];
         snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%u}", (unsigned)out_id);
         return send_json(req, json);
     }
-
-    if (strcmp(action, "overwrite") == 0) {
-        if (!live_edit_can_overwrite(&rec, err, sizeof(err))) {
-            return send_forbidden(req, err);
-        }
-        char confirm[4];
-        bool confirmed =
-            http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 && strcmp(confirm, "1") == 0;
-        if (!confirmed) {
-            return send_bad_request(req, "confirm=1 required to overwrite");
-        }
-        if (!live_edit_decide(LIVE_EDIT_DECISION_OVERWRITE, &rec, NULL, true, live_http_name_at, NULL, err,
-                               sizeof(err))) {
-            return send_bad_request(req, err);
-        }
-        profile_t *working = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!working) {
-            return send_server_error(req, "out of memory");
-        }
-        if (!live_profile_load_working(working)) {
-            heap_caps_free(working);
-            return send_server_error(req, "out of memory");
-        }
-        uint8_t out_id = 0;
-        uint8_t warn_count = 0;
-        bool saved = profiles_http_save(rec.origin_id, working, &out_id, &warn_count, err, sizeof(err));
-        heap_caps_free(working);
-        if (!saved) {
-            return send_bad_request(req, err);
-        }
-        live_profile_clear(err, sizeof(err));
-        return send_json(req, "{\"ok\":true}");
-    }
-
-    return send_bad_request(req, "unknown action");
+    return send_json(req, "{\"ok\":true}");
 }
 
 /* ---- registration -------------------------------------------------------- */

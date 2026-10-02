@@ -168,6 +168,9 @@ void ui_home_profile_btn_cb(lv_event_t *e);
 void ui_home_pause_resume_btn_cb(lv_event_t *e);
 void ui_home_edit_btn_cb(lv_event_t *e);
 
+/* Cached "a live-edit decision is owed" read (ui_page_home_refresh.c). */
+bool ui_home_live_edit_decision_owed(void);
+
 /* WEB_AUTH_PLAN.md item 10 -- one shared corner-tap handler for all four
  * hit zones, discriminated by the corner baked into the event's user_data
  * at lv_obj_add_event_cb() time (auth_reset_gesture_corner_t cast through

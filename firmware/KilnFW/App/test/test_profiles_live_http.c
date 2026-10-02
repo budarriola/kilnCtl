@@ -552,6 +552,11 @@ static void fork_for_tests(uint8_t origin_id)
     g_fake_live_status.segment_index = 0;
     profiles_slot_set(origin_id);
     strncpy(g_fake_slots[origin_id].name, "origin", sizeof(g_fake_slots[origin_id].name) - 1);
+    if (origin_id < PROFILES_MAX_COUNT) {
+        /* live_http_name_at() (collision checks, fork's origin_name) reads s_profiles, not g_fake_slots. */
+        strncpy(g_fake_profiles_state.profiles[origin_id].name, "origin",
+                sizeof(g_fake_profiles_state.profiles[origin_id].name) - 1);
+    }
     httpd_req_t freq = make_req(NULL);
     esp_err_t ferr = api_profile_live_fork_post_handler(&freq);
     TEST_CHECK(ferr == ESP_OK, "fork_for_tests: fork ok");
@@ -695,6 +700,118 @@ static void test_decide_unknown_action_400(void)
     esp_err_t err = api_profile_live_decide_post_handler(&req);
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
     TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "400 unknown action");
+}
+
+/* ---- shared decide core (HTTP and LCD both call it) ---------------------- */
+
+static void test_decide_core_nothing_pending(void)
+{
+    TEST_SECTION("profiles_live_decide_apply -- NOTHING_PENDING with no record");
+    reset_fakes();
+    char err[64];
+    profiles_live_decide_status_t st;
+    profiles_live_decide_status(&st);
+    TEST_CHECK(!st.record_pending && !st.pending_decision, "status: nothing pending");
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_NOTHING_PENDING,
+               "discard with no record -> NOTHING_PENDING");
+}
+
+static void test_decide_core_status_pending_decision_follows_executor(void)
+{
+    TEST_SECTION("profiles_live_decide_status -- pending_decision false while running, true after the end");
+    reset_fakes();
+    fork_for_tests(0);
+    profiles_live_decide_status_t st;
+    profiles_live_decide_status(&st);
+    TEST_CHECK(st.record_pending && !st.pending_decision, "running: record pending but no decision owed yet");
+    TEST_CHECK(!st.origin_is_builtin, "user origin is not builtin");
+    TEST_CHECK(strcmp(st.origin_name, "origin") == 0, "origin name carried through");
+    g_fake_live_status.active = false;
+    profiles_live_decide_status(&st);
+    TEST_CHECK(st.pending_decision, "firing ended: decision owed");
+}
+
+static void test_decide_core_discard_save_overwrite(void)
+{
+    TEST_SECTION("profiles_live_decide_apply -- discard / save_as / overwrite results");
+    char err[96];
+    uint8_t id = 0xFF;
+
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_live_status.active = false;
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_OK,
+               "discard OK");
+    live_edit_record_t rec;
+    TEST_CHECK(!live_profile_load_record(&rec) || !rec.pending, "record cleared after discard");
+
+    reset_fakes();
+    fork_for_tests(0);
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, NULL, false, &id, err, sizeof(err)) ==
+                   LIVE_DECIDE_BAD_REQUEST,
+               "save_as with no name -> BAD_REQUEST");
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "origin", false, &id, err, sizeof(err)) ==
+                   LIVE_DECIDE_BAD_REQUEST,
+               "save_as onto an existing user name -> BAD_REQUEST");
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "Fresh", false, &id, err, sizeof(err)) ==
+                   LIVE_DECIDE_OK,
+               "save_as new name OK");
+    TEST_CHECK(id == 1 && profiles_slot_used(1), "landed in first free slot");
+    TEST_CHECK(!live_profile_load_record(&rec) || !rec.pending, "record cleared after save_as");
+
+    reset_fakes();
+    fork_for_tests(0);
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_OVERWRITE, NULL, false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_BAD_REQUEST,
+               "overwrite without confirm -> BAD_REQUEST");
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_OVERWRITE, NULL, true, &id, err, sizeof(err)) ==
+                   LIVE_DECIDE_OK,
+               "overwrite with confirm OK");
+    TEST_CHECK(id == 0, "overwrite targets the origin slot");
+}
+
+static void test_decide_core_overwrite_builtin_forbidden_even_with_confirm(void)
+{
+    TEST_SECTION("profiles_live_decide_apply -- builtin origin: overwrite FORBIDDEN, save_as still allowed");
+    reset_fakes();
+    g_fake_builtin_on = true;
+    fork_for_tests(PROFILE_BUILTIN_ID_BASE);
+    char err[96];
+    profiles_live_decide_status_t st;
+    profiles_live_decide_status(&st);
+    TEST_CHECK(st.origin_is_builtin, "status flags builtin origin (LCD disables Overwrite from this)");
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_OVERWRITE, NULL, true, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_FORBIDDEN,
+               "overwrite of builtin -> FORBIDDEN even with confirm");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "refusal leaves the record pending");
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "FromBuiltin", false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_OK,
+               "save_as of a builtin-origin edit OK");
+}
+
+static void test_decide_core_default_name(void)
+{
+    TEST_SECTION("profiles_live_decide_default_name -- origin-E, then -E2 on collision, clipped to 15");
+    reset_fakes();
+    fork_for_tests(0);
+    profiles_live_decide_status_t st;
+    profiles_live_decide_status(&st);
+    char name[PROFILE_NAME_MAX_LEN + 1];
+    TEST_CHECK(profiles_live_decide_default_name(&st, name, sizeof(name)), "name generated");
+    TEST_CHECK(strcmp(name, "origin-E") == 0, "first candidate is <origin>-E");
+
+    profiles_slot_set(2);
+    strncpy(g_fake_profiles_state.profiles[2].name, "origin-E", sizeof(g_fake_profiles_state.profiles[2].name) - 1);
+    TEST_CHECK(profiles_live_decide_default_name(&st, name, sizeof(name)), "name generated after collision");
+    TEST_CHECK(strcmp(name, "origin-E2") == 0, "collision moves to -E2");
+
+    strncpy(st.origin_name, "ABCDEFGHIJKLMNO", sizeof(st.origin_name) - 1);
+    TEST_CHECK(profiles_live_decide_default_name(&st, name, sizeof(name)), "long origin handled");
+    TEST_CHECK(strlen(name) <= PROFILE_NAME_MAX_LEN && strcmp(name, "ABCDEFGHIJKLM-E") == 0,
+               "clipped to 15 chars keeping the suffix");
 }
 
 /* ---- landing-pass review-fix regression tests --------------------------- */
@@ -872,6 +989,11 @@ int main(void)
     test_decide_overwrite_missing_confirm_400();
     test_decide_overwrite_success();
     test_decide_unknown_action_400();
+    test_decide_core_nothing_pending();
+    test_decide_core_status_pending_decision_follows_executor();
+    test_decide_core_discard_save_overwrite();
+    test_decide_core_overwrite_builtin_forbidden_even_with_confirm();
+    test_decide_core_default_name();
     test_get_status_working_id_minus_one_until_forked();
     test_get_status_last_refusal_is_null_not_false();
     test_get_content_requires_a_working_copy();

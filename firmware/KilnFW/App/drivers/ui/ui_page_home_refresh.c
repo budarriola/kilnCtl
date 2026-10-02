@@ -19,6 +19,7 @@
 #include "zones_config_accessors.h" /* zones_config_get_load_fault() -- CLAUDE.md's
                                        * ota_rollback_esp() hazard, closed 2026-09-16 */
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
+#include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
@@ -879,11 +880,42 @@ lag_notice_done:;
     /* Owner request 2026-09-28 -- Edit visible exactly when there is a
      * firing to edit, same RUNNING/PAUSED condition as Pause/Resume above. */
     if (st->state == PROFILE_EXEC_RUNNING || st->state == PROFILE_EXEC_PAUSED) {
+        lv_label_set_text(s_ui_home_edit_btn_label, "Edit");
+        lv_obj_remove_flag(s_ui_home_edit_btn, LV_OBJ_FLAG_HIDDEN);
+    } else if (st->state != PROFILE_EXEC_FAULTED && ui_home_live_edit_decision_owed()) {
+        /* A live-edited working copy is waiting for Discard / Save as /
+         * Overwrite (same condition as GET /api/profile/live's
+         * pending_decision). The Edit slot is reused, relabeled; its tap is
+         * the same PIN-gated callback and routes to the decision page. */
+        lv_label_set_text(s_ui_home_edit_btn_label, "Keep?");
         lv_obj_remove_flag(s_ui_home_edit_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_ui_home_edit_btn, LV_OBJ_FLAG_HIDDEN);
     }
     free(st);
+}
+
+/* True iff the persisted live-edit record says a decision is owed. The read
+ * is an NVS read, so it is cached: re-read only when live_profile_generation()
+ * moves (fork/save/clear all bump it), on the first call, and as a slow
+ * backstop every UI_HOME_LIVE_EDIT_REREAD_TICKS refreshes (1 Hz). The caller
+ * has already excluded RUNNING/PAUSED/FAULTED. */
+#define UI_HOME_LIVE_EDIT_REREAD_TICKS 30
+bool ui_home_live_edit_decision_owed(void)
+{
+    static bool s_valid;
+    static bool s_pending;
+    static uint32_t s_gen;
+    static uint8_t s_ticks;
+    uint32_t gen = live_profile_generation();
+    if (!s_valid || gen != s_gen || ++s_ticks >= UI_HOME_LIVE_EDIT_REREAD_TICKS) {
+        live_edit_record_t rec;
+        s_pending = live_profile_load_record(&rec) && rec.pending;
+        s_gen = gen;
+        s_valid = true;
+        s_ticks = 0;
+    }
+    return s_pending;
 }
 
 /* UI_PLAN.md 6.1 -- sets the profile-name label left of Start/Pause from the

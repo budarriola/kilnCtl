@@ -12,12 +12,10 @@
 // live_profile.h) -- this page never re-implements a rule, it only calls
 // through to it and reports whatever reason it refuses with.
 //
-// NOT in this version, by design (owner: "leave the working copy's end-of-
-// run decision to the web"): no save-as/overwrite UI. If the backend ever
-// requires a decision to be resolved from this page (it does not today --
-// discard/save_as/overwrite is prompted only once the run is no longer
-// RUNNING/PAUSED, i.e. after the LCD's Edit button is already hidden), the
-// default is DISCARD, never overwrite.
+// End-of-run decision: this page has no save-as/overwrite UI of its own.
+// When the firing ends with the working copy still owed a decision, the
+// Apply button becomes "Save/discard edit..." and opens ui_page_live_decide
+// (PIN-gated); the home page's "Keep?" button reaches the same page.
 //
 // Reached only through the PIN gate off the home page (ui_page_home_actions.c's
 // ui_home_edit_btn_cb()) -- see tools/check_lcd_home_nav_gated.ps1.
