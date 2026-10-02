@@ -1117,7 +1117,8 @@ def judge_lcd_edit_refusal(adopted: "list[dict]", wid_before: int, status_after:
                            content_after: "dict | None", exec_after: "dict | None",
                            refusal_before: "str | None", locked_seen: bool,
                            http_window: "tuple | None", http_bound: "tuple | None",
-                           content_after_http: "dict | None") -> CaseResult:
+                           content_after_http: "dict | None",
+                           http_ceiling: "tuple | None" = None) -> CaseResult:
     """LCD-23 part 2: an edit the firmware must refuse. The finished segment's
     steppers must vanish from the Edit page (locked_seen), the LCD Apply of a
     stale edit to that segment must adopt NOTHING (working copy still equals
@@ -1125,7 +1126,9 @@ def judge_lcd_edit_refusal(adopted: "list[dict]", wid_before: int, status_after:
     window check turned it away before the executor saw it), the HTTP window
     violation must answer 409 and the HTTP bound violation 400 (each a
     (status, detail) tuple, status None when the call was accepted), and the
-    working copy must still equal `adopted` afterwards."""
+    working copy must still equal `adopted` afterwards. `http_ceiling` (None
+    = probe not run) is the same (status, detail) for a target 10 C above the
+    zone's max_temp_c, which only the HARD validator refuses: it must be 400."""
     if status_after is None or content_after is None or content_after_http is None:
         return CaseResult(Verdict.INCONCLUSIVE, reason="could not read the live profile after the refused edits",
                           observed={"status_after": status_after, "content_after": content_after})
@@ -1140,13 +1143,17 @@ def judge_lcd_edit_refusal(adopted: "list[dict]", wid_before: int, status_after:
                         f"(last_refusal={status_after.get('last_refusal')!r}); the LCD should refuse it first")
     if not exec_after or exec_after.get("state_name") != "running":
         problems.append(f"executor is not running after the refused edits ({(exec_after or {}).get('state_name')!r})")
-    for label, got, want in (("window violation", http_window, 409), ("bound violation", http_bound, 400)):
+    checks = [("window violation", http_window, 409), ("bound violation", http_bound, 400)]
+    if http_ceiling is not None:
+        checks.append(("zone-ceiling violation", http_ceiling, 400))
+    for label, got, want in checks:
         status = got[0] if got else None
         if status != want:
             problems.append(f"HTTP {label} answered {status!r}, expected {want} ({got[1] if got else 'no result'})")
     problems += _lcd_edit_segs_problems(content_after_http, adopted, "after the HTTP refusals")
     observed = {"status_after": status_after, "content_after": content_after, "exec_after": exec_after,
-                "locked_seen": locked_seen, "http_window": http_window, "http_bound": http_bound}
+                "locked_seen": locked_seen, "http_window": http_window, "http_bound": http_bound,
+                "http_ceiling": http_ceiling}
     if problems:
         return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)
     return CaseResult(Verdict.PASS, observed=observed)

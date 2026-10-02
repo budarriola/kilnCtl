@@ -49,7 +49,8 @@ def tearDownModule():
 ZONE_TEMP = 25.4
 BASE = float(math.floor(ZONE_TEMP))
 ROW_Y = {"target": 86, "ramp": 136, "dwell": 186}
-MINUS_X, PLUS_X = 233, 443
+MINUS_X, PLUS_X = 100, 443  # real layout: minus right after the caption
+GLYPH = "�" * 3     # ui_test_client decodes LVGL symbol names as U+FFFD
 NEXT_X, PREV_X = 453, 413
 ADVANCE_AT = 30.0   # seconds after start: segment 0 -> 1
 END_AT = 60.0       # seconds after start: firing done (LCD-24 profile)
@@ -107,6 +108,10 @@ class FakeBoard:
         self.relays_energized = kw.get("relays_energized", False)
         self.preexisting_working = kw.get("preexisting_working", False)
         self.ends_as = kw.get("ends_as", "done")
+        self.max_temp = kw.get("max_temp", 1300.0)
+        self.max_ramp = kw.get("max_ramp", 1000.0)
+        self.ceiling_accepts = kw.get("ceiling_accepts", False)
+        self.foreign_wid_at_end = kw.get("foreign_wid_at_end", False)
         if self.preexisting_working:
             self.working = [{"target_c": 99.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}]
             self.working_id = 5
@@ -160,14 +165,18 @@ class FakeBoard:
              {"name": "home", "cx": 373, "cy": 20, "hidden": False}]
         if self.page_active():
             if self.cur_seg > 0:
-                t.append({"name": "", "cx": PREV_X, "cy": 20, "hidden": False})
+                t.append({"name": GLYPH, "cx": PREV_X, "cy": 20, "hidden": False})
             if self.cur_seg + 1 < len(self.page_segs):
-                t.append({"name": "", "cx": NEXT_X, "cy": 20, "hidden": False})
+                t.append({"name": GLYPH, "cx": NEXT_X, "cy": 20, "hidden": False})
             t.append({"name": "Apply", "cx": 239, "cy": 255, "hidden": False})
+            # kiln_ui.c's tap walk lists each (CLICKABLE) row container too, its
+            # name borrowed from the caption label, centred mid-row.
+            for caption, y in zip(("Target", "Ramp", "Dwell"), ROW_Y.values()):
+                t.append({"name": caption, "cx": 240, "cy": y, "hidden": False})
             if self.editable():
                 for y in ROW_Y.values():
-                    t.append({"name": "", "cx": MINUS_X, "cy": y, "hidden": False})
-                    t.append({"name": "", "cx": PLUS_X, "cy": y, "hidden": False})
+                    t.append({"name": GLYPH, "cx": MINUS_X, "cy": y, "hidden": False})
+                    t.append({"name": GLYPH, "cx": PLUS_X, "cy": y, "hidden": False})
         return t
 
     def press(self, x, y):
@@ -290,7 +299,10 @@ class FakeLiveClient:
 
     def get_live_status(self, host):
         b = self.b
-        return {"active": b.running(), "working_id": b.working_id if b.working is not None else -1,
+        wid = b.working_id if b.working is not None else -1
+        if b.foreign_wid_at_end and b.working is not None and not b.running():
+            wid = 11
+        return {"active": b.running(), "working_id": wid,
                 "pending_decision": (b.working is not None and not b.running() and not b.no_pending_decision),
                 "last_refusal": b.last_refusal}
 
@@ -307,6 +319,8 @@ class FakeLiveClient:
         if any(s["target_c"] > 2015 for s in segs):
             if b.http_bound_status == 400:
                 raise FakeLiveError(400, "target_c out of range")
+        elif b.max_temp > 0 and any(s["target_c"] > b.max_temp for s in segs) and not b.ceiling_accepts:
+            raise FakeLiveError(400, "target exceeds zone ceiling")
         elif b.window_violation(segs) and not b.http_window_accepts:
             raise FakeLiveError(409, "segment 1 has already run")
         b.working = segs
@@ -343,7 +357,8 @@ def _run(case, kind, edit_heat=True, allow_heat=True, ambient=ZONE_TEMP, **kw):
         "srv": srv, "host": "1.2.3.4", "allow_heat": allow_heat, "lcd22_allow_heat": edit_heat,
         "_now": clock.now, "_sleep": clock.sleep, "_profile_live_client": FakeLiveClient(b),
         "capability_preflight_run": lambda *_a, **_k: SimpleNamespace(ok=True),
-        "_get_zones_config": lambda h: {"zones": []},
+        "_get_zones_config": lambda h: {"zones": [
+            {"index": 0, "max_temp_c": b.max_temp, "max_ramp_c_per_hr": b.max_ramp}]},
         "_http_get_json": _http(b),
     }
     with mock.patch("kilnctrl.dashboard_http_client.get_status", side_effect=lambda h: dict(
@@ -495,6 +510,91 @@ class Lcd23Test(unittest.TestCase):
         self.assertEqual(b.calls, [])
 
 
+class Lcd23GeometryAndLimitsTest(unittest.TestCase):
+    def test_minus_taps_hit_the_minus_stepper_not_the_row_container(self):
+        result, b = run23()
+        ramp_y = ROW_Y["ramp"]
+        self.assertIn((MINUS_X, ramp_y), b.presses)
+        self.assertNotIn((240, ramp_y), b.presses)   # the row container's centre
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_ceiling_probe_posts_max_temp_plus_10_and_passes(self):
+        result, b = run23(max_temp=70.0)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["ceiling_probe_target_c"], 80.0)
+        self.assertEqual(result.observed["http_ceiling"][0], 400)
+        self.assertEqual(b.calls.count("edit_live"), 3)
+
+    def test_ceiling_probe_accepted_is_fail_and_stops_the_firing_at_once(self):
+        result, b = run23(max_temp=70.0, ceiling_accepts=True)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("zone-ceiling violation", result.reason)
+        last_edit = len(b.calls) - 1 - b.calls[::-1].index("edit_live")
+        self.assertEqual(b.calls.index("stop"), last_edit + 1)
+        # one stop sent immediately on the accepted probe, one by cleanup
+        self.assertEqual(b.calls.count("stop"), 2)
+        self.assertEqual(b.exec_state()[0], "idle")
+
+    def test_ceiling_probe_skipped_when_ceiling_unusable(self):
+        for mt in (0.0, 2010.0):
+            result, b = run23(max_temp=mt)
+            self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+            self.assertIsNone(result.observed["http_ceiling"])
+            self.assertEqual(b.calls.count("edit_live"), 2)
+
+    def test_low_ramp_ceiling_lowers_the_base_ramp(self):
+        result, b = run23(max_ramp=100.0)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["orig"][1]["ramp_c_per_hr"], 90.0)
+        self.assertEqual(result.observed["expected"][1]["ramp_c_per_hr"], 95.0)
+
+    def test_ramp_ceiling_with_no_room_is_inconclusive_no_action(self):
+        for run in (run23, run24):
+            result, b = run(max_ramp=15.0)
+            self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+            self.assertIn("ramp ceiling", result.reason)
+            self.assertEqual(b.calls, [])
+
+    def test_ramp_ceiling_edit_never_exceeds_ceiling(self):
+        for ceiling in (20.0, 37.5, 100.0, 605.0, 614.0, 700.0):
+            result, b = run23(max_ramp=ceiling)
+            self.assertEqual(result.verdict, Verdict.PASS, (ceiling, result.reason))
+            self.assertLessEqual(result.observed["expected"][1]["ramp_c_per_hr"], ceiling)
+
+
+class NavSlotTest(unittest.TestCase):
+    """_lcd_edit_nav derives Prev/Next from computed topbar slots, so a disabled
+    Next (absent from the listing) is never mistaken for the rightmost Prev."""
+
+    def _state(self, cur_seg):
+        clock = _Clock()
+        b = FakeBoard(clock, kind="lcd23")
+        b.origin = [{"target_c": 1.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}] * 3
+        b.started_at = 0.0
+        b.open_page()
+        b.cur_seg = cur_seg
+        return C._lcd_edit_page_state(FakeUi(b))
+
+    def test_middle_segment_has_both(self):
+        st = self._state(1)
+        self.assertEqual(C._lcd_edit_nav(st, "prev")[0], PREV_X)
+        self.assertEqual(C._lcd_edit_nav(st, "next")[0], NEXT_X)
+
+    def test_last_segment_next_is_disabled_not_prev(self):
+        st = self._state(2)
+        self.assertIsNone(C._lcd_edit_nav(st, "next"))
+        self.assertEqual(C._lcd_edit_nav(st, "prev")[0], PREV_X)
+
+    def test_first_segment_prev_is_disabled(self):
+        st = self._state(0)
+        self.assertIsNone(C._lcd_edit_nav(st, "prev"))
+        self.assertEqual(C._lcd_edit_nav(st, "next")[0], NEXT_X)
+
+    def test_missing_anchors_means_no_nav(self):
+        self.assertIsNone(C._lcd_edit_nav({"topbar": {"prev": None, "next": None}}, "next"))
+        self.assertIsNone(C._lcd_edit_nav({}, "prev"))
+
+
 class Lcd24Test(unittest.TestCase):
     def test_pass(self):
         result, b = run24()
@@ -532,6 +632,12 @@ class Lcd24Test(unittest.TestCase):
         self.assertIn("stop", b.calls)
         self.assertTrue(result.observed["cleanup"]["verified"])
         self.assertIsNone(b.working)
+
+    def test_discard_not_attempted_for_a_foreign_working_id(self):
+        result, b = run24(foreign_wid_at_end=True)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("not attempted", result.reason)
+        self.assertEqual(b.calls.count("discard"), 0)
 
     def test_only_one_edit_click_and_no_pin_taps(self):
         result, b = run24()
@@ -605,6 +711,14 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(self._refusal(content_after={"segments": segs}).verdict, Verdict.FAIL)
         self.assertEqual(self._refusal(content_after_http={"segments": segs}).verdict, Verdict.FAIL)
         self.assertEqual(self._refusal(status_after=None).verdict, Verdict.INCONCLUSIVE)
+
+    def test_refusal_judge_ceiling_probe(self):
+        self.assertEqual(self._refusal(http_ceiling=(400, "z")).verdict, Verdict.PASS)
+        self.assertEqual(self._refusal(http_ceiling=None).verdict, Verdict.PASS)
+        bad = self._refusal(http_ceiling=(None, "accepted"))
+        self.assertEqual(bad.verdict, Verdict.FAIL)
+        self.assertIn("zone-ceiling violation", bad.reason)
+        self.assertEqual(self._refusal(http_ceiling=(409, "z")).verdict, Verdict.FAIL)
 
     def _end(self, **kw):
         args = dict(adopted=self.EXP, own_wid=9, end_state="done", lcd_ended=True,

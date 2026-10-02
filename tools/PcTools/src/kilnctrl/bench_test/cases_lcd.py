@@ -4297,22 +4297,22 @@ def _case_lcd22(ctx: dict) -> CaseResult:
 
 #: Row centre y of the three stepper rows (LCD-22 measured Target ~86 and
 #: Dwell ~186; Ramp sits between them) and the band that still counts as the
-#: same row. Steppers are located by position in list_tap_targets(), never by
-#: name (their labels are glyphs) and never by a hardcoded x: a disabled
-#: stepper is not clickable and so is simply absent from the listing.
+#: same row. Each row is a CLICKABLE flex container (ui_page_edit_firing.c's
+#: build_step_row(): caption, minus, value, plus) that kiln_ui.c's tap walk
+#: also lists, in its non-actionable pass, named after the caption label
+#: ("Target"/"Ramp"/"Dwell") and centred mid-row. The steppers are the
+#: glyph-named targets in the band (_is_glyph_name), minus before plus by x;
+#: a disabled stepper is not clickable and so is simply absent. There is NO x
+#: cut: minus sits right after the caption (cx ~70-110) on the real panel.
 _LCD_EDIT_ROW_Y = {"target": 86, "ramp": 136, "dwell": 186}
 _LCD_EDIT_ROW_BAND_PX = 14
-_LCD_EDIT_ROW_MIN_X = 200
-_LCD_EDIT_TOPBAR_Y = 20
-#: UI_TOPBAR_ICON_W_PX (36) + UI_TOPBAR_ICON_GAP_PX (4): Prev's x is Next's
-#: minus this, used only when the topbar listing cannot say.
-_LCD_EDIT_TOPBAR_PITCH_PX = 40
 _LCD_EDIT_ZONE_MASK = 1
 #: Segment durations. Segment 0 dwells one whole minute (dwell_min is an
 #: integer) so the firing sits in it long enough to edit a later segment.
 _LCD_EDIT_SEG0_DWELL_MIN = 1
 _LCD_EDIT_RAMP_C_PER_HR = 600.0
 _LCD_EDIT_MAX_TARGET_C = 60.0
+_LCD_EDIT_MIN_RAMP_C_PER_HR = 10.0
 _LCD23_SEG1_OFFSET_C = 10.0
 _LCD23_SEG2_OFFSET_C = 20.0
 _LCD23_SEG1_DWELL_MIN = 30
@@ -4322,6 +4322,8 @@ _LCD23_ADVANCE_WAIT_S = 100.0
 _LCD24_END_WAIT_S = 120.0
 _LCD_EDIT_ENDED_WAIT_S = 4.0
 _LCD_EDIT_BOUND_TARGET_C = 5000.0
+_LCD_EDIT_CEILING_PROBE_C = 10.0
+_LCD_EDIT_MAX_TARGET_FIELD_C = 2015.0
 
 
 def _lcd_edit_names(tap: dict) -> set:
@@ -4343,31 +4345,40 @@ def _lcd_edit_page_state(ui) -> dict:
                              "steppers": {}, "names": sorted(names)}
     for field, row_y in _LCD_EDIT_ROW_Y.items():
         row = sorted((t for t in targets if abs(t.get("cy", -999) - row_y) <= _LCD_EDIT_ROW_BAND_PX
-                      and t.get("cx", 0) >= _LCD_EDIT_ROW_MIN_X), key=lambda t: t["cx"])
+                      and _is_glyph_name(t.get("name"))), key=lambda t: t["cx"])
         state["steppers"][field] = ((row[0]["cx"], row[0]["cy"]), (row[-1]["cx"], row[-1]["cy"])) \
             if len(row) == 2 else None
-    top = sorted((t for t in targets if abs(t.get("cy", -999) - _LCD_EDIT_TOPBAR_Y) <= _LCD_EDIT_ROW_BAND_PX
-                  and t.get("cx", 0) >= 300 and t.get("name") not in ("back", "home", "settings")), key=lambda t: t["cx"])
-    # Unnamed glyph icons right of Back/Home: [..., prev, next] (each present
-    # only while enabled). The rightmost is Next unless it is disabled, in
-    # which case Prev is rightmost; the page position tells which we need, so
-    # report both candidates by x and let the caller pick (see _lcd_edit_nav).
-    state["topbar_x"] = [t["cx"] for t in top]
+    # Topbar: Back, Home, Prev, Next in one flex row; a disabled Prev/Next is
+    # dimmed, not clickable, so absent from the listing, but keeps its layout
+    # slot (same geometry as _profiles_topbar_icons). Slots are therefore
+    # home.cx + k * (home.cx - back.cx): k=1 Prev, k=2 Next; a missing glyph
+    # at a computed slot means that icon is disabled.
+    state["topbar"] = {"prev": None, "next": None}
+    back = next((t for t in targets if t.get("name") == "back"), None)
+    home = next((t for t in targets if t.get("name") == "home"), None)
+    if back is not None and home is not None:
+        try:
+            pitch = float(home["cx"]) - float(back["cx"])
+            home_cx, home_cy = float(home["cx"]), float(home["cy"])
+        except (KeyError, TypeError, ValueError):
+            pitch = 0.0
+        if pitch > 0:
+            glyphs = [t for t in targets if _is_glyph_name(t.get("name"))
+                      and abs(float(t.get("cy", -1000)) - home_cy) <= pitch / 4]
+            for k, key in ((1, "prev"), (2, "next")):
+                for g in glyphs:
+                    if abs(float(g["cx"]) - (home_cx + k * pitch)) <= pitch / 4:
+                        state["topbar"][key] = (g["cx"], g["cy"])
+                        break
     return state
 
 
 def _lcd_edit_nav(state: dict, which: str) -> "Optional[tuple[int, int]]":
-    """Next/Prev xy from a page state. Next is the rightmost unnamed topbar
-    icon; Prev is the one a pitch to its left (or, when only one icon is
-    clickable and that is Prev, simply the rightmost -- the caller only asks
-    for Prev on a page where Next is clickable too)."""
-    xs = sorted(state.get("topbar_x") or [])
-    if not xs:
-        return None
-    nxt = xs[-1]
-    if which == "next":
-        return (nxt, _LCD_EDIT_TOPBAR_Y)
-    return (xs[-2] if len(xs) >= 2 else nxt - _LCD_EDIT_TOPBAR_PITCH_PX, _LCD_EDIT_TOPBAR_Y)
+    """Next/Prev xy from a page state, or None when that icon is disabled (no
+    glyph at its computed slot) or the Back/Home anchors are missing. Never
+    guesses: with Next disabled and Prev enabled the rightmost glyph is Prev,
+    which must not be tapped as Next."""
+    return (state.get("topbar") or {}).get("next" if which == "next" else "prev")
 
 
 def _lcd_edit_step(env: dict, field: str, sign: str) -> "Optional[str]":
@@ -4453,8 +4464,9 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
     -> ONE Edit click (keypad checked first) -> page open -> body(env) ->
     finally: stop, verify relays off, discard only our own working copy.
 
-    plan(ctx, zone_temp_c) -> (segments, orig_list, max_target_c) or a
-    CaseResult (INCONCLUSIVE, nothing started)."""
+    plan(ctx, zone_temp_c) -> (segments, orig_list, max_target_c, limits) or
+    a CaseResult (INCONCLUSIVE, nothing started); limits is the zone's
+    {"max_temp_c", "max_ramp_c_per_hr"} as read before the run."""
     if ctx.get("allow_heat") is not True:
         return CaseResult(Verdict.NOT_RUN, reason=f"allow_heat=False: {cid} starts a real low-temperature firing")
     if ctx.get("lcd22_allow_heat") is not True:
@@ -4498,7 +4510,7 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
     planned = plan(ctx, zone_temp)
     if isinstance(planned, CaseResult):
         return planned
-    segments, orig, max_target = planned
+    segments, orig, max_target, limits = planned
     if max_target > _LCD_EDIT_MAX_TARGET_C:
         return CaseResult(Verdict.INCONCLUSIVE, reason=(
             f"zone temperature {zone_temp:.1f} C leaves no room under the {_LCD_EDIT_MAX_TARGET_C:.0f} C "
@@ -4515,7 +4527,7 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
     sleep = ctx.get("_sleep", time.sleep)
     env = {"ctx": ctx, "srv": srv, "ui": ui, "client": client, "host": host, "now": now, "sleep": sleep,
            "observed": observed, "state": {"own_working_id": None}, "refusal_before": refusal_before,
-           "orig": orig, "exec_before": None}
+           "orig": orig, "exec_before": None, "limits": limits}
     try:
         try:
             save = srv._profiles.save(_heat.BENCH_PROFILE_SLOT_ID, _heat.BENCH_PROFILE_NAME,
@@ -4624,6 +4636,39 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
                     result.verdict = Verdict.FAIL
 
 
+def _lcd_edit_zone_limits(ctx: dict) -> dict:
+    """Zone 0's max_temp_c / max_ramp_c_per_hr from GET /api/zones (None for a
+    value that cannot be read). Read-only."""
+    out: Dict[str, Any] = {"max_temp_c": None, "max_ramp_c_per_hr": None}
+    try:
+        from .. import zones_http_client
+        snap = ctx.get("_get_zones_config", zones_http_client.get_zones)(ctx.get("host"))
+        for zone in (snap or {}).get("zones", []) or []:
+            if zone.get("index") == 0:
+                for key in out:
+                    val = zone.get(key)
+                    out[key] = float(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _lcd_edit_base_ramp(limits: dict) -> "tuple[Optional[float], str]":
+    """Segment ramp rate for the case's profile: _LCD_EDIT_RAMP_C_PER_HR, or,
+    when the zone's own ramp ceiling is lower, 10 C/hr below that ceiling, so
+    the ramp+5 edit stays within the HARD validator's ceiling (a rate above
+    it is a 400 and would false-FAIL the stepper check). (None, reason) when
+    the ceiling leaves no usable rate."""
+    ceiling = limits.get("max_ramp_c_per_hr")
+    if ceiling is None or ceiling <= 0.0:
+        return _LCD_EDIT_RAMP_C_PER_HR, ""  # unknown/unset: profiles.save states its own refusal
+    ramp = min(_LCD_EDIT_RAMP_C_PER_HR, math.floor(ceiling) - 10.0)
+    if ramp < _LCD_EDIT_MIN_RAMP_C_PER_HR:
+        return None, (f"zone 0's ramp ceiling {ceiling:.1f} C/hr leaves no room for a "
+                      f"+5 C/hr edit above {_LCD_EDIT_MIN_RAMP_C_PER_HR:.0f} C/hr")
+    return float(ramp), ""
+
+
 def _lcd_edit_seg(target: float, ramp: float, dwell: float) -> dict:
     return {"target_c": float(target), "ramp_c_per_hr": float(ramp), "dwell_min": float(dwell)}
 
@@ -4636,12 +4681,17 @@ def _lcd_edit_pstep(ProfileSegment, seg: dict):
 def _lcd23_plan(ctx: dict, zone_temp: float):
     from .. import devices
     base = float(math.floor(zone_temp))
+    limits = _lcd_edit_zone_limits(ctx)
+    ramp, why = _lcd_edit_base_ramp(limits)
+    if ramp is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
     orig = [
-        _lcd_edit_seg(base, _LCD_EDIT_RAMP_C_PER_HR, _LCD_EDIT_SEG0_DWELL_MIN),
-        _lcd_edit_seg(base + _LCD23_SEG1_OFFSET_C, _LCD_EDIT_RAMP_C_PER_HR, _LCD23_SEG1_DWELL_MIN),
-        _lcd_edit_seg(base + _LCD23_SEG2_OFFSET_C, _LCD_EDIT_RAMP_C_PER_HR, _LCD23_SEG2_DWELL_MIN),
+        _lcd_edit_seg(base, ramp, _LCD_EDIT_SEG0_DWELL_MIN),
+        _lcd_edit_seg(base + _LCD23_SEG1_OFFSET_C, ramp, _LCD23_SEG1_DWELL_MIN),
+        _lcd_edit_seg(base + _LCD23_SEG2_OFFSET_C, ramp, _LCD23_SEG2_DWELL_MIN),
     ]
-    return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + _LCD23_SEG2_OFFSET_C
+    return ([_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig,
+            base + _LCD23_SEG2_OFFSET_C, limits)
 
 
 def _lcd23_body(env: dict) -> CaseResult:
@@ -4744,9 +4794,29 @@ def _lcd23_body(env: dict) -> CaseResult:
     bound_segs[2] = dict(bound_segs[2], target_c=_LCD_EDIT_BOUND_TARGET_C)
     http_window = _post(window_segs)
     http_bound = _post(bound_segs)
+    # HARD validator probe: a FUTURE segment (3) target 10 C above the zone's
+    # own max_temp_c (still a legal 0-2015 value, so only profiles_validate_
+    # candidate() in HARD mode can refuse it). Skipped when the ceiling is
+    # unreadable/unset or +10 would leave the 0-2015 range. If the board
+    # wrongly ACCEPTS it, the firing is stopped at once so the executor can
+    # never reach that segment (cleanup then discards the working copy).
+    max_temp = (env.get("limits") or {}).get("max_temp_c")
+    http_ceiling = None
+    if (max_temp is not None and max_temp > 0.0
+            and max_temp + _LCD_EDIT_CEILING_PROBE_C <= _LCD_EDIT_MAX_TARGET_FIELD_C):
+        ceiling_segs = [dict(s) for s in expected]
+        ceiling_segs[2] = dict(ceiling_segs[2], target_c=max_temp + _LCD_EDIT_CEILING_PROBE_C)
+        http_ceiling = _post(ceiling_segs)
+        observed["ceiling_probe_target_c"] = max_temp + _LCD_EDIT_CEILING_PROBE_C
+        if http_ceiling[0] is None:
+            try:
+                srv._profiles.stop()
+            except Exception:  # noqa: BLE001
+                pass
     _s, content_http = _lcd22_read_live(client, host)
     result = J.judge_lcd_edit_refusal(expected, wid_before, status_after, content_after, exec_after2,
-                                      env["refusal_before"], locked_seen, http_window, http_bound, content_http)
+                                      env["refusal_before"], locked_seen, http_window, http_bound, content_http,
+                                      http_ceiling=http_ceiling)
     result.observed = dict(result.observed or {})
     result.observed.update(observed)
     return result
@@ -4759,11 +4829,15 @@ def _case_lcd23(ctx: dict) -> CaseResult:
 def _lcd24_plan(ctx: dict, zone_temp: float):
     from .. import devices
     base = float(math.floor(zone_temp))
+    limits = _lcd_edit_zone_limits(ctx)
+    ramp, why = _lcd_edit_base_ramp(limits)
+    if ramp is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
     orig = [
-        _lcd_edit_seg(base, _LCD_EDIT_RAMP_C_PER_HR, _LCD_EDIT_SEG0_DWELL_MIN),
-        _lcd_edit_seg(base, _LCD_EDIT_RAMP_C_PER_HR, 0),
+        _lcd_edit_seg(base, ramp, _LCD_EDIT_SEG0_DWELL_MIN),
+        _lcd_edit_seg(base, ramp, 0),
     ]
-    return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + 5.0
+    return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + 5.0, limits
 
 
 def _lcd24_body(env: dict) -> CaseResult:
@@ -4840,10 +4914,15 @@ def _lcd24_body(env: dict) -> CaseResult:
     observed["lcd_ended"] = lcd_ended
     status_ended, content_ended = _lcd22_read_live(client, host)
     discard_error = None
-    try:
-        client.decide_live_discard(host)
-    except Exception as exc:  # noqa: BLE001
-        discard_error = f"{type(exc).__name__}:{getattr(exc, 'status', None)}"
+    if J._lcd_edit_wid(status_ended) != own_wid:
+        # Defence in depth: never discard a working copy that is not the run's own.
+        discard_error = (f"not attempted: the live working_id is {J._lcd_edit_wid(status_ended)}, "
+                         f"not this run's {own_wid}")
+    else:
+        try:
+            client.decide_live_discard(host)
+        except Exception as exc:  # noqa: BLE001
+            discard_error = f"{type(exc).__name__}:{getattr(exc, 'status', None)}"
     try:
         status_discarded = client.get_live_status(host)
     except Exception:  # noqa: BLE001
