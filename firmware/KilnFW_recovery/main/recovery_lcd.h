@@ -1,46 +1,47 @@
-// recovery_lcd.h -- the one static line of recovery-mode text on the panel
-// (docs/OTA_SINGLE_SLOT_PLAN.md section 3 item 4 / section 9.2, owner-decided
-// against the plan's own recommendation of a dark panel).
+// recovery_lcd.h -- static recovery-mode status screen on the 480x320 ST7796
+// panel (docs/OTA_SINGLE_SLOT_PLAN.md section 3 item 4 / section 9.2).
 //
-// SCOPE OF THIS PASS. This is a deliberately independent, minimal driver --
-// NOT a port of firmware/KilnFW's App/drivers/hw/panel_spi*.c family, which
-// pulls in touch (FT6336U/NS2009), panel auto-detection and the full
-// SX1509 register library (~1,050 lines) to serve a UI far beyond one
-// static line. Pulling that whole stack into the one image whose entire
-// value is having almost nothing that can fail would be exactly backwards
-// -- see section 3's bar ("anything beyond receive-an-image-and-write-it
-// must justify itself"). What IS reused, because getting it wrong risks
-// nothing running at all: the real, hardware-confirmed pin facts from
-// App/drivers/hw/settings.h and the SX1509 register map from
-// App/drivers/hw/SX1509.h --
-//   - Shared SPI bus: SCLK=GPIO12, MOSI=GPIO11 (MISO unused for a
-//     write-only panel), panel ~CS=GPIO21, all Kconfig-default values on
-//     this board (KILNCTL_SPI_SCLK_IO/MOSI_IO, KILNCTL_DISPLAY_CS_IO).
-//   - Panel DC and RESET are NOT raw ESP GPIOs -- they are bits 6 and 7 of
-//     the SX1509 I/O expander's bank B (pins 14/15, SX1509_LCD_DC_PIN/
-//     SX1509_LCD_RESET_PIN in settings.h), reached over I2C
-//     (SDA=GPIO8, SCL=GPIO9, address 0x3E) via three register writes
-//     (RegDirB=0x0E, RegDataB=0x10) -- there is no need for the full
-//     SX1509 driver's LED/interrupt/pull-up machinery just to hold two
-//     pins as outputs.
-// No touch, no LVGL, no panel auto-detection: exactly one init sequence,
-// one fill, one small bitmap-font string blit. Never bench-verified on real
-// hardware as of this pass -- see the module's own header note, same
-// discipline as ST7796_get_panel_desc()'s STOP-block disclaimer.
+// Independent, minimal driver -- NOT a port of firmware/KilnFW's
+// App/drivers/hw/panel_*.c stack (touch, panel auto-detect, full SX1509
+// library). Facts mirrored from the main app, each verified against source:
+//   - Panel: ST7796 (MSP4031 module), native 320x480, driven landscape via
+//     MADCTL 0x28 = MV|BGR (st7796_panel.c madctl[1]=0x20 for rotation 1, OR
+//     the BGR bit 0x08 from .color_order_bit). The init table below is
+//     st7796_panel.c's vendor sequence verbatim except MADCTL.
+//   - COLMOD 0x05 (16 bpp), RGB565 sent big-endian (high byte first) --
+//     panel_codec.c's byte-order fix (2026-09-04).
+//   - SPI2: SCLK=GPIO12, MOSI=GPIO11, ~CS=GPIO21, 20 MHz, mode 0
+//     (settings.h / Kconfig KILNCTL_SPI_SCLK_IO, MOSI_IO, DISPLAY_CS_IO).
+//   - D/C = SX1509 IO15, ~RESET = SX1509 IO14 (settings.h SX1509_LCD_DC_PIN /
+//     SX1509_LCD_RESET_PIN, docs/DISPLAY_ST7796_WIRING.md). The earlier
+//     recovery driver had these swapped and used ILI9488 init/geometry.
+//     Both pins are driven through recovery_io.c, which owns the expander.
+//   - Backlight: ESP GPIO15 (KILNCTL_BACKLIGHT_GPIO), flying wire, active
+//     high; plain GPIO high here (no PWM).
+//
+// Memory: one 960-byte DMA line buffer (480 px * 2 B), no framebuffer.
 #ifndef RECOVERY_LCD_H
 #define RECOVERY_LCD_H
+
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Brings up the shared SPI bus, the SX1509's two GPIO lines, resets and
-// initializes the panel, clears it, and draws the fixed recovery-mode
-// message. Logs and returns on any failure rather than aborting -- a
-// display fault must never prevent Wi-Fi/HTTP/OTA from coming up, since
-// those are the actual job (section 3: "anything beyond receive-an-image-
-// and-write-it must justify itself").
+// Brings up SPI + panel and draws the full status screen (title, boot_guard
+// count, reset reason, crash/coredump presence, relay state, network line,
+// upload instruction). Requires recovery_io_hold_relays_off() to have run
+// (it owns I2C and the expander). Logs and returns on failure; a display
+// fault must never stop Wi-Fi/HTTP/OTA from coming up.
 void recovery_lcd_show_message(void);
+
+// Updates the network line and the "Open http://<ip>/" instruction and
+// redraws the screen. `name` is the station SSID or the AP's own SSID; `ip`
+// is dotted-quad text. Safe to call from any task, before or after
+// recovery_lcd_show_message() (it then only records the values), and with
+// the panel down (no-op).
+void recovery_lcd_set_network(bool is_ap, const char *name, const char *ip);
 
 #ifdef __cplusplus
 }

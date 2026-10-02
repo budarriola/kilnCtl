@@ -18,6 +18,7 @@
 #include "nvs_flash.h"
 
 #include "recovery_http.h"
+#include "recovery_io.h"
 #include "recovery_lcd.h"
 #include "recovery_wifi.h"
 
@@ -37,6 +38,23 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    // Hold the kiln OFF before anything else (Wi-Fi, HTTP, LCD): relays
+    // IO0..IO3 forced low and driven, verified by read-back. Never blocks
+    // boot on failure -- uploads must still work -- but sets a fault flag.
+    recovery_io_hold_relays_off();
+
+    // recovery_wifi.c / recovery_http.c open wifi_nvs and kiln_nvs by
+    // partition name, which fails with ESP_ERR_NVS_NOT_INITIALIZED unless
+    // the partition was initialised first. Failures are logged, not fatal.
+    static const char *const extra_parts[] = {"wifi_nvs", "kiln_nvs"};
+    for (size_t i = 0; i < sizeof(extra_parts) / sizeof(extra_parts[0]); i++) {
+        esp_err_t perr = nvs_flash_init_partition(extra_parts[i]);
+        if (perr != ESP_OK) {
+            ESP_LOGW(TAG, "nvs_flash_init_partition(%s) failed: %s", extra_parts[i],
+                     esp_err_to_name(perr));
+        }
+    }
 
     // If this boot is itself the fresh recovery image landing after an OTA
     // (the migration flash, or a future recovery-image update), confirm it

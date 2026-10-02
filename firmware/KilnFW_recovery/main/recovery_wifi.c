@@ -1,6 +1,7 @@
 // recovery_wifi.c -- see recovery_wifi.h.
 #include "recovery_wifi.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_event.h"
@@ -12,6 +13,8 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#include "recovery_lcd.h"
 
 static const char *TAG = "recovery_wifi";
 
@@ -67,6 +70,18 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
+// Pushes the current IPv4 address of the named netif to the LCD status screen.
+static void publish_network(const char *ifkey, bool is_ap, const char *name)
+{
+    char ip[16] = "?";
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(ifkey);
+    esp_netif_ip_info_t info;
+    if (netif && esp_netif_get_ip_info(netif, &info) == ESP_OK) {
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&info.ip));
+    }
+    recovery_lcd_set_network(is_ap, name, ip);
+}
+
 static bool try_station(void)
 {
     char ssid[33] = {0};
@@ -92,6 +107,7 @@ static bool try_station(void)
                                             pdMS_TO_TICKS(RECOVERY_STA_CONNECT_TIMEOUT_MS));
     if (bits & WIFI_UP_BIT) {
         ESP_LOGI(TAG, "station link up (ssid=%s)", ssid);
+        publish_network("WIFI_STA_DEF", false, ssid);
         return true;
     }
     ESP_LOGW(TAG, "station link to '%s' did not come up within %d ms -- falling back to AP",
@@ -128,6 +144,7 @@ static void start_softap(void)
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "SoftAP up: ssid=%s open=%d", ap_ssid, cfg.ap.authmode == WIFI_AUTH_OPEN);
     s_up = true;
+    publish_network("WIFI_AP_DEF", true, ap_ssid);
 }
 
 void recovery_wifi_start(void)

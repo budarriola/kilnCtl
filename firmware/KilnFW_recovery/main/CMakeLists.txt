@@ -4,6 +4,8 @@ idf_component_register(
         "recovery_wifi.c"
         "recovery_http.c"
         "recovery_lcd.c"
+        "recovery_io.c"
+        "recovery_text.c"
         "ota_auth.c"
     INCLUDE_DIRS "."
     REQUIRES
